@@ -18,7 +18,7 @@ class TestCLIParseKnownArgs:
         """Recreate the parser from kitty.cli.main."""
         parser = argparse.ArgumentParser(
             prog="kitty",
-            description="Kitty Code — launch coding agents through a local API bridge.",
+            description="Kitty Bridge — launch coding agents through a local API bridge.",
         )
         parser.add_argument("--version", "-v", action="version", version="kitty test")
         parser.add_argument("--debug", action="store_true", help="Enable debug logging")

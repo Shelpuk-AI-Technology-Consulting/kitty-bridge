@@ -3,10 +3,27 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "kitty-code"
-version = "0.1.1"
-description = "Kitty Code — launch coding agents through a local API bridge"
+name = "kitty-bridge"
+version = "0.1.2"
+description = "Kitty Bridge — launch coding agents through a local API bridge"
+readme = "README.md"
+license = "MIT"
 requires-python = ">=3.10"
+authors = [
+    { name = "Shelpuk AI Technology Consulting" },
+]
+keywords = ["coding-agent", "cli", "api-bridge", "codex", "claude-code", "llm"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
 dependencies = [
     "aiohttp>=3.9",
     "pydantic>=2.0",
@@ -16,6 +33,11 @@ dependencies = [
     "platformdirs>=4.0",
     "boto3>=1.34",
 ]
+
+[project.urls]
+Homepage = "https://github.com/Shelpuk-AI-Technology-Consulting/kitty-bridge"
+Repository = "https://github.com/Shelpuk-AI-Technology-Consulting/kitty-bridge"
+Issues = "https://github.com/Shelpuk-AI-Technology-Consulting/kitty-bridge/issues"
 
 [project.scripts]
 kitty = "kitty.cli.main:main"
@@ -28,6 +50,8 @@ dev = [
     "ruff>=0.4",
     "mypy>=1.10",
     "import-linter>=2.0",
+    "build>=1.0",
+    "twine>=4.0",
 ]
 
 [tool.hatch.build.targets.wheel]

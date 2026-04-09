@@ -33,6 +33,7 @@ _DEBUG_LOG_PATH = _DEBUG_LOG_DIR / "bridge.log"
 _MAX_RETRIES = 3
 _RETRYABLE_STATUSES = {429, 500, 502, 503, 504}
 _BACKOFF_BASE = 1.0
+_CLIENT_MAX_SIZE = 16 * 1024 * 1024  # 16 MiB
 
 
 class UpstreamError(Exception):
@@ -115,7 +116,7 @@ class BridgeServer:
     async def start_async(self) -> int:
         """Create the aiohttp app, register routes, start listening. Returns bound port."""
         self._log_path = self._setup_debug_logging()
-        self._app = web.Application()
+        self._app = web.Application(client_max_size=_CLIENT_MAX_SIZE)
         self._register_routes(self._app)
         self._runner = web.AppRunner(self._app)
         await self._runner.setup()
@@ -353,6 +354,15 @@ class BridgeServer:
     async def _handle_messages(self, request: web.Request) -> web.StreamResponse:
         try:
             body = await request.json()
+        except web.HTTPRequestEntityTooLarge:
+            logger.warning("Messages API request body exceeded %d bytes", _CLIENT_MAX_SIZE)
+            return web.json_response(
+                {
+                    "type": "error",
+                    "error": {"type": "invalid_request_error", "message": "Request body too large"},
+                },
+                status=400,
+            )
         except (json.JSONDecodeError, Exception):
             return web.json_response(
                 {"type": "error", "error": {"type": "invalid_request_error", "message": "Invalid JSON body"}},

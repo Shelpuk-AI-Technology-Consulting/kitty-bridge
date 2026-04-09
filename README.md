@@ -1,4 +1,4 @@
-# Kitty Code
+# Kitty Bridge
 
 A thin launcher for coding agents (Codex, Claude Code) that routes requests through a local API bridge to any upstream Chat Completions provider.
 
@@ -60,6 +60,13 @@ kitty my-profile codex
 4. The bridge translates requests to Chat Completions format and forwards them to your provider
 5. Responses are translated back to the agent's native format
 6. When the agent exits, kitty restores the agent's config files to their original state. This cleanup is guaranteed to run even if kitty crashes (via `atexit` handler). If kitty is killed with `SIGKILL` (which cannot be intercepted), use `kitty cleanup` to manually restore the config.
+
+## Supported agents
+
+- [Claude Code](https://docs.anthropic.com/en/docs/claude-code) — Anthropic's coding agent
+- [Codex CLI](https://github.com/openai/codex) — OpenAI's coding agent
+- [Gemini CLI](https://github.com/google-gemini/gemini-cli) — Google's coding agent
+- [Kilo Code](https://github.com/kilocode/kilo-code) — open-source coding agent
 
 ## Supported providers
 

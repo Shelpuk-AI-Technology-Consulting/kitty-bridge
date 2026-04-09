@@ -131,6 +131,17 @@ def _claude_code_simple_request():
     }
 
 
+def _claude_code_large_request(content_size: int) -> dict:
+    """Claude Code request with a large but valid JSON message body."""
+    return {
+        "model": "claude-sonnet-4-20250514",
+        "max_tokens": 4096,
+        "messages": [
+            {"role": "user", "content": "x" * content_size},
+        ],
+    }
+
+
 def _claude_code_request_with_system():
     """Claude Code with a system prompt (includes project context)."""
     return {
@@ -677,6 +688,50 @@ class TestClaudeCodeErrorHandling:
                     data = await resp.json()
                     assert data["type"] == "error"
                     assert data["error"]["type"] == "invalid_request_error"
+        finally:
+            await server.stop_async()
+
+    @pytest.mark.asyncio
+    async def test_large_valid_json_payload_is_accepted(self):
+        server = _make_server()
+        port = await server.start_async()
+        try:
+            with aioresponses(passthrough=["http://127.0.0.1"]) as m:
+                m.post(UPSTREAM_URL, payload=UPSTREAM_TEXT_RESPONSE)
+                content_size = 2 * 1024 * 1024
+                request_payload = _claude_code_large_request(content_size=content_size)
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(
+                        f"http://127.0.0.1:{port}/v1/messages",
+                        json=request_payload,
+                    ) as resp:
+                        assert resp.status == 200
+                        data = await resp.json()
+                        assert data["type"] == "message"
+                        request_list = m.requests[("POST", aiohttp.client.URL(UPSTREAM_URL))]
+                        assert len(request_list) == 1
+                        sent_json = request_list[0].kwargs["json"]
+                        assert sent_json["model"] == request_payload["model"]
+                        assert len(sent_json["messages"][0]["content"]) == content_size
+        finally:
+            await server.stop_async()
+
+    @pytest.mark.asyncio
+    async def test_oversized_json_payload_returns_body_too_large_error(self):
+        server = _make_server()
+        port = await server.start_async()
+        try:
+            async with aiohttp.ClientSession() as session:
+                request_payload = _claude_code_large_request(content_size=(16 * 1024 * 1024) + 1024)
+                async with session.post(
+                    f"http://127.0.0.1:{port}/v1/messages",
+                    json=request_payload,
+                ) as resp:
+                    assert resp.status == 400
+                    data = await resp.json()
+                    assert data["type"] == "error"
+                    assert data["error"]["type"] == "invalid_request_error"
+                    assert "too large" in data["error"]["message"].lower()
         finally:
             await server.stop_async()
 

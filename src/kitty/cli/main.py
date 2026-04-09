@@ -26,7 +26,7 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(
         prog="kitty",
-        description="Kitty Code — launch coding agents through a local API bridge.",
+        description="Kitty Bridge — launch coding agents through a local API bridge.",
     )
     parser.add_argument(
         "--version",
