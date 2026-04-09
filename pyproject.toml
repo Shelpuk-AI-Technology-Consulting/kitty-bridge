@@ -1,0 +1,98 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "kitty-code"
+version = "0.1.1"
+description = "Kitty Code — launch coding agents through a local API bridge"
+requires-python = ">=3.10"
+dependencies = [
+    "aiohttp>=3.9",
+    "pydantic>=2.0",
+    "keyring>=23.0",
+    "rich>=13.0",
+    "filelock>=3.13",
+    "platformdirs>=4.0",
+    "boto3>=1.34",
+]
+
+[project.scripts]
+kitty = "kitty.cli.main:main"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "aioresponses>=0.7",
+    "ruff>=0.4",
+    "mypy>=1.10",
+    "import-linter>=2.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/kitty"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # isort
+    "UP",   # pyupgrade
+    "B",    # flake8-bugbear
+    "SIM",  # flake8-simplify
+]
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+
+[[tool.mypy.overrides]]
+module = ["aiohttp.*", "keyring.*", "filelock.*", "platformdirs.*", "rich.*", "aioresponses.*", "boto3.*", "botocore.*"]
+ignore_missing_imports = true
+
+[tool.importlinter]
+root_packages = ["kitty"]
+
+[[tool.importlinter.contracts]]
+name = "Leaf modules must not import upper layers"
+type = "forbidden"
+source_modules = [
+    "kitty.profiles",
+    "kitty.credentials",
+    "kitty.providers",
+    "kitty.tui",
+]
+forbidden_modules = [
+    "kitty.cli",
+    "kitty.launchers",
+    "kitty.bridge",
+]
+
+[[tool.importlinter.contracts]]
+name = "Bridge must not import leaf or CLI modules"
+type = "forbidden"
+source_modules = ["kitty.bridge"]
+forbidden_modules = [
+    "kitty.cli",
+    "kitty.launchers",
+    "kitty.profiles",
+    "kitty.credentials",
+    "kitty.tui",
+]
+
+[[tool.importlinter.contracts]]
+name = "Launchers must not import CLI module"
+type = "forbidden"
+source_modules = ["kitty.launchers"]
+forbidden_modules = ["kitty.cli"]

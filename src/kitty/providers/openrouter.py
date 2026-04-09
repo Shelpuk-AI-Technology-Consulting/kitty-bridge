@@ -1,0 +1,55 @@
+"""OpenRouter provider adapter — unified gateway to 300+ models."""
+
+from __future__ import annotations
+
+from kitty.providers.base import ProviderAdapter, ProviderError
+
+__all__ = ["OpenRouterAdapter"]
+
+
+class OpenRouterAdapter(ProviderAdapter):
+    """OpenRouter API adapter.
+
+    OpenRouter provides an OpenAI Chat Completions-compatible API that routes
+    to hundreds of models from different providers.  Model names use the
+    ``provider/model`` format (e.g. ``"openai/gpt-4o"``).
+    """
+
+    @property
+    def provider_type(self) -> str:
+        return "openrouter"
+
+    @property
+    def default_base_url(self) -> str:
+        return "https://openrouter.ai/api/v1"
+
+    def build_request(self, model: str, messages: list[dict], **kwargs: object) -> dict:
+        request: dict = {
+            "model": model,
+            "messages": messages,
+            "stream": kwargs.get("stream", False),
+        }
+        if "base_url" in kwargs and kwargs["base_url"]:
+            request["base_url"] = kwargs["base_url"]
+        if "tools" in kwargs and kwargs["tools"]:
+            request["tools"] = kwargs["tools"]
+        for key in ("temperature", "top_p", "max_tokens"):
+            if key in kwargs and kwargs[key] is not None:
+                request[key] = kwargs[key]
+        return request
+
+    def parse_response(self, response_data: dict) -> dict:
+        choice = response_data.get("choices", [{}])[0]
+        message = choice.get("message", {})
+        result: dict = {
+            "content": message.get("content"),
+            "finish_reason": choice.get("finish_reason"),
+            "usage": response_data.get("usage", {}),
+        }
+        if "tool_calls" in message:
+            result["tool_calls"] = message["tool_calls"]
+        return result
+
+    def map_error(self, status_code: int, body: dict) -> Exception:
+        error_msg = body.get("error", {}) if isinstance(body.get("error"), dict) else body.get("error", "Unknown error")
+        return ProviderError(f"OpenRouter error {status_code}: {error_msg}")
