@@ -34,6 +34,8 @@ _MAX_RETRIES = 3
 _RETRYABLE_STATUSES = {429, 500, 502, 503, 504}
 _BACKOFF_BASE = 1.0
 _CLIENT_MAX_SIZE = 16 * 1024 * 1024  # 16 MiB
+_STREAM_READ_TIMEOUT = 120  # seconds — upstream must respond with first byte within this
+_MAX_REQUEST_CHARS = 4_000_000  # ~1.2M estimated tokens; requests larger than this are rejected
 
 
 class UpstreamError(Exception):
@@ -155,7 +157,11 @@ class BridgeServer:
 
     def _register_routes(self, app: web.Application) -> None:
         app.router.add_get("/healthz", self._handle_healthz)
-        protocol = self._adapter.bridge_protocol
+        # If no adapter is set (bridge mode), default to Chat Completions API
+        if self._adapter is None:
+            protocol = BridgeProtocol.CHAT_COMPLETIONS_API
+        else:
+            protocol = self._adapter.bridge_protocol
         if protocol == BridgeProtocol.RESPONSES_API:
             app.router.add_post("/v1/responses", self._handle_responses)
         elif protocol == BridgeProtocol.MESSAGES_API:
@@ -198,6 +204,11 @@ class BridgeServer:
         self._provider.normalize_request(cc_request)
 
         logger.debug("Translated CC request: %s", json.dumps(cc_request, indent=2, ensure_ascii=False))
+
+        # P4: Context size guardrail
+        size_error = self._check_request_size(cc_request)
+        if size_error is not None:
+            return size_error
 
         if cc_request.get("stream"):
             return await self._stream_responses(request, body, translator, cc_request)
@@ -248,21 +259,40 @@ class BridgeServer:
             logger.debug("Upstream POST → %s", url)
 
             upstream_body = self._provider.translate_to_upstream(cc_request)
-            async with session.post(url, json=upstream_body, headers=headers) as upstream:
-                upstream_status = upstream.status
-                logger.debug("Upstream response status: %d", upstream.status)
-                logger.debug("Upstream response headers: %s", dict(upstream.headers))
+            stream_timeout = aiohttp.ClientTimeout(total=None, sock_connect=30, sock_read=_STREAM_READ_TIMEOUT)
 
-                if upstream.status not in (200, 201):
-                    terminal_status = "incomplete"
-                    error_body = await upstream.text()
-                    logger.error("Upstream error %d: %s", upstream.status, error_body)
-                    error_event = responses_format_error(
-                        {"code": "upstream_error", "message": error_body},
-                        seq=translator._next_seq(),
-                    )
-                    await sr.write(error_event.encode())
-                else:
+            # Retry loop for retryable upstream errors
+            for attempt in range(_MAX_RETRIES + 1):
+                async with session.post(url, json=upstream_body, headers=headers, timeout=stream_timeout) as upstream:
+                    upstream_status = upstream.status
+                    logger.debug("Upstream response status: %d", upstream.status)
+                    logger.debug("Upstream response headers: %s", dict(upstream.headers))
+
+                    if upstream.status not in (200, 201):
+                        error_body = await upstream.text()
+                        logger.error("Upstream error %d: %s", upstream.status, error_body)
+
+                        if upstream.status in _RETRYABLE_STATUSES and attempt < _MAX_RETRIES:
+                            delay = _BACKOFF_BASE * (2**attempt)
+                            logger.warning(
+                                "Upstream %d, retrying in %.1fs (%d/%d)",
+                                upstream.status,
+                                delay,
+                                attempt + 1,
+                                _MAX_RETRIES,
+                            )
+                            await asyncio.sleep(delay)
+                            continue
+
+                        terminal_status = "incomplete"
+                        error_event = responses_format_error(
+                            {"code": "upstream_error", "message": error_body},
+                            seq=translator._next_seq(),
+                        )
+                        await sr.write(error_event.encode())
+                        break
+
+                    # Success path — stream the response
                     line_buffer = ""
                     chunk_count = 0
                     done = False
@@ -312,7 +342,19 @@ class BridgeServer:
                                         await sr.write(event.encode())
                                 except json.JSONDecodeError:
                                     logger.warning("Failed to parse flushed SSE data: %s", data_str[:200])
+                    break  # Exit retry loop on success
 
+        except asyncio.TimeoutError:
+            terminal_status = "incomplete"
+            logger.error("Upstream POST timed out after %ds for %s", _STREAM_READ_TIMEOUT, response_id)
+            error_event = responses_format_error(
+                {"code": "timeout", "message": f"Upstream provider timed out ({_STREAM_READ_TIMEOUT}s). Try /clear to reduce context size."},
+                seq=translator._next_seq(),
+            )
+            try:
+                await sr.write(error_event.encode())
+            except (ConnectionResetError, BrokenPipeError, OSError):
+                logger.debug("Client disconnected before timeout error could be sent for %s", response_id)
         except (ConnectionResetError, BrokenPipeError, OSError):
             logger.debug("Client disconnected during Responses API streaming for %s", response_id)
         except Exception as exc:
@@ -380,13 +422,18 @@ class BridgeServer:
 
         logger.debug("Translated CC request: %s", json.dumps(cc_request, indent=2, ensure_ascii=False))
 
+        # P4: Context size guardrail
+        size_error = self._check_request_size(cc_request)
+        if size_error is not None:
+            return size_error
+
         if cc_request.get("stream"):
             return await self._stream_messages(request, body, translator, cc_request)
 
         try:
             cc_response = await self._make_upstream_request(cc_request)
         except UpstreamError as exc:
-            error_msg = self._translate_upstream_error(exc.status, str(exc))
+            error_msg = self._translate_upstream_error(exc.status, exc.body)
             return web.json_response(
                 {"type": "error", "error": {"type": "api_error", "message": error_msg}},
                 status=exc.status,
@@ -410,6 +457,8 @@ class BridgeServer:
         message_id = f"msg_{uuid.uuid4().hex[:24]}"
         model = cc_request.get("model", body.get("model", ""))
 
+        logger.debug("═══ STREAM MESSAGES START ═══ message_id=%s model=%s", message_id, model)
+
         sr = web.StreamResponse(
             status=200,
             headers={"Content-Type": "text/event-stream", "Cache-Control": "no-cache"},
@@ -421,21 +470,47 @@ class BridgeServer:
             url = self._build_upstream_url()
             headers = self._build_upstream_headers()
             upstream_body = self._provider.translate_to_upstream(cc_request)
+            logger.debug("Upstream POST → %s", url)
 
-            async with session.post(url, json=upstream_body, headers=headers) as upstream:
-                if upstream.status not in (200, 201):
-                    error_body = await upstream.text()
-                    error_msg = self._translate_upstream_error(upstream.status, error_body)
-                    error_event = messages_format_error(
-                        {"type": "error", "error": {"type": "api_error", "message": error_msg}},
-                    )
-                    await sr.write(error_event.encode())
-                else:
+            stream_timeout = aiohttp.ClientTimeout(total=None, sock_connect=30, sock_read=_STREAM_READ_TIMEOUT)
+
+            # Retry loop for retryable upstream errors
+            for attempt in range(_MAX_RETRIES + 1):
+                async with session.post(url, json=upstream_body, headers=headers, timeout=stream_timeout) as upstream:
+                    upstream_status = upstream.status
+                    logger.debug("Upstream response status: %d", upstream.status)
+
+                    if upstream.status not in (200, 201):
+                        error_body = await upstream.text()
+                        logger.error("Upstream error %d: %s", upstream.status, error_body)
+
+                        if upstream.status in _RETRYABLE_STATUSES and attempt < _MAX_RETRIES:
+                            delay = _BACKOFF_BASE * (2**attempt)
+                            logger.warning(
+                                "Upstream %d, retrying in %.1fs (%d/%d)",
+                                upstream.status,
+                                delay,
+                                attempt + 1,
+                                _MAX_RETRIES,
+                            )
+                            await asyncio.sleep(delay)
+                            continue
+
+                        error_msg = self._translate_upstream_error(upstream.status, error_body)
+                        error_event = messages_format_error(
+                            {"type": "error", "error": {"type": "api_error", "message": error_msg}},
+                        )
+                        await sr.write(error_event.encode())
+                        break
+
+                    # Success path — stream the response
                     line_buffer = ""
                     done = False
+                    chunk_count = 0
                     async for chunk_bytes in upstream.content:
                         if done:
                             break
+                        chunk_count += 1
                         line_buffer += chunk_bytes.decode("utf-8", errors="replace")
                         while "\n" in line_buffer:
                             line, line_buffer = line_buffer.split("\n", 1)
@@ -456,6 +531,8 @@ class BridgeServer:
                                 for event in events:
                                     await sr.write(event.encode())
 
+                    logger.debug("Upstream stream ended. chunks=%d done=%s", chunk_count, done)
+
                     # Flush remaining buffer (last chunk without trailing \n)
                     if not done and line_buffer.strip():
                         line = line_buffer.strip()
@@ -469,7 +546,17 @@ class BridgeServer:
                                         await sr.write(event.encode())
                                 except json.JSONDecodeError:
                                     logger.warning("Failed to parse flushed SSE data: %s", data_str[:200])
+                    break  # Exit retry loop on success
 
+        except asyncio.TimeoutError:
+            logger.error("Upstream POST timed out after %ds for %s", _STREAM_READ_TIMEOUT, message_id)
+            error_event = messages_format_error(
+                {"type": "error", "error": {"type": "api_error", "message": f"Upstream provider timed out ({_STREAM_READ_TIMEOUT}s). Try /clear to reduce context size."}},
+            )
+            try:
+                await sr.write(error_event.encode())
+            except (ConnectionResetError, BrokenPipeError, OSError):
+                logger.debug("Client disconnected before timeout error could be sent for %s", message_id)
         except (ConnectionResetError, BrokenPipeError, OSError):
             logger.debug("Client disconnected during Messages API streaming for %s", message_id)
         except Exception as exc:
@@ -482,6 +569,7 @@ class BridgeServer:
             except (ConnectionResetError, BrokenPipeError, OSError):
                 logger.debug("Client disconnected before error could be sent for %s", message_id)
 
+        logger.info("Messages stream completed for %s", message_id)
         # Client may disconnect before write_eof() completes — benign race.
         try:
             await sr.write_eof()
@@ -512,6 +600,11 @@ class BridgeServer:
         self._provider.normalize_request(cc_request)
 
         logger.debug("Translated CC request: %s", json.dumps(cc_request, indent=2, ensure_ascii=False))
+
+        # P4: Context size guardrail
+        size_error = self._check_request_size(cc_request)
+        if size_error is not None:
+            return size_error
 
         # Gemini CLI streams via streamGenerateContent; generateContent is non-streaming.
         # The translator defaults stream=True (Gemini's interactive mode always streams),
@@ -559,19 +652,40 @@ class BridgeServer:
             session = await self._get_session()
             url = self._build_upstream_url()
             headers = self._build_upstream_headers()
-            logger.debug("Upstream POST → %s", url)
             upstream_body = self._provider.translate_to_upstream(cc_request)
+            logger.debug("Upstream POST → %s", url)
 
-            async with session.post(url, json=upstream_body, headers=headers) as upstream:
-                if upstream.status not in (200, 201):
-                    error_body = await upstream.text()
-                    logger.error("Upstream error %d: %s", upstream.status, error_body)
-                    error_sse = f"data: {json.dumps({'error': {'code': upstream.status, 'message': error_body}})}\n\n"
-                    try:
-                        await sr.write(error_sse.encode())
-                    except (ConnectionResetError, BrokenPipeError, OSError):
-                        logger.debug("Client disconnected before upstream error could be sent")
-                else:
+            stream_timeout = aiohttp.ClientTimeout(total=None, sock_connect=30, sock_read=_STREAM_READ_TIMEOUT)
+
+            # Retry loop for retryable upstream errors
+            for attempt in range(_MAX_RETRIES + 1):
+                async with session.post(url, json=upstream_body, headers=headers, timeout=stream_timeout) as upstream:
+                    logger.debug("Upstream response status: %d", upstream.status)
+
+                    if upstream.status not in (200, 201):
+                        error_body = await upstream.text()
+                        logger.error("Upstream error %d: %s", upstream.status, error_body)
+
+                        if upstream.status in _RETRYABLE_STATUSES and attempt < _MAX_RETRIES:
+                            delay = _BACKOFF_BASE * (2**attempt)
+                            logger.warning(
+                                "Upstream %d, retrying in %.1fs (%d/%d)",
+                                upstream.status,
+                                delay,
+                                attempt + 1,
+                                _MAX_RETRIES,
+                            )
+                            await asyncio.sleep(delay)
+                            continue
+
+                        error_sse = f"data: {json.dumps({'error': {'code': upstream.status, 'message': error_body}})}\n\n"
+                        try:
+                            await sr.write(error_sse.encode())
+                        except (ConnectionResetError, BrokenPipeError, OSError):
+                            logger.debug("Client disconnected before upstream error could be sent")
+                        break
+
+                    # Success path — stream the response
                     line_buffer = ""
                     done = False
                     async for chunk_bytes in upstream.content:
@@ -610,7 +724,15 @@ class BridgeServer:
                                         await sr.write(event.encode())
                                 except json.JSONDecodeError:
                                     logger.warning("Failed to parse flushed SSE data: %s", data_str[:200])
+                    break  # Exit retry loop on success
 
+        except asyncio.TimeoutError:
+            logger.error("Upstream POST timed out after %ds for Gemini stream", _STREAM_READ_TIMEOUT)
+            error_sse = f"data: {json.dumps({'error': {'code': 504, 'message': f'Upstream provider timed out ({_STREAM_READ_TIMEOUT}s)'}})}\n\n"
+            try:
+                await sr.write(error_sse.encode())
+            except (ConnectionResetError, BrokenPipeError, OSError):
+                logger.debug("Client disconnected before timeout error could be sent")
         except (ConnectionResetError, BrokenPipeError, OSError):
             logger.debug("Client disconnected during Gemini streaming")
         except Exception as exc:
@@ -653,6 +775,11 @@ class BridgeServer:
 
         logger.debug("Normalized CC request: %s", json.dumps(cc_request, indent=2, ensure_ascii=False))
 
+        # P4: Context size guardrail
+        size_error = self._check_request_size(cc_request)
+        if size_error is not None:
+            return size_error
+
         if cc_request.get("stream"):
             return await self._stream_chat_completions(request, cc_request)
 
@@ -690,22 +817,41 @@ class BridgeServer:
             session = await self._get_session()
             url = self._build_upstream_url()
             headers = self._build_upstream_headers()
-            logger.debug("Upstream POST → %s", url)
             upstream_body = self._provider.translate_to_upstream(cc_request)
+            logger.debug("Upstream POST → %s", url)
 
-            async with session.post(url, json=upstream_body, headers=headers) as upstream:
-                upstream_status = upstream.status
-                logger.debug("Upstream response status: %d", upstream.status)
+            stream_timeout = aiohttp.ClientTimeout(total=None, sock_connect=30, sock_read=_STREAM_READ_TIMEOUT)
 
-                if upstream.status not in (200, 201):
-                    error_body = await upstream.text()
-                    logger.error("Upstream error %d: %s", upstream.status, error_body)
-                    error_sse = f"data: {json.dumps({'error': {'message': error_body, 'type': 'upstream_error'}})}\n\n"
-                    try:
-                        await sr.write(error_sse.encode())
-                    except (ConnectionResetError, BrokenPipeError, OSError):
-                        logger.debug("Client disconnected before upstream error could be sent")
-                else:
+            # Retry loop for retryable upstream errors
+            for attempt in range(_MAX_RETRIES + 1):
+                async with session.post(url, json=upstream_body, headers=headers, timeout=stream_timeout) as upstream:
+                    upstream_status = upstream.status
+                    logger.debug("Upstream response status: %d", upstream.status)
+
+                    if upstream.status not in (200, 201):
+                        error_body = await upstream.text()
+                        logger.error("Upstream error %d: %s", upstream.status, error_body)
+
+                        if upstream.status in _RETRYABLE_STATUSES and attempt < _MAX_RETRIES:
+                            delay = _BACKOFF_BASE * (2**attempt)
+                            logger.warning(
+                                "Upstream %d, retrying in %.1fs (%d/%d)",
+                                upstream.status,
+                                delay,
+                                attempt + 1,
+                                _MAX_RETRIES,
+                            )
+                            await asyncio.sleep(delay)
+                            continue
+
+                        error_sse = f"data: {json.dumps({'error': {'message': error_body, 'type': 'upstream_error'}})}\n\n"
+                        try:
+                            await sr.write(error_sse.encode())
+                        except (ConnectionResetError, BrokenPipeError, OSError):
+                            logger.debug("Client disconnected before upstream error could be sent")
+                        break
+
+                    # Success path — pass-through stream
                     async for chunk_bytes in upstream.content:
                         try:
                             for translated in self._provider.translate_upstream_stream_event(chunk_bytes):
@@ -713,7 +859,15 @@ class BridgeServer:
                         except (ConnectionResetError, BrokenPipeError, OSError):
                             logger.debug("Client disconnected during streaming")
                             break
+                    break  # Exit retry loop on success
 
+        except asyncio.TimeoutError:
+            logger.error("Upstream POST timed out after %ds for Chat Completions stream", _STREAM_READ_TIMEOUT)
+            error_sse = f"data: {json.dumps({'error': {'message': f'Upstream provider timed out ({_STREAM_READ_TIMEOUT}s)', 'type': 'timeout_error'}})}\n\n"
+            try:
+                await sr.write(error_sse.encode())
+            except (ConnectionResetError, BrokenPipeError, OSError):
+                logger.debug("Client disconnected before timeout error could be sent")
         except (ConnectionResetError, BrokenPipeError, OSError):
             logger.debug("Client disconnected during Chat Completions streaming")
         except Exception as exc:
@@ -754,6 +908,35 @@ class BridgeServer:
                 logger.debug("Normalized model: %s -> %s", model, normalized)
             cc_request["model"] = normalized
 
+    def _check_request_size(self, cc_request: dict) -> web.Response | None:
+        """Return a 400 error if the translated request exceeds the safe size limit.
+
+        Returns None if the request is within limits, or a json_response to return
+        immediately if it's too large.
+        """
+        request_size = len(json.dumps(cc_request, ensure_ascii=False))
+        if request_size > _MAX_REQUEST_CHARS:
+            logger.warning(
+                "Request body size %d chars exceeds safe limit (%d) — rejecting",
+                request_size,
+                _MAX_REQUEST_CHARS,
+            )
+            return web.json_response(
+                {
+                    "type": "error",
+                    "error": {
+                        "type": "invalid_request_error",
+                        "message": (
+                            f"Request too large ({request_size / 1024:.0f} KB). "
+                            "The conversation context has grown beyond what the upstream provider can handle. "
+                            "Use /clear to reset the conversation context."
+                        ),
+                    },
+                },
+                status=400,
+            )
+        return None
+
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
             # LLM calls can be very long (large context, extended thinking).
@@ -765,19 +948,61 @@ class BridgeServer:
 
 
     @staticmethod
-    def _translate_upstream_error(status: int, body: str) -> str:
+    def _translate_upstream_error(status: int, body: object) -> str:
         """Translate an upstream HTTP error into a user-friendly message.
 
         For auth errors (401/403), returns a clear message indicating the
-        API key issue. For other errors, returns the raw body.
+        API key issue.
         """
+        if isinstance(body, dict):
+            details = json.dumps(body, ensure_ascii=False)
+        elif body is None:
+            details = ""
+        else:
+            details = str(body)
+
         if status in (401, 403):
             return (
                 f"Upstream authentication failed (HTTP {status}): "
                 "API key is invalid, expired, or lacks permission. "
                 "Update your API key with 'kitty setup'."
             )
-        return body
+
+        if status == 500:
+            code = ""
+            error_message = ""
+            if isinstance(body, dict):
+                error_obj = body.get("error")
+                if isinstance(error_obj, dict):
+                    if error_obj.get("code") is not None:
+                        code = str(error_obj.get("code"))
+                    if error_obj.get("message") is not None:
+                        error_message = str(error_obj.get("message"))
+            else:
+                try:
+                    parsed = json.loads(details)
+                except Exception:
+                    parsed = None
+                if isinstance(parsed, dict):
+                    error_obj = parsed.get("error")
+                    if isinstance(error_obj, dict):
+                        if error_obj.get("code") is not None:
+                            code = str(error_obj.get("code"))
+                        if error_obj.get("message") is not None:
+                            error_message = str(error_obj.get("message"))
+
+            searchable = f"{details}\n{error_message}".lower()
+            is_provider_network_failure = code == "1234" or "network failure" in searchable
+            if is_provider_network_failure:
+                prefix = (
+                    "Upstream provider temporary network/internal failure (HTTP 500). "
+                    "Please retry shortly."
+                )
+            else:
+                prefix = "Upstream provider temporary internal failure (HTTP 500). Please retry shortly."
+            return f"{prefix} Details: {details}" if details else prefix
+
+        return details
 
     def _build_upstream_url(self) -> str:
         base = self._provider.build_base_url(self._provider_config).rstrip("/")
@@ -808,10 +1033,12 @@ class BridgeServer:
         headers = self._build_upstream_headers()
         upstream_body = self._provider.translate_to_upstream(cc_request)
 
+        request_timeout = aiohttp.ClientTimeout(total=None, sock_connect=30, sock_read=_STREAM_READ_TIMEOUT)
+
         last_status = 0
         last_body: dict = {}
         for attempt in range(_MAX_RETRIES + 1):
-            async with session.post(url, json=upstream_body, headers=headers) as resp:
+            async with session.post(url, json=upstream_body, headers=headers, timeout=request_timeout) as resp:
                 last_status = resp.status
                 try:
                     last_body = await resp.json()

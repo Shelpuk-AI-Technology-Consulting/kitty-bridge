@@ -674,6 +674,69 @@ class TestClaudeCodeErrorHandling:
             await server.stop_async()
 
     @pytest.mark.asyncio
+    async def test_upstream_500_returns_transient_api_error_message(self):
+        server = _make_server()
+        port = await server.start_async()
+        try:
+            with aioresponses(passthrough=["http://127.0.0.1"]) as m:
+                for _ in range(4):
+                    m.post(
+                        UPSTREAM_URL,
+                        status=500,
+                        payload={"error": {"message": "provider internal exception"}},
+                    )
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(
+                        f"http://127.0.0.1:{port}/v1/messages",
+                        json=_claude_code_simple_request(),
+                    ) as resp:
+                        assert resp.status == 500
+                        data = await resp.json()
+                        assert data["type"] == "error"
+                        assert data["error"]["type"] == "api_error"
+                        msg = data["error"]["message"].lower()
+                        assert "retry" in msg
+                        assert "temporary" in msg
+        finally:
+            await server.stop_async()
+
+    @pytest.mark.asyncio
+    async def test_upstream_500_code_1234_mentions_network_failure_and_preserves_error_id(self):
+        server = _make_server()
+        port = await server.start_async()
+        error_id = "2026041005083390d186ad292449a0"
+        try:
+            with aioresponses(passthrough=["http://127.0.0.1"]) as m:
+                for _ in range(4):
+                    m.post(
+                        UPSTREAM_URL,
+                        status=500,
+                        payload={
+                            "error": {
+                                "code": "1234",
+                                "message": f"Internal network failure, error id: {error_id}",
+                            }
+                        },
+                    )
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(
+                        f"http://127.0.0.1:{port}/v1/messages",
+                        json=_claude_code_simple_request(),
+                    ) as resp:
+                        assert resp.status == 500
+                        data = await resp.json()
+                        assert data["type"] == "error"
+                        assert data["error"]["type"] == "api_error"
+                        msg = data["error"]["message"]
+                        msg_lower = msg.lower()
+                        assert "network" in msg_lower
+                        assert "retry" in msg_lower
+                        assert "temporary" in msg_lower
+                        assert error_id in msg
+        finally:
+            await server.stop_async()
+
+    @pytest.mark.asyncio
     async def test_invalid_json_returns_400(self):
         server = _make_server()
         port = await server.start_async()

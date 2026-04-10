@@ -75,7 +75,11 @@ def run_profile_menu(store: ProfileStore) -> None:
 
         if choice == "Create new profile":
             cred_store = _make_credential_store(store)
-            _create_profile_flow(store, cred_store)
+            try:
+                _create_profile_flow(store, cred_store)
+            except (NonTTYError, ValueError, KeyboardInterrupt) as exc:
+                print_info(f"Cancelled: {exc}")
+                continue
         elif choice == "Delete profile":
             _delete_profile_flow(store)
         elif choice == "Set default profile":
@@ -100,7 +104,7 @@ def _create_profile_flow(store: ProfileStore, cred_store: CredentialStore) -> Pr
         The created and saved Profile.
     """
     # Step 1: Provider selection
-    provider_menu = SelectionMenu("Select provider", ["zai_regular", "zai_coding", "minimax", "novita", "openai", "openrouter"])
+    provider_menu = SelectionMenu("Select provider", ["zai_regular", "zai_coding", "minimax", "novita", "ollama", "openai", "openrouter", "fireworks", "anthropic", "bedrock", "azure", "vertex"])
     provider = provider_menu.show()
     if provider is None:
         raise NonTTYError("Provider selection cancelled")

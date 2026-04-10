@@ -32,6 +32,20 @@ class TestTranslateRequest:
         result = self.t.translate_request(req)
         assert result["messages"][0] == {"role": "system", "content": "You are helpful."}
 
+    def test_system_prompt_as_content_blocks_flattened_to_string(self):
+        """Anthropic allows system as array of content blocks — must flatten to string."""
+        req = {
+            "model": "claude-3-opus",
+            "system": [
+                {"type": "text", "text": "Part one."},
+                {"type": "text", "text": "Part two.", "cache_control": {"type": "ephemeral"}},
+            ],
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 1024,
+        }
+        result = self.t.translate_request(req)
+        assert result["messages"][0] == {"role": "system", "content": "Part one.\nPart two."}
+
     def test_text_content_blocks_mapped_to_string(self):
         req = {
             "model": "claude-3-opus",
@@ -466,3 +480,19 @@ class TestTranslateStreamChunk:
         events = self.t.translate_stream_chunk(msg_id, model, chunk)
         delta_event = [e for e in events if "message_delta" in e][0]
         assert "max_tokens" in delta_event
+
+    def test_empty_choices_returns_empty_events(self):
+        """SSE chunks with empty choices list (e.g. Fireworks usage chunks) must not crash."""
+        msg_id = self._make_message_id()
+        model = "m"
+        chunk = {"choices": [], "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}}
+        events = self.t.translate_stream_chunk(msg_id, model, chunk)
+        assert events == []
+
+    def test_missing_choices_returns_empty_events(self):
+        """SSE chunks with no choices key must not crash."""
+        msg_id = self._make_message_id()
+        model = "m"
+        chunk = {"id": "chatcmpl-1", "usage": {"prompt_tokens": 10, "completion_tokens": 5}}
+        events = self.t.translate_stream_chunk(msg_id, model, chunk)
+        assert events == []

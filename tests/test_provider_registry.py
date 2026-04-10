@@ -49,3 +49,11 @@ class TestGetProvider:
     def test_returns_vertex_adapter(self):
         adapter = get_provider("vertex")
         assert adapter.provider_type == "vertex"
+
+    def test_returns_fireworks_adapter(self):
+        adapter = get_provider("fireworks")
+        assert adapter.provider_type == "fireworks"
+
+    def test_returns_ollama_adapter(self):
+        adapter = get_provider("ollama")
+        assert adapter.provider_type == "ollama"

@@ -20,6 +20,7 @@ class BuiltinCommand(str, Enum):
     PROFILE = "profile"
     DOCTOR = "doctor"
     CLEANUP = "cleanup"
+    BRIDGE = "bridge"
 
 
 class RoutingError(Exception):
@@ -86,26 +87,36 @@ class CLIRouter:
         rest = args[1:]
         head_lower = head.lower()
 
-        # 1. Built-in command match
+        # 1. Built-in command match (bridge can also come after profile name)
         builtin = _BUILTIN_MAP.get(head_lower)
-        if builtin is not None:
+        if builtin is not None and builtin != BuiltinCommand.BRIDGE:
             return RouteResult(builtin=builtin, extra_args=rest)
 
-        # 2. Launcher target match
+        # 2. Bridge command (standalone or with profile)
+        if builtin == BuiltinCommand.BRIDGE:
+            profile = self._resolver.resolve_default()
+            return RouteResult(builtin=builtin, profile=profile, extra_args=rest)
+
+        # 3. Launcher target match
         adapter = self._adapters.get(head_lower)
         if adapter is not None:
             profile = self._resolver.resolve_default()
             return RouteResult(adapter=adapter, profile=profile, extra_args=rest)
 
-        # 3. Profile name match
+        # 4. Profile name match (profile may be followed by bridge or agent)
         profile = self._store.get(head_lower)
         if profile is not None:
-            # Second arg may be a launcher target; otherwise use default.
-            if rest and rest[0].lower() in self._adapters:
-                adapter = self._adapters[rest[0].lower()]
-                return RouteResult(adapter=adapter, profile=profile, extra_args=rest[1:])
+            # Second arg may be bridge or a launcher target
+            if rest:
+                second = rest[0].lower()
+                if second == "bridge":
+                    return RouteResult(builtin=BuiltinCommand.BRIDGE, profile=profile, extra_args=rest[1:])
+                if second in self._adapters:
+                    adapter = self._adapters[second]
+                    return RouteResult(adapter=adapter, profile=profile, extra_args=rest[1:])
+            # Default to codex if no target specified
             adapter = self._adapters[_DEFAULT_ADAPTER_KEY]
             return RouteResult(adapter=adapter, profile=profile, extra_args=rest)
 
-        # 4. No match
+        # 5. No match
         raise RoutingError(f"Unknown command or profile: {head!r}")

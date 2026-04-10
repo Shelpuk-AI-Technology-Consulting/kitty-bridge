@@ -75,6 +75,7 @@ kitty my-profile codex
 - Novita
 - OpenAI
 - OpenRouter
+- Fireworks (Fire Pass)
 
 ## Architecture
 

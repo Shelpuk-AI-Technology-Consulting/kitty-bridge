@@ -50,7 +50,7 @@ def run_setup_wizard(store: ProfileStore, cred_store: CredentialStore) -> Profil
 
     # Step 1: Provider selection
     print_step(1, 6, "Provider selection")
-    provider_menu = SelectionMenu("Select provider", ["zai_regular", "zai_coding", "minimax", "novita", "openai", "openrouter"])
+    provider_menu = SelectionMenu("Select provider", ["zai_regular", "zai_coding", "minimax", "novita", "ollama", "openai", "openrouter", "fireworks", "anthropic", "bedrock", "azure", "vertex"])
     provider = provider_menu.show()
     if provider is None:
         raise NonTTYError("Provider selection cancelled")

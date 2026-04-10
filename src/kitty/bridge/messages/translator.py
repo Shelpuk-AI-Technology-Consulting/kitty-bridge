@@ -52,6 +52,16 @@ class MessagesTranslator:
         # System prompt -> system message
         system = messages_request.get("system")
         if system:
+            # Anthropic allows system as a string or array of content blocks.
+            # Chat Completions requires a plain string.
+            if isinstance(system, list):
+                parts = []
+                for block in system:
+                    if isinstance(block, dict) and block.get("type") == "text":
+                        parts.append(block.get("text", ""))
+                    elif isinstance(block, str):
+                        parts.append(block)
+                system = "\n".join(parts)
             messages.append({"role": "system", "content": system})
 
         # Messages with content block handling
@@ -257,7 +267,10 @@ class MessagesTranslator:
     ) -> list[str]:
         """Convert a Chat Completions streaming chunk to Messages API SSE event strings."""
         events: list[str] = []
-        choice = chunk.get("choices", [{}])[0]
+        choices = chunk.get("choices", [])
+        if not choices:
+            return events
+        choice = choices[0]
         delta = choice.get("delta", {})
 
         # Text delta

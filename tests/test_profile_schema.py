@@ -95,7 +95,7 @@ class TestProfileNameValidation:
 
 
 class TestProfileProviderValidation:
-    @pytest.mark.parametrize("provider", ["zai_regular", "zai_coding", "minimax", "novita", "openai", "openrouter"])
+    @pytest.mark.parametrize("provider", ["zai_regular", "zai_coding", "minimax", "novita", "ollama", "openai", "openrouter"])
     def test_accepts_valid_providers(self, provider):
         Profile(
             name="test",

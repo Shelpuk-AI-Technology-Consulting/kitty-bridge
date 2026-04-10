@@ -224,7 +224,8 @@ class ResponsesTranslator:
 
     def translate_response(self, cc_response: dict) -> dict:
         """Convert a Chat Completions response to a Responses API response."""
-        choice = cc_response.get("choices", [{}])[0]
+        choices = cc_response.get("choices", [])
+        choice = choices[0] if choices else {}
         message = choice.get("message", {})
         finish_reason = choice.get("finish_reason")
 
@@ -292,7 +293,10 @@ class ResponsesTranslator:
     ) -> list[str]:
         """Convert a Chat Completions streaming chunk to Responses SSE event strings."""
         events: list[str] = []
-        choice = chunk.get("choices", [{}])[0]
+        choices = chunk.get("choices", [])
+        if not choices:
+            return events
+        choice = choices[0]
         delta = choice.get("delta", {})
 
         # Text delta
@@ -402,7 +406,8 @@ class ResponsesTranslator:
     def _build_finish_events(self, response_id: str, chunk: dict) -> list[str]:
         """Build the trailing lifecycle events: done events → output_item.done → completed."""
         events: list[str] = []
-        choice = chunk.get("choices", [{}])[0]
+        choices = chunk.get("choices", [])
+        choice = choices[0] if choices else {}
         finish_reason = choice.get("finish_reason", "stop")
 
         status = "completed"
