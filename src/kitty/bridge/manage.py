@@ -141,6 +141,9 @@ def start_bridge(
     for _ in range(50):
         if state_path.exists():
             break
+        # Check if process already exited (startup error)
+        if proc.poll() is not None:
+            break
         time.sleep(0.1)
 
     state = load_state(state_path)
@@ -149,10 +152,14 @@ def start_bridge(
         print(f"{scheme}://{state.host}:{state.port}")
     else:
         # Process may have failed to start
-        proc.wait(timeout=5)
-        print(f"Error: Bridge failed to start", file=sys.stderr)
-        if proc.stderr:
-            print(proc.stderr.read().decode(), file=sys.stderr)
+        if proc.poll() is not None:
+            # Process already exited — read error
+            print(f"Error: Bridge failed to start (exit code {proc.returncode})", file=sys.stderr)
+            if proc.stderr:
+                print(proc.stderr.read().decode(), file=sys.stderr)
+        else:
+            # Process is running but state file never appeared
+            print("Error: Bridge started but state file not found", file=sys.stderr)
         sys.exit(1)
 
 

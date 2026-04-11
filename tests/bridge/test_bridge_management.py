@@ -129,15 +129,28 @@ class TestBridgeManagementHelpers:
         )
         write_state(state_path, state)
 
-        # This will fail because bridge_runner module doesn't exist
-        # but the stale state should be cleared first
-        with pytest.raises(SystemExit):
+        # start_bridge will spawn a background process.
+        # It may actually start (if profiles exist in the test env) or fail.
+        # Either way, the stale state should be cleared first.
+        try:
             start_bridge(
                 state_path=state_path,
                 host="127.0.0.1",
                 port=0,
-                profile="test",
             )
+        except SystemExit:
+            pass  # Expected if bridge runner fails
+
+        # Clean up: kill any spawned bridge process
+        final_state = load_state(state_path)
+        if final_state is not None and is_pid_alive(final_state.pid):
+            os.kill(final_state.pid, signal.SIGTERM)
+
+        # The stale state should be gone (cleared before spawn)
+        # A new state file may exist if the bridge actually started
+        if state_path.exists():
+            data = json.loads(state_path.read_text())
+            assert data["pid"] != 999999999
 
 
 class TestBridgeRestart:

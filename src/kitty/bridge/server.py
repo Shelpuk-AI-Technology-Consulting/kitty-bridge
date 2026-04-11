@@ -73,6 +73,7 @@ class BridgeServer:
         tls_cert: str | None = None,
         tls_key: str | None = None,
         state_file: str | None = None,
+        backend_cooldown: int = 300,
     ) -> None:
         # TLS validation: both or neither
         if tls_cert and not tls_key:
@@ -116,32 +117,107 @@ class BridgeServer:
         # Balancing mode: list of (provider, resolved_key, profile) tuples
         self._backends = backends
         self._backend_index = 0
+        self._backend_cooldown = backend_cooldown
+
+        # Backend health tracking (parallel to _backends)
+        self._backend_health: list[dict] = []
+        if backends:
+            self._backend_health = [
+                {"healthy": True, "failed_at": None, "cooldown": backend_cooldown}
+                for _ in backends
+            ]
 
         # Active backend for current request (set by _select_backend)
         self._active_provider = provider
         self._active_key = resolved_key
         self._active_model = model
         self._active_provider_config = provider_config or {}
+        self._current_backend_idx: int = -1
 
     def _get_next_backend(self) -> tuple[ProviderAdapter, str, str | None, dict]:
-        """Select the next backend in round-robin order.
+        """Select the next healthy backend in round-robin order.
+
+        Skips backends that are in cooldown (unhealthy). If all backends
+        are unhealthy, returns the next one anyway (let it fail naturally).
 
         Returns (provider, resolved_key, model, provider_config).
         """
         if self._backends:
-            backend = self._backends[self._backend_index % len(self._backends)]
-            self._backend_index = (self._backend_index + 1) % len(self._backends)
+            n = len(self._backends)
+            # Try all backends to find a healthy one
+            for _ in range(n):
+                idx = self._backend_index % n
+                self._backend_index = (self._backend_index + 1) % n
+
+                health = self._backend_health[idx]
+                if health["healthy"]:
+                    backend = self._backends[idx]
+                    provider, key, profile = backend
+                    return provider, key, profile.model, profile.provider_config  # type: ignore[union-attr]
+
+                # Check if cooldown has expired
+                if health["failed_at"] is not None:
+                    elapsed = time.monotonic() - health["failed_at"]
+                    if elapsed >= health["cooldown"]:
+                        logger.info(
+                            "Backend %s cooldown expired (%.0fs), retrying",
+                            self._backends[idx][2].name,
+                            elapsed,
+                        )
+                        health["healthy"] = True
+                        health["failed_at"] = None
+                        backend = self._backends[idx]
+                        provider, key, profile = backend
+                        return provider, key, profile.model, profile.provider_config  # type: ignore[union-attr]
+
+            # All backends unhealthy — return next one anyway
+            logger.warning("All %d backends unhealthy, attempting request anyway", n)
+            idx = self._backend_index % n
+            self._backend_index = (self._backend_index + 1) % n
+            backend = self._backends[idx]
             provider, key, profile = backend
             return provider, key, profile.model, profile.provider_config  # type: ignore[union-attr]
+
         return self._provider, self._resolved_key, self._model, self._provider_config or {}
+
+    def _mark_backend_unhealthy(self, index: int) -> None:
+        """Mark a backend as unhealthy and log the event."""
+        if not self._backends or index >= len(self._backend_health):
+            return
+        health = self._backend_health[index]
+        health["healthy"] = False
+        health["failed_at"] = time.monotonic()
+        profile_name = self._backends[index][2].name
+        cooldown = health["cooldown"]
+        logger.info(
+            "Backend %s marked unhealthy for %ds after upstream error",
+            profile_name,
+            cooldown,
+        )
+
+    def _find_backend_index(self, key: str) -> int:
+        """Find the index of a backend by its resolved key. Returns -1 if not found."""
+        if not self._backends:
+            return -1
+        for i, (_, k, _) in enumerate(self._backends):
+            if k == key:
+                return i
+        return -1
 
     def _select_backend(self) -> None:
         """Select next backend and set active fields for the current request."""
+        # Record which backend index we're about to use (before _get_next_backend advances)
+        if self._backends:
+            # _get_next_backend already advanced the index, so the one just used is
+            # (index - 1) % n. We track it after the call.
+            pass
         provider, key, model, provider_config = self._get_next_backend()
         self._active_provider = provider
         self._active_key = key
         self._active_model = model
         self._active_provider_config = provider_config
+        # Track which backend index was selected for circuit breaker
+        self._current_backend_idx = self._find_backend_index(key)
 
     @property
     def port(self) -> int:
@@ -217,6 +293,7 @@ class BridgeServer:
         ssl_context = None
         if self._tls_cert and self._tls_key:
             ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            ssl_context.minimum_version = ssl.TLSVersion.TLSv1_2
             ssl_context.load_cert_chain(self._tls_cert, self._tls_key)
 
         site = web.TCPSite(self._runner, self._host, self._port, ssl_context=ssl_context)
@@ -330,13 +407,12 @@ class BridgeServer:
             return web.json_response({"error": "Unauthorized"}, status=401)
 
         # Store key info for access logging
-        import hashlib
         key_hash = hashlib.sha256(token.encode()).hexdigest()[:8]
         request["_key_id"] = key_hash
-        request["_profile_name"] = self._profile_name
 
-        # If key maps to a profile, store it for the handler to use
+        # If key maps to a profile, use that profile name for logging
         mapped_profile = self._keys_entries[token]
+        request["_profile_name"] = mapped_profile or self._profile_name
         if mapped_profile is not None:
             request["_mapped_profile"] = mapped_profile
 
@@ -346,16 +422,14 @@ class BridgeServer:
 
     @web.middleware
     async def _access_log_middleware(self, request: web.Request, handler: object) -> web.StreamResponse:
-        import asyncio as _asyncio
-
         start = time.monotonic()
         response: web.StreamResponse | None = None
         try:
             response = await handler(request)  # type: ignore[misc]
         except web.HTTPException:
             raise
-        except Exception:
-            # Let the default error handler deal with it
+        except Exception as exc:
+            logger.exception("Handler error: %s", exc)
             response = web.json_response({"error": "Internal server error"}, status=500)
         finally:
             if self._access_log_file is not None:
@@ -441,7 +515,7 @@ class BridgeServer:
             return await self._stream_responses(request, body, translator, cc_request)
 
         try:
-            cc_response = await self._make_upstream_request(cc_request)
+            cc_response = await self._request_with_retry(cc_request)
         except UpstreamError as exc:
             error_msg = self._translate_upstream_error(exc.status, exc.body)
             return web.json_response(
@@ -661,7 +735,7 @@ class BridgeServer:
             return await self._stream_messages(request, body, translator, cc_request)
 
         try:
-            cc_response = await self._make_upstream_request(cc_request)
+            cc_response = await self._request_with_retry(cc_request)
         except UpstreamError as exc:
             error_msg = self._translate_upstream_error(exc.status, exc.body)
             return web.json_response(
@@ -849,7 +923,7 @@ class BridgeServer:
             return await self._stream_gemini(request, translator, cc_request)
 
         try:
-            cc_response = await self._make_upstream_request(cc_request)
+            cc_response = await self._request_with_retry(cc_request)
         except UpstreamError as exc:
             error_msg = self._translate_upstream_error(exc.status, exc.body)
             return web.json_response(
@@ -984,6 +1058,52 @@ class BridgeServer:
 
     # ── Chat Completions pass-through handler ─────────────────────────────
 
+    async def _request_with_retry(self, cc_request: dict) -> dict:
+        """Make an upstream request with automatic retry on balancing backends.
+
+        For non-balancing mode (no backends), makes a single attempt.
+        For balancing mode, retries up to N times (where N = number of backends),
+        marking failed backends as unhealthy.
+        """
+        if not self._backends:
+            return await self._make_upstream_request(cc_request)
+
+        n_backends = len(self._backends)
+        last_exc: UpstreamError | Exception | None = None
+
+        for attempt in range(n_backends):
+            if attempt > 0:
+                # Re-select backend and re-normalize for the new backend
+                self._select_backend()
+                self._normalize_model(cc_request)
+                self._active_provider.normalize_request(cc_request)
+
+            try:
+                return await self._make_upstream_request(cc_request)
+            except UpstreamError as exc:
+                last_exc = exc
+                idx = self._current_backend_idx
+                if idx >= 0:
+                    self._mark_backend_unhealthy(idx)
+                logger.info(
+                    "Backend attempt %d/%d failed (status %d), retrying",
+                    attempt + 1, n_backends, exc.status,
+                )
+            except Exception as exc:
+                last_exc = exc
+                idx = self._current_backend_idx
+                if idx >= 0:
+                    self._mark_backend_unhealthy(idx)
+                logger.info(
+                    "Backend attempt %d/%d failed (%s), retrying",
+                    attempt + 1, n_backends, exc,
+                )
+
+        # All attempts exhausted — propagate the last error
+        if isinstance(last_exc, UpstreamError):
+            raise last_exc
+        raise last_exc  # type: ignore[misc]
+
     async def _handle_chat_completions(self, request: web.Request) -> web.StreamResponse:
         """Handle Chat Completions pass-through requests.
 
@@ -1018,7 +1138,7 @@ class BridgeServer:
             return await self._stream_chat_completions(request, cc_request)
 
         try:
-            cc_response = await self._make_upstream_request(cc_request)
+            cc_response = await self._request_with_retry(cc_request)
         except UpstreamError as exc:
             error_msg = self._translate_upstream_error(exc.status, exc.body)
             return web.json_response(

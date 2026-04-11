@@ -5,6 +5,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+_DEFAULT_CONFIG = str(Path.home() / ".config" / "kitty" / "bridge.yaml")
+
 
 def _resolve_executable() -> str:
     """Resolve the kitty executable path."""
@@ -25,13 +27,14 @@ def generate_systemd_unit(
         systemd unit file content as string.
     """
     executable = executable or _resolve_executable()
+    config_path = config_path or _DEFAULT_CONFIG
     return f"""[Unit]
 Description=Kitty Bridge API Gateway
 After=network.target
 
 [Service]
 Type=simple
-ExecStart={executable} -m kitty bridge --config {config_path}
+ExecStart={executable} -m kitty.bridge_runner --config {config_path}
 Restart=on-failure
 RestartSec=5
 
@@ -54,6 +57,7 @@ def generate_launchd_plist(
         plist XML content as string.
     """
     executable = executable or _resolve_executable()
+    config_path = config_path or _DEFAULT_CONFIG
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -64,8 +68,7 @@ def generate_launchd_plist(
     <array>
         <string>{executable}</string>
         <string>-m</string>
-        <string>kitty</string>
-        <string>bridge</string>
+        <string>kitty.bridge_runner</string>
         <string>--config</string>
         <string>{config_path}</string>
     </array>
@@ -96,6 +99,7 @@ def generate_windows_script(
         PowerShell script content as string.
     """
     executable = executable or _resolve_executable()
+    config_path = config_path or _DEFAULT_CONFIG
     return f"""# Kitty Bridge Windows Service Installation Script
 # This script uses NSSM (Non-Sucking Service Manager) to install kitty bridge as a Windows service.
 # Install NSSM first: https://nssm.cc/download
@@ -114,7 +118,7 @@ if ($LASTEXITCODE -ne 0) {{
 }}
 
 # Install the service
-nssm install $serviceName $executable "-m" "kitty" "bridge" "--config" $config
+nssm install $serviceName $executable "-m" "kitty.bridge_runner" "--config" $config
 
 # Set description
 nssm set $serviceName Description "Kitty Bridge API Gateway"
