@@ -75,7 +75,11 @@ class TestContentPartAddedEvent:
     def test_format(self):
         part = {"type": "output_text", "text": ""}
         raw = format_content_part_added_event(
-            seq=3, item_id="msg_abc", output_index=0, content_index=0, part=part,
+            seq=3,
+            item_id="msg_abc",
+            output_index=0,
+            content_index=0,
+            part=part,
         )
         data = _assert_required_fields(raw, "response.content_part.added")
         assert data["item_id"] == "msg_abc"
@@ -87,8 +91,12 @@ class TestContentPartAddedEvent:
 class TestOutputTextDeltaEvent:
     def test_format(self):
         raw = format_output_text_delta_event(
-            seq=4, response_id="resp_abc", item_id="msg_abc",
-            output_index=0, content_index=0, delta="Hello",
+            seq=4,
+            response_id="resp_abc",
+            item_id="msg_abc",
+            output_index=0,
+            content_index=0,
+            delta="Hello",
         )
         data = _assert_required_fields(raw, "response.output_text.delta")
         assert data["response_id"] == "resp_abc"
@@ -99,8 +107,12 @@ class TestOutputTextDeltaEvent:
 
     def test_ends_with_double_newline(self):
         raw = format_output_text_delta_event(
-            seq=0, response_id="r", item_id="m",
-            output_index=0, content_index=0, delta="x",
+            seq=0,
+            response_id="r",
+            item_id="m",
+            output_index=0,
+            content_index=0,
+            delta="x",
         )
         assert raw.endswith("\n\n")
 
@@ -108,7 +120,11 @@ class TestOutputTextDeltaEvent:
 class TestOutputTextDoneEvent:
     def test_format(self):
         raw = format_output_text_done_event(
-            seq=10, item_id="msg_abc", output_index=0, content_index=0, text="Hello world",
+            seq=10,
+            item_id="msg_abc",
+            output_index=0,
+            content_index=0,
+            text="Hello world",
         )
         data = _assert_required_fields(raw, "response.output_text.done")
         assert data["item_id"] == "msg_abc"
@@ -119,7 +135,11 @@ class TestContentPartDoneEvent:
     def test_format(self):
         part = {"type": "output_text", "text": "Hello world"}
         raw = format_content_part_done_event(
-            seq=11, item_id="msg_abc", output_index=0, content_index=0, part=part,
+            seq=11,
+            item_id="msg_abc",
+            output_index=0,
+            content_index=0,
+            part=part,
         )
         data = _assert_required_fields(raw, "response.content_part.done")
         assert data["part"]["text"] == "Hello world"
@@ -128,8 +148,11 @@ class TestContentPartDoneEvent:
 class TestOutputItemDoneEvent:
     def test_format(self):
         item = {
-            "id": "msg_abc", "type": "message", "status": "completed",
-            "content": [{"type": "output_text", "text": "Hello world"}], "role": "assistant",
+            "id": "msg_abc",
+            "type": "message",
+            "status": "completed",
+            "content": [{"type": "output_text", "text": "Hello world"}],
+            "role": "assistant",
         }
         raw = format_output_item_done_event(seq=12, output_index=0, item=item)
         data = _assert_required_fields(raw, "response.output_item.done")
@@ -139,8 +162,11 @@ class TestOutputItemDoneEvent:
 class TestFunctionCallArgumentsDeltaEvent:
     def test_format(self):
         raw = format_function_call_arguments_delta_event(
-            seq=5, response_id="resp_abc", item_id="fc_001",
-            call_id="call_001", delta='{"city":',
+            seq=5,
+            response_id="resp_abc",
+            item_id="fc_001",
+            call_id="call_001",
+            delta='{"city":',
         )
         data = _assert_required_fields(raw, "response.function_call_arguments.delta")
         assert data["response_id"] == "resp_abc"
@@ -152,8 +178,11 @@ class TestFunctionCallArgumentsDeltaEvent:
 class TestFunctionCallArgumentsDoneEvent:
     def test_format(self):
         raw = format_function_call_arguments_done_event(
-            seq=8, response_id="resp_abc", item_id="fc_001",
-            call_id="call_001", arguments='{"city":"London"}',
+            seq=8,
+            response_id="resp_abc",
+            item_id="fc_001",
+            call_id="call_001",
+            arguments='{"city":"London"}',
         )
         data = _assert_required_fields(raw, "response.function_call_arguments.done")
         assert data["arguments"] == '{"city":"London"}'
@@ -207,14 +236,26 @@ class TestSSEFormatValidity:
             format_response_created_event("r1", seq=0),
             format_response_in_progress_event("r1", seq=1),
             format_output_item_added_event(seq=2, output_index=0, item={"id": "m1", "type": "message"}),
-            format_content_part_added_event(seq=3, item_id="m1", output_index=0, content_index=0, part={"type": "output_text", "text": ""}),
-            format_output_text_delta_event(seq=4, response_id="r1", item_id="m1", output_index=0, content_index=0, delta="hi"),
+            format_content_part_added_event(
+                seq=3, item_id="m1", output_index=0, content_index=0, part={"type": "output_text", "text": ""}
+            ),
+            format_output_text_delta_event(
+                seq=4, response_id="r1", item_id="m1", output_index=0, content_index=0, delta="hi"
+            ),
             format_output_text_done_event(seq=5, item_id="m1", output_index=0, content_index=0, text="hi"),
-            format_content_part_done_event(seq=6, item_id="m1", output_index=0, content_index=0, part={"type": "output_text", "text": "hi"}),
-            format_output_item_done_event(seq=7, output_index=0, item={"id": "m1", "type": "message", "status": "completed"}),
+            format_content_part_done_event(
+                seq=6, item_id="m1", output_index=0, content_index=0, part={"type": "output_text", "text": "hi"}
+            ),
+            format_output_item_done_event(
+                seq=7, output_index=0, item={"id": "m1", "type": "message", "status": "completed"}
+            ),
             format_response_completed_event("r1", seq=8, response_data={"output": []}),
-            format_function_call_arguments_delta_event(seq=3, response_id="r1", item_id="fc_1", call_id="call_1", delta="{}"),
-            format_function_call_arguments_done_event(seq=4, response_id="r1", item_id="fc_1", call_id="call_1", arguments="{}"),
+            format_function_call_arguments_delta_event(
+                seq=3, response_id="r1", item_id="fc_1", call_id="call_1", delta="{}"
+            ),
+            format_function_call_arguments_done_event(
+                seq=4, response_id="r1", item_id="fc_1", call_id="call_1", arguments="{}"
+            ),
             format_error_event({"code": "x", "message": "y"}),
         ]
         for raw in events:

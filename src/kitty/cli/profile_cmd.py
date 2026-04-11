@@ -41,7 +41,7 @@ def run_profile_menu(store: ProfileStore) -> None:
     _check_tty()
 
     while True:
-        profiles = store.load_all()
+        store.load_all()
         backends = store.get_all_backends()
 
         clear_screen()
@@ -109,7 +109,23 @@ def _create_profile_flow(store: ProfileStore, cred_store: CredentialStore) -> Pr
         The created and saved Profile.
     """
     # Step 1: Provider selection
-    provider_menu = SelectionMenu("Select provider", ["zai_regular", "zai_coding", "minimax", "novita", "ollama", "openai", "openrouter", "fireworks", "anthropic", "bedrock", "azure", "vertex"])
+    provider_menu = SelectionMenu(
+        "Select provider",
+        [
+            "zai_regular",
+            "zai_coding",
+            "minimax",
+            "novita",
+            "ollama",
+            "openai",
+            "openrouter",
+            "fireworks",
+            "anthropic",
+            "bedrock",
+            "azure",
+            "vertex",
+        ],
+    )
     provider = provider_menu.show()
     if provider is None:
         raise NonTTYError("Provider selection cancelled")
@@ -243,10 +259,7 @@ def _delete_profile_flow(store: ProfileStore) -> None:
         return
 
     # Check if any balancing profiles reference this one
-    referencing = [
-        b.name for b in backends
-        if isinstance(b, BalancingProfile) and selected in b.members
-    ]
+    referencing = [b.name for b in backends if isinstance(b, BalancingProfile) and selected in b.members]
     if referencing:
         print_error(
             f"Cannot delete {selected!r} — it is a member of balancing profile(s): "

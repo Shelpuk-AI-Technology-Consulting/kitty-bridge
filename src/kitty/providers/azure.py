@@ -85,9 +85,16 @@ class AzureOpenAIAdapter(ProviderAdapter):
         and strips internal metadata fields.
         """
         # Shallow copy to avoid mutating the original
-        result = {k: v for k, v in cc_request.items() if k not in (
-            "model", "_resolved_key", "_provider_config",
-        )}
+        result = {
+            k: v
+            for k, v in cc_request.items()
+            if k
+            not in (
+                "model",
+                "_resolved_key",
+                "_provider_config",
+            )
+        }
         return result
 
     def translate_from_upstream(self, raw_response: dict) -> dict:
@@ -134,8 +141,5 @@ class AzureOpenAIAdapter(ProviderAdapter):
         if not isinstance(body, dict):
             return ProviderError(f"Azure OpenAI error {status_code}: {body}")
         error_msg = body.get("error", body)
-        if isinstance(error_msg, dict):
-            msg = error_msg.get("message", str(error_msg))
-        else:
-            msg = str(error_msg)
+        msg = error_msg.get("message", str(error_msg)) if isinstance(error_msg, dict) else str(error_msg)
         return ProviderError(f"Azure OpenAI error {status_code}: {msg}")

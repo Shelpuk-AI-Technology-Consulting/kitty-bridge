@@ -78,6 +78,20 @@ def _gitignore_lines() -> list[str]:
     return [line.strip() for line in (ROOT / ".gitignore").read_text().splitlines()]
 
 
+def _requires_dist_names(wheel_metadata: str) -> set[str]:
+    """Extract normalized direct dependency names from wheel METADATA."""
+    names: set[str] = set()
+    for line in wheel_metadata.splitlines():
+        if not line.startswith("Requires-Dist:"):
+            continue
+        spec = line.split(":", 1)[1].strip()
+        marker_free = spec.split(";", 1)[0].strip()
+        m = re.match(r"([A-Za-z0-9][A-Za-z0-9_.-]*)", marker_free)
+        if m:
+            names.add(re.sub(r"[-_.]+", "-", m.group(1)).lower())
+    return names
+
+
 # ── R1: Metadata completeness ────────────────────────────────────────────
 
 
@@ -124,6 +138,12 @@ class TestMetadataCompleteness:
 
     def test_classifier_python3(self, wheel_metadata: str):
         assert any("Programming Language :: Python :: 3" in line for line in wheel_metadata.splitlines())
+
+    def test_no_langchain_ecosystem_runtime_deps(self, wheel_metadata: str):
+        blocked = {"langsmith", "langchain", "langchain-core", "langchain-community"}
+        requires_dist = _requires_dist_names(wheel_metadata)
+        unexpected = sorted(requires_dist & blocked)
+        assert not unexpected, "Wheel must not directly require LangChain ecosystem packages: " + ", ".join(unexpected)
 
 
 # ── R2: twine check passes ───────────────────────────────────────────────
@@ -187,9 +207,7 @@ class TestBuildArtifacts:
     def test_wheel_contains_license(self, built_wheel: Path):
         with zipfile.ZipFile(built_wheel) as z:
             names = z.namelist()
-        assert any(n.endswith("/LICENSE") or n == "LICENSE" for n in names), (
-            "LICENSE must be in wheel (exact match)"
-        )
+        assert any(n.endswith("/LICENSE") or n == "LICENSE" for n in names), "LICENSE must be in wheel (exact match)"
 
     def test_wheel_contains_main_module(self, built_wheel: Path):
         with zipfile.ZipFile(built_wheel) as z:

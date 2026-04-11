@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import enum
 import os
 import signal
@@ -10,7 +11,7 @@ import sys
 import time
 from pathlib import Path
 
-from kitty.bridge.state import BridgeState, load_state, remove_state, write_state
+from kitty.bridge.state import load_state, remove_state
 
 
 class BridgeStatus(enum.Enum):
@@ -59,10 +60,8 @@ def stop_bridge(state_path: Path | str | None = None) -> None:
         return
 
     if is_pid_alive(state.pid):
-        try:
+        with contextlib.suppress(ProcessLookupError):
             os.kill(state.pid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
 
         # Wait up to 10 seconds for process to exit
         for _ in range(100):
@@ -72,10 +71,8 @@ def stop_bridge(state_path: Path | str | None = None) -> None:
 
         # Force kill if still alive
         if is_pid_alive(state.pid):
-            try:
+            with contextlib.suppress(ProcessLookupError):
                 os.kill(state.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
 
     remove_state(state_path)
 
@@ -101,8 +98,7 @@ def start_bridge(
     state = load_state(state_path)
     if state is not None and is_pid_alive(state.pid):
         print(
-            f"Error: Bridge is already running (PID {state.pid}, "
-            f"{state.host}:{state.port}, profile={state.profile})",
+            f"Error: Bridge is already running (PID {state.pid}, {state.host}:{state.port}, profile={state.profile})",
             file=sys.stderr,
         )
         sys.exit(1)

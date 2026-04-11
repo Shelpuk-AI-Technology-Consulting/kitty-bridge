@@ -6,7 +6,7 @@ import asyncio
 import json
 import logging
 import uuid
-from typing import Awaitable, Callable
+from collections.abc import Awaitable, Callable
 
 from kitty.providers.base import ProviderAdapter, ProviderError
 
@@ -59,7 +59,7 @@ class BedrockAdapter(ProviderAdapter):
         """
         parts = raw.split(":", 2)
         if len(parts) < 2 or not parts[0] or not parts[1]:
-            raise ProviderError(f"Invalid AWS credentials format: expected 'access_key:secret_key[:session_token]'")
+            raise ProviderError("Invalid AWS credentials format: expected 'access_key:secret_key[:session_token]'")
         return tuple(parts)
 
     def is_sso_mode(self, resolved_key: str) -> bool:
@@ -84,8 +84,10 @@ class BedrockAdapter(ProviderAdapter):
         """
         try:
             import boto3
-        except ImportError:
-            raise ProviderError("boto3 is required for the Bedrock provider. Install with: pip install boto3")
+        except ImportError as err:
+            raise ProviderError(
+                "boto3 is required for the Bedrock provider. Install with: pip install boto3"
+            ) from err
 
         region = self.get_region(provider_config)
 
@@ -173,23 +175,22 @@ class BedrockAdapter(ProviderAdapter):
 
         for tc in msg.get("tool_calls", []):
             func = tc.get("function", {})
-            content_blocks.append({
-                "toolUse": {
-                    "toolUseId": tc.get("id", f"call_{uuid.uuid4().hex[:24]}"),
-                    "name": func.get("name", ""),
-                    "input": json.loads(func.get("arguments") or "{}"),
+            content_blocks.append(
+                {
+                    "toolUse": {
+                        "toolUseId": tc.get("id", f"call_{uuid.uuid4().hex[:24]}"),
+                        "name": func.get("name", ""),
+                        "input": json.loads(func.get("arguments") or "{}"),
+                    }
                 }
-            })
+            )
 
         return {"role": "assistant", "content": content_blocks or [{"text": ""}]}
 
     def _translate_tool_result_msg(self, msg: dict) -> dict:
         """Translate a CC tool result message to Bedrock toolResult."""
         content = msg.get("content", "")
-        if isinstance(content, str):
-            result_content = [{"text": content}]
-        else:
-            result_content = content
+        result_content = [{"text": content}] if isinstance(content, str) else content
 
         return {
             "role": "user",
@@ -209,15 +210,17 @@ class BedrockAdapter(ProviderAdapter):
         bedrock_tools = []
         for tool in cc_tools:
             func = tool.get("function", {})
-            bedrock_tools.append({
-                "toolSpec": {
-                    "name": func.get("name", ""),
-                    "description": func.get("description", ""),
-                    "inputSchema": {
-                        "json": func.get("parameters", {"type": "object", "properties": {}}),
-                    },
+            bedrock_tools.append(
+                {
+                    "toolSpec": {
+                        "name": func.get("name", ""),
+                        "description": func.get("description", ""),
+                        "inputSchema": {
+                            "json": func.get("parameters", {"type": "object", "properties": {}}),
+                        },
+                    }
                 }
-            })
+            )
         return bedrock_tools
 
     # ── Bedrock → CC response translation ────────────────────────────────
@@ -445,8 +448,5 @@ class BedrockAdapter(ProviderAdapter):
 
     def map_error(self, status_code: int, body: dict) -> Exception:
         error_msg = body.get("error", body.get("message", body))
-        if isinstance(error_msg, dict):
-            msg = error_msg.get("message", str(error_msg))
-        else:
-            msg = str(error_msg)
+        msg = error_msg.get("message", str(error_msg)) if isinstance(error_msg, dict) else str(error_msg)
         return ProviderError(f"Bedrock error {status_code}: {msg}")

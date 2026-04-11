@@ -16,7 +16,6 @@ import aiohttp
 from aiohttp import web
 
 from kitty.bridge.gemini.translator import GeminiTranslator
-from kitty.profiles.schema import Profile
 from kitty.bridge.messages.events import format_error_event as messages_format_error
 from kitty.bridge.messages.translator import MessagesTranslator
 from kitty.bridge.responses.events import (
@@ -24,6 +23,7 @@ from kitty.bridge.responses.events import (
 )
 from kitty.bridge.responses.translator import ResponsesTranslator
 from kitty.launchers.base import LauncherAdapter
+from kitty.profiles.schema import Profile
 from kitty.providers.base import ProviderAdapter
 from kitty.types import BridgeProtocol
 
@@ -41,6 +41,22 @@ _BACKOFF_BASE = 1.0
 _CLIENT_MAX_SIZE = 16 * 1024 * 1024  # 16 MiB
 _STREAM_READ_TIMEOUT = 120  # seconds — upstream must respond with first byte within this
 _MAX_REQUEST_CHARS = 4_000_000  # ~1.2M estimated tokens; requests larger than this are rejected
+
+
+def _is_retryable_exception(exc: Exception) -> bool:
+    """Return True for transient network exceptions that should be retried."""
+    if isinstance(exc, (asyncio.TimeoutError, ConnectionResetError, BrokenPipeError, aiohttp.ClientConnectionError)):
+        return True
+    if isinstance(exc, OSError):
+        return exc.errno in {32, 104, 110, 111, 113}
+    return False
+
+
+def _truncate_for_log(text: str, limit: int = 2000) -> str:
+    """Truncate long strings for logs while preserving the total original size."""
+    if len(text) <= limit:
+        return text
+    return f"{text[:limit]}... ({len(text)} chars total)"
 
 
 class UpstreamError(Exception):
@@ -107,6 +123,7 @@ class BridgeServer:
         self._keys_entries: dict[str, str | None] = {}  # key -> profile_name or None
         if keys_file:
             from kitty.bridge.keys import parse_keys_file
+
             entries = parse_keys_file(keys_file)
             self._keys_entries = {e.key: e.profile for e in entries}
 
@@ -123,8 +140,7 @@ class BridgeServer:
         self._backend_health: list[dict] = []
         if backends:
             self._backend_health = [
-                {"healthy": True, "failed_at": None, "cooldown": backend_cooldown}
-                for _ in backends
+                {"healthy": True, "failed_at": None, "cooldown": backend_cooldown} for _ in backends
             ]
 
         # Active backend for current request (set by _select_backend)
@@ -240,18 +256,19 @@ class BridgeServer:
 
         # Avoid duplicate handlers on repeated calls
         has_bridge_handler = any(
-            isinstance(h, logging.FileHandler)
-            and getattr(h, "_kitty_bridge_log", False)
+            isinstance(h, logging.FileHandler) and getattr(h, "_kitty_bridge_log", False)
             for h in bridge_logger.handlers
         )
         if not has_bridge_handler:
             fh = logging.FileHandler(_DEBUG_LOG_PATH, mode="a", encoding="utf-8")
             fh._kitty_bridge_log = True  # type: ignore[attr-defined]
             fh.setLevel(logging.DEBUG)
-            fh.setFormatter(logging.Formatter(
-                "%(asctime)s.%(msecs)03d %(levelname)-5s %(name)s │ %(message)s",
-                datefmt="%H:%M:%S",
-            ))
+            fh.setFormatter(
+                logging.Formatter(
+                    "%(asctime)s.%(msecs)03d %(levelname)-5s %(name)s │ %(message)s",
+                    datefmt="%H:%M:%S",
+                )
+            )
             bridge_logger.addHandler(fh)
 
         return _DEBUG_LOG_PATH
@@ -273,18 +290,20 @@ class BridgeServer:
         if self._access_log_path:
             log_path = Path(self._access_log_path)
             log_path.parent.mkdir(parents=True, exist_ok=True)
-            self._access_log_file = open(log_path, "a", encoding="utf-8")
+            self._access_log_file = log_path.open("a", encoding="utf-8")
 
         # TLS warning
         if self._should_warn_no_tls():
             import sys
+
             print(
-                f"WARNING: Binding to {self._host} without TLS. "
-                "API keys and responses will be sent in plain text.",
+                f"WARNING: Binding to {self._host} without TLS. API keys and responses will be sent in plain text.",
                 file=sys.stderr,
             )
 
-        self._app = web.Application(client_max_size=_CLIENT_MAX_SIZE, middlewares=[self._auth_middleware, self._access_log_middleware])
+        self._app = web.Application(
+            client_max_size=_CLIENT_MAX_SIZE, middlewares=[self._auth_middleware, self._access_log_middleware]
+        )
         self._register_routes(self._app)
         self._runner = web.AppRunner(self._app)
         await self._runner.setup()
@@ -309,9 +328,11 @@ class BridgeServer:
 
         # Write state file if configured
         if self._state_file:
-            from kitty.bridge.state import BridgeState, write_state
             import os
             from datetime import datetime, timezone
+
+            from kitty.bridge.state import BridgeState, write_state
+
             state = BridgeState(
                 pid=os.getpid(),
                 host=self._host,
@@ -343,6 +364,7 @@ class BridgeServer:
         # Remove state file
         if self._state_file:
             from kitty.bridge.state import remove_state
+
             remove_state(self._state_file)
         logger.info("Bridge server stopped")
 
@@ -398,10 +420,7 @@ class BridgeServer:
             return await handler(request)  # type: ignore[misc]
 
         auth_header = request.headers.get("Authorization", "")
-        if auth_header.startswith("Bearer "):
-            token = auth_header[7:]
-        else:
-            token = None
+        token = auth_header[7:] if auth_header.startswith("Bearer ") else None
 
         if not token or token not in self._keys_entries:
             return web.json_response({"error": "Unauthorized"}, status=401)
@@ -452,9 +471,16 @@ class BridgeServer:
         status = response.status if response is not None else 500
 
         bytes_in = request.content_length if request.content_length else "-"
-        bytes_out = response.content_length if (response is not None and hasattr(response, "content_length") and response.content_length) else "-"
+        bytes_out = (
+            response.content_length
+            if (response is not None and hasattr(response, "content_length") and response.content_length)
+            else "-"
+        )
 
-        line = f"{now}\t{client_ip}\t{key_id}\t{profile}\t{method}\t{path}\t{status}\t{bytes_in}\t{bytes_out}\t{elapsed_ms}\n"
+        line = (
+            f"{now}\t{client_ip}\t{key_id}\t{profile}\t{method}\t{path}\t"
+            f"{status}\t{bytes_in}\t{bytes_out}\t{elapsed_ms}\n"
+        )
         self._access_log_file.write(line)
         self._access_log_file.flush()
 
@@ -475,13 +501,12 @@ class BridgeServer:
             models.append(self._model)
 
         now = int(time.time())
-        return web.json_response({
-            "object": "list",
-            "data": [
-                {"id": m, "object": "model", "created": now, "owned_by": "kitty-bridge"}
-                for m in models
-            ],
-        })
+        return web.json_response(
+            {
+                "object": "list",
+                "data": [{"id": m, "object": "model", "created": now, "owned_by": "kitty-bridge"} for m in models],
+            }
+        )
 
     # ── Responses API handler ─────────────────────────────────────────────
 
@@ -627,8 +652,12 @@ class BridgeServer:
                                     logger.debug("SSE → %s", event.split("\n", 1)[0][:120])
                                     await sr.write(event.encode())
 
-                    logger.debug("Upstream stream ended. chunks=%d done=%s remaining_buffer=%d chars",
-                                 chunk_count, done, len(line_buffer))
+                    logger.debug(
+                        "Upstream stream ended. chunks=%d done=%s remaining_buffer=%d chars",
+                        chunk_count,
+                        done,
+                        len(line_buffer),
+                    )
 
                     # Flush remaining buffer (last chunk without trailing \n)
                     if not done and line_buffer.strip():
@@ -651,7 +680,13 @@ class BridgeServer:
             terminal_status = "incomplete"
             logger.error("Upstream POST timed out after %ds for %s", _STREAM_READ_TIMEOUT, response_id)
             error_event = responses_format_error(
-                {"code": "timeout", "message": f"Upstream provider timed out ({_STREAM_READ_TIMEOUT}s). Try /clear to reduce context size."},
+                {
+                    "code": "timeout",
+                    "message": (
+                        f"Upstream provider timed out ({_STREAM_READ_TIMEOUT}s). "
+                        "Try /clear to reduce context size."
+                    ),
+                },
                 seq=translator._next_seq(),
             )
             try:
@@ -778,26 +813,34 @@ class BridgeServer:
 
             stream_timeout = aiohttp.ClientTimeout(total=None, sock_connect=30, sock_read=_STREAM_READ_TIMEOUT)
 
-            # Retry loop for retryable upstream errors
-            for attempt in range(_MAX_RETRIES + 1):
+            # Retry loop for retryable upstream errors with backend failover
+            n_backends = len(self._backends) if self._backends else 1
+            max_attempts = (_MAX_RETRIES + 1) * n_backends
+            for attempt in range(max_attempts):
                 async with session.post(url, json=upstream_body, headers=headers, timeout=stream_timeout) as upstream:
-                    upstream_status = upstream.status
                     logger.debug("Upstream response status: %d", upstream.status)
 
                     if upstream.status not in (200, 201):
                         error_body = await upstream.text()
                         logger.error("Upstream error %d: %s", upstream.status, error_body)
 
-                        if upstream.status in _RETRYABLE_STATUSES and attempt < _MAX_RETRIES:
-                            delay = _BACKOFF_BASE * (2**attempt)
-                            logger.warning(
-                                "Upstream %d, retrying in %.1fs (%d/%d)",
-                                upstream.status,
-                                delay,
-                                attempt + 1,
-                                _MAX_RETRIES,
-                            )
-                            await asyncio.sleep(delay)
+                        if upstream.status in _RETRYABLE_STATUSES and attempt < max_attempts - 1:
+                            # Mark backend unhealthy if in balancing mode
+                            if self._backends and self._current_backend_idx >= 0:
+                                self._mark_backend_unhealthy(self._current_backend_idx)
+                                self._select_backend()
+                                url = self._build_upstream_url()
+                                headers = self._build_upstream_headers()
+                                upstream_body = self._active_provider.translate_to_upstream(cc_request)
+                                logger.info(
+                                    "Streaming failover: backend attempt %d/%d (status %d), switching backend",
+                                    attempt + 1,
+                                    max_attempts,
+                                    upstream.status,
+                                )
+                            else:
+                                delay = _BACKOFF_BASE * (2 ** (attempt % (_MAX_RETRIES + 1)))
+                                await asyncio.sleep(delay)
                             continue
 
                         error_msg = self._translate_upstream_error(upstream.status, error_body)
@@ -855,7 +898,16 @@ class BridgeServer:
         except asyncio.TimeoutError:
             logger.error("Upstream POST timed out after %ds for %s", _STREAM_READ_TIMEOUT, message_id)
             error_event = messages_format_error(
-                {"type": "error", "error": {"type": "api_error", "message": f"Upstream provider timed out ({_STREAM_READ_TIMEOUT}s). Try /clear to reduce context size."}},
+                {
+                    "type": "error",
+                    "error": {
+                        "type": "api_error",
+                        "message": (
+                            f"Upstream provider timed out ({_STREAM_READ_TIMEOUT}s). "
+                            "Try /clear to reduce context size."
+                        ),
+                    },
+                },
             )
             try:
                 await sr.write(error_event.encode())
@@ -985,7 +1037,9 @@ class BridgeServer:
                             continue
 
                         error_msg = self._translate_upstream_error(upstream.status, error_body)
-                        error_sse = f"data: {json.dumps({'error': {'code': upstream.status, 'message': error_msg}})}\n\n"
+                        error_sse = (
+                            f"data: {json.dumps({'error': {'code': upstream.status, 'message': error_msg}})}\n\n"
+                        )
                         try:
                             await sr.write(error_sse.encode())
                         except (ConnectionResetError, BrokenPipeError, OSError):
@@ -1035,7 +1089,13 @@ class BridgeServer:
 
         except asyncio.TimeoutError:
             logger.error("Upstream POST timed out after %ds for Gemini stream", _STREAM_READ_TIMEOUT)
-            error_sse = f"data: {json.dumps({'error': {'code': 504, 'message': f'Upstream provider timed out ({_STREAM_READ_TIMEOUT}s)'}})}\n\n"
+            error_payload = {
+                "error": {
+                    "code": 504,
+                    "message": f"Upstream provider timed out ({_STREAM_READ_TIMEOUT}s)",
+                }
+            }
+            error_sse = f"data: {json.dumps(error_payload)}\n\n"
             try:
                 await sr.write(error_sse.encode())
             except (ConnectionResetError, BrokenPipeError, OSError):
@@ -1087,7 +1147,9 @@ class BridgeServer:
                     self._mark_backend_unhealthy(idx)
                 logger.info(
                     "Backend attempt %d/%d failed (status %d), retrying",
-                    attempt + 1, n_backends, exc.status,
+                    attempt + 1,
+                    n_backends,
+                    exc.status,
                 )
             except Exception as exc:
                 last_exc = exc
@@ -1096,7 +1158,9 @@ class BridgeServer:
                     self._mark_backend_unhealthy(idx)
                 logger.info(
                     "Backend attempt %d/%d failed (%s), retrying",
-                    attempt + 1, n_backends, exc,
+                    attempt + 1,
+                    n_backends,
+                    exc,
                 )
 
         # All attempts exhausted — propagate the last error
@@ -1200,7 +1264,9 @@ class BridgeServer:
                             continue
 
                         error_msg = self._translate_upstream_error(upstream.status, error_body)
-                        error_sse = f"data: {json.dumps({'error': {'message': error_msg, 'type': 'upstream_error'}})}\n\n"
+                        error_sse = (
+                            f"data: {json.dumps({'error': {'message': error_msg, 'type': 'upstream_error'}})}\n\n"
+                        )
                         try:
                             await sr.write(error_sse.encode())
                         except (ConnectionResetError, BrokenPipeError, OSError):
@@ -1219,7 +1285,13 @@ class BridgeServer:
 
         except asyncio.TimeoutError:
             logger.error("Upstream POST timed out after %ds for Chat Completions stream", _STREAM_READ_TIMEOUT)
-            error_sse = f"data: {json.dumps({'error': {'message': f'Upstream provider timed out ({_STREAM_READ_TIMEOUT}s)', 'type': 'timeout_error'}})}\n\n"
+            error_payload = {
+                "error": {
+                    "message": f"Upstream provider timed out ({_STREAM_READ_TIMEOUT}s)",
+                    "type": "timeout_error",
+                }
+            }
+            error_sse = f"data: {json.dumps(error_payload)}\n\n"
             try:
                 await sr.write(error_sse.encode())
             except (ConnectionResetError, BrokenPipeError, OSError):
@@ -1302,13 +1374,14 @@ class BridgeServer:
             self._session = aiohttp.ClientSession(timeout=timeout)
         return self._session
 
-
     @staticmethod
     def _extract_error_fields(body: object) -> tuple[str, str]:
         """Extract (code, message) from an upstream error body.
 
         Handles both dict bodies (from non-streaming path) and raw JSON
-        strings (from streaming path).
+        strings (from streaming path). Also handles double-nested errors
+        where the `message` field itself contains a JSON string with an
+        inner `error` object (e.g. Minimax).
         """
         error_obj: dict | None = None
         if isinstance(body, dict):
@@ -1328,6 +1401,24 @@ class BridgeServer:
                 code = str(error_obj.get("code"))
             if error_obj.get("message") is not None:
                 message = str(error_obj.get("message"))
+
+        # If no code was found at the top level, try parsing nested JSON
+        # from the message field (e.g. Minimax wraps errors this way).
+        if not code and isinstance(message, str) and message.startswith("{"):
+            try:
+                nested = json.loads(message)
+                if isinstance(nested, dict):
+                    inner_error = nested.get("error")
+                    if isinstance(inner_error, dict):
+                        if inner_error.get("code") is not None:
+                            code = str(inner_error.get("code"))
+                        # Append inner message for searchability
+                        inner_msg = inner_error.get("message")
+                        if inner_msg:
+                            message = f"{message} {inner_msg}"
+            except json.JSONDecodeError:
+                pass
+
         return code, message
 
     @staticmethod
@@ -1354,12 +1445,16 @@ class BridgeServer:
         code, error_message = BridgeServer._extract_error_fields(body)
 
         # Z.AI code 1261: prompt exceeds model context window
+        # Minimax code 2013: context window exceeds limit
         searchable = f"{details}\n{error_message}".lower()
         is_context_too_large = (
             code == "1261"
+            or code == "2013"
             or "exceeds max length" in searchable
             or "prompt exceeds" in searchable
             or "context length" in searchable
+            or "context window exceeds" in searchable
+            or "exceeds context" in searchable
             or "maximum context" in searchable
         )
         if is_context_too_large:
@@ -1371,10 +1466,7 @@ class BridgeServer:
         if status == 500:
             is_provider_network_failure = code == "1234" or "network failure" in searchable
             if is_provider_network_failure:
-                prefix = (
-                    "Upstream provider temporary network/internal failure (HTTP 500). "
-                    "Please retry shortly."
-                )
+                prefix = "Upstream provider temporary network/internal failure (HTTP 500). Please retry shortly."
             else:
                 prefix = "Upstream provider temporary internal failure (HTTP 500). Please retry shortly."
             return f"{prefix} Details: {details}" if details else prefix

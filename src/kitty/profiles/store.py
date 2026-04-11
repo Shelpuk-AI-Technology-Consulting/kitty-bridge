@@ -13,7 +13,7 @@ from typing import Any
 import filelock
 from platformdirs import user_config_dir
 
-from kitty.profiles.schema import BalancingProfile, BackendConfig, Profile
+from kitty.profiles.schema import BackendConfig, BalancingProfile, Profile
 
 logger = logging.getLogger(__name__)
 

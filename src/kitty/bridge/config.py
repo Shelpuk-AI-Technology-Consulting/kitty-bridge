@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -97,8 +97,12 @@ def load_bridge_config(
         keys_file=str(_expand_path(str(_get("keys_file", None, _DEFAULT_KEYS_FILE))) or _DEFAULT_KEYS_FILE),  # type: ignore[arg-type]
         log_access=_get("log_access", cli_log_access, None),  # type: ignore[arg-type]
         log_dir=str(_expand_path(str(_get("log_dir", None, _DEFAULT_LOG_DIR))) or _DEFAULT_LOG_DIR),  # type: ignore[arg-type]
-        tls_cert=_expand_path(str(v) if v is not None else None) if (v := _get("tls_cert", cli_tls_cert, None)) is not None else None,  # type: ignore[arg-type]
-        tls_key=_expand_path(str(v) if v is not None else None) if (v := _get("tls_key", cli_tls_key, None)) is not None else None,  # type: ignore[arg-type]
+        tls_cert=_expand_path(str(v) if v is not None else None)
+        if (v := _get("tls_cert", cli_tls_cert, None)) is not None
+        else None,  # type: ignore[arg-type]
+        tls_key=_expand_path(str(v) if v is not None else None)
+        if (v := _get("tls_key", cli_tls_key, None)) is not None
+        else None,  # type: ignore[arg-type]
     )
 
     return config

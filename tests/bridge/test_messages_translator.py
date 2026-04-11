@@ -334,6 +334,46 @@ class TestTranslateResponse:
         assert result["content"][0]["type"] == "text"
         assert result["content"][1]["type"] == "tool_use"
 
+    def test_empty_assistant_output_emits_fallback_text_block(self):
+        cc_response = {
+            "id": "chatcmpl-empty",
+            "model": "gpt-4o",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {"role": "assistant", "content": None},
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {"prompt_tokens": 42, "completion_tokens": 0, "total_tokens": 42},
+        }
+
+        result = self.t.translate_response(cc_response)
+        assert len(result["content"]) == 1
+        assert result["content"][0]["type"] == "text"
+        assert result["content"][0]["text"].strip() != ""
+        assert "retry" in result["content"][0]["text"].lower()
+        assert "/clear" in result["content"][0]["text"]
+
+    def test_empty_assistant_output_prefers_refusal_text(self):
+        cc_response = {
+            "id": "chatcmpl-empty-refusal",
+            "model": "gpt-4o",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {"role": "assistant", "content": None, "refusal": "Policy refusal from upstream"},
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {"prompt_tokens": 42, "completion_tokens": 0, "total_tokens": 42},
+        }
+
+        result = self.t.translate_response(cc_response)
+        assert len(result["content"]) == 1
+        assert result["content"][0]["type"] == "text"
+        assert result["content"][0]["text"] == "Policy refusal from upstream"
+
 
 # ── translate_stream_chunk ─────────────────────────────────────────────────
 
@@ -373,6 +413,23 @@ class TestTranslateStreamChunk:
         # Check stop_reason
         delta_event = [e for e in events if "message_delta" in e][0]
         assert "end_turn" in delta_event
+
+    def test_finish_without_content_emits_fallback_text_events(self):
+        msg_id = self._make_message_id()
+        model = "claude-3-opus"
+        chunk = {
+            "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 0, "total_tokens": 10},
+        }
+
+        events = self.t.translate_stream_chunk(msg_id, model, chunk)
+        event_blob = "\n".join(events)
+        assert "message_start" in event_blob
+        assert "content_block_start" in event_blob
+        assert "content_block_delta" in event_blob
+        assert "/clear" in event_blob
+        assert "retry" in event_blob.lower()
+        assert "message_stop" in event_blob
 
     def test_tool_call_delta_produces_input_json_delta(self):
         msg_id = self._make_message_id()

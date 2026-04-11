@@ -5,11 +5,11 @@ from __future__ import annotations
 import sys
 import uuid
 
+from rich.console import Console
+
 from kitty.credentials.store import CredentialStore
 from kitty.profiles.schema import _NAME_PATTERN, RESERVED_NAMES, Profile
 from kitty.profiles.store import ProfileStore
-from rich.console import Console
-
 from kitty.tui.display import print_error, print_section, print_status, print_step, print_warning
 from kitty.tui.menu import SelectionMenu
 from kitty.tui.prompts import NonTTYError, prompt_confirm, prompt_secret, prompt_text
@@ -50,7 +50,23 @@ def run_setup_wizard(store: ProfileStore, cred_store: CredentialStore) -> Profil
 
     # Step 1: Provider selection
     print_step(1, 6, "Provider selection")
-    provider_menu = SelectionMenu("Select provider", ["zai_regular", "zai_coding", "minimax", "novita", "ollama", "openai", "openrouter", "fireworks", "anthropic", "bedrock", "azure", "vertex"])
+    provider_menu = SelectionMenu(
+        "Select provider",
+        [
+            "zai_regular",
+            "zai_coding",
+            "minimax",
+            "novita",
+            "ollama",
+            "openai",
+            "openrouter",
+            "fireworks",
+            "anthropic",
+            "bedrock",
+            "azure",
+            "vertex",
+        ],
+    )
     provider = provider_menu.show()
     if provider is None:
         raise NonTTYError("Provider selection cancelled")

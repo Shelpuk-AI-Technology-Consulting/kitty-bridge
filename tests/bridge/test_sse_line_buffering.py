@@ -1,9 +1,8 @@
 """Tests for SSE line buffering — validates that upstream TCP chunks are
 properly reassembled into complete SSE lines before parsing."""
 
+import contextlib
 import json
-
-import pytest
 
 
 def parse_sse_chunks(chunks: list[bytes]) -> list[dict]:
@@ -30,10 +29,8 @@ def parse_sse_chunks(chunks: list[bytes]) -> list[dict]:
             if data_str.strip() == "[DONE]":
                 done = True
                 break
-            try:
+            with contextlib.suppress(json.JSONDecodeError):
                 received.append(json.loads(data_str))
-            except json.JSONDecodeError:
-                pass
 
     # Flush remaining buffer (last chunk without trailing \n)
     if not done and buffer.strip():
@@ -41,10 +38,8 @@ def parse_sse_chunks(chunks: list[bytes]) -> list[dict]:
         if line.startswith("data: "):
             data_str = line[6:]
             if data_str.strip() != "[DONE]":
-                try:
+                with contextlib.suppress(json.JSONDecodeError):
                     received.append(json.loads(data_str))
-                except json.JSONDecodeError:
-                    pass
 
     return received
 
@@ -85,7 +80,7 @@ class TestSSELineBuffering:
         """[DONE] sentinel is detected and stops parsing."""
         chunks = [
             b'data: {"choices":[{"delta":{"content":"Hi"},"finish_reason":null}]}\n\n',
-            b'data: [DONE]\n\n',
+            b"data: [DONE]\n\n",
         ]
         result = parse_sse_chunks(chunks)
         assert len(result) == 1
@@ -104,9 +99,9 @@ class TestSSELineBuffering:
     def test_empty_lines_ignored(self):
         """Empty SSE lines (event separators) are silently skipped."""
         chunks = [
-            b'\n',
+            b"\n",
             b'data: {"choices":[{"delta":{"content":"X"},"finish_reason":null}]}\n',
-            b'\n',
+            b"\n",
         ]
         result = parse_sse_chunks(chunks)
         assert len(result) == 1
@@ -141,7 +136,7 @@ class TestSSELineBuffering:
         """[DONE] sentinel stops parsing, remaining data is ignored."""
         chunks = [
             b'data: {"choices":[{"delta":{"content":"Hi"},"finish_reason":null}]}\n\n',
-            b'data: [DONE]\n\n',
+            b"data: [DONE]\n\n",
             b'data: {"choices":[{"delta":{"content":"AfterDone"},"finish_reason":null}]}\n\n',
         ]
         result = parse_sse_chunks(chunks)

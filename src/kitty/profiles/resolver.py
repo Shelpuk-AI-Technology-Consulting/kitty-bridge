@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from kitty.profiles.schema import BalancingProfile, BackendConfig, Profile
+from kitty.profiles.schema import BackendConfig, BalancingProfile, Profile
 from kitty.profiles.store import ProfileStore
 
 

@@ -3,13 +3,11 @@
 from __future__ import annotations
 
 import asyncio
-import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from kitty.providers.base import ProviderAdapter
-from kitty.providers.zai import ZaiCodingAdapter
 from kitty.validation import ValidationResult, validate_api_key
 
 
@@ -145,7 +143,6 @@ async def test_validate_200_returns_valid(mock_session_cls):
 @pytest.mark.asyncio
 @patch("kitty.validation.aiohttp.ClientSession")
 async def test_validate_timeout_returns_valid_with_warning(mock_session_cls):
-    import aiohttp
 
     provider = MockProvider()
     mock_session = AsyncMock()
@@ -167,9 +164,12 @@ async def test_validate_connection_error_returns_valid_with_warning(mock_session
 
     provider = MockProvider()
     mock_session = AsyncMock()
-    mock_session.post = MagicMock(side_effect=aiohttp.ClientConnectorError(
-        connection_key=MagicMock(), os_error=OSError("Connection refused"),
-    ))
+    mock_session.post = MagicMock(
+        side_effect=aiohttp.ClientConnectorError(
+            connection_key=MagicMock(),
+            os_error=OSError("Connection refused"),
+        )
+    )
     mock_session.__aenter__ = AsyncMock(return_value=mock_session)
     mock_session.__aexit__ = AsyncMock(return_value=False)
     mock_session_cls.return_value = mock_session

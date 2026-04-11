@@ -9,8 +9,6 @@ import json
 import uuid
 from pathlib import Path
 
-import pytest
-
 from kitty.launchers.claude import ClaudeAdapter
 from kitty.profiles.schema import Profile
 
@@ -57,10 +55,13 @@ class TestApiKeyInSettingsEnv:
         bridge; the bridge always uses Bearer {resolved_key}.  Removing it
         causes Claude Code to show 'Not logged in'."""
         settings_path = tmp_path / ".claude" / "settings.json"
-        _write_settings(settings_path, env={
-            "ANTHROPIC_AUTH_TOKEN": "secret-token",
-            "ANTHROPIC_BASE_URL": "https://old.example.com",
-        })
+        _write_settings(
+            settings_path,
+            env={
+                "ANTHROPIC_AUTH_TOKEN": "secret-token",
+                "ANTHROPIC_BASE_URL": "https://old.example.com",
+            },
+        )
 
         adapter = ClaudeAdapter()
         adapter.prepare_launch(
@@ -75,11 +76,14 @@ class TestApiKeyInSettingsEnv:
     def test_bridge_overrides_win_over_pre_existing_settings(self, tmp_path: Path):
         """Bridge env_overrides must win over pre-existing settings.json values."""
         settings_path = tmp_path / ".claude" / "settings.json"
-        _write_settings(settings_path, env={
-            "ANTHROPIC_BASE_URL": "http://127.0.0.1:8080",
-            "ANTHROPIC_API_KEY": "sk-from-settings",
-            "ANTHROPIC_MODEL": "minimax-m2.7",
-        })
+        _write_settings(
+            settings_path,
+            env={
+                "ANTHROPIC_BASE_URL": "http://127.0.0.1:8080",
+                "ANTHROPIC_API_KEY": "sk-from-settings",
+                "ANTHROPIC_MODEL": "minimax-m2.7",
+            },
+        )
 
         adapter = ClaudeAdapter()
         original = adapter.prepare_launch(

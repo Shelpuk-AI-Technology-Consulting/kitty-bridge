@@ -564,10 +564,7 @@ class TestTranslateStreamChunk:
         output = data["response"]["output"]
         assert len(output) == 1
         assert output[0]["type"] == "message"
-        assert any(
-            block["type"] == "output_text" and block["text"] == "Hello world"
-            for block in output[0]["content"]
-        )
+        assert any(block["type"] == "output_text" and block["text"] == "Hello world" for block in output[0]["content"])
 
     def test_finish_reason_length_sets_incomplete_status(self):
         chunk = {
@@ -621,22 +618,26 @@ class TestTranslateStreamChunk:
     def test_tool_call_with_null_usage_preserves_arguments(self):
         """MiniMax sends tool calls with 'usage: null' in the same chunk. Arguments must be preserved."""
         chunk = {
-            "choices": [{
-                "index": 0,
-                "delta": {
-                    "role": "assistant",
-                    "tool_calls": [{
-                        "id": "call_001",
-                        "type": "function",
-                        "function": {
-                            "name": "test_tool",
-                            "arguments": '{"key": "value"}',
-                        },
-                        "index": 0,
-                    }],
-                },
-                "finish_reason": "tool_calls",
-            }],
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {
+                        "role": "assistant",
+                        "tool_calls": [
+                            {
+                                "id": "call_001",
+                                "type": "function",
+                                "function": {
+                                    "name": "test_tool",
+                                    "arguments": '{"key": "value"}',
+                                },
+                                "index": 0,
+                            }
+                        ],
+                    },
+                    "finish_reason": "tool_calls",
+                }
+            ],
             "usage": None,
         }
         events = self.t.translate_stream_chunk("resp_test", chunk)
@@ -788,11 +789,19 @@ class TestStripThinkingTags:
     def test_streaming_thinking_tags_stripped(self):
         """اخل tags in streaming content must be stripped from accumulated text."""
         # Simulate MiniMax streaming: thinking tag + actual content + finish
-        chunk1 = {"choices": [{"index": 0, "delta": {"content": "<\u0627\u062e\u0644>thinking"}, "finish_reason": None}]}
+        chunk1 = {
+            "choices": [{"index": 0, "delta": {"content": "<\u0627\u062e\u0644>thinking"}, "finish_reason": None}]
+        }
         chunk2 = {"choices": [{"index": 0, "delta": {"content": " about math"}, "finish_reason": None}]}
-        chunk3 = {"choices": [{"index": 0, "delta": {"content": "</\u0627\u062e\u0644>\n\nThe answer is 4."}, "finish_reason": None}]}
-        chunk4 = {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
-                  "usage": {"prompt_tokens": 5, "completion_tokens": 10, "total_tokens": 15}}
+        chunk3 = {
+            "choices": [
+                {"index": 0, "delta": {"content": "</\u0627\u062e\u0644>\n\nThe answer is 4."}, "finish_reason": None}
+            ]
+        }
+        chunk4 = {
+            "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 5, "completion_tokens": 10, "total_tokens": 15},
+        }
 
         self.t.translate_stream_chunk("resp_test", chunk1)
         self.t.translate_stream_chunk("resp_test", chunk2)
@@ -810,8 +819,10 @@ class TestStripThinkingTags:
         """Content without thinking tags passes through unchanged."""
         chunk1 = {"choices": [{"index": 0, "delta": {"content": "Hello"}, "finish_reason": None}]}
         chunk2 = {"choices": [{"index": 0, "delta": {"content": " world"}, "finish_reason": None}]}
-        chunk3 = {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
-                  "usage": {"prompt_tokens": 5, "completion_tokens": 5, "total_tokens": 10}}
+        chunk3 = {
+            "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 5, "completion_tokens": 5, "total_tokens": 10},
+        }
 
         self.t.translate_stream_chunk("resp_test", chunk1)
         self.t.translate_stream_chunk("resp_test", chunk2)
@@ -902,15 +913,17 @@ class TestSynthesizeCompletedEvents:
             _, d = _parse_sse_event(e)
             seqs.append(d["sequence_number"])
 
-        chunk2 = {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
-                   "usage": {"prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7}}
+        chunk2 = {
+            "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7},
+        }
         for e in self.t.translate_stream_chunk("resp_test", chunk2):
             _, d = _parse_sse_event(e)
             seqs.append(d["sequence_number"])
 
         # All sequence numbers should be monotonically increasing
         for i in range(1, len(seqs)):
-            assert seqs[i] > seqs[i - 1], f"seq[{i}]={seqs[i]} not > seq[{i-1}]={seqs[i-1]}"
+            assert seqs[i] > seqs[i - 1], f"seq[{i}]={seqs[i]} not > seq[{i - 1}]={seqs[i - 1]}"
 
     def test_tool_call_arguments_not_empty_in_synthesized_completed(self):
         """synthesize_completed_events must call finalize() only once per buffer.

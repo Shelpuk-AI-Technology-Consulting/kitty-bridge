@@ -377,12 +377,19 @@ class TestStreamConnectionReset:
         port = await server.start_async()
         try:
             upstream_chunks = [
-                b'data: {"id":"test","choices":[{"index":0,"delta":{"content":"Hi"},"finish_reason":null}],"model":"test"}\n\n',
-                b'data: {"id":"test","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"model":"test","usage":null}\n\n',
+                (
+                    b'data: {"id":"test","choices":[{"index":0,"delta":{"content":"Hi"},'
+                    b'"finish_reason":null}],"model":"test"}\n\n'
+                ),
+                (
+                    b'data: {"id":"test","choices":[{"index":0,"delta":{},'
+                    b'"finish_reason":"stop"}],"model":"test","usage":null}\n\n'
+                ),
                 b"data: [DONE]\n\n",
             ]
 
             with aioresponses(passthrough=["http://127.0.0.1"]) as m:
+
                 async def _streaming_upstream(url, **kwargs):
                     """Mock upstream that returns SSE chunks."""
                     resp = aiohttp.StreamResponse(status=200, headers={"Content-Type": "text/event-stream"})
@@ -400,15 +407,17 @@ class TestStreamConnectionReset:
                 )
 
                 # Read the full response — client will disconnect after reading
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(
+                async with (
+                    aiohttp.ClientSession() as session,
+                    session.post(
                         f"http://127.0.0.1:{port}/v1/responses",
                         json={"model": "test-model", "input": [{"role": "user", "content": "hi"}], "stream": True},
-                    ) as resp:
-                        assert resp.status == 200
-                        # Read all SSE events
-                        body = await resp.read()
-                        assert b"response.completed" in body
+                    ) as resp,
+                ):
+                    assert resp.status == 200
+                    # Read all SSE events
+                    body = await resp.read()
+                    assert b"response.completed" in body
 
         finally:
             await server.stop_async()
@@ -422,8 +431,14 @@ class TestStreamConnectionReset:
         port = await server.start_async()
         try:
             upstream_chunks = [
-                b'data: {"id":"test","choices":[{"index":0,"delta":{"content":"Hi"},"finish_reason":null}],"model":"test"}\n\n',
-                b'data: {"id":"test","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"model":"test","usage":null}\n\n',
+                (
+                    b'data: {"id":"test","choices":[{"index":0,"delta":{"content":"Hi"},'
+                    b'"finish_reason":null}],"model":"test"}\n\n'
+                ),
+                (
+                    b'data: {"id":"test","choices":[{"index":0,"delta":{},'
+                    b'"finish_reason":"stop"}],"model":"test","usage":null}\n\n'
+                ),
                 b"data: [DONE]\n\n",
             ]
 
@@ -434,14 +449,18 @@ class TestStreamConnectionReset:
                     headers={"Content-Type": "text/event-stream"},
                 )
 
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(
-                        f"http://127.0.0.1:{port}/v1/messages",
-                        json={"model": "test-model", "messages": [{"role": "user", "content": "hi"}], "max_tokens": 1024, "stream": True},
-                    ) as resp:
-                        assert resp.status == 200
-                        body = await resp.read()
-                        assert len(body) > 0
+                async with aiohttp.ClientSession() as session, session.post(
+                    f"http://127.0.0.1:{port}/v1/messages",
+                    json={
+                        "model": "test-model",
+                        "messages": [{"role": "user", "content": "hi"}],
+                        "max_tokens": 1024,
+                        "stream": True,
+                    },
+                ) as resp:
+                    assert resp.status == 200
+                    body = await resp.read()
+                    assert len(body) > 0
 
         finally:
             await server.stop_async()
@@ -460,13 +479,15 @@ class TestStreamConnectionReset:
                     payload={"error": {"code": "1234", "message": "Internal network failure"}},
                 )
 
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(
+                async with (
+                    aiohttp.ClientSession() as session,
+                    session.post(
                         f"http://127.0.0.1:{port}/v1/responses",
                         json={"model": "test-model", "input": [{"role": "user", "content": "hi"}], "stream": True},
-                    ) as resp:
-                        assert resp.status == 200
-                        body = await resp.read()
+                    ) as resp,
+                ):
+                    assert resp.status == 200
+                    body = await resp.read()
 
                 assert b"response.completed" in body
                 sse_events = _parse_sse_events(body)

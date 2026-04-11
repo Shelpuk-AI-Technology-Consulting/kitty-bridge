@@ -7,10 +7,9 @@ from pathlib import Path
 import aiohttp
 import pytest
 
-from kitty.bridge.keys import KeyEntry, parse_keys_file
+from kitty.bridge.keys import parse_keys_file
 from kitty.bridge.server import BridgeServer
 from kitty.providers.zai import ZaiRegularAdapter
-
 
 # ---------------------------------------------------------------------------
 # Keys file parser tests
@@ -133,9 +132,10 @@ class TestApiKeyAuthMiddleware:
         server = _make_server(keys_file=None)
         port = await server.start_async()
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(f"http://127.0.0.1:{port}/healthz") as resp:
-                    assert resp.status == 200
+            async with aiohttp.ClientSession() as session, session.get(
+                f"http://127.0.0.1:{port}/healthz"
+            ) as resp:
+                assert resp.status == 200
         finally:
             await server.stop_async()
 
@@ -145,12 +145,14 @@ class TestApiKeyAuthMiddleware:
         server = _make_server(keys_file=str(keys))
         port = await server.start_async()
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(
+            async with (
+                aiohttp.ClientSession() as session,
+                session.get(
                     f"http://127.0.0.1:{port}/healthz",
                     headers={"Authorization": "Bearer sk-valid-key"},
-                ) as resp:
-                    assert resp.status == 200
+                ) as resp,
+            ):
+                assert resp.status == 200
         finally:
             await server.stop_async()
 
@@ -160,12 +162,14 @@ class TestApiKeyAuthMiddleware:
         server = _make_server(keys_file=str(keys))
         port = await server.start_async()
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(
+            async with (
+                aiohttp.ClientSession() as session,
+                session.get(
                     f"http://127.0.0.1:{port}/healthz",
                     headers={"Authorization": "Bearer sk-wrong-key"},
-                ) as resp:
-                    assert resp.status == 401
+                ) as resp,
+            ):
+                assert resp.status == 401
         finally:
             await server.stop_async()
 
@@ -175,9 +179,10 @@ class TestApiKeyAuthMiddleware:
         server = _make_server(keys_file=str(keys))
         port = await server.start_async()
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(f"http://127.0.0.1:{port}/healthz") as resp:
-                    assert resp.status == 401
+            async with aiohttp.ClientSession() as session, session.get(
+                f"http://127.0.0.1:{port}/healthz"
+            ) as resp:
+                assert resp.status == 401
         finally:
             await server.stop_async()
 
@@ -199,12 +204,14 @@ class TestApiKeyAuthMiddleware:
         )
         port = await server.start_async()
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(
+            async with (
+                aiohttp.ClientSession() as session,
+                session.get(
                     f"http://127.0.0.1:{port}/healthz",
                     headers={"Authorization": "Bearer sk-secret-key"},
-                ) as resp:
-                    assert resp.status == 200
+                ) as resp,
+            ):
+                assert resp.status == 200
         finally:
             await server.stop_async()
 
@@ -213,5 +220,6 @@ class TestApiKeyAuthMiddleware:
         fields = lines[0].split("\t")
         # Key ID should be first 8 chars of SHA-256, not "sk-secret-key"
         import hashlib
+
         expected_hash = hashlib.sha256(b"sk-secret-key").hexdigest()[:8]
         assert fields[2] == expected_hash

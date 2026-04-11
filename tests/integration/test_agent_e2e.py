@@ -13,6 +13,7 @@ Skip in normal runs: pytest tests/ --ignore=tests/integration
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 from pathlib import Path
 
@@ -58,19 +59,20 @@ ADAPTERS: dict[str, LauncherAdapter] = {
     "kilo": KiloAdapter(),
 }
 
+
 # Agent-specific CLI command builders
 # Each returns (binary_name, [args_before_prompt], [args_after_prompt])
 def _build_agent_cmd(agent_name: str, prompt: str) -> list[str]:
     """Build the full CLI command for an agent."""
     binary = str(_get_binary(agent_name))
-    if agent_name == "codex":
-        return [binary, "exec", "--full-auto", prompt]
-    elif agent_name == "claude":
-        return [binary, "-p", prompt, "--dangerously-skip-permissions"]
-    elif agent_name == "gemini":
-        return [binary, "-p", prompt, "-y"]
-    elif agent_name == "kilo":
-        return [binary, "run", "--auto", prompt]
+    command_map: dict[str, list[str]] = {
+        "codex": [binary, "exec", "--full-auto", prompt],
+        "claude": [binary, "-p", prompt, "--dangerously-skip-permissions"],
+        "gemini": [binary, "-p", prompt, "-y"],
+        "kilo": [binary, "run", "--auto", prompt],
+    }
+    if agent_name in command_map:
+        return command_map[agent_name]
     raise ValueError(f"Unknown agent: {agent_name}")
 
 
@@ -79,6 +81,7 @@ def _build_agent_cmd(agent_name: str, prompt: str) -> list[str]:
 
 def _resolve_key(profile: Profile) -> str:
     from kitty.credentials.store import CredentialNotFoundError
+
     cred_store = CredentialStore(backends=[FileBackend()])
     try:
         return cred_store.resolve(profile)
@@ -149,9 +152,7 @@ async def _run_agent_through_bridge(
             stderr=asyncio.subprocess.PIPE,
         )
         try:
-            stdout, stderr = await asyncio.wait_for(
-                proc.communicate(), timeout=timeout
-            )
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
         except asyncio.TimeoutError:
             proc.kill()
             await proc.wait()
@@ -164,10 +165,8 @@ async def _run_agent_through_bridge(
         except Exception:
             pass
         # Stop bridge server
-        try:
+        with contextlib.suppress(Exception):
             await server.stop_async()
-        except Exception:
-            pass
 
     output = stdout.decode("utf-8", errors="replace").strip()
     stderr_text = stderr.decode("utf-8", errors="replace").strip()
@@ -192,7 +191,10 @@ class TestAgentMathE2E:
     async def test_math_2plus2(self, agent_name, profile_name):
         profile = _get_profile(profile_name)
         output = await _run_agent_through_bridge(
-            agent_name, profile, MATH_PROMPT, MATH_TIMEOUT,
+            agent_name,
+            profile,
+            MATH_PROMPT,
+            MATH_TIMEOUT,
         )
         assert MATH_EXPECTED in output, f"Expected '4' in output, got: {output[:500]}"
 
@@ -207,16 +209,16 @@ class TestAgentWebSearchE2E:
     async def test_web_search_weather(self, agent_name, profile_name):
         profile = _get_profile(profile_name)
         output = await _run_agent_through_bridge(
-            agent_name, profile, WEB_SEARCH_PROMPT, WEB_SEARCH_TIMEOUT,
+            agent_name,
+            profile,
+            WEB_SEARCH_PROMPT,
+            WEB_SEARCH_TIMEOUT,
         )
         # Verify the output contains weather-related keywords
         output_lower = output.lower()
         weather_keywords = ["venice", "weather", "temperature", "°c", "°f", "celsius", "fahrenheit"]
         found = [kw for kw in weather_keywords if kw in output_lower]
-        assert found, (
-            f"Expected weather keywords {weather_keywords} in output, "
-            f"but none found. Output: {output[:1000]}"
-        )
+        assert found, f"Expected weather keywords {weather_keywords} in output, but none found. Output: {output[:1000]}"
         # Verify that Kindly's page_content was used (not just a generic response)
         # The response should contain specific weather data, not just "I can't search"
         first_200 = output_lower[:200]

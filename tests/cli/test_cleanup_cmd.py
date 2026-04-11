@@ -3,9 +3,6 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
-
-import pytest
 
 from kitty.cli.cleanup_cmd import _detect_stale_env, _display_value, run_cleanup
 

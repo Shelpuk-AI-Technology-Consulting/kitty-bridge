@@ -81,9 +81,7 @@ class TestCIWorkflow:
     def test_installs_python(self, workflow: dict):
         steps = _get_all_steps(workflow)
         uses = [s.get("uses", "") for s in steps]
-        assert any("actions/setup-python" in u or "setup-python" in u for u in uses), (
-            "Must use setup-python action"
-        )
+        assert any("actions/setup-python" in u or "setup-python" in u for u in uses), "Must use setup-python action"
 
     def test_installs_dependencies(self, workflow: dict):
         steps = _get_all_steps(workflow)
@@ -161,9 +159,7 @@ class TestPublishWorkflow:
     def test_uses_pypi_publish_action(self, workflow: dict):
         steps = _get_all_steps(workflow)
         uses = [s.get("uses", "") for s in steps]
-        assert any("pypa/gh-action-pypi-publish" in u for u in uses), (
-            "Must use pypa/gh-action-pypi-publish action"
-        )
+        assert any("pypa/gh-action-pypi-publish" in u for u in uses), "Must use pypa/gh-action-pypi-publish action"
 
     def test_no_hardcoded_api_token(self, workflow: dict):
         """Verify the workflow does not reference any secrets (OIDC only)."""

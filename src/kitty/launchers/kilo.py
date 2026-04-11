@@ -77,7 +77,10 @@ class KiloAdapter(LauncherAdapter):
         return BridgeProtocol.CHAT_COMPLETIONS_API
 
     def build_spawn_config(
-        self, profile: Profile, bridge_port: int, resolved_key: str,
+        self,
+        profile: Profile,
+        bridge_port: int,
+        resolved_key: str,
     ) -> SpawnConfig:
         # Stash values for prepare_launch (called later by the orchestrator
         # with only env_overrides as argument).

@@ -1,11 +1,9 @@
 """Tests for providers/vertex.py — VertexAIAdapter."""
 
-import json
-
 import pytest
 
-from kitty.providers.vertex import VertexAIAdapter
 from kitty.providers.base import ProviderError
+from kitty.providers.vertex import VertexAIAdapter
 
 # ── CC format samples ────────────────────────────────────────────────────
 

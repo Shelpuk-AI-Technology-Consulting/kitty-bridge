@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from kitty.providers.base import ProviderAdapter
 from kitty.providers.anthropic import AnthropicAdapter
 from kitty.providers.azure import AzureOpenAIAdapter
+from kitty.providers.base import ProviderAdapter
 from kitty.providers.bedrock import BedrockAdapter
 from kitty.providers.fireworks import FireworksAdapter
 from kitty.providers.minimax import MiniMaxAdapter

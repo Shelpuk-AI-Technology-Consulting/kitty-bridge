@@ -116,7 +116,10 @@ class TestTranslateRequestFunctionCall:
             "contents": [
                 {"role": "user", "parts": [{"text": "Weather?"}]},
                 {"role": "model", "parts": [{"functionCall": {"name": "get_weather", "args": {"location": "NYC"}}}]},
-                {"role": "function", "parts": [{"functionResponse": {"name": "get_weather", "response": {"temp": "72F"}}}]},
+                {
+                    "role": "function",
+                    "parts": [{"functionResponse": {"name": "get_weather", "response": {"temp": "72F"}}}],
+                },
                 {"role": "user", "parts": [{"text": "Thanks"}]},
             ],
         }
@@ -194,29 +197,46 @@ class TestTranslateResponseFinishReasons:
 
     def test_stop(self):
         t = GeminiTranslator()
-        resp = t.translate_response({
-            "id": "x", "choices": [{"message": {"role": "assistant", "content": "hi"}, "finish_reason": "stop"}],
-            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
-        })
+        resp = t.translate_response(
+            {
+                "id": "x",
+                "choices": [{"message": {"role": "assistant", "content": "hi"}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            }
+        )
         assert resp["candidates"][0]["finishReason"] == "STOP"
 
     def test_length(self):
         t = GeminiTranslator()
-        resp = t.translate_response({
-            "id": "x", "choices": [{"message": {"role": "assistant", "content": "hi"}, "finish_reason": "length"}],
-            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
-        })
+        resp = t.translate_response(
+            {
+                "id": "x",
+                "choices": [{"message": {"role": "assistant", "content": "hi"}, "finish_reason": "length"}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            }
+        )
         assert resp["candidates"][0]["finishReason"] == "MAX_TOKENS"
 
     def test_tool_calls_maps_to_stop(self):
         t = GeminiTranslator()
-        resp = t.translate_response({
-            "id": "x",
-            "choices": [{"message": {"role": "assistant", "content": None, "tool_calls": [
-                {"id": "c", "type": "function", "function": {"name": "f", "arguments": "{}"}}
-            ]}, "finish_reason": "tool_calls"}],
-            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
-        })
+        resp = t.translate_response(
+            {
+                "id": "x",
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": None,
+                            "tool_calls": [
+                                {"id": "c", "type": "function", "function": {"name": "f", "arguments": "{}"}}
+                            ],
+                        },
+                        "finish_reason": "tool_calls",
+                    }
+                ],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            }
+        )
         assert resp["candidates"][0]["finishReason"] == "STOP"
 
 
@@ -225,10 +245,13 @@ class TestTranslateResponseUsage:
 
     def test_usage_metadata(self):
         t = GeminiTranslator()
-        resp = t.translate_response({
-            "id": "x", "choices": [{"message": {"role": "assistant", "content": "hi"}, "finish_reason": "stop"}],
-            "usage": {"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30},
-        })
+        resp = t.translate_response(
+            {
+                "id": "x",
+                "choices": [{"message": {"role": "assistant", "content": "hi"}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30},
+            }
+        )
         assert resp["usageMetadata"]["promptTokenCount"] == 10
         assert resp["usageMetadata"]["candidatesTokenCount"] == 20
         assert resp["usageMetadata"]["totalTokenCount"] == 30
@@ -267,7 +290,16 @@ class TestStreamingToolCallDeltas:
         t = GeminiTranslator()
         # First chunk: tool call starts
         chunk1 = {
-            "choices": [{"delta": {"tool_calls": [{"index": 0, "id": "call_1", "function": {"name": "get_weather", "arguments": ""}}]}, "finish_reason": None}],
+            "choices": [
+                {
+                    "delta": {
+                        "tool_calls": [
+                            {"index": 0, "id": "call_1", "function": {"name": "get_weather", "arguments": ""}}
+                        ]
+                    },
+                    "finish_reason": None,
+                }
+            ],
         }
         events1 = t.translate_stream_chunk(chunk1)
         # No events yet — buffering starts
@@ -275,14 +307,21 @@ class TestStreamingToolCallDeltas:
 
         # Argument delta
         chunk2 = {
-            "choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"arguments": '{"loc'}}]}, "finish_reason": None}],
+            "choices": [
+                {"delta": {"tool_calls": [{"index": 0, "function": {"arguments": '{"loc'}}]}, "finish_reason": None}
+            ],
         }
         events2 = t.translate_stream_chunk(chunk2)
         assert events2 == []
 
         # More argument delta
         chunk3 = {
-            "choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"arguments": 'ation":"NYC"}'}}]}, "finish_reason": None}],
+            "choices": [
+                {
+                    "delta": {"tool_calls": [{"index": 0, "function": {"arguments": 'ation":"NYC"}'}}]},
+                    "finish_reason": None,
+                }
+            ],
         }
         events3 = t.translate_stream_chunk(chunk3)
         assert events3 == []

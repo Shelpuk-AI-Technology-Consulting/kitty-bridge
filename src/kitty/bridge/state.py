@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 from dataclasses import dataclass
@@ -60,7 +61,5 @@ def load_state(path: Path | str) -> BridgeState | None:
 def remove_state(path: Path | str) -> None:
     """Remove the bridge state file. No-op if file doesn't exist."""
     path = Path(path)
-    try:
+    with contextlib.suppress(OSError):
         path.unlink(missing_ok=True)
-    except OSError:
-        pass

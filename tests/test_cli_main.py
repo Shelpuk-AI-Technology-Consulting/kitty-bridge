@@ -29,25 +29,19 @@ class TestCLIParseKnownArgs:
         """parse_args() rejects unknown flags — this is the bug we're fixing."""
         parser = self._make_parser()
         with pytest.raises(SystemExit):
-            parser.parse_args(
-                ["glm", "claude", "--dangerously-skip-permissions", "--resume", "foo"]
-            )
+            parser.parse_args(["glm", "claude", "--dangerously-skip-permissions", "--resume", "foo"])
 
     def test_parse_known_args_passes_unknown_flags_through(self) -> None:
         """parse_known_args() should leave unknown flags in the remainder."""
         parser = self._make_parser()
-        args, unknown = parser.parse_known_args(
-            ["glm", "claude", "--dangerously-skip-permissions", "--resume", "foo"]
-        )
+        args, unknown = parser.parse_known_args(["glm", "claude", "--dangerously-skip-permissions", "--resume", "foo"])
         assert args.command == ["glm", "claude"]
         assert unknown == ["--dangerously-skip-permissions", "--resume", "foo"]
 
     def test_parse_known_args_debug_flag_still_works(self) -> None:
         """Known flags like --debug should still be parsed correctly."""
         parser = self._make_parser()
-        args, unknown = parser.parse_known_args(
-            ["--debug", "claude", "--resume", "foo"]
-        )
+        args, unknown = parser.parse_known_args(["--debug", "claude", "--resume", "foo"])
         assert args.debug is True
         assert args.command == ["claude"]
         assert unknown == ["--resume", "foo"]
@@ -88,7 +82,7 @@ class TestCLIIntegrationPassthrough:
         """
         from unittest.mock import MagicMock, patch
 
-        from kitty.cli.router import BuiltinCommand, RouteResult
+        from kitty.cli.router import RouteResult
         from kitty.launchers.base import LauncherAdapter
         from kitty.profiles.schema import Profile
 
@@ -107,7 +101,10 @@ class TestCLIIntegrationPassthrough:
         )
 
         with (
-            patch("sys.argv", ["kitty", "glm", "claude", "--dangerously-skip-permissions", "--resume", "tui-display-polish"]),
+            patch(
+                "sys.argv",
+                ["kitty", "glm", "claude", "--dangerously-skip-permissions", "--resume", "tui-display-polish"],
+            ),
             patch("kitty.cli.router.CLIRouter.route", return_value=mock_result),
             patch("kitty.cli.main._launch_target", return_value=0) as mock_launch,
         ):

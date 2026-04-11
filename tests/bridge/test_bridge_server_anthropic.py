@@ -1,7 +1,5 @@
 """Tests for bridge server integration with Anthropic provider."""
 
-import json
-
 import pytest
 from aioresponses import aioresponses
 
@@ -97,17 +95,19 @@ class TestBridgeAnthropicRequestTranslation:
                 # Simulate a Responses API request that gets translated to CC internally
                 import aiohttp
 
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(
+                async with (
+                    aiohttp.ClientSession() as session,
+                    session.post(
                         f"http://127.0.0.1:{server.port}/v1/responses",
                         json={
                             "model": "claude-sonnet-4-6",
                             "input": [{"type": "message", "role": "user", "content": "What is 2+2?"}],
                         },
-                    ) as resp:
-                        assert resp.status == 200
-                        body = await resp.json()
-                        # Should contain the translated response
-                        assert body is not None
+                    ) as resp,
+                ):
+                    assert resp.status == 200
+                    body = await resp.json()
+                    # Should contain the translated response
+                    assert body is not None
             finally:
                 await server.stop_async()

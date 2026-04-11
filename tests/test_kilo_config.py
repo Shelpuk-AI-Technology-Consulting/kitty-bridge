@@ -2,7 +2,6 @@
 
 import json
 import uuid
-from pathlib import Path
 
 import pytest
 
@@ -86,8 +85,8 @@ class TestPrepareLaunch:
 
         data = json.loads(config_path.read_text())
         assert "openai" in data["provider"]  # Preserved
-        assert "kitty" in data["provider"]   # Added
-        assert original is not None           # Saved original
+        assert "kitty" in data["provider"]  # Added
+        assert original is not None  # Saved original
 
     def test_returns_original_content(self, adapter, config_path):
         existing = {"provider": {"openai": {"options": {"apiKey": "sk-123"}}}}

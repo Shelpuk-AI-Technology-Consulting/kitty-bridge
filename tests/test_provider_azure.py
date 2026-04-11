@@ -1,11 +1,6 @@
 """Tests for providers/azure.py — AzureOpenAIAdapter."""
 
-import json
-
-import pytest
-
 from kitty.providers.azure import AzureOpenAIAdapter
-from kitty.providers.base import ProviderError
 
 # ── CC format samples ────────────────────────────────────────────────────
 

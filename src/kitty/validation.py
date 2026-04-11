@@ -70,9 +70,14 @@ async def validate_api_key(
     timeout = aiohttp.ClientTimeout(total=_VALIDATION_TIMEOUT)
 
     try:
-        async with aiohttp.ClientSession(timeout=timeout) as session, session.post(
-            url, json=body, headers=headers,
-        ) as resp:
+        async with (
+            aiohttp.ClientSession(timeout=timeout) as session,
+            session.post(
+                url,
+                json=body,
+                headers=headers,
+            ) as resp,
+        ):
             if resp.status in (401, 403):
                 return await _handle_auth_failure(provider, resp)
             # Any other status means the key is accepted at the
@@ -84,25 +89,16 @@ async def validate_api_key(
             )
             return ValidationResult(valid=True)
     except asyncio.TimeoutError:
-        warning = (
-            f"API key validation timed out for {provider.provider_type}"
-            " — proceeding anyway"
-        )
+        warning = f"API key validation timed out for {provider.provider_type} — proceeding anyway"
         logger.warning(warning)
         return ValidationResult(valid=True, warning=warning)
     except aiohttp.ClientConnectorError as exc:
-        warning = (
-            f"Cannot reach {provider.provider_type} for key validation:"
-            f" {exc} — proceeding anyway"
-        )
+        warning = f"Cannot reach {provider.provider_type} for key validation: {exc} — proceeding anyway"
         logger.warning(warning)
         return ValidationResult(valid=True, warning=warning)
     except (aiohttp.ClientError, OSError) as exc:
         # Client-side HTTP errors (redirect, payload, etc.) — proceed
-        warning = (
-            f"Key validation network error for {provider.provider_type}:"
-            f" {exc} — proceeding anyway"
-        )
+        warning = f"Key validation network error for {provider.provider_type}: {exc} — proceeding anyway"
         logger.warning(warning)
         return ValidationResult(valid=True, warning=warning)
 
@@ -125,9 +121,7 @@ async def _handle_auth_failure(
     )
     return ValidationResult(
         valid=False,
-        reason=(
-            f"API key rejected by {provider.provider_type}: {error_msg}"
-        ),
+        reason=(f"API key rejected by {provider.provider_type}: {error_msg}"),
     )
 
 

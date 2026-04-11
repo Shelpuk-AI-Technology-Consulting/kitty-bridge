@@ -8,8 +8,6 @@ import json
 import uuid
 from pathlib import Path
 
-import pytest
-
 from kitty.launchers.claude import ClaudeAdapter
 from kitty.profiles.schema import Profile
 
@@ -71,10 +69,13 @@ class TestPrepareLaunch:
         The bridge uses Bearer auth (Authorization header) independently of
         ANTHROPIC_AUTH_TOKEN, and removing it causes 'Not logged in' errors."""
         settings_path = tmp_path / ".claude" / "settings.json"
-        _write_settings(settings_path, env={
-            "ANTHROPIC_AUTH_TOKEN": "secret-token",
-            "ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic",
-        })
+        _write_settings(
+            settings_path,
+            env={
+                "ANTHROPIC_AUTH_TOKEN": "secret-token",
+                "ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic",
+            },
+        )
 
         adapter = ClaudeAdapter()
         env_overrides = {"ANTHROPIC_BASE_URL": "http://127.0.0.1:4242", "ANTHROPIC_API_KEY": "sk-test"}

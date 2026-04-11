@@ -3,8 +3,6 @@
 import json
 import uuid
 
-import pytest
-
 from kitty.profiles.schema import BalancingProfile, Profile
 from kitty.profiles.store import ProfileStore
 

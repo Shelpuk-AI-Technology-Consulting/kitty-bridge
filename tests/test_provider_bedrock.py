@@ -1,12 +1,11 @@
 """Tests for providers/bedrock.py — BedrockAdapter."""
 
-import json
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
-from kitty.providers.bedrock import BedrockAdapter
 from kitty.providers.base import ProviderError
+from kitty.providers.bedrock import BedrockAdapter
 
 # ── CC format samples ────────────────────────────────────────────────────
 
@@ -285,7 +284,9 @@ class TestBedrockCredentialResolution:
     def test_parse_aws_credentials(self):
         """Colon-separated key:secret format."""
         adapter = BedrockAdapter()
-        access_key, secret_key = adapter.parse_aws_credentials("AKIAIOSFODNN7EXAMPLE:wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY")
+        access_key, secret_key = adapter.parse_aws_credentials(
+            "AKIAIOSFODNN7EXAMPLE:wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+        )
         assert access_key == "AKIAIOSFODNN7EXAMPLE"
         assert secret_key == "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
 
@@ -337,10 +338,16 @@ class TestBedrockNormalizeModelName:
         self.adapter = BedrockAdapter()
 
     def test_returns_unchanged(self):
-        assert self.adapter.normalize_model_name("anthropic.claude-sonnet-4-20250514") == "anthropic.claude-sonnet-4-20250514"
+        assert (
+            self.adapter.normalize_model_name("anthropic.claude-sonnet-4-20250514")
+            == "anthropic.claude-sonnet-4-20250514"
+        )
 
     def test_cross_region_prefix_preserved(self):
-        assert self.adapter.normalize_model_name("us.anthropic.claude-sonnet-4-20250514") == "us.anthropic.claude-sonnet-4-20250514"
+        assert (
+            self.adapter.normalize_model_name("us.anthropic.claude-sonnet-4-20250514")
+            == "us.anthropic.claude-sonnet-4-20250514"
+        )
 
 
 # ── Error mapping ────────────────────────────────────────────────────────
@@ -453,9 +460,10 @@ class TestBedrockMakeRequest:
         mock_client = MagicMock()
         mock_client.converse.side_effect = Exception("ThrottlingException")
 
-        with patch.object(adapter, "_get_boto3_client", return_value=mock_client):
-            with pytest.raises(Exception, match="ThrottlingException"):
-                await adapter.make_request(cc_request)
+        with patch.object(adapter, "_get_boto3_client", return_value=mock_client), pytest.raises(
+            Exception, match="ThrottlingException"
+        ):
+            await adapter.make_request(cc_request)
 
 
 class TestBedrockStreamRequest:
@@ -518,9 +526,14 @@ class TestBedrockStreamRequest:
             {"contentBlockStart": {"contentBlockIndex": 0, "start": {"text": ""}}},
             {"contentBlockDelta": {"contentBlockIndex": 0, "delta": {"text": "Checking."}}},
             {"contentBlockStop": {"contentBlockIndex": 0}},
-            {"contentBlockStart": {"contentBlockIndex": 1, "start": {"toolUse": {"toolUseId": "toolu_123", "name": "get_weather"}}}},
-            {"contentBlockDelta": {"contentBlockIndex": 1, "delta": {"toolUse": {"input": "{\"city\":"}}}},
-            {"contentBlockDelta": {"contentBlockIndex": 1, "delta": {"toolUse": {"input": "\"London\"}"}}}},
+            {
+                "contentBlockStart": {
+                    "contentBlockIndex": 1,
+                    "start": {"toolUse": {"toolUseId": "toolu_123", "name": "get_weather"}},
+                }
+            },
+            {"contentBlockDelta": {"contentBlockIndex": 1, "delta": {"toolUse": {"input": '{"city":'}}}},
+            {"contentBlockDelta": {"contentBlockIndex": 1, "delta": {"toolUse": {"input": '"London"}'}}}},
             {"contentBlockStop": {"contentBlockIndex": 1}},
             {"messageStop": {"stopReason": "tool_use"}},
             {"metadata": {"usage": {"inputTokens": 20, "outputTokens": 15}}},

@@ -110,10 +110,12 @@ class AnthropicAdapter(ProviderAdapter):
             elif role == "tool":
                 anthropic["messages"].append(self._translate_tool_result_msg(msg))
             else:
-                anthropic["messages"].append({
-                    "role": role,
-                    "content": msg.get("content", ""),
-                })
+                anthropic["messages"].append(
+                    {
+                        "role": role,
+                        "content": msg.get("content", ""),
+                    }
+                )
 
         # Translate tools
         if "tools" in cc_request and cc_request["tools"]:
@@ -131,12 +133,14 @@ class AnthropicAdapter(ProviderAdapter):
 
         for tc in msg.get("tool_calls", []):
             func = tc.get("function", {})
-            content_blocks.append({
-                "type": "tool_use",
-                "id": tc.get("id", f"toolu_{uuid.uuid4().hex[:24]}"),
-                "name": func.get("name", ""),
-                "input": json.loads(func.get("arguments", "{}")),
-            })
+            content_blocks.append(
+                {
+                    "type": "tool_use",
+                    "id": tc.get("id", f"toolu_{uuid.uuid4().hex[:24]}"),
+                    "name": func.get("name", ""),
+                    "input": json.loads(func.get("arguments", "{}")),
+                }
+            )
 
         return {"role": "assistant", "content": content_blocks or ""}
 
@@ -160,11 +164,13 @@ class AnthropicAdapter(ProviderAdapter):
         anthropic_tools = []
         for tool in cc_tools:
             func = tool.get("function", {})
-            anthropic_tools.append({
-                "name": func.get("name", ""),
-                "description": func.get("description", ""),
-                "input_schema": func.get("parameters", {"type": "object", "properties": {}}),
-            })
+            anthropic_tools.append(
+                {
+                    "name": func.get("name", ""),
+                    "description": func.get("description", ""),
+                    "input_schema": func.get("parameters", {"type": "object", "properties": {}}),
+                }
+            )
         return anthropic_tools
 
     # ── Anthropic response → CC translation ──────────────────────────────
@@ -239,12 +245,11 @@ class AnthropicAdapter(ProviderAdapter):
             return []
 
         # Parse SSE lines
-        event_type = None
         data_str = None
         for line in raw_str.split("\n"):
             line = line.strip()
             if line.startswith("event:"):
-                event_type = line[6:].strip()
+                line[6:].strip()
             elif line.startswith("data:"):
                 data_str = line[5:].strip()
 
@@ -338,8 +343,5 @@ class AnthropicAdapter(ProviderAdapter):
 
     def map_error(self, status_code: int, body: dict) -> Exception:
         error_obj = body.get("error", body)
-        if isinstance(error_obj, dict):
-            msg = error_obj.get("message", str(error_obj))
-        else:
-            msg = str(error_obj)
+        msg = error_obj.get("message", str(error_obj)) if isinstance(error_obj, dict) else str(error_obj)
         return ProviderError(f"Anthropic error {status_code}: {msg}")

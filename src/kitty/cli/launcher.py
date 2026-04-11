@@ -49,7 +49,9 @@ def _atexit_cleanup() -> None:
 
 
 def _register_atexit_cleanup(
-    adapter: LauncherAdapter, original: str | None, settings_path: Path,
+    adapter: LauncherAdapter,
+    original: str | None,
+    settings_path: Path,
 ) -> None:
     """Register atexit cleanup if not already registered and store state."""
     global _atexit_registered
@@ -152,8 +154,11 @@ async def launch_async(
 
     # 3. Start bridge server
     server = BridgeServer(
-        adapter, provider, resolved_key,
-        model=profile.model, debug=debug,
+        adapter,
+        provider,
+        resolved_key,
+        model=profile.model,
+        debug=debug,
         provider_config=profile.provider_config,
         backends=backends,
     )
@@ -300,22 +305,37 @@ def launch(
 
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
                 coro = launch_async(
-                    adapter, provider, profile, cred_store,
-                    extra_args, debug=debug, validate=validate,
+                    adapter,
+                    provider,
+                    profile,
+                    cred_store,
+                    extra_args,
+                    debug=debug,
+                    validate=validate,
                     backends=backends,
                 )
                 future = pool.submit(asyncio.run, coro)
                 return future.result()
         coro = launch_async(
-            adapter, provider, profile, cred_store,
-            extra_args, debug=debug, validate=validate,
+            adapter,
+            provider,
+            profile,
+            cred_store,
+            extra_args,
+            debug=debug,
+            validate=validate,
             backends=backends,
         )
         return loop.run_until_complete(coro)
     except RuntimeError:
         coro = launch_async(
-            adapter, provider, profile, cred_store,
-            extra_args, debug=debug, validate=validate,
+            adapter,
+            provider,
+            profile,
+            cred_store,
+            extra_args,
+            debug=debug,
+            validate=validate,
             backends=backends,
         )
         return asyncio.run(coro)

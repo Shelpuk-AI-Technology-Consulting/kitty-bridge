@@ -21,6 +21,11 @@ from kitty.bridge.messages.events import (
 
 __all__ = ["MessagesTranslator"]
 
+_EMPTY_ASSISTANT_FALLBACK_TEXT = (
+    "Upstream model returned an empty response. Please retry. "
+    "If the context is full, use /clear to reset the conversation."
+)
+
 
 class MessagesTranslator:
     """Translates between Anthropic Messages API and Chat Completions formats."""
@@ -31,6 +36,7 @@ class MessagesTranslator:
         self._tool_call_meta: dict[int, dict] = {}  # index -> {id, tool_id, name, block_index}
         self._content_block_index: int = 0
         self._text_block_opened: bool = False
+        self._message_started: bool = False
 
     @property
     def thinking_warned(self) -> bool:
@@ -42,6 +48,7 @@ class MessagesTranslator:
         self._tool_call_meta = {}
         self._content_block_index = 0
         self._text_block_opened = False
+        self._message_started = False
 
     # ── Request translation ───────────────────────────────────────────────
 
@@ -206,6 +213,47 @@ class MessagesTranslator:
 
         return {"role": "assistant", "content": str(content) if content else None}
 
+    @staticmethod
+    def _extract_text_content(raw_content: object) -> str:
+        """Extract a non-whitespace text string from Chat Completions content."""
+        if isinstance(raw_content, str):
+            return raw_content if raw_content.strip() else ""
+        if isinstance(raw_content, list):
+            text_parts = []
+            for part in raw_content:
+                if isinstance(part, dict) and part.get("type") == "text":
+                    text_val = part.get("text")
+                    if isinstance(text_val, str) and text_val.strip():
+                        text_parts.append(text_val)
+            return "\n".join(text_parts)
+        return ""
+
+    @staticmethod
+    def _fallback_assistant_text(message: dict | None = None) -> str:
+        """Return an actionable fallback when upstream emits empty assistant output."""
+        if isinstance(message, dict):
+            refusal = message.get("refusal")
+            if isinstance(refusal, str) and refusal.strip():
+                return refusal
+        return _EMPTY_ASSISTANT_FALLBACK_TEXT
+
+    def _emit_message_start_if_needed(self, events: list[str], message_id: str, model: str) -> None:
+        """Emit `message_start` once per streaming response."""
+        if self._message_started:
+            return
+        message_obj = {
+            "id": message_id,
+            "type": "message",
+            "role": "assistant",
+            "content": [],
+            "model": model,
+            "stop_reason": None,
+            "stop_sequence": None,
+            "usage": {"input_tokens": 0, "output_tokens": 0},
+        }
+        events.append(format_message_start_event(message_obj))
+        self._message_started = True
+
     # ── Response translation (sync) ──────────────────────────────────────
 
     def translate_response(self, cc_response: dict) -> dict:
@@ -218,7 +266,7 @@ class MessagesTranslator:
         content: list[dict] = []
 
         # Text content -> text block
-        text = message.get("content")
+        text = self._extract_text_content(message.get("content"))
         if text:
             content.append({"type": "text", "text": text})
 
@@ -239,6 +287,10 @@ class MessagesTranslator:
                     "input": input_data,
                 }
             )
+
+        # Defensive fallback: never emit empty assistant output when no tool call exists.
+        if not content and not tool_calls:
+            content.append({"type": "text", "text": self._fallback_assistant_text(message)})
 
         stop_reason = TranslationEngine.map_finish_reason(finish_reason)
         usage = cc_response.get("usage") or {}
@@ -278,18 +330,7 @@ class MessagesTranslator:
         if text_content:
             # Open text block on first text delta
             if not self._text_block_opened:
-                # Emit message_start on first content
-                message_obj = {
-                    "id": message_id,
-                    "type": "message",
-                    "role": "assistant",
-                    "content": [],
-                    "model": model,
-                    "stop_reason": None,
-                    "stop_sequence": None,
-                    "usage": {"input_tokens": 0, "output_tokens": 0},
-                }
-                events.append(format_message_start_event(message_obj))
+                self._emit_message_start_if_needed(events, message_id, model)
 
                 # Open text content block
                 events.append(
@@ -321,19 +362,7 @@ class MessagesTranslator:
                         self._content_block_index += 1
                         self._text_block_opened = False
 
-                    # Emit message_start if not yet emitted
-                    if not events and self._content_block_index == 0 and not self._text_block_opened:
-                        message_obj = {
-                            "id": message_id,
-                            "type": "message",
-                            "role": "assistant",
-                            "content": [],
-                            "model": model,
-                            "stop_reason": None,
-                            "stop_sequence": None,
-                            "usage": {"input_tokens": 0, "output_tokens": 0},
-                        }
-                        events.append(format_message_start_event(message_obj))
+                    self._emit_message_start_if_needed(events, message_id, model)
 
                     call_id = tc_delta["id"]
                     func = tc_delta.get("function", {})
@@ -371,6 +400,27 @@ class MessagesTranslator:
         # Finish
         finish_reason = choice.get("finish_reason")
         if finish_reason is not None:
+            has_content_blocks = (
+                bool(self._tool_call_buffers) or self._text_block_opened or self._content_block_index > 0
+            )
+            if not has_content_blocks:
+                fallback_text = self._fallback_assistant_text()
+                self._emit_message_start_if_needed(events, message_id, model)
+                events.append(
+                    format_content_block_start_event(
+                        self._content_block_index,
+                        {"type": "text", "text": ""},
+                    )
+                )
+                events.append(
+                    format_content_block_delta_event(
+                        self._content_block_index,
+                        {"type": "text_delta", "text": fallback_text},
+                    )
+                )
+                events.append(format_content_block_stop_event(self._content_block_index))
+                self._content_block_index += 1
+
             # Close text block if still open
             if self._text_block_opened:
                 events.append(format_content_block_stop_event(self._content_block_index))

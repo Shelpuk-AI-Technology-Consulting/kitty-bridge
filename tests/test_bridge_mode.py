@@ -14,7 +14,6 @@ from kitty.launchers.codex import CodexAdapter
 from kitty.profiles.schema import Profile
 from kitty.profiles.store import ProfileStore
 
-
 # -- Fixtures -----------------------------------------------------------------
 
 
@@ -57,7 +56,7 @@ class TestBridgeBuiltinRouting:
         populated_store: ProfileStore,
         adapters: dict[str, LauncherAdapter],
     ) -> None:
-        """"bridge" should route to BuiltinCommand.BRIDGE."""
+        """ "bridge" should route to BuiltinCommand.BRIDGE."""
         router = CLIRouter(populated_store, adapters)
         result = router.route(["bridge"])
         assert result.builtin == BuiltinCommand.BRIDGE
@@ -155,11 +154,10 @@ class TestBridgeExecution:
         assert port > 0  # Server starts on random available port
 
         # Test health check
-        async with aiohttp.ClientSession() as session:
-            async with session.get(f"http://127.0.0.1:{port}/healthz") as resp:
-                assert resp.status == 200
-                body = await resp.json()
-                assert body["status"] == "ok"
+        async with aiohttp.ClientSession() as session, session.get(f"http://127.0.0.1:{port}/healthz") as resp:
+            assert resp.status == 200
+            body = await resp.json()
+            assert body["status"] == "ok"
 
         await server.stop_async()
 
@@ -184,11 +182,10 @@ class TestBridgeExecution:
         assert port > 0
 
         # Test health check
-        async with aiohttp.ClientSession() as session:
-            async with session.get(f"http://127.0.0.1:{port}/healthz") as resp:
-                assert resp.status == 200
-                body = await resp.json()
-                assert body["status"] == "ok"
+        async with aiohttp.ClientSession() as session, session.get(f"http://127.0.0.1:{port}/healthz") as resp:
+            assert resp.status == 200
+            body = await resp.json()
+            assert body["status"] == "ok"
 
         await server.stop_async()
 

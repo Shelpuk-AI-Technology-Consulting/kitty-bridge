@@ -13,18 +13,16 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from unittest.mock import MagicMock
 
 import aiohttp
 import pytest
 from aioresponses import aioresponses
 
 from kitty.bridge.server import BridgeServer
-from kitty.providers.base import ProviderAdapter
 from kitty.launchers.base import LauncherAdapter, SpawnConfig
 from kitty.profiles.schema import Profile
+from kitty.providers.base import ProviderAdapter
 from kitty.types import BridgeProtocol
-
 
 # ── Test infrastructure ──────────────────────────────────────────────────
 
@@ -71,8 +69,14 @@ class StubProvider(ProviderAdapter):
 def _make_messages_stream_body() -> list[bytes]:
     """Standard SSE chunks for a Messages API streaming response."""
     return [
-        b'data: {"id":"test","choices":[{"index":0,"delta":{"content":"Hi"},"finish_reason":null}],"model":"test"}\n\n',
-        b'data: {"id":"test","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"model":"test","usage":null}\n\n',
+        (
+            b'data: {"id":"test","choices":[{"index":0,"delta":{"content":"Hi"},'
+            b'"finish_reason":null}],"model":"test"}\n\n'
+        ),
+        (
+            b'data: {"id":"test","choices":[{"index":0,"delta":{},'
+            b'"finish_reason":"stop"}],"model":"test","usage":null}\n\n'
+        ),
         b"data: [DONE]\n\n",
     ]
 
@@ -118,8 +122,9 @@ class TestStreamingReadTimeout:
                     exception=asyncio.TimeoutError(),
                 )
 
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(
+                async with (
+                    aiohttp.ClientSession() as session,
+                    session.post(
                         f"http://127.0.0.1:{port}/v1/messages",
                         json={
                             "model": "test-model",
@@ -128,12 +133,13 @@ class TestStreamingReadTimeout:
                             "stream": True,
                         },
                         timeout=aiohttp.ClientTimeout(total=30),
-                    ) as resp:
-                        # Should get an error response, not hang
-                        assert resp.status == 200  # SSE stream always starts 200
-                        body = await resp.read()
-                        # Must contain an error event
-                        assert len(body) > 0
+                    ) as resp,
+                ):
+                    # Should get an error response, not hang
+                    assert resp.status == 200  # SSE stream always starts 200
+                    body = await resp.read()
+                    # Must contain an error event
+                    assert len(body) > 0
         finally:
             await server.stop_async()
 
@@ -152,8 +158,9 @@ class TestStreamingReadTimeout:
                     headers={"Content-Type": "text/event-stream"},
                 )
 
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(
+                async with (
+                    aiohttp.ClientSession() as session,
+                    session.post(
                         f"http://127.0.0.1:{port}/v1/messages",
                         json={
                             "model": "test-model",
@@ -161,12 +168,13 @@ class TestStreamingReadTimeout:
                             "max_tokens": 1024,
                             "stream": True,
                         },
-                    ) as resp:
-                        assert resp.status == 200
-                        body = await resp.read()
-                        assert len(body) > 0
-                        # Should contain message_start and message_stop events
-                        assert b"message_start" in body or b"message_stop" in body
+                    ) as resp,
+                ):
+                    assert resp.status == 200
+                    body = await resp.read()
+                    assert len(body) > 0
+                    # Should contain message_start and message_stop events
+                    assert b"message_start" in body or b"message_stop" in body
         finally:
             await server.stop_async()
 
@@ -193,8 +201,9 @@ class TestMessagesStreamDebugLogging:
                         headers={"Content-Type": "text/event-stream"},
                     )
 
-                    async with aiohttp.ClientSession() as session:
-                        async with session.post(
+                    async with (
+                        aiohttp.ClientSession() as session,
+                        session.post(
                             f"http://127.0.0.1:{port}/v1/messages",
                             json={
                                 "model": "test-model",
@@ -202,8 +211,9 @@ class TestMessagesStreamDebugLogging:
                                 "max_tokens": 1024,
                                 "stream": True,
                             },
-                        ) as resp:
-                            await resp.read()
+                        ) as resp,
+                    ):
+                        await resp.read()
 
                 # Must have logged the upstream POST URL
                 assert any("Upstream POST" in r.message for r in caplog.records), (
@@ -228,8 +238,9 @@ class TestMessagesStreamDebugLogging:
                         headers={"Content-Type": "text/event-stream"},
                     )
 
-                    async with aiohttp.ClientSession() as session:
-                        async with session.post(
+                    async with (
+                        aiohttp.ClientSession() as session,
+                        session.post(
                             f"http://127.0.0.1:{port}/v1/messages",
                             json={
                                 "model": "test-model",
@@ -237,13 +248,15 @@ class TestMessagesStreamDebugLogging:
                                 "max_tokens": 1024,
                                 "stream": True,
                             },
-                        ) as resp:
-                            await resp.read()
+                        ) as resp,
+                    ):
+                        await resp.read()
 
                 # Must have logged the upstream response status
-                assert any("upstream response status" in r.message.lower() or "Upstream response status" in r.message for r in caplog.records), (
-                    f"Missing upstream status log. Got: {[r.message for r in caplog.records]}"
-                )
+                assert any(
+                    "upstream response status" in r.message.lower() or "Upstream response status" in r.message
+                    for r in caplog.records
+                ), f"Missing upstream status log. Got: {[r.message for r in caplog.records]}"
         finally:
             await server.stop_async()
 
@@ -263,8 +276,9 @@ class TestMessagesStreamDebugLogging:
                         payload={"error": {"message": "Internal server error"}},
                     )
 
-                    async with aiohttp.ClientSession() as session:
-                        async with session.post(
+                    async with (
+                        aiohttp.ClientSession() as session,
+                        session.post(
                             f"http://127.0.0.1:{port}/v1/messages",
                             json={
                                 "model": "test-model",
@@ -272,8 +286,9 @@ class TestMessagesStreamDebugLogging:
                                 "max_tokens": 1024,
                                 "stream": True,
                             },
-                        ) as resp:
-                            await resp.read()
+                        ) as resp,
+                    ):
+                        await resp.read()
 
                 # Must have logged the upstream error at ERROR level
                 error_records = [r for r in caplog.records if r.levelno >= logging.ERROR]
@@ -312,8 +327,9 @@ class TestStreamingRetry:
                     headers={"Content-Type": "text/event-stream"},
                 )
 
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(
+                async with (
+                    aiohttp.ClientSession() as session,
+                    session.post(
                         f"http://127.0.0.1:{port}/v1/messages",
                         json={
                             "model": "test-model",
@@ -322,18 +338,19 @@ class TestStreamingRetry:
                             "stream": True,
                         },
                         timeout=aiohttp.ClientTimeout(total=30),
-                    ) as resp:
-                        assert resp.status == 200
-                        body = await resp.read()
-                        assert len(body) > 0
-                        # Verify we got a SUCCESSFUL response, not an error forwarded from 503.
-                        # The successful streaming response contains "message_stop" event.
-                        assert b"message_stop" in body, (
-                            "Expected successful response after retry, but got error response"
-                        )
+                    ) as resp,
+                ):
+                    assert resp.status == 200
+                    body = await resp.read()
+                    assert len(body) > 0
+                    # Verify we got a SUCCESSFUL response, not an error forwarded from 503.
+                    # The successful streaming response contains "message_stop" event.
+                    assert b"message_stop" in body, "Expected successful response after retry, but got error response"
 
                 # Verify that the upstream was called exactly twice (initial + retry)
-                upstream_calls = m.requests.get(("POST", aiohttp.client.URL("https://api.example.com/v1/chat/completions")), [])
+                upstream_calls = m.requests.get(
+                    ("POST", aiohttp.client.URL("https://api.example.com/v1/chat/completions")), []
+                )
                 assert len(upstream_calls) == 2, (
                     f"Expected 2 upstream calls (initial 503 + retry 200), got {len(upstream_calls)}"
                 )
@@ -360,8 +377,9 @@ class TestStreamingRetry:
                     headers={"Content-Type": "text/event-stream"},
                 )
 
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(
+                async with (
+                    aiohttp.ClientSession() as session,
+                    session.post(
                         f"http://127.0.0.1:{port}/v1/messages",
                         json={
                             "model": "test-model",
@@ -370,13 +388,12 @@ class TestStreamingRetry:
                             "stream": True,
                         },
                         timeout=aiohttp.ClientTimeout(total=30),
-                    ) as resp:
-                        assert resp.status == 200
-                        body = await resp.read()
-                        assert len(body) > 0
-                        assert b"message_stop" in body, (
-                            "Expected successful response after retry, but got error response"
-                        )
+                    ) as resp,
+                ):
+                    assert resp.status == 200
+                    body = await resp.read()
+                    assert len(body) > 0
+                    assert b"message_stop" in body, "Expected successful response after retry, but got error response"
         finally:
             await server.stop_async()
 
@@ -395,8 +412,9 @@ class TestStreamingRetry:
                     payload={"error": {"message": "Unauthorized"}},
                 )
 
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(
+                async with (
+                    aiohttp.ClientSession() as session,
+                    session.post(
                         f"http://127.0.0.1:{port}/v1/messages",
                         json={
                             "model": "test-model",
@@ -405,11 +423,12 @@ class TestStreamingRetry:
                             "stream": True,
                         },
                         timeout=aiohttp.ClientTimeout(total=30),
-                    ) as resp:
-                        assert resp.status == 200  # SSE stream always starts 200
-                        body = await resp.read()
-                        # Must contain error event, not success
-                        assert b"error" in body.lower() or b"Error" in body
+                    ) as resp,
+                ):
+                    assert resp.status == 200  # SSE stream always starts 200
+                    body = await resp.read()
+                    # Must contain error event, not success
+                    assert b"error" in body.lower() or b"Error" in body
         finally:
             await server.stop_async()
 
@@ -437,17 +456,19 @@ class TestContextSizeGuardrail:
                 "stream": True,
             }
 
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
+            async with (
+                aiohttp.ClientSession() as session,
+                session.post(
                     f"http://127.0.0.1:{port}/v1/messages",
                     json=messages_request,
-                ) as resp:
-                    # Should be rejected with 400 before hitting upstream
-                    assert resp.status == 400
-                    body = await resp.json()
-                    assert "error" in body
-                    error_msg = body["error"].get("message", "") or body.get("error", {}).get("type", "")
-                    assert "context" in error_msg.lower() or "large" in error_msg.lower() or "clear" in error_msg.lower()
+                ) as resp,
+            ):
+                # Should be rejected with 400 before hitting upstream
+                assert resp.status == 400
+                body = await resp.json()
+                assert "error" in body
+                error_msg = body["error"].get("message", "") or body.get("error", {}).get("type", "")
+                assert "context" in error_msg.lower() or "large" in error_msg.lower() or "clear" in error_msg.lower()
         finally:
             await server.stop_async()
 
@@ -466,8 +487,9 @@ class TestContextSizeGuardrail:
                     headers={"Content-Type": "text/event-stream"},
                 )
 
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(
+                async with (
+                    aiohttp.ClientSession() as session,
+                    session.post(
                         f"http://127.0.0.1:{port}/v1/messages",
                         json={
                             "model": "test-model",
@@ -475,9 +497,10 @@ class TestContextSizeGuardrail:
                             "max_tokens": 1024,
                             "stream": True,
                         },
-                    ) as resp:
-                        # Normal request should pass through fine
-                        assert resp.status == 200
+                    ) as resp,
+                ):
+                    # Normal request should pass through fine
+                    assert resp.status == 200
         finally:
             await server.stop_async()
 
@@ -504,8 +527,9 @@ class TestNon200ErrorLogging:
                         payload={"error": {"message": "Internal server error"}},
                     )
 
-                    async with aiohttp.ClientSession() as session:
-                        async with session.post(
+                    async with (
+                        aiohttp.ClientSession() as session,
+                        session.post(
                             f"http://127.0.0.1:{port}/v1/messages",
                             json={
                                 "model": "test-model",
@@ -513,17 +537,16 @@ class TestNon200ErrorLogging:
                                 "max_tokens": 1024,
                                 "stream": True,
                             },
-                        ) as resp:
-                            await resp.read()
+                        ) as resp,
+                    ):
+                        await resp.read()
 
                 # Error body should be logged at ERROR level
                 error_records = [r for r in caplog.records if r.levelno >= logging.ERROR]
                 assert len(error_records) > 0, "No ERROR-level log records found"
                 combined = " ".join(r.message for r in error_records)
                 assert "500" in combined, f"Expected '500' in error logs: {combined}"
-                assert "Internal server error" in combined, (
-                    f"Expected error body text in logs: {combined}"
-                )
+                assert "Internal server error" in combined, f"Expected error body text in logs: {combined}"
         finally:
             await server.stop_async()
 
@@ -543,16 +566,18 @@ class TestNon200ErrorLogging:
                         body=b"Bad Gateway",
                     )
 
-                    async with aiohttp.ClientSession() as session:
-                        async with session.post(
+                    async with (
+                        aiohttp.ClientSession() as session,
+                        session.post(
                             f"http://127.0.0.1:{port}/v1/chat/completions",
                             json={
                                 "model": "test-model",
                                 "messages": [{"role": "user", "content": "hi"}],
                                 "stream": True,
                             },
-                        ) as resp:
-                            await resp.read()
+                        ) as resp,
+                    ):
+                        await resp.read()
 
                 error_records = [r for r in caplog.records if r.levelno >= logging.ERROR]
                 assert len(error_records) > 0, "No ERROR-level log records found"

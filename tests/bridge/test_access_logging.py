@@ -33,9 +33,10 @@ class TestAccessLogFormat:
         server = _make_server(log_path=str(log_path))
         port = await server.start_async()
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(f"http://127.0.0.1:{port}/healthz") as resp:
-                    assert resp.status == 200
+            async with aiohttp.ClientSession() as session, session.get(
+                f"http://127.0.0.1:{port}/healthz"
+            ) as resp:
+                assert resp.status == 200
         finally:
             await server.stop_async()
 
@@ -73,12 +74,14 @@ class TestAccessLogFormat:
         server = _make_server(log_path=str(log_path))
         port = await server.start_async()
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
+            async with (
+                aiohttp.ClientSession() as session,
+                session.post(
                     f"http://127.0.0.1:{port}/v1/chat/completions",
                     json={"model": "gpt-4o", "messages": [{"role": "user", "content": "hi"}]},
-                ) as resp:
-                    pass  # May get error from upstream, that's fine
+                ),
+            ):
+                pass  # May get error from upstream, that's fine
         finally:
             await server.stop_async()
 
@@ -96,14 +99,15 @@ class TestAccessLogFormat:
         server = _make_server(log_path=None)
         port = await server.start_async()
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(f"http://127.0.0.1:{port}/healthz") as resp:
-                    assert resp.status == 200
+            async with aiohttp.ClientSession() as session, session.get(
+                f"http://127.0.0.1:{port}/healthz"
+            ) as resp:
+                assert resp.status == 200
         finally:
             await server.stop_async()
 
         # No log files in default location either
-        default_log = Path.home() / ".config" / "kitty" / "logs" / "bridge_access.log"
+        Path.home() / ".config" / "kitty" / "logs" / "bridge_access.log"
         # We can't guarantee the default log doesn't exist from other tests,
         # but we can verify the tmp_path has no logs
         assert not (tmp_path / "access.log").exists()
@@ -114,9 +118,10 @@ class TestAccessLogFormat:
         server = _make_server(log_path=str(log_path))
         port = await server.start_async()
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(f"http://127.0.0.1:{port}/healthz") as resp:
-                    assert resp.status == 200
+            async with aiohttp.ClientSession() as session, session.get(
+                f"http://127.0.0.1:{port}/healthz"
+            ) as resp:
+                assert resp.status == 200
         finally:
             await server.stop_async()
 

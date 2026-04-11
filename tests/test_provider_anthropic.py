@@ -2,8 +2,6 @@
 
 import json
 
-import pytest
-
 from kitty.providers.anthropic import AnthropicAdapter
 
 # ── CC format samples (what the bridge produces internally) ─────────────────
@@ -310,7 +308,10 @@ class TestAnthropicTranslateUpstreamStreamEvent:
         self.adapter = AnthropicAdapter()
 
     def test_text_delta_becomes_cc_chunk(self):
-        raw = b'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}\n\n'
+        raw = (
+            b'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,'
+            b'"delta":{"type":"text_delta","text":"Hello"}}\n\n'
+        )
         chunks = self.adapter.translate_upstream_stream_event(raw)
         assert len(chunks) >= 1
         # Should produce CC-format SSE data
@@ -320,14 +321,20 @@ class TestAnthropicTranslateUpstreamStreamEvent:
         assert parsed["choices"][0]["delta"]["content"] == "Hello"
 
     def test_message_start_yields_role(self):
-        raw = b'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_01","role":"assistant","content":[],"model":"claude-sonnet-4-6","stop_reason":null}}\n\n'
+        raw = (
+            b'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_01",'
+            b'"role":"assistant","content":[],"model":"claude-sonnet-4-6","stop_reason":null}}\n\n'
+        )
         chunks = self.adapter.translate_upstream_stream_event(raw)
         combined = b"".join(chunks)
         parsed = json.loads(combined.split(b"data:", 1)[1].strip())
         assert parsed["choices"][0]["delta"]["role"] == "assistant"
 
     def test_message_delta_yields_finish_reason(self):
-        raw = b'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":15}}\n\n'
+        raw = (
+            b'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn",'
+            b'"stop_sequence":null},"usage":{"output_tokens":15}}\n\n'
+        )
         chunks = self.adapter.translate_upstream_stream_event(raw)
         combined = b"".join(chunks)
         parsed = json.loads(combined.split(b"data:", 1)[1].strip())
@@ -339,7 +346,10 @@ class TestAnthropicTranslateUpstreamStreamEvent:
         assert chunks == []
 
     def test_content_block_start_ignored(self):
-        raw = b'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n'
+        raw = (
+            b'event: content_block_start\ndata: {"type":"content_block_start","index":0,'
+            b'"content_block":{"type":"text","text":""}}\n\n'
+        )
         chunks = self.adapter.translate_upstream_stream_event(raw)
         assert chunks == []
 
@@ -355,7 +365,10 @@ class TestAnthropicTranslateUpstreamStreamEvent:
         assert combined.strip() == b"data: [DONE]"
 
     def test_tool_use_delta_accumulates(self):
-        raw = b'event: content_block_delta\ndata: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\\"city\\":\\"London\\"}"}}\n\n'
+        raw = (
+            b'event: content_block_delta\ndata: {"type":"content_block_delta","index":1,'
+            b'"delta":{"type":"input_json_delta","partial_json":"{\\"city\\":\\"London\\"}"}}\n\n'
+        )
         chunks = self.adapter.translate_upstream_stream_event(raw)
         # Tool use deltas are buffered until content_block_stop
         # For now they may be suppressed or buffered — we verify no crash
@@ -367,11 +380,15 @@ class TestAnthropicMapError:
         self.adapter = AnthropicAdapter()
 
     def test_401_error(self):
-        exc = self.adapter.map_error(401, {"type": "error", "error": {"type": "authentication_error", "message": "invalid x-api-key"}})
+        exc = self.adapter.map_error(
+            401, {"type": "error", "error": {"type": "authentication_error", "message": "invalid x-api-key"}}
+        )
         assert "401" in str(exc)
 
     def test_429_error(self):
-        exc = self.adapter.map_error(429, {"type": "error", "error": {"type": "rate_limit_error", "message": "slow down"}})
+        exc = self.adapter.map_error(
+            429, {"type": "error", "error": {"type": "rate_limit_error", "message": "slow down"}}
+        )
         assert "429" in str(exc)
 
     def test_500_error(self):

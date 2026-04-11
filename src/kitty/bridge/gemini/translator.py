@@ -105,11 +105,13 @@ class GeminiTranslator:
             for part in parts:
                 fr = part.get("functionResponse")
                 if fr:
-                    results.append({
-                        "role": "tool",
-                        "tool_call_id": self._make_tool_call_id(fr["name"]),
-                        "content": json.dumps(fr.get("response", {})),
-                    })
+                    results.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": self._make_tool_call_id(fr["name"]),
+                            "content": json.dumps(fr.get("response", {})),
+                        }
+                    )
             return results if results else None
 
         # Check for functionCall in assistant messages
@@ -119,14 +121,16 @@ class GeminiTranslator:
             for part in parts:
                 fc = part.get("functionCall")
                 if fc:
-                    tool_calls.append({
-                        "id": self._make_tool_call_id(fc["name"]),
-                        "type": "function",
-                        "function": {
-                            "name": fc["name"],
-                            "arguments": json.dumps(fc.get("args", {})),
-                        },
-                    })
+                    tool_calls.append(
+                        {
+                            "id": self._make_tool_call_id(fc["name"]),
+                            "type": "function",
+                            "function": {
+                                "name": fc["name"],
+                                "arguments": json.dumps(fc.get("args", {})),
+                            },
+                        }
+                    )
                 elif "text" in part:
                     text_parts.append(part["text"])
 
@@ -150,14 +154,16 @@ class GeminiTranslator:
         cc_tools: list[dict] = []
         for tool in gemini_tools:
             for fd in tool.get("functionDeclarations", []):
-                cc_tools.append({
-                    "type": "function",
-                    "function": {
-                        "name": fd["name"],
-                        "description": fd.get("description", ""),
-                        "parameters": fd.get("parameters", {}),
-                    },
-                })
+                cc_tools.append(
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": fd["name"],
+                            "description": fd.get("description", ""),
+                            "parameters": fd.get("parameters", {}),
+                        },
+                    }
+                )
         return cc_tools
 
     @staticmethod
@@ -199,11 +205,13 @@ class GeminiTranslator:
             parts.append({"text": ""})
 
         return {
-            "candidates": [{
-                "content": {"role": "model", "parts": parts},
-                "finishReason": _CC_TO_GEMINI_FINISH.get(finish_reason, "STOP"),
-                "index": 0,
-            }],
+            "candidates": [
+                {
+                    "content": {"role": "model", "parts": parts},
+                    "finishReason": _CC_TO_GEMINI_FINISH.get(finish_reason, "STOP"),
+                    "index": 0,
+                }
+            ],
             "usageMetadata": {
                 "promptTokenCount": usage.get("prompt_tokens", 0),
                 "candidatesTokenCount": usage.get("completion_tokens", 0),
@@ -228,12 +236,18 @@ class GeminiTranslator:
         # Text delta
         text = delta.get("content")
         if text:
-            events.append(format_gemini_sse({
-                "candidates": [{
-                    "content": {"role": "model", "parts": [{"text": text}]},
-                    "index": 0,
-                }],
-            }))
+            events.append(
+                format_gemini_sse(
+                    {
+                        "candidates": [
+                            {
+                                "content": {"role": "model", "parts": [{"text": text}]},
+                                "index": 0,
+                            }
+                        ],
+                    }
+                )
+            )
 
         # Tool call delta — buffer arguments
         for tc in delta.get("tool_calls", []):
@@ -258,23 +272,31 @@ class GeminiTranslator:
                 except (ToolCallBufferError, json.JSONDecodeError):
                     args = {}
                 meta = self._tool_call_meta.get(idx, {"name": "unknown"})
-                events.append(format_gemini_sse({
-                    "candidates": [{
-                        "content": {
-                            "role": "model",
-                            "parts": [{"functionCall": {"name": meta["name"], "args": args}}],
-                        },
-                        "index": 0,
-                    }],
-                }))
+                events.append(
+                    format_gemini_sse(
+                        {
+                            "candidates": [
+                                {
+                                    "content": {
+                                        "role": "model",
+                                        "parts": [{"functionCall": {"name": meta["name"], "args": args}}],
+                                    },
+                                    "index": 0,
+                                }
+                            ],
+                        }
+                    )
+                )
 
             # Finish event
             finish_data: dict = {
-                "candidates": [{
-                    "content": {"role": "model", "parts": []},
-                    "finishReason": _CC_TO_GEMINI_FINISH.get(finish_reason, "STOP"),
-                    "index": 0,
-                }],
+                "candidates": [
+                    {
+                        "content": {"role": "model", "parts": []},
+                        "finishReason": _CC_TO_GEMINI_FINISH.get(finish_reason, "STOP"),
+                        "index": 0,
+                    }
+                ],
             }
             if usage:
                 finish_data["usageMetadata"] = {

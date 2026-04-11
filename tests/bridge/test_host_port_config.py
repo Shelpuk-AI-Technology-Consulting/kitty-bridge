@@ -48,9 +48,10 @@ class TestBridgeServerHostPort:
         port = await server.start_async()
         try:
             assert port == free_port
-            async with aiohttp.ClientSession() as session:
-                async with session.get(f"http://127.0.0.1:{port}/healthz") as resp:
-                    assert resp.status == 200
+            async with aiohttp.ClientSession() as session, session.get(
+                f"http://127.0.0.1:{port}/healthz"
+            ) as resp:
+                assert resp.status == 200
         finally:
             await server.stop_async()
 
@@ -76,9 +77,10 @@ class TestBridgeServerHostPort:
         port = await server.start_async()
         try:
             # Connect to 127.0.0.1 explicitly
-            async with aiohttp.ClientSession() as session:
-                async with session.get(f"http://127.0.0.1:{port}/healthz") as resp:
-                    assert resp.status == 200
+            async with aiohttp.ClientSession() as session, session.get(
+                f"http://127.0.0.1:{port}/healthz"
+            ) as resp:
+                assert resp.status == 200
         finally:
             await server.stop_async()
 

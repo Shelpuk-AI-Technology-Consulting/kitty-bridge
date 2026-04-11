@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import contextlib
 import sys
+from typing import TYPE_CHECKING
 
 from kitty import __version__
 
 __all__ = ["main", "map_child_exit_code"]
+
+if TYPE_CHECKING:
+    from kitty.profiles.schema import BalancingProfile
 
 
 def map_child_exit_code(code: int) -> int:
@@ -85,34 +90,46 @@ def main() -> None:
         _run_cleanup()
     elif result.builtin == BuiltinCommand.BRIDGE_START:
         from pathlib import Path as _Path
+
         from platformdirs import user_config_dir as _ucd
+
         _config_dir = _Path(_ucd("kitty"))
         from kitty.bridge.manage import start_bridge
+
         start_bridge(
             state_path=_config_dir / "bridge_state.json",
             config_path=_config_dir / "bridge.yaml",
         )
     elif result.builtin == BuiltinCommand.BRIDGE_STOP:
         from pathlib import Path as _Path
+
         from platformdirs import user_config_dir as _ucd
+
         _config_dir = _Path(_ucd("kitty"))
         from kitty.bridge.manage import stop_bridge
+
         stop_bridge(_config_dir / "bridge_state.json")
     elif result.builtin == BuiltinCommand.BRIDGE_RESTART:
         from pathlib import Path as _Path
+
         from platformdirs import user_config_dir as _ucd
+
         _config_dir = _Path(_ucd("kitty"))
         from kitty.bridge.manage import restart_bridge
+
         restart_bridge(
             state_path=_config_dir / "bridge_state.json",
             config_path=_config_dir / "bridge.yaml",
         )
     elif result.builtin == BuiltinCommand.BRIDGE_STATUS:
         from pathlib import Path as _Path
+
         from platformdirs import user_config_dir as _ucd
+
         _config_dir = _Path(_ucd("kitty"))
-        from kitty.bridge.manage import bridge_status, BridgeStatus
+        from kitty.bridge.manage import BridgeStatus, bridge_status
         from kitty.bridge.state import load_state
+
         _state_path = _config_dir / "bridge_state.json"
         status = bridge_status(_state_path)
         if status == BridgeStatus.RUNNING:
@@ -128,9 +145,12 @@ def main() -> None:
             sys.exit(1)
     elif result.builtin == BuiltinCommand.BRIDGE_CONFIG:
         from pathlib import Path as _Path
+
         from platformdirs import user_config_dir as _ucd
+
         _config_path = _Path(_ucd("kitty")) / "bridge.yaml"
         from kitty.bridge.config import load_bridge_config
+
         config = load_bridge_config(_config_path)
         print(f"Host: {config.host}")
         print(f"Port: {config.port}")
@@ -142,10 +162,13 @@ def main() -> None:
         print(f"TLS key: {config.tls_key or '(none)'}")
     elif result.builtin == BuiltinCommand.BRIDGE_INSTALL:
         from pathlib import Path as _Path
+
         from platformdirs import user_config_dir as _ucd
+
         _config_path = str(_Path(_ucd("kitty")) / "bridge.yaml")
         dry_run = "--dry-run" in result.extra_args
-        from kitty.bridge.service import generate_systemd_unit, generate_launchd_plist, generate_windows_script
+        from kitty.bridge.service import generate_launchd_plist, generate_systemd_unit, generate_windows_script
+
         if sys.platform == "linux":
             content = generate_systemd_unit(executable=sys.executable, config_path=_config_path)
             if dry_run:
@@ -155,6 +178,7 @@ def main() -> None:
                 unit_path.parent.mkdir(parents=True, exist_ok=True)
                 unit_path.write_text(content)
                 import subprocess
+
                 subprocess.run(["systemctl", "--user", "daemon-reload"], check=True)
                 print(f"Installed: {unit_path}")
                 print("Enable: systemctl --user enable --now kitty-bridge")
@@ -177,8 +201,9 @@ def main() -> None:
                 script_path.write_text(content)
                 print(f"Generated {script_path}. Review and run it to install.")
     elif result.builtin == BuiltinCommand.BRIDGE_UNINSTALL:
-        from pathlib import Path as _Path
         import subprocess
+        from pathlib import Path as _Path
+
         if sys.platform == "linux":
             unit_path = _Path.home() / ".config" / "systemd" / "user" / "kitty-bridge.service"
             subprocess.run(["systemctl", "--user", "stop", "kitty-bridge"], capture_output=True)
@@ -204,8 +229,11 @@ def main() -> None:
     elif result.adapter is not None and (result.backend is not None or result.profile is not None):
         backend = result.backend or result.profile
         exit_code = _launch_target(
-            result.adapter, backend, cred_store,
-            result.extra_args, debug=args.debug,
+            result.adapter,
+            backend,
+            cred_store,
+            result.extra_args,
+            debug=args.debug,
             validate=not args.no_validate,
         )
         sys.exit(exit_code)
@@ -251,13 +279,13 @@ def _run_bridge(
     import asyncio
     import signal
     import sys
+    from contextlib import suppress
 
     from rich.console import Console
     from rich.panel import Panel
 
     from kitty.bridge.server import BridgeServer
-    from kitty.credentials.store import CredentialStore
-    from kitty.profiles.schema import BalancingProfile, Profile
+    from kitty.profiles.schema import BalancingProfile
     from kitty.providers.registry import get_provider
     from kitty.tui.display import print_error
 
@@ -298,22 +326,24 @@ def _run_bridge(
         port = await server.start_async()
 
         console = Console()
-        console.print(Panel.fit(
-            f"[bold green]Bridge server running on http://127.0.0.1:{port}[/bold green]\n\n"
-            f"Profile: [cyan]{profile.name}[/cyan]\n"  # type: ignore[union-attr]
-            f"Provider: [cyan]{profile.provider}[/cyan]\n"  # type: ignore[union-attr]
-            f"Model: [cyan]{profile.model}[/cyan]\n\n"  # type: ignore[union-attr]
-            f"Endpoints:\n"
-            f"  • POST /v1/chat/completions\n"
-            f"  • POST /v1/messages\n"
-            f"  • POST /v1/responses\n"
-            f"  • POST /v1beta/models/{{model}}:generateContent\n"
-            f"  • GET  /v1/models\n"
-            f"  • GET  /healthz\n\n"
-            f"Press Ctrl+C to stop",
-            title="Kitty Bridge Mode",
-            border_style="green",
-        ))
+        console.print(
+            Panel.fit(
+                f"[bold green]Bridge server running on http://127.0.0.1:{port}[/bold green]\n\n"
+                f"Profile: [cyan]{profile.name}[/cyan]\n"  # type: ignore[union-attr]
+                f"Provider: [cyan]{profile.provider}[/cyan]\n"  # type: ignore[union-attr]
+                f"Model: [cyan]{profile.model}[/cyan]\n\n"  # type: ignore[union-attr]
+                f"Endpoints:\n"
+                f"  • POST /v1/chat/completions\n"
+                f"  • POST /v1/messages\n"
+                f"  • POST /v1/responses\n"
+                f"  • POST /v1beta/models/{{model}}:generateContent\n"
+                f"  • GET  /v1/models\n"
+                f"  • GET  /healthz\n\n"
+                f"Press Ctrl+C to stop",
+                title="Kitty Bridge Mode",
+                border_style="green",
+            )
+        )
 
         # Set up graceful shutdown
         stop_event = asyncio.Event()
@@ -331,10 +361,8 @@ def _run_bridge(
             await server.stop_async()
             console.print("[green]Bridge server stopped.[/green]")
 
-    try:
+    with suppress(KeyboardInterrupt):
         asyncio.run(run_server())
-    except KeyboardInterrupt:
-        pass  # Graceful shutdown handled in run_server
     sys.exit(0)
 
 
@@ -354,14 +382,13 @@ def _run_bridge_balancing(
     from rich.panel import Panel
 
     from kitty.bridge.server import BridgeServer
-    from kitty.credentials.store import CredentialStore
     from kitty.profiles.resolver import ProfileResolver
-    from kitty.profiles.store import ProfileStore
-    from kitty.providers.registry import get_provider
-    from kitty.tui.display import print_error
 
     # Resolve all member profiles
     from kitty.profiles.store import ProfileStore as _PS
+    from kitty.providers.registry import get_provider
+    from kitty.tui.display import print_error
+
     profile_store = _PS()
     resolver = ProfileResolver(profile_store)
     member_profiles = resolver.resolve_balancing(balancing.name)
@@ -393,25 +420,24 @@ def _run_bridge_balancing(
         port = await server.start_async()
 
         console = Console()
-        members_info = "\n".join(
-            f"  • [cyan]{mp.name}[/cyan] ({mp.provider}/{mp.model})"
-            for mp in member_profiles
+        members_info = "\n".join(f"  • [cyan]{mp.name}[/cyan] ({mp.provider}/{mp.model})" for mp in member_profiles)
+        console.print(
+            Panel.fit(
+                f"[bold green]Bridge server running on http://127.0.0.1:{port}[/bold green]\n\n"
+                f"Profile: [cyan]{balancing.name}[/cyan] (balancing)\n"
+                f"Members:\n{members_info}\n\n"
+                f"Endpoints:\n"
+                f"  • POST /v1/chat/completions\n"
+                f"  • POST /v1/messages\n"
+                f"  • POST /v1/responses\n"
+                f"  • POST /v1beta/models/{{model}}:generateContent\n"
+                f"  • GET  /v1/models\n"
+                f"  • GET  /healthz\n\n"
+                f"Press Ctrl+C to stop",
+                title="Kitty Bridge Mode (Balancing)",
+                border_style="green",
+            )
         )
-        console.print(Panel.fit(
-            f"[bold green]Bridge server running on http://127.0.0.1:{port}[/bold green]\n\n"
-            f"Profile: [cyan]{balancing.name}[/cyan] (balancing)\n"
-            f"Members:\n{members_info}\n\n"
-            f"Endpoints:\n"
-            f"  • POST /v1/chat/completions\n"
-            f"  • POST /v1/messages\n"
-            f"  • POST /v1/responses\n"
-            f"  • POST /v1beta/models/{{model}}:generateContent\n"
-            f"  • GET  /v1/models\n"
-            f"  • GET  /healthz\n\n"
-            f"Press Ctrl+C to stop",
-            title="Kitty Bridge Mode (Balancing)",
-            border_style="green",
-        ))
 
         stop_event = asyncio.Event()
 
@@ -428,10 +454,8 @@ def _run_bridge_balancing(
             await server.stop_async()
             console.print("[green]Bridge server stopped.[/green]")
 
-    try:
+    with contextlib.suppress(KeyboardInterrupt):
         asyncio.run(run_server())
-    except KeyboardInterrupt:
-        pass
     sys.exit(0)
 
 
@@ -488,6 +512,7 @@ def _launch_target_balancing(
         key = cred_store.get(mp.auth_ref)  # type: ignore[union-attr]
         if not key:
             from kitty.tui.display import print_error
+
             print_error(f"No API key found for member profile {mp.name!r}")
             return 1
         provider = get_provider(mp.provider)

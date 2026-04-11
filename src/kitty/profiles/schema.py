@@ -15,7 +15,20 @@ RESERVED_NAMES: frozenset[str] = frozenset(
 
 _NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
 
-_PROVIDER_TYPES = Literal["zai_regular", "zai_coding", "minimax", "novita", "ollama", "openai", "openrouter", "anthropic", "bedrock", "azure", "vertex", "fireworks"]
+_PROVIDER_TYPES = Literal[
+    "zai_regular",
+    "zai_coding",
+    "minimax",
+    "novita",
+    "ollama",
+    "openai",
+    "openrouter",
+    "anthropic",
+    "bedrock",
+    "azure",
+    "vertex",
+    "fireworks",
+]
 
 
 class HttpsUrl(_HttpUrl):

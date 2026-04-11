@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Callable, Awaitable
+from collections.abc import Awaitable, Callable
 
 
 class ProviderAdapter(ABC):
@@ -47,6 +47,7 @@ class ProviderAdapter(ABC):
         Args:
             cc_request: Chat Completions request dict to normalize.
         """
+        return None
 
     @property
     def upstream_path(self) -> str:

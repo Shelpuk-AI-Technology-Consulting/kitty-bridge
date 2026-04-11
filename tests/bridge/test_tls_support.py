@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import ssl
 from pathlib import Path
 
 import pytest
@@ -30,10 +29,20 @@ def _generate_self_signed_cert(tmp_path: Path) -> tuple[Path, Path]:
     key_path = tmp_path / "key.pem"
     subprocess.run(
         [
-            "openssl", "req", "-x509", "-newkey", "rsa:2048",
-            "-keyout", str(key_path), "-out", str(cert_path),
-            "-days", "1", "-nodes",
-            "-subj", "/CN=localhost",
+            "openssl",
+            "req",
+            "-x509",
+            "-newkey",
+            "rsa:2048",
+            "-keyout",
+            str(key_path),
+            "-out",
+            str(cert_path),
+            "-days",
+            "1",
+            "-nodes",
+            "-subj",
+            "/CN=localhost",
         ],
         check=True,
         capture_output=True,
@@ -55,9 +64,10 @@ class TestTLSSupport:
 
             # Connect without TLS verification (self-signed)
             conn = aiohttp.TCPConnector(ssl=False)
-            async with aiohttp.ClientSession(connector=conn) as session:
-                async with session.get(f"https://127.0.0.1:{port}/healthz") as resp:
-                    assert resp.status == 200
+            async with aiohttp.ClientSession(connector=conn) as session, session.get(
+                f"https://127.0.0.1:{port}/healthz"
+            ) as resp:
+                assert resp.status == 200
         finally:
             await server.stop_async()
 
@@ -85,9 +95,10 @@ class TestTLSSupport:
         try:
             import aiohttp
 
-            async with aiohttp.ClientSession() as session:
-                async with session.get(f"http://127.0.0.1:{port}/healthz") as resp:
-                    assert resp.status == 200
+            async with aiohttp.ClientSession() as session, session.get(
+                f"http://127.0.0.1:{port}/healthz"
+            ) as resp:
+                assert resp.status == 200
         finally:
             await server.stop_async()
 

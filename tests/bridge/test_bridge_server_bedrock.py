@@ -1,7 +1,6 @@
 """Tests for bridge server integration with Bedrock provider (custom transport)."""
 
-import json
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -59,8 +58,11 @@ class TestBridgeBedrockCustomTransport:
         provider = BedrockAdapter()
         adapter = _FakeLauncher()
         server = BridgeServer(
-            adapter, provider, "AKID:SECRET",
-            host="127.0.0.1", port=0,
+            adapter,
+            provider,
+            "AKID:SECRET",
+            host="127.0.0.1",
+            port=0,
             provider_config={"region": "us-east-1"},
         )
 
@@ -78,15 +80,17 @@ class TestBridgeBedrockCustomTransport:
             try:
                 import aiohttp
 
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(
+                async with (
+                    aiohttp.ClientSession() as session,
+                    session.post(
                         f"http://127.0.0.1:{server.port}/v1/responses",
                         json={
                             "model": "anthropic.claude-sonnet-4-20250514",
                             "input": [{"type": "message", "role": "user", "content": "What is 2+2?"}],
                         },
-                    ) as resp:
-                        assert resp.status == 200
+                    ) as resp,
+                ):
+                    assert resp.status == 200
             finally:
                 await server.stop_async()
 

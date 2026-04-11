@@ -128,7 +128,9 @@ class CLIRouter:
             if rest:
                 second = rest[0].lower()
                 if second == "bridge":
-                    return RouteResult(builtin=BuiltinCommand.BRIDGE, profile=profile, backend=backend, extra_args=rest[1:])
+                    return RouteResult(
+                        builtin=BuiltinCommand.BRIDGE, profile=profile, backend=backend, extra_args=rest[1:]
+                    )
                 if second in self._adapters:
                     adapter = self._adapters[second]
                     return RouteResult(adapter=adapter, profile=profile, backend=backend, extra_args=rest[1:])

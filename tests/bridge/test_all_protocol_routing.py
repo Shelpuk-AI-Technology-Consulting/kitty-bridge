@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
-
 import aiohttp
 import pytest
 
@@ -40,9 +38,10 @@ class TestBridgeModeAllEndpoints:
         server = _make_server()
         port = await server.start_async()
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(f"http://127.0.0.1:{port}/healthz") as resp:
-                    assert resp.status == 200
+            async with aiohttp.ClientSession() as session, session.get(
+                f"http://127.0.0.1:{port}/healthz"
+            ) as resp:
+                assert resp.status == 200
         finally:
             await server.stop_async()
 
@@ -51,13 +50,12 @@ class TestBridgeModeAllEndpoints:
         server = _make_server()
         port = await server.start_async()
         try:
-            async with aiohttp.ClientSession() as session:
-                # POST with empty body — should get 400 or upstream error, NOT 404
-                async with session.post(
-                    f"http://127.0.0.1:{port}/v1/chat/completions",
-                    json={},
-                ) as resp:
-                    assert resp.status != 404
+            # POST with empty body — should get 400 or upstream error, NOT 404
+            async with aiohttp.ClientSession() as session, session.post(
+                f"http://127.0.0.1:{port}/v1/chat/completions",
+                json={},
+            ) as resp:
+                assert resp.status != 404
         finally:
             await server.stop_async()
 
@@ -66,12 +64,14 @@ class TestBridgeModeAllEndpoints:
         server = _make_server()
         port = await server.start_async()
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
+            async with (
+                aiohttp.ClientSession() as session,
+                session.post(
                     f"http://127.0.0.1:{port}/v1/messages",
                     json={},
-                ) as resp:
-                    assert resp.status != 404
+                ) as resp,
+            ):
+                assert resp.status != 404
         finally:
             await server.stop_async()
 
@@ -80,12 +80,14 @@ class TestBridgeModeAllEndpoints:
         server = _make_server()
         port = await server.start_async()
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
+            async with (
+                aiohttp.ClientSession() as session,
+                session.post(
                     f"http://127.0.0.1:{port}/v1/responses",
                     json={},
-                ) as resp:
-                    assert resp.status != 404
+                ) as resp,
+            ):
+                assert resp.status != 404
         finally:
             await server.stop_async()
 
@@ -94,12 +96,14 @@ class TestBridgeModeAllEndpoints:
         server = _make_server()
         port = await server.start_async()
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
+            async with (
+                aiohttp.ClientSession() as session,
+                session.post(
                     f"http://127.0.0.1:{port}/v1beta/models/gpt-4o:generateContent",
                     json={},
-                ) as resp:
-                    assert resp.status != 404
+                ) as resp,
+            ):
+                assert resp.status != 404
         finally:
             await server.stop_async()
 
@@ -108,12 +112,14 @@ class TestBridgeModeAllEndpoints:
         server = _make_server()
         port = await server.start_async()
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
+            async with (
+                aiohttp.ClientSession() as session,
+                session.post(
                     f"http://127.0.0.1:{port}/v1beta/models/gpt-4o:streamGenerateContent",
                     json={},
-                ) as resp:
-                    assert resp.status != 404
+                ) as resp,
+            ):
+                assert resp.status != 404
         finally:
             await server.stop_async()
 
@@ -122,19 +128,21 @@ class TestBridgeModeAllEndpoints:
         server = _make_server()
         port = await server.start_async()
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(
+            async with (
+                aiohttp.ClientSession() as session,
+                session.get(
                     f"http://127.0.0.1:{port}/v1/models",
-                ) as resp:
-                    assert resp.status == 200
-                    body = await resp.json()
-                    assert body["object"] == "list"
-                    assert isinstance(body["data"], list)
-                    assert len(body["data"]) >= 1
-                    model = body["data"][0]
-                    assert model["object"] == "model"
-                    assert model["id"] == "gpt-4o"
-                    assert model["owned_by"] == "kitty-bridge"
+                ) as resp,
+            ):
+                assert resp.status == 200
+                body = await resp.json()
+                assert body["object"] == "list"
+                assert isinstance(body["data"], list)
+                assert len(body["data"]) >= 1
+                model = body["data"][0]
+                assert model["object"] == "model"
+                assert model["id"] == "gpt-4o"
+                assert model["owned_by"] == "kitty-bridge"
         finally:
             await server.stop_async()
 
@@ -154,14 +162,10 @@ class TestAgentLaunchModeSingleProtocol:
         try:
             async with aiohttp.ClientSession() as session:
                 # Messages endpoint exists
-                async with session.post(
-                    f"http://127.0.0.1:{port}/v1/messages", json={}
-                ) as resp:
+                async with session.post(f"http://127.0.0.1:{port}/v1/messages", json={}) as resp:
                     assert resp.status != 404
                 # Chat completions does NOT exist
-                async with session.post(
-                    f"http://127.0.0.1:{port}/v1/chat/completions", json={}
-                ) as resp:
+                async with session.post(f"http://127.0.0.1:{port}/v1/chat/completions", json={}) as resp:
                     assert resp.status == 404
         finally:
             await server.stop_async()
@@ -173,14 +177,10 @@ class TestAgentLaunchModeSingleProtocol:
         try:
             async with aiohttp.ClientSession() as session:
                 # Responses endpoint exists
-                async with session.post(
-                    f"http://127.0.0.1:{port}/v1/responses", json={}
-                ) as resp:
+                async with session.post(f"http://127.0.0.1:{port}/v1/responses", json={}) as resp:
                     assert resp.status != 404
                 # Chat completions does NOT exist
-                async with session.post(
-                    f"http://127.0.0.1:{port}/v1/chat/completions", json={}
-                ) as resp:
+                async with session.post(f"http://127.0.0.1:{port}/v1/chat/completions", json={}) as resp:
                     assert resp.status == 404
         finally:
             await server.stop_async()
@@ -198,9 +198,7 @@ class TestAgentLaunchModeSingleProtocol:
                 ) as resp:
                     assert resp.status != 404
                 # Chat completions does NOT exist
-                async with session.post(
-                    f"http://127.0.0.1:{port}/v1/chat/completions", json={}
-                ) as resp:
+                async with session.post(f"http://127.0.0.1:{port}/v1/chat/completions", json={}) as resp:
                     assert resp.status == 404
         finally:
             await server.stop_async()
@@ -212,14 +210,10 @@ class TestAgentLaunchModeSingleProtocol:
         try:
             async with aiohttp.ClientSession() as session:
                 # Chat completions endpoint exists
-                async with session.post(
-                    f"http://127.0.0.1:{port}/v1/chat/completions", json={}
-                ) as resp:
+                async with session.post(f"http://127.0.0.1:{port}/v1/chat/completions", json={}) as resp:
                     assert resp.status != 404
                 # Messages does NOT exist
-                async with session.post(
-                    f"http://127.0.0.1:{port}/v1/messages", json={}
-                ) as resp:
+                async with session.post(f"http://127.0.0.1:{port}/v1/messages", json={}) as resp:
                     assert resp.status == 404
         finally:
             await server.stop_async()

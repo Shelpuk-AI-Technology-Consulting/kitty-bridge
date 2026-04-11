@@ -37,8 +37,7 @@ def store(tmp_path: object) -> ProfileStore:
 class TestRunProfileMenu:
     def test_non_tty_raises(self, store: ProfileStore) -> None:
         """Profile menu rejects non-TTY with deterministic error."""
-        with patch("sys.stdin.isatty", return_value=False), \
-             pytest.raises(Exception, match="interactive"):
+        with patch("sys.stdin.isatty", return_value=False), pytest.raises(Exception, match="interactive"):
             run_profile_menu(store)
 
     def test_list_profiles(self, store: ProfileStore) -> None:
@@ -49,14 +48,14 @@ class TestRunProfileMenu:
 
     def test_create_profile_interactive(self, store: ProfileStore) -> None:
         """Create a new profile through the menu flow."""
-        cred_store = CredentialStore(
-            backends=[FileBackend(path=store._path.parent / "creds.json")]
-        )
+        cred_store = CredentialStore(backends=[FileBackend(path=store._path.parent / "creds.json")])
 
-        with patch("kitty.cli.profile_cmd.prompt_text", side_effect=["gpt-4o", "myprofile"]), \
-             patch("kitty.cli.profile_cmd.SelectionMenu.show", return_value="zai_regular"), \
-             patch("kitty.cli.profile_cmd.prompt_secret", return_value="sk-test-key-123"), \
-             patch("kitty.cli.profile_cmd.prompt_confirm", return_value=True):
+        with (
+            patch("kitty.cli.profile_cmd.prompt_text", side_effect=["gpt-4o", "myprofile"]),
+            patch("kitty.cli.profile_cmd.SelectionMenu.show", return_value="zai_regular"),
+            patch("kitty.cli.profile_cmd.prompt_secret", return_value="sk-test-key-123"),
+            patch("kitty.cli.profile_cmd.prompt_confirm", return_value=True),
+        ):
             profile = _create_profile_flow(store, cred_store)
 
         assert profile is not None

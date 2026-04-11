@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import time
 import uuid
 
@@ -10,12 +9,11 @@ import aiohttp
 import pytest
 from aioresponses import aioresponses
 
-from kitty.bridge.server import BridgeServer, UpstreamError
+from kitty.bridge.server import BridgeServer
 from kitty.launchers.base import LauncherAdapter, SpawnConfig
 from kitty.profiles.schema import Profile
 from kitty.providers.base import ProviderAdapter
 from kitty.types import BridgeProtocol
-
 
 # -- Helpers -----------------------------------------------------------------
 
@@ -212,15 +210,18 @@ class TestCircuitBreakerRetry:
 
         with aioresponses(passthrough=["http://127.0.0.1"]) as m:
             # Backend-0 fails
-            m.post("https://api0.example.com/v1/chat/completions", status=500, payload={"error": {"message": "Internal error"}})
+            m.post(
+                "https://api0.example.com/v1/chat/completions",
+                status=500,
+                payload={"error": {"message": "Internal error"}},
+            )
             # Backend-1 succeeds
             m.post("https://api1.example.com/v1/chat/completions", payload=UPSTREAM_OK)
 
-            async with aiohttp.ClientSession() as session:
-                async with session.post(url, json=request_body) as resp:
-                    assert resp.status == 200
-                    body = await resp.json()
-                    assert body["choices"][0]["message"]["content"] == "Hello!"
+            async with aiohttp.ClientSession() as session, session.post(url, json=request_body) as resp:
+                assert resp.status == 200
+                body = await resp.json()
+                assert body["choices"][0]["message"]["content"] == "Hello!"
 
         await server.stop_async()
 
@@ -241,9 +242,8 @@ class TestCircuitBreakerRetry:
             m.post("https://api1.example.com/v1/chat/completions", status=502, payload={"error": {"message": "fail 1"}})
             m.post("https://api2.example.com/v1/chat/completions", payload=UPSTREAM_OK)
 
-            async with aiohttp.ClientSession() as session:
-                async with session.post(url, json=request_body) as resp:
-                    assert resp.status == 200
+            async with aiohttp.ClientSession() as session, session.post(url, json=request_body) as resp:
+                assert resp.status == 200
 
         await server.stop_async()
 
@@ -263,9 +263,8 @@ class TestCircuitBreakerRetry:
             m.post("https://api0.example.com/v1/chat/completions", status=500, payload={"error": {"message": "fail 0"}})
             m.post("https://api1.example.com/v1/chat/completions", status=502, payload={"error": {"message": "fail 1"}})
 
-            async with aiohttp.ClientSession() as session:
-                async with session.post(url, json=request_body) as resp:
-                    assert resp.status == 500
+            async with aiohttp.ClientSession() as session, session.post(url, json=request_body) as resp:
+                assert resp.status == 500
 
         await server.stop_async()
 
@@ -290,9 +289,8 @@ class TestCircuitBreakerRetry:
         with aioresponses(passthrough=["http://127.0.0.1"]) as m:
             m.post("https://api.example.com/v1/chat/completions", status=500, payload={"error": {"message": "fail"}})
 
-            async with aiohttp.ClientSession() as session:
-                async with session.post(url, json=request_body) as resp:
-                    assert resp.status == 500
+            async with aiohttp.ClientSession() as session, session.post(url, json=request_body) as resp:
+                assert resp.status == 500
 
         await server.stop_async()
 
@@ -313,15 +311,13 @@ class TestCircuitBreakerRetry:
             m.post("https://api0.example.com/v1/chat/completions", status=500, payload={"error": {"message": "fail"}})
             m.post("https://api1.example.com/v1/chat/completions", payload=UPSTREAM_OK)
 
-            async with aiohttp.ClientSession() as session:
-                async with session.post(url, json=request_body) as resp:
-                    assert resp.status == 200
+            async with aiohttp.ClientSession() as session, session.post(url, json=request_body) as resp:
+                assert resp.status == 200
 
             # Request 2: backend-0 should be skipped (in cooldown), backend-1 used directly
             m.post("https://api1.example.com/v1/chat/completions", payload=UPSTREAM_OK)
 
-            async with aiohttp.ClientSession() as session:
-                async with session.post(url, json=request_body) as resp:
-                    assert resp.status == 200
+            async with aiohttp.ClientSession() as session, session.post(url, json=request_body) as resp:
+                assert resp.status == 200
 
         await server.stop_async()

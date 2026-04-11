@@ -23,7 +23,6 @@ from kitty.profiles.schema import Profile
 from kitty.providers.base import ProviderAdapter
 from kitty.types import BridgeProtocol
 
-
 # ── Test infrastructure ──────────────────────────────────────────────────
 
 
@@ -69,8 +68,14 @@ class StubProvider(ProviderAdapter):
 def _make_messages_stream_body() -> list[bytes]:
     """Standard SSE chunks for a Messages API streaming response."""
     return [
-        b'data: {"id":"test","choices":[{"index":0,"delta":{"content":"Hi"},"finish_reason":null}],"model":"test"}\n\n',
-        b'data: {"id":"test","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"model":"test","usage":null}\n\n',
+        (
+            b'data: {"id":"test","choices":[{"index":0,"delta":{"content":"Hi"},'
+            b'"finish_reason":null}],"model":"test"}\n\n'
+        ),
+        (
+            b'data: {"id":"test","choices":[{"index":0,"delta":{},'
+            b'"finish_reason":"stop"}],"model":"test","usage":null}\n\n'
+        ),
         b"data: [DONE]\n\n",
     ]
 
@@ -78,8 +83,14 @@ def _make_messages_stream_body() -> list[bytes]:
 def _make_responses_stream_body() -> list[bytes]:
     """Standard SSE chunks for a Responses API streaming response."""
     return [
-        b'data: {"id":"test","choices":[{"index":0,"delta":{"content":"Hi"},"finish_reason":null}],"model":"test"}\n\n',
-        b'data: {"id":"test","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"model":"test","usage":null}\n\n',
+        (
+            b'data: {"id":"test","choices":[{"index":0,"delta":{"content":"Hi"},'
+            b'"finish_reason":null}],"model":"test"}\n\n'
+        ),
+        (
+            b'data: {"id":"test","choices":[{"index":0,"delta":{},'
+            b'"finish_reason":"stop"}],"model":"test","usage":null}\n\n'
+        ),
         b"data: [DONE]\n\n",
     ]
 
@@ -166,8 +177,9 @@ class TestMessagesConnectionRetries:
                     headers={"Content-Type": "text/event-stream"},
                 )
 
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(
+                async with (
+                    aiohttp.ClientSession() as session,
+                    session.post(
                         f"http://127.0.0.1:{port}/v1/messages",
                         json={
                             "model": "test-model",
@@ -176,11 +188,12 @@ class TestMessagesConnectionRetries:
                             "stream": True,
                         },
                         timeout=aiohttp.ClientTimeout(total=30),
-                    ) as resp:
-                        assert resp.status == 200
-                        body = await resp.read()
-                        # Should have successful content, not an error
-                        assert b"message_stop" in body or b"content_block_delta" in body or len(body) > 0
+                    ) as resp,
+                ):
+                    assert resp.status == 200
+                    body = await resp.read()
+                    # Should have successful content, not an error
+                    assert b"message_stop" in body or b"content_block_delta" in body or len(body) > 0
         finally:
             await server.stop_async()
 
@@ -200,8 +213,9 @@ class TestMessagesConnectionRetries:
                         exception=asyncio.TimeoutError(),
                     )
 
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(
+                async with (
+                    aiohttp.ClientSession() as session,
+                    session.post(
                         f"http://127.0.0.1:{port}/v1/messages",
                         json={
                             "model": "test-model",
@@ -210,10 +224,11 @@ class TestMessagesConnectionRetries:
                             "stream": True,
                         },
                         timeout=aiohttp.ClientTimeout(total=30),
-                    ) as resp:
-                        assert resp.status == 200
-                        body = await resp.read()
-                        assert b"error" in body
+                    ) as resp,
+                ):
+                    assert resp.status == 200
+                    body = await resp.read()
+                    assert b"error" in body
         finally:
             await server.stop_async()
 
@@ -236,8 +251,9 @@ class TestMessagesConnectionRetries:
                     headers={"Content-Type": "text/event-stream"},
                 )
 
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(
+                async with (
+                    aiohttp.ClientSession() as session,
+                    session.post(
                         f"http://127.0.0.1:{port}/v1/messages",
                         json={
                             "model": "test-model",
@@ -246,10 +262,11 @@ class TestMessagesConnectionRetries:
                             "stream": True,
                         },
                         timeout=aiohttp.ClientTimeout(total=30),
-                    ) as resp:
-                        assert resp.status == 200
-                        body = await resp.read()
-                        assert len(body) > 0
+                    ) as resp,
+                ):
+                    assert resp.status == 200
+                    body = await resp.read()
+                    assert len(body) > 0
         finally:
             await server.stop_async()
 
@@ -268,8 +285,9 @@ class TestMessagesConnectionRetries:
                     payload={"error": {"message": "Bad request"}},
                 )
 
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(
+                async with (
+                    aiohttp.ClientSession() as session,
+                    session.post(
                         f"http://127.0.0.1:{port}/v1/messages",
                         json={
                             "model": "test-model",
@@ -277,10 +295,11 @@ class TestMessagesConnectionRetries:
                             "max_tokens": 1024,
                             "stream": True,
                         },
-                    ) as resp:
-                        body = await resp.read()
-                        # Only one call was made — no retry
-                        assert b"error" in body
+                    ) as resp,
+                ):
+                    body = await resp.read()
+                    # Only one call was made — no retry
+                    assert b"error" in body
         finally:
             await server.stop_async()
 
@@ -292,8 +311,9 @@ class TestMessagesConnectionRetries:
         server = BridgeServer(adapter, provider, "test-key")
         port = await server.start_async()
         try:
-            with caplog.at_level(logging.DEBUG, logger="kitty.bridge.server"):
-                with aioresponses(passthrough=["http://127.0.0.1"]) as m:
+            with caplog.at_level(logging.DEBUG, logger="kitty.bridge.server"), aioresponses(
+                passthrough=["http://127.0.0.1"]
+            ) as m:
                     m.post(
                         "https://api.example.com/v1/chat/completions",
                         exception=asyncio.TimeoutError(),
@@ -304,8 +324,9 @@ class TestMessagesConnectionRetries:
                         headers={"Content-Type": "text/event-stream"},
                     )
 
-                    async with aiohttp.ClientSession() as session:
-                        async with session.post(
+                    async with (
+                        aiohttp.ClientSession() as session,
+                        session.post(
                             f"http://127.0.0.1:{port}/v1/messages",
                             json={
                                 "model": "test-model",
@@ -314,8 +335,9 @@ class TestMessagesConnectionRetries:
                                 "stream": True,
                             },
                             timeout=aiohttp.ClientTimeout(total=30),
-                        ) as resp:
-                            await resp.read()
+                        ) as resp,
+                    ):
+                        await resp.read()
 
                     # Should have a retry warning
                     warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
@@ -350,8 +372,9 @@ class TestResponsesConnectionRetries:
                     headers={"Content-Type": "text/event-stream"},
                 )
 
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(
+                async with (
+                    aiohttp.ClientSession() as session,
+                    session.post(
                         f"http://127.0.0.1:{port}/v1/responses",
                         json={
                             "model": "test-model",
@@ -359,10 +382,11 @@ class TestResponsesConnectionRetries:
                             "stream": True,
                         },
                         timeout=aiohttp.ClientTimeout(total=30),
-                    ) as resp:
-                        assert resp.status == 200
-                        body = await resp.read()
-                        assert len(body) > 0
+                    ) as resp,
+                ):
+                    assert resp.status == 200
+                    body = await resp.read()
+                    assert len(body) > 0
         finally:
             await server.stop_async()
 
@@ -381,8 +405,9 @@ class TestResponsesConnectionRetries:
                         exception=asyncio.TimeoutError(),
                     )
 
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(
+                async with (
+                    aiohttp.ClientSession() as session,
+                    session.post(
                         f"http://127.0.0.1:{port}/v1/responses",
                         json={
                             "model": "test-model",
@@ -390,9 +415,10 @@ class TestResponsesConnectionRetries:
                             "stream": True,
                         },
                         timeout=aiohttp.ClientTimeout(total=30),
-                    ) as resp:
-                        body = await resp.read()
-                        assert b"response.completed" in body  # Must always emit completed
+                    ) as resp,
+                ):
+                    body = await resp.read()
+                    assert b"response.completed" in body  # Must always emit completed
         finally:
             await server.stop_async()
 
@@ -418,12 +444,16 @@ class TestChatCompletionsConnectionRetries:
                 )
                 m.post(
                     "https://api.example.com/v1/chat/completions",
-                    body=b'data: {"id":"test","choices":[{"index":0,"delta":{"content":"Hi"},"finish_reason":null}]}\n\ndata: [DONE]\n\n',
+                    body=(
+                        b'data: {"id":"test","choices":[{"index":0,"delta":{"content":"Hi"},'
+                        b'"finish_reason":null}]}\n\ndata: [DONE]\n\n'
+                    ),
                     headers={"Content-Type": "text/event-stream"},
                 )
 
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(
+                async with (
+                    aiohttp.ClientSession() as session,
+                    session.post(
                         f"http://127.0.0.1:{port}/v1/chat/completions",
                         json={
                             "model": "test-model",
@@ -431,10 +461,11 @@ class TestChatCompletionsConnectionRetries:
                             "stream": True,
                         },
                         timeout=aiohttp.ClientTimeout(total=30),
-                    ) as resp:
-                        assert resp.status == 200
-                        body = await resp.read()
-                        assert len(body) > 0
+                    ) as resp,
+                ):
+                    assert resp.status == 200
+                    body = await resp.read()
+                    assert len(body) > 0
         finally:
             await server.stop_async()
 
@@ -453,8 +484,9 @@ class TestDebugLogTruncation:
         server = BridgeServer(adapter, provider, "test-key", debug=True)
         port = await server.start_async()
         try:
-            with caplog.at_level(logging.DEBUG, logger="kitty.bridge.server"):
-                with aioresponses(passthrough=["http://127.0.0.1"]) as m:
+            with caplog.at_level(logging.DEBUG, logger="kitty.bridge.server"), aioresponses(
+                passthrough=["http://127.0.0.1"]
+            ) as m:
                     m.post(
                         "https://api.example.com/v1/chat/completions",
                         body=b"".join(_make_messages_stream_body()),
@@ -463,8 +495,9 @@ class TestDebugLogTruncation:
 
                     # Send a request with a large body
                     large_content = "x" * 5000
-                    async with aiohttp.ClientSession() as session:
-                        async with session.post(
+                    async with (
+                        aiohttp.ClientSession() as session,
+                        session.post(
                             f"http://127.0.0.1:{port}/v1/messages",
                             json={
                                 "model": "test-model",
@@ -472,8 +505,9 @@ class TestDebugLogTruncation:
                                 "max_tokens": 1024,
                                 "stream": True,
                             },
-                        ) as resp:
-                            await resp.read()
+                        ) as resp,
+                    ):
+                        await resp.read()
 
                     # Check that the log entry is truncated
                     body_logs = [r for r in caplog.records if "Request body:" in r.message]

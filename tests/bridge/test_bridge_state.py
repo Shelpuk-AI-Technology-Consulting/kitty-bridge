@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from kitty.bridge.server import BridgeServer
-from kitty.bridge.state import BridgeState, load_state, write_state, remove_state
+from kitty.bridge.state import BridgeState, load_state, remove_state, write_state
 from kitty.providers.zai import ZaiRegularAdapter
 
 
@@ -65,14 +65,29 @@ class TestBridgeStateFile:
         state_path = tmp_path / "bridge_state.json"
         # We need a cert/key to start TLS — skip if openssl not available
         import subprocess
+
         try:
             cert = tmp_path / "cert.pem"
             key = tmp_path / "key.pem"
             subprocess.run(
-                ["openssl", "req", "-x509", "-newkey", "rsa:2048",
-                 "-keyout", str(key), "-out", str(cert),
-                 "-days", "1", "-nodes", "-subj", "/CN=localhost"],
-                check=True, capture_output=True,
+                [
+                    "openssl",
+                    "req",
+                    "-x509",
+                    "-newkey",
+                    "rsa:2048",
+                    "-keyout",
+                    str(key),
+                    "-out",
+                    str(cert),
+                    "-days",
+                    "1",
+                    "-nodes",
+                    "-subj",
+                    "/CN=localhost",
+                ],
+                check=True,
+                capture_output=True,
             )
         except (FileNotFoundError, subprocess.CalledProcessError):
             pytest.skip("openssl not available")
@@ -99,7 +114,9 @@ class TestBridgeStateHelpers:
 
     def test_write_and_load_state(self, tmp_path: Path):
         state_path = tmp_path / "state.json"
-        state = BridgeState(pid=12345, host="0.0.0.0", port=8080, profile="my-zai", started_at="2026-04-11T10:30:00Z", tls=False)
+        state = BridgeState(
+            pid=12345, host="0.0.0.0", port=8080, profile="my-zai", started_at="2026-04-11T10:30:00Z", tls=False
+        )
         write_state(state_path, state)
 
         loaded = load_state(state_path)
@@ -126,7 +143,9 @@ class TestBridgeStateHelpers:
 
     def test_timestamp_is_utc(self, tmp_path: Path):
         state_path = tmp_path / "state.json"
-        state = BridgeState(pid=1, host="127.0.0.1", port=8080, profile="p", started_at="2026-04-11T10:30:00Z", tls=False)
+        state = BridgeState(
+            pid=1, host="127.0.0.1", port=8080, profile="p", started_at="2026-04-11T10:30:00Z", tls=False
+        )
         write_state(state_path, state)
         loaded = load_state(state_path)
         assert loaded is not None

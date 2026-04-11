@@ -52,7 +52,7 @@ class VertexAIAdapter(ProviderAdapter):
         The path always includes ``/endpoints/openapi/chat/completions``.
         The model is specified in the request body, not the URL.
         """
-        return f"/endpoints/openapi/chat/completions"
+        return "/endpoints/openapi/chat/completions"
 
     # ── URL construction ─────────────────────────────────────────────────
 
@@ -74,10 +74,7 @@ class VertexAIAdapter(ProviderAdapter):
             raise ProviderError("Vertex AI requires 'project_id' in provider_config")
         location = provider_config.get("location", "") or _DEFAULT_LOCATION
 
-        if location == "global":
-            host = "aiplatform.googleapis.com"
-        else:
-            host = f"{location}-aiplatform.googleapis.com"
+        host = "aiplatform.googleapis.com" if location == "global" else f"{location}-aiplatform.googleapis.com"
 
         return f"https://{host}/{_API_VERSION}/projects/{project_id}/locations/{location}"
 
@@ -107,9 +104,15 @@ class VertexAIAdapter(ProviderAdapter):
         Strips internal metadata fields.  The request body is otherwise
         standard Chat Completions format — passthrough.
         """
-        return {k: v for k, v in cc_request.items() if k not in (
-            "_resolved_key", "_provider_config",
-        )}
+        return {
+            k: v
+            for k, v in cc_request.items()
+            if k
+            not in (
+                "_resolved_key",
+                "_provider_config",
+            )
+        }
 
     def translate_from_upstream(self, raw_response: dict) -> dict:
         """Vertex AI returns CC-compatible responses — passthrough."""
@@ -164,8 +167,5 @@ class VertexAIAdapter(ProviderAdapter):
         if not isinstance(body, dict):
             return ProviderError(f"Vertex AI error {status_code}: {body}")
         error_msg = body.get("error", body)
-        if isinstance(error_msg, dict):
-            msg = error_msg.get("message", str(error_msg))
-        else:
-            msg = str(error_msg)
+        msg = error_msg.get("message", str(error_msg)) if isinstance(error_msg, dict) else str(error_msg)
         return ProviderError(f"Vertex AI error {status_code}: {msg}")

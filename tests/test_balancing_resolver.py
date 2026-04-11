@@ -15,7 +15,9 @@ from kitty.profiles.store import ProfileStore
 VALID_UUID = str(uuid.uuid4())
 
 
-def _make_store(tmp_path, profiles_data: list[dict] | None = None, balancing_data: list[dict] | None = None) -> ProfileStore:
+def _make_store(
+    tmp_path, profiles_data: list[dict] | None = None, balancing_data: list[dict] | None = None
+) -> ProfileStore:
     store = ProfileStore(path=tmp_path / "profiles.json")
     if profiles_data:
         for data in profiles_data:
@@ -99,7 +101,15 @@ class TestResolveDefaultBackend:
     def test_resolve_default_backend_regular(self, tmp_path):
         store = _make_store(
             tmp_path,
-            [{"name": "alpha", "provider": "zai_regular", "model": "gpt-4o", "auth_ref": VALID_UUID, "is_default": True}],
+            [
+                {
+                    "name": "alpha",
+                    "provider": "zai_regular",
+                    "model": "gpt-4o",
+                    "auth_ref": VALID_UUID,
+                    "is_default": True,
+                }
+            ],
         )
         resolver = ProfileResolver(store)
         result = resolver.resolve_default_backend()

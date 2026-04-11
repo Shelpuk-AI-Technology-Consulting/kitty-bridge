@@ -158,3 +158,89 @@ class TestTranslateUpstreamError:
         code, message = BridgeServer._extract_error_fields(None)
         assert code == ""
         assert message == ""
+
+    # ── Minimax code 2013: context window exceeds limit ──────────────────────
+
+    def test_minimax_2013_dict_body(self):
+        """Minimax 2013 error with double-nested JSON dict body returns actionable /clear message."""
+        inner_error = json.dumps(
+            {
+                "type": "error",
+                "error": {
+                    "type": "bad_request_error",
+                    "message": "invalid params, context window exceeds limit (2013)",
+                    "http_code": "400",
+                },
+                "request_id": "abc123",
+            }
+        )
+        body = {
+            "type": "error",
+            "error": {"type": "api_error", "message": inner_error},
+        }
+        result = self._call(400, body)
+        assert "/clear" in result
+        assert "context" in result.lower()
+
+    def test_minimax_2013_string_body(self):
+        """Minimax 2013 error with raw JSON string body returns actionable /clear message."""
+        inner_error = json.dumps(
+            {
+                "type": "error",
+                "error": {
+                    "type": "bad_request_error",
+                    "message": "invalid params, context window exceeds limit (2013)",
+                    "http_code": "400",
+                },
+            }
+        )
+        body = json.dumps(
+            {
+                "type": "error",
+                "error": {"type": "api_error", "message": inner_error},
+            }
+        )
+        result = self._call(400, body)
+        assert "/clear" in result
+        assert "context" in result.lower()
+
+    def test_minimax_context_window_exceeds_limit_text_only(self):
+        """Detection via 'context window exceeds' text even without nested JSON."""
+        body = {"error": {"message": "context window exceeds limit"}}
+        result = self._call(400, body)
+        assert "/clear" in result
+
+    @pytest.mark.parametrize(
+        "status",
+        [400, 429, 500, 502],
+        ids=["400", "429", "500", "502"],
+    )
+    def test_minimax_2013_on_various_statuses(self, status: int):
+        """Minimax-style error detected regardless of HTTP status."""
+        inner_error = json.dumps(
+            {
+                "type": "error",
+                "error": {
+                    "type": "bad_request_error",
+                    "message": "invalid params, context window exceeds limit (2013)",
+                    "http_code": "400",
+                },
+            }
+        )
+        body = {"error": {"message": inner_error}}
+        result = self._call(status, body)
+        assert "/clear" in result
+
+    def test_extract_error_fields_nested_json_message(self):
+        """_extract_error_fields parses inner JSON from message field for code."""
+        inner = json.dumps({"type": "error", "error": {"code": "2013", "message": "context window exceeds limit"}})
+        code, message = BridgeServer._extract_error_fields({"error": {"message": inner}})
+        assert code == "2013"
+        assert "context window exceeds limit" in message
+
+    def test_extract_error_fields_nested_json_message_with_outer_code(self):
+        """Outer code takes precedence over nested code."""
+        inner = json.dumps({"error": {"code": "2013", "message": "context window"}})
+        code, message = BridgeServer._extract_error_fields({"error": {"code": "5000", "message": inner}})
+        assert code == "5000"
+        assert "context window" in message

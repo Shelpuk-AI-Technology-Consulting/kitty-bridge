@@ -148,7 +148,10 @@ class TestFireworksAdapter:
         assert "500" in str(exc)
 
     def test_normalize_model_name_returns_unchanged(self):
-        assert self.adapter.normalize_model_name("accounts/fireworks/routers/kimi-k2p5-turbo") == "accounts/fireworks/routers/kimi-k2p5-turbo"
+        assert (
+            self.adapter.normalize_model_name("accounts/fireworks/routers/kimi-k2p5-turbo")
+            == "accounts/fireworks/routers/kimi-k2p5-turbo"
+        )
 
     def test_normalize_model_name_passthrough(self):
         """Fireworks uses full model paths — no prefix stripping needed."""
@@ -158,28 +161,52 @@ class TestFireworksAdapter:
         """No mutation when max_tokens is absent."""
         cc = {"model": "accounts/fireworks/routers/kimi-k2p5-turbo", "messages": SAMPLE_MESSAGES, "stream": False}
         self.adapter.normalize_request(cc)
-        assert cc == {"model": "accounts/fireworks/routers/kimi-k2p5-turbo", "messages": SAMPLE_MESSAGES, "stream": False}
+        assert cc == {
+            "model": "accounts/fireworks/routers/kimi-k2p5-turbo",
+            "messages": SAMPLE_MESSAGES,
+            "stream": False,
+        }
 
     def test_normalize_request_caps_max_tokens_non_streaming(self):
         """max_tokens > 4096 is capped for non-streaming requests."""
-        cc = {"model": "accounts/fireworks/routers/kimi-k2p5-turbo", "messages": SAMPLE_MESSAGES, "stream": False, "max_tokens": 16384}
+        cc = {
+            "model": "accounts/fireworks/routers/kimi-k2p5-turbo",
+            "messages": SAMPLE_MESSAGES,
+            "stream": False,
+            "max_tokens": 16384,
+        }
         self.adapter.normalize_request(cc)
         assert cc["max_tokens"] == 4096
 
     def test_normalize_request_no_cap_when_streaming(self):
         """max_tokens is not capped for streaming requests."""
-        cc = {"model": "accounts/fireworks/routers/kimi-k2p5-turbo", "messages": SAMPLE_MESSAGES, "stream": True, "max_tokens": 16384}
+        cc = {
+            "model": "accounts/fireworks/routers/kimi-k2p5-turbo",
+            "messages": SAMPLE_MESSAGES,
+            "stream": True,
+            "max_tokens": 16384,
+        }
         self.adapter.normalize_request(cc)
         assert cc["max_tokens"] == 16384
 
     def test_normalize_request_no_cap_when_max_tokens_below_limit(self):
         """max_tokens <= 4096 is not touched."""
-        cc = {"model": "accounts/fireworks/routers/kimi-k2p5-turbo", "messages": SAMPLE_MESSAGES, "stream": False, "max_tokens": 2048}
+        cc = {
+            "model": "accounts/fireworks/routers/kimi-k2p5-turbo",
+            "messages": SAMPLE_MESSAGES,
+            "stream": False,
+            "max_tokens": 2048,
+        }
         self.adapter.normalize_request(cc)
         assert cc["max_tokens"] == 2048
 
     def test_normalize_request_no_cap_when_max_tokens_exactly_4096(self):
         """max_tokens == 4096 is not touched."""
-        cc = {"model": "accounts/fireworks/routers/kimi-k2p5-turbo", "messages": SAMPLE_MESSAGES, "stream": False, "max_tokens": 4096}
+        cc = {
+            "model": "accounts/fireworks/routers/kimi-k2p5-turbo",
+            "messages": SAMPLE_MESSAGES,
+            "stream": False,
+            "max_tokens": 4096,
+        }
         self.adapter.normalize_request(cc)
         assert cc["max_tokens"] == 4096

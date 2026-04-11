@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import pytest
 
-from kitty.bridge.config import BridgeConfig, load_bridge_config
+from kitty.bridge.config import load_bridge_config
 
 
 def _write_yaml(path: Path, content: str) -> Path:
@@ -34,7 +33,9 @@ class TestBridgeConfigParsing:
         assert config.tls_key is None
 
     def test_full_config(self, tmp_path: Path):
-        _write_yaml(tmp_path / "bridge.yaml", """
+        _write_yaml(
+            tmp_path / "bridge.yaml",
+            """
 host: "0.0.0.0"
 port: 9090
 profile: "my-zai"
@@ -43,7 +44,8 @@ log_access: true
 log_dir: "/var/log/kitty"
 tls_cert: "/path/to/cert.pem"
 tls_key: "/path/to/key.pem"
-""")
+""",
+        )
         config = load_bridge_config(tmp_path / "bridge.yaml")
         assert config.host == "0.0.0.0"
         assert config.port == 9090
@@ -55,9 +57,12 @@ tls_key: "/path/to/key.pem"
         assert config.tls_key == "/path/to/key.pem"
 
     def test_partial_config_uses_defaults(self, tmp_path: Path):
-        _write_yaml(tmp_path / "bridge.yaml", """
+        _write_yaml(
+            tmp_path / "bridge.yaml",
+            """
 port: 8080
-""")
+""",
+        )
         config = load_bridge_config(tmp_path / "bridge.yaml")
         assert config.host == "127.0.0.1"  # default
         assert config.port == 8080  # from file
@@ -65,12 +70,15 @@ port: 8080
         assert config.tls_cert is None  # default
 
     def test_tilde_expansion(self, tmp_path: Path):
-        _write_yaml(tmp_path / "bridge.yaml", f"""
+        _write_yaml(
+            tmp_path / "bridge.yaml",
+            """
 keys_file: "~/keys.txt"
 log_dir: "~/logs"
 tls_cert: "~/cert.pem"
 tls_key: "~/key.pem"
-""")
+""",
+        )
         config = load_bridge_config(tmp_path / "bridge.yaml")
         home = Path.home()
         assert config.keys_file == str(home / "keys.txt")

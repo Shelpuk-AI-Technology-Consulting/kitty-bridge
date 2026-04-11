@@ -1,8 +1,5 @@
 """Tests for bridge server round-robin balancing — backend selection per request."""
 
-import asyncio
-import json
-
 import aiohttp
 import pytest
 from aioresponses import aioresponses
@@ -65,8 +62,9 @@ UPSTREAM_RESPONSE = {
 
 def _make_backends(n: int):
     """Create n (provider, key, profile_dict) tuples for balancing tests."""
-    from kitty.profiles.schema import Profile
     import uuid
+
+    from kitty.profiles.schema import Profile
 
     backends = []
     for i in range(n):
@@ -176,16 +174,17 @@ class TestRoundRobinIntegration:
                 # First request → backend 0
                 async with session.post(url, json=request_body) as resp:
                     assert resp.status == 200
-                    body1 = await resp.json()
+                    await resp.json()
 
                 # Second request → backend 1
                 async with session.post(url, json=request_body) as resp:
                     assert resp.status == 200
-                    body2 = await resp.json()
+                    await resp.json()
 
         await server.stop_async()
         # Verify both backends were called
         from yarl import URL
+
         requests_to_0 = list(m.requests.get(("POST", URL("https://api0.example.com/v1/chat/completions")), []))
         requests_to_1 = list(m.requests.get(("POST", URL("https://api1.example.com/v1/chat/completions")), []))
         assert len(requests_to_0) >= 1
@@ -211,9 +210,8 @@ class TestRoundRobinIntegration:
 
         with aioresponses(passthrough=["http://127.0.0.1"]) as m:
             m.post("https://api.example.com/v1/chat/completions", payload=UPSTREAM_RESPONSE)
-            async with aiohttp.ClientSession() as session:
-                async with session.post(url, json=request_body) as resp:
-                    assert resp.status == 200
+            async with aiohttp.ClientSession() as session, session.post(url, json=request_body) as resp:
+                assert resp.status == 200
 
         await server.stop_async()
 
@@ -221,8 +219,9 @@ class TestRoundRobinIntegration:
 class TestProviderConfigPropagation:
     def test_provider_config_per_backend(self):
         """Each backend's provider_config is correctly set as _active_provider_config."""
-        from kitty.profiles.schema import Profile
         import uuid
+
+        from kitty.profiles.schema import Profile
 
         backends = []
         for i in range(3):

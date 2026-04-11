@@ -150,9 +150,15 @@ class OllamaAdapter(ProviderAdapter):
         Returns:
             Request dict to send to Ollama.
         """
-        return {k: v for k, v in cc_request.items() if k not in (
-            "_resolved_key", "_provider_config",
-        )}
+        return {
+            k: v
+            for k, v in cc_request.items()
+            if k
+            not in (
+                "_resolved_key",
+                "_provider_config",
+            )
+        }
 
     def translate_from_upstream(self, raw_response: dict) -> dict:
         """Translate an Ollama response to Chat Completions format.
@@ -180,8 +186,5 @@ class OllamaAdapter(ProviderAdapter):
         if not isinstance(body, dict):
             return ProviderError(f"Ollama error {status_code}: {body}")
         error_msg = body.get("error", body)
-        if isinstance(error_msg, dict):
-            msg = error_msg.get("message", str(error_msg))
-        else:
-            msg = str(error_msg)
+        msg = error_msg.get("message", str(error_msg)) if isinstance(error_msg, dict) else str(error_msg)
         return ProviderError(f"Ollama error {status_code}: {msg}")

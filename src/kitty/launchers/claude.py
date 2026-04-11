@@ -46,6 +46,7 @@ def _atomic_write_text(path: Path, content: str) -> None:
             os.unlink(tmp_path_str)
         raise
 
+
 __all__ = ["ClaudeAdapter"]
 
 _CONFLICTING_ENV_VARS: tuple[str, ...] = (
@@ -155,8 +156,7 @@ class ClaudeAdapter(LauncherAdapter):
 
         logger.info(
             "prepare_launch: settings.json env before patch: %s",
-            {k: (v[:8] + "..." if isinstance(v, str) and len(v) > 8 else v)
-             for k, v in env.items()},
+            {k: (v[:8] + "..." if isinstance(v, str) and len(v) > 8 else v) for k, v in env.items()},
         )
 
         # Clean up stale localhost ANTHROPIC_BASE_URL from previous crashed sessions
@@ -179,8 +179,7 @@ class ClaudeAdapter(LauncherAdapter):
 
         logger.info(
             "prepare_launch: settings.json env after patch: %s",
-            {k: (v[:8] + "..." if isinstance(v, str) and len(v) > 8 else v)
-             for k, v in env.items()},
+            {k: (v[:8] + "..." if isinstance(v, str) and len(v) > 8 else v) for k, v in env.items()},
         )
 
         _atomic_write_json(settings_path, settings)

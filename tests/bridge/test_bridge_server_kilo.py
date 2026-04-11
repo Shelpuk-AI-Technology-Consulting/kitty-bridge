@@ -1,7 +1,5 @@
 """Tests for bridge/server.py — Chat Completions pass-through handler (Kilo Code CLI)."""
 
-import asyncio
-
 import aiohttp
 import pytest
 from aioresponses import aioresponses
@@ -79,14 +77,13 @@ class TestChatCompletionsEndpoint:
         server = _make_server()
         port = await server.start_async()
         try:
-            async with aiohttp.ClientSession() as session:
-                # /v1/chat/completions should exist
-                async with session.post(
-                    f"http://127.0.0.1:{port}/v1/chat/completions",
-                    json={"model": "x", "messages": []},
-                ) as resp:
-                    # May get 200 or upstream error, but NOT 404
-                    assert resp.status != 404
+            # /v1/chat/completions should exist
+            async with aiohttp.ClientSession() as session, session.post(
+                f"http://127.0.0.1:{port}/v1/chat/completions",
+                json={"model": "x", "messages": []},
+            ) as resp:
+                # May get 200 or upstream error, but NOT 404
+                assert resp.status != 404
         finally:
             await server.stop_async()
 
@@ -96,12 +93,14 @@ class TestChatCompletionsEndpoint:
         server = _make_server()
         port = await server.start_async()
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
+            async with (
+                aiohttp.ClientSession() as session,
+                session.post(
                     f"http://127.0.0.1:{port}/v1/responses",
                     json={},
-                ) as resp:
-                    assert resp.status == 404
+                ) as resp,
+            ):
+                assert resp.status == 404
         finally:
             await server.stop_async()
 
@@ -110,10 +109,11 @@ class TestChatCompletionsEndpoint:
         server = _make_server()
         port = await server.start_async()
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(f"http://127.0.0.1:{port}/healthz") as resp:
-                    assert resp.status == 200
-                    assert await resp.json() == {"status": "ok"}
+            async with aiohttp.ClientSession() as session, session.get(
+                f"http://127.0.0.1:{port}/healthz"
+            ) as resp:
+                assert resp.status == 200
+                assert await resp.json() == {"status": "ok"}
         finally:
             await server.stop_async()
 
@@ -122,15 +122,17 @@ class TestChatCompletionsEndpoint:
         server = _make_server()
         port = await server.start_async()
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
+            async with (
+                aiohttp.ClientSession() as session,
+                session.post(
                     f"http://127.0.0.1:{port}/v1/chat/completions",
                     data=b"not json",
                     headers={"Content-Type": "application/json"},
-                ) as resp:
-                    assert resp.status == 400
-                    data = await resp.json()
-                    assert "error" in data
+                ) as resp,
+            ):
+                assert resp.status == 400
+                data = await resp.json()
+                assert "error" in data
         finally:
             await server.stop_async()
 
@@ -173,17 +175,19 @@ class TestChatCompletionsPassthrough:
                     "https://api.example.com/v1/chat/completions",
                     payload=UPSTREAM_RESPONSE,
                 )
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(
+                async with (
+                    aiohttp.ClientSession() as session,
+                    session.post(
                         f"http://127.0.0.1:{port}/v1/chat/completions",
                         json={"model": "original-model", "messages": []},
-                    ) as resp:
-                        assert resp.status == 200
-                        # Verify the upstream request used the overridden model
-                        url = "https://api.example.com/v1/chat/completions"
-                        request_list = m.requests[("POST", aiohttp.client.URL(url))]
-                        sent_json = request_list[0].kwargs["json"]
-                        assert sent_json["model"] == "override-model"
+                    ) as resp,
+                ):
+                    assert resp.status == 200
+                    # Verify the upstream request used the overridden model
+                    url = "https://api.example.com/v1/chat/completions"
+                    request_list = m.requests[("POST", aiohttp.client.URL(url))]
+                    sent_json = request_list[0].kwargs["json"]
+                    assert sent_json["model"] == "override-model"
         finally:
             await server.stop_async()
 
@@ -199,14 +203,16 @@ class TestChatCompletionsPassthrough:
                     status=500,
                     payload={"error": {"message": "Internal error"}},
                 )
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(
+                async with (
+                    aiohttp.ClientSession() as session,
+                    session.post(
                         f"http://127.0.0.1:{port}/v1/chat/completions",
                         json={"model": "x", "messages": []},
-                    ) as resp:
-                        assert resp.status == 500
-                        data = await resp.json()
-                        assert "error" in data
+                    ) as resp,
+                ):
+                    assert resp.status == 500
+                    data = await resp.json()
+                    assert "error" in data
         finally:
             await server.stop_async()
 
@@ -232,15 +238,17 @@ class TestChatCompletionsStreaming:
                     body=b"".join(sse_chunks),
                     content_type="text/event-stream",
                 )
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(
+                async with (
+                    aiohttp.ClientSession() as session,
+                    session.post(
                         f"http://127.0.0.1:{port}/v1/chat/completions",
                         json={"model": "x", "messages": [], "stream": True},
-                    ) as resp:
-                        assert resp.status == 200
-                        raw = await resp.read()
-                        # Verify SSE content is forwarded
-                        assert b'"content":"Hello"' in raw or b"Hello" in raw
+                    ) as resp,
+                ):
+                    assert resp.status == 200
+                    raw = await resp.read()
+                    # Verify SSE content is forwarded
+                    assert b'"content":"Hello"' in raw or b"Hello" in raw
         finally:
             await server.stop_async()
 
@@ -256,13 +264,15 @@ class TestChatCompletionsStreaming:
                     status=500,
                     body=b"Internal Server Error",
                 )
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(
+                async with (
+                    aiohttp.ClientSession() as session,
+                    session.post(
                         f"http://127.0.0.1:{port}/v1/chat/completions",
                         json={"model": "x", "messages": [], "stream": True},
-                    ) as resp:
-                        assert resp.status == 200  # StreamResponse is already 200
-                        raw = await resp.read()
-                        assert b"error" in raw.lower()
+                    ) as resp,
+                ):
+                    assert resp.status == 200  # StreamResponse is already 200
+                    raw = await resp.read()
+                    assert b"error" in raw.lower()
         finally:
             await server.stop_async()

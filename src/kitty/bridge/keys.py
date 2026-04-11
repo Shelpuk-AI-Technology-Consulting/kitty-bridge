@@ -66,10 +66,7 @@ def parse_keys_file(path: Path | str) -> list[KeyEntry]:
 
         # Check for duplicates
         if key in seen_keys:
-            raise ValueError(
-                f"Duplicate key '{key}' found in {path} "
-                f"(lines {seen_keys[key]} and {line_num})"
-            )
+            raise ValueError(f"Duplicate key '{key}' found in {path} (lines {seen_keys[key]} and {line_num})")
         seen_keys[key] = line_num
 
         entries.append(KeyEntry(key=key, profile=profile))

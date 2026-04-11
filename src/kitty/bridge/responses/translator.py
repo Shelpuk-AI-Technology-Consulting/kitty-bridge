@@ -525,9 +525,7 @@ class ResponsesTranslator:
                 "total_tokens": usage.get("total_tokens", 0),
             },
         }
-        events.append(
-            format_response_completed_event(response_id, seq=self._next_seq(), response_data=response_data)
-        )
+        events.append(format_response_completed_event(response_id, seq=self._next_seq(), response_data=response_data))
 
         self.reset()
         return events
@@ -649,9 +647,7 @@ class ResponsesTranslator:
             "output": output_items,
             "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
         }
-        events.append(
-            format_response_completed_event(response_id, seq=self._next_seq(), response_data=response_data)
-        )
+        events.append(format_response_completed_event(response_id, seq=self._next_seq(), response_data=response_data))
 
         self.reset()
         return events

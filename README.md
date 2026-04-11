@@ -251,6 +251,26 @@ kitty setup
 
 The conversation context has grown beyond the model's context window. Use `/clear` in the agent to reset the conversation.
 
+### "pip's dependency resolver ... langchain/langchain-core requires langsmith<0.4, but you have langsmith 0.4.x"
+
+`kitty-bridge` does not depend on `langsmith`. This warning means your current Python environment already has a `langchain 0.3.x` stack that is incompatible with the installed `langsmith` version.
+
+If you are staying on `langchain 0.3.x`, repair the environment first:
+
+```bash
+python -m pip check
+python -m pip install --upgrade "langsmith<0.4"
+python -m pip check
+```
+
+Then install kitty again:
+
+```bash
+python -m pip install -e .
+```
+
+Using a fresh virtual environment per project avoids this class of cross-project dependency conflict.
+
 ## License
 
 MIT

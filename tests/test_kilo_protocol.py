@@ -2,8 +2,6 @@
 
 import uuid
 
-import pytest
-
 from kitty.types import BridgeProtocol
 
 

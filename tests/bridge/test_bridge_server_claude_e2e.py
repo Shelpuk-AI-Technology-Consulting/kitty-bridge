@@ -5,7 +5,6 @@ would) to the bridge, mock the upstream Chat Completions provider, and verify th
 full round-trip translation is correct.
 """
 
-import asyncio
 import json
 
 import aiohttp
@@ -17,7 +16,6 @@ from kitty.launchers.base import LauncherAdapter, SpawnConfig
 from kitty.profiles.schema import Profile
 from kitty.providers.base import ProviderAdapter
 from kitty.types import BridgeProtocol
-
 
 # ── Stub adapters ────────────────────────────────────────────────────────────
 
@@ -152,6 +150,10 @@ def _claude_code_request_with_system():
             {"role": "user", "content": "Create a hello world function in Python"},
         ],
     }
+
+
+def _sse_chunk(payload: dict) -> bytes:
+    return f"data: {json.dumps(payload, separators=(',', ':'))}\n\n".encode()
 
 
 def _claude_code_tool_call_request():
@@ -321,8 +323,9 @@ class TestClaudeCodeSimpleRoundTrip:
         try:
             with aioresponses(passthrough=["http://127.0.0.1"]) as m:
                 m.post(UPSTREAM_URL, payload=UPSTREAM_TEXT_RESPONSE)
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(
+                async with (
+                    aiohttp.ClientSession() as session,
+                    session.post(
                         f"http://127.0.0.1:{port}/v1/messages",
                         json=_claude_code_simple_request(),
                         headers={
@@ -330,26 +333,27 @@ class TestClaudeCodeSimpleRoundTrip:
                             "anthropic-version": "2023-06-01",
                             "x-api-key": "test-api-key",
                         },
-                    ) as resp:
-                        assert resp.status == 200
-                        data = await resp.json()
+                    ) as resp,
+                ):
+                    assert resp.status == 200
+                    data = await resp.json()
 
-                        # Verify Messages API response format
-                        assert data["type"] == "message"
-                        assert data["role"] == "assistant"
-                        assert data["model"] == "test-model"
-                        assert data["stop_reason"] == "end_turn"
-                        assert data["stop_sequence"] is None
-                        assert data["id"].startswith("msg_")
+                    # Verify Messages API response format
+                    assert data["type"] == "message"
+                    assert data["role"] == "assistant"
+                    assert data["model"] == "test-model"
+                    assert data["stop_reason"] == "end_turn"
+                    assert data["stop_sequence"] is None
+                    assert data["id"].startswith("msg_")
 
-                        # Content blocks
-                        assert len(data["content"]) == 1
-                        assert data["content"][0]["type"] == "text"
-                        assert data["content"][0]["text"] == "Hello from the upstream provider!"
+                    # Content blocks
+                    assert len(data["content"]) == 1
+                    assert data["content"][0]["type"] == "text"
+                    assert data["content"][0]["text"] == "Hello from the upstream provider!"
 
-                        # Usage
-                        assert data["usage"]["input_tokens"] == 25
-                        assert data["usage"]["output_tokens"] == 10
+                    # Usage
+                    assert data["usage"]["input_tokens"] == 25
+                    assert data["usage"]["output_tokens"] == 10
         finally:
             await server.stop_async()
 
@@ -364,23 +368,25 @@ class TestClaudeCodeWithSystemPrompt:
         try:
             with aioresponses(passthrough=["http://127.0.0.1"]) as m:
                 m.post(UPSTREAM_URL, payload=UPSTREAM_TEXT_RESPONSE)
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(
-                        f"http://127.0.0.1:{port}/v1/messages",
-                        json=_claude_code_request_with_system(),
-                    ) as resp:
-                        assert resp.status == 200
-                        data = await resp.json()
-                        assert data["type"] == "message"
+                async with aiohttp.ClientSession() as session, session.post(
+                    f"http://127.0.0.1:{port}/v1/messages",
+                    json=_claude_code_request_with_system(),
+                ) as resp:
+                    assert resp.status == 200
+                    data = await resp.json()
+                    assert data["type"] == "message"
 
-                        # Verify the upstream received the system message
-                        request_list = m.requests[("POST", aiohttp.client.URL(UPSTREAM_URL))]
-                        assert len(request_list) == 1
-                        sent_json = request_list[0].kwargs["json"]
-                        assert sent_json["messages"][0] == {
-                            "role": "system",
-                            "content": "You are Claude Code, an AI coding assistant. You help with software engineering tasks.",
-                        }
+                    # Verify the upstream received the system message
+                    request_list = m.requests[("POST", aiohttp.client.URL(UPSTREAM_URL))]
+                    assert len(request_list) == 1
+                    sent_json = request_list[0].kwargs["json"]
+                    assert sent_json["messages"][0] == {
+                        "role": "system",
+                        "content": (
+                            "You are Claude Code, an AI coding assistant. "
+                            "You help with software engineering tasks."
+                        ),
+                    }
         finally:
             await server.stop_async()
 
@@ -396,27 +402,29 @@ class TestClaudeCodeToolUseRoundTrip:
         try:
             with aioresponses(passthrough=["http://127.0.0.1"]) as m:
                 m.post(UPSTREAM_URL, payload=UPSTREAM_TOOL_CALL_RESPONSE)
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(
+                async with (
+                    aiohttp.ClientSession() as session,
+                    session.post(
                         f"http://127.0.0.1:{port}/v1/messages",
                         json=_claude_code_request_with_tools(),
-                    ) as resp:
-                        assert resp.status == 200
-                        data = await resp.json()
+                    ) as resp,
+                ):
+                    assert resp.status == 200
+                    data = await resp.json()
 
-                        assert data["type"] == "message"
-                        assert data["stop_reason"] == "tool_use"
+                    assert data["type"] == "message"
+                    assert data["stop_reason"] == "tool_use"
 
-                        # Should have text + tool_use content blocks
-                        assert len(data["content"]) == 2
-                        assert data["content"][0]["type"] == "text"
-                        assert data["content"][0]["text"] == "Let me check the weather for you."
+                    # Should have text + tool_use content blocks
+                    assert len(data["content"]) == 2
+                    assert data["content"][0]["type"] == "text"
+                    assert data["content"][0]["text"] == "Let me check the weather for you."
 
-                        tool_block = data["content"][1]
-                        assert tool_block["type"] == "tool_use"
-                        assert tool_block["name"] == "get_weather"
-                        assert tool_block["input"] == {"city": "London"}
-                        assert tool_block["id"]  # Must have an id
+                    tool_block = data["content"][1]
+                    assert tool_block["type"] == "tool_use"
+                    assert tool_block["name"] == "get_weather"
+                    assert tool_block["input"] == {"city": "London"}
+                    assert tool_block["id"]  # Must have an id
         finally:
             await server.stop_async()
 
@@ -428,25 +436,27 @@ class TestClaudeCodeToolUseRoundTrip:
         try:
             with aioresponses(passthrough=["http://127.0.0.1"]) as m:
                 m.post(UPSTREAM_URL, payload=UPSTREAM_TOOL_RESULT_RESPONSE)
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(
+                async with (
+                    aiohttp.ClientSession() as session,
+                    session.post(
                         f"http://127.0.0.1:{port}/v1/messages",
                         json=_claude_code_tool_call_request(),
-                    ) as resp:
-                        assert resp.status == 200
-                        data = await resp.json()
-                        assert data["type"] == "message"
-                        assert data["stop_reason"] == "end_turn"
+                    ) as resp,
+                ):
+                    assert resp.status == 200
+                    data = await resp.json()
+                    assert data["type"] == "message"
+                    assert data["stop_reason"] == "end_turn"
 
-                        # Verify the upstream received the tool message
-                        request_list = m.requests[("POST", aiohttp.client.URL(UPSTREAM_URL))]
-                        sent_json = request_list[0].kwargs["json"]
+                    # Verify the upstream received the tool message
+                    request_list = m.requests[("POST", aiohttp.client.URL(UPSTREAM_URL))]
+                    sent_json = request_list[0].kwargs["json"]
 
-                        # Find the tool role message
-                        tool_msgs = [m for m in sent_json["messages"] if m["role"] == "tool"]
-                        assert len(tool_msgs) == 1
-                        assert tool_msgs[0]["tool_call_id"] == "toolu_e2e_001"
-                        assert tool_msgs[0]["content"] == "15°C, sunny"
+                    # Find the tool role message
+                    tool_msgs = [m for m in sent_json["messages"] if m["role"] == "tool"]
+                    assert len(tool_msgs) == 1
+                    assert tool_msgs[0]["tool_call_id"] == "toolu_e2e_001"
+                    assert tool_msgs[0]["content"] == "15°C, sunny"
         finally:
             await server.stop_async()
 
@@ -461,23 +471,25 @@ class TestClaudeCodeMultipleToolResults:
         try:
             with aioresponses(passthrough=["http://127.0.0.1"]) as m:
                 m.post(UPSTREAM_URL, payload=UPSTREAM_TEXT_RESPONSE)
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(
+                async with (
+                    aiohttp.ClientSession() as session,
+                    session.post(
                         f"http://127.0.0.1:{port}/v1/messages",
                         json=_claude_code_multiple_tool_results_request(),
-                    ) as resp:
-                        assert resp.status == 200
+                    ) as resp,
+                ):
+                    assert resp.status == 200
 
-                        # Verify the upstream received two tool messages
-                        request_list = m.requests[("POST", aiohttp.client.URL(UPSTREAM_URL))]
-                        sent_json = request_list[0].kwargs["json"]
+                    # Verify the upstream received two tool messages
+                    request_list = m.requests[("POST", aiohttp.client.URL(UPSTREAM_URL))]
+                    sent_json = request_list[0].kwargs["json"]
 
-                        tool_msgs = [m for m in sent_json["messages"] if m["role"] == "tool"]
-                        assert len(tool_msgs) == 2
-                        assert tool_msgs[0]["tool_call_id"] == "toolu_e2e_001"
-                        assert tool_msgs[0]["content"] == "print('a')"
-                        assert tool_msgs[1]["tool_call_id"] == "toolu_e2e_002"
-                        assert tool_msgs[1]["content"] == "print('b')"
+                    tool_msgs = [m for m in sent_json["messages"] if m["role"] == "tool"]
+                    assert len(tool_msgs) == 2
+                    assert tool_msgs[0]["tool_call_id"] == "toolu_e2e_001"
+                    assert tool_msgs[0]["content"] == "print('a')"
+                    assert tool_msgs[1]["tool_call_id"] == "toolu_e2e_002"
+                    assert tool_msgs[1]["content"] == "print('b')"
         finally:
             await server.stop_async()
 
@@ -492,17 +504,19 @@ class TestClaudeCodeThinkingStripped:
         try:
             with aioresponses(passthrough=["http://127.0.0.1"]) as m:
                 m.post(UPSTREAM_URL, payload=UPSTREAM_TEXT_RESPONSE)
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(
+                async with (
+                    aiohttp.ClientSession() as session,
+                    session.post(
                         f"http://127.0.0.1:{port}/v1/messages",
                         json=_claude_code_request_with_thinking(),
-                    ) as resp:
-                        assert resp.status == 200
+                    ) as resp,
+                ):
+                    assert resp.status == 200
 
-                        # Verify thinking was NOT forwarded
-                        request_list = m.requests[("POST", aiohttp.client.URL(UPSTREAM_URL))]
-                        sent_json = request_list[0].kwargs["json"]
-                        assert "thinking" not in sent_json
+                    # Verify thinking was NOT forwarded
+                    request_list = m.requests[("POST", aiohttp.client.URL(UPSTREAM_URL))]
+                    sent_json = request_list[0].kwargs["json"]
+                    assert "thinking" not in sent_json
         finally:
             await server.stop_async()
 
@@ -517,21 +531,23 @@ class TestClaudeCodeContentBlocks:
         try:
             with aioresponses(passthrough=["http://127.0.0.1"]) as m:
                 m.post(UPSTREAM_URL, payload=UPSTREAM_TEXT_RESPONSE)
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(
+                async with (
+                    aiohttp.ClientSession() as session,
+                    session.post(
                         f"http://127.0.0.1:{port}/v1/messages",
                         json=_claude_code_request_with_content_blocks(),
-                    ) as resp:
-                        assert resp.status == 200
+                    ) as resp,
+                ):
+                    assert resp.status == 200
 
-                        # Verify the upstream received concatenated text
-                        request_list = m.requests[("POST", aiohttp.client.URL(UPSTREAM_URL))]
-                        sent_json = request_list[0].kwargs["json"]
-                        user_msg = sent_json["messages"][0]
-                        assert user_msg["role"] == "user"
-                        # Text blocks should be joined with newline
-                        assert "Here is my code:" in user_msg["content"]
-                        assert "def hello(): print('hi')" in user_msg["content"]
+                    # Verify the upstream received concatenated text
+                    request_list = m.requests[("POST", aiohttp.client.URL(UPSTREAM_URL))]
+                    sent_json = request_list[0].kwargs["json"]
+                    user_msg = sent_json["messages"][0]
+                    assert user_msg["role"] == "user"
+                    # Text blocks should be joined with newline
+                    assert "Here is my code:" in user_msg["content"]
+                    assert "def hello(): print('hi')" in user_msg["content"]
         finally:
             await server.stop_async()
 
@@ -546,9 +562,28 @@ class TestClaudeCodeStreamingRoundTrip:
         port = await server.start_async()
         try:
             upstream_chunks = [
-                b'data: {"id":"chatcmpl-stream1","choices":[{"index":0,"delta":{"content":"Hello"},"finish_reason":null}],"model":"test-model"}\n\n',
-                b'data: {"id":"chatcmpl-stream1","choices":[{"index":0,"delta":{"content":" world"},"finish_reason":null}],"model":"test-model"}\n\n',
-                b'data: {"id":"chatcmpl-stream1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"model":"test-model","usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}\n\n',
+                _sse_chunk(
+                    {
+                        "id": "chatcmpl-stream1",
+                        "choices": [{"index": 0, "delta": {"content": "Hello"}, "finish_reason": None}],
+                        "model": "test-model",
+                    }
+                ),
+                _sse_chunk(
+                    {
+                        "id": "chatcmpl-stream1",
+                        "choices": [{"index": 0, "delta": {"content": " world"}, "finish_reason": None}],
+                        "model": "test-model",
+                    }
+                ),
+                _sse_chunk(
+                    {
+                        "id": "chatcmpl-stream1",
+                        "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+                        "model": "test-model",
+                        "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+                    }
+                ),
                 b"data: [DONE]\n\n",
             ]
 
@@ -562,31 +597,33 @@ class TestClaudeCodeStreamingRoundTrip:
                 request = _claude_code_simple_request()
                 request["stream"] = True
 
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(
+                async with (
+                    aiohttp.ClientSession() as session,
+                    session.post(
                         f"http://127.0.0.1:{port}/v1/messages",
                         json=request,
-                    ) as resp:
-                        assert resp.status == 200
-                        assert resp.headers.get("Content-Type") == "text/event-stream"
+                    ) as resp,
+                ):
+                    assert resp.status == 200
+                    assert resp.headers.get("Content-Type") == "text/event-stream"
 
-                        body = await resp.read()
-                        body_str = body.decode("utf-8")
+                    body = await resp.read()
+                    body_str = body.decode("utf-8")
 
-                        # Verify SSE events
-                        assert "event: message_start" in body_str
-                        assert "event: content_block_start" in body_str
-                        assert "event: content_block_delta" in body_str
-                        assert "event: content_block_stop" in body_str
-                        assert "event: message_delta" in body_str
-                        assert "event: message_stop" in body_str
+                    # Verify SSE events
+                    assert "event: message_start" in body_str
+                    assert "event: content_block_start" in body_str
+                    assert "event: content_block_delta" in body_str
+                    assert "event: content_block_stop" in body_str
+                    assert "event: message_delta" in body_str
+                    assert "event: message_stop" in body_str
 
-                        # Verify text deltas
-                        assert '"Hello"' in body_str
-                        assert '" world"' in body_str
+                    # Verify text deltas
+                    assert '"Hello"' in body_str
+                    assert '" world"' in body_str
 
-                        # Verify stop_reason
-                        assert "end_turn" in body_str
+                    # Verify stop_reason
+                    assert "end_turn" in body_str
         finally:
             await server.stop_async()
 
@@ -597,12 +634,78 @@ class TestClaudeCodeStreamingRoundTrip:
         port = await server.start_async()
         try:
             upstream_chunks = [
-                b'data: {"id":"chatcmpl-stream2","choices":[{"index":0,"delta":{"content":"Let me"},"finish_reason":null}],"model":"test-model"}\n\n',
-                b'data: {"id":"chatcmpl-stream2","choices":[{"index":0,"delta":{"content":" check."},"finish_reason":null}],"model":"test-model"}\n\n',
-                b'data: {"id":"chatcmpl-stream2","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_001","type":"function","function":{"name":"read_file","arguments":""}}]},"finish_reason":null}],"model":"test-model"}\n\n',
-                b'data: {"id":"chatcmpl-stream2","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\\"path\\":"}}]},"finish_reason":null}],"model":"test-model"}\n\n',
-                b'data: {"id":"chatcmpl-stream2","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\\"main.py\\"}"}}]},"finish_reason":null}],"model":"test-model"}\n\n',
-                b'data: {"id":"chatcmpl-stream2","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],"model":"test-model","usage":{"prompt_tokens":50,"completion_tokens":30,"total_tokens":80}}\n\n',
+                _sse_chunk(
+                    {
+                        "id": "chatcmpl-stream2",
+                        "choices": [{"index": 0, "delta": {"content": "Let me"}, "finish_reason": None}],
+                        "model": "test-model",
+                    }
+                ),
+                _sse_chunk(
+                    {
+                        "id": "chatcmpl-stream2",
+                        "choices": [{"index": 0, "delta": {"content": " check."}, "finish_reason": None}],
+                        "model": "test-model",
+                    }
+                ),
+                _sse_chunk(
+                    {
+                        "id": "chatcmpl-stream2",
+                        "choices": [
+                            {
+                                "index": 0,
+                                "delta": {
+                                    "tool_calls": [
+                                        {
+                                            "index": 0,
+                                            "id": "call_001",
+                                            "type": "function",
+                                            "function": {"name": "read_file", "arguments": ""},
+                                        }
+                                    ]
+                                },
+                                "finish_reason": None,
+                            }
+                        ],
+                        "model": "test-model",
+                    }
+                ),
+                _sse_chunk(
+                    {
+                        "id": "chatcmpl-stream2",
+                        "choices": [
+                            {
+                                "index": 0,
+                                "delta": {"tool_calls": [{"index": 0, "function": {"arguments": '{"path":'}}]},
+                                "finish_reason": None,
+                            }
+                        ],
+                        "model": "test-model",
+                    }
+                ),
+                _sse_chunk(
+                    {
+                        "id": "chatcmpl-stream2",
+                        "choices": [
+                            {
+                                "index": 0,
+                                "delta": {
+                                    "tool_calls": [{"index": 0, "function": {"arguments": '"main.py"'}}]
+                                },
+                                "finish_reason": None,
+                            }
+                        ],
+                        "model": "test-model",
+                    }
+                ),
+                _sse_chunk(
+                    {
+                        "id": "chatcmpl-stream2",
+                        "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}],
+                        "model": "test-model",
+                        "usage": {"prompt_tokens": 50, "completion_tokens": 30, "total_tokens": 80},
+                    }
+                ),
                 b"data: [DONE]\n\n",
             ]
 
@@ -616,32 +719,34 @@ class TestClaudeCodeStreamingRoundTrip:
                 request = _claude_code_request_with_tools()
                 request["stream"] = True
 
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(
+                async with (
+                    aiohttp.ClientSession() as session,
+                    session.post(
                         f"http://127.0.0.1:{port}/v1/messages",
                         json=request,
-                    ) as resp:
-                        assert resp.status == 200
-                        body = await resp.read()
-                        body_str = body.decode("utf-8")
+                    ) as resp,
+                ):
+                    assert resp.status == 200
+                    body = await resp.read()
+                    body_str = body.decode("utf-8")
 
-                        # Verify text content was streamed
-                        assert '"Let me"' in body_str
-                        assert '" check."' in body_str
+                    # Verify text content was streamed
+                    assert '"Let me"' in body_str
+                    assert '" check."' in body_str
 
-                        # Verify tool_use content block was opened
-                        assert "tool_use" in body_str
-                        assert "read_file" in body_str
+                    # Verify tool_use content block was opened
+                    assert "tool_use" in body_str
+                    assert "read_file" in body_str
 
-                        # Verify input_json_delta for arguments
-                        assert "input_json_delta" in body_str
+                    # Verify input_json_delta for arguments
+                    assert "input_json_delta" in body_str
 
-                        # Verify stop_reason = tool_use
-                        assert "tool_use" in body_str
+                    # Verify stop_reason = tool_use
+                    assert "tool_use" in body_str
 
-                        # Verify message lifecycle events
-                        assert "event: message_start" in body_str
-                        assert "event: message_stop" in body_str
+                    # Verify message lifecycle events
+                    assert "event: message_start" in body_str
+                    assert "event: message_stop" in body_str
         finally:
             await server.stop_async()
 
@@ -660,16 +765,18 @@ class TestClaudeCodeErrorHandling:
                     status=401,
                     payload={"error": {"message": "Invalid API key"}},
                 )
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(
+                async with (
+                    aiohttp.ClientSession() as session,
+                    session.post(
                         f"http://127.0.0.1:{port}/v1/messages",
                         json=_claude_code_simple_request(),
-                    ) as resp:
-                        assert resp.status == 401
-                        data = await resp.json()
-                        assert data["type"] == "error"
-                        assert "error" in data
-                        assert data["error"]["type"] == "api_error"
+                    ) as resp,
+                ):
+                    assert resp.status == 401
+                    data = await resp.json()
+                    assert data["type"] == "error"
+                    assert "error" in data
+                    assert data["error"]["type"] == "api_error"
         finally:
             await server.stop_async()
 
@@ -685,18 +792,20 @@ class TestClaudeCodeErrorHandling:
                         status=500,
                         payload={"error": {"message": "provider internal exception"}},
                     )
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(
+                async with (
+                    aiohttp.ClientSession() as session,
+                    session.post(
                         f"http://127.0.0.1:{port}/v1/messages",
                         json=_claude_code_simple_request(),
-                    ) as resp:
-                        assert resp.status == 500
-                        data = await resp.json()
-                        assert data["type"] == "error"
-                        assert data["error"]["type"] == "api_error"
-                        msg = data["error"]["message"].lower()
-                        assert "retry" in msg
-                        assert "temporary" in msg
+                    ) as resp,
+                ):
+                    assert resp.status == 500
+                    data = await resp.json()
+                    assert data["type"] == "error"
+                    assert data["error"]["type"] == "api_error"
+                    msg = data["error"]["message"].lower()
+                    assert "retry" in msg
+                    assert "temporary" in msg
         finally:
             await server.stop_async()
 
@@ -718,21 +827,23 @@ class TestClaudeCodeErrorHandling:
                             }
                         },
                     )
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(
+                async with (
+                    aiohttp.ClientSession() as session,
+                    session.post(
                         f"http://127.0.0.1:{port}/v1/messages",
                         json=_claude_code_simple_request(),
-                    ) as resp:
-                        assert resp.status == 500
-                        data = await resp.json()
-                        assert data["type"] == "error"
-                        assert data["error"]["type"] == "api_error"
-                        msg = data["error"]["message"]
-                        msg_lower = msg.lower()
-                        assert "network" in msg_lower
-                        assert "retry" in msg_lower
-                        assert "temporary" in msg_lower
-                        assert error_id in msg
+                    ) as resp,
+                ):
+                    assert resp.status == 500
+                    data = await resp.json()
+                    assert data["type"] == "error"
+                    assert data["error"]["type"] == "api_error"
+                    msg = data["error"]["message"]
+                    msg_lower = msg.lower()
+                    assert "network" in msg_lower
+                    assert "retry" in msg_lower
+                    assert "temporary" in msg_lower
+                    assert error_id in msg
         finally:
             await server.stop_async()
 
@@ -741,16 +852,18 @@ class TestClaudeCodeErrorHandling:
         server = _make_server()
         port = await server.start_async()
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
+            async with (
+                aiohttp.ClientSession() as session,
+                session.post(
                     f"http://127.0.0.1:{port}/v1/messages",
                     data=b"not json",
                     headers={"Content-Type": "application/json"},
-                ) as resp:
-                    assert resp.status == 400
-                    data = await resp.json()
-                    assert data["type"] == "error"
-                    assert data["error"]["type"] == "invalid_request_error"
+                ) as resp,
+            ):
+                assert resp.status == 400
+                data = await resp.json()
+                assert data["type"] == "error"
+                assert data["error"]["type"] == "invalid_request_error"
         finally:
             await server.stop_async()
 
@@ -763,19 +876,21 @@ class TestClaudeCodeErrorHandling:
                 m.post(UPSTREAM_URL, payload=UPSTREAM_TEXT_RESPONSE)
                 content_size = 2 * 1024 * 1024
                 request_payload = _claude_code_large_request(content_size=content_size)
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(
+                async with (
+                    aiohttp.ClientSession() as session,
+                    session.post(
                         f"http://127.0.0.1:{port}/v1/messages",
                         json=request_payload,
-                    ) as resp:
-                        assert resp.status == 200
-                        data = await resp.json()
-                        assert data["type"] == "message"
-                        request_list = m.requests[("POST", aiohttp.client.URL(UPSTREAM_URL))]
-                        assert len(request_list) == 1
-                        sent_json = request_list[0].kwargs["json"]
-                        assert sent_json["model"] == request_payload["model"]
-                        assert len(sent_json["messages"][0]["content"]) == content_size
+                    ) as resp,
+                ):
+                    assert resp.status == 200
+                    data = await resp.json()
+                    assert data["type"] == "message"
+                    request_list = m.requests[("POST", aiohttp.client.URL(UPSTREAM_URL))]
+                    assert len(request_list) == 1
+                    sent_json = request_list[0].kwargs["json"]
+                    assert sent_json["model"] == request_payload["model"]
+                    assert len(sent_json["messages"][0]["content"]) == content_size
         finally:
             await server.stop_async()
 
@@ -812,18 +927,20 @@ class TestClaudeCodeErrorHandling:
                 )
                 request = _claude_code_simple_request()
                 request["stream"] = True
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(
+                async with (
+                    aiohttp.ClientSession() as session,
+                    session.post(
                         f"http://127.0.0.1:{port}/v1/messages",
                         json=request,
-                    ) as resp:
-                        # Bridge returns 200 with SSE error event
-                        assert resp.status == 200
-                        body = await resp.read()
-                        body_str = body.decode("utf-8")
-                        # The SSE error event should contain the actionable message
-                        assert "/clear" in body_str
-                        assert "context" in body_str.lower()
+                    ) as resp,
+                ):
+                    # Bridge returns 200 with SSE error event
+                    assert resp.status == 200
+                    body = await resp.read()
+                    body_str = body.decode("utf-8")
+                    # The SSE error event should contain the actionable message
+                    assert "/clear" in body_str
+                    assert "context" in body_str.lower()
         finally:
             await server.stop_async()
 
@@ -839,18 +956,20 @@ class TestClaudeCodeErrorHandling:
                     status=400,
                     payload={"error": {"code": "1261", "message": "Prompt exceeds max length"}},
                 )
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(
+                async with (
+                    aiohttp.ClientSession() as session,
+                    session.post(
                         f"http://127.0.0.1:{port}/v1/messages",
                         json=_claude_code_simple_request(),
-                    ) as resp:
-                        assert resp.status == 400
-                        data = await resp.json()
-                        assert data["type"] == "error"
-                        assert data["error"]["type"] == "api_error"
-                        msg = data["error"]["message"]
-                        assert "/clear" in msg
-                        assert "context" in msg.lower()
+                    ) as resp,
+                ):
+                    assert resp.status == 400
+                    data = await resp.json()
+                    assert data["type"] == "error"
+                    assert data["error"]["type"] == "api_error"
+                    msg = data["error"]["message"]
+                    assert "/clear" in msg
+                    assert "context" in msg.lower()
         finally:
             await server.stop_async()
 
@@ -866,23 +985,25 @@ class TestClaudeCodeUpstreamRequestFormat:
         try:
             with aioresponses(passthrough=["http://127.0.0.1"]) as m:
                 m.post(UPSTREAM_URL, payload=UPSTREAM_TEXT_RESPONSE)
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(
+                async with (
+                    aiohttp.ClientSession() as session,
+                    session.post(
                         f"http://127.0.0.1:{port}/v1/messages",
                         json=_claude_code_request_with_tools(),
-                    ) as resp:
-                        assert resp.status == 200
+                    ) as resp,
+                ):
+                    assert resp.status == 200
 
-                        request_list = m.requests[("POST", aiohttp.client.URL(UPSTREAM_URL))]
-                        sent_json = request_list[0].kwargs["json"]
+                    request_list = m.requests[("POST", aiohttp.client.URL(UPSTREAM_URL))]
+                    sent_json = request_list[0].kwargs["json"]
 
-                        # Verify tools are in Chat Completions format
-                        assert "tools" in sent_json
-                        assert len(sent_json["tools"]) == 2
-                        assert sent_json["tools"][0]["type"] == "function"
-                        assert sent_json["tools"][0]["function"]["name"] == "read_file"
-                        assert sent_json["tools"][0]["function"]["parameters"]["required"] == ["path"]
-                        assert sent_json["tools"][1]["function"]["name"] == "write_file"
+                    # Verify tools are in Chat Completions format
+                    assert "tools" in sent_json
+                    assert len(sent_json["tools"]) == 2
+                    assert sent_json["tools"][0]["type"] == "function"
+                    assert sent_json["tools"][0]["function"]["name"] == "read_file"
+                    assert sent_json["tools"][0]["function"]["parameters"]["required"] == ["path"]
+                    assert sent_json["tools"][1]["function"]["name"] == "write_file"
         finally:
             await server.stop_async()
 
@@ -894,26 +1015,28 @@ class TestClaudeCodeUpstreamRequestFormat:
         try:
             with aioresponses(passthrough=["http://127.0.0.1"]) as m:
                 m.post(UPSTREAM_URL, payload=UPSTREAM_TEXT_RESPONSE)
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(
+                async with (
+                    aiohttp.ClientSession() as session,
+                    session.post(
                         f"http://127.0.0.1:{port}/v1/messages",
                         json=_claude_code_tool_call_request(),
-                    ) as resp:
-                        assert resp.status == 200
+                    ) as resp,
+                ):
+                    assert resp.status == 200
 
-                        request_list = m.requests[("POST", aiohttp.client.URL(UPSTREAM_URL))]
-                        sent_json = request_list[0].kwargs["json"]
+                    request_list = m.requests[("POST", aiohttp.client.URL(UPSTREAM_URL))]
+                    sent_json = request_list[0].kwargs["json"]
 
-                        # Find assistant message
-                        assistant_msgs = [m for m in sent_json["messages"] if m["role"] == "assistant"]
-                        assert len(assistant_msgs) == 1
-                        asst = assistant_msgs[0]
-                        assert asst["content"] == "Let me check the weather."
-                        assert len(asst["tool_calls"]) == 1
-                        tc = asst["tool_calls"][0]
-                        assert tc["id"] == "toolu_e2e_001"
-                        assert tc["function"]["name"] == "get_weather"
-                        assert json.loads(tc["function"]["arguments"]) == {"city": "London"}
+                    # Find assistant message
+                    assistant_msgs = [m for m in sent_json["messages"] if m["role"] == "assistant"]
+                    assert len(assistant_msgs) == 1
+                    asst = assistant_msgs[0]
+                    assert asst["content"] == "Let me check the weather."
+                    assert len(asst["tool_calls"]) == 1
+                    tc = asst["tool_calls"][0]
+                    assert tc["id"] == "toolu_e2e_001"
+                    assert tc["function"]["name"] == "get_weather"
+                    assert json.loads(tc["function"]["arguments"]) == {"city": "London"}
         finally:
             await server.stop_async()
 
@@ -925,17 +1048,19 @@ class TestClaudeCodeUpstreamRequestFormat:
         try:
             with aioresponses(passthrough=["http://127.0.0.1"]) as m:
                 m.post(UPSTREAM_URL, payload=UPSTREAM_TEXT_RESPONSE)
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(
+                async with (
+                    aiohttp.ClientSession() as session,
+                    session.post(
                         f"http://127.0.0.1:{port}/v1/messages",
                         json=_claude_code_simple_request(),
-                    ) as resp:
-                        assert resp.status == 200
+                    ) as resp,
+                ):
+                    assert resp.status == 200
 
-                        # Verify the server builds the correct upstream headers
-                        headers = server._build_upstream_headers()
-                        assert headers["Authorization"] == "Bearer sk-resolved-key-12345"
-                        assert headers["Content-Type"] == "application/json"
+                    # Verify the server builds the correct upstream headers
+                    headers = server._build_upstream_headers()
+                    assert headers["Authorization"] == "Bearer sk-resolved-key-12345"
+                    assert headers["Content-Type"] == "application/json"
         finally:
             await server.stop_async()
 
@@ -953,17 +1078,19 @@ class TestClaudeCodeTemperaturePassthrough:
                 request = _claude_code_simple_request()
                 request["temperature"] = 0.5
                 request["top_p"] = 0.9
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(
+                async with (
+                    aiohttp.ClientSession() as session,
+                    session.post(
                         f"http://127.0.0.1:{port}/v1/messages",
                         json=request,
-                    ) as resp:
-                        assert resp.status == 200
+                    ) as resp,
+                ):
+                    assert resp.status == 200
 
-                        request_list = m.requests[("POST", aiohttp.client.URL(UPSTREAM_URL))]
-                        sent_json = request_list[0].kwargs["json"]
-                        assert sent_json["temperature"] == 0.5
-                        assert sent_json["top_p"] == 0.9
+                    request_list = m.requests[("POST", aiohttp.client.URL(UPSTREAM_URL))]
+                    sent_json = request_list[0].kwargs["json"]
+                    assert sent_json["temperature"] == 0.5
+                    assert sent_json["top_p"] == 0.9
         finally:
             await server.stop_async()
 
@@ -989,16 +1116,18 @@ class TestClaudeCodeMissingUsage:
             }
             with aioresponses(passthrough=["http://127.0.0.1"]) as m:
                 m.post(UPSTREAM_URL, payload=upstream_no_usage)
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(
+                async with (
+                    aiohttp.ClientSession() as session,
+                    session.post(
                         f"http://127.0.0.1:{port}/v1/messages",
                         json=_claude_code_simple_request(),
-                    ) as resp:
-                        assert resp.status == 200
-                        data = await resp.json()
-                        assert data["type"] == "message"
-                        assert data["usage"]["input_tokens"] == 0
-                        assert data["usage"]["output_tokens"] == 0
+                    ) as resp,
+                ):
+                    assert resp.status == 200
+                    data = await resp.json()
+                    assert data["type"] == "message"
+                    assert data["usage"]["input_tokens"] == 0
+                    assert data["usage"]["output_tokens"] == 0
         finally:
             await server.stop_async()
 
@@ -1038,18 +1167,20 @@ class TestClaudeCodeEmptyToolArguments:
             }
             with aioresponses(passthrough=["http://127.0.0.1"]) as m:
                 m.post(UPSTREAM_URL, payload=upstream_empty_args)
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(
+                async with (
+                    aiohttp.ClientSession() as session,
+                    session.post(
                         f"http://127.0.0.1:{port}/v1/messages",
                         json=_claude_code_request_with_tools(),
-                    ) as resp:
-                        assert resp.status == 200
-                        data = await resp.json()
-                        assert data["stop_reason"] == "tool_use"
-                        tool_blocks = [b for b in data["content"] if b["type"] == "tool_use"]
-                        assert len(tool_blocks) == 1
-                        assert tool_blocks[0]["name"] == "list_files"
-                        assert tool_blocks[0]["input"] == {}
+                    ) as resp,
+                ):
+                    assert resp.status == 200
+                    data = await resp.json()
+                    assert data["stop_reason"] == "tool_use"
+                    tool_blocks = [b for b in data["content"] if b["type"] == "tool_use"]
+                    assert len(tool_blocks) == 1
+                    assert tool_blocks[0]["name"] == "list_files"
+                    assert tool_blocks[0]["input"] == {}
         finally:
             await server.stop_async()
 
@@ -1085,17 +1216,19 @@ class TestClaudeCodeEmptyToolArguments:
             }
             with aioresponses(passthrough=["http://127.0.0.1"]) as m:
                 m.post(UPSTREAM_URL, payload=upstream_bad_json)
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(
+                async with (
+                    aiohttp.ClientSession() as session,
+                    session.post(
                         f"http://127.0.0.1:{port}/v1/messages",
                         json=_claude_code_request_with_tools(),
-                    ) as resp:
-                        assert resp.status == 200
-                        data = await resp.json()
-                        tool_blocks = [b for b in data["content"] if b["type"] == "tool_use"]
-                        assert len(tool_blocks) == 1
-                        # Invalid JSON should gracefully default to empty dict
-                        assert tool_blocks[0]["input"] == {}
+                    ) as resp,
+                ):
+                    assert resp.status == 200
+                    data = await resp.json()
+                    tool_blocks = [b for b in data["content"] if b["type"] == "tool_use"]
+                    assert len(tool_blocks) == 1
+                    # Invalid JSON should gracefully default to empty dict
+                    assert tool_blocks[0]["input"] == {}
         finally:
             await server.stop_async()
 
@@ -1111,13 +1244,15 @@ class TestClaudeCodeRetryOnUpstreamError:
             with aioresponses(passthrough=["http://127.0.0.1"]) as m:
                 m.post(UPSTREAM_URL, status=429)
                 m.post(UPSTREAM_URL, payload=UPSTREAM_TEXT_RESPONSE)
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(
+                async with (
+                    aiohttp.ClientSession() as session,
+                    session.post(
                         f"http://127.0.0.1:{port}/v1/messages",
                         json=_claude_code_simple_request(),
-                    ) as resp:
-                        assert resp.status == 200
-                        data = await resp.json()
-                        assert data["type"] == "message"
+                    ) as resp,
+                ):
+                    assert resp.status == 200
+                    data = await resp.json()
+                    assert data["type"] == "message"
         finally:
             await server.stop_async()

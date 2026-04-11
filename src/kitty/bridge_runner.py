@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import signal
 import sys
 
@@ -36,8 +37,10 @@ def main() -> None:
     tls_key = args.tls_key
 
     if args.config:
-        from kitty.bridge.config import load_bridge_config
         from pathlib import Path
+
+        from kitty.bridge.config import load_bridge_config
+
         config = load_bridge_config(
             args.config,
             cli_host=args.host,
@@ -56,26 +59,29 @@ def main() -> None:
 
     if args.log and not args.no_log and not access_log_path:
         from pathlib import Path
+
         access_log_path = str(Path.home() / ".config" / "kitty" / "logs" / "bridge_access.log")
 
     # Resolve provider and key from profile
-    from kitty.profiles.store import ProfileStore
     from kitty.credentials.file_backend import FileBackend
     from kitty.credentials.store import CredentialStore
-    from kitty.providers.registry import get_provider
     from kitty.profiles.schema import BalancingProfile
+    from kitty.profiles.store import ProfileStore
+    from kitty.providers.registry import get_provider
 
     profile_store = ProfileStore()
     cred_store = CredentialStore(backends=[FileBackend()])
 
     # State file — always use default path
     from pathlib import Path
+
     state_path = Path.home() / ".config" / "kitty" / "bridge_state.json"
 
     profile_name = args.profile
     backend = profile_store.get_backend(profile_name) if profile_name else None
     if backend is None:
         from kitty.profiles.resolver import ProfileResolver
+
         resolver = ProfileResolver(profile_store)
         backend = resolver.resolve_default_backend()
 
@@ -85,6 +91,7 @@ def main() -> None:
 
     if isinstance(backend, BalancingProfile):
         from kitty.profiles.resolver import ProfileResolver
+
         resolver = ProfileResolver(profile_store)
         members = resolver.resolve_balancing(backend.name)
         backends = []
@@ -149,10 +156,8 @@ def main() -> None:
         finally:
             await server.stop_async()
 
-    try:
+    with contextlib.suppress(KeyboardInterrupt):
         asyncio.run(run())
-    except KeyboardInterrupt:
-        pass
 
 
 if __name__ == "__main__":

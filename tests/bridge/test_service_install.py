@@ -3,11 +3,8 @@
 from __future__ import annotations
 
 import sys
-from pathlib import Path
 
-import pytest
-
-from kitty.bridge.service import generate_systemd_unit, generate_launchd_plist, generate_windows_script
+from kitty.bridge.service import generate_launchd_plist, generate_systemd_unit, generate_windows_script
 
 
 class TestSystemdUnitGeneration:

@@ -70,8 +70,11 @@ class TestOllamaAdapter:
         """OllamaAdapter passes through temperature, top_p, max_tokens."""
         adapter = OllamaAdapter()
         req = adapter.build_request(
-            "llama3.2", [{"role": "user", "content": "hi"}],
-            temperature=0.7, top_p=0.9, max_tokens=100,
+            "llama3.2",
+            [{"role": "user", "content": "hi"}],
+            temperature=0.7,
+            top_p=0.9,
+            max_tokens=100,
         )
         assert req["temperature"] == 0.7
         assert req["top_p"] == 0.9
