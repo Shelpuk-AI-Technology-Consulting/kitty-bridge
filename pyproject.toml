@@ -1,5 +1,5 @@
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling>=1.0"]
 build-backend = "hatchling.build"
 
 [project]
@@ -52,6 +52,7 @@ dev = [
     "mypy>=1.10",
     "import-linter>=2.0",
     "build>=1.0",
+    "hatchling>=1.0",
     "twine>=4.0",
 ]
 
