@@ -281,13 +281,10 @@ def _run_bridge(
     import sys
     from contextlib import suppress
 
-    from rich.console import Console
-    from rich.panel import Panel
-
     from kitty.bridge.server import BridgeServer
     from kitty.profiles.schema import BalancingProfile
     from kitty.providers.registry import get_provider
-    from kitty.tui.display import print_error
+    from kitty.tui.display import print_error, print_panel, print_status, print_warning, status_spinner
 
     if isinstance(backend, BalancingProfile):
         _run_bridge_balancing(backend, cred_store, debug=debug, validate=validate)
@@ -307,8 +304,7 @@ def _run_bridge(
 
     # Validate API key if requested
     if validate:
-        console = Console()
-        with console.status("[bold cyan]Validating API key..."):
+        with status_spinner("Validating API key..."):
             # TODO: Implement actual validation
             pass
 
@@ -325,24 +321,20 @@ def _run_bridge(
     async def run_server() -> None:
         port = await server.start_async()
 
-        console = Console()
-        console.print(
-            Panel.fit(
-                f"[bold green]Bridge server running on http://127.0.0.1:{port}[/bold green]\n\n"
-                f"Profile: [cyan]{profile.name}[/cyan]\n"  # type: ignore[union-attr]
-                f"Provider: [cyan]{profile.provider}[/cyan]\n"  # type: ignore[union-attr]
-                f"Model: [cyan]{profile.model}[/cyan]\n\n"  # type: ignore[union-attr]
-                f"Endpoints:\n"
-                f"  • POST /v1/chat/completions\n"
-                f"  • POST /v1/messages\n"
-                f"  • POST /v1/responses\n"
-                f"  • POST /v1beta/models/{{model}}:generateContent\n"
-                f"  • GET  /v1/models\n"
-                f"  • GET  /healthz\n\n"
-                f"Press Ctrl+C to stop",
-                title="Kitty Bridge Mode",
-                border_style="green",
-            )
+        print_panel(
+            "Kitty Bridge Mode",
+            f"[kitty.ok]Bridge server running on http://127.0.0.1:{port}[/kitty.ok]\n\n"
+            f"Profile: [kitty.accent]{profile.name}[/kitty.accent]\n"  # type: ignore[union-attr]
+            f"Provider: [kitty.accent]{profile.provider}[/kitty.accent]\n"  # type: ignore[union-attr]
+            f"Model: [kitty.accent]{profile.model}[/kitty.accent]\n\n"  # type: ignore[union-attr]
+            f"Endpoints:\n"
+            f"  • POST /v1/chat/completions\n"
+            f"  • POST /v1/messages\n"
+            f"  • POST /v1/responses\n"
+            f"  • POST /v1beta/models/{{model}}:generateContent\n"
+            f"  • GET  /v1/models\n"
+            f"  • GET  /healthz\n\n"
+            f"Press Ctrl+C to stop",
         )
 
         # Set up graceful shutdown
@@ -357,9 +349,9 @@ def _run_bridge(
         try:
             await stop_event.wait()
         finally:
-            console.print("\n[yellow]Shutting down bridge server...[/yellow]")
+            print_warning("Shutting down bridge server...")
             await server.stop_async()
-            console.print("[green]Bridge server stopped.[/green]")
+            print_status("Bridge server stopped.")
 
     with suppress(KeyboardInterrupt):
         asyncio.run(run_server())
@@ -378,16 +370,13 @@ def _run_bridge_balancing(
     import signal
     import sys
 
-    from rich.console import Console
-    from rich.panel import Panel
-
     from kitty.bridge.server import BridgeServer
     from kitty.profiles.resolver import ProfileResolver
 
     # Resolve all member profiles
     from kitty.profiles.store import ProfileStore as _PS
     from kitty.providers.registry import get_provider
-    from kitty.tui.display import print_error
+    from kitty.tui.display import print_error, print_panel, print_status, print_warning
 
     profile_store = _PS()
     resolver = ProfileResolver(profile_store)
@@ -419,24 +408,20 @@ def _run_bridge_balancing(
     async def run_server() -> None:
         port = await server.start_async()
 
-        console = Console()
-        members_info = "\n".join(f"  • [cyan]{mp.name}[/cyan] ({mp.provider}/{mp.model})" for mp in member_profiles)
-        console.print(
-            Panel.fit(
-                f"[bold green]Bridge server running on http://127.0.0.1:{port}[/bold green]\n\n"
-                f"Profile: [cyan]{balancing.name}[/cyan] (balancing)\n"
-                f"Members:\n{members_info}\n\n"
-                f"Endpoints:\n"
-                f"  • POST /v1/chat/completions\n"
-                f"  • POST /v1/messages\n"
-                f"  • POST /v1/responses\n"
-                f"  • POST /v1beta/models/{{model}}:generateContent\n"
-                f"  • GET  /v1/models\n"
-                f"  • GET  /healthz\n\n"
-                f"Press Ctrl+C to stop",
-                title="Kitty Bridge Mode (Balancing)",
-                border_style="green",
-            )
+        members_info = "\n".join(f"  • [kitty.accent]{mp.name}[/kitty.accent] ({mp.provider}/{mp.model})" for mp in member_profiles)
+        print_panel(
+            "Kitty Bridge Mode (Balancing)",
+            f"[kitty.ok]Bridge server running on http://127.0.0.1:{port}[/kitty.ok]\n\n"
+            f"Profile: [kitty.accent]{balancing.name}[/kitty.accent] (balancing)\n"
+            f"Members:\n{members_info}\n\n"
+            f"Endpoints:\n"
+            f"  • POST /v1/chat/completions\n"
+            f"  • POST /v1/messages\n"
+            f"  • POST /v1/responses\n"
+            f"  • POST /v1beta/models/{{model}}:generateContent\n"
+            f"  • GET  /v1/models\n"
+            f"  • GET  /healthz\n\n"
+            f"Press Ctrl+C to stop",
         )
 
         stop_event = asyncio.Event()
@@ -450,9 +435,9 @@ def _run_bridge_balancing(
         try:
             await stop_event.wait()
         finally:
-            console.print("\n[yellow]Shutting down bridge server...[/yellow]")
+            print_warning("Shutting down bridge server...")
             await server.stop_async()
-            console.print("[green]Bridge server stopped.[/green]")
+            print_status("Bridge server stopped.")
 
     with contextlib.suppress(KeyboardInterrupt):
         asyncio.run(run_server())

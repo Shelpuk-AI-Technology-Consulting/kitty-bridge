@@ -12,7 +12,7 @@ from kitty.profiles.resolver import NoDefaultProfileError, ProfileResolver
 from kitty.profiles.schema import Profile
 from kitty.profiles.store import ProfileStore
 from kitty.providers.registry import get_provider
-from kitty.tui.display import print_error, print_section, print_status, print_warning
+from kitty.tui.display import LiveChecklist, print_error, print_section, print_status, print_warning
 
 __all__ = ["run_doctor"]
 
@@ -41,42 +41,44 @@ def run_doctor(
     failures = 0
     cred_store = CredentialStore(backends=[FileBackend()])
 
-    print_section("kitty doctor")
-
-    # Specific target validation
+    # Specific target validation — uses simple sequential output
     if target_name is not None:
+        print_section("kitty doctor")
         failures += _check_target(target_name)
         return failures
 
-    # Specific profile validation
+    # Specific profile validation — uses simple sequential output
     if profile_name is not None:
+        print_section("kitty doctor")
         failures += _check_profile(store, cred_store, profile_name)
         return failures
 
-    # Full check: all targets
-    for name in _ADAPTERS:
-        failures += _check_target(name)
-
-    # Check profiles
+    # Full check — uses LiveChecklist for in-place updates
     resolver = ProfileResolver(store)
     profiles = resolver.list_profiles()
 
+    checks = []
+
+    # Target binary checks
+    for name in _ADAPTERS:
+        checks.append((f"Target {name!r}", _make_target_check(name)))
+
+    # Early exit: no profiles
     if not profiles:
         print_warning("No profiles configured — run 'kitty setup' to get started")
-        failures += 1
-        return failures
+        return 1
 
-    # Check default profile
-    try:
-        default = resolver.resolve_default()
-        print_status(f"Default profile: {default.name}")
-    except NoDefaultProfileError:
-        print_error("No default profile set")
-        failures += 1
+    # Default profile check
+    checks.append(("Default profile", _make_default_profile_check(resolver)))
 
-    # Check each profile's credentials
+    # Per-profile credential checks
     for profile in profiles:
-        failures += _check_profile_credentials(cred_store, profile)
+        checks.append(
+            (f"Credentials for {profile.name!r}", _make_credential_check(cred_store, profile))
+        )
+
+    checklist = LiveChecklist("kitty doctor")
+    failures = checklist.run_checks(checks)
 
     if failures == 0:
         print_section("All checks passed")
@@ -86,8 +88,41 @@ def run_doctor(
     return failures
 
 
+def _make_target_check(name: str):
+    """Create a check function for a launcher target binary."""
+    def check() -> tuple[bool, str]:
+        if name not in _ADAPTERS:
+            return False, f"Unknown target: {name!r}"
+        binary_path = discover_binary(name)
+        if binary_path is not None:
+            return True, f"binary found at {binary_path}"
+        return False, "binary not found on PATH or common install directories"
+    return check
+
+
+def _make_default_profile_check(resolver: ProfileResolver):
+    """Create a check function for the default profile."""
+    def check() -> tuple[bool, str]:
+        try:
+            default = resolver.resolve_default()
+            return True, default.name
+        except NoDefaultProfileError:
+            return False, "No default profile set"
+    return check
+
+
+def _make_credential_check(cred_store: CredentialStore, profile: Profile):
+    """Create a check function for a profile's credentials."""
+    def check() -> tuple[bool, str]:
+        key = cred_store.get(profile.auth_ref)
+        if key is not None:
+            return True, f"resolved ({len(key)} chars)"
+        return False, f"auth_ref {profile.auth_ref!r} not found"
+    return check
+
+
 def _check_target(name: str) -> int:
-    """Check if a launcher target binary is available.
+    """Check if a launcher target binary is available (sequential output).
 
     Returns:
         0 if found, 1 if missing.
@@ -106,7 +141,7 @@ def _check_target(name: str) -> int:
 
 
 def _check_profile(store: ProfileStore, cred_store: CredentialStore, name: str) -> int:
-    """Validate a specific profile.
+    """Validate a specific profile (sequential output).
 
     Returns:
         0 if valid, 1 if issues found.
@@ -128,21 +163,11 @@ def _check_profile(store: ProfileStore, cred_store: CredentialStore, name: str) 
         failures += 1
 
     # Check credentials
-    failures += _check_profile_credentials(cred_store, profile)
-
-    return failures
-
-
-def _check_profile_credentials(cred_store: CredentialStore, profile: Profile) -> int:
-    """Check that a profile's credentials resolve.
-
-    Returns:
-        0 if credential found, 1 if not.
-    """
     key = cred_store.get(profile.auth_ref)
     if key is not None:
         print_status(f"  Credentials for {profile.name!r}: resolved ({len(key)} chars)")
-        return 0
+    else:
+        print_error(f"  Credentials for {profile.name!r}: auth_ref {profile.auth_ref!r} not found")
+        failures += 1
 
-    print_error(f"  Credentials for {profile.name!r}: auth_ref {profile.auth_ref!r} not found")
-    return 1
+    return failures

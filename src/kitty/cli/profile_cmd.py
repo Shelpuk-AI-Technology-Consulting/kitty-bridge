@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import sys
 import uuid
 
 from kitty.credentials.store import CredentialStore
@@ -18,15 +17,9 @@ from kitty.tui.display import (
     print_warning,
 )
 from kitty.tui.menu import SelectionMenu
-from kitty.tui.prompts import NonTTYError, prompt_confirm, prompt_secret, prompt_text
+from kitty.tui.prompts import NonTTYError, check_tty, prompt_confirm, prompt_secret, prompt_text
 
 __all__ = ["run_profile_menu"]
-
-
-def _check_tty() -> None:
-    """Raise if not running in an interactive terminal."""
-    if not sys.stdin.isatty():
-        raise NonTTYError("This command requires an interactive terminal (TTY)")
 
 
 def run_profile_menu(store: ProfileStore) -> None:
@@ -38,7 +31,7 @@ def run_profile_menu(store: ProfileStore) -> None:
     Raises:
         NonTTYError: If not running in an interactive terminal.
     """
-    _check_tty()
+    check_tty()
 
     while True:
         store.load_all()

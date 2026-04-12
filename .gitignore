@@ -11,3 +11,4 @@
 *.egg-info/
 *.whl
 *.tar.gz
+/.research/

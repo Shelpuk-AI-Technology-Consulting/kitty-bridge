@@ -33,7 +33,7 @@ def _capture_provider_options(monkeypatch: pytest.MonkeyPatch, module_prefix: st
 def test_setup_cmd_includes_all_registered_providers(monkeypatch: pytest.MonkeyPatch) -> None:
     """Setup wizard provider list must include all providers from registry."""
     captured = _capture_provider_options(monkeypatch, "kitty.cli.setup_cmd")
-    monkeypatch.setattr("kitty.cli.setup_cmd._check_tty", lambda: None)
+    monkeypatch.setattr("kitty.cli.setup_cmd.check_tty", lambda: None)
 
     with pytest.raises(_StopFlow):
         run_setup_wizard(store=MagicMock(), cred_store=MagicMock())

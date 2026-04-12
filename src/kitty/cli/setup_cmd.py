@@ -2,25 +2,16 @@
 
 from __future__ import annotations
 
-import sys
 import uuid
-
-from rich.console import Console
 
 from kitty.credentials.store import CredentialStore
 from kitty.profiles.schema import _NAME_PATTERN, RESERVED_NAMES, Profile
 from kitty.profiles.store import ProfileStore
-from kitty.tui.display import print_error, print_section, print_status, print_step, print_warning
+from kitty.tui.display import print_error, print_section, print_status, print_step, print_warning, status_spinner
 from kitty.tui.menu import SelectionMenu
-from kitty.tui.prompts import NonTTYError, prompt_confirm, prompt_secret, prompt_text
+from kitty.tui.prompts import NonTTYError, check_tty, prompt_confirm, prompt_secret, prompt_text
 
 __all__ = ["run_setup_wizard"]
-
-
-def _check_tty() -> None:
-    """Raise if not running in an interactive terminal."""
-    if not sys.stdin.isatty():
-        raise NonTTYError("This command requires an interactive terminal (TTY)")
 
 
 def run_setup_wizard(store: ProfileStore, cred_store: CredentialStore) -> Profile:
@@ -44,7 +35,7 @@ def run_setup_wizard(store: ProfileStore, cred_store: CredentialStore) -> Profil
     Raises:
         NonTTYError: If not running in an interactive terminal.
     """
-    _check_tty()
+    check_tty()
 
     print_section("kitty setup wizard")
 
@@ -126,8 +117,7 @@ def run_setup_wizard(store: ProfileStore, cred_store: CredentialStore) -> Profil
     # Step 6: Connectivity check (optional)
     print_step(6, 6, "Connectivity check")
     if prompt_confirm("Test connectivity to provider?", default=True):
-        console = Console()
-        with console.status("[bold cyan]Testing connectivity..."):
+        with status_spinner("Testing connectivity..."):
             connected = _check_connectivity(provider, api_key)
         if connected:
             print_status("Connectivity check passed")
