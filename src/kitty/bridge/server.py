@@ -5,8 +5,8 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-import random
 import logging
+import random
 import ssl
 import time
 import uuid
@@ -220,7 +220,7 @@ class BridgeServer:
         """Check if there's at least one healthy backend remaining."""
         if not self._backends:
             return False
-        for idx, health in enumerate(self._backend_health):
+        for _idx, health in enumerate(self._backend_health):
             if health["healthy"]:
                 return True
             # Check if cooldown has expired
@@ -912,7 +912,8 @@ class BridgeServer:
                                     headers = self._build_upstream_headers()
                                     upstream_body = self._active_provider.translate_to_upstream(cc_request)
                                     logger.info(
-                                        "Messages stream failover: backend attempt %d/%d (status %d), switching backend",
+                                        "Messages stream failover: attempt %d/%d "
+                                        "(status %d), switching backend",
                                         attempt + 1,
                                         max_attempts,
                                         upstream.status,
@@ -989,20 +990,20 @@ class BridgeServer:
                                         logger.warning("Failed to parse flushed SSE data: %s", data_str[:200])
 
                         # Handle in-stream error failover
-                        if stream_error:
-                            if attempt < max_attempts - 1:
-                                self._select_backend()
-                                self._normalize_model(cc_request)
-                                self._active_provider.normalize_request(cc_request)
-                                url = self._build_upstream_url()
-                                headers = self._build_upstream_headers()
-                                upstream_body = self._active_provider.translate_to_upstream(cc_request)
-                                logger.info(
-                                    "Messages stream failover: in-stream error, backend attempt %d/%d, switching backend",
-                                    attempt + 1,
-                                    max_attempts,
-                                )
-                                continue
+                        if stream_error and attempt < max_attempts - 1:
+                            self._select_backend()
+                            self._normalize_model(cc_request)
+                            self._active_provider.normalize_request(cc_request)
+                            url = self._build_upstream_url()
+                            headers = self._build_upstream_headers()
+                            upstream_body = self._active_provider.translate_to_upstream(cc_request)
+                            logger.info(
+                                "Messages stream in-stream error: "
+                                "attempt %d/%d, switching backend",
+                                attempt + 1,
+                                max_attempts,
+                            )
+                            continue
                         break  # Exit retry loop
                 except Exception as exc:
                     if _is_retryable_exception(exc):
@@ -1481,7 +1482,8 @@ class BridgeServer:
                                 headers = self._build_upstream_headers()
                                 upstream_body = self._active_provider.translate_to_upstream(cc_request)
                                 logger.info(
-                                    "Chat Completions stream failover: backend attempt %d/%d (status %d), switching backend",
+                                    "CC stream failover: attempt %d/%d "
+                                    "(status %d), switching backend",
                                     attempt + 1,
                                     max_attempts,
                                     upstream.status,
@@ -1542,20 +1544,20 @@ class BridgeServer:
                             break
 
                     # Handle in-stream error failover
-                    if stream_error:
-                        if attempt < max_attempts - 1:
-                            self._select_backend()
-                            self._normalize_model(cc_request)
-                            self._active_provider.normalize_request(cc_request)
-                            url = self._build_upstream_url()
-                            headers = self._build_upstream_headers()
-                            upstream_body = self._active_provider.translate_to_upstream(cc_request)
-                            logger.info(
-                                "Chat Completions stream failover: in-stream error, backend attempt %d/%d, switching backend",
-                                attempt + 1,
-                                max_attempts,
-                            )
-                            continue
+                    if stream_error and attempt < max_attempts - 1:
+                        self._select_backend()
+                        self._normalize_model(cc_request)
+                        self._active_provider.normalize_request(cc_request)
+                        url = self._build_upstream_url()
+                        headers = self._build_upstream_headers()
+                        upstream_body = self._active_provider.translate_to_upstream(cc_request)
+                        logger.info(
+                            "CC stream in-stream error: "
+                            "attempt %d/%d, switching backend",
+                            attempt + 1,
+                            max_attempts,
+                        )
+                        continue
                     break  # Exit retry loop
 
         except asyncio.TimeoutError:

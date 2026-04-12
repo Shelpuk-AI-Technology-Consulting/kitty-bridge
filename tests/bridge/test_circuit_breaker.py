@@ -137,12 +137,10 @@ class TestGetNextBackendHealthAware:
         server = _make_server(3)
         server._mark_backend_unhealthy(1)
 
-        # Should cycle through 0 and 2 only
-        keys = []
-        for _ in range(4):
+        # Backend 1 must never be returned while unhealthy
+        for _ in range(20):
             _, key, _, _, _ = server._get_next_backend()
-            keys.append(key)
-        assert keys == ["key-0", "key-2", "key-0", "key-2"]
+            assert key in ("key-0", "key-2"), f"Got {key}, expected only key-0 or key-2"
 
     def test_cooldown_expired_backend_recovers(self):
         server = _make_server(3, cooldown=0)  # Instant cooldown

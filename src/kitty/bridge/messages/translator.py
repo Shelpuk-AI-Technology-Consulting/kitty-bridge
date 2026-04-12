@@ -37,6 +37,8 @@ class MessagesTranslator:
         self._content_block_index: int = 0
         self._text_block_opened: bool = False
         self._message_started: bool = False
+        self._finished: bool = False
+        self._last_message_id: str | None = None
 
     @property
     def thinking_warned(self) -> bool:
@@ -318,6 +320,12 @@ class MessagesTranslator:
         chunk: dict,
     ) -> list[str]:
         """Convert a Chat Completions streaming chunk to Messages API SSE event strings."""
+        # Detect new message stream — reset _finished so the translator
+        # can be reused across requests with different message IDs.
+        if message_id != self._last_message_id:
+            self._finished = False
+            self._last_message_id = message_id
+
         events: list[str] = []
         choices = chunk.get("choices", [])
         if not choices:
@@ -399,7 +407,7 @@ class MessagesTranslator:
 
         # Finish
         finish_reason = choice.get("finish_reason")
-        if finish_reason is not None:
+        if finish_reason is not None and not self._finished:
             has_content_blocks = (
                 bool(self._tool_call_buffers) or self._text_block_opened or self._content_block_index > 0
             )
@@ -449,5 +457,10 @@ class MessagesTranslator:
 
             # Auto-reset
             self.reset()
+
+            # Mark as finished to guard against duplicate finish_reason chunks
+            # (some models/providers emit a second empty finish chunk after reset).
+            # Set AFTER reset() so the flag survives the state cleanup.
+            self._finished = True
 
         return events

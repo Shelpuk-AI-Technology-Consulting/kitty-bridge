@@ -270,11 +270,13 @@ class TestMessagesStreamDebugLogging:
         try:
             with caplog.at_level(logging.DEBUG, logger="kitty.bridge.server"):
                 with aioresponses(passthrough=["http://127.0.0.1"]) as m:
-                    m.post(
-                        "https://api.example.com/v1/chat/completions",
-                        status=500,
-                        payload={"error": {"message": "Internal server error"}},
-                    )
+                    # Server retries on 500 — register enough mock responses
+                    for _ in range(4):
+                        m.post(
+                            "https://api.example.com/v1/chat/completions",
+                            status=500,
+                            payload={"error": {"message": "Internal server error"}},
+                        )
 
                     async with (
                         aiohttp.ClientSession() as session,
@@ -521,11 +523,13 @@ class TestNon200ErrorLogging:
         try:
             with caplog.at_level(logging.DEBUG, logger="kitty.bridge.server"):
                 with aioresponses(passthrough=["http://127.0.0.1"]) as m:
-                    m.post(
-                        "https://api.example.com/v1/chat/completions",
-                        status=500,
-                        payload={"error": {"message": "Internal server error"}},
-                    )
+                    # Server retries on 500 — register enough mock responses
+                    for _ in range(4):
+                        m.post(
+                            "https://api.example.com/v1/chat/completions",
+                            status=500,
+                            payload={"error": {"message": "Internal server error"}},
+                        )
 
                     async with (
                         aiohttp.ClientSession() as session,

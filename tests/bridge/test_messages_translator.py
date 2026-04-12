@@ -553,3 +553,67 @@ class TestTranslateStreamChunk:
         chunk = {"id": "chatcmpl-1", "usage": {"prompt_tokens": 10, "completion_tokens": 5}}
         events = self.t.translate_stream_chunk(msg_id, model, chunk)
         assert events == []
+
+    def test_duplicate_finish_chunk_does_not_emit_extra_message(self):
+        """Duplicate finish_reason chunks (emitted by some models/providers like Gemma/OpenRouter)
+        must not produce a second message lifecycle with fallback text.
+
+        Reproduces: https://github.com/QwenLM/qwen-code/issues/2402
+        Some models emit two consecutive finish_reason chunks. After the first finishes
+        and self.reset() is called, the second (empty) finish chunk must be silently ignored
+        rather than triggering the fallback-text path.
+        """
+        msg_id = self._make_message_id()
+        model = "m"
+
+        # First chunk: content delta with finish
+        chunk1 = {
+            "choices": [{"index": 0, "delta": {"content": "hello"}, "finish_reason": "stop"}],
+        }
+        events1 = self.t.translate_stream_chunk(msg_id, model, chunk1)
+
+        # Should produce: message_start, content_block_start(text), content_block_delta("hello"),
+        # content_block_stop, message_delta, message_stop
+        content_block_deltas = [e for e in events1 if "content_block_delta" in e]
+        assert len(content_block_deltas) == 1
+        assert '"text": "hello"' in content_block_deltas[0]
+
+        message_stops = [e for e in events1 if "message_stop" in e]
+        assert len(message_stops) == 1
+
+        # Second chunk: duplicate finish (empty delta) — must be ignored
+        chunk2 = {
+            "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+        }
+        events2 = self.t.translate_stream_chunk(msg_id, model, chunk2)
+
+        # Must produce ZERO events — no second message lifecycle, no fallback text
+        assert events2 == [], (
+            f"Duplicate finish chunk should produce no events, got: {events2}"
+        )
+
+    def test_translator_reuse_across_requests(self):
+        """A new message_id must reset _finished so the translator can handle multiple requests."""
+        msg_id1 = self._make_message_id()
+        msg_id2 = self._make_message_id()
+        model = "m"
+
+        # First request finishes normally
+        chunk1 = {
+            "choices": [{"index": 0, "delta": {"content": "hi"}, "finish_reason": "stop"}],
+        }
+        events1 = self.t.translate_stream_chunk(msg_id1, model, chunk1)
+        assert any("message_stop" in e for e in events1)
+
+        # Second request (different message_id) must also finish properly
+        chunk2 = {
+            "choices": [{"index": 0, "delta": {"content": "bye"}, "finish_reason": "stop"}],
+        }
+        events2 = self.t.translate_stream_chunk(msg_id2, model, chunk2)
+        assert any("message_stop" in e for e in events2), (
+            "Second request should emit message_stop"
+        )
+        content_deltas = [e for e in events2 if "content_block_delta" in e]
+        assert any('"bye"' in e for e in content_deltas), (
+            "Second request should emit its content"
+        )
