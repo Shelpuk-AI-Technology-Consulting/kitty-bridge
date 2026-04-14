@@ -4,9 +4,8 @@ from __future__ import annotations
 
 import os
 import sys
-from collections.abc import Generator, Callable
+from collections.abc import Callable, Generator
 from contextlib import contextmanager
-from typing import Any
 
 from rich.console import Console
 from rich.live import Live
@@ -49,9 +48,7 @@ def _should_enable_color() -> bool:
     """
     if os.environ.get("FORCE_COLOR"):
         return True
-    if os.environ.get("NO_COLOR") is not None:
-        return False
-    return True
+    return os.environ.get("NO_COLOR") is None
 
 
 _console = Console(theme=KITTY_THEME, no_color=not _should_enable_color())
@@ -66,7 +63,8 @@ def clear_screen() -> None:
 def print_banner(version: str) -> None:
     """Print the kitty startup banner with version and tagline."""
     _console.print(
-        f"[kitty.accent]kitty[/kitty.accent] [kitty.muted]v{version}[/kitty.muted] — launch coding agents through a local API bridge"
+        f"[kitty.accent]kitty[/kitty.accent] [kitty.muted]v{version}[/kitty.muted]"
+        " — launch coding agents through a local API bridge"
     )
 
 
@@ -223,7 +221,7 @@ class LiveChecklist:
                 table.add_row(item.status_text, label, "")
 
             with Live(table, console=_console, refresh_per_second=4):
-                for item, (_, check_fn) in zip(items, checks):
+                for item, (_, check_fn) in zip(items, checks, strict=True):
                     try:
                         ok, detail = check_fn()
                     except Exception as exc:

@@ -178,7 +178,7 @@ class TestKittyTheme:
             assert name in KITTY_THEME.styles
 
     def test_consoles_use_theme(self) -> None:
-        from kitty.tui.display import _console, _stderr_console, KITTY_THEME
+        from kitty.tui.display import KITTY_THEME, _console, _stderr_console
         # Consoles constructed with theme= should resolve custom style names
         # Print via the console and verify the style is in the stack
         assert _console._theme_stack is not None
@@ -191,6 +191,7 @@ class TestKittyTheme:
         buf = StringIO()
         with patch("sys.stdout", buf), patch.dict(os.environ, {"NO_COLOR": "1"}):
             from rich.console import Console
+
             from kitty.tui.display import KITTY_THEME
             c = Console(theme=KITTY_THEME, file=buf, no_color=True)
             c.print("[kitty.ok]✓[/kitty.ok] test")
@@ -201,8 +202,7 @@ class TestKittyTheme:
 
     def test_force_color_overrides_no_color(self) -> None:
         import os
-        from io import StringIO
-        buf = StringIO()
+
         with patch.dict(os.environ, {"NO_COLOR": "1", "FORCE_COLOR": "1"}):
             # We need to re-import or re-create console because it's a singleton
             # For testing we can create a new one with the same logic we intend to use

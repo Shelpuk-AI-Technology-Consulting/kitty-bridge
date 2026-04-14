@@ -50,6 +50,11 @@ def main() -> None:
         help="Skip pre-flight API key validation",
     )
     parser.add_argument(
+        "--logging",
+        action="store_true",
+        help="Log LLM call token usage to ~/.cache/kitty/usage.log",
+    )
+    parser.add_argument(
         "command",
         nargs="*",
         help="Command to run: setup, profile, doctor, codex, claude, or a profile name.",
@@ -225,7 +230,7 @@ def main() -> None:
         if backend is None:
             parser.error("No default profile configured. Create one with 'kitty setup' first.")
             sys.exit(1)
-        _run_bridge(backend, cred_store, debug=args.debug, validate=not args.no_validate)
+        _run_bridge(backend, cred_store, debug=args.debug, validate=not args.no_validate, logging_enabled=args.logging)
     elif result.adapter is not None and (result.backend is not None or result.profile is not None):
         backend = result.backend or result.profile
         exit_code = _launch_target(
@@ -235,6 +240,7 @@ def main() -> None:
             result.extra_args,
             debug=args.debug,
             validate=not args.no_validate,
+            logging_enabled=args.logging,
         )
         sys.exit(exit_code)
     else:
@@ -274,6 +280,7 @@ def _run_bridge(
     *,
     debug: bool = False,
     validate: bool = True,
+    logging_enabled: bool = False,
 ) -> None:
     """Run bridge mode — start OpenAI-compatible API server without launching agent."""
     import asyncio
@@ -287,7 +294,7 @@ def _run_bridge(
     from kitty.tui.display import print_error, print_panel, print_status, print_warning, status_spinner
 
     if isinstance(backend, BalancingProfile):
-        _run_bridge_balancing(backend, cred_store, debug=debug, validate=validate)
+        _run_bridge_balancing(backend, cred_store, debug=debug, validate=validate, logging_enabled=logging_enabled)
         return
 
     profile = backend  # type: ignore[assignment]
@@ -316,6 +323,7 @@ def _run_bridge(
         model=profile.model,  # type: ignore[union-attr]
         debug=debug,
         provider_config=getattr(profile, "provider_config", {}),
+        logging_enabled=logging_enabled,
     )
 
     async def run_server() -> None:
@@ -364,6 +372,7 @@ def _run_bridge_balancing(
     *,
     debug: bool = False,
     validate: bool = True,
+    logging_enabled: bool = False,
 ) -> None:
     """Run bridge mode with a balancing profile — random selection across healthy members."""
     import asyncio
@@ -403,12 +412,16 @@ def _run_bridge_balancing(
         debug=debug,
         provider_config=member_profiles[0].provider_config,
         backends=backends,
+        logging_enabled=logging_enabled,
     )
 
     async def run_server() -> None:
         port = await server.start_async()
 
-        members_info = "\n".join(f"  • [kitty.accent]{mp.name}[/kitty.accent] ({mp.provider}/{mp.model})" for mp in member_profiles)
+        members_info = "\n".join(
+            f"  • [kitty.accent]{mp.name}[/kitty.accent] ({mp.provider}/{mp.model})"
+            for mp in member_profiles
+        )
         print_panel(
             "Kitty Bridge Mode (Balancing)",
             f"[kitty.ok]Bridge server running on http://127.0.0.1:{port}[/kitty.ok]\n\n"
@@ -452,13 +465,17 @@ def _launch_target(
     *,
     debug: bool = False,
     validate: bool = True,
+    logging_enabled: bool = False,
 ) -> int:
     from kitty.cli.launcher import launch
     from kitty.profiles.schema import BalancingProfile
     from kitty.providers.registry import get_provider
 
     if isinstance(backend, BalancingProfile):
-        return _launch_target_balancing(adapter, backend, cred_store, extra_args, debug=debug, validate=validate)
+        return _launch_target_balancing(
+            adapter, backend, cred_store, extra_args,
+            debug=debug, validate=validate, logging_enabled=logging_enabled,
+        )
 
     profile = backend
     return launch(
@@ -469,6 +486,7 @@ def _launch_target(
         extra_args=extra_args,
         debug=debug,
         validate=validate,
+        logging_enabled=logging_enabled,
     )
 
 
@@ -480,6 +498,7 @@ def _launch_target_balancing(
     *,
     debug: bool = False,
     validate: bool = True,
+    logging_enabled: bool = False,
 ) -> int:
     """Launch a coding agent with a balancing profile (random healthy member selection)."""
     from kitty.cli.launcher import launch
@@ -516,4 +535,5 @@ def _launch_target_balancing(
         debug=debug,
         validate=validate,
         backends=backends,
+        logging_enabled=logging_enabled,
     )

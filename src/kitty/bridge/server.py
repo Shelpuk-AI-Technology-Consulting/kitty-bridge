@@ -97,6 +97,8 @@ class BridgeServer:
         tls_key: str | None = None,
         state_file: str | None = None,
         backend_cooldown: int = 300,
+        logging_enabled: bool = False,
+        _usage_log_path: Path | None = None,
     ) -> None:
         # TLS validation: both or neither
         if tls_cert and not tls_key:
@@ -147,7 +149,13 @@ class BridgeServer:
         self._backend_health: list[dict] = []
         if backends:
             self._backend_health = [
-                {"healthy": True, "failed_at": None, "cooldown": backend_cooldown} for _ in backends
+                {
+                    "healthy": True,
+                    "failed_at": None,
+                    "cooldown": backend_cooldown,
+                    "stream_error_count": 0,
+                }
+                for _ in backends
             ]
 
         # Active backend for current request (set by _select_backend)
@@ -156,6 +164,10 @@ class BridgeServer:
         self._active_model = model
         self._active_provider_config = provider_config or {}
         self._current_backend_idx: int = -1
+
+        # Usage logging
+        self._logging_enabled = logging_enabled
+        self._usage_log_path = _usage_log_path or (_DEBUG_LOG_DIR / "usage.log")
 
     def _get_next_backend(self) -> tuple[ProviderAdapter, str, str | None, dict]:
         """Select a healthy backend at random with equal probability.
@@ -185,6 +197,7 @@ class BridgeServer:
                         )
                         health["healthy"] = True
                         health["failed_at"] = None
+                        health["stream_error_count"] = 0
                         healthy_indices.append(idx)
 
             if healthy_indices:
@@ -202,19 +215,29 @@ class BridgeServer:
 
         return self._provider, self._resolved_key, self._model, self._provider_config or {}, -1
 
-    def _mark_backend_unhealthy(self, index: int) -> None:
+    def _mark_backend_unhealthy(self, index: int, *, cooldown: int | None = None) -> None:
         """Mark a backend as unhealthy and log the event."""
         if not self._backends or index >= len(self._backend_health):
             return
         health = self._backend_health[index]
         health["healthy"] = False
         health["failed_at"] = time.monotonic()
+
+        if cooldown is not None:
+            health["cooldown"] = cooldown
+            # If this is a stream error, increment the error count
+            if cooldown < self._backend_cooldown:
+                health["stream_error_count"] = health.get("stream_error_count", 0) + 1
+        else:
+            health["cooldown"] = self._backend_cooldown
+            health["stream_error_count"] = 0  # Reset on persistent error
+
         profile_name = self._backends[index][2].name
-        cooldown = health["cooldown"]
+        cooldown_val = health["cooldown"]
         logger.info(
             "Backend %s marked unhealthy for %ds after upstream error",
             profile_name,
-            cooldown,
+            cooldown_val,
         )
 
     def _any_healthy_backend(self) -> bool:
@@ -230,6 +253,20 @@ class BridgeServer:
                 if elapsed >= health["cooldown"]:
                     return True
         return False
+
+    def _get_stream_error_cooldown(self, backend_idx: int) -> int:
+        """Return cooldown for a transient stream error on the given backend.
+
+        Uses exponential backoff starting at 30s, doubling on repeated failures.
+        """
+        if not self._backends or backend_idx < 0:
+            return 30
+        health = self._backend_health[backend_idx]
+        # First failure: start at 30s regardless of initial cooldown
+        if health["healthy"] or health.get("stream_error_count", 0) == 0:
+            return 30
+        count = health.get("stream_error_count", 0)
+        return min(30 * (2**count), self._backend_cooldown)
 
     @staticmethod
     def _is_upstream_stream_error(chunk: dict) -> bool:
@@ -317,6 +354,30 @@ class BridgeServer:
             bridge_logger.addHandler(fh)
 
         return _DEBUG_LOG_PATH
+
+    def _log_usage(self, usage: dict | None) -> None:
+        """Append a JSONL usage entry to the usage log file.
+
+        Fire-and-forget: failures are logged but never raised.
+        """
+        if not self._logging_enabled:
+            return
+        try:
+            usage = usage or {}
+            entry = {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "profile": self._profile_name,
+                "provider": self._active_provider.provider_type,
+                "model": self._active_model or "",
+                "input_tokens": usage.get("prompt_tokens", 0),
+                "output_tokens": usage.get("completion_tokens", 0),
+            }
+            line = json.dumps(entry, ensure_ascii=False) + "\n"
+            self._usage_log_path.parent.mkdir(parents=True, exist_ok=True)
+            with self._usage_log_path.open("a", encoding="utf-8") as f:
+                f.write(line)
+        except Exception as exc:
+            logger.debug("Failed to write usage log: %s", exc)
 
     # ── Lifecycle ─────────────────────────────────────────────────────────
 
@@ -598,6 +659,7 @@ class BridgeServer:
             )
 
         result = translator.translate_response(cc_response)
+        self._log_usage(cc_response.get("usage"))
         return web.json_response(result)
 
     async def _stream_responses(
@@ -626,6 +688,7 @@ class BridgeServer:
 
         upstream_status = None
         terminal_status = "completed"
+        last_usage: dict | None = None
         try:
             session = await self._get_session()
             url = self._build_upstream_url()
@@ -718,17 +781,22 @@ class BridgeServer:
                                     continue
                                 # In balancing mode: detect in-stream errors and failover
                                 if self._is_upstream_stream_error(chunk):
-                                    logger.error("Upstream sent error in stream chunk: %s", json.dumps(chunk)[:500])
+                                    logger.warning("Upstream sent error in stream chunk: %s", json.dumps(chunk)[:500])
                                     if self._backends and self._current_backend_idx >= 0:
-                                        self._mark_backend_unhealthy(self._current_backend_idx)
+                                        cooldown = self._get_stream_error_cooldown(self._current_backend_idx)
+                                        self._mark_backend_unhealthy(self._current_backend_idx, cooldown=cooldown)
                                         if self._any_healthy_backend():
                                             stream_error = True
                                             done = True
                                             break
-                                    # No healthy backends — pass error to agent via translator
+                                    # No healthy backends — skip the error chunk, let terminal error handle it
+                                    stream_error = True
+                                    done = True
+                                    break
                                 events = translator.translate_stream_chunk(response_id, chunk)
                                 # Buffer finish events to detect empty responses before writing
                                 if self._chunk_has_finish_reason(chunk):
+                                    last_usage = chunk.get("usage")
                                     finish_events.extend(events)
                                 else:
                                     for event in events:
@@ -753,6 +821,7 @@ class BridgeServer:
                                     chunk = json.loads(data_str)
                                     events = translator.translate_stream_chunk(response_id, chunk)
                                     if self._chunk_has_finish_reason(chunk):
+                                        last_usage = chunk.get("usage")
                                         finish_events.extend(events)
                                     else:
                                         for event in events:
@@ -776,8 +845,19 @@ class BridgeServer:
                                 max_attempts,
                             )
                             continue
-                        # No more backends — error already logged, stream continues to end
+                        # No more backends — emit error event and mark incomplete
                         terminal_status = "incomplete"
+                        error_event = responses_format_error(
+                            {"code": "upstream_error", "message": "All upstream providers returned errors"},
+                            seq=translator._next_seq(),
+                        )
+                        try:
+                            await sr.write(error_event.encode())
+                        except (ConnectionResetError, BrokenPipeError, OSError):
+                            logger.debug(
+                                "Client disconnected before error could be sent for %s",
+                                response_id,
+                            )
 
                     # Check for empty response
                     if translator.response_was_empty and finish_events:
@@ -822,8 +902,8 @@ class BridgeServer:
                     for event in finish_events:
                         logger.debug("SSE (finish) → %s", event.split("\n", 1)[0][:120])
                         await sr.write(event.encode())
+                    self._log_usage(last_usage)
                     break  # Exit retry loop
-
         except asyncio.TimeoutError:
             terminal_status = "incomplete"
             logger.error("Upstream POST timed out after %ds for %s", _STREAM_READ_TIMEOUT, response_id)
@@ -831,8 +911,7 @@ class BridgeServer:
                 {
                     "code": "timeout",
                     "message": (
-                        f"Upstream provider timed out ({_STREAM_READ_TIMEOUT}s). "
-                        "Try /clear to reduce context size."
+                        f"Upstream provider timed out ({_STREAM_READ_TIMEOUT}s). Try /clear to reduce context size."
                     ),
                 },
                 seq=translator._next_seq(),
@@ -932,6 +1011,7 @@ class BridgeServer:
             )
 
         result = translator.translate_response(cc_response)
+        self._log_usage(cc_response.get("usage"))
         return web.json_response(result)
 
     async def _stream_messages(
@@ -952,6 +1032,7 @@ class BridgeServer:
         )
         await sr.prepare(request)
 
+        last_usage: dict | None = None
         try:
             session = await self._get_session()
             url = self._build_upstream_url()
@@ -989,8 +1070,7 @@ class BridgeServer:
                                     headers = self._build_upstream_headers()
                                     upstream_body = self._active_provider.translate_to_upstream(cc_request)
                                     logger.info(
-                                        "Messages stream failover: attempt %d/%d "
-                                        "(status %d), switching backend",
+                                        "Messages stream failover: attempt %d/%d (status %d), switching backend",
                                         attempt + 1,
                                         max_attempts,
                                         upstream.status,
@@ -1039,17 +1119,24 @@ class BridgeServer:
                                         continue
                                     # In balancing mode: detect in-stream errors and failover
                                     if self._is_upstream_stream_error(chunk):
-                                        logger.error("Upstream sent error in stream chunk: %s", json.dumps(chunk)[:500])
+                                        logger.warning(
+                                            "Upstream sent error in stream chunk: %s", json.dumps(chunk)[:500]
+                                        )
                                         if self._backends and self._current_backend_idx >= 0:
-                                            self._mark_backend_unhealthy(self._current_backend_idx)
+                                            cooldown = self._get_stream_error_cooldown(self._current_backend_idx)
+                                            self._mark_backend_unhealthy(self._current_backend_idx, cooldown=cooldown)
                                             if self._any_healthy_backend():
                                                 stream_error = True
                                                 done = True
                                                 break
-                                        # No healthy backends — pass error to agent via translator
+                                        # No healthy backends — skip the error chunk and let terminal error handle it
+                                        stream_error = True
+                                        done = True
+                                        break
                                     events = translator.translate_stream_chunk(message_id, model, chunk)
                                     # Buffer finish events to detect empty responses before writing
                                     if self._chunk_has_finish_reason(chunk):
+                                        last_usage = chunk.get("usage")
                                         finish_events.extend(events)
                                     else:
                                         for event in events:
@@ -1067,6 +1154,7 @@ class BridgeServer:
                                         chunk = json.loads(data_str)
                                         events = translator.translate_stream_chunk(message_id, model, chunk)
                                         if self._chunk_has_finish_reason(chunk):
+                                            last_usage = chunk.get("usage")
                                             finish_events.extend(events)
                                         else:
                                             for event in events:
@@ -1075,20 +1163,42 @@ class BridgeServer:
                                         logger.warning("Failed to parse flushed SSE data: %s", data_str[:200])
 
                         # Handle in-stream error failover
-                        if stream_error and attempt < max_attempts - 1:
-                            self._select_backend()
-                            self._normalize_model(cc_request)
-                            self._active_provider.normalize_request(cc_request)
-                            url = self._build_upstream_url()
-                            headers = self._build_upstream_headers()
-                            upstream_body = self._active_provider.translate_to_upstream(cc_request)
-                            logger.info(
-                                "Messages stream in-stream error: "
-                                "attempt %d/%d, switching backend",
-                                attempt + 1,
-                                max_attempts,
+                        if stream_error:
+                            if attempt < max_attempts - 1:
+                                self._select_backend()
+                                self._normalize_model(cc_request)
+                                self._active_provider.normalize_request(cc_request)
+                                url = self._build_upstream_url()
+                                headers = self._build_upstream_headers()
+                                upstream_body = self._active_provider.translate_to_upstream(cc_request)
+                                logger.info(
+                                    "Messages stream in-stream error: attempt %d/%d, switching backend",
+                                    attempt + 1,
+                                    max_attempts,
+                                )
+                                continue
+                            # All backends failed — emit clean error event
+                            error_event = messages_format_error(
+                                {
+                                    "type": "error",
+                                    "error": {
+                                        "type": "api_error",
+                                        "message": "All upstream providers returned errors",
+                                    },
+                                },
                             )
-                            continue
+                            try:
+                                await sr.write(error_event.encode())
+                            except (
+                                ConnectionResetError,
+                                BrokenPipeError,
+                                OSError,
+                            ):
+                                logger.debug(
+                                    "Client disconnected before error could be sent for %s",
+                                    message_id,
+                                )
+                            break
 
                         # Check for empty response: if the translator detected an empty stream
                         # (finish_reason but no content), buffer the fallback events and retry
@@ -1141,6 +1251,7 @@ class BridgeServer:
                         # Write buffered finish events to client
                         for event in finish_events:
                             await sr.write(event.encode())
+                        self._log_usage(last_usage)
                         break  # Exit retry loop
                 except Exception as exc:
                     if _is_retryable_exception(exc):
@@ -1209,8 +1320,7 @@ class BridgeServer:
                     "error": {
                         "type": "api_error",
                         "message": (
-                            f"Upstream provider timed out ({_STREAM_READ_TIMEOUT}s). "
-                            "Try /clear to reduce context size."
+                            f"Upstream provider timed out ({_STREAM_READ_TIMEOUT}s). Try /clear to reduce context size."
                         ),
                     },
                 },
@@ -1295,6 +1405,7 @@ class BridgeServer:
             )
 
         result = translator.translate_response(cc_response)
+        self._log_usage(cc_response.get("usage"))
         return web.json_response(result)
 
     async def _stream_gemini(
@@ -1312,6 +1423,7 @@ class BridgeServer:
         )
         await sr.prepare(request)
 
+        last_usage: dict | None = None
         try:
             session = await self._get_session()
             url = self._build_upstream_url()
@@ -1398,17 +1510,22 @@ class BridgeServer:
                                     continue
                                 # In balancing mode: detect in-stream errors and failover
                                 if self._is_upstream_stream_error(chunk):
-                                    logger.error("Upstream sent error in stream chunk: %s", json.dumps(chunk)[:500])
+                                    logger.warning("Upstream sent error in stream chunk: %s", json.dumps(chunk)[:500])
                                     if self._backends and self._current_backend_idx >= 0:
-                                        self._mark_backend_unhealthy(self._current_backend_idx)
+                                        cooldown = self._get_stream_error_cooldown(self._current_backend_idx)
+                                        self._mark_backend_unhealthy(self._current_backend_idx, cooldown=cooldown)
                                         if self._any_healthy_backend():
                                             stream_error = True
                                             done = True
                                             break
-                                    # No healthy backends — pass error to agent via translator
+                                    # No healthy backends — skip the error chunk, let terminal error handle it
+                                    stream_error = True
+                                    done = True
+                                    break
                                 events = translator.translate_stream_chunk(chunk)
                                 # Buffer finish events to detect empty responses before writing
                                 if self._chunk_has_finish_reason(chunk):
+                                    last_usage = chunk.get("usage")
                                     finish_events.extend(events)
                                 else:
                                     for event in events:
@@ -1424,6 +1541,7 @@ class BridgeServer:
                                     chunk = json.loads(data_str)
                                     events = translator.translate_stream_chunk(chunk)
                                     if self._chunk_has_finish_reason(chunk):
+                                        last_usage = chunk.get("usage")
                                         finish_events.extend(events)
                                     else:
                                         for event in events:
@@ -1490,6 +1608,7 @@ class BridgeServer:
                     # Write buffered finish events
                     for event in finish_events:
                         await sr.write(event.encode())
+                    self._log_usage(last_usage)
                     break  # Exit retry loop
 
         except asyncio.TimeoutError:
@@ -1663,6 +1782,7 @@ class BridgeServer:
                 status=500,
             )
 
+        self._log_usage(cc_response.get("usage"))
         return web.json_response(cc_response)
 
     async def _stream_chat_completions(
@@ -1680,6 +1800,7 @@ class BridgeServer:
         await sr.prepare(request)
 
         upstream_status = None
+        last_usage: dict | None = None
         try:
             session = await self._get_session()
             url = self._build_upstream_url()
@@ -1712,8 +1833,7 @@ class BridgeServer:
                                 headers = self._build_upstream_headers()
                                 upstream_body = self._active_provider.translate_to_upstream(cc_request)
                                 logger.info(
-                                    "CC stream failover: attempt %d/%d "
-                                    "(status %d), switching backend",
+                                    "CC stream failover: attempt %d/%d (status %d), switching backend",
                                     attempt + 1,
                                     max_attempts,
                                     upstream.status,
@@ -1747,27 +1867,43 @@ class BridgeServer:
                     has_content = False
                     async for chunk_bytes in upstream.content:
                         try:
-                            # Detect in-stream errors for balancing mode
-                            if self._backends:
-                                raw = chunk_bytes.decode("utf-8", errors="replace")
-                                # Check for error markers in SSE data
-                                if '"error"' in raw or '"type":"error"' in raw:
-                                    # Try to parse and check if it's actually an error
-                                    for line in raw.split("\n"):
-                                        if line.startswith("data: ") and not line.endswith("[DONE]"):
-                                            data_str = line[6:]
-                                            try:
-                                                chunk = json.loads(data_str)
-                                                if self._is_upstream_stream_error(chunk):
-                                                    logger.error("Upstream sent error in stream chunk: %s", raw[:500])
-                                                    self._mark_backend_unhealthy(self._current_backend_idx)
-                                                    if self._any_healthy_backend():
-                                                        stream_error = True
-                                                        break
-                                            except json.JSONDecodeError:
-                                                pass
-                                    if stream_error:
-                                        break
+                            # Detect in-stream errors (both balancing and non-balancing)
+                            raw = chunk_bytes.decode("utf-8", errors="replace")
+                            if '"error"' in raw or '"type":"error"' in raw:
+                                # Try to parse and check if it's actually an error
+                                for line in raw.split("\n"):
+                                    if line.startswith("data: ") and not line.endswith("[DONE]"):
+                                        data_str = line[6:]
+                                        try:
+                                            chunk = json.loads(data_str)
+                                            if self._is_upstream_stream_error(chunk):
+                                                logger.warning("Upstream sent error in stream chunk: %s", raw[:500])
+                                                if self._backends and self._current_backend_idx >= 0:
+                                                    cooldown = self._get_stream_error_cooldown(
+                                                        self._current_backend_idx
+                                                    )
+                                                    self._mark_backend_unhealthy(
+                                                        self._current_backend_idx, cooldown=cooldown
+                                                    )
+                                                stream_error = True
+                                                break
+                                        except json.JSONDecodeError:
+                                            pass
+                                if stream_error:
+                                    break
+
+                            # Extract usage for logging
+                            for line in raw.split("\n"):
+                                if line.startswith("data: "):
+                                    data_str = line[6:]
+                                    if data_str.strip() != "[DONE]":
+                                        try:
+                                            chunk = json.loads(data_str)
+                                            if "usage" in chunk:
+                                                last_usage = chunk["usage"]
+                                        except json.JSONDecodeError:
+                                            pass
+
                             for translated in self._active_provider.translate_upstream_stream_event(chunk_bytes):
                                 has_content = True
                                 await sr.write(translated)
@@ -1776,20 +1912,47 @@ class BridgeServer:
                             break
 
                     # Handle in-stream error failover
-                    if stream_error and attempt < max_attempts - 1:
-                        self._select_backend()
-                        self._normalize_model(cc_request)
-                        self._active_provider.normalize_request(cc_request)
-                        url = self._build_upstream_url()
-                        headers = self._build_upstream_headers()
-                        upstream_body = self._active_provider.translate_to_upstream(cc_request)
-                        logger.info(
-                            "CC stream in-stream error: "
-                            "attempt %d/%d, switching backend",
-                            attempt + 1,
-                            max_attempts,
-                        )
-                        continue
+                    if stream_error:
+                        if not self._backends or not self._any_healthy_backend():
+                            # All backends failed or non-balancing — emit clean error and stop
+                            error_payload = {
+                                "error": {
+                                    "message": "All upstream providers returned errors",
+                                    "type": "upstream_error",
+                                }
+                            }
+                            error_sse = f"data: {json.dumps(error_payload)}\n\n"
+                            try:
+                                await sr.write(error_sse.encode())
+                            except (ConnectionResetError, BrokenPipeError, OSError):
+                                logger.debug("Client disconnected before upstream error could be sent")
+                            break
+                        if attempt < max_attempts - 1:
+                            self._select_backend()
+                            self._normalize_model(cc_request)
+                            self._active_provider.normalize_request(cc_request)
+                            url = self._build_upstream_url()
+                            headers = self._build_upstream_headers()
+                            upstream_body = self._active_provider.translate_to_upstream(cc_request)
+                            logger.info(
+                                "CC stream in-stream error: attempt %d/%d, switching backend",
+                                attempt + 1,
+                                max_attempts,
+                            )
+                            continue
+                        # Exhausted all attempts — emit error and stop
+                        error_payload = {
+                            "error": {
+                                "message": "All upstream providers returned errors",
+                                "type": "upstream_error",
+                            }
+                        }
+                        error_sse = f"data: {json.dumps(error_payload)}\n\n"
+                        try:
+                            await sr.write(error_sse.encode())
+                        except (ConnectionResetError, BrokenPipeError, OSError):
+                            logger.debug("Client disconnected before upstream error could be sent")
+                        break
 
                     # Check for empty response (pass-through: no content bytes written)
                     if not has_content:
@@ -1818,6 +1981,7 @@ class BridgeServer:
                             )
                             await asyncio.sleep(delay)
                             continue
+                    self._log_usage(last_usage)
                     break  # Exit retry loop
 
         except asyncio.TimeoutError:
