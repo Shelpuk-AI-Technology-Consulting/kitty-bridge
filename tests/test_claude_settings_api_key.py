@@ -51,9 +51,9 @@ class TestApiKeyInSettingsEnv:
         assert patched["env"]["ANTHROPIC_API_KEY"] == "sk-test-key-123"
 
     def test_does_not_remove_auth_token_from_settings_env(self, tmp_path: Path):
-        """ANTHROPIC_AUTH_TOKEN must NOT be removed — it is not sent to the
-        bridge; the bridge always uses Bearer {resolved_key}.  Removing it
-        causes Claude Code to show 'Not logged in'."""
+        """ANTHROPIC_AUTH_TOKEN must be present after prepare_launch — kitty injects
+        its own value so Claude Code does not require login.  If the user had a
+        pre-existing token, kitty's value overrides it."""
         settings_path = tmp_path / ".claude" / "settings.json"
         _write_settings(
             settings_path,
@@ -65,13 +65,16 @@ class TestApiKeyInSettingsEnv:
 
         adapter = ClaudeAdapter()
         adapter.prepare_launch(
-            {"ANTHROPIC_BASE_URL": "http://127.0.0.1:4242"},
+            {
+                "ANTHROPIC_BASE_URL": "http://127.0.0.1:4242",
+                "ANTHROPIC_AUTH_TOKEN": "kitty-bridge-token",
+            },
             settings_path=settings_path,
         )
 
         patched = json.loads(settings_path.read_text(encoding="utf-8"))
-        # ANTHROPIC_AUTH_TOKEN must still be present
-        assert patched["env"]["ANTHROPIC_AUTH_TOKEN"] == "secret-token"
+        # ANTHROPIC_AUTH_TOKEN must still be present (kitty's value)
+        assert patched["env"]["ANTHROPIC_AUTH_TOKEN"] == "kitty-bridge-token"
 
     def test_bridge_overrides_win_over_pre_existing_settings(self, tmp_path: Path):
         """Bridge env_overrides must win over pre-existing settings.json values."""

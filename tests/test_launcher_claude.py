@@ -67,7 +67,6 @@ class TestClaudeAdapterSpawnConfig:
         config = adapter.build_spawn_config(profile, bridge_port=8080, resolved_key="key")
 
         assert set(config.env_clear) == {
-            "ANTHROPIC_AUTH_TOKEN",
             "ANTHROPIC_BEDROCK_BASE_URL",
             "ANTHROPIC_VERTEX_BASE_URL",
             "ANTHROPIC_FOUNDRY_BASE_URL",
@@ -88,3 +87,23 @@ class TestClaudeAdapterSpawnConfig:
         base_url = config.env_overrides["ANTHROPIC_BASE_URL"]
         assert not base_url.endswith("/v1")
         assert not base_url.endswith("/")
+
+    def test_auth_token_in_env_overrides(self):
+        """ANTHROPIC_AUTH_TOKEN must be in env_overrides so Claude Code does not
+        require an Anthropic account login.  Without it, Claude Code checks for
+        an OAuth token and prompts the user to log in, ignoring ANTHROPIC_API_KEY."""
+        adapter = ClaudeAdapter()
+        profile = _make_profile()
+        config = adapter.build_spawn_config(profile, bridge_port=4242, resolved_key="sk-test")
+
+        assert "ANTHROPIC_AUTH_TOKEN" in config.env_overrides
+        assert config.env_overrides["ANTHROPIC_AUTH_TOKEN"]  # non-empty
+
+    def test_auth_token_not_in_env_clear(self):
+        """ANTHROPIC_AUTH_TOKEN must NOT be in env_clear because kitty sets its own
+        value for it (to bypass the login gate)."""
+        adapter = ClaudeAdapter()
+        profile = _make_profile()
+        config = adapter.build_spawn_config(profile, bridge_port=4242, resolved_key="sk-test")
+
+        assert "ANTHROPIC_AUTH_TOKEN" not in config.env_clear

@@ -64,7 +64,7 @@ class TestPrepareLaunch:
         assert patched["env"]["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "minimax-m2.7"
         assert patched["env"]["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "minimax-m2.7"
 
-    def test_auth_token_preserved_not_removed(self, tmp_path: Path):
+    def test_auth_token_preserved_when_present(self, tmp_path: Path):
         """ANTHROPIC_AUTH_TOKEN must NOT be removed from settings.json env.
         The bridge uses Bearer auth (Authorization header) independently of
         ANTHROPIC_AUTH_TOKEN, and removing it causes 'Not logged in' errors."""
@@ -78,11 +78,34 @@ class TestPrepareLaunch:
         )
 
         adapter = ClaudeAdapter()
-        env_overrides = {"ANTHROPIC_BASE_URL": "http://127.0.0.1:4242", "ANTHROPIC_API_KEY": "sk-test"}
+        env_overrides = {
+            "ANTHROPIC_BASE_URL": "http://127.0.0.1:4242",
+            "ANTHROPIC_API_KEY": "sk-test",
+            "ANTHROPIC_AUTH_TOKEN": "kitty-bridge-token",
+        }
         adapter.prepare_launch(env_overrides, settings_path=settings_path)
 
         patched = json.loads(settings_path.read_text(encoding="utf-8"))
-        assert patched["env"]["ANTHROPIC_AUTH_TOKEN"] == "secret-token"
+        # kitty's token must override the existing one
+        assert patched["env"]["ANTHROPIC_AUTH_TOKEN"] == "kitty-bridge-token"
+
+    def test_auth_token_injected_when_missing(self, tmp_path: Path):
+        """ANTHROPIC_AUTH_TOKEN must be injected into settings.json even when
+        the user is logged out (no prior token).  Without it, Claude Code
+        requires an Anthropic account login and ignores ANTHROPIC_API_KEY."""
+        settings_path = tmp_path / ".claude" / "settings.json"
+        _write_settings(settings_path, env={})
+
+        adapter = ClaudeAdapter()
+        env_overrides = {
+            "ANTHROPIC_BASE_URL": "http://127.0.0.1:4242",
+            "ANTHROPIC_API_KEY": "sk-test",
+            "ANTHROPIC_AUTH_TOKEN": "kitty-bridge-token",
+        }
+        adapter.prepare_launch(env_overrides, settings_path=settings_path)
+
+        patched = json.loads(settings_path.read_text(encoding="utf-8"))
+        assert patched["env"]["ANTHROPIC_AUTH_TOKEN"] == "kitty-bridge-token"
 
     def test_preserves_other_settings_fields(self, tmp_path: Path):
         settings_path = tmp_path / ".claude" / "settings.json"

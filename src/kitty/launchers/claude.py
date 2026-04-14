@@ -50,7 +50,6 @@ def _atomic_write_text(path: Path, content: str) -> None:
 __all__ = ["ClaudeAdapter"]
 
 _CONFLICTING_ENV_VARS: tuple[str, ...] = (
-    "ANTHROPIC_AUTH_TOKEN",
     "ANTHROPIC_BEDROCK_BASE_URL",
     "ANTHROPIC_VERTEX_BASE_URL",
     "ANTHROPIC_FOUNDRY_BASE_URL",
@@ -61,6 +60,7 @@ _CONFLICTING_ENV_VARS: tuple[str, ...] = (
 _SETTINGS_ENV_OVERRIDE_KEYS: tuple[str, ...] = (
     "ANTHROPIC_BASE_URL",
     "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
     "ANTHROPIC_MODEL",
     "ANTHROPIC_DEFAULT_OPUS_MODEL",
     "ANTHROPIC_DEFAULT_SONNET_MODEL",
@@ -108,6 +108,7 @@ class ClaudeAdapter(LauncherAdapter):
             env_overrides={
                 "ANTHROPIC_BASE_URL": f"http://127.0.0.1:{bridge_port}",
                 "ANTHROPIC_API_KEY": resolved_key,
+                "ANTHROPIC_AUTH_TOKEN": "kitty-bridge-token",
                 "ANTHROPIC_MODEL": profile.model,
                 "ANTHROPIC_DEFAULT_OPUS_MODEL": profile.model,
                 "ANTHROPIC_DEFAULT_SONNET_MODEL": profile.model,

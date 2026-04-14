@@ -117,7 +117,8 @@ class TestAdapterSpawnConfig:
         assert config.env_overrides["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "claude-3-opus"
         assert config.env_overrides["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "claude-3-opus"
         assert config.env_overrides["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "claude-3-opus"
-        assert "ANTHROPIC_AUTH_TOKEN" in config.env_clear
+        assert "ANTHROPIC_AUTH_TOKEN" not in config.env_clear
+        assert config.env_overrides["ANTHROPIC_AUTH_TOKEN"] == "kitty-bridge-token"
         assert "ANTHROPIC_BEDROCK_BASE_URL" in config.env_clear
         assert "ANTHROPIC_VERTEX_BASE_URL" in config.env_clear
         assert "ANTHROPIC_FOUNDRY_BASE_URL" in config.env_clear
