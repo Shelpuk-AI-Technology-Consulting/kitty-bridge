@@ -196,8 +196,10 @@ class TestAzureNormalizeModelName:
     def setup_method(self):
         self.adapter = AzureOpenAIAdapter()
 
-    def test_returns_unchanged(self):
-        # Azure uses deployment names, not model names — passthrough
+    def test_strips_prefix(self):
+        assert self.adapter.normalize_model_name("azure/my-gpt4o-deployment") == "my-gpt4o-deployment"
+
+    def test_no_prefix(self):
         assert self.adapter.normalize_model_name("my-gpt4o-deployment") == "my-gpt4o-deployment"
 
 

@@ -337,13 +337,23 @@ class TestBedrockNormalizeModelName:
     def setup_method(self):
         self.adapter = BedrockAdapter()
 
-    def test_returns_unchanged(self):
+    def test_strips_prefix(self):
+        """Bedrock adapter strips provider prefix."""
+        assert (
+            self.adapter.normalize_model_name("bedrock/anthropic.claude-sonnet-4-20250514")
+            == "anthropic.claude-sonnet-4-20250514"
+        )
+        assert (
+            self.adapter.normalize_model_name("bedrock/us.anthropic.claude-sonnet-4-20250514")
+            == "us.anthropic.claude-sonnet-4-20250514"
+        )
+
+    def test_no_prefix(self):
+        """Model names without prefix pass through."""
         assert (
             self.adapter.normalize_model_name("anthropic.claude-sonnet-4-20250514")
             == "anthropic.claude-sonnet-4-20250514"
         )
-
-    def test_cross_region_prefix_preserved(self):
         assert (
             self.adapter.normalize_model_name("us.anthropic.claude-sonnet-4-20250514")
             == "us.anthropic.claude-sonnet-4-20250514"

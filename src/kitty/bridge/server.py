@@ -1814,6 +1814,12 @@ class BridgeServer:
             n_backends = len(self._backends) if self._backends else 1
             max_attempts = (_MAX_RETRIES + 1) * n_backends
             for attempt in range(max_attempts):
+                # Reset stream state for each retry attempt
+                line_buffer = ""
+                done = False
+                stream_error = False
+                has_content = False
+                chunk_count = 0
                 async with session.post(url, json=upstream_body, headers=headers, timeout=stream_timeout) as upstream:
                     upstream_status = upstream.status
                     logger.debug("Upstream response status: %d", upstream.status)
@@ -1862,54 +1868,99 @@ class BridgeServer:
                             logger.debug("Client disconnected before upstream error could be sent")
                         break
 
-                    # Success path — pass-through stream
-                    stream_error = False
-                    has_content = False
+                    # Success path — line-buffered SSE pass-through stream
                     async for chunk_bytes in upstream.content:
                         try:
-                            # Detect in-stream errors (both balancing and non-balancing)
-                            raw = chunk_bytes.decode("utf-8", errors="replace")
-                            if '"error"' in raw or '"type":"error"' in raw:
-                                # Try to parse and check if it's actually an error
-                                for line in raw.split("\n"):
-                                    if line.startswith("data: ") and not line.endswith("[DONE]"):
-                                        data_str = line[6:]
-                                        try:
-                                            chunk = json.loads(data_str)
-                                            if self._is_upstream_stream_error(chunk):
-                                                logger.warning("Upstream sent error in stream chunk: %s", raw[:500])
-                                                if self._backends and self._current_backend_idx >= 0:
-                                                    cooldown = self._get_stream_error_cooldown(
-                                                        self._current_backend_idx
-                                                    )
-                                                    self._mark_backend_unhealthy(
-                                                        self._current_backend_idx, cooldown=cooldown
-                                                    )
-                                                stream_error = True
-                                                break
-                                        except json.JSONDecodeError:
-                                            pass
-                                if stream_error:
+                            if done:
+                                break
+                            chunk_count += 1
+                            line_buffer += chunk_bytes.decode("utf-8", errors="replace")
+                            while "\n" in line_buffer:
+                                line, line_buffer = line_buffer.split("\n", 1)
+                                line = line.rstrip("\r")
+                                if not line:
+                                    continue
+                                if not line.startswith("data: "):
+                                    # Non-data SSE fields (event:, id:, retry:) not used by CC providers
+                                    continue
+                                data_str = line[6:]
+                                if data_str.strip() == "[DONE]":
+                                    raw_line_bytes = f"{line}\n\n".encode()
+                                    for translated in self._active_provider.translate_upstream_stream_event(
+                                        raw_line_bytes
+                                    ):
+                                        has_content = True
+                                        await sr.write(translated)
+                                    done = True
                                     break
-
-                            # Extract usage for logging
-                            for line in raw.split("\n"):
-                                if line.startswith("data: "):
-                                    data_str = line[6:]
-                                    if data_str.strip() != "[DONE]":
-                                        try:
-                                            chunk = json.loads(data_str)
-                                            if "usage" in chunk:
-                                                last_usage = chunk["usage"]
-                                        except json.JSONDecodeError:
-                                            pass
-
-                            for translated in self._active_provider.translate_upstream_stream_event(chunk_bytes):
-                                has_content = True
-                                await sr.write(translated)
+                                try:
+                                    chunk = json.loads(data_str)
+                                except json.JSONDecodeError:
+                                    # Non-JSON data line — pass through
+                                    raw_line_bytes = f"{line}\n\n".encode()
+                                    for translated in self._active_provider.translate_upstream_stream_event(
+                                        raw_line_bytes
+                                    ):
+                                        has_content = True
+                                        await sr.write(translated)
+                                    continue
+                                # Detect in-stream errors
+                                if self._is_upstream_stream_error(chunk):
+                                    logger.warning("Upstream sent error in stream chunk: %s", data_str[:500])
+                                    if self._backends and self._current_backend_idx >= 0:
+                                        cooldown = self._get_stream_error_cooldown(self._current_backend_idx)
+                                        self._mark_backend_unhealthy(self._current_backend_idx, cooldown=cooldown)
+                                    stream_error = True
+                                    done = True
+                                    break
+                                # Extract usage for logging
+                                if "usage" in chunk and chunk["usage"] is not None:
+                                    last_usage = chunk["usage"]
+                                # Forward non-error chunk
+                                raw_line_bytes = f"{line}\n\n".encode()
+                                for translated in self._active_provider.translate_upstream_stream_event(
+                                    raw_line_bytes
+                                ):
+                                    has_content = True
+                                    await sr.write(translated)
                         except (ConnectionResetError, BrokenPipeError, OSError):
                             logger.debug("Client disconnected during streaming")
                             break
+
+                    logger.debug("Upstream stream ended. chunks=%d done=%s", chunk_count, done)
+
+                    # Flush remaining buffer (last chunk without trailing \n)
+                    if not done and line_buffer.strip():
+                        line = line_buffer.strip()
+                        if line.startswith("data: "):
+                            data_str = line[6:]
+                            if data_str.strip() == "[DONE]":
+                                raw_line_bytes = f"{line}\n\n".encode()
+                                for translated in self._active_provider.translate_upstream_stream_event(
+                                    raw_line_bytes
+                                ):
+                                    has_content = True
+                                    await sr.write(translated)
+                            else:
+                                try:
+                                    chunk = json.loads(data_str)
+                                    if not self._is_upstream_stream_error(chunk):
+                                        if "usage" in chunk and chunk["usage"] is not None:
+                                            last_usage = chunk["usage"]
+                                        raw_line_bytes = f"{line}\n\n".encode()
+                                        for translated in self._active_provider.translate_upstream_stream_event(
+                                            raw_line_bytes
+                                        ):
+                                            has_content = True
+                                            await sr.write(translated)
+                                except json.JSONDecodeError:
+                                    raw_line_bytes = f"{line}\n\n".encode()
+                                    for translated in self._active_provider.translate_upstream_stream_event(
+                                        raw_line_bytes
+                                    ):
+                                        has_content = True
+                                        await sr.write(translated)
+                        line_buffer = ""  # Buffer consumed
 
                     # Handle in-stream error failover
                     if stream_error:

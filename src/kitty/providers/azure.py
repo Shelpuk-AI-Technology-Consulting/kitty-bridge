@@ -107,7 +107,9 @@ class AzureOpenAIAdapter(ProviderAdapter):
         """No normalization needed for Azure OpenAI (CC-compatible)."""
 
     def normalize_model_name(self, model: str) -> str:
-        """Azure uses deployment names — passthrough."""
+        """Strip provider prefix if present (e.g. 'azure/my-gpt4o')."""
+        if "/" in model:
+            return model.split("/", 1)[1] or model
         return model
 
     # ── Standard ProviderAdapter methods ─────────────────────────────────
@@ -126,7 +128,8 @@ class AzureOpenAIAdapter(ProviderAdapter):
         return request
 
     def parse_response(self, response_data: dict) -> dict:
-        choice = response_data.get("choices", [{}])[0]
+        choices = response_data.get("choices") or [{}]
+        choice = choices[0] if choices else {}
         message = choice.get("message", {})
         result: dict = {
             "content": message.get("content"),

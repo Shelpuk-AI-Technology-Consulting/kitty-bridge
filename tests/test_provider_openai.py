@@ -150,9 +150,13 @@ class TestOpenAIAdapter:
     def test_normalize_model_name_returns_unchanged(self):
         assert self.adapter.normalize_model_name("gpt-4o") == "gpt-4o"
 
-    def test_normalize_model_name_passthrough(self):
-        """OpenAI is the canonical API — no prefix stripping needed."""
-        assert self.adapter.normalize_model_name("o3") == "o3"
+    def test_normalize_model_name_strips_prefix(self):
+        """OpenAI adapter strips provider prefix."""
+        assert self.adapter.normalize_model_name("openai/gpt-4o") == "gpt-4o"
+        assert self.adapter.normalize_model_name("openai/o3") == "o3"
+
+    def test_normalize_model_name_no_prefix(self):
+        """Model names without prefix pass through."""
         assert self.adapter.normalize_model_name("gpt-4.1") == "gpt-4.1"
 
     def test_normalize_request_does_nothing(self):

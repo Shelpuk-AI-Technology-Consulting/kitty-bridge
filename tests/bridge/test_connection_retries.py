@@ -305,7 +305,7 @@ class TestMessagesConnectionRetries:
 
     @pytest.mark.asyncio
     async def test_retry_logging(self, caplog):
-        """Retries produce WARNING-level log messages."""
+        """Retries produce DEBUG-level log messages."""
         adapter = StubLauncher(BridgeProtocol.MESSAGES_API)
         provider = StubProvider()
         server = BridgeServer(adapter, provider, "test-key")
@@ -339,10 +339,9 @@ class TestMessagesConnectionRetries:
                     ):
                         await resp.read()
 
-                    # Should have a retry warning
-                    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
-                    retry_msgs = [r for r in warnings if "retrying" in r.message.lower()]
-                    assert len(retry_msgs) > 0, f"Expected retry warning, got: {[r.message for r in warnings]}"
+                    # Should have a retry debug log
+                    retry_msgs = [r for r in caplog.records if "retrying" in r.message.lower()]
+                    assert len(retry_msgs) > 0, f"Expected retry log, got: {[r.message for r in caplog.records]}"
         finally:
             await server.stop_async()
 

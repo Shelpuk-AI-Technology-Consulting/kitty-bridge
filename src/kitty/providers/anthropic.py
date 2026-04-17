@@ -311,10 +311,10 @@ class AnthropicAdapter(ProviderAdapter):
     # ── Standard ProviderAdapter methods ─────────────────────────────────
 
     def normalize_model_name(self, model: str) -> str:
-        """Strip provider prefix if present (e.g. 'anthropic/claude-sonnet-4-6')."""
+        """Strip provider prefix and normalize version separators (e.g. '4.6' -> '4-6')."""
         if "/" in model:
-            return model.rsplit("/", 1)[-1]
-        return model
+            model = model.split("/", 1)[1] or model
+        return model.replace(".", "-")
 
     def build_request(self, model: str, messages: list[dict], **kwargs: object) -> dict:
         request: dict = {

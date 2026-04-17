@@ -1,7 +1,5 @@
 """Tests for Ollama provider adapter."""
 
-import pytest
-
 from kitty.providers.ollama import OllamaAdapter, ProviderError
 
 
@@ -41,8 +39,14 @@ class TestOllamaAdapter:
         headers2 = adapter.build_upstream_headers("ollama")
         assert headers1 == headers2
 
-    def test_normalize_model_name_passthrough(self):
-        """OllamaAdapter passes model names through unchanged."""
+    def test_normalize_model_name_strips_prefix(self):
+        """OllamaAdapter strips provider prefix."""
+        adapter = OllamaAdapter()
+        assert adapter.normalize_model_name("ollama/llama3.2") == "llama3.2"
+        assert adapter.normalize_model_name("ollama/mistral") == "mistral"
+
+    def test_normalize_model_name_no_prefix(self):
+        """Model names without prefix pass through."""
         adapter = OllamaAdapter()
         assert adapter.normalize_model_name("llama3.2") == "llama3.2"
         assert adapter.normalize_model_name("codellama:7b") == "codellama:7b"
@@ -109,13 +113,13 @@ class TestOllamaAdapter:
         result = adapter.parse_response(resp)
         assert result["tool_calls"] == tool_calls
 
-    def test_parse_response_missing_choices_raises(self):
-        """OllamaAdapter raises ProviderError when choices is missing or empty."""
+    def test_parse_response_missing_choices_graceful(self):
+        """OllamaAdapter handles missing or empty choices gracefully."""
         adapter = OllamaAdapter()
-        with pytest.raises(ProviderError, match="missing 'choices'"):
-            adapter.parse_response({})
-        with pytest.raises(ProviderError, match="missing 'choices'"):
-            adapter.parse_response({"choices": []})
+        result = adapter.parse_response({})
+        assert result["content"] is None
+        result = adapter.parse_response({"choices": []})
+        assert result["content"] is None
 
     def test_translate_to_upstream_strips_metadata(self):
         """OllamaAdapter translate_to_upstream strips internal metadata fields."""

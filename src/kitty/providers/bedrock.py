@@ -419,6 +419,9 @@ class BedrockAdapter(ProviderAdapter):
     # ── Standard ProviderAdapter methods ─────────────────────────────────
 
     def normalize_model_name(self, model: str) -> str:
+        """Strip provider prefix if present (e.g. 'bedrock/claude-3')."""
+        if "/" in model:
+            return model.split("/", 1)[1] or model
         return model
 
     def build_request(self, model: str, messages: list[dict], **kwargs: object) -> dict:
@@ -435,7 +438,8 @@ class BedrockAdapter(ProviderAdapter):
         return request
 
     def parse_response(self, response_data: dict) -> dict:
-        choice = response_data.get("choices", [{}])[0]
+        choices = response_data.get("choices") or [{}]
+        choice = choices[0] if choices else {}
         message = choice.get("message", {})
         result: dict = {
             "content": message.get("content"),

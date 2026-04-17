@@ -73,17 +73,9 @@ class OllamaAdapter(ProviderAdapter):
         return {"Content-Type": "application/json"}
 
     def normalize_model_name(self, model: str) -> str:
-        """Normalize model name for Ollama.
-
-        Ollama model names are passed through unchanged. Models use
-        formats like ``llama3.2``, ``mistral``, ``codellama:7b``.
-
-        Args:
-            model: Raw model name.
-
-        Returns:
-            The model name unchanged.
-        """
+        """Strip provider prefix if present (e.g. 'ollama/llama3.2')."""
+        if "/" in model:
+            return model.split("/", 1)[1] or model
         return model
 
     def normalize_request(self, cc_request: dict) -> None:
@@ -124,10 +116,8 @@ class OllamaAdapter(ProviderAdapter):
         Raises:
             ProviderError: If the response is missing 'choices' field.
         """
-        choices = response_data.get("choices")
-        if not choices:
-            raise ProviderError(f"Ollama response missing 'choices': {response_data}")
-        choice = choices[0]
+        choices = response_data.get("choices") or [{}]
+        choice = choices[0] if choices else {}
         message = choice.get("message", {})
         result: dict = {
             "content": message.get("content"),
