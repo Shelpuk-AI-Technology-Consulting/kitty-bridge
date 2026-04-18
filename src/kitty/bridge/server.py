@@ -48,6 +48,9 @@ _RATE_LIMIT_PATTERNS = ("limit exhaust", "rate limit", "quota exceeded", "usage 
 _CLIENT_MAX_SIZE = 16 * 1024 * 1024  # 16 MiB
 _STREAM_READ_TIMEOUT = 120  # seconds — upstream must respond with first byte within this
 _MAX_REQUEST_CHARS = 4_000_000  # ~1.2M estimated tokens; requests larger than this are rejected
+_COMPACTION_CHAR_THRESHOLD = int(_MAX_REQUEST_CHARS * 0.7)  # Trigger compaction at 70% of max size
+_COMPACTION_TAIL_COUNT = 20  # Minimum number of recent messages to preserve
+_TOOL_RESULT_TRUNCATION_LIMIT = 50_000  # Max chars for a tool result before truncation
 
 
 def _is_retryable_exception(exc: Exception) -> bool:
@@ -987,6 +990,10 @@ class BridgeServer:
         self._thinking_warned = translator.thinking_warned
 
         logger.debug("Translated CC request: %s", json.dumps(cc_request, indent=2, ensure_ascii=False))
+
+        # Compact messages before size check
+        if "messages" in cc_request:
+            cc_request["messages"] = self._compact_messages(cc_request["messages"])
 
         # P4: Context size guardrail
         size_error = self._check_request_size(cc_request)
@@ -2087,6 +2094,115 @@ class BridgeServer:
             if normalized != model:
                 logger.debug("Normalized model: %s -> %s", model, normalized)
             cc_request["model"] = normalized
+
+
+    def _compact_messages(self, messages: list[dict]) -> list[dict]:
+        """Compact message history to prevent upstream context window overflow.
+
+        Applies two strategies:
+        1. Tool result truncation: Replace large tool outputs with a size notice.
+        2. Head+Tail pruning: Keep system prompt + initial messages (head)
+           and the most recent messages (tail), dropping the middle.
+           Tool-call/result pairs are kept atomic (never split).
+
+        Returns the (possibly compacted) messages list.
+        """
+        if not messages:
+            return messages
+
+        original_size = len(json.dumps(messages, ensure_ascii=False))
+        if original_size <= _COMPACTION_CHAR_THRESHOLD:
+            return messages
+
+        # ── Step 1: Truncate large tool results ──────────────────────────
+        compacted = []
+        for msg in messages:
+            if msg.get("role") == "tool" and isinstance(msg.get("content"), str):
+                content_len = len(msg["content"])
+                if content_len > _TOOL_RESULT_TRUNCATION_LIMIT:
+                    compacted.append({
+                        **msg,
+                        "content": f"[Tool output truncated — original size: {content_len:,} chars]",
+                    })
+                else:
+                    compacted.append(msg)
+            else:
+                compacted.append(msg)
+
+        size_after_truncation = len(json.dumps(compacted, ensure_ascii=False))
+        if size_after_truncation <= _COMPACTION_CHAR_THRESHOLD:
+            logger.info(
+                "Context compaction: tool result truncation reduced size from %d to %d chars "
+                "(%d messages)",
+                original_size, size_after_truncation, len(compacted),
+            )
+            return compacted
+
+        # ── Step 2: Group messages into atomic blocks ────────────────────
+        # A block is a single message, or an assistant(tool_calls) + all
+        # immediately following tool(result) messages.
+        blocks: list[tuple[list[dict], int]] = []  # (messages, total_chars)
+        i = 0
+        while i < len(compacted):
+            block_msgs = [compacted[i]]
+            if compacted[i].get("role") == "assistant" and compacted[i].get("tool_calls"):
+                # Include all following tool results as one atomic block
+                j = i + 1
+                while j < len(compacted) and compacted[j].get("role") == "tool":
+                    block_msgs.append(compacted[j])
+                    j += 1
+            block_size = sum(len(json.dumps(m, ensure_ascii=False)) for m in block_msgs)
+            blocks.append((block_msgs, block_size))
+            i += len(block_msgs)
+
+        # ── Step 3: Identify system blocks (always preserved) ────────────
+        system_blocks: list[tuple[list[dict], int]] = []
+        remaining_blocks: list[tuple[list[dict], int]] = []
+        for block in blocks:
+            if not system_blocks and block[0][0].get("role") == "system":
+                system_blocks.append(block)
+            else:
+                remaining_blocks.append(block)
+
+        system_size = sum(s for _, s in system_blocks)
+        system_messages = [m for msgs, _ in system_blocks for m in msgs]
+
+        # ── Step 4: Head+Tail pruning on remaining blocks ────────────────
+        head_budget = int(_COMPACTION_CHAR_THRESHOLD * 0.2) - system_size
+        tail_budget = _COMPACTION_CHAR_THRESHOLD * 0.8
+
+        # Build head: initial context after system messages
+        head_messages: list[dict] = []
+        head_size = 0
+        for block_msgs, block_size in remaining_blocks:
+            if head_size + block_size <= head_budget:
+                head_messages.extend(block_msgs)
+                head_size += block_size
+            else:
+                break
+
+        # Build tail: most recent blocks (respecting min count)
+        head_ids = {id(m) for m in head_messages}
+        tail_messages: list[dict] = []
+        tail_size = 0
+        min_tail = max(_COMPACTION_TAIL_COUNT, 1)
+        for block_msgs, block_size in reversed(remaining_blocks):
+            if id(block_msgs[0]) in head_ids:
+                break
+            if len(tail_messages) >= min_tail and tail_size + block_size > tail_budget:
+                break
+            tail_messages[:0] = block_msgs  # prepend
+            tail_size += block_size
+
+        result = system_messages + head_messages + tail_messages
+        result_size = len(json.dumps(result, ensure_ascii=False))
+
+        logger.info(
+            "Context compaction: head+tail pruning reduced messages from %d to %d "
+            "and size from %d to %d chars",
+            len(compacted), len(result), original_size, result_size,
+        )
+        return result
 
     def _check_request_size(self, cc_request: dict) -> web.Response | None:
         """Return a 400 error if the translated request exceeds the safe size limit.

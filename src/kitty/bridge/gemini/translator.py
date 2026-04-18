@@ -127,6 +127,7 @@ class GeminiTranslator:
         if cc_role == "assistant":
             tool_calls = []
             text_parts = []
+            thought_parts = []
             for part in parts:
                 fc = part.get("functionCall")
                 if fc:
@@ -140,6 +141,8 @@ class GeminiTranslator:
                             },
                         }
                     )
+                elif "text" in part and part.get("thought"):
+                    thought_parts.append(part["text"])
                 elif "text" in part:
                     text_parts.append(part["text"])
 
@@ -148,6 +151,8 @@ class GeminiTranslator:
                 msg["content"] = "\n".join(text_parts)
             else:
                 msg["content"] = None
+            if thought_parts:
+                msg["reasoning_content"] = "\n".join(thought_parts)
             if tool_calls:
                 msg["tool_calls"] = tool_calls
             return msg
@@ -196,6 +201,11 @@ class GeminiTranslator:
 
         parts: list[dict] = []
 
+        # Reasoning content -> thought part
+        reasoning = message.get("reasoning_content")
+        if reasoning:
+            parts.append({"text": reasoning, "thought": True})
+
         # Text content
         text = message.get("content")
         if text:
@@ -241,6 +251,23 @@ class GeminiTranslator:
         delta = choice.get("delta", {})
         finish_reason = choice.get("finish_reason")
         usage = chunk.get("usage")
+
+        # Reasoning delta -> thought part
+        reasoning = delta.get("reasoning_content")
+        if reasoning:
+            self._saw_content = True
+            events.append(
+                format_gemini_sse(
+                    {
+                        "candidates": [
+                            {
+                                "content": {"role": "model", "parts": [{"text": reasoning, "thought": True}]},
+                                "index": 0,
+                            }
+                        ],
+                    }
+                )
+            )
 
         # Text delta
         text = delta.get("content")

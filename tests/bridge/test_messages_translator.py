@@ -224,6 +224,87 @@ class TestTranslateRequest:
         assert "top_k" not in result
         assert "tool_choice" not in result
 
+    def test_thinking_block_mapped_to_reasoning_content(self):
+        """Thinking blocks in assistant messages must be mapped to reasoning_content
+        for Chat Completions, not stripped. Required by Kimi Code and other
+        providers with thinking mode."""
+        req = {
+            "model": "m",
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "thinking", "thinking": "Let me analyze this..."},
+                        {"type": "text", "text": "The answer is 42."},
+                    ],
+                },
+            ],
+            "max_tokens": 10,
+        }
+        result = self.t.translate_request(req)
+        assistant_msg = result["messages"][-1]
+        assert assistant_msg["reasoning_content"] == "Let me analyze this..."
+        assert assistant_msg["content"] == "The answer is 42."
+
+    def test_thinking_block_with_tool_use_maps_to_reasoning_content(self):
+        """Thinking blocks with tool_use must include reasoning_content.
+        Kimi Code errors with 400 if reasoning_content is missing from
+        assistant tool call messages when thinking mode is enabled."""
+        req = {
+            "model": "m",
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "thinking", "thinking": "I need to check the weather..."},
+                        {"type": "tool_use", "id": "toolu_001", "name": "get_weather", "input": {"city": "London"}},
+                    ],
+                },
+            ],
+            "max_tokens": 10,
+        }
+        result = self.t.translate_request(req)
+        assistant_msg = result["messages"][-1]
+        assert assistant_msg["reasoning_content"] == "I need to check the weather..."
+        assert assistant_msg["content"] is None
+        assert len(assistant_msg["tool_calls"]) == 1
+
+    def test_multiple_thinking_blocks_concatenated(self):
+        """Multiple thinking blocks should be concatenated into a single reasoning_content."""
+        req = {
+            "model": "m",
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "thinking", "thinking": "Part one."},
+                        {"type": "thinking", "thinking": "Part two."},
+                        {"type": "text", "text": "Result."},
+                    ],
+                },
+            ],
+            "max_tokens": 10,
+        }
+        result = self.t.translate_request(req)
+        assistant_msg = result["messages"][-1]
+        assert assistant_msg["reasoning_content"] == "Part one.\nPart two."
+
+    def test_no_thinking_block_no_reasoning_content(self):
+        """Assistant messages without thinking blocks should not have reasoning_content."""
+        req = {
+            "model": "m",
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": "Just a plain response.",
+                },
+            ],
+            "max_tokens": 10,
+        }
+        result = self.t.translate_request(req)
+        assistant_msg = result["messages"][-1]
+        assert "reasoning_content" not in assistant_msg
+
 
 # ── translate_response ──────────────────────────────────────────────────────
 
@@ -373,6 +454,55 @@ class TestTranslateResponse:
         assert len(result["content"]) == 1
         assert result["content"][0]["type"] == "text"
         assert result["content"][0]["text"] == "Policy refusal from upstream"
+
+    def test_response_with_reasoning_content_mapped_to_thinking_block(self):
+        """Chat Completions responses with reasoning_content must be mapped
+        to thinking blocks in Messages API."""
+        cc_response = {
+            "id": "chatcmpl-reason",
+            "model": "kimi-k2",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": "The answer is 42.",
+                        "reasoning_content": "Step 1: Analyze. Step 2: Compute.",
+                    },
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 50, "total_tokens": 60},
+        }
+        result = self.t.translate_response(cc_response)
+        # content should be [thinking block, text block]
+        assert len(result["content"]) == 2
+        assert result["content"][0]["type"] == "thinking"
+        assert result["content"][0]["thinking"] == "Step 1: Analyze. Step 2: Compute."
+        assert result["content"][1]["type"] == "text"
+        assert result["content"][1]["text"] == "The answer is 42."
+
+    def test_response_with_only_reasoning_content_mapped_to_thinking_block(self):
+        cc_response = {
+            "id": "chatcmpl-reason-only",
+            "model": "kimi-k2",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": None,
+                        "reasoning_content": "Deep thinking...",
+                    },
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 50, "total_tokens": 60},
+        }
+        result = self.t.translate_response(cc_response)
+        assert len(result["content"]) == 1
+        assert result["content"][0]["type"] == "thinking"
+        assert result["content"][0]["thinking"] == "Deep thinking..."
 
 
 # ── translate_stream_chunk ─────────────────────────────────────────────────
@@ -617,3 +747,62 @@ class TestTranslateStreamChunk:
         assert any('"bye"' in e for e in content_deltas), (
             "Second request should emit its content"
         )
+
+    def test_reasoning_delta_produces_thinking_block(self):
+        """Streaming reasoning_content deltas must map to thinking blocks in Messages API."""
+        msg_id = self._make_message_id()
+        model = "kimi-k2"
+
+        chunk = {
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {"reasoning_content": "Let me think..."},
+                    "finish_reason": None,
+                }
+            ],
+        }
+        events = self.t.translate_stream_chunk(msg_id, model, chunk)
+        # Should produce content_block_start for thinking + content_block_delta
+        start_events = [e for e in events if "content_block_start" in e]
+        assert len(start_events) == 1
+        assert '"thinking"' in start_events[0]
+
+        delta_events = [e for e in events if "content_block_delta" in e]
+        assert len(delta_events) == 1
+        assert '"thinking_delta"' in delta_events[0]
+        assert "Let me think..." in delta_events[0]
+
+    def test_reasoning_then_text_content_block_increments(self):
+        """Thinking block at index 0, then text block at index 1."""
+        msg_id = self._make_message_id()
+        model = "kimi-k2"
+
+        # Reasoning chunk
+        chunk1 = {
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {"reasoning_content": "Analyzing..."},
+                    "finish_reason": None,
+                }
+            ],
+        }
+        events1 = self.t.translate_stream_chunk(msg_id, model, chunk1)
+        thinking_starts = [e for e in events1 if "content_block_start" in e]
+        assert '"index": 0' in thinking_starts[0]
+
+        # Text chunk
+        chunk2 = {
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {"content": "The answer."},
+                    "finish_reason": None,
+                }
+            ],
+        }
+        events2 = self.t.translate_stream_chunk(msg_id, model, chunk2)
+        text_starts = [e for e in events2 if "content_block_start" in e]
+        assert len(text_starts) == 1
+        assert '"index": 1' in text_starts[0]

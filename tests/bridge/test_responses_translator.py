@@ -226,6 +226,59 @@ class TestTranslateRequest:
         assert result["messages"][0]["role"] == "system"
         assert result["messages"][0]["content"] == "You are helpful."
 
+    def test_reasoning_input_item_mapped_to_reasoning_content(self):
+        """Responses API 'reasoning' items must map to reasoning_content on the
+        preceding assistant message for providers that require it."""
+        req = {
+            "model": "gpt-4o",
+            "input": [
+                {"role": "user", "content": "solve"},
+                {
+                    "type": "reasoning",
+                    "id": "rs_001",
+                    "summary": [{"type": "summary_text", "text": "Step 1: analyze..."}],
+                },
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "The answer is 42."}],
+                },
+            ],
+        }
+        result = self.t.translate_request(req)
+        # Should produce user + assistant with reasoning_content
+        assistant_msgs = [m for m in result["messages"] if m["role"] == "assistant"]
+        assert len(assistant_msgs) == 1
+        assert assistant_msgs[0]["reasoning_content"] == "Step 1: analyze..."
+        assert assistant_msgs[0]["content"] == "The answer is 42."
+
+    def test_reasoning_item_before_function_call(self):
+        """Reasoning items before function_call must attach reasoning_content
+        to the function_call's assistant message."""
+        req = {
+            "model": "gpt-4o",
+            "input": [
+                {"role": "user", "content": "weather?"},
+                {
+                    "type": "reasoning",
+                    "id": "rs_001",
+                    "summary": [{"type": "summary_text", "text": "I need the weather tool"}],
+                },
+                {
+                    "type": "function_call",
+                    "id": "fc_001",
+                    "call_id": "call_001",
+                    "name": "get_weather",
+                    "arguments": '{"city": "London"}',
+                },
+            ],
+        }
+        result = self.t.translate_request(req)
+        assistant_msgs = [m for m in result["messages"] if m["role"] == "assistant"]
+        assert len(assistant_msgs) == 1
+        assert assistant_msgs[0]["reasoning_content"] == "I need the weather tool"
+        assert len(assistant_msgs[0]["tool_calls"]) == 1
+
     def test_developer_role_with_instructions_merges_into_single_system(self):
         """When both 'instructions' and 'developer' role items exist, system messages are merged."""
         req = {
@@ -426,6 +479,55 @@ class TestTranslateResponse:
         assert len(result["output"]) == 2
         assert result["output"][0]["type"] == "message"
         assert result["output"][1]["type"] == "function_call"
+
+    def test_response_with_reasoning_content_produces_reasoning_item(self):
+        """CC responses with reasoning_content must produce a reasoning output item."""
+        cc_response = {
+            "id": "chatcmpl-reason",
+            "model": "kimi-for-coding",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": "The answer is 42.",
+                        "reasoning_content": "Step 1: analyze. Step 2: compute.",
+                    },
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 50, "total_tokens": 60},
+        }
+        result = self.t.translate_response(cc_response)
+        reasoning_items = [o for o in result["output"] if o.get("type") == "reasoning"]
+        assert len(reasoning_items) == 1
+        summary_texts = [s["text"] for s in reasoning_items[0].get("summary", [])]
+        assert "Step 1: analyze. Step 2: compute." in summary_texts
+        # Text message should also be present
+        msg_items = [o for o in result["output"] if o.get("type") == "message"]
+        assert len(msg_items) == 1
+
+    def test_response_with_only_reasoning_content(self):
+        """CC response with only reasoning_content (no text) produces reasoning item only."""
+        cc_response = {
+            "id": "chatcmpl-reason-only",
+            "model": "kimi-for-coding",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": None,
+                        "reasoning_content": "Deep thinking...",
+                    },
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 50, "total_tokens": 60},
+        }
+        result = self.t.translate_response(cc_response)
+        reasoning_items = [o for o in result["output"] if o.get("type") == "reasoning"]
+        assert len(reasoning_items) == 1
 
 
 # ── translate_stream_start ──────────────────────────────────────────────

@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 
 from kitty.credentials.store import CredentialStore
-from kitty.profiles.schema import _NAME_PATTERN, PROVIDER_LIST, RESERVED_NAMES, BalancingProfile, Profile
+from kitty.profiles.schema import _NAME_PATTERN, PROVIDER_LABELS, PROVIDER_LIST, RESERVED_NAMES, BalancingProfile, Profile
 from kitty.profiles.store import ProfileStore
 from kitty.tui.display import (
     print_error,
@@ -126,9 +126,12 @@ def _create_profile_flow(store: ProfileStore, cred_store: CredentialStore) -> Pr
         The created and saved Profile.
     """
     # Step 1: Provider selection
-    provider = SelectionMenu("Select provider", PROVIDER_LIST).show()
+    _label_to_type = {PROVIDER_LABELS.get(p, p): p for p in PROVIDER_LIST}
+    provider = SelectionMenu("Select provider", list(_label_to_type)).show()
     if provider is None:
         raise NonTTYError("Provider selection cancelled")
+    if provider in _label_to_type:
+        provider = _label_to_type[provider]
 
     # Step 2: API key — offer reuse if a same-provider profile exists
     existing_auth_ref = _find_reusable_auth_ref(store, cred_store, provider)

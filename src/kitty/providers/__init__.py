@@ -5,6 +5,7 @@ __all__ = [
     "AzureOpenAIAdapter",
     "BedrockAdapter",
     "FireworksAdapter",
+    "KimiCodeAdapter",
     "MiniMaxAdapter",
     "NovitaAdapter",
     "OllamaAdapter",
@@ -24,6 +25,7 @@ from kitty.providers.azure import AzureOpenAIAdapter
 from kitty.providers.base import ProviderAdapter, ProviderError
 from kitty.providers.bedrock import BedrockAdapter
 from kitty.providers.fireworks import FireworksAdapter
+from kitty.providers.kimi import KimiCodeAdapter
 from kitty.providers.minimax import MiniMaxAdapter
 from kitty.providers.novita import NovitaAdapter
 from kitty.providers.ollama import OllamaAdapter

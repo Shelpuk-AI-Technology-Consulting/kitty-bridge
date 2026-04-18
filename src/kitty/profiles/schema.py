@@ -30,9 +30,14 @@ _PROVIDER_TYPES = Literal[
     "vertex",
     "fireworks",
     "opencode_go",
+    "kimi",
 ]
 
 PROVIDER_LIST: list[str] = list(typing.get_args(_PROVIDER_TYPES))
+
+PROVIDER_LABELS: dict[str, str] = {
+    "kimi": "Kimi Code",
+}
 
 
 class HttpsUrl(_HttpUrl):

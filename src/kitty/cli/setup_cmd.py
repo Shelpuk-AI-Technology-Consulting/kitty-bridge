@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 
 from kitty.credentials.store import CredentialStore
-from kitty.profiles.schema import _NAME_PATTERN, PROVIDER_LIST, RESERVED_NAMES, Profile
+from kitty.profiles.schema import _NAME_PATTERN, PROVIDER_LABELS, PROVIDER_LIST, RESERVED_NAMES, Profile
 from kitty.profiles.store import ProfileStore
 from kitty.tui.display import print_error, print_section, print_status, print_step, print_warning, status_spinner
 from kitty.tui.menu import SelectionMenu
@@ -47,7 +47,10 @@ def run_setup_wizard(store: ProfileStore, cred_store: CredentialStore) -> Profil
 
     # Step 1: Provider selection
     print_step(1, 6, "Provider selection")
-    provider = SelectionMenu("Select provider", PROVIDER_LIST).show()
+    _label_to_type = {PROVIDER_LABELS.get(p, p): p for p in PROVIDER_LIST}
+    provider = SelectionMenu("Select provider", list(_label_to_type)).show()
+    if provider is not None:
+        provider = _label_to_type[provider]
     if provider is None:
         raise NonTTYError("Provider selection cancelled")
 

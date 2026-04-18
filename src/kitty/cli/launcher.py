@@ -116,6 +116,7 @@ async def launch_async(
     validate: bool = True,
     backends: list[tuple[ProviderAdapter, str, Profile]] | None = None,
     logging_enabled: bool = False,
+    usage_log_path: Path | None = None,
 ) -> int:
     """Launch the full bridge + child process lifecycle.
 
@@ -163,6 +164,7 @@ async def launch_async(
         provider_config=profile.provider_config,
         backends=backends,
         logging_enabled=logging_enabled,
+        _usage_log_path=usage_log_path,
     )
     port = await server.start_async()
     logger.info("Bridge started on port %d", port)
@@ -299,6 +301,7 @@ def launch(
     validate: bool = True,
     backends: list[tuple[ProviderAdapter, str, Profile]] | None = None,
     logging_enabled: bool = False,
+    usage_log_path: Path | None = None,
 ) -> int:
     """Synchronous wrapper around launch_async."""
     try:
@@ -317,6 +320,7 @@ def launch(
                     validate=validate,
                     backends=backends,
                     logging_enabled=logging_enabled,
+                    usage_log_path=usage_log_path,
                 )
                 future = pool.submit(asyncio.run, coro)
                 return future.result()
@@ -330,6 +334,7 @@ def launch(
             validate=validate,
             backends=backends,
             logging_enabled=logging_enabled,
+            usage_log_path=usage_log_path,
         )
         return loop.run_until_complete(coro)
     except RuntimeError:
@@ -343,5 +348,6 @@ def launch(
             validate=validate,
             backends=backends,
             logging_enabled=logging_enabled,
+            usage_log_path=usage_log_path,
         )
         return asyncio.run(coro)

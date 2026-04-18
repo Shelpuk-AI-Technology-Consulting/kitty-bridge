@@ -50,9 +50,12 @@ class ResponsesTranslator:
         self._tool_call_buffers: dict[int, ToolCallBuffer] = {}
         self._tool_call_meta: dict[int, dict] = {}  # index -> {id, name, call_id, item_id}
         self._accumulated_text: str = ""
+        self._accumulated_reasoning: str = ""
         self._seq: int = 0
         self._text_item_id: str | None = None
+        self._reasoning_item_id: str | None = None
         self._text_started: bool = False
+        self._reasoning_started: bool = False
         self._last_was_empty: bool = False
 
     @property
@@ -65,9 +68,12 @@ class ResponsesTranslator:
         self._tool_call_buffers = {}
         self._tool_call_meta = {}
         self._accumulated_text = ""
+        self._accumulated_reasoning = ""
         self._seq = 0
         self._text_item_id = None
+        self._reasoning_item_id = None
         self._text_started = False
+        self._reasoning_started = False
         self._last_was_empty = False
 
     def _next_seq(self) -> int:
@@ -99,9 +105,23 @@ class ResponsesTranslator:
             messages.append({"role": "system", "content": instructions})
 
         # Input items -> messages
+        # Accumulate reasoning from 'reasoning' items and merge into the next
+        # assistant message's reasoning_content field.
+        pending_reasoning: list[str] = []
         for item in responses_request.get("input", []):
+            # Extract reasoning text from reasoning items
+            if item.get("type") == "reasoning":
+                for summary in item.get("summary", []):
+                    if summary.get("type") == "summary_text" and summary.get("text"):
+                        pending_reasoning.append(summary["text"])
+                continue
+
             msg = self._translate_input_item(item)
             if msg is not None:
+                # Attach accumulated reasoning to assistant messages
+                if msg.get("role") == "assistant" and pending_reasoning:
+                    msg["reasoning_content"] = "\n".join(pending_reasoning)
+                    pending_reasoning = []
                 messages.append(msg)
 
         # Merge consecutive system messages (some providers reject multiples)
@@ -238,6 +258,17 @@ class ResponsesTranslator:
 
         output: list[dict] = []
 
+        # Reasoning content -> reasoning output item
+        reasoning = message.get("reasoning_content")
+        if reasoning:
+            output.append(
+                {
+                    "type": "reasoning",
+                    "id": f"rs_{uuid.uuid4().hex[:24]}",
+                    "summary": [{"type": "summary_text", "text": reasoning}],
+                }
+            )
+
         # Text content
         content = message.get("content")
         if content:
@@ -293,6 +324,13 @@ class ResponsesTranslator:
         self._text_item_id = f"msg_{uuid.uuid4().hex[:24]}"
         self._text_started = True
 
+    def _ensure_reasoning_item_started(self, response_id: str) -> None:
+        """Lazily initialize the reasoning item state."""
+        if self._reasoning_started:
+            return
+        self._reasoning_item_id = f"rs_{uuid.uuid4().hex[:24]}"
+        self._reasoning_started = True
+
     def translate_stream_chunk(
         self,
         response_id: str,
@@ -305,6 +343,25 @@ class ResponsesTranslator:
             return events
         choice = choices[0]
         delta = choice.get("delta", {})
+
+        # Reasoning delta
+        reasoning_content = delta.get("reasoning_content")
+        if reasoning_content:
+            if not self._reasoning_started:
+                self._ensure_reasoning_item_started(response_id)
+                # Emit output_item.added for reasoning
+                events.append(
+                    format_output_item_added_event(
+                        seq=self._next_seq(),
+                        output_index=0,
+                        item={
+                            "id": self._reasoning_item_id,
+                            "type": "reasoning",
+                            "summary": [],
+                        },
+                    )
+                )
+            self._accumulated_reasoning += reasoning_content
 
         # Text delta
         content = delta.get("content")
@@ -421,6 +478,20 @@ class ResponsesTranslator:
         if finish_reason == "length":
             status = "incomplete"
 
+        # Close reasoning item if started
+        if self._reasoning_started and self._reasoning_item_id:
+            events.append(
+                format_output_item_done_event(
+                    seq=self._next_seq(),
+                    output_index=0,
+                    item={
+                        "type": "reasoning",
+                        "id": self._reasoning_item_id,
+                        "summary": [{"type": "summary_text", "text": self._accumulated_reasoning}],
+                    },
+                )
+            )
+
         # Close text content if any was accumulated
         clean_text = self._clean_text()
         if self._text_started and self._text_item_id:
@@ -497,6 +568,14 @@ class ResponsesTranslator:
 
         # Build output items for the completed response
         output_items: list[dict] = []
+        if self._reasoning_started and self._reasoning_item_id:
+            output_items.append(
+                {
+                    "type": "reasoning",
+                    "id": self._reasoning_item_id,
+                    "summary": [{"type": "summary_text", "text": self._accumulated_reasoning}],
+                }
+            )
         if clean_text:
             output_items.append(
                 {
@@ -535,7 +614,7 @@ class ResponsesTranslator:
         events.append(format_response_completed_event(response_id, seq=self._next_seq(), response_data=response_data))
 
         # Track emptiness before reset clears the state
-        was_empty = not clean_text and not self._tool_call_buffers
+        was_empty = not clean_text and not self._tool_call_buffers and not self._accumulated_reasoning
         self.reset()
         self._last_was_empty = was_empty
         return events
@@ -554,7 +633,7 @@ class ResponsesTranslator:
         were accumulated, preventing duplicate completion after normal finish chunks.
         """
         clean_text = self._clean_text()
-        if status == "completed" and not clean_text and not self._tool_call_buffers:
+        if status == "completed" and not clean_text and not self._tool_call_buffers and not self._accumulated_reasoning:
             return []
 
         events: list[str] = []

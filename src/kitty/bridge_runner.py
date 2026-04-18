@@ -12,6 +12,7 @@ import asyncio
 import contextlib
 import signal
 import sys
+from pathlib import Path
 
 from kitty.bridge.server import BridgeServer
 
@@ -24,6 +25,7 @@ def main() -> None:
     parser.add_argument("--config", default=None)
     parser.add_argument("--log", action="store_true", default=False)
     parser.add_argument("--no-log", action="store_true", default=False)
+    parser.add_argument("--log-file", default=None, metavar="PATH")
     parser.add_argument("--tls-cert", default=None)
     parser.add_argument("--tls-key", default=None)
     args = parser.parse_args()
@@ -37,8 +39,6 @@ def main() -> None:
     tls_key = args.tls_key
 
     if args.config:
-        from pathlib import Path
-
         from kitty.bridge.config import load_bridge_config
 
         config = load_bridge_config(
@@ -58,8 +58,6 @@ def main() -> None:
             access_log_path = str(Path(config.log_dir) / "bridge_access.log")
 
     if args.log and not args.no_log and not access_log_path:
-        from pathlib import Path
-
         access_log_path = str(Path.home() / ".config" / "kitty" / "logs" / "bridge_access.log")
 
     # Resolve provider and key from profile
@@ -69,12 +67,13 @@ def main() -> None:
     from kitty.profiles.store import ProfileStore
     from kitty.providers.registry import get_provider
 
+    usage_log_path = Path(args.log_file) if args.log_file else None
+    logging_enabled = usage_log_path is not None
+
     profile_store = ProfileStore()
     cred_store = CredentialStore(backends=[FileBackend()])
 
     # State file — always use default path
-    from pathlib import Path
-
     state_path = Path.home() / ".config" / "kitty" / "bridge_state.json"
 
     profile_name = args.profile
@@ -117,6 +116,8 @@ def main() -> None:
             tls_cert=tls_cert,
             tls_key=tls_key,
             state_file=str(state_path),
+            logging_enabled=logging_enabled,
+            _usage_log_path=usage_log_path,
         )
     else:
         profile = backend
@@ -139,6 +140,8 @@ def main() -> None:
             tls_cert=tls_cert,
             tls_key=tls_key,
             state_file=str(state_path),
+            logging_enabled=logging_enabled,
+            _usage_log_path=usage_log_path,
         )
 
     async def run() -> None:

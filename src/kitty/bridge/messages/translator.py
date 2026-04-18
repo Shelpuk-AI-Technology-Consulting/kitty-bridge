@@ -36,6 +36,7 @@ class MessagesTranslator:
         self._tool_call_meta: dict[int, dict] = {}  # index -> {id, tool_id, name, block_index}
         self._content_block_index: int = 0
         self._text_block_opened: bool = False
+        self._thinking_block_opened: bool = False
         self._message_started: bool = False
         self._finished: bool = False
         self._last_message_id: str | None = None
@@ -56,6 +57,7 @@ class MessagesTranslator:
         self._tool_call_meta = {}
         self._content_block_index = 0
         self._text_block_opened = False
+        self._thinking_block_opened = False
         self._message_started = False
         self._finished = False
         self._last_was_empty = False
@@ -186,13 +188,14 @@ class MessagesTranslator:
         return {"role": "user", "content": str(content) if content else ""}
 
     def _translate_assistant_message(self, content) -> dict:
-        """Translate an assistant message, handling tool_use content blocks."""
+        """Translate an assistant message, handling tool_use and thinking content blocks."""
         if isinstance(content, str):
             return {"role": "assistant", "content": content}
 
         if isinstance(content, list):
             text_parts = []
             tool_calls = []
+            thinking_parts = []
             for block in content:
                 if not isinstance(block, dict):
                     continue
@@ -210,13 +213,16 @@ class MessagesTranslator:
                         }
                     )
                 elif block.get("type") == "thinking":
-                    # Strip thinking blocks from upstream request
-                    pass
+                    thinking_text = block.get("thinking", "")
+                    if thinking_text:
+                        thinking_parts.append(thinking_text)
 
             result: dict = {
                 "role": "assistant",
                 "content": "\n".join(text_parts) if text_parts else None,
             }
+            if thinking_parts:
+                result["reasoning_content"] = "\n".join(thinking_parts)
             if tool_calls:
                 result["tool_calls"] = tool_calls
             return result
@@ -274,6 +280,11 @@ class MessagesTranslator:
         finish_reason = choice.get("finish_reason")
 
         content: list[dict] = []
+
+        # reasoning_content -> thinking block (must come before text)
+        reasoning = message.get("reasoning_content")
+        if reasoning:
+            content.append({"type": "thinking", "thinking": reasoning})
 
         # Text content -> text block
         text = self._extract_text_content(message.get("content"))
@@ -344,9 +355,36 @@ class MessagesTranslator:
         choice = choices[0]
         delta = choice.get("delta", {})
 
+        # Reasoning delta
+        reasoning_content = delta.get("reasoning_content")
+        if reasoning_content:
+            if not self._thinking_block_opened:
+                self._emit_message_start_if_needed(events, message_id, model)
+
+                events.append(
+                    format_content_block_start_event(
+                        self._content_block_index,
+                        {"type": "thinking", "thinking": ""},
+                    )
+                )
+                self._thinking_block_opened = True
+
+            events.append(
+                format_content_block_delta_event(
+                    self._content_block_index,
+                    {"type": "thinking_delta", "thinking": reasoning_content},
+                )
+            )
+
         # Text delta
         text_content = delta.get("content")
         if text_content:
+            # Close thinking block if still open
+            if self._thinking_block_opened:
+                events.append(format_content_block_stop_event(self._content_block_index))
+                self._content_block_index += 1
+                self._thinking_block_opened = False
+
             # Open text block on first text delta
             if not self._text_block_opened:
                 self._emit_message_start_if_needed(events, message_id, model)
@@ -375,6 +413,12 @@ class MessagesTranslator:
 
                 # New tool call: id + name arrive in first chunk
                 if "id" in tc_delta:
+                    # Close thinking block if still open
+                    if self._thinking_block_opened:
+                        events.append(format_content_block_stop_event(self._content_block_index))
+                        self._content_block_index += 1
+                        self._thinking_block_opened = False
+
                     # Close text block if still open
                     if self._text_block_opened:
                         events.append(format_content_block_stop_event(self._content_block_index))
@@ -420,7 +464,10 @@ class MessagesTranslator:
         finish_reason = choice.get("finish_reason")
         if finish_reason is not None and not self._finished:
             has_content_blocks = (
-                bool(self._tool_call_buffers) or self._text_block_opened or self._content_block_index > 0
+                bool(self._tool_call_buffers)
+                or self._text_block_opened
+                or self._thinking_block_opened
+                or self._content_block_index > 0
             )
             if not has_content_blocks:
                 fallback_text = self._fallback_assistant_text()
@@ -439,6 +486,12 @@ class MessagesTranslator:
                 )
                 events.append(format_content_block_stop_event(self._content_block_index))
                 self._content_block_index += 1
+
+            # Close thinking block if still open
+            if self._thinking_block_opened:
+                events.append(format_content_block_stop_event(self._content_block_index))
+                self._content_block_index += 1
+                self._thinking_block_opened = False
 
             # Close text block if still open
             if self._text_block_opened:

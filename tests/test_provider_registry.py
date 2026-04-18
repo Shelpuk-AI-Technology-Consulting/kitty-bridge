@@ -77,3 +77,7 @@ class TestGetProvider:
     def test_returns_opencode_go_adapter(self):
         adapter = get_provider("opencode_go")
         assert adapter.provider_type == "opencode_go"
+
+    def test_returns_kimi_adapter(self):
+        adapter = get_provider("kimi")
+        assert adapter.provider_type == "kimi"

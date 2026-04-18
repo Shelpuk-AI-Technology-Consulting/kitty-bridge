@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import sys
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from kitty import __version__
@@ -21,13 +22,9 @@ def map_child_exit_code(code: int) -> int:
     return _map(code)
 
 
-def main() -> None:
-    """Main entry point for the kitty CLI."""
+def _build_parser():
+    """Build the argument parser. Exposed for testing."""
     import argparse
-
-    from kitty.tui.display import print_banner
-
-    print_banner(__version__)
 
     parser = argparse.ArgumentParser(
         prog="kitty",
@@ -55,10 +52,27 @@ def main() -> None:
         help="Log LLM call token usage to ~/.cache/kitty/usage.log",
     )
     parser.add_argument(
+        "--log-file",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="Write usage logs to PATH instead of ~/.cache/kitty/usage.log (implies --logging)",
+    )
+    parser.add_argument(
         "command",
         nargs="*",
         help="Command to run: setup, profile, doctor, codex, claude, or a profile name.",
     )
+    return parser
+
+
+def main() -> None:
+    """Main entry point for the kitty CLI."""
+    from kitty.tui.display import print_banner
+
+    print_banner(__version__)
+
+    parser = _build_parser()
     args, unknown_args = parser.parse_known_args()
 
     # Merge unknown flags back into the command list so they pass through to the agent.
@@ -230,17 +244,19 @@ def main() -> None:
         if backend is None:
             parser.error("No default profile configured. Create one with 'kitty setup' first.")
             sys.exit(1)
-        _run_bridge(backend, cred_store, debug=args.debug, validate=not args.no_validate, logging_enabled=args.logging)
+        _run_bridge(
+            backend, cred_store,
+            debug=args.debug, validate=not args.no_validate,
+            logging_enabled=args.logging or args.log_file is not None,
+            usage_log_path=args.log_file,
+        )
     elif result.adapter is not None and (result.backend is not None or result.profile is not None):
         backend = result.backend or result.profile
         exit_code = _launch_target(
-            result.adapter,
-            backend,
-            cred_store,
-            result.extra_args,
-            debug=args.debug,
-            validate=not args.no_validate,
-            logging_enabled=args.logging,
+            result.adapter, backend, cred_store, result.extra_args,
+            debug=args.debug, validate=not args.no_validate,
+            logging_enabled=args.logging or args.log_file is not None,
+            usage_log_path=args.log_file,
         )
         sys.exit(exit_code)
     else:
@@ -281,6 +297,7 @@ def _run_bridge(
     debug: bool = False,
     validate: bool = True,
     logging_enabled: bool = False,
+    usage_log_path: Path | None = None,
 ) -> None:
     """Run bridge mode — start OpenAI-compatible API server without launching agent."""
     import asyncio
@@ -294,7 +311,12 @@ def _run_bridge(
     from kitty.tui.display import print_error, print_panel, print_status, print_warning, status_spinner
 
     if isinstance(backend, BalancingProfile):
-        _run_bridge_balancing(backend, cred_store, debug=debug, validate=validate, logging_enabled=logging_enabled)
+        _run_bridge_balancing(
+            backend, cred_store,
+            debug=debug, validate=validate,
+            logging_enabled=logging_enabled,
+            usage_log_path=usage_log_path,
+        )
         return
 
     profile = backend  # type: ignore[assignment]
@@ -324,6 +346,7 @@ def _run_bridge(
         debug=debug,
         provider_config=getattr(profile, "provider_config", {}),
         logging_enabled=logging_enabled,
+        _usage_log_path=usage_log_path,
     )
 
     async def run_server() -> None:
@@ -370,6 +393,7 @@ def _run_bridge_balancing(
     debug: bool = False,
     validate: bool = True,
     logging_enabled: bool = False,
+    usage_log_path: Path | None = None,
 ) -> None:
     """Run bridge mode with a balancing profile — random selection across healthy members."""
     import asyncio
@@ -410,6 +434,7 @@ def _run_bridge_balancing(
         provider_config=member_profiles[0].provider_config,
         backends=backends,
         logging_enabled=logging_enabled,
+        _usage_log_path=usage_log_path,
     )
 
     async def run_server() -> None:
@@ -460,6 +485,7 @@ def _launch_target(
     debug: bool = False,
     validate: bool = True,
     logging_enabled: bool = False,
+    usage_log_path: Path | None = None,
 ) -> int:
     from kitty.cli.launcher import launch
     from kitty.profiles.schema import BalancingProfile
@@ -469,6 +495,7 @@ def _launch_target(
         return _launch_target_balancing(
             adapter, backend, cred_store, extra_args,
             debug=debug, validate=validate, logging_enabled=logging_enabled,
+            usage_log_path=usage_log_path,
         )
 
     profile = backend
@@ -481,6 +508,7 @@ def _launch_target(
         debug=debug,
         validate=validate,
         logging_enabled=logging_enabled,
+        usage_log_path=usage_log_path,
     )
 
 
@@ -493,6 +521,7 @@ def _launch_target_balancing(
     debug: bool = False,
     validate: bool = True,
     logging_enabled: bool = False,
+    usage_log_path: Path | None = None,
 ) -> int:
     """Launch a coding agent with a balancing profile (random healthy member selection)."""
     from kitty.cli.launcher import launch
@@ -530,4 +559,5 @@ def _launch_target_balancing(
         validate=validate,
         backends=backends,
         logging_enabled=logging_enabled,
+        usage_log_path=usage_log_path,
     )

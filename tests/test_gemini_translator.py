@@ -137,6 +137,45 @@ class TestTranslateRequestFunctionCall:
         assert msgs[2]["content"] == '{"temp": "72F"}'
         assert msgs[3]["role"] == "user"
 
+    def test_assistant_message_with_thought_mapped_to_reasoning_content(self):
+        """Assistant messages with thought parts must map to reasoning_content."""
+        t = GeminiTranslator()
+        gemini_req = {
+            "contents": [
+                {
+                    "role": "model",
+                    "parts": [
+                        {"text": "I will solve this", "thought": True},
+                        {"text": "The answer is 42"},
+                    ],
+                },
+            ],
+        }
+        cc = t.translate_request(gemini_req)
+        msg = cc["messages"][0]
+        assert msg["reasoning_content"] == "I will solve this"
+        assert msg["content"] == "The answer is 42"
+
+    def test_model_function_call_with_thought(self):
+        """Assistant messages with thought + functionCall must map to reasoning_content + tool_calls."""
+        t = GeminiTranslator()
+        gemini_req = {
+            "contents": [
+                {
+                    "role": "model",
+                    "parts": [
+                        {"text": "Thinking about weather...", "thought": True},
+                        {"functionCall": {"name": "get_weather", "args": {"location": "NYC"}}},
+                    ],
+                },
+            ],
+        }
+        cc = t.translate_request(gemini_req)
+        msg = cc["messages"][0]
+        assert msg["reasoning_content"] == "Thinking about weather..."
+        assert len(msg["tool_calls"]) == 1
+        assert msg["tool_calls"][0]["function"]["name"] == "get_weather"
+
 
 class TestTranslateResponseText:
     """Chat Completions text response → Gemini candidates."""
@@ -158,6 +197,30 @@ class TestTranslateResponseText:
         assert gemini_resp["candidates"][0]["content"]["role"] == "model"
         assert gemini_resp["candidates"][0]["content"]["parts"] == [{"text": "Hello!"}]
         assert gemini_resp["candidates"][0]["finishReason"] == "STOP"
+
+    def test_response_with_reasoning_content(self):
+        """CC response with reasoning_content must map to Gemini thought parts."""
+        t = GeminiTranslator()
+        cc_resp = {
+            "id": "chatcmpl-reason",
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "The answer is 42.",
+                        "reasoning_content": "Let me think...",
+                    },
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 50, "total_tokens": 60},
+        }
+        gemini_resp = t.translate_response(cc_resp)
+        parts = gemini_resp["candidates"][0]["content"]["parts"]
+        # Should be [thought part, text part]
+        assert len(parts) == 2
+        assert parts[0] == {"text": "Let me think...", "thought": True}
+        assert parts[1] == {"text": "The answer is 42."}
 
 
 class TestTranslateResponseToolCalls:
