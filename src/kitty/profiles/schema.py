@@ -31,6 +31,7 @@ _PROVIDER_TYPES = Literal[
     "fireworks",
     "opencode_go",
     "kimi",
+    "byteplus",
 ]
 
 PROVIDER_LIST: list[str] = list(typing.get_args(_PROVIDER_TYPES))

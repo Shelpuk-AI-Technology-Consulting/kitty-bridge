@@ -6,6 +6,7 @@ from kitty.providers.anthropic import AnthropicAdapter
 from kitty.providers.azure import AzureOpenAIAdapter
 from kitty.providers.base import ProviderAdapter
 from kitty.providers.bedrock import BedrockAdapter
+from kitty.providers.byteplus import BytePlusAdapter
 from kitty.providers.fireworks import FireworksAdapter
 from kitty.providers.kimi import KimiCodeAdapter
 from kitty.providers.minimax import MiniMaxAdapter
@@ -32,6 +33,7 @@ _registry: dict[str, type[ProviderAdapter]] = {
     "fireworks": FireworksAdapter,
     "opencode_go": OpenCodeGoAdapter,
     "kimi": KimiCodeAdapter,
+    "byteplus": BytePlusAdapter,
 }
 
 
