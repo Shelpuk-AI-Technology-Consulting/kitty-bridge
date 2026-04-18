@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "kitty-bridge"
-version = "0.2.1"
+version = "0.2.2"
 description = "Kitty Bridge — launch coding agents through a local API bridge"
 readme = "README.md"
 license = "MIT"
