@@ -29,6 +29,7 @@ _PROVIDER_TYPES = Literal[
     "azure",
     "vertex",
     "fireworks",
+    "google_aistudio",
     "opencode_go",
     "kimi",
     "byteplus",
@@ -37,6 +38,7 @@ _PROVIDER_TYPES = Literal[
 PROVIDER_LIST: list[str] = list(typing.get_args(_PROVIDER_TYPES))
 
 PROVIDER_LABELS: dict[str, str] = {
+    "google_aistudio": "Google AI Studio",
     "kimi": "Kimi Code",
 }
 

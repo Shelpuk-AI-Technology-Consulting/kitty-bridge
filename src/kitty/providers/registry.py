@@ -8,6 +8,7 @@ from kitty.providers.base import ProviderAdapter
 from kitty.providers.bedrock import BedrockAdapter
 from kitty.providers.byteplus import BytePlusAdapter
 from kitty.providers.fireworks import FireworksAdapter
+from kitty.providers.google_aistudio import GoogleAIStudioAdapter
 from kitty.providers.kimi import KimiCodeAdapter
 from kitty.providers.minimax import MiniMaxAdapter
 from kitty.providers.novita import NovitaAdapter
@@ -31,6 +32,7 @@ _registry: dict[str, type[ProviderAdapter]] = {
     "azure": AzureOpenAIAdapter,
     "vertex": VertexAIAdapter,
     "fireworks": FireworksAdapter,
+    "google_aistudio": GoogleAIStudioAdapter,
     "opencode_go": OpenCodeGoAdapter,
     "kimi": KimiCodeAdapter,
     "byteplus": BytePlusAdapter,

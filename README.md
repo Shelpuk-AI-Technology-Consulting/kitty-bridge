@@ -119,6 +119,7 @@ Point your tool at `http://localhost:<port>` and it just works.
 | Z.AI (regular) | `zai_regular` | General-purpose endpoint |
 | Z.AI (coding) | `zai_coding` | Coding-optimized endpoint |
 | Fireworks | `fireworks` | |
+| Google AI Studio | `google_aistudio` | Gemini models via OpenAI-compatible endpoint |
 | Ollama | `ollama` | Local LLM deployment |
 | OpenCode | `opencode_go` | |
 | AWS Bedrock | `bedrock` | Uses boto3 SigV4 auth |
