@@ -52,6 +52,21 @@ $ kitty claude
   > Hello! How can I help you today?
 ```
 
+### Example: Use Gemma 4 31B with Claude Code
+
+```bash
+$ pip install kitty-bridge
+$ kitty setup
+  ? Provider: Google AI Studio
+  ? Model: gemma-4-31b-it
+  ? API key: ********
+
+$ kitty claude
+  ✓ Bridge running on port <random_port>
+  ✓ Claude Code launched
+  > Hello! How can I help you today?
+```
+
 ## Balanced Profiles
 
 A **balanced profile** combines multiple providers into one. Each request is sent to a randomly chosen healthy provider. If one provider goes down, the others pick up the slack automatically.
