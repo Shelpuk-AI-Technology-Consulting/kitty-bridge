@@ -7,6 +7,7 @@ __all__ = [
     "FireworksAdapter",
     "GoogleAIStudioAdapter",
     "KimiCodeAdapter",
+    "MimoAdapter",
     "MiniMaxAdapter",
     "NovitaAdapter",
     "OllamaAdapter",
@@ -28,6 +29,7 @@ from kitty.providers.bedrock import BedrockAdapter
 from kitty.providers.fireworks import FireworksAdapter
 from kitty.providers.google_aistudio import GoogleAIStudioAdapter
 from kitty.providers.kimi import KimiCodeAdapter
+from kitty.providers.mimo import MimoAdapter
 from kitty.providers.minimax import MiniMaxAdapter
 from kitty.providers.novita import NovitaAdapter
 from kitty.providers.ollama import OllamaAdapter

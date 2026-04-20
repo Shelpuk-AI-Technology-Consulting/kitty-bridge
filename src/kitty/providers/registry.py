@@ -10,6 +10,7 @@ from kitty.providers.byteplus import BytePlusAdapter
 from kitty.providers.fireworks import FireworksAdapter
 from kitty.providers.google_aistudio import GoogleAIStudioAdapter
 from kitty.providers.kimi import KimiCodeAdapter
+from kitty.providers.mimo import MimoAdapter
 from kitty.providers.minimax import MiniMaxAdapter
 from kitty.providers.novita import NovitaAdapter
 from kitty.providers.ollama import OllamaAdapter
@@ -35,6 +36,7 @@ _registry: dict[str, type[ProviderAdapter]] = {
     "google_aistudio": GoogleAIStudioAdapter,
     "opencode_go": OpenCodeGoAdapter,
     "kimi": KimiCodeAdapter,
+    "mimo": MimoAdapter,
     "byteplus": BytePlusAdapter,
 }
 

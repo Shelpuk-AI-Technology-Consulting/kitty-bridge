@@ -67,6 +67,21 @@ $ kitty claude
   > Hello! How can I help you today?
 ```
 
+### Example: Use MiMo V2 Pro with Claude Code
+
+```bash
+$ pip install kitty-bridge
+$ kitty setup
+  ? Provider: Xiaomi MiMo
+  ? Model: mimo-v2-pro
+  ? API key: ********
+
+$ kitty claude
+  ✓ Bridge running on port <random_port>
+  ✓ Claude Code launched
+  > Hello! How can I help you today?
+```
+
 ## Balanced Profiles
 
 A **balanced profile** combines multiple providers into one. Each request is sent to a randomly chosen healthy provider. If one provider goes down, the others pick up the slack automatically.
@@ -135,6 +150,7 @@ Point your tool at `http://localhost:<port>` and it just works.
 | Z.AI (coding) | `zai_coding` | Coding-optimized endpoint |
 | Fireworks | `fireworks` | |
 | Google AI Studio | `google_aistudio` | Gemini models via OpenAI-compatible endpoint |
+| Xiaomi MiMo | `mimo` | |
 | Ollama | `ollama` | Local LLM deployment |
 | OpenCode | `opencode_go` | |
 | AWS Bedrock | `bedrock` | Uses boto3 SigV4 auth |
