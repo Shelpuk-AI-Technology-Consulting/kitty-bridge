@@ -389,35 +389,46 @@ def _delete_profile_flow(store: ProfileStore, cred_store: CredentialStore) -> No
         return
 
     # Show what will happen to balancing profiles before confirming
-    referencing = [b for b in backends if isinstance(b, BalancingProfile) and selected in b.members]
-    if referencing:
-        affected = ", ".join(b.name for b in referencing)
-        print_warning(f"{selected!r} is a member of balancing profile(s): {affected}")
+    target_backend = store.get_backend(selected)
+    if isinstance(target_backend, BalancingProfile):
+        print_warning(f"{selected!r} is a balancing profile — its member profiles will not be deleted")
+    else:
+        referencing = [b for b in backends if isinstance(b, BalancingProfile) and selected in b.members]
+        if referencing:
+            affected = ", ".join(b.name for b in referencing)
+            print_warning(f"{selected!r} is a member of balancing profile(s): {affected}")
 
     if prompt_confirm(f"Delete profile {selected!r}?", default=False):
         # Auto-remove from any balancing profiles that reference this profile
-        for bp in referencing:
-            new_members = [m for m in bp.members if m != selected]
-            if len(new_members) >= 2:
-                updated = bp.model_copy(update={"members": new_members})
-                store.save(updated)
-                print_status(f"Removed {selected!r} from balancing profile {bp.name!r}")
-            else:
-                store.delete(bp.name)
-                print_warning(
-                    f"Balancing profile {bp.name!r} deleted — would have fewer than 2 members"
-                )
+        if isinstance(target_backend, Profile):
+            referencing = [b for b in backends if isinstance(b, BalancingProfile) and selected in b.members]
+            for bp in referencing:
+                new_members = [m for m in bp.members if m != selected]
+                if len(new_members) >= 2:
+                    updated = bp.model_copy(update={"members": new_members})
+                    store.save(updated)
+                    print_status(f"Removed {selected!r} from balancing profile {bp.name!r}")
+                else:
+                    store.delete(bp.name)
+                    print_warning(
+                        f"Balancing profile {bp.name!r} deleted — would have fewer than 2 members"
+                    )
 
         # Clean up credential if no other profile shares the same auth_ref
-        target = store.get_backend(selected)
         store.delete(selected)
-        if isinstance(target, Profile):
+        if isinstance(target_backend, Profile):
             remaining = [
-                b for b in backends
-                if isinstance(b, Profile) and b.name != selected and b.auth_ref == target.auth_ref
+                b for b in store.load_all()
+                if b.auth_ref == target_backend.auth_ref
             ]
             if not remaining:
-                cred_store.delete(target.auth_ref)
+                cred_store.delete(target_backend.auth_ref)
+            # Promote another profile to default if the deleted one was default
+            if target_backend.is_default:
+                others = store.load_all()
+                if others:
+                    store.save(others[0].model_copy(update={"is_default": True}))
+                    print_status(f"Profile {others[0].name!r} promoted to default")
         print_status(f"Profile {selected!r} deleted")
     else:
         print_info("Cancelled")

@@ -614,6 +614,47 @@ class TestDeleteWithBalancingCascade:
         assert isinstance(bal, BalancingProfile)
         assert bal.members == ["target", "other1", "other2"]
 
+    def test_deleting_default_profile_promotes_another(self, store, cred_store):
+        """Deleting the default profile promotes another profile to default."""
+        delete = _import_delete_profile_flow()
+        p1 = _make_profile("default-one", is_default=True)
+        p2 = _make_profile("regular")
+        store.save(p1)
+        store.save(p2)
+
+        with (
+            patch("kitty.cli.profile_cmd.SelectionMenu.show", return_value="default-one"),
+            patch("kitty.cli.profile_cmd.prompt_confirm", return_value=True),
+        ):
+            delete(store, cred_store)
+
+        assert store.get("default-one") is None
+        promoted = store.get("regular")
+        assert promoted is not None and promoted.is_default
+
+    def test_cascade_uses_fresh_store_for_credential_check(self, store, cred_store):
+        """Credential cleanup queries fresh store state, not stale backends snapshot."""
+        delete = _import_delete_profile_flow()
+        shared_ref = str(uuid.uuid4())
+        target = Profile(name="target", provider="zai_regular", model="m", auth_ref=shared_ref)
+        other = Profile(name="other", provider="minimax", model="m2", auth_ref=shared_ref)
+        store.save(target)
+        store.save(other)
+        # Balancing with exactly target + other → cascade will delete this BP
+        store.save(_make_balancing("bal", ["target", "other"]))
+        cred_store.set(shared_ref, "shared-key")
+
+        with (
+            patch("kitty.cli.profile_cmd.SelectionMenu.show", return_value="target"),
+            patch("kitty.cli.profile_cmd.prompt_confirm", return_value=True),
+        ):
+            delete(store, cred_store)
+
+        # target deleted, other still exists and shares auth_ref
+        assert store.get("target") is None
+        assert store.get("other") is not None
+        assert cred_store.get(shared_ref) == "shared-key"  # preserved — other still uses it
+
 
 # ---------------------------------------------------------------------------
 # OAuth provider create flow
