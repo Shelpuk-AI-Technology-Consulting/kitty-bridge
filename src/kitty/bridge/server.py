@@ -706,15 +706,47 @@ class BridgeServer:
             cc_request["_resolved_key"] = self._active_key
             cc_request["_provider_config"] = self._active_provider_config
             cc_request["_original_body"] = body
-            try:
-                await self._active_provider.stream_request(cc_request, sr.write)
-            except Exception:
-                raise
-            finally:
+
+            n_backends = len(self._backends) if self._backends else 1
+            for attempt in range(n_backends):
                 try:
-                    await sr.write_eof()
-                except (ConnectionResetError, BrokenPipeError, OSError):
-                    logger.debug("Client disconnected before stream EOF")
+                    await self._active_provider.stream_request(cc_request, sr.write)
+                except Exception as exc:
+                    logger.warning("Custom-transport stream failed: %s", exc)
+                    if self._backends and self._current_backend_idx >= 0:
+                        self._mark_backend_unhealthy(self._current_backend_idx)
+                        if self._any_healthy_backend() and attempt < n_backends - 1:
+                            self._select_backend()
+                            self._normalize_model(cc_request)
+                            self._active_provider.normalize_request(cc_request)
+                            cc_request["_resolved_key"] = self._active_key
+                            cc_request["_provider_config"] = self._active_provider_config
+                            logger.info(
+                                "Custom-transport failover: attempt %d/%d (%s), switching backend",
+                                attempt + 1, n_backends, exc,
+                            )
+                            continue
+                    # All backends exhausted or single-backend mode — surface error
+                    error_msg = str(exc)
+                    error_event = responses_format_error(
+                        {"code": "upstream_error", "message": error_msg},
+                        seq=translator._next_seq(),
+                    )
+                    try:
+                        await sr.write(error_event.encode())
+                    except (ConnectionResetError, BrokenPipeError, OSError):
+                        logger.debug("Client disconnected before error event")
+                    break
+                upstream_status = 200
+                break
+
+            cc_request.pop("_resolved_key", None)
+            cc_request.pop("_provider_config", None)
+            cc_request.pop("_original_body", None)
+            try:
+                await sr.write_eof()
+            except (ConnectionResetError, BrokenPipeError, OSError):
+                logger.debug("Client disconnected before stream EOF")
             return sr
 
         # Emit response.created and response.in_progress via translator
@@ -1085,111 +1117,141 @@ class BridgeServer:
             cc_request["_resolved_key"] = self._active_key
             cc_request["_provider_config"] = self._active_provider_config
 
-            raw_chunks: list[bytes] = []
+            n_backends = len(self._backends) if self._backends else 1
+            max_attempts = n_backends
+            for attempt in range(max_attempts):
+                raw_chunks: list[bytes] = []
 
-            async def _collect(chunk: bytes) -> None:
-                raw_chunks.append(chunk)
+                async def _collect(chunk: bytes, _raw_chunks: list[bytes] = raw_chunks) -> None:
+                    _raw_chunks.append(chunk)
 
-            try:
-                await self._active_provider.stream_request(cc_request, _collect)
-            except Exception:
-                raise
-
-            # Parse Responses API SSE → Chat Completions response
-            raw_bytes = b"".join(raw_chunks)
-            logger.debug(
-                "Custom-transport collected %d chunks, %d bytes raw SSE",
-                len(raw_chunks), len(raw_bytes),
-            )
-
-            from kitty.providers.openai_subscription import OpenAISubscriptionAdapter
-
-            cc_response = OpenAISubscriptionAdapter._parse_sse_to_response(raw_bytes)
-            logger.debug(
-                "Parsed CC response: %s",
-                json.dumps(cc_response, ensure_ascii=False)[:2000],
-            )
-            result = translator.translate_response(cc_response)
-            logger.debug(
-                "Translated Messages API result: %s",
-                json.dumps(result, ensure_ascii=False)[:2000],
-            )
-
-            msg_id = result.get("id", message_id)
-            model = result.get("model", "")
-            usage = result.get("usage", {})
-
-            # Emit Messages API SSE events
-            await sr.write(
-                format_message_start_event(
-                    {
-                        "id": msg_id,
-                        "type": "message",
-                        "role": "assistant",
-                        "content": [],
-                        "model": model,
-                        "stop_reason": None,
-                        "stop_sequence": None,
-                        "usage": usage,
-                    }
-                ).encode()
-            )
-
-            for idx, block in enumerate(result.get("content", [])):
-                btype = block.get("type")
-                if btype == "thinking":
-                    await sr.write(
-                        format_content_block_start_event(
-                            idx, {"type": "thinking", "thinking": ""}
-                        ).encode()
+                try:
+                    await self._active_provider.stream_request(cc_request, _collect)
+                except Exception as exc:
+                    logger.warning("Custom-transport stream failed: %s", exc)
+                    # In balancing mode: mark unhealthy and failover
+                    if self._backends and self._current_backend_idx >= 0:
+                        self._mark_backend_unhealthy(self._current_backend_idx)
+                        if self._any_healthy_backend() and attempt < max_attempts - 1:
+                            self._select_backend()
+                            self._normalize_model(cc_request)
+                            self._active_provider.normalize_request(cc_request)
+                            cc_request["_resolved_key"] = self._active_key
+                            cc_request["_provider_config"] = self._active_provider_config
+                            logger.info(
+                                "Custom-transport failover: attempt %d/%d (%s), switching backend",
+                                attempt + 1, max_attempts, exc,
+                            )
+                            continue
+                    # All backends exhausted or single-backend mode — surface error
+                    error_msg = str(exc)
+                    error_event = messages_format_error(
+                        {"type": "error", "error": {"type": "api_error", "message": error_msg}},
                     )
-                    await sr.write(
-                        format_content_block_delta_event(
-                            idx, {"type": "thinking_delta", "thinking": block.get("thinking", "")}
-                        ).encode()
+                    try:
+                        await sr.write(error_event.encode())
+                    except (ConnectionResetError, BrokenPipeError, OSError):
+                        logger.debug("Client disconnected before error event")
+                    break
+                else:
+                    # Success — parse and emit SSE events
+                    raw_bytes = b"".join(raw_chunks)
+                    logger.debug(
+                        "Custom-transport collected %d chunks, %d bytes raw SSE",
+                        len(raw_chunks), len(raw_bytes),
                     )
-                    await sr.write(format_content_block_stop_event(idx).encode())
-                elif btype == "text":
-                    await sr.write(
-                        format_content_block_start_event(
-                            idx, {"type": "text", "text": ""}
-                        ).encode()
+
+                    from kitty.providers.openai_subscription import OpenAISubscriptionAdapter
+
+                    cc_response = OpenAISubscriptionAdapter._parse_sse_to_response(raw_bytes)
+                    logger.debug(
+                        "Parsed CC response: %s",
+                        json.dumps(cc_response, ensure_ascii=False)[:2000],
                     )
-                    await sr.write(
-                        format_content_block_delta_event(
-                            idx, {"type": "text_delta", "text": block.get("text", "")}
-                        ).encode()
+                    result = translator.translate_response(cc_response)
+                    logger.debug(
+                        "Translated Messages API result: %s",
+                        json.dumps(result, ensure_ascii=False)[:2000],
                     )
-                    await sr.write(format_content_block_stop_event(idx).encode())
-                elif btype == "tool_use":
-                    partial = json.dumps(block.get("input", {}), ensure_ascii=False)
+
+                    msg_id = result.get("id", message_id)
+                    model = result.get("model", "")
+                    usage = result.get("usage", {})
+
+                    # Emit Messages API SSE events
                     await sr.write(
-                        format_content_block_start_event(
-                            idx,
+                        format_message_start_event(
                             {
-                                "type": "tool_use",
-                                "id": block.get("id", ""),
-                                "name": block.get("name", ""),
-                                "input": {},
-                            },
+                                "id": msg_id,
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [],
+                                "model": model,
+                                "stop_reason": None,
+                                "stop_sequence": None,
+                                "usage": usage,
+                            }
                         ).encode()
                     )
+
+                    for idx, block in enumerate(result.get("content", [])):
+                        btype = block.get("type")
+                        if btype == "thinking":
+                            await sr.write(
+                                format_content_block_start_event(
+                                    idx, {"type": "thinking", "thinking": ""}
+                                ).encode()
+                            )
+                            await sr.write(
+                                format_content_block_delta_event(
+                                    idx, {"type": "thinking_delta", "thinking": block.get("thinking", "")}
+                                ).encode()
+                            )
+                            await sr.write(format_content_block_stop_event(idx).encode())
+                        elif btype == "text":
+                            await sr.write(
+                                format_content_block_start_event(
+                                    idx, {"type": "text", "text": ""}
+                                ).encode()
+                            )
+                            await sr.write(
+                                format_content_block_delta_event(
+                                    idx, {"type": "text_delta", "text": block.get("text", "")}
+                                ).encode()
+                            )
+                            await sr.write(format_content_block_stop_event(idx).encode())
+                        elif btype == "tool_use":
+                            partial = json.dumps(block.get("input", {}), ensure_ascii=False)
+                            await sr.write(
+                                format_content_block_start_event(
+                                    idx,
+                                    {
+                                        "type": "tool_use",
+                                        "id": block.get("id", ""),
+                                        "name": block.get("name", ""),
+                                        "input": {},
+                                    },
+                                ).encode()
+                            )
+                            await sr.write(
+                                format_content_block_delta_event(
+                                    idx, {"type": "input_json_delta", "partial_json": partial}
+                                ).encode()
+                            )
+                            await sr.write(format_content_block_stop_event(idx).encode())
+
+                    stop_reason = result.get("stop_reason", "end_turn")
                     await sr.write(
-                        format_content_block_delta_event(
-                            idx, {"type": "input_json_delta", "partial_json": partial}
+                        format_message_delta_event(
+                            {"stop_reason": stop_reason, "stop_sequence": None}, {}
                         ).encode()
                     )
-                    await sr.write(format_content_block_stop_event(idx).encode())
+                    await sr.write(format_message_stop_event().encode())
+                    self._log_usage(cc_response.get("usage"))
+                    break
 
-            stop_reason = result.get("stop_reason", "end_turn")
-            await sr.write(
-                format_message_delta_event(
-                    {"stop_reason": stop_reason, "stop_sequence": None}, {}
-                ).encode()
-            )
-            await sr.write(format_message_stop_event().encode())
-            self._log_usage(cc_response.get("usage"))
-
+            cc_request.pop("_resolved_key", None)
+            cc_request.pop("_provider_config", None)
             try:
                 await sr.write_eof()
             except (ConnectionResetError, BrokenPipeError, OSError):
@@ -1592,15 +1654,42 @@ class BridgeServer:
         if self._active_provider.use_custom_transport:
             cc_request["_resolved_key"] = self._active_key
             cc_request["_provider_config"] = self._active_provider_config
-            try:
-                await self._active_provider.stream_request(cc_request, sr.write)
-            except Exception:
-                raise
-            finally:
+
+            n_backends = len(self._backends) if self._backends else 1
+            for attempt in range(n_backends):
                 try:
-                    await sr.write_eof()
-                except (ConnectionResetError, BrokenPipeError, OSError):
-                    logger.debug("Client disconnected before stream EOF")
+                    await self._active_provider.stream_request(cc_request, sr.write)
+                except Exception as exc:
+                    logger.warning("Custom-transport stream failed: %s", exc)
+                    if self._backends and self._current_backend_idx >= 0:
+                        self._mark_backend_unhealthy(self._current_backend_idx)
+                        if self._any_healthy_backend() and attempt < n_backends - 1:
+                            self._select_backend()
+                            self._normalize_model(cc_request)
+                            self._active_provider.normalize_request(cc_request)
+                            cc_request["_resolved_key"] = self._active_key
+                            cc_request["_provider_config"] = self._active_provider_config
+                            logger.info(
+                                "Custom-transport failover: attempt %d/%d (%s), switching backend",
+                                attempt + 1, n_backends, exc,
+                            )
+                            continue
+                    # All backends exhausted or single-backend mode — surface error
+                    error_msg = str(exc)
+                    error_sse = f"data: {json.dumps({'error': {'code': 'stream_error', 'message': error_msg}})}\n\n"
+                    try:
+                        await sr.write(error_sse.encode())
+                    except (ConnectionResetError, BrokenPipeError, OSError):
+                        logger.debug("Client disconnected before error event")
+                    break
+                break
+
+            cc_request.pop("_resolved_key", None)
+            cc_request.pop("_provider_config", None)
+            try:
+                await sr.write_eof()
+            except (ConnectionResetError, BrokenPipeError, OSError):
+                logger.debug("Client disconnected before stream EOF")
             return sr
 
         try:
@@ -1987,78 +2076,109 @@ class BridgeServer:
             cc_request["_resolved_key"] = self._active_key
             cc_request["_provider_config"] = self._active_provider_config
 
-            raw_chunks: list[bytes] = []
+            n_backends = len(self._backends) if self._backends else 1
+            for attempt in range(n_backends):
+                raw_chunks: list[bytes] = []
 
-            async def _collect(chunk: bytes) -> None:
-                raw_chunks.append(chunk)
+                async def _collect(chunk: bytes, _raw_chunks: list[bytes] = raw_chunks) -> None:
+                    _raw_chunks.append(chunk)
 
-            try:
-                await self._active_provider.stream_request(cc_request, _collect)
-            except Exception:
-                upstream_status = 500
-                raise
-
-            raw_bytes = b"".join(raw_chunks)
-            from kitty.providers.openai_subscription import OpenAISubscriptionAdapter
-
-            cc_response = OpenAISubscriptionAdapter._parse_sse_to_response(raw_bytes)
-
-            # Re-emit as Chat Completions SSE stream
-            response_id = cc_response.get("id", "chatcmpl-sub")
-            created = cc_response.get("created", 0)
-            model = cc_response.get("model", "")
-
-            def _cc_chunk(delta: dict, fin: str | None = None, usage: dict | None = None) -> bytes:
-                payload: dict = {
-                    "id": response_id,
-                    "object": "chat.completion.chunk",
-                    "created": created,
-                    "model": model,
-                    "choices": [{"index": 0, "delta": delta, "finish_reason": fin}],
-                }
-                if usage is not None:
-                    payload["usage"] = usage
-                return f"data: {json.dumps(payload)}\n\n".encode()
-
-            choice = (cc_response.get("choices") or [{}])[0]
-            msg = choice.get("message", {})
-            finish_reason = choice.get("finish_reason", "stop")
-
-            # First chunk: role + content/tool_calls start
-            first_delta: dict = {"role": "assistant", "content": None}
-            if msg.get("content"):
-                first_delta["content"] = ""
-            if msg.get("tool_calls"):
-                first_delta["tool_calls"] = [
-                    {
-                        "index": i,
-                        "id": tc.get("id", f"call_{i}"),
-                        "type": "function",
-                        "function": {"name": tc["function"]["name"], "arguments": ""},
+                try:
+                    await self._active_provider.stream_request(cc_request, _collect)
+                except Exception as exc:
+                    logger.warning("Custom-transport stream failed: %s", exc)
+                    if self._backends and self._current_backend_idx >= 0:
+                        self._mark_backend_unhealthy(self._current_backend_idx)
+                        if self._any_healthy_backend() and attempt < n_backends - 1:
+                            self._select_backend()
+                            self._normalize_model(cc_request)
+                            self._active_provider.normalize_request(cc_request)
+                            cc_request["_resolved_key"] = self._active_key
+                            cc_request["_provider_config"] = self._active_provider_config
+                            logger.info(
+                                "Custom-transport failover: attempt %d/%d (%s), switching backend",
+                                attempt + 1, n_backends, exc,
+                            )
+                            continue
+                    upstream_status = 500
+                    error_payload = {
+                        "error": {"message": str(exc), "type": "api_error"},
                     }
-                    for i, tc in enumerate(msg["tool_calls"])
-                ]
-            await sr.write(_cc_chunk(first_delta))
+                    await sr.write(f"data: {json.dumps(error_payload)}\n\n".encode())
+                    await sr.write(b"data: [DONE]\n\n")
+                    break
+                else:
+                    raw_bytes = b"".join(raw_chunks)
+                    from kitty.providers.openai_subscription import OpenAISubscriptionAdapter
 
-            # Content delta
-            if msg.get("content"):
-                await sr.write(_cc_chunk({"content": msg["content"]}))
+                    cc_response = OpenAISubscriptionAdapter._parse_sse_to_response(raw_bytes)
 
-            # Tool call argument deltas
-            for i, tc in enumerate(msg.get("tool_calls", [])):
-                args = tc.get("function", {}).get("arguments", "")
-                if args:
-                    await sr.write(_cc_chunk(
-                        {"tool_calls": [{"index": i, "function": {"arguments": args}}]},
-                    ))
+                    # Re-emit as Chat Completions SSE stream
+                    response_id = cc_response.get("id", "chatcmpl-sub")
+                    created = cc_response.get("created", 0)
+                    model = cc_response.get("model", "")
 
-            # Finish
-            await sr.write(
-                _cc_chunk({}, fin=finish_reason, usage=cc_response.get("usage")),
-            )
-            await sr.write(b"data: [DONE]\n\n")
-            self._log_usage(cc_response.get("usage"))
+                    def _cc_chunk(
+                        delta: dict,
+                        fin: str | None = None,
+                        usage: dict | None = None,
+                        _response_id: str = response_id,
+                        _created: int = created,
+                        _model: str = model,
+                    ) -> bytes:
+                        payload: dict = {
+                            "id": _response_id,
+                            "object": "chat.completion.chunk",
+                            "created": _created,
+                            "model": _model,
+                            "choices": [{"index": 0, "delta": delta, "finish_reason": fin}],
+                        }
+                        if usage is not None:
+                            payload["usage"] = usage
+                        return f"data: {json.dumps(payload)}\n\n".encode()
 
+                    choice = (cc_response.get("choices") or [{}])[0]
+                    msg = choice.get("message", {})
+                    finish_reason = choice.get("finish_reason", "stop")
+
+                    # First chunk: role + content/tool_calls start
+                    first_delta: dict = {"role": "assistant", "content": None}
+                    if msg.get("content"):
+                        first_delta["content"] = ""
+                    if msg.get("tool_calls"):
+                        first_delta["tool_calls"] = [
+                            {
+                                "index": i,
+                                "id": tc.get("id", f"call_{i}"),
+                                "type": "function",
+                                "function": {"name": tc["function"]["name"], "arguments": ""},
+                            }
+                            for i, tc in enumerate(msg["tool_calls"])
+                        ]
+                    await sr.write(_cc_chunk(first_delta))
+
+                    # Content delta
+                    if msg.get("content"):
+                        await sr.write(_cc_chunk({"content": msg["content"]}))
+
+                    # Tool call argument deltas
+                    for i, tc in enumerate(msg.get("tool_calls", [])):
+                        args = tc.get("function", {}).get("arguments", "")
+                        if args:
+                            await sr.write(_cc_chunk(
+                                {"tool_calls": [{"index": i, "function": {"arguments": args}}]},
+                            ))
+
+                    # Finish
+                    await sr.write(
+                        _cc_chunk({}, fin=finish_reason, usage=cc_response.get("usage")),
+                    )
+                    await sr.write(b"data: [DONE]\n\n")
+                    self._log_usage(cc_response.get("usage"))
+                    break
+
+            cc_request.pop("_resolved_key", None)
+            cc_request.pop("_provider_config", None)
             try:
                 await sr.write_eof()
             except (ConnectionResetError, BrokenPipeError, OSError):
