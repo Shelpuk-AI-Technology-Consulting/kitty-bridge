@@ -488,6 +488,134 @@ class TestDeleteCredentialCleanup:
 
 
 # ---------------------------------------------------------------------------
+# Delete cascade: removing from balancing profiles
+# ---------------------------------------------------------------------------
+
+class TestDeleteWithBalancingCascade:
+    def test_deleting_profile_removes_from_balancing(self, store, cred_store):
+        """Deleting a profile auto-removes it from a balancing profile's members."""
+        delete = _import_delete_profile_flow()
+        p = _make_profile("target")
+        store.save(p)
+        store.save(_make_profile("other1"))
+        store.save(_make_profile("other2"))
+        store.save(_make_balancing("bal", ["target", "other1", "other2"]))
+        cred_store.set(p.auth_ref, "key")
+
+        with (
+            patch("kitty.cli.profile_cmd.SelectionMenu.show", return_value="target"),
+            patch("kitty.cli.profile_cmd.prompt_confirm", return_value=True),
+        ):
+            delete(store, cred_store)
+
+        # Regular profile deleted
+        assert store.get("target") is None
+        # Balancing profile updated: target removed
+        bal = store.get_backend("bal")
+        assert isinstance(bal, BalancingProfile)
+        assert "target" not in bal.members
+        assert bal.members == ["other1", "other2"]
+
+    def test_deleting_profile_cascades_balancing_below_minimum(self, store, cred_store):
+        """When removal leaves a balancing profile with <2 members, it is deleted too."""
+        delete = _import_delete_profile_flow()
+        p = _make_profile("target")
+        store.save(p)
+        store.save(_make_profile("other"))
+        store.save(_make_balancing("bal", ["target", "other"]))
+        cred_store.set(p.auth_ref, "key")
+
+        with (
+            patch("kitty.cli.profile_cmd.SelectionMenu.show", return_value="target"),
+            patch("kitty.cli.profile_cmd.prompt_confirm", return_value=True),
+        ):
+            delete(store, cred_store)
+
+        # Both deleted
+        assert store.get("target") is None
+        assert store.get_backend("bal") is None
+
+    def test_deleting_profile_removes_from_multiple_balancing_profiles(self, store, cred_store):
+        """Profile in two balancing profiles → both updated."""
+        delete = _import_delete_profile_flow()
+        p = _make_profile("target")
+        store.save(p)
+        store.save(_make_profile("a"))
+        store.save(_make_profile("b"))
+        store.save(_make_profile("c"))
+        store.save(_make_balancing("bal1", ["target", "a", "b"]))
+        store.save(_make_balancing("bal2", ["target", "a", "c"]))
+
+        with (
+            patch("kitty.cli.profile_cmd.SelectionMenu.show", return_value="target"),
+            patch("kitty.cli.profile_cmd.prompt_confirm", return_value=True),
+        ):
+            delete(store, cred_store)
+
+        assert store.get("target") is None
+        bal1 = store.get_backend("bal1")
+        bal2 = store.get_backend("bal2")
+        assert isinstance(bal1, BalancingProfile) and bal1.members == ["a", "b"]
+        assert isinstance(bal2, BalancingProfile) and bal2.members == ["a", "c"]
+
+    def test_deleting_balancing_profile_directly(self, store, cred_store):
+        """Deleting a balancing profile (not a regular one) still works."""
+        delete = _import_delete_profile_flow()
+        store.save(_make_profile("a"))
+        store.save(_make_profile("b"))
+        store.save(_make_balancing("bal", ["a", "b"]))
+
+        with (
+            patch("kitty.cli.profile_cmd.SelectionMenu.show", return_value="bal"),
+            patch("kitty.cli.profile_cmd.prompt_confirm", return_value=True),
+        ):
+            delete(store, cred_store)
+
+        assert store.get_backend("bal") is None
+        assert store.get("a") is not None
+        assert store.get("b") is not None
+
+    def test_cascaded_balancing_deletion_no_credential_error(self, store, cred_store):
+        """Deleting a profile that cascades a balancing delete does not try to clean balancing's auth_ref."""
+        delete = _import_delete_profile_flow()
+        p = _make_profile("target")
+        store.save(p)
+        store.save(_make_profile("other"))
+        store.save(_make_balancing("bal", ["target", "other"]))
+        cred_store.set(p.auth_ref, "key")
+
+        with (
+            patch("kitty.cli.profile_cmd.SelectionMenu.show", return_value="target"),
+            patch("kitty.cli.profile_cmd.prompt_confirm", return_value=True),
+        ):
+            delete(store, cred_store)  # should not raise
+
+        # Credential cleaned up (target was the only user)
+        assert cred_store.get(p.auth_ref) is None
+
+    def test_cancel_does_not_modify_balancing_profiles(self, store, cred_store):
+        """Cancelling at the confirmation prompt leaves balancing profiles untouched."""
+        delete = _import_delete_profile_flow()
+        p = _make_profile("target")
+        store.save(p)
+        store.save(_make_profile("other1"))
+        store.save(_make_profile("other2"))
+        store.save(_make_balancing("bal", ["target", "other1", "other2"]))
+
+        with (
+            patch("kitty.cli.profile_cmd.SelectionMenu.show", return_value="target"),
+            patch("kitty.cli.profile_cmd.prompt_confirm", return_value=False),
+        ):
+            delete(store, cred_store)
+
+        # Nothing changed
+        assert store.get("target") is not None
+        bal = store.get_backend("bal")
+        assert isinstance(bal, BalancingProfile)
+        assert bal.members == ["target", "other1", "other2"]
+
+
+# ---------------------------------------------------------------------------
 # OAuth provider create flow
 # ---------------------------------------------------------------------------
 

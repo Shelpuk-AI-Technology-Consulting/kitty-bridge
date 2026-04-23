@@ -373,7 +373,10 @@ def _edit_balancing_flow(store: ProfileStore, balancing_name: str) -> None:
 def _delete_profile_flow(store: ProfileStore, cred_store: CredentialStore) -> None:
     """Interactive flow for deleting a profile.
 
-    Cleans up the associated credential when no other profile shares the same auth_ref.
+    If the profile is a member of any balancing profiles, it is automatically
+    removed from them. Balancing profiles that would drop below 2 members are
+    deleted as well. Cleans up the associated credential when no other profile
+    shares the same auth_ref.
     """
     backends = store.get_all_backends()
     if not backends:
@@ -385,16 +388,26 @@ def _delete_profile_flow(store: ProfileStore, cred_store: CredentialStore) -> No
     if selected is None:
         return
 
-    # Check if any balancing profiles reference this one
-    referencing = [b.name for b in backends if isinstance(b, BalancingProfile) and selected in b.members]
+    # Show what will happen to balancing profiles before confirming
+    referencing = [b for b in backends if isinstance(b, BalancingProfile) and selected in b.members]
     if referencing:
-        print_error(
-            f"Cannot delete {selected!r} — it is a member of balancing profile(s): "
-            f"{', '.join(referencing)}. Remove it from those profiles first."
-        )
-        return
+        affected = ", ".join(b.name for b in referencing)
+        print_warning(f"{selected!r} is a member of balancing profile(s): {affected}")
 
     if prompt_confirm(f"Delete profile {selected!r}?", default=False):
+        # Auto-remove from any balancing profiles that reference this profile
+        for bp in referencing:
+            new_members = [m for m in bp.members if m != selected]
+            if len(new_members) >= 2:
+                updated = bp.model_copy(update={"members": new_members})
+                store.save(updated)
+                print_status(f"Removed {selected!r} from balancing profile {bp.name!r}")
+            else:
+                store.delete(bp.name)
+                print_warning(
+                    f"Balancing profile {bp.name!r} deleted — would have fewer than 2 members"
+                )
+
         # Clean up credential if no other profile shares the same auth_ref
         target = store.get_backend(selected)
         store.delete(selected)
