@@ -56,6 +56,24 @@ def _make_streaming_codex_response(
     return mock_resp
 
 
+def _make_streaming_error_response(
+    *, status_code: int, chunks_before_error: list[bytes], error_message: str,
+) -> unittest.mock.MagicMock:
+    """Create a streaming response that errors mid-iteration."""
+    mock_resp = unittest.mock.MagicMock()
+    mock_resp.status_code = status_code
+    mock_resp.text = b"".join(chunks_before_error).decode("utf-8", errors="replace")
+    mock_resp.content = b"".join(chunks_before_error)
+
+    async def _aiter_content():
+        for chunk in chunks_before_error:
+            yield chunk
+        raise Exception(error_message)
+
+    mock_resp.aiter_content = _aiter_content
+    return mock_resp
+
+
 @contextlib.contextmanager
 def _mock_curl_session(mock_response: object) -> unittest.mock.MagicMock:
     """Patch the provider's ``_curl_session`` property to return a mock.
@@ -420,6 +438,33 @@ class TestHandleCurlError:
         assert "request failed" in str(result)
 
 
+class TestIsTransientStreamError:
+    def test_curl_56_is_transient(self) -> None:
+        assert OpenAISubscriptionAdapter._is_transient_stream_error(
+            Exception("Failed to perform, curl: (56) Connection closed abruptly.")
+        )
+
+    def test_recv_error_is_transient(self) -> None:
+        assert OpenAISubscriptionAdapter._is_transient_stream_error(
+            Exception("Recv error: connection reset")
+        )
+
+    def test_connection_closed_is_transient(self) -> None:
+        assert OpenAISubscriptionAdapter._is_transient_stream_error(
+            Exception("Connection closed by server")
+        )
+
+    def test_timeout_is_not_transient(self) -> None:
+        assert not OpenAISubscriptionAdapter._is_transient_stream_error(
+            Exception("Connection timed out after 30s")
+        )
+
+    def test_generic_error_is_not_transient(self) -> None:
+        assert not OpenAISubscriptionAdapter._is_transient_stream_error(
+            Exception("Something unexpected")
+        )
+
+
 # ── Session reuse ────────────────────────────────────────────────────────
 
 class TestCurlSessionReuse:
@@ -487,6 +532,93 @@ class TestMakeRequestCloudflare:
 
 class TestStreamRequestBasic:
     """Test successful streaming via curl_cffi."""
+
+    @pytest.mark.asyncio()
+    async def test_retries_on_abrupt_connection_close(
+        self, adapter: OpenAISubscriptionAdapter, fresh_session: tuple[OAuthSession, Path],
+    ) -> None:
+        _, session_path = fresh_session
+        cc_request = {
+            "model": "gpt-5.4",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": True,
+            "_resolved_key": str(session_path),
+        }
+        written: list[bytes] = []
+
+        async def mock_write(data: bytes) -> None:
+            written.append(data)
+
+        first_resp = _make_streaming_error_response(
+            status_code=200,
+            chunks_before_error=[b'data: {"type":"response.output_text.delta","delta":"Hel"}\n\n'],
+            error_message="Failed to perform, curl: (56) Connection closed abruptly.",
+        )
+        second_resp = _make_streaming_codex_response(
+            status_code=200,
+            chunks=[
+                b'data: {"type":"response.output_text.delta","delta":"Hello"}\n\n',
+                b'data: [DONE]\n\n',
+            ],
+        )
+
+        mock_session = unittest.mock.AsyncMock()
+        mock_session.post = unittest.mock.AsyncMock(side_effect=[first_resp, second_resp])
+        with unittest.mock.patch.object(
+            OpenAISubscriptionAdapter,
+            "_curl_session",
+            new_callable=unittest.mock.PropertyMock,
+            return_value=mock_session,
+        ):
+            mock_aiohttp_session = unittest.mock.MagicMock()
+            mock_aiohttp_session.__aenter__ = unittest.mock.AsyncMock(return_value=mock_aiohttp_session)
+            mock_aiohttp_session.__aexit__ = unittest.mock.AsyncMock(return_value=False)
+            with unittest.mock.patch("aiohttp.ClientSession", return_value=mock_aiohttp_session):
+                await adapter.stream_request(cc_request, mock_write)
+
+        assert mock_session.post.await_count == 2
+        assert any(b'"delta":"Hello"' in chunk for chunk in written)
+
+    @pytest.mark.asyncio()
+    async def test_raises_after_retry_exhaustion(
+        self, adapter: OpenAISubscriptionAdapter, fresh_session: tuple[OAuthSession, Path],
+    ) -> None:
+        _, session_path = fresh_session
+        cc_request = {
+            "model": "gpt-5.4",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": True,
+            "_resolved_key": str(session_path),
+        }
+        written: list[bytes] = []
+
+        async def mock_write(data: bytes) -> None:
+            written.append(data)
+
+        err_resp = _make_streaming_error_response(
+            status_code=200,
+            chunks_before_error=[],
+            error_message="Failed to perform, curl: (56) Connection closed abruptly.",
+        )
+
+        mock_session = unittest.mock.AsyncMock()
+        mock_session.post = unittest.mock.AsyncMock(side_effect=[err_resp, err_resp, err_resp])
+        with unittest.mock.patch.object(
+            OpenAISubscriptionAdapter,
+            "_curl_session",
+            new_callable=unittest.mock.PropertyMock,
+            return_value=mock_session,
+        ):
+            mock_aiohttp_session = unittest.mock.MagicMock()
+            mock_aiohttp_session.__aenter__ = unittest.mock.AsyncMock(return_value=mock_aiohttp_session)
+            mock_aiohttp_session.__aexit__ = unittest.mock.AsyncMock(return_value=False)
+            with unittest.mock.patch("aiohttp.ClientSession", return_value=mock_aiohttp_session):
+                from kitty.providers.base import ProviderError
+                with pytest.raises(ProviderError, match="connection failed|request failed"):
+                    await adapter.stream_request(cc_request, mock_write)
+
+        assert mock_session.post.await_count == 3
+        assert written == []
 
     @pytest.mark.asyncio()
     async def test_streams_sse_chunks(

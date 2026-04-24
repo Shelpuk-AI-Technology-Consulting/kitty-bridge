@@ -48,6 +48,7 @@ logger = logging.getLogger(__name__)
 _CODEX_BACKEND_URL = "https://chatgpt.com/backend-api/codex/responses"
 # Timeout: (connect_seconds, read_seconds) — matches Codex CLI reqwest defaults
 _CODEX_TIMEOUT = (30, 300)
+_STREAM_RECV_ERROR_RETRIES = 2
 
 
 def _convert_content_types(items: list) -> list:
@@ -185,6 +186,18 @@ class OpenAISubscriptionAdapter(OpenAIAdapter):
         if "connection" in exc_msg:
             return ProviderError(f"Codex backend connection failed: {exc}")
         return ProviderError(f"Codex backend request failed: {exc}")
+
+    @staticmethod
+    def _is_transient_stream_error(exc: Exception) -> bool:
+        """Check if a stream error is transient and worth retrying.
+
+        curl error 56 (RECV_ERROR / "Connection closed abruptly") is the
+        most common transient error for SSE streams — the server resets the
+        connection mid-stream, often due to idle timeouts or load balancer
+        teardown.  The Codex CLI (reqwest) retries these automatically.
+        """
+        msg = str(exc).lower()
+        return "curl: (56)" in msg or "connection closed" in msg or "recv error" in msg
 
     _ALLOWED_RESPONSES_PARAMS = frozenset({
         "model", "stream", "store", "instructions", "input",
@@ -357,40 +370,59 @@ class OpenAISubscriptionAdapter(OpenAIAdapter):
 
         headers = self._build_codex_headers(access_token, session.id_token)
 
-        try:
-            resp = await self._curl_session.post(
-                _CODEX_BACKEND_URL,
-                json=resp_body,
-                headers=headers,
-                timeout=_CODEX_TIMEOUT,
-                stream=True,
-            )
-        except Exception as exc:
-            raise self._handle_curl_error(exc) from exc
+        last_exc: Exception | None = None
+        for attempt in range(_STREAM_RECV_ERROR_RETRIES + 1):
+            try:
+                resp = await self._curl_session.post(
+                    _CODEX_BACKEND_URL,
+                    json=resp_body,
+                    headers=headers,
+                    timeout=_CODEX_TIMEOUT,
+                    stream=True,
+                )
+            except Exception as exc:
+                raise self._handle_curl_error(exc) from exc
 
-        if resp.status_code >= 400:
-            raw = resp.text
-            if self._is_cloudflare_block(resp.status_code, raw):
-                logger.warning("Codex backend blocked by Cloudflare challenge")
-                raise self.map_error(resp.status_code, {"error": {"message": raw}})
-            body = {}
-            with contextlib.suppress(Exception):
-                body = json.loads(raw)
-            # Log raw response at DEBUG level for diagnosis
-            logger.debug("Codex backend error %d: %s", resp.status_code, raw[:500])
-            if not body:
-                body = {"error": {"message": raw}}
-            raise self.map_error(resp.status_code, body)
+            if resp.status_code >= 400:
+                raw = resp.text
+                if self._is_cloudflare_block(resp.status_code, raw):
+                    logger.warning("Codex backend blocked by Cloudflare challenge")
+                    raise self.map_error(resp.status_code, {"error": {"message": raw}})
+                body = {}
+                with contextlib.suppress(Exception):
+                    body = json.loads(raw)
+                # Log raw response at DEBUG level for diagnosis
+                logger.debug("Codex backend error %d: %s", resp.status_code, raw[:500])
+                if not body:
+                    body = {"error": {"message": raw}}
+                raise self.map_error(resp.status_code, body)
 
-        # Stream SSE chunks to the downstream client.  Do NOT call
-        # resp.close() — curl_cffi's internal cleanup callback releases
-        # the handle back to the session pool when the stream task completes.
-        async for chunk in resp.aiter_content():
-            if chunk:
-                # Strip UTF-8 BOM that some responses include
-                cleaned = chunk.replace(b"\xef\xbb\xbf", b"")
-                if cleaned:
-                    await write(cleaned)
+            # Stream SSE chunks to the downstream client.  Do NOT call
+            # resp.close() — curl_cffi's internal cleanup callback releases
+            # the handle back to the session pool when the stream task completes.
+            try:
+                async for chunk in resp.aiter_content():
+                    if chunk:
+                        # Strip UTF-8 BOM that some responses include
+                        cleaned = chunk.replace(b"\xef\xbb\xbf", b"")
+                        if cleaned:
+                            await write(cleaned)
+                # Stream completed successfully
+                return
+            except Exception as exc:
+                if self._is_transient_stream_error(exc) and attempt < _STREAM_RECV_ERROR_RETRIES:
+                    logger.info(
+                        "Codex backend stream reset (attempt %d/%d), retrying: %s",
+                        attempt + 1, _STREAM_RECV_ERROR_RETRIES + 1, exc,
+                    )
+                    last_exc = exc
+                    continue
+                # Non-transient or retries exhausted — surface the error
+                raise self._handle_curl_error(exc) from exc
+
+        # Should not reach here, but guard against it
+        if last_exc:
+            raise self._handle_curl_error(last_exc) from last_exc
 
     def _cc_to_responses(self, cc_request: dict) -> dict:
         """Convert a CC (Chat Completions) request to Responses API format.
