@@ -57,6 +57,14 @@ class StubProvider(ProviderAdapter):
         return Exception(f"Error {status_code}")
 
 
+UPSTREAM_OK = {
+    "id": "chatcmpl-1",
+    "model": "test-model",
+    "choices": [{"index": 0, "message": {"role": "assistant", "content": "Hello!"}, "finish_reason": "stop"}],
+    "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+}
+
+
 def _make_balancing_server(n_backends: int = 2, backend_cooldown: int = 300) -> BridgeServer:
     backends = []
     for i in range(n_backends):
@@ -287,5 +295,83 @@ class TestStreamErrorCooldownExponentialBackoff:
 
             # Backend-0 cooldown should have doubled: 30 -> 60
             assert server._backend_health[0]["cooldown"] == 60
+        finally:
+            await server.stop_async()
+
+
+# ── Phase 2: 401 auth failure blacklisting ──────────────────────────────────────
+
+
+class TestAuthFailureBlacklisting:
+    """401 from upstream should blacklist the backend for the session and failover."""
+
+    @pytest.mark.asyncio
+    async def test_401_cc_stream_marks_backend_auth_unhealthy(self):
+        """CC stream: upstream 401 marks backend with very long cooldown."""
+        server = _make_balancing_server(n_backends=2)
+        port = await server.start_async()
+        try:
+            with aioresponses(passthrough=["http://127.0.0.1"]) as m:
+                m.post(
+                    "https://api0.example.com/v1/chat/completions",
+                    status=401,
+                    payload={"error": {"message": "Unauthorized"}},
+                )
+                m.post("https://api1.example.com/v1/chat/completions", payload=UPSTREAM_OK)
+
+                async with aiohttp.ClientSession() as session, session.post(
+                    f"http://127.0.0.1:{port}/v1/chat/completions",
+                    json={"model": "test", "messages": [{"role": "user", "content": "hi"}], "stream": True},
+                ) as resp:
+                    body = await resp.read()
+                    assert resp.status == 200
+
+                # Backend-0 should have a very long cooldown (auth blacklisting)
+                assert server._backend_health[0]["cooldown"] >= 86400
+        finally:
+            await server.stop_async()
+
+    @pytest.mark.asyncio
+    async def test_401_balancing_failover_to_healthy_backend(self):
+        """Two backends: backend-0 returns 401, backend-1 succeeds."""
+        server = _make_balancing_server(n_backends=2)
+        port = await server.start_async()
+        try:
+            with aioresponses(passthrough=["http://127.0.0.1"]) as m:
+                m.post(
+                    "https://api0.example.com/v1/chat/completions",
+                    status=401,
+                    payload={"error": {"message": "Unauthorized"}},
+                )
+                m.post("https://api1.example.com/v1/chat/completions", payload=UPSTREAM_OK)
+
+                async with aiohttp.ClientSession() as session, session.post(
+                    f"http://127.0.0.1:{port}/v1/chat/completions",
+                    json={"model": "test", "messages": [{"role": "user", "content": "hi"}]},
+                ) as resp:
+                    assert resp.status == 200
+                    body = await resp.json()
+                    assert body["choices"][0]["message"]["content"] == "Hello!"
+        finally:
+            await server.stop_async()
+
+    @pytest.mark.asyncio
+    async def test_401_single_backend_returns_auth_error(self):
+        """Single backend with 401 returns a clean auth error to the agent."""
+        server = _make_balancing_server(n_backends=1)
+        port = await server.start_async()
+        try:
+            with aioresponses(passthrough=["http://127.0.0.1"]) as m:
+                m.post(
+                    "https://api0.example.com/v1/chat/completions",
+                    status=401,
+                    payload={"error": {"message": "Unauthorized"}},
+                )
+
+                async with aiohttp.ClientSession() as session, session.post(
+                    f"http://127.0.0.1:{port}/v1/chat/completions",
+                    json={"model": "test", "messages": [{"role": "user", "content": "hi"}]},
+                ) as resp:
+                    assert resp.status == 401
         finally:
             await server.stop_async()

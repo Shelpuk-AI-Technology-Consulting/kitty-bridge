@@ -838,3 +838,167 @@ class TestFamilyCooldown:
             model="model",
         )
         assert server._get_family_cooldown("anything") is None
+
+
+# -- Phase 1: Backend exhaustion fixes ------------------------------------------
+
+
+class TestMarkBackendHealthy:
+    """_mark_backend_healthy resets a backend to healthy state."""
+
+    def test_resets_healthy_flag(self):
+        server = _make_server(3)
+        server._mark_backend_unhealthy(1)
+        assert server._backend_health[1]["healthy"] is False
+
+        server._mark_backend_healthy(1)
+        assert server._backend_health[1]["healthy"] is True
+
+    def test_clears_failed_at(self):
+        server = _make_server(3)
+        server._mark_backend_unhealthy(1)
+        assert server._backend_health[1]["failed_at"] is not None
+
+        server._mark_backend_healthy(1)
+        assert server._backend_health[1]["failed_at"] is None
+
+    def test_resets_stream_and_transport_error_counts(self):
+        server = _make_server(3)
+        server._mark_backend_unhealthy(0, cooldown=30)
+        server._mark_backend_unhealthy(0, cooldown=60)
+        assert server._backend_health[0]["stream_error_count"] == 2
+
+        server._mark_backend_healthy(0)
+        assert server._backend_health[0]["stream_error_count"] == 0
+        assert server._backend_health[0]["transport_error_count"] == 0
+
+    def test_does_not_reset_failure_count(self):
+        """Failure count is cumulative and should NOT be reset by health recovery."""
+        server = _make_server(3)
+        server._mark_backend_unhealthy(0)
+        server._mark_backend_unhealthy(0)
+        assert server._backend_health[0]["failure_count"] == 2
+
+        server._mark_backend_healthy(0)
+        assert server._backend_health[0]["failure_count"] == 2
+
+    def test_out_of_range_is_noop(self):
+        """Calling with an out-of-range index should not raise."""
+        server = _make_server(2)
+        server._mark_backend_healthy(99)  # should not raise
+
+
+class TestSingleBackendCooldownCap:
+    """Single-backend configurations should use shorter cooldowns."""
+
+    def test_single_backend_cooldown_capped(self):
+        """A single backend should get a capped cooldown, not the full 300s."""
+        backends = _make_backends(1)
+        server = BridgeServer(
+            adapter=StubLauncher(),
+            provider=backends[0][0],
+            resolved_key=backends[0][1],
+            model="model-0",
+            backends=backends,
+            backend_cooldown=300,
+        )
+        server._mark_backend_unhealthy(0)
+        assert server._backend_health[0]["cooldown"] <= 30
+
+    def test_multi_backend_keeps_full_cooldown(self):
+        """Multi-backend should keep the full cooldown."""
+        server = _make_server(3, cooldown=300)
+        server._mark_backend_unhealthy(0)
+        assert server._backend_health[0]["cooldown"] == 300
+
+    def test_single_backend_with_explicit_short_cooldown(self):
+        """Explicit short cooldown should not be increased by the cap."""
+        backends = _make_backends(1)
+        server = BridgeServer(
+            adapter=StubLauncher(),
+            provider=backends[0][0],
+            resolved_key=backends[0][1],
+            model="model-0",
+            backends=backends,
+            backend_cooldown=300,
+        )
+        server._mark_backend_unhealthy(0, cooldown=10)
+        assert server._backend_health[0]["cooldown"] == 10
+
+    @pytest.mark.asyncio
+    async def test_single_backend_recovers_after_successful_request(self):
+        """After a successful CC stream, a single backend should be marked healthy again."""
+        backends = _make_backends(1)
+        server = BridgeServer(
+            adapter=StubLauncher(),
+            provider=backends[0][0],
+            resolved_key=backends[0][1],
+            model="model-0",
+            backends=backends,
+            backend_cooldown=300,
+        )
+        port = await server.start_async()
+        url = f"http://127.0.0.1:{port}/v1/chat/completions"
+
+        request_body = {
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": True,
+        }
+
+        sse_body = (
+            b'data: {"id":"chatcmpl-1","choices":[{"index":0,"delta":{"content":"Hello!"},"finish_reason":null}],'
+            b'"model":"test-model"}\n\n'
+            b'data: {"id":"chatcmpl-1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],'
+            b'"model":"test-model"}\n\n'
+            b'data: [DONE]\n\n'
+        )
+
+        with aioresponses(passthrough=["http://127.0.0.1"]) as m:
+            # First request succeeds
+            m.post(
+                "https://api0.example.com/v1/chat/completions",
+                body=sse_body,
+                headers={"Content-Type": "text/event-stream"},
+            )
+
+            async with aiohttp.ClientSession() as session, session.post(url, json=request_body) as resp:
+                assert resp.status == 200
+
+            # Backend should be marked healthy after success
+            assert server._backend_health[0]["healthy"] is True
+
+        await server.stop_async()
+
+
+# -- Phase 2: 401 auth failure blacklisting --------------------------------------
+
+
+class TestMarkBackendUnhealthyAuth:
+    """_mark_backend_unhealthy with failure_kind='auth' blacklists the backend."""
+
+    def test_auth_failure_sets_max_cooldown(self):
+        """Auth failure should set a very long (session-persistent) cooldown."""
+        server = _make_server(3)
+        server._mark_backend_unhealthy(0, failure_kind="auth")
+        assert server._backend_health[0]["cooldown"] >= 86400  # 24h
+
+    def test_auth_failure_resets_error_counts(self):
+        """Auth failure resets stream/transport error counts like 'hard'."""
+        server = _make_server(3)
+        server._mark_backend_unhealthy(0, cooldown=30)
+        assert server._backend_health[0]["stream_error_count"] == 1
+
+        server._mark_backend_unhealthy(0, failure_kind="auth")
+        assert server._backend_health[0]["stream_error_count"] == 0
+        assert server._backend_health[0]["transport_error_count"] == 0
+
+    def test_auth_failure_backend_stays_unhealthy(self):
+        """After auth failure, backend should not recover within a normal session."""
+        server = _make_server(3, cooldown=300)
+        server._mark_backend_unhealthy(0, failure_kind="auth")
+        # Simulate a long time passing — should still be unhealthy
+        server._backend_health[0]["failed_at"] = time.monotonic() - 3600  # 1 hour ago
+        assert not server._backend_health[0]["healthy"]
+        # Cooldown hasn't expired (86400s)
+        assert server._backend_health[0]["cooldown"] >= 86400

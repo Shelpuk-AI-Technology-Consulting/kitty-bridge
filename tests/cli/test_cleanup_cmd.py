@@ -50,6 +50,7 @@ def test_detect_stale_env_no_base_url():
 
 def test_run_cleanup_removes_stale_values(tmp_path):
     settings_path = tmp_path / "settings.json"
+    backup_path = tmp_path / "claude-settings-backup.json"
     settings_data = {
         "env": {
             "ANTHROPIC_BASE_URL": "http://127.0.0.1:32987",
@@ -63,7 +64,8 @@ def test_run_cleanup_removes_stale_values(tmp_path):
     }
     settings_path.write_text(json.dumps(settings_data))
 
-    exit_code = run_cleanup(settings_path=settings_path)
+    with patch("kitty.cli.cleanup_cmd._get_backup_path", return_value=backup_path):
+        exit_code = run_cleanup(settings_path=settings_path)
     assert exit_code == 0
 
     result = json.loads(settings_path.read_text())
@@ -163,6 +165,7 @@ class TestAuthTokenCleanup:
     def test_cleanup_removes_auth_token(self, tmp_path: Path):
         """Regression: cleanup must remove kitty-bridge-token, fixing 401 errors."""
         settings_path = tmp_path / "settings.json"
+        backup_path = tmp_path / "claude-settings-backup.json"
         settings_data = {
             "env": {
                 "ANTHROPIC_BASE_URL": "http://127.0.0.1:32987",
@@ -173,7 +176,8 @@ class TestAuthTokenCleanup:
         }
         settings_path.write_text(json.dumps(settings_data))
 
-        exit_code = run_cleanup(settings_path=settings_path)
+        with patch("kitty.cli.cleanup_cmd._get_backup_path", return_value=backup_path):
+            exit_code = run_cleanup(settings_path=settings_path)
         assert exit_code == 0
 
         result = json.loads(settings_path.read_text())
@@ -186,6 +190,7 @@ class TestAuthTokenCleanup:
     def test_cleanup_removes_kitty_token_without_base_url(self, tmp_path: Path):
         """When base URL was already removed, kitty token should still be cleaned."""
         settings_path = tmp_path / "settings.json"
+        backup_path = tmp_path / "claude-settings-backup.json"
         settings_data = {
             "env": {
                 "ANTHROPIC_AUTH_TOKEN": "kitty-bridge-token",
@@ -194,7 +199,8 @@ class TestAuthTokenCleanup:
         }
         settings_path.write_text(json.dumps(settings_data))
 
-        exit_code = run_cleanup(settings_path=settings_path)
+        with patch("kitty.cli.cleanup_cmd._get_backup_path", return_value=backup_path):
+            exit_code = run_cleanup(settings_path=settings_path)
         assert exit_code == 0
 
         result = json.loads(settings_path.read_text())

@@ -49,6 +49,8 @@ _DEBUG_LOG_PATH = _DEBUG_LOG_DIR / "bridge.log"
 
 _MAX_RETRIES = 3
 _RETRYABLE_STATUSES = {429, 500, 502, 503, 504}
+_AUTH_FAILURE_STATUSES = {401}  # 403 handled as Cloudflare
+_AUTH_COOLDOWN = 86400  # 24h — effectively permanent per session
 _BACKOFF_BASE = 1.0
 _EMPTY_RETRY_DELAYS = [5.0, 15.0]  # delays between retries for empty responses (non-balancing)
 
@@ -58,6 +60,7 @@ _RATE_LIMIT_CODES = {"1310"}
 _RATE_LIMIT_PATTERNS = ("limit exhaust", "rate limit", "quota exceeded", "usage limit", "exhausted")
 _CLIENT_MAX_SIZE = 16 * 1024 * 1024  # 16 MiB
 _STREAM_READ_TIMEOUT = 120  # seconds — upstream must respond with first byte within this
+_SINGLE_BACKEND_COOLDOWN_CAP = 30  # seconds — cap cooldown for single-backend profiles
 _MAX_REQUEST_CHARS = 4_000_000  # ~1.2M estimated tokens; requests larger than this are rejected
 _COMPACTION_CHAR_THRESHOLD = int(_MAX_REQUEST_CHARS * 0.7)  # Trigger compaction at 70% of max size
 _COMPACTION_TAIL_COUNT = 20  # Minimum number of recent messages to preserve
@@ -288,12 +291,13 @@ class BridgeServer:
     def _mark_backend_unhealthy(self, index: int, *, cooldown: int | None = None, failure_kind: str = "hard") -> None:
         """Mark a backend as unhealthy and log the event.
 
-        failure_kind: "hard" (default), "stream", "transport", "rate_limit", or "cloudflare".
+        failure_kind: "hard" (default), "stream", "transport", "rate_limit", "cloudflare", or "auth".
         - "hard" resets stream_error_count and transport_error_count.
         - "stream" increments stream_error_count, resets transport_error_count.
         - "transport" increments transport_error_count, resets stream_error_count.
         - "rate_limit" marks the backend unhealthy and triggers family cooldown.
         - "cloudflare" marks the backend unhealthy and triggers escalated family cooldown.
+        - "auth" sets a session-persistent cooldown (24h) for invalid credentials.
 
         For backward compatibility, a short cooldown passed without an explicit
         failure_kind is treated as a stream error.
@@ -305,10 +309,19 @@ class BridgeServer:
         health["failed_at"] = time.monotonic()
         health["failure_count"] = health.get("failure_count", 0) + 1
 
-        if cooldown is not None:
+        if failure_kind == "auth":
+            health["cooldown"] = _AUTH_COOLDOWN
+        elif cooldown is not None:
             health["cooldown"] = cooldown
         else:
             health["cooldown"] = self._backend_cooldown
+            # Single-backend profiles get a shorter cooldown on hard failures — no failover alternative
+            if len(self._backends) == 1 and health["cooldown"] > _SINGLE_BACKEND_COOLDOWN_CAP:
+                logger.debug(
+                    "Capping single-backend cooldown from %ds to %ds",
+                    health["cooldown"], _SINGLE_BACKEND_COOLDOWN_CAP,
+                )
+                health["cooldown"] = _SINGLE_BACKEND_COOLDOWN_CAP
 
         if failure_kind == "transport":
             health["transport_error_count"] = health.get("transport_error_count", 0) + 1
@@ -353,6 +366,21 @@ class BridgeServer:
                 if elapsed >= health["cooldown"]:
                     return True
         return False
+
+    def _mark_backend_healthy(self, index: int) -> None:
+        """Reset a backend to healthy state after a successful request.
+
+        Resets ``healthy``, ``failed_at``, ``stream_error_count``, and
+        ``transport_error_count``.  Does **not** reset ``failure_count``
+        (cumulative lifetime statistic).
+        """
+        if not self._backends or index >= len(self._backend_health) or index < 0:
+            return
+        health = self._backend_health[index]
+        health["healthy"] = True
+        health["failed_at"] = None
+        health["stream_error_count"] = 0
+        health["transport_error_count"] = 0
 
     def _get_stream_error_cooldown(self, backend_idx: int) -> int:
         """Return cooldown for a transient stream error on the given backend.
@@ -861,6 +889,8 @@ class BridgeServer:
 
         result = translator.translate_response(cc_response)
         self._log_usage(cc_response.get("usage"))
+        if self._backends and self._current_backend_idx >= 0:
+            self._mark_backend_healthy(self._current_backend_idx)
         return web.json_response(result)
 
     async def _stream_responses(
@@ -977,7 +1007,8 @@ class BridgeServer:
 
                         # In balancing mode: mark unhealthy, try next backend
                         if self._backends and self._current_backend_idx >= 0:
-                            self._mark_backend_unhealthy(self._current_backend_idx)
+                            kind = "auth" if upstream.status in _AUTH_FAILURE_STATUSES else "hard"
+                            self._mark_backend_unhealthy(self._current_backend_idx, failure_kind=kind)
                             if self._any_healthy_backend() and attempt < max_attempts - 1:
                                 self._select_backend()
                                 self._normalize_model(cc_request)
@@ -1178,6 +1209,9 @@ class BridgeServer:
                         logger.debug("SSE (finish) → %s", event.split("\n", 1)[0][:120])
                         await sr.write(event.encode())
                     self._log_usage(last_usage)
+                    # Mark backend healthy on clean stream completion
+                    if self._backends and self._current_backend_idx >= 0:
+                        self._mark_backend_healthy(self._current_backend_idx)
                     break  # Exit retry loop
         except asyncio.TimeoutError:
             terminal_status = "incomplete"
@@ -1290,6 +1324,8 @@ class BridgeServer:
 
         result = translator.translate_response(cc_response)
         self._log_usage(cc_response.get("usage"))
+        if self._backends and self._current_backend_idx >= 0:
+            self._mark_backend_healthy(self._current_backend_idx)
         return web.json_response(result)
 
     async def _stream_messages(
@@ -1311,6 +1347,7 @@ class BridgeServer:
         await sr.prepare(request)
 
         last_usage: dict | None = None
+        stream_ok = False  # Set True only on clean completion
 
         # Custom-transport providers (e.g. openai_subscription) return
         # Responses API SSE.  We must collect the raw stream, parse it into
@@ -1392,75 +1429,78 @@ class BridgeServer:
                     model = result.get("model", "")
                     usage = result.get("usage", {})
 
-                    # Emit Messages API SSE events
-                    await sr.write(
-                        format_message_start_event(
-                            {
-                                "id": msg_id,
-                                "type": "message",
-                                "role": "assistant",
-                                "content": [],
-                                "model": model,
-                                "stop_reason": None,
-                                "stop_sequence": None,
-                                "usage": usage,
-                            }
-                        ).encode()
-                    )
+                    # Emit Messages API SSE events — client may disconnect mid-stream
+                    try:
+                        await sr.write(
+                            format_message_start_event(
+                                {
+                                    "id": msg_id,
+                                    "type": "message",
+                                    "role": "assistant",
+                                    "content": [],
+                                    "model": model,
+                                    "stop_reason": None,
+                                    "stop_sequence": None,
+                                    "usage": usage,
+                                }
+                            ).encode()
+                        )
 
-                    for idx, block in enumerate(result.get("content", [])):
-                        btype = block.get("type")
-                        if btype == "thinking":
-                            await sr.write(
-                                format_content_block_start_event(
-                                    idx, {"type": "thinking", "thinking": ""}
-                                ).encode()
-                            )
-                            await sr.write(
-                                format_content_block_delta_event(
-                                    idx, {"type": "thinking_delta", "thinking": block.get("thinking", "")}
-                                ).encode()
-                            )
-                            await sr.write(format_content_block_stop_event(idx).encode())
-                        elif btype == "text":
-                            await sr.write(
-                                format_content_block_start_event(
-                                    idx, {"type": "text", "text": ""}
-                                ).encode()
-                            )
-                            await sr.write(
-                                format_content_block_delta_event(
-                                    idx, {"type": "text_delta", "text": block.get("text", "")}
-                                ).encode()
-                            )
-                            await sr.write(format_content_block_stop_event(idx).encode())
-                        elif btype == "tool_use":
-                            partial = json.dumps(block.get("input", {}), ensure_ascii=False)
-                            await sr.write(
-                                format_content_block_start_event(
-                                    idx,
-                                    {
-                                        "type": "tool_use",
-                                        "id": block.get("id", ""),
-                                        "name": block.get("name", ""),
-                                        "input": {},
-                                    },
-                                ).encode()
-                            )
-                            await sr.write(
-                                format_content_block_delta_event(
-                                    idx, {"type": "input_json_delta", "partial_json": partial}
-                                ).encode()
-                            )
-                            await sr.write(format_content_block_stop_event(idx).encode())
+                        for idx, block in enumerate(result.get("content", [])):
+                            btype = block.get("type")
+                            if btype == "thinking":
+                                await sr.write(
+                                    format_content_block_start_event(
+                                        idx, {"type": "thinking", "thinking": ""}
+                                    ).encode()
+                                )
+                                await sr.write(
+                                    format_content_block_delta_event(
+                                        idx, {"type": "thinking_delta", "thinking": block.get("thinking", "")}
+                                    ).encode()
+                                )
+                                await sr.write(format_content_block_stop_event(idx).encode())
+                            elif btype == "text":
+                                await sr.write(
+                                    format_content_block_start_event(
+                                        idx, {"type": "text", "text": ""}
+                                    ).encode()
+                                )
+                                await sr.write(
+                                    format_content_block_delta_event(
+                                        idx, {"type": "text_delta", "text": block.get("text", "")}
+                                    ).encode()
+                                )
+                                await sr.write(format_content_block_stop_event(idx).encode())
+                            elif btype == "tool_use":
+                                partial = json.dumps(block.get("input", {}), ensure_ascii=False)
+                                await sr.write(
+                                    format_content_block_start_event(
+                                        idx,
+                                        {
+                                            "type": "tool_use",
+                                            "id": block.get("id", ""),
+                                            "name": block.get("name", ""),
+                                            "input": {},
+                                        },
+                                    ).encode()
+                                )
+                                await sr.write(
+                                    format_content_block_delta_event(
+                                        idx, {"type": "input_json_delta", "partial_json": partial}
+                                    ).encode()
+                                )
+                                await sr.write(format_content_block_stop_event(idx).encode())
 
-                    stop_reason = result.get("stop_reason", "end_turn")
-                    await sr.write(
-                        format_message_delta_event(
-                            {"stop_reason": stop_reason, "stop_sequence": None}, {}
-                        ).encode()
-                    )
-                    await sr.write(format_message_stop_event().encode())
+                        stop_reason = result.get("stop_reason", "end_turn")
+                        await sr.write(
+                            format_message_delta_event(
+                                {"stop_reason": stop_reason, "stop_sequence": None}, {}
+                            ).encode()
+                        )
+                        await sr.write(format_message_stop_event().encode())
+                    except (ConnectionResetError, BrokenPipeError, OSError):
+                        logger.debug("Client disconnected during custom-transport emit for %s", message_id)
                     self._log_usage(cc_response.get("usage"))
                     break
 
@@ -1512,7 +1552,8 @@ class BridgeServer:
                             retryable = self._should_retry_stream(upstream.status, error_body)
                             # In balancing mode: mark unhealthy and try next backend for ANY error
                             if self._backends and self._current_backend_idx >= 0:
-                                self._mark_backend_unhealthy(self._current_backend_idx)
+                                kind = "auth" if upstream.status in _AUTH_FAILURE_STATUSES else "hard"
+                                self._mark_backend_unhealthy(self._current_backend_idx, failure_kind=kind)
                                 if self._any_healthy_backend() and attempt < max_attempts - 1:
                                     self._select_backend()
                                     self._normalize_model(cc_request)
@@ -1723,6 +1764,7 @@ class BridgeServer:
                         for event in finish_events:
                             await sr.write(event.encode())
                         self._log_usage(last_usage)
+                        stream_ok = True
                         break  # Exit retry loop
                 except Exception as exc:
                     if _is_retryable_exception(exc):
@@ -1824,6 +1866,9 @@ class BridgeServer:
                 logger.debug("Client disconnected before error could be sent for %s", message_id)
 
         logger.info("Messages stream completed for %s", message_id)
+        # Mark backend healthy on success so cooldown resets for next request
+        if stream_ok and self._backends and self._current_backend_idx >= 0:
+            self._mark_backend_healthy(self._current_backend_idx)
         # Client may disconnect before write_eof() completes — benign race.
         try:
             await sr.write_eof()
@@ -1891,6 +1936,8 @@ class BridgeServer:
 
         result = translator.translate_response(cc_response)
         self._log_usage(cc_response.get("usage"))
+        if self._backends and self._current_backend_idx >= 0:
+            self._mark_backend_healthy(self._current_backend_idx)
         return web.json_response(result)
 
     async def _stream_gemini(
@@ -1909,6 +1956,7 @@ class BridgeServer:
         await sr.prepare(request)
 
         last_usage: dict | None = None
+        stream_ok = False  # Set True only on clean completion
 
         # Custom-transport providers handle their own HTTP requests.
         if self._active_provider.use_custom_transport:
@@ -1990,7 +2038,8 @@ class BridgeServer:
 
                         # In balancing mode: mark unhealthy, try next backend
                         if self._backends and self._current_backend_idx >= 0:
-                            self._mark_backend_unhealthy(self._current_backend_idx)
+                            kind = "auth" if upstream.status in _AUTH_FAILURE_STATUSES else "hard"
+                            self._mark_backend_unhealthy(self._current_backend_idx, failure_kind=kind)
                             if self._any_healthy_backend() and attempt < max_attempts - 1:
                                 self._select_backend()
                                 self._normalize_model(cc_request)
@@ -2153,6 +2202,7 @@ class BridgeServer:
                     for event in finish_events:
                         await sr.write(event.encode())
                     self._log_usage(last_usage)
+                    stream_ok = True
                     break  # Exit retry loop
 
         except asyncio.TimeoutError:
@@ -2182,6 +2232,9 @@ class BridgeServer:
             await sr.write_eof()
         except (ConnectionResetError, BrokenPipeError, OSError):
             logger.debug("Client disconnected before stream EOF")
+        # Mark backend healthy on success so cooldown resets for next request
+        if stream_ok and self._backends and self._current_backend_idx >= 0:
+            self._mark_backend_healthy(self._current_backend_idx)
         return sr
 
     # ── Chat Completions pass-through handler ─────────────────────────────
@@ -2254,6 +2307,8 @@ class BridgeServer:
                         failure_kind = "rate_limit"
                     elif isinstance(exc.body, str) and self._is_cloudflare_block(exc.status, exc.body):
                         failure_kind = "cloudflare"
+                    elif exc.status in _AUTH_FAILURE_STATUSES:
+                        failure_kind = "auth"
                     else:
                         failure_kind = "hard"
                     self._mark_backend_unhealthy(idx, failure_kind=failure_kind)
@@ -2390,8 +2445,11 @@ class BridgeServer:
                     error_payload = {
                         "error": {"message": str(exc), "type": "api_error"},
                     }
-                    await sr.write(f"data: {json.dumps(error_payload)}\n\n".encode())
-                    await sr.write(b"data: [DONE]\n\n")
+                    try:
+                        await sr.write(f"data: {json.dumps(error_payload)}\n\n".encode())
+                        await sr.write(b"data: [DONE]\n\n")
+                    except (ConnectionResetError, BrokenPipeError, OSError):
+                        logger.debug("Client disconnected before error event")
                     break
                 else:
                     raw_bytes = b"".join(raw_chunks)
@@ -2441,25 +2499,28 @@ class BridgeServer:
                             }
                             for i, tc in enumerate(msg["tool_calls"])
                         ]
-                    await sr.write(_cc_chunk(first_delta))
+                    try:
+                        await sr.write(_cc_chunk(first_delta))
 
-                    # Content delta
-                    if msg.get("content"):
-                        await sr.write(_cc_chunk({"content": msg["content"]}))
+                        # Content delta
+                        if msg.get("content"):
+                            await sr.write(_cc_chunk({"content": msg["content"]}))
 
-                    # Tool call argument deltas
-                    for i, tc in enumerate(msg.get("tool_calls", [])):
-                        args = tc.get("function", {}).get("arguments", "")
-                        if args:
-                            await sr.write(_cc_chunk(
-                                {"tool_calls": [{"index": i, "function": {"arguments": args}}]},
-                            ))
+                        # Tool call argument deltas
+                        for i, tc in enumerate(msg.get("tool_calls", [])):
+                            args = tc.get("function", {}).get("arguments", "")
+                            if args:
+                                await sr.write(_cc_chunk(
+                                    {"tool_calls": [{"index": i, "function": {"arguments": args}}]},
+                                ))
 
-                    # Finish
-                    await sr.write(
-                        _cc_chunk({}, fin=finish_reason, usage=cc_response.get("usage")),
-                    )
-                    await sr.write(b"data: [DONE]\n\n")
+                        # Finish
+                        await sr.write(
+                            _cc_chunk({}, fin=finish_reason, usage=cc_response.get("usage")),
+                        )
+                        await sr.write(b"data: [DONE]\n\n")
+                    except (ConnectionResetError, BrokenPipeError, OSError):
+                        logger.debug("Client disconnected during custom-transport emit")
                     self._log_usage(cc_response.get("usage"))
                     break
 
@@ -2515,7 +2576,8 @@ class BridgeServer:
 
                         # In balancing mode: mark unhealthy, try next backend
                         if self._backends and self._current_backend_idx >= 0:
-                            self._mark_backend_unhealthy(self._current_backend_idx)
+                            kind = "auth" if upstream.status in _AUTH_FAILURE_STATUSES else "hard"
+                            self._mark_backend_unhealthy(self._current_backend_idx, failure_kind=kind)
                             if self._any_healthy_backend() and attempt < max_attempts - 1:
                                 self._select_backend()
                                 self._normalize_model(cc_request)
@@ -2718,6 +2780,9 @@ class BridgeServer:
                             await asyncio.sleep(delay)
                             continue
                     self._log_usage(last_usage)
+                    # Mark backend healthy on clean stream completion
+                    if self._backends and self._current_backend_idx >= 0:
+                        self._mark_backend_healthy(self._current_backend_idx)
                     break  # Exit retry loop
 
         except asyncio.TimeoutError:
@@ -2774,7 +2839,7 @@ class BridgeServer:
             cc_request["model"] = normalized
 
 
-    def _compact_messages(self, messages: list[dict]) -> list[dict]:
+    def _compact_messages(self, messages: list[dict], max_messages_chars: int | None = None) -> list[dict]:
         """Compact message history to prevent upstream context window overflow.
 
         Applies three strategies in order:
@@ -2792,7 +2857,9 @@ class BridgeServer:
             return messages
 
         original_size = len(json.dumps(messages, ensure_ascii=False))
-        if original_size <= _COMPACTION_CHAR_THRESHOLD:
+        compaction_threshold = _COMPACTION_CHAR_THRESHOLD if max_messages_chars is None else max_messages_chars
+        guaranteed_max = _COMPACTION_GUARANTEED_MESSAGES_MAX if max_messages_chars is None else max_messages_chars
+        if original_size <= compaction_threshold:
             return messages
 
         # ── Step 1: Truncate large tool results ──────────────────────────
@@ -2811,7 +2878,7 @@ class BridgeServer:
                 compacted.append(msg)
 
         size_after_truncation = len(json.dumps(compacted, ensure_ascii=False))
-        if size_after_truncation <= _COMPACTION_CHAR_THRESHOLD:
+        if size_after_truncation <= compaction_threshold:
             logger.info(
                 "Context compaction: tool result truncation reduced size from %d to %d chars "
                 "(%d messages)",
@@ -2849,8 +2916,8 @@ class BridgeServer:
 
         # ── Step 4: Head+Tail pruning on remaining blocks ────────────────
         system_size = sum(s for _, s in system_blocks)
-        head_budget = max(0, int(_COMPACTION_CHAR_THRESHOLD * 0.2) - system_size)
-        tail_budget = _COMPACTION_CHAR_THRESHOLD * 0.8
+        head_budget = max(0, int(compaction_threshold * 0.2) - system_size)
+        tail_budget = compaction_threshold * 0.8
 
         # Build head: initial context after system messages
         head_blocks: list[tuple[list[dict], int]] = []
@@ -2888,7 +2955,7 @@ class BridgeServer:
         # Drop head blocks first, then oldest tail blocks (keeping at least 1).
         head_dropped = 0
         tail_dropped = 0
-        while result_size > _COMPACTION_GUARANTEED_MESSAGES_MAX:
+        while result_size > guaranteed_max:
             if head_blocks:
                 _, popped_size = head_blocks.pop(0)
                 head_dropped += 1
@@ -2909,7 +2976,7 @@ class BridgeServer:
             result.extend(block_msgs)
 
         if head_dropped or tail_dropped:
-            budget_met = result_size <= _COMPACTION_GUARANTEED_MESSAGES_MAX
+            budget_met = result_size <= guaranteed_max
             logger.info(
                 "Context compaction: guaranteed-fit fallback dropped %d head and %d tail blocks, "
                 "reducing messages from %d to %d and size from %d to %d chars (budget %s)",
@@ -2928,11 +2995,26 @@ class BridgeServer:
         """Compact request messages in place before applying request-size guardrails.
 
         If the translated request contains a ``messages`` list, this method
-        compacts it using ``_compact_messages()``. Requests without messages are
-        left unchanged.
+        compacts it using ``_compact_messages()``. The compaction budget is
+        reduced to account for non-message payload (tools, model, metadata)
+        so that the full request fits within ``_MAX_REQUEST_CHARS``.
+
+        Requests without messages are left unchanged.
         """
-        if "messages" in cc_request:
-            cc_request["messages"] = self._compact_messages(cc_request["messages"])
+        if "messages" not in cc_request:
+            return
+
+        # Compute the size of the non-message payload (tools, model, etc.)
+        # so that messages + overhead stays within _MAX_REQUEST_CHARS.
+        non_msg = {k: v for k, v in cc_request.items() if k != "messages"}
+        overhead = len(json.dumps(non_msg, ensure_ascii=False))
+        # Budget for messages = max request size - overhead (with safety margin)
+        messages_budget = max(0, _MAX_REQUEST_CHARS - overhead - 10_000)  # 10K margin for JSON punctuation
+
+        cc_request["messages"] = self._compact_messages(
+            cc_request["messages"],
+            max_messages_chars=messages_budget,
+        )
 
     def _check_request_size(self, cc_request: dict) -> web.Response | None:
         """Return a 400 error if the translated request exceeds the safe size limit.

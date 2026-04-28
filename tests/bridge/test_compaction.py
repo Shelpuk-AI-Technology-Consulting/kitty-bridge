@@ -6,7 +6,11 @@ histories to prevent 400 "context too large" errors from upstream providers.
 
 import json
 
-from kitty.bridge.server import _COMPACTION_GUARANTEED_MESSAGES_MAX, BridgeServer
+from kitty.bridge.server import (
+    _COMPACTION_GUARANTEED_MESSAGES_MAX,
+    _MAX_REQUEST_CHARS,
+    BridgeServer,
+)
 from kitty.launchers.base import LauncherAdapter, SpawnConfig
 from kitty.profiles.schema import Profile
 from kitty.providers.base import ProviderAdapter
@@ -568,3 +572,173 @@ class TestCompactMessagesGuaranteedFit:
             assert prev.get("tool_calls") is not None
             call_ids = {tc["id"] for tc in prev["tool_calls"]}
             assert tr["tool_call_id"] in call_ids
+
+
+
+class TestRequestSizeAccountingForTools:
+    """Regression tests for the full-request size check including tools.
+
+    The bridge's compaction only shrinks messages, but _check_request_size
+    checks the ENTIRE request (tools + system + model + metadata + messages).
+    If the tools array is large, the request can exceed _MAX_REQUEST_CHARS
+    even after messages are compacted.  This test class validates the fix.
+    """
+
+    def test_check_request_size_rejects_when_tools_push_over_limit(self):
+        """A request with compacted messages but large tools must still be rejected."""
+        server = _make_server()
+        # Messages are small (well under threshold)
+        messages = [
+            {"role": "system", "content": "System prompt"},
+            {"role": "user", "content": "Hi"},
+            {"role": "assistant", "content": "Hello!"},
+        ]
+        # But tools are enormous — push the whole request over _MAX_REQUEST_CHARS
+        large_tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": f"tool_{i}",
+                    "description": f"Tool {i}: " + "x" * 100_000,
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+            for i in range(50)
+        ]
+        cc_request = {
+            "model": "test-model",
+            "messages": messages,
+            "tools": large_tools,
+            "stream": True,
+        }
+        # Sanity: the full request should exceed the limit
+        full_size = len(json.dumps(cc_request, ensure_ascii=False))
+        assert full_size > _MAX_REQUEST_CHARS
+
+        result = server._check_request_size(cc_request)
+        assert result is not None, "Expected _check_request_size to reject the oversized request"
+        assert result.status == 400
+
+    def test_compaction_does_not_shrink_tools(self):
+        """_apply_compaction only touches messages — tools are never trimmed."""
+        server = _make_server()
+        # Build a request where messages are small but tools are huge
+        original_tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": f"tool_{i}",
+                    "description": "x" * 50_000,
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+            for i in range(20)
+        ]
+        tools_size_before = len(json.dumps(original_tools, ensure_ascii=False))
+        cc_request = {
+            "model": "test-model",
+            "messages": [
+                {"role": "system", "content": "System"},
+                {"role": "user", "content": "A" * 3_000_000},
+                {"role": "assistant", "content": "B" * 3_000_000},
+            ],
+            "tools": original_tools,
+        }
+        server._apply_compaction(cc_request)
+
+        # Tools should be unchanged
+        assert cc_request["tools"] == original_tools
+        tools_size_after = len(json.dumps(cc_request["tools"], ensure_ascii=False))
+        assert tools_size_before == tools_size_after
+
+    def test_full_request_fits_after_compaction_with_tools(self):
+        """The happy path: messages are compacted, tools are preserved, whole request fits."""
+        server = _make_server()
+        # Large messages that trigger compaction
+        messages = [{"role": "system", "content": "System"}]
+        for i in range(20):
+            role = "user" if i % 2 == 0 else "assistant"
+            messages.append({"role": role, "content": f"Msg{i} " * 50_000})
+
+        # Moderate tools — together with compacted messages should fit
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": f"tool_{i}",
+                    "description": f"Tool {i} description",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+            for i in range(10)
+        ]
+        cc_request = {
+            "model": "test-model",
+            "messages": messages,
+            "tools": tools,
+            "stream": True,
+        }
+
+        server._apply_compaction(cc_request)
+        result = server._check_request_size(cc_request)
+        assert result is None, (
+            f"Expected request to fit after compaction. "
+            f"Full size: {len(json.dumps(cc_request, ensure_ascii=False))} chars, "
+            f"limit: {_MAX_REQUEST_CHARS}"
+        )
+
+
+    def test_request_rejected_when_tools_plus_compacted_messages_exceed_limit(self):
+        """BUG: compacted messages fit, but tools push the full request over the limit.
+
+        This reproduces the /compact failure scenario: Claude Code's compaction
+        produces a request where messages are small enough, but the tools array
+        (which is never compacted) causes the full request to exceed the limit.
+        The bridge must handle this gracefully instead of hard-rejecting.
+        """
+        server = _make_server()
+        # Build messages that are just barely under the compaction threshold
+        # so compaction still kicks in but doesn't shrink much
+        messages = [{"role": "system", "content": "System prompt"}]
+        for i in range(15):
+            role = "user" if i % 2 == 0 else "assistant"
+            messages.append({"role": role, "content": f"Msg{i} " * 100_000})
+
+        # Tools that are large but not enormous — together with compacted
+        # messages they push the full request over _MAX_REQUEST_CHARS
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": f"tool_{i}",
+                    "description": "A tool that does something useful. " + "x" * 20_000,
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+            for i in range(40)  # 40 tools × ~20K each ≈ 800K total
+        ]
+
+        cc_request = {
+            "model": "test-model",
+            "messages": messages,
+            "tools": tools,
+            "stream": True,
+        }
+
+        # Before compaction: the full request would exceed the limit.
+        # Verify this by checking the raw messages size.
+        raw_msg_size = len(json.dumps(cc_request["messages"], ensure_ascii=False))
+        assert raw_msg_size > _COMPACTION_GUARANTEED_MESSAGES_MAX, (
+            f"Raw messages should exceed guaranteed max: got {raw_msg_size:,}"
+        )
+
+        # Apply compaction — now accounts for the non-message payload (tools, model)
+        server._apply_compaction(cc_request)
+
+        full_size = len(json.dumps(cc_request, ensure_ascii=False))
+        # After tools-aware compaction, the full request should fit.
+        result = server._check_request_size(cc_request)
+        assert result is None, (
+            f"Full request should fit after tools-aware compaction. "
+            f"Full size: {full_size:,}, limit: {_MAX_REQUEST_CHARS:,}"
+        )

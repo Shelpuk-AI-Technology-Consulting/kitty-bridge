@@ -751,3 +751,128 @@ class TestCloudflareRegression:
                     assert "api key is invalid" not in message
         finally:
             await server.stop_async()
+
+
+class TestCustomTransportStreamDisconnect:
+    """Regression tests for custom-transport streaming when sr.write() fails.
+
+    When StreamResponse.write() raises (client disconnected mid-stream),
+    the handler must catch it silently — NOT propagate to _access_log_middleware
+    as an unhandled "Handler error".
+    """
+
+    @pytest.mark.asyncio
+    async def test_messages_custom_transport_emit_handles_disconnect(self):
+        """sr.write() failures during custom-transport SSE emit must not propagate.
+
+        The _stream_messages custom-transport success path writes parsed SSE
+        events via sr.write(). If the client disconnects, these writes raise
+        ConnectionResetError which must be caught, not leaked as Handler errors.
+        """
+        from unittest.mock import patch
+
+        sse_data = (
+            b'data: {"type":"response.output_text.delta","delta":"Hello "}\n\n'
+            b'data: {"type":"response.completed","response":{"id":"resp_1",'
+            b'"object":"response","status":"completed",'
+            b'"output":[{"type":"message","role":"assistant","content":'
+            b'[{"type":"output_text","text":"Hello "}]}],'
+            b'"model":"test","usage":{"input_tokens":5,"output_tokens":2}}}\n\n'
+        )
+
+        adapter = StubLauncher(BridgeProtocol.MESSAGES_API)
+        provider = _CustomTransportProvider(raw_chunks=[sse_data])
+        server = BridgeServer(adapter, provider, "test-key")
+        port = await server.start_async()
+
+        async def _failing_write(_self, _data):
+            raise ConnectionResetError("Cannot write to closing transport")
+
+        try:
+            with patch.object(aiohttp.web.StreamResponse, "write", _failing_write):
+                async with aiohttp.ClientSession() as session:
+                    resp = await session.post(
+                        f"http://127.0.0.1:{port}/v1/messages",
+                        json={
+                            "model": "test-model",
+                            "messages": [{"role": "user", "content": "hi"}],
+                            "max_tokens": 1024,
+                            "stream": True,
+                        },
+                    )
+                    assert resp.status == 200
+                    resp.close()
+            await asyncio.sleep(0.1)
+        finally:
+            await server.stop_async()
+
+    @pytest.mark.asyncio
+    async def test_chat_completions_custom_transport_error_handles_disconnect(self):
+        """Chat Completions custom-transport error writes must not leak exceptions.
+
+        When the custom transport raises and sr.write() also fails during
+        error emit, the handler must catch the write failure silently.
+        """
+        from unittest.mock import patch
+
+        adapter = StubLauncher(BridgeProtocol.CHAT_COMPLETIONS_API)
+        provider = _CustomTransportProvider(raise_on_stream=RuntimeError("rate limited"))
+        server = BridgeServer(adapter, provider, "test-key")
+        port = await server.start_async()
+
+        async def _failing_write(_self, _data):
+            raise ConnectionResetError("Cannot write to closing transport")
+
+        try:
+            with patch.object(aiohttp.web.StreamResponse, "write", _failing_write):
+                async with aiohttp.ClientSession() as session:
+                    resp = await session.post(
+                        f"http://127.0.0.1:{port}/v1/chat/completions",
+                        json={
+                            "model": "test-model",
+                            "messages": [{"role": "user", "content": "hi"}],
+                            "max_tokens": 1024,
+                            "stream": True,
+                        },
+                    )
+                    assert resp.status == 200
+                    resp.close()
+            await asyncio.sleep(0.1)
+        finally:
+            await server.stop_async()
+
+
+class _CustomTransportProvider(ProviderAdapter):
+    """Provider that simulates custom transport for testing."""
+
+    def __init__(self, raw_chunks: list[bytes] | None = None, raise_on_stream: Exception | None = None):
+        self._raw_chunks = raw_chunks or []
+        self._raise_on_stream = raise_on_stream
+
+    @property
+    def provider_type(self) -> str:
+        return "custom_transport_test"
+
+    @property
+    def default_base_url(self) -> str:
+        return "https://custom.example.com/v1"
+
+    @property
+    def use_custom_transport(self) -> bool:
+        return True
+
+    def build_request(self, model: str, messages: list[dict], **kwargs) -> dict:
+        return {"model": model, "messages": messages}
+
+    def parse_response(self, response_data: dict) -> dict:
+        return response_data
+
+    def map_error(self, status_code: int, body: dict) -> Exception:
+        return Exception(f"Upstream error {status_code}: {body}")
+
+    async def stream_request(self, cc_request: dict, write) -> None:
+        """Stream raw SSE chunks, or raise if configured to fail."""
+        if self._raise_on_stream:
+            raise self._raise_on_stream
+        for chunk in self._raw_chunks:
+            await write(chunk)
