@@ -62,6 +62,62 @@ class MessagesTranslator:
         self._finished = False
         self._last_was_empty = False
 
+    def finalize_interrupted_stream(self) -> list[str]:
+        """Close the current streaming message after an upstream interruption."""
+        if not self._message_started:
+            return []
+
+        events: list[str] = []
+        has_content_blocks = (
+            bool(self._tool_call_buffers)
+            or self._text_block_opened
+            or self._thinking_block_opened
+            or self._content_block_index > 0
+        )
+
+        if not has_content_blocks:
+            fallback_text = self._fallback_assistant_text()
+            events.append(
+                format_content_block_start_event(
+                    self._content_block_index,
+                    {"type": "text", "text": ""},
+                )
+            )
+            events.append(
+                format_content_block_delta_event(
+                    self._content_block_index,
+                    {"type": "text_delta", "text": fallback_text},
+                )
+            )
+            events.append(format_content_block_stop_event(self._content_block_index))
+            self._content_block_index += 1
+
+        if self._thinking_block_opened:
+            events.append(format_content_block_stop_event(self._content_block_index))
+            self._content_block_index += 1
+            self._thinking_block_opened = False
+
+        if self._text_block_opened:
+            events.append(format_content_block_stop_event(self._content_block_index))
+            self._content_block_index += 1
+            self._text_block_opened = False
+
+        for block_index in sorted({meta["block_index"] for meta in self._tool_call_meta.values()}):
+            events.append(format_content_block_stop_event(block_index))
+
+        events.append(
+            format_message_delta_event(
+                delta={"stop_reason": "end_turn", "stop_sequence": None},
+                usage={"output_tokens": 0},
+            )
+        )
+        events.append(format_message_stop_event())
+
+        self.reset()
+        self._finished = True
+        self._last_was_empty = not has_content_blocks
+        return events
+
     # ── Request translation ───────────────────────────────────────────────
 
     def translate_request(self, messages_request: dict) -> dict:

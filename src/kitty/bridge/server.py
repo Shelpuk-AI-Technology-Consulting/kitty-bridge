@@ -1346,11 +1346,28 @@ class BridgeServer:
 
         logger.debug("═══ STREAM MESSAGES START ═══ message_id=%s model=%s", message_id, model)
 
-        sr = web.StreamResponse(
-            status=200,
-            headers={"Content-Type": "text/event-stream", "Cache-Control": "no-cache"},
-        )
-        await sr.prepare(request)
+        # Defer StreamResponse preparation until content is ready to stream.
+        # If all upstream attempts fail before any content is emitted, we return
+        # a plain HTTP error response (with proper status code) instead of a
+        # 200-status SSE stream containing only an error event.  This lets
+        # Claude Code's compaction handler properly detect API errors.
+        sr: web.StreamResponse | None = None
+        _last_error_status: int = 502  # default error status for pre-stream failures
+
+        async def _ensure_prepared() -> web.StreamResponse:
+            """Lazily prepare the SSE StreamResponse on first content write."""
+            nonlocal sr
+            if sr is None:
+                sr = web.StreamResponse(
+                    status=200,
+                    headers={"Content-Type": "text/event-stream", "Cache-Control": "no-cache"},
+                )
+                await sr.prepare(request)
+            return sr
+
+        def _make_error_response(error_data: dict, status: int) -> web.Response:
+            """Build a Messages API error response for pre-stream failures."""
+            return web.json_response(error_data, status=status)
 
         last_usage: dict | None = None
         stream_ok = False  # Set True only on clean completion
@@ -1402,11 +1419,11 @@ class BridgeServer:
                             continue
                     # All backends exhausted or single-backend mode — surface error
                     error_msg = str(exc)
-                    error_event = messages_format_error(
-                        {"type": "error", "error": {"type": "api_error", "message": error_msg}},
-                    )
+                    error_data = {"type": "error", "error": {"type": "api_error", "message": error_msg}}
+                    if sr is None:
+                        return _make_error_response(error_data, status=502)
                     try:
-                        await sr.write(error_event.encode())
+                        await sr.write(messages_format_error(error_data).encode())
                     except (ConnectionResetError, BrokenPipeError, OSError):
                         logger.debug("Client disconnected before error event")
                     break
@@ -1437,7 +1454,8 @@ class BridgeServer:
 
                     # Emit Messages API SSE events — client may disconnect mid-stream
                     try:
-                        await sr.write(
+                        s = await _ensure_prepared()
+                        await s.write(
                             format_message_start_event(
                                 {
                                     "id": msg_id,
@@ -1455,32 +1473,32 @@ class BridgeServer:
                         for idx, block in enumerate(result.get("content", [])):
                             btype = block.get("type")
                             if btype == "thinking":
-                                await sr.write(
+                                await s.write(
                                     format_content_block_start_event(
                                         idx, {"type": "thinking", "thinking": ""}
                                     ).encode()
                                 )
-                                await sr.write(
+                                await s.write(
                                     format_content_block_delta_event(
                                         idx, {"type": "thinking_delta", "thinking": block.get("thinking", "")}
                                     ).encode()
                                 )
-                                await sr.write(format_content_block_stop_event(idx).encode())
+                                await s.write(format_content_block_stop_event(idx).encode())
                             elif btype == "text":
-                                await sr.write(
+                                await s.write(
                                     format_content_block_start_event(
                                         idx, {"type": "text", "text": ""}
                                     ).encode()
                                 )
-                                await sr.write(
+                                await s.write(
                                     format_content_block_delta_event(
                                         idx, {"type": "text_delta", "text": block.get("text", "")}
                                     ).encode()
                                 )
-                                await sr.write(format_content_block_stop_event(idx).encode())
+                                await s.write(format_content_block_stop_event(idx).encode())
                             elif btype == "tool_use":
                                 partial = json.dumps(block.get("input", {}), ensure_ascii=False)
-                                await sr.write(
+                                await s.write(
                                     format_content_block_start_event(
                                         idx,
                                         {
@@ -1491,20 +1509,20 @@ class BridgeServer:
                                         },
                                     ).encode()
                                 )
-                                await sr.write(
+                                await s.write(
                                     format_content_block_delta_event(
                                         idx, {"type": "input_json_delta", "partial_json": partial}
                                     ).encode()
                                 )
-                                await sr.write(format_content_block_stop_event(idx).encode())
+                                await s.write(format_content_block_stop_event(idx).encode())
 
                         stop_reason = result.get("stop_reason", "end_turn")
-                        await sr.write(
+                        await s.write(
                             format_message_delta_event(
                                 {"stop_reason": stop_reason, "stop_sequence": None}, {}
                             ).encode()
                         )
-                        await sr.write(format_message_stop_event().encode())
+                        await s.write(format_message_stop_event().encode())
                     except (ConnectionResetError, BrokenPipeError, OSError):
                         logger.debug("Client disconnected during custom-transport emit for %s", message_id)
                     self._log_usage(cc_response.get("usage"))
@@ -1512,10 +1530,11 @@ class BridgeServer:
 
             cc_request.pop("_resolved_key", None)
             cc_request.pop("_provider_config", None)
-            try:
-                await sr.write_eof()
-            except (ConnectionResetError, BrokenPipeError, OSError):
-                logger.debug("Client disconnected before stream EOF")
+            if sr is not None:
+                try:
+                    await sr.write_eof()
+                except (ConnectionResetError, BrokenPipeError, OSError):
+                    logger.debug("Client disconnected before stream EOF")
             return sr
 
         try:
@@ -1562,10 +1581,11 @@ class BridgeServer:
                                         )
                                         continue
                                 error_msg = self._translate_upstream_error(upstream.status, error_body)
-                                error_event = messages_format_error(
-                                    {"type": "error", "error": {"type": "api_error", "message": error_msg}},
-                                )
-                                await sr.write(error_event.encode())
+                                error_data = {"type": "error", "error": {"type": "api_error", "message": error_msg}}
+                                if sr is None:
+                                    _last_error_status = upstream.status
+                                    return _make_error_response(error_data, status=upstream.status)
+                                await sr.write(messages_format_error(error_data).encode())
                                 break
 
                             retryable = self._should_retry_stream(upstream.status, error_body)
@@ -1596,10 +1616,11 @@ class BridgeServer:
                             # All backends exhausted or non-balancing mode — surface error to agent
                             logger.error("Upstream error %d: %s", upstream.status, error_body)
                             error_msg = self._translate_upstream_error(upstream.status, error_body)
-                            error_event = messages_format_error(
-                                {"type": "error", "error": {"type": "api_error", "message": error_msg}},
-                            )
-                            await sr.write(error_event.encode())
+                            error_data = {"type": "error", "error": {"type": "api_error", "message": error_msg}}
+                            if sr is None:
+                                _last_error_status = upstream.status
+                                return _make_error_response(error_data, status=upstream.status)
+                            await sr.write(messages_format_error(error_data).encode())
                             break
 
                         # Success path — stream the response
@@ -1652,7 +1673,8 @@ class BridgeServer:
                                         finish_events.extend(events)
                                     else:
                                         for event in events:
-                                            await sr.write(event.encode())
+                                            s = await _ensure_prepared()
+                                            await s.write(event.encode())
                                             events_emitted = True
 
                         logger.debug("Upstream stream ended. chunks=%d done=%s", chunk_count, done)
@@ -1671,27 +1693,30 @@ class BridgeServer:
                                             finish_events.extend(events)
                                         else:
                                             for event in events:
-                                                await sr.write(event.encode())
+                                                s = await _ensure_prepared()
+                                                await s.write(event.encode())
                                     except json.JSONDecodeError:
                                         logger.warning("Failed to parse flushed SSE data: %s", data_str[:200])
 
                         # Handle in-stream error failover
                         if stream_error:
                             if events_emitted:
-                                # Partial output already sent — retrying would duplicate lifecycle events
                                 logger.warning(
-                                    "Messages stream error after client events emitted; not retrying"
+                                    "Messages stream error after client events emitted; finalizing partial response"
                                 )
-                                error_event = messages_format_error(
-                                    {
-                                        "type": "error",
-                                        "error": {
-                                            "type": "api_error",
-                                            "message": "Upstream stream error during response",
-                                        },
-                                    },
-                                )
-                                await sr.write(error_event.encode())
+                                try:
+                                    s = await _ensure_prepared()
+                                    for event in translator.finalize_interrupted_stream():
+                                        await s.write(event.encode())
+                                except (
+                                    ConnectionResetError,
+                                    BrokenPipeError,
+                                    OSError,
+                                ):
+                                    logger.debug(
+                                        "Client disconnected before interrupted stream finalization for %s",
+                                        message_id,
+                                    )
                                 break
                             elif attempt < max_attempts - 1:
                                 translator.reset()
@@ -1709,17 +1734,17 @@ class BridgeServer:
                                 )
                                 continue
                             # All backends failed — emit clean error event
-                            error_event = messages_format_error(
-                                {
-                                    "type": "error",
-                                    "error": {
-                                        "type": "api_error",
-                                        "message": "All upstream providers returned errors",
-                                    },
+                            error_data = {
+                                "type": "error",
+                                "error": {
+                                    "type": "api_error",
+                                    "message": "All upstream providers returned errors",
                                 },
-                            )
+                            }
+                            if sr is None:
+                                return _make_error_response(error_data, status=502)
                             try:
-                                await sr.write(error_event.encode())
+                                await sr.write(messages_format_error(error_data).encode())
                             except (
                                 ConnectionResetError,
                                 BrokenPipeError,
@@ -1780,8 +1805,9 @@ class BridgeServer:
                                 continue
 
                         # Write buffered finish events to client
+                        s = await _ensure_prepared()
                         for event in finish_events:
-                            await sr.write(event.encode())
+                            await s.write(event.encode())
                         self._log_usage(last_usage)
                         stream_ok = True
                         break  # Exit retry loop
@@ -1844,11 +1870,11 @@ class BridgeServer:
                             )
                             error_msg = str(exc) or "Upstream provider request failed"
 
-                        error_event = messages_format_error(
-                            {"type": "error", "error": {"type": "api_error", "message": error_msg}},
-                        )
+                        error_data = {"type": "error", "error": {"type": "api_error", "message": error_msg}}
+                        if sr is None:
+                            return _make_error_response(error_data, status=_last_error_status)
                         try:
-                            await sr.write(error_event.encode())
+                            await sr.write(messages_format_error(error_data).encode())
                         except (ConnectionResetError, BrokenPipeError, OSError):
                             logger.debug("Client disconnected before error could be sent for %s", message_id)
                         break
@@ -1857,30 +1883,30 @@ class BridgeServer:
 
         except asyncio.TimeoutError:
             logger.error("Upstream POST timed out after %ds for %s", _STREAM_READ_TIMEOUT, message_id)
-            error_event = messages_format_error(
-                {
-                    "type": "error",
-                    "error": {
-                        "type": "api_error",
-                        "message": (
-                            f"Upstream provider timed out ({_STREAM_READ_TIMEOUT}s). Try /clear to reduce context size."
-                        ),
-                    },
+            error_data = {
+                "type": "error",
+                "error": {
+                    "type": "api_error",
+                    "message": (
+                        f"Upstream provider timed out ({_STREAM_READ_TIMEOUT}s). Try /clear to reduce context size."
+                    ),
                 },
-            )
+            }
+            if sr is None:
+                return _make_error_response(error_data, status=504)
             try:
-                await sr.write(error_event.encode())
+                await sr.write(messages_format_error(error_data).encode())
             except (ConnectionResetError, BrokenPipeError, OSError):
                 logger.debug("Client disconnected before timeout error could be sent for %s", message_id)
         except (ConnectionResetError, BrokenPipeError, OSError):
             logger.debug("Client disconnected during Messages API streaming for %s", message_id)
         except Exception as exc:
             logger.exception("Exception in _stream_messages: %s", exc)
-            error_event = messages_format_error(
-                {"type": "error", "error": {"type": "api_error", "message": str(exc)}},
-            )
+            error_data = {"type": "error", "error": {"type": "api_error", "message": str(exc)}}
+            if sr is None:
+                return _make_error_response(error_data, status=502)
             try:
-                await sr.write(error_event.encode())
+                await sr.write(messages_format_error(error_data).encode())
             except (ConnectionResetError, BrokenPipeError, OSError):
                 logger.debug("Client disconnected before error could be sent for %s", message_id)
 
@@ -1889,11 +1915,17 @@ class BridgeServer:
         if stream_ok and self._backends and self._current_backend_idx >= 0:
             self._mark_backend_healthy(self._current_backend_idx)
         # Client may disconnect before write_eof() completes — benign race.
-        try:
-            await sr.write_eof()
-        except (ConnectionResetError, BrokenPipeError, OSError):
-            logger.debug("Client disconnected before stream EOF for %s", message_id)
-        return sr
+        if sr is not None:
+            try:
+                await sr.write_eof()
+            except (ConnectionResetError, BrokenPipeError, OSError):
+                logger.debug("Client disconnected before stream EOF for %s", message_id)
+            return sr
+        # Fallback: if sr was never prepared (should not happen), return a generic error.
+        return _make_error_response(
+            {"type": "error", "error": {"type": "api_error", "message": "No upstream response"}},
+            status=502,
+        )
 
     async def _handle_gemini(self, request: web.Request) -> web.StreamResponse:
         """Handle Gemini generateContent / streamGenerateContent requests."""

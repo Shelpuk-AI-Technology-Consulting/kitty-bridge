@@ -136,10 +136,10 @@ class TestStreamingReadTimeout:
                     ) as resp,
                 ):
                     # Should get an error response, not hang
-                    assert resp.status == 200  # SSE stream always starts 200
-                    body = await resp.read()
-                    # Must contain an error event
-                    assert len(body) > 0
+                    assert resp.status == 502
+                    data = await resp.json()
+                    assert data["type"] == "error"
+                    assert len(data["error"]["message"]) > 0
         finally:
             await server.stop_async()
 
@@ -427,10 +427,10 @@ class TestStreamingRetry:
                         timeout=aiohttp.ClientTimeout(total=30),
                     ) as resp,
                 ):
-                    assert resp.status == 200  # SSE stream always starts 200
-                    body = await resp.read()
-                    # Must contain error event, not success
-                    assert b"error" in body.lower() or b"Error" in body
+                    assert resp.status == 401
+                    data = await resp.json()
+                    assert data["type"] == "error"
+                    assert "authentication" in data["error"]["message"].lower() or "401" in data["error"]["message"]
         finally:
             await server.stop_async()
 

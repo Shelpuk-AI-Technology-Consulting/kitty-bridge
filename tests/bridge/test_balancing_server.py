@@ -154,7 +154,7 @@ class _MessagesLauncher(LauncherAdapter):
 class TestMessagesStreamingRetry:
     @pytest.mark.asyncio
     async def test_instream_error_after_partial_output_does_not_retry(self):
-        """Messages streaming should not retry once client-visible output has started."""
+        """Messages streaming should close the lifecycle once client-visible output has started."""
         backends = _make_backends(2)
         server = BridgeServer(
             adapter=_MessagesLauncher(),
@@ -190,7 +190,18 @@ class TestMessagesStreamingRetry:
                     assert text.count("event: message_start") == 1
                     assert "Recovered" not in text
                     assert "Hello" in text
-                    assert "error" in text
+                    assert "event: content_block_stop" in text
+                    assert "event: message_delta" in text
+                    assert '"stop_reason": "end_turn"' in text
+                    assert "event: message_stop" in text
+                    assert "event: error" not in text
+                    assert text.index("Hello") < text.index("event: content_block_stop")
+                    assert text.index("event: content_block_stop") < text.index("event: message_delta")
+                    assert text.index("event: message_delta") < text.index("event: message_stop")
+
+                recorded_urls = [str(key[1]) for key, calls in m.requests.items() for _request in calls]
+                assert len(recorded_urls) == 1
+                assert recorded_urls[0] in {first_url, second_url}
         finally:
             await server.stop_async()
 
@@ -313,12 +324,12 @@ class TestMessagesStreamingRetry:
                     aiohttp.ClientSession() as session,
                     session.post(f"http://127.0.0.1:{port}/v1/messages", json=msg_req) as resp,
                 ):
-                    body = await resp.read()
-                    assert resp.status == 200
-                    text = body.decode("utf-8", errors="replace")
-                    assert "cloudflare bot detection" in text.lower()
-                    assert "<html>" not in text
-                    assert "cf-browser-verification" not in text
+                    assert resp.status == 403
+                    data = await resp.json()
+                    assert data["type"] == "error"
+                    assert "cloudflare bot detection" in data["error"]["message"].lower()
+                    assert "<html>" not in data["error"]["message"]
+                    assert "cf-browser-verification" not in data["error"]["message"]
         finally:
             await server.stop_async()
 
@@ -354,11 +365,11 @@ class TestMessagesStreamingRetry:
                     aiohttp.ClientSession() as session,
                     session.post(f"http://127.0.0.1:{port}/v1/messages", json=msg_req) as resp,
                 ):
-                    body = await resp.read()
-                    assert resp.status == 200
-                    text = body.decode("utf-8", errors="replace")
-                    assert text.lower().count("cloudflare bot detection") == 1
-                    assert "<html>" not in text
+                    assert resp.status == 403
+                    data = await resp.json()
+                    assert data["type"] == "error"
+                    assert "cloudflare bot detection" in data["error"]["message"].lower()
+                    assert "<html>" not in data["error"]["message"]
                     assert server._backend_health[0]["healthy"] is False
                     assert server._backend_health[1]["healthy"] is False
         finally:

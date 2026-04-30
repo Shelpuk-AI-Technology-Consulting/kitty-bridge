@@ -561,6 +561,78 @@ class TestTranslateStreamChunk:
         assert "retry" in event_blob.lower()
         assert "message_stop" in event_blob
 
+    def test_finalize_interrupted_stream_closes_open_text_block(self):
+        msg_id = self._make_message_id()
+        model = "claude-3-opus"
+        chunk = {
+            "choices": [{"index": 0, "delta": {"content": "Hello"}, "finish_reason": None}],
+        }
+
+        initial_events = self.t.translate_stream_chunk(msg_id, model, chunk)
+        final_events = self.t.finalize_interrupted_stream()
+        final_blob = "\n".join(final_events)
+
+        assert any("content_block_delta" in event for event in initial_events)
+        assert "content_block_stop" in final_blob
+        assert "message_delta" in final_blob
+        assert '"stop_reason": "end_turn"' in final_blob
+        assert "message_stop" in final_blob
+        assert "error" not in final_blob
+        assert self.t._text_block_opened is False
+        assert self.t._message_started is False
+
+    def test_finalize_interrupted_stream_with_message_start_only_emits_fallback_block(self):
+        msg_id = self._make_message_id()
+        model = "claude-3-opus"
+        events: list[str] = []
+        self.t._emit_message_start_if_needed(events, msg_id, model)
+
+        final_events = self.t.finalize_interrupted_stream()
+        final_blob = "\n".join(final_events)
+
+        assert "message_start" not in final_blob
+        assert "content_block_start" in final_blob
+        assert "content_block_delta" in final_blob
+        assert "/clear" in final_blob
+        assert "content_block_stop" in final_blob
+        assert "message_delta" in final_blob
+        assert "message_stop" in final_blob
+
+    def test_finalize_interrupted_stream_closes_open_tool_block(self):
+        msg_id = self._make_message_id()
+        model = "claude-3-opus"
+        chunk = {
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {
+                        "tool_calls": [
+                            {
+                                "index": 0,
+                                "id": "call_1",
+                                "type": "function",
+                                "function": {"name": "lookup", "arguments": '{"query":'},
+                            },
+                        ],
+                    },
+                    "finish_reason": None,
+                },
+            ],
+        }
+
+        initial_events = self.t.translate_stream_chunk(msg_id, model, chunk)
+        final_events = self.t.finalize_interrupted_stream()
+        final_blob = "\n".join(final_events)
+
+        assert any("tool_use" in event for event in initial_events)
+        assert "content_block_stop" in final_blob
+        assert "message_delta" in final_blob
+        assert "message_stop" in final_blob
+        assert self.t._tool_call_buffers == {}
+
+    def test_finalize_interrupted_stream_without_started_message_is_noop(self):
+        assert self.t.finalize_interrupted_stream() == []
+
     def test_tool_call_delta_produces_input_json_delta(self):
         msg_id = self._make_message_id()
         model = "claude-3-opus"

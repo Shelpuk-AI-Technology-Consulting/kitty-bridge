@@ -226,9 +226,10 @@ class TestMessagesConnectionRetries:
                         timeout=aiohttp.ClientTimeout(total=30),
                     ) as resp,
                 ):
-                    assert resp.status == 200
-                    body = await resp.read()
-                    assert b"error" in body
+                    assert resp.status == 502
+                    data = await resp.json()
+                    assert data["type"] == "error"
+                    assert len(data["error"]["message"]) > 0
         finally:
             await server.stop_async()
 

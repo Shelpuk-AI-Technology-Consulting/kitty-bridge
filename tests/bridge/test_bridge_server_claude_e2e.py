@@ -934,13 +934,14 @@ class TestClaudeCodeErrorHandling:
                         json=request,
                     ) as resp,
                 ):
-                    # Bridge returns 200 with SSE error event
-                    assert resp.status == 200
-                    body = await resp.read()
-                    body_str = body.decode("utf-8")
-                    # The SSE error event should contain the actionable message
-                    assert "/clear" in body_str
-                    assert "context" in body_str.lower()
+                    # Bridge returns proper HTTP error status
+                    assert resp.status == 400
+                    data = await resp.json()
+                    assert data["type"] == "error"
+                    msg = data["error"]["message"]
+                    # The error should contain the actionable message
+                    assert "/clear" in msg
+                    assert "context" in msg.lower()
         finally:
             await server.stop_async()
 
