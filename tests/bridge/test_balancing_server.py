@@ -1,7 +1,7 @@
 """Tests for bridge server random balancing — backend selection per request."""
 
 import random
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import aiohttp
 import pytest
@@ -234,6 +234,133 @@ class TestMessagesStreamingRetry:
                     text = body.decode("utf-8", errors="replace")
                     assert text.count("event: message_start") == 1
                     assert "Recovered" in text
+        finally:
+            await server.stop_async()
+
+    @pytest.mark.asyncio
+    async def test_http_cloudflare_before_output_retries_safely(self):
+        """Messages streaming should fail over on HTTP Cloudflare 403 before output."""
+        backends = _make_backends(2)
+        server = BridgeServer(
+            adapter=_MessagesLauncher(),
+            provider=backends[0][0],
+            resolved_key=backends[0][1],
+            model="model-0",
+            backends=backends,
+        )
+        port = await server.start_async()
+        try:
+            first_url = "https://api0.example.com/v1/chat/completions"
+            second_url = "https://api1.example.com/v1/chat/completions"
+            cloudflare_html = "<html><head>cf-browser-verification window._cf_chl_opt = {};</head></html>"
+            rec_chunk = b'data: {"id":"2","choices":[{"index":0,"delta":{"content":"Recovered"},'
+            rec_chunk += b'"finish_reason":null}],"model":"test-model"}\n\n'
+            rec_finish = b'data: {"id":"2","choices":[{"index":0,"delta":{},'
+            rec_finish += b'"finish_reason":"stop"}],"model":"test-model"}\n\n'
+            recovery_stream = rec_chunk + rec_finish + b"data: [DONE]\n\n"
+            msg_req = {
+                "model": "model-0",
+                "messages": [{"role": "user", "content": "hi"}],
+                "max_tokens": 1024,
+                "stream": True,
+            }
+            with (
+                aioresponses(passthrough=["http://127.0.0.1"]) as m,
+                patch("kitty.bridge.server.random.choices", side_effect=[[0], [1]]),
+            ):
+                m.post(first_url, status=403, body=cloudflare_html, headers={"Content-Type": "text/html"})
+                m.post(second_url, body=recovery_stream, headers={"Content-Type": "text/event-stream"})
+                async with (
+                    aiohttp.ClientSession() as session,
+                    session.post(f"http://127.0.0.1:{port}/v1/messages", json=msg_req) as resp,
+                ):
+                    body = await resp.read()
+                    assert resp.status == 200
+                    text = body.decode("utf-8", errors="replace")
+                    assert "Recovered" in text
+                    assert "<html>" not in text
+                    assert server._backend_health[0]["healthy"] is False
+        finally:
+            await server.stop_async()
+
+    @pytest.mark.asyncio
+    async def test_http_cloudflare_single_backend_emits_sanitized_error(self):
+        """Messages streaming should sanitize Cloudflare HTML when no failover exists."""
+        backends = _make_backends(1)
+        server = BridgeServer(
+            adapter=_MessagesLauncher(),
+            provider=backends[0][0],
+            resolved_key=backends[0][1],
+            model="model-0",
+            backends=backends,
+        )
+        port = await server.start_async()
+        try:
+            url = "https://api0.example.com/v1/chat/completions"
+            cloudflare_html = "<html><head>cf-browser-verification window._cf_chl_opt = {};</head></html>"
+            msg_req = {
+                "model": "model-0",
+                "messages": [{"role": "user", "content": "hi"}],
+                "max_tokens": 1024,
+                "stream": True,
+            }
+            with (
+                aioresponses(passthrough=["http://127.0.0.1"]) as m,
+                patch("kitty.bridge.server.random.choices", return_value=[0]),
+            ):
+                m.post(url, status=403, body=cloudflare_html, headers={"Content-Type": "text/html"})
+                async with (
+                    aiohttp.ClientSession() as session,
+                    session.post(f"http://127.0.0.1:{port}/v1/messages", json=msg_req) as resp,
+                ):
+                    body = await resp.read()
+                    assert resp.status == 200
+                    text = body.decode("utf-8", errors="replace")
+                    assert "cloudflare bot detection" in text.lower()
+                    assert "<html>" not in text
+                    assert "cf-browser-verification" not in text
+        finally:
+            await server.stop_async()
+
+    @pytest.mark.asyncio
+    async def test_http_cloudflare_all_backends_exhausted_emits_sanitized_error(self):
+        """Messages streaming should stop cleanly when all backends hit Cloudflare."""
+        backends = _make_backends(2)
+        server = BridgeServer(
+            adapter=_MessagesLauncher(),
+            provider=backends[0][0],
+            resolved_key=backends[0][1],
+            model="model-0",
+            backends=backends,
+        )
+        port = await server.start_async()
+        try:
+            first_url = "https://api0.example.com/v1/chat/completions"
+            second_url = "https://api1.example.com/v1/chat/completions"
+            cloudflare_html = "<html><head>cf-browser-verification window._cf_chl_opt = {};</head></html>"
+            msg_req = {
+                "model": "model-0",
+                "messages": [{"role": "user", "content": "hi"}],
+                "max_tokens": 1024,
+                "stream": True,
+            }
+            with (
+                aioresponses(passthrough=["http://127.0.0.1"]) as m,
+                patch("kitty.bridge.server.random.choices", side_effect=[[0], [1]]),
+            ):
+                m.post(first_url, status=403, body=cloudflare_html, headers={"Content-Type": "text/html"})
+                m.post(second_url, status=403, body=cloudflare_html, headers={"Content-Type": "text/html"})
+                async with (
+                    aiohttp.ClientSession() as session,
+                    session.post(f"http://127.0.0.1:{port}/v1/messages", json=msg_req) as resp,
+                ):
+                    body = await resp.read()
+                    assert resp.status == 200
+                    text = body.decode("utf-8", errors="replace")
+                    assert text.lower().count("cloudflare bot detection") == 1
+                    assert "<html>" not in text
+                    assert server._backend_health[0]["healthy"] is False
+                    assert server._backend_health[1]["healthy"] is False
         finally:
             await server.stop_async()
 

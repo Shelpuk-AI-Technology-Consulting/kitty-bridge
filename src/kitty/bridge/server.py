@@ -95,6 +95,12 @@ def _truncate_for_log(text: str, limit: int = 2000) -> str:
     return f"{text[:limit]}... ({len(text)} chars total)"
 
 
+def _log_cloudflare_block(status: int, body: str) -> None:
+    """Log a Cloudflare block without exposing HTML at warning/error level."""
+    logger.warning("Upstream Cloudflare block %d", status)
+    logger.debug("Upstream Cloudflare response body: %s", _truncate_for_log(body))
+
+
 class UpstreamError(Exception):
     """Raised when the upstream provider returns a non-retryable error or retries are exhausted."""
 
@@ -994,7 +1000,7 @@ class BridgeServer:
 
                         # Cloudflare challenge — never retryable, abort immediately
                         if self._is_cloudflare_block(upstream.status, error_body):
-                            logger.error("Upstream Cloudflare block %d: %s", upstream.status, error_body[:200])
+                            _log_cloudflare_block(upstream.status, error_body)
                             error_msg = self._translate_upstream_error(upstream.status, error_body)
                             error_event = responses_format_error(
                                 {"code": "upstream_error", "message": error_msg},
@@ -1537,16 +1543,29 @@ class BridgeServer:
                         if upstream.status not in (200, 201):
                             error_body = await upstream.text()
 
-                            # Cloudflare challenge — never retryable, abort immediately
+                            # Cloudflare challenge before output: fail over if a healthy backend remains.
                             if self._is_cloudflare_block(upstream.status, error_body):
-                                logger.error("Upstream Cloudflare block %d: %s", upstream.status, error_body[:200])
+                                _log_cloudflare_block(upstream.status, error_body)
+                                if self._backends and self._current_backend_idx >= 0:
+                                    self._mark_backend_unhealthy(self._current_backend_idx, failure_kind="cloudflare")
+                                    if self._any_healthy_backend() and attempt < max_attempts - 1:
+                                        self._select_backend()
+                                        self._normalize_model(cc_request)
+                                        self._active_provider.normalize_request(cc_request)
+                                        url = self._build_upstream_url()
+                                        headers = self._build_upstream_headers()
+                                        upstream_body = self._active_provider.translate_to_upstream(cc_request)
+                                        logger.info(
+                                            "Messages stream Cloudflare failover: attempt %d/%d, switching backend",
+                                            attempt + 1,
+                                            max_attempts,
+                                        )
+                                        continue
                                 error_msg = self._translate_upstream_error(upstream.status, error_body)
                                 error_event = messages_format_error(
                                     {"type": "error", "error": {"type": "api_error", "message": error_msg}},
                                 )
                                 await sr.write(error_event.encode())
-                                if self._backends and self._current_backend_idx >= 0:
-                                    self._mark_backend_unhealthy(self._current_backend_idx, failure_kind="cloudflare")
                                 break
 
                             retryable = self._should_retry_stream(upstream.status, error_body)
@@ -2019,11 +2038,10 @@ class BridgeServer:
 
                     if upstream.status not in (200, 201):
                         error_body = await upstream.text()
-                        logger.error("Upstream error %d: %s", upstream.status, error_body)
 
                         # Cloudflare challenge — never retryable, abort immediately
                         if self._is_cloudflare_block(upstream.status, error_body):
-                            logger.error("Upstream Cloudflare block %d", upstream.status)
+                            _log_cloudflare_block(upstream.status, error_body)
                             error_msg = self._translate_upstream_error(upstream.status, error_body)
                             error_sse = (
                                 f"data: {json.dumps({'error': {'code': 'upstream_error', 'message': error_msg}})}\n\n"
@@ -2035,6 +2053,8 @@ class BridgeServer:
                             if self._backends and self._current_backend_idx >= 0:
                                 self._mark_backend_unhealthy(self._current_backend_idx, failure_kind="cloudflare")
                             break
+
+                        logger.error("Upstream error %d: %s", upstream.status, error_body)
 
                         # In balancing mode: mark unhealthy, try next backend
                         if self._backends and self._current_backend_idx >= 0:
@@ -2081,6 +2101,7 @@ class BridgeServer:
                     line_buffer = ""
                     done = False
                     stream_error = False
+                    events_emitted = False
                     finish_events: list[str] = []  # buffered finish events
                     async for chunk_bytes in upstream.content:
                         if done:
@@ -2123,6 +2144,7 @@ class BridgeServer:
                                 else:
                                     for event in events:
                                         await sr.write(event.encode())
+                                        events_emitted = True
 
                     # Flush remaining buffer
                     if not done and line_buffer.strip():
@@ -2139,11 +2161,15 @@ class BridgeServer:
                                     else:
                                         for event in events:
                                             await sr.write(event.encode())
+                                            events_emitted = True
                                 except json.JSONDecodeError:
                                     logger.warning("Failed to parse flushed SSE data: %s", data_str[:200])
 
                     # Handle in-stream error failover
                     if stream_error:
+                        if events_emitted:
+                            logger.warning("Gemini stream error after client events emitted; not retrying")
+                            break
                         if attempt < max_attempts - 1:
                             self._select_backend()
                             self._normalize_model(cc_request)
@@ -2557,11 +2583,10 @@ class BridgeServer:
 
                     if upstream.status not in (200, 201):
                         error_body = await upstream.text()
-                        logger.error("Upstream error %d: %s", upstream.status, error_body)
 
                         # Cloudflare challenge — never retryable, abort immediately
                         if self._is_cloudflare_block(upstream.status, error_body):
-                            logger.error("Upstream Cloudflare block %d", upstream.status)
+                            _log_cloudflare_block(upstream.status, error_body)
                             error_msg = self._translate_upstream_error(upstream.status, error_body)
                             error_sse = (
                                 f"data: {json.dumps({'error': {'message': error_msg, 'type': 'upstream_error'}})}\n\n"
@@ -2573,6 +2598,8 @@ class BridgeServer:
                             if self._backends and self._current_backend_idx >= 0:
                                 self._mark_backend_unhealthy(self._current_backend_idx, failure_kind="cloudflare")
                             break
+
+                        logger.error("Upstream error %d: %s", upstream.status, error_body)
 
                         # In balancing mode: mark unhealthy, try next backend
                         if self._backends and self._current_backend_idx >= 0:
@@ -2711,6 +2738,23 @@ class BridgeServer:
 
                     # Handle in-stream error failover
                     if stream_error:
+                        if has_content:
+                            # Partial content already sent — retrying would corrupt the stream
+                            logger.warning("CC stream error after content emitted; not retrying")
+                            error_json = json.dumps(
+                                {
+                                    "error": {
+                                        "message": "Upstream stream error during response",
+                                        "type": "upstream_error",
+                                    }
+                                }
+                            )
+                            error_sse = f"data: {error_json}\n\n"
+                            try:
+                                await sr.write(error_sse.encode())
+                            except (ConnectionResetError, BrokenPipeError, OSError):
+                                logger.debug("Client disconnected before error could be sent")
+                            break
                         if not self._backends or not self._any_healthy_backend():
                             # All backends failed or non-balancing — emit clean error and stop
                             error_payload = {

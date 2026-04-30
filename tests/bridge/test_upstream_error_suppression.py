@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from unittest.mock import patch
 
 import aiohttp
 import pytest
@@ -323,7 +324,6 @@ class TestAuthFailureBlacklisting:
                     f"http://127.0.0.1:{port}/v1/chat/completions",
                     json={"model": "test", "messages": [{"role": "user", "content": "hi"}], "stream": True},
                 ) as resp:
-                    body = await resp.read()
                     assert resp.status == 200
 
                 # Backend-0 should have a very long cooldown (auth blacklisting)
@@ -373,5 +373,161 @@ class TestAuthFailureBlacklisting:
                     json={"model": "test", "messages": [{"role": "user", "content": "hi"}]},
                 ) as resp:
                     assert resp.status == 401
+        finally:
+            await server.stop_async()
+
+
+# ── Phase 3: In-stream error after partial content ─────────────────────────────
+
+
+class TestCCStreamErrorAfterContent:
+    """CC stream: in-stream error after content was sent must NOT retry."""
+
+    @pytest.mark.asyncio
+    async def test_cc_stream_error_after_content_emits_clean_error(self):
+        """CC stream error after content chunks were sent emits clean error, no retry.
+
+        When partial content was already forwarded to the agent, the bridge must NOT
+        retry on a different backend — that would produce concatenated/corrupted output.
+        Instead it should emit a clean error SSE and stop.
+        """
+        server = _make_balancing_server(n_backends=2)
+        port = await server.start_async()
+        try:
+            with aioresponses(passthrough=["http://127.0.0.1"]) as m, \
+                 patch("kitty.bridge.server.random.choices", return_value=[0]):
+                # Backend-0: sends content first, then an error chunk
+                m.post(
+                    "https://api0.example.com/v1/chat/completions",
+                    body=(
+                        'data: {"id":"c","model":"m",'
+                        '"choices":[{"index":0,"delta":{"content":"Hello partial"}}]}\n\n'
+                        'data: {"error":{"code":502,"message":"Provider error"}}\n\n'
+                        'data: [DONE]\n\n'
+                    ),
+                )
+                # Backend-1 would succeed, but should NOT be called
+                m.post(
+                    "https://api1.example.com/v1/chat/completions",
+                    body=(
+                        'data: {"id":"c","model":"m",'
+                        '"choices":[{"index":0,'
+                        '"delta":{"content":"Hello from backend-1!"}}]}\n\n'
+                        'data: {"id":"c","model":"m",'
+                        '"choices":[{"index":0,"delta":{},'
+                        '"finish_reason":"stop"}]}\n\n'
+                        'data: [DONE]\n\n'
+                    ),
+                )
+                async with aiohttp.ClientSession() as session, session.post(
+                    f"http://127.0.0.1:{port}/v1/chat/completions",
+                    json={"model": "test", "messages": [{"role": "user", "content": "hi"}], "stream": True},
+                ) as resp:
+                    assert resp.status == 200
+                    body = await resp.text()
+                    # The partial content must be present
+                    assert "Hello partial" in body
+                    # Backend-1's content must NOT be present — no retry happened
+                    assert "Hello from backend-1" not in body
+                    # A clean error must be present (not the raw upstream error)
+                    assert "Provider error" not in body
+                    # But a clean upstream error message should be there
+                    assert "upstream_error" in body
+        finally:
+            await server.stop_async()
+
+    @pytest.mark.asyncio
+    async def test_cc_stream_error_before_content_retries(self):
+        """CC stream error before any content was sent should still retry/failover.
+
+        Regression guard: the has_content gate must NOT prevent retries when
+        no content has been emitted yet.
+        """
+        server = _make_balancing_server(n_backends=2)
+        port = await server.start_async()
+        try:
+            with aioresponses(passthrough=["http://127.0.0.1"]) as m, \
+                 patch("kitty.bridge.server.random.choices", side_effect=[[0], [1]]):
+                # Backend-0: error chunk with no prior content
+                m.post(
+                    "https://api0.example.com/v1/chat/completions",
+                    body='data: {"error":{"code":502,"message":"Provider error"}}\n\ndata: [DONE]\n\n',
+                )
+                # Backend-1: succeeds
+                m.post(
+                    "https://api1.example.com/v1/chat/completions",
+                    body=(
+                        'data: {"id":"c","model":"m",'
+                        '"choices":[{"index":0,'
+                        '"delta":{"content":"Hello from backend-1!"}}]}\n\n'
+                        'data: {"id":"c","model":"m",'
+                        '"choices":[{"index":0,"delta":{},'
+                        '"finish_reason":"stop"}]}\n\n'
+                        'data: [DONE]\n\n'
+                    ),
+                )
+                async with aiohttp.ClientSession() as session, session.post(
+                    f"http://127.0.0.1:{port}/v1/chat/completions",
+                    json={"model": "test", "messages": [{"role": "user", "content": "hi"}], "stream": True},
+                ) as resp:
+                    assert resp.status == 200
+                    body = await resp.text()
+                    # Backend-1's content must be present — retry happened
+                    assert "Hello from backend-1" in body
+                    # Raw upstream error must not leak
+                    assert "Provider error" not in body
+        finally:
+            await server.stop_async()
+
+
+class TestGeminiStreamErrorAfterContent:
+    """Gemini stream: in-stream error after events were sent must NOT retry."""
+
+    @pytest.mark.asyncio
+    async def test_gemini_stream_error_after_content_emits_clean_error(self):
+        """Gemini stream error after events were sent must stop, not retry.
+
+        When partial content was already forwarded to the agent, the bridge must NOT
+        retry on a different backend — that would produce concatenated/corrupted output.
+        Instead it should stop the stream cleanly.
+        """
+        server = _make_balancing_server(n_backends=2)
+        port = await server.start_async()
+        try:
+            with aioresponses(passthrough=["http://127.0.0.1"]) as m, \
+                 patch("kitty.bridge.server.random.choices", return_value=[0]):
+                # Backend-0: sends content first, then an error chunk
+                m.post(
+                    "https://api0.example.com/v1/chat/completions",
+                    body=(
+                        'data: {"id":"c","model":"m",'
+                        '"choices":[{"index":0,"delta":{"content":"Hello partial"}}]}\n\n'
+                        'data: {"error":{"code":502,"message":"Provider error"}}\n\n'
+                        'data: [DONE]\n\n'
+                    ),
+                )
+                # Backend-1 should NOT be called
+                m.post(
+                    "https://api1.example.com/v1/chat/completions",
+                    body=(
+                        'data: {"id":"c","model":"m",'
+                        '"choices":[{"index":0,'
+                        '"delta":{"content":"Hello from backend-1!"}}]}\n\n'
+                        'data: {"id":"c","model":"m",'
+                        '"choices":[{"index":0,"delta":{},'
+                        '"finish_reason":"stop"}]}\n\n'
+                        'data: [DONE]\n\n'
+                    ),
+                )
+                async with aiohttp.ClientSession() as session, session.post(
+                    f"http://127.0.0.1:{port}/v1beta/models/model-0:streamGenerateContent",
+                    json={"contents": [{"role": "user", "parts": [{"text": "hi"}]}]},
+                ) as resp:
+                    assert resp.status == 200
+                    body = await resp.text()
+                    # The partial content must be present
+                    assert "Hello partial" in body
+                    # Backend-1's content must NOT be present — no retry happened
+                    assert "Hello from backend-1" not in body
         finally:
             await server.stop_async()

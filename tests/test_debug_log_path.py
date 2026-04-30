@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import io
 import logging
+import sys
 from pathlib import Path
 
 import pytest
@@ -131,6 +133,31 @@ class TestCustomDebugLogPath:
         result = server._setup_debug_logging()
         assert result is None
 
+    def test_unconfigured_kitty_logger_does_not_write_to_stderr(self, monkeypatch):
+        """Kitty loggers must not leak through logging.lastResort in normal runs."""
+        root_logger = logging.getLogger()
+        bridge_logger = logging.getLogger("kitty.bridge")
+        server_logger = logging.getLogger("kitty.bridge.server")
+
+        original_root_handlers = list(root_logger.handlers)
+        original_bridge_handlers = list(bridge_logger.handlers)
+        original_server_handlers = list(server_logger.handlers)
+        stderr = io.StringIO()
+
+        try:
+            root_logger.handlers.clear()
+            bridge_logger.handlers.clear()
+            server_logger.handlers.clear()
+            monkeypatch.setattr(sys, "stderr", stderr)
+
+            server_logger.error("Upstream Cloudflare block %d: %s", 403, "<html>blocked</html>")
+
+            assert stderr.getvalue() == ""
+        finally:
+            root_logger.handlers = original_root_handlers
+            bridge_logger.handlers = original_bridge_handlers
+            server_logger.handlers = original_server_handlers
+
     def test_debug_true_default_path(self):
         server = BridgeServer(
             StubLauncher(),
@@ -182,13 +209,13 @@ class TestCustomDebugLogPath:
 
         # Close all handlers to flush buffers to disk
         bridge_logger = logging.getLogger("kitty.bridge")
-        bridge_logger.debug("test debug message")
+        logging.getLogger("kitty.bridge.server").debug("test child debug message")
         for h in list(bridge_logger.handlers):
             h.close()
 
         assert custom_path.exists()
         content = custom_path.read_text()
-        assert "test debug message" in content
+        assert "test child debug message" in content
 
 
 # ── Effective debug wiring test ─────────────────────────────────────────────
