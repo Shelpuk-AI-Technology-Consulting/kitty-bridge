@@ -249,5 +249,7 @@ class ProviderAdapter(ABC):
 class ProviderError(Exception):
     """Base exception for upstream provider adapter errors."""
 
+    is_cloudflare = False
+
 
 __all__ = ["ProviderAdapter", "ProviderError"]

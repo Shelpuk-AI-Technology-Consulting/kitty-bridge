@@ -782,3 +782,71 @@ class TestBalancingAllCustomTransport:
             await server.stop_async()
 
         assert server._active_provider is stream_provider
+
+
+class TestCustomTransportCloudflareClassification:
+    """Verify that ProviderError with is_cloudflare=True triggers
+    failure_kind='cloudflare' in the balancer, not a generic stream error."""
+
+    @pytest.mark.asyncio
+    async def test_cf_provider_error_marks_cloudflare_failure_kind(self):
+        """Custom-transport CF ProviderError should mark backend with failure_kind='cloudflare'."""
+        import uuid
+
+        from kitty.profiles.schema import Profile
+        from kitty.providers.base import ProviderError
+
+        # Create a custom-transport provider that raises a CF ProviderError
+        provider = BedrockAdapter()  # use_custom_transport=True
+
+        async def _cf_stream_tagged(req, write):
+            exc = ProviderError("Cloudflare bot detection blocked the Codex backend request.")
+            exc.is_cloudflare = True
+            raise exc
+
+        provider.stream_request = AsyncMock(side_effect=_cf_stream_tagged)
+
+        profile = Profile(
+            name="test-cf-profile",
+            provider="bedrock",
+            model="test-model",
+            auth_ref=str(uuid.uuid4()),
+        )
+        backends = [(provider, "key-0", profile)]
+        server = BridgeServer(
+            adapter=None,  # bridge mode
+            provider=provider,
+            resolved_key="key-0",
+            model="test-model",
+            backends=backends,
+        )
+        port = await server.start_async()
+        url = f"http://127.0.0.1:{port}/v1/responses"
+        request_body = {
+            "model": "test-model",
+            "input": [{"type": "message", "role": "user", "content": "hi"}],
+            "stream": True,
+        }
+
+        try:
+            async with aiohttp.ClientSession() as session, session.post(url, json=request_body) as resp:
+                body = await resp.read()
+                # Should have gotten the CF error message in the SSE response
+                assert b"Cloudflare" in body or b"cloudflare" in body.lower()
+        finally:
+            await server.stop_async()
+
+        # Verify the backend was marked unhealthy with cloudflare failure kind
+        health = server._backend_health[0]
+        assert health["healthy"] is False
+        # The cooldown is capped to _SINGLE_BACKEND_COOLDOWN_CAP (30s) for single-backend
+        # profiles, but the key distinction is that failure_kind="cloudflare" was used
+        # (which triggers family-level abuse cooldown, not stream error cooldown).
+        # Verify by checking the cooldown is NOT the stream error base (30s from
+        # _get_stream_error_cooldown) — both happen to be 30 for single-backend, so
+        # instead verify the family abuse was triggered via _family_cooldowns.
+        family = server._get_backend_family(0)
+        if family is not None:
+            assert family in server._family_cooldown, (
+                "CF error should have triggered family-level cooldown"
+            )

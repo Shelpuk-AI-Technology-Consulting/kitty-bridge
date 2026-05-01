@@ -36,7 +36,7 @@ from kitty.bridge.responses.translator import ResponsesTranslator
 from kitty.cloudflare import is_cloudflare_block
 from kitty.launchers.base import LauncherAdapter
 from kitty.profiles.schema import Profile
-from kitty.providers.base import ProviderAdapter
+from kitty.providers.base import ProviderAdapter, ProviderError
 from kitty.types import BridgeProtocol
 
 __all__ = ["BridgeServer"]
@@ -541,6 +541,25 @@ class BridgeServer:
         self._active_provider_config = provider_config
         self._current_backend_idx = backend_idx
 
+    def _log_backend_selection(self) -> None:
+        """Log diagnostic info about the currently selected backend."""
+        idx = self._current_backend_idx
+        provider = self._active_provider
+        if self._backends and idx >= 0:
+            profile_name = self._backends[idx][2].name
+            healthy = self._backend_health[idx]["healthy"]
+            logger.debug(
+                "Selected backend: profile=%s provider=%s model=%s healthy=%s idx=%d",
+                profile_name, getattr(provider, "provider_type", type(provider).__name__),
+                self._active_model, healthy, idx,
+            )
+        else:
+            logger.debug(
+                "Selected backend: provider=%s model=%s (single-backend)",
+                getattr(provider, "provider_type", type(provider).__name__),
+                self._active_model,
+            )
+
     @property
     def port(self) -> int:
         return self._port
@@ -878,6 +897,7 @@ class BridgeServer:
         # so the provider can forward it directly without CC round-trip translation.
         if self._active_provider.use_custom_transport:
             cc_request["_original_body"] = body
+            self._log_backend_selection()
 
         try:
             cc_response = await self._request_with_retry(cc_request)
@@ -922,6 +942,7 @@ class BridgeServer:
             cc_request["_resolved_key"] = self._active_key
             cc_request["_provider_config"] = self._active_provider_config
             cc_request["_original_body"] = body
+            self._log_backend_selection()
 
             n_backends = len(self._backends) if self._backends else 1
             for attempt in range(n_backends):
@@ -930,8 +951,14 @@ class BridgeServer:
                 except Exception as exc:
                     logger.warning("Custom-transport stream failed: %s", exc)
                     if self._backends and self._current_backend_idx >= 0:
-                        cooldown = self._get_stream_error_cooldown(self._current_backend_idx)
-                        self._mark_backend_unhealthy(self._current_backend_idx, cooldown=cooldown)
+                        if isinstance(exc, ProviderError) and exc.is_cloudflare:
+                            self._mark_backend_unhealthy(
+                                self._current_backend_idx,
+                                failure_kind="cloudflare",
+                            )
+                        else:
+                            cooldown = self._get_stream_error_cooldown(self._current_backend_idx)
+                            self._mark_backend_unhealthy(self._current_backend_idx, cooldown=cooldown)
                         if self._any_healthy_backend() and attempt < n_backends - 1:
                             self._select_backend(require_streaming=True)
                             self._normalize_model(cc_request)
@@ -1379,6 +1406,7 @@ class BridgeServer:
         if self._active_provider.use_custom_transport:
             cc_request["_resolved_key"] = self._active_key
             cc_request["_provider_config"] = self._active_provider_config
+            self._log_backend_selection()
 
             n_backends = len(self._backends) if self._backends else 1
             max_attempts = n_backends
@@ -1394,18 +1422,24 @@ class BridgeServer:
                     logger.warning("Custom-transport stream failed: %s", exc)
                     # In balancing mode: mark unhealthy and failover
                     if self._backends and self._current_backend_idx >= 0:
-                        is_transport = _is_transport_error(exc)
-                        cooldown = (
-                            self._get_transport_error_cooldown(self._current_backend_idx)
-                            if is_transport
-                            else self._backend_cooldown
-                        )
-                        kind = "transport" if is_transport else "hard"
-                        self._mark_backend_unhealthy(
-                            self._current_backend_idx,
-                            cooldown=cooldown,
-                            failure_kind=kind,
-                        )
+                        if isinstance(exc, ProviderError) and exc.is_cloudflare:
+                            self._mark_backend_unhealthy(
+                                self._current_backend_idx,
+                                failure_kind="cloudflare",
+                            )
+                        else:
+                            is_transport = _is_transport_error(exc)
+                            cooldown = (
+                                self._get_transport_error_cooldown(self._current_backend_idx)
+                                if is_transport
+                                else self._backend_cooldown
+                            )
+                            kind = "transport" if is_transport else "hard"
+                            self._mark_backend_unhealthy(
+                                self._current_backend_idx,
+                                cooldown=cooldown,
+                                failure_kind=kind,
+                            )
                         if self._any_healthy_backend() and attempt < max_attempts - 1:
                             self._select_backend(require_streaming=True)
                             self._normalize_model(cc_request)
@@ -2013,6 +2047,7 @@ class BridgeServer:
         if self._active_provider.use_custom_transport:
             cc_request["_resolved_key"] = self._active_key
             cc_request["_provider_config"] = self._active_provider_config
+            self._log_backend_selection()
 
             n_backends = len(self._backends) if self._backends else 1
             for attempt in range(n_backends):
@@ -2021,8 +2056,14 @@ class BridgeServer:
                 except Exception as exc:
                     logger.warning("Custom-transport stream failed: %s", exc)
                     if self._backends and self._current_backend_idx >= 0:
-                        cooldown = self._get_stream_error_cooldown(self._current_backend_idx)
-                        self._mark_backend_unhealthy(self._current_backend_idx, cooldown=cooldown)
+                        if isinstance(exc, ProviderError) and exc.is_cloudflare:
+                            self._mark_backend_unhealthy(
+                                self._current_backend_idx,
+                                failure_kind="cloudflare",
+                            )
+                        else:
+                            cooldown = self._get_stream_error_cooldown(self._current_backend_idx)
+                            self._mark_backend_unhealthy(self._current_backend_idx, cooldown=cooldown)
                         if self._any_healthy_backend() and attempt < n_backends - 1:
                             self._select_backend(require_streaming=True)
                             self._normalize_model(cc_request)
@@ -2473,6 +2514,7 @@ class BridgeServer:
         if self._active_provider.use_custom_transport:
             cc_request["_resolved_key"] = self._active_key
             cc_request["_provider_config"] = self._active_provider_config
+            self._log_backend_selection()
 
             n_backends = len(self._backends) if self._backends else 1
             for attempt in range(n_backends):
@@ -2486,8 +2528,14 @@ class BridgeServer:
                 except Exception as exc:
                     logger.warning("Custom-transport stream failed: %s", exc)
                     if self._backends and self._current_backend_idx >= 0:
-                        cooldown = self._get_stream_error_cooldown(self._current_backend_idx)
-                        self._mark_backend_unhealthy(self._current_backend_idx, cooldown=cooldown)
+                        if isinstance(exc, ProviderError) and exc.is_cloudflare:
+                            self._mark_backend_unhealthy(
+                                self._current_backend_idx,
+                                failure_kind="cloudflare",
+                            )
+                        else:
+                            cooldown = self._get_stream_error_cooldown(self._current_backend_idx)
+                            self._mark_backend_unhealthy(self._current_backend_idx, cooldown=cooldown)
                         if self._any_healthy_backend() and attempt < n_backends - 1:
                             self._select_backend(require_streaming=True)
                             self._normalize_model(cc_request)
@@ -3221,8 +3269,8 @@ class BridgeServer:
         if status == 403 and isinstance(body, str) and BridgeServer._is_cloudflare_block(status, body):
             return (
                 "Cloudflare bot detection blocked the upstream request. "
-                "This is not an API key problem and retries will not help. "
-                "The upstream is challenging Kitty's non-browser TLS fingerprint."
+                "This may be transient — a retry after a short delay may resolve it. "
+                "This is not an API key problem."
             )
 
         if status in (401, 403):
@@ -3297,6 +3345,7 @@ class BridgeServer:
         if self._active_provider.use_custom_transport:
             cc_request["_resolved_key"] = self._active_key
             cc_request["_provider_config"] = self._active_provider_config
+            self._log_backend_selection()
             return await self._active_provider.make_request(cc_request)
 
         session = await self._get_session()
