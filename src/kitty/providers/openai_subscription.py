@@ -1013,14 +1013,18 @@ class OpenAISubscriptionAdapter(OpenAIAdapter):
         error_obj = body.get("error", body)
         msg = error_obj.get("message", str(error_obj)) if isinstance(error_obj, dict) else str(error_obj)
         if status_code == 401:
-            return ProviderError(
+            err = ProviderError(
                 f"OpenAI subscription auth failed. "
                 f"Please re-authenticate with 'kitty auth openai'. Details: {msg}"
             )
+            err.http_status = 401
+            return err
         if status_code == 429:
-            return ProviderError(
+            err = ProviderError(
                 f"OpenAI subscription rate limited: {msg}"
             )
+            err.http_status = 429
+            return err
         if status_code == 403:
             if is_cloudflare_block(403, msg):
                 err = ProviderError(
@@ -1029,12 +1033,19 @@ class OpenAISubscriptionAdapter(OpenAIAdapter):
                     "This is not an API key problem."
                 )
                 err.is_cloudflare = True
+                err.http_status = 403
                 return err
-            return ProviderError(
+            err = ProviderError(
                 f"OpenAI subscription access denied: {msg}"
             )
+            err.http_status = 403
+            return err
         if status_code >= 500:
-            return ProviderError(
+            err = ProviderError(
                 f"OpenAI subscription server error {status_code}: {msg}"
             )
-        return ProviderError(f"OpenAI subscription error {status_code}: {msg}")
+            err.http_status = status_code
+            return err
+        err = ProviderError(f"OpenAI subscription error {status_code}: {msg}")
+        err.http_status = status_code
+        return err

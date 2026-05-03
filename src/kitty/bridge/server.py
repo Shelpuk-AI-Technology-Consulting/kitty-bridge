@@ -951,14 +951,11 @@ class BridgeServer:
                 except Exception as exc:
                     logger.warning("Custom-transport stream failed: %s", exc)
                     if self._backends and self._current_backend_idx >= 0:
-                        if isinstance(exc, ProviderError) and exc.is_cloudflare:
-                            self._mark_backend_unhealthy(
-                                self._current_backend_idx,
-                                failure_kind="cloudflare",
-                            )
-                        else:
-                            cooldown = self._get_stream_error_cooldown(self._current_backend_idx)
-                            self._mark_backend_unhealthy(self._current_backend_idx, cooldown=cooldown)
+                        kind = self._provider_error_failure_kind(exc)
+                        self._mark_backend_unhealthy(
+                            self._current_backend_idx,
+                            failure_kind=kind,
+                        )
                         if self._any_healthy_backend() and attempt < n_backends - 1:
                             self._select_backend(require_streaming=True)
                             self._normalize_model(cc_request)
@@ -972,8 +969,10 @@ class BridgeServer:
                             continue
                     # All backends exhausted or single-backend mode — surface error
                     error_msg = str(exc)
+                    error_status, _ = self._map_provider_error(exc)
+                    error_code = "rate_limit_exhausted" if error_status == 429 else "upstream_error"
                     error_event = responses_format_error(
-                        {"code": "upstream_error", "message": error_msg},
+                        {"code": error_code, "message": error_msg},
                         seq=translator._next_seq(),
                     )
                     try:
@@ -1422,24 +1421,11 @@ class BridgeServer:
                     logger.warning("Custom-transport stream failed: %s", exc)
                     # In balancing mode: mark unhealthy and failover
                     if self._backends and self._current_backend_idx >= 0:
-                        if isinstance(exc, ProviderError) and exc.is_cloudflare:
-                            self._mark_backend_unhealthy(
-                                self._current_backend_idx,
-                                failure_kind="cloudflare",
-                            )
-                        else:
-                            is_transport = _is_transport_error(exc)
-                            cooldown = (
-                                self._get_transport_error_cooldown(self._current_backend_idx)
-                                if is_transport
-                                else self._backend_cooldown
-                            )
-                            kind = "transport" if is_transport else "hard"
-                            self._mark_backend_unhealthy(
-                                self._current_backend_idx,
-                                cooldown=cooldown,
-                                failure_kind=kind,
-                            )
+                        kind = self._provider_error_failure_kind(exc)
+                        self._mark_backend_unhealthy(
+                            self._current_backend_idx,
+                            failure_kind=kind,
+                        )
                         if self._any_healthy_backend() and attempt < max_attempts - 1:
                             self._select_backend(require_streaming=True)
                             self._normalize_model(cc_request)
@@ -1453,9 +1439,10 @@ class BridgeServer:
                             continue
                     # All backends exhausted or single-backend mode — surface error
                     error_msg = str(exc)
-                    error_data = {"type": "error", "error": {"type": "api_error", "message": error_msg}}
+                    error_status, error_type = self._map_provider_error(exc)
+                    error_data = {"type": "error", "error": {"type": error_type, "message": error_msg}}
                     if sr is None:
-                        return _make_error_response(error_data, status=502)
+                        return _make_error_response(error_data, status=error_status)
                     try:
                         await sr.write(messages_format_error(error_data).encode())
                     except (ConnectionResetError, BrokenPipeError, OSError):
@@ -2056,14 +2043,11 @@ class BridgeServer:
                 except Exception as exc:
                     logger.warning("Custom-transport stream failed: %s", exc)
                     if self._backends and self._current_backend_idx >= 0:
-                        if isinstance(exc, ProviderError) and exc.is_cloudflare:
-                            self._mark_backend_unhealthy(
-                                self._current_backend_idx,
-                                failure_kind="cloudflare",
-                            )
-                        else:
-                            cooldown = self._get_stream_error_cooldown(self._current_backend_idx)
-                            self._mark_backend_unhealthy(self._current_backend_idx, cooldown=cooldown)
+                        kind = self._provider_error_failure_kind(exc)
+                        self._mark_backend_unhealthy(
+                            self._current_backend_idx,
+                            failure_kind=kind,
+                        )
                         if self._any_healthy_backend() and attempt < n_backends - 1:
                             self._select_backend(require_streaming=True)
                             self._normalize_model(cc_request)
@@ -2077,7 +2061,9 @@ class BridgeServer:
                             continue
                     # All backends exhausted or single-backend mode — surface error
                     error_msg = str(exc)
-                    error_sse = f"data: {json.dumps({'error': {'code': 'stream_error', 'message': error_msg}})}\n\n"
+                    error_status, _ = self._map_provider_error(exc)
+                    error_code = error_status if error_status != 502 else "stream_error"
+                    error_sse = f"data: {json.dumps({'error': {'code': error_code, 'message': error_msg}})}\n\n"
                     try:
                         await sr.write(error_sse.encode())
                     except (ConnectionResetError, BrokenPipeError, OSError):
@@ -2528,14 +2514,11 @@ class BridgeServer:
                 except Exception as exc:
                     logger.warning("Custom-transport stream failed: %s", exc)
                     if self._backends and self._current_backend_idx >= 0:
-                        if isinstance(exc, ProviderError) and exc.is_cloudflare:
-                            self._mark_backend_unhealthy(
-                                self._current_backend_idx,
-                                failure_kind="cloudflare",
-                            )
-                        else:
-                            cooldown = self._get_stream_error_cooldown(self._current_backend_idx)
-                            self._mark_backend_unhealthy(self._current_backend_idx, cooldown=cooldown)
+                        kind = self._provider_error_failure_kind(exc)
+                        self._mark_backend_unhealthy(
+                            self._current_backend_idx,
+                            failure_kind=kind,
+                        )
                         if self._any_healthy_backend() and attempt < n_backends - 1:
                             self._select_backend(require_streaming=True)
                             self._normalize_model(cc_request)
@@ -2547,9 +2530,10 @@ class BridgeServer:
                                 attempt + 1, n_backends, exc,
                             )
                             continue
-                    upstream_status = 500
+                    error_status, error_type = self._map_provider_error(exc)
+                    upstream_status = error_status
                     error_payload = {
-                        "error": {"message": str(exc), "type": "api_error"},
+                        "error": {"message": str(exc), "type": error_type},
                     }
                     try:
                         await sr.write(f"data: {json.dumps(error_payload)}\n\n".encode())
@@ -3311,6 +3295,40 @@ class BridgeServer:
             return f"{prefix} Details: {details}" if details else prefix
 
         return details
+
+    @staticmethod
+    def _map_provider_error(exc: Exception) -> tuple[int, str]:
+        """Map a custom-transport exception to (http_status, error_type).
+
+        Uses ProviderError.http_status when available; falls back to 502
+        for unknown exceptions.  Returns an Anthropic-compatible error type
+        string for the Messages API.
+        """
+        status = exc.http_status if isinstance(exc, ProviderError) and exc.http_status else 502
+
+        if status == 429:
+            return status, "rate_limit_error"
+        if status in (401, 403):
+            return status, "authentication_error"
+        return status, "api_error"
+
+    @staticmethod
+    def _provider_error_failure_kind(exc: Exception) -> str:
+        """Determine the correct failure_kind for _mark_backend_unhealthy.
+
+        Uses ProviderError.http_status to pick the right classification so
+        balancing profiles get proper cooldown and failover behavior.
+        """
+        if isinstance(exc, ProviderError):
+            if exc.is_cloudflare:
+                return "cloudflare"
+            if exc.http_status == 429:
+                return "rate_limit"
+            if exc.http_status in (401, 403):
+                return "auth"
+        if _is_transport_error(exc):
+            return "transport"
+        return "hard"
 
     def _build_upstream_url(self) -> str:
         base = self._active_provider.build_base_url(self._active_provider_config).rstrip("/")

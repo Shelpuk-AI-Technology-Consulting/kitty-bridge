@@ -250,6 +250,7 @@ class ProviderError(Exception):
     """Base exception for upstream provider adapter errors."""
 
     is_cloudflare = False
+    http_status: int = 0
 
 
 __all__ = ["ProviderAdapter", "ProviderError"]

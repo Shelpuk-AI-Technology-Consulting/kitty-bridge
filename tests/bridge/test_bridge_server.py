@@ -876,3 +876,135 @@ class _CustomTransportProvider(ProviderAdapter):
             raise self._raise_on_stream
         for chunk in self._raw_chunks:
             await write(chunk)
+
+
+class TestCustomTransportErrorPropagation:
+    """Test that custom-transport errors propagate the correct HTTP status and error type."""
+
+    @pytest.mark.asyncio
+    async def test_messages_429_returns_rate_limit_error(self):
+        from kitty.providers.base import ProviderError
+
+        err = ProviderError("OpenAI subscription rate limited: quota exceeded")
+        err.http_status = 429
+
+        adapter = StubLauncher(BridgeProtocol.MESSAGES_API)
+        provider = _CustomTransportProvider(raise_on_stream=err)
+        server = BridgeServer(adapter, provider, "test-key")
+        port = await server.start_async()
+        try:
+            async with aiohttp.ClientSession() as session:
+                resp = await session.post(
+                    f"http://127.0.0.1:{port}/v1/messages",
+                    json={
+                        "model": "test-model",
+                        "messages": [{"role": "user", "content": "hi"}],
+                        "max_tokens": 1024,
+                        "stream": True,
+                    },
+                )
+                assert resp.status == 429
+                body = await resp.json()
+                assert body["type"] == "error"
+                assert body["error"]["type"] == "rate_limit_error"
+                assert "rate limited" in body["error"]["message"].lower()
+        finally:
+            await server.stop_async()
+
+    @pytest.mark.asyncio
+    async def test_messages_401_returns_authentication_error(self):
+        from kitty.providers.base import ProviderError
+
+        err = ProviderError("OpenAI subscription auth failed. Please re-authenticate.")
+        err.http_status = 401
+
+        adapter = StubLauncher(BridgeProtocol.MESSAGES_API)
+        provider = _CustomTransportProvider(raise_on_stream=err)
+        server = BridgeServer(adapter, provider, "test-key")
+        port = await server.start_async()
+        try:
+            async with aiohttp.ClientSession() as session:
+                resp = await session.post(
+                    f"http://127.0.0.1:{port}/v1/messages",
+                    json={
+                        "model": "test-model",
+                        "messages": [{"role": "user", "content": "hi"}],
+                        "max_tokens": 1024,
+                        "stream": True,
+                    },
+                )
+                assert resp.status == 401
+                body = await resp.json()
+                assert body["type"] == "error"
+                assert body["error"]["type"] == "authentication_error"
+        finally:
+            await server.stop_async()
+
+    @pytest.mark.asyncio
+    async def test_messages_generic_error_returns_502(self):
+        """Non-ProviderError exceptions still return 502 with api_error."""
+        adapter = StubLauncher(BridgeProtocol.MESSAGES_API)
+        provider = _CustomTransportProvider(raise_on_stream=RuntimeError("unexpected"))
+        server = BridgeServer(adapter, provider, "test-key")
+        port = await server.start_async()
+        try:
+            async with aiohttp.ClientSession() as session:
+                resp = await session.post(
+                    f"http://127.0.0.1:{port}/v1/messages",
+                    json={
+                        "model": "test-model",
+                        "messages": [{"role": "user", "content": "hi"}],
+                        "max_tokens": 1024,
+                        "stream": True,
+                    },
+                )
+                assert resp.status == 502
+                body = await resp.json()
+                assert body["error"]["type"] == "api_error"
+        finally:
+            await server.stop_async()
+
+    @pytest.mark.asyncio
+    async def test_map_provider_error_helper(self):
+        """Unit test for _map_provider_error static method."""
+        from kitty.providers.base import ProviderError
+
+        assert BridgeServer._map_provider_error(RuntimeError("x")) == (502, "api_error")
+        assert BridgeServer._map_provider_error(ProviderError("x")) == (502, "api_error")
+
+        err429 = ProviderError("x")
+        err429.http_status = 429
+        assert BridgeServer._map_provider_error(err429) == (429, "rate_limit_error")
+
+        err401 = ProviderError("x")
+        err401.http_status = 401
+        assert BridgeServer._map_provider_error(err401) == (401, "authentication_error")
+
+        err403 = ProviderError("x")
+        err403.http_status = 403
+        assert BridgeServer._map_provider_error(err403) == (403, "authentication_error")
+
+        err500 = ProviderError("x")
+        err500.http_status = 500
+        assert BridgeServer._map_provider_error(err500) == (500, "api_error")
+
+    @pytest.mark.asyncio
+    async def test_provider_error_failure_kind_helper(self):
+        """Unit test for _provider_error_failure_kind static method."""
+        from kitty.providers.base import ProviderError
+
+        assert BridgeServer._provider_error_failure_kind(RuntimeError("x")) == "hard"
+
+        err429 = ProviderError("x")
+        err429.http_status = 429
+        assert BridgeServer._provider_error_failure_kind(err429) == "rate_limit"
+
+        err401 = ProviderError("x")
+        err401.http_status = 401
+        assert BridgeServer._provider_error_failure_kind(err401) == "auth"
+
+        err_cf = ProviderError("x")
+        err_cf.is_cloudflare = True
+        assert BridgeServer._provider_error_failure_kind(err_cf) == "cloudflare"
+
+        assert BridgeServer._provider_error_failure_kind(ConnectionResetError("x")) == "transport"

@@ -336,15 +336,18 @@ class TestMapError:
         error = adapter.map_error(429, {"error": {"message": "Rate limited"}})
         assert "rate limited" in str(error).lower()
         assert "Rate limited" in str(error)
+        assert error.http_status == 429
 
     def test_map_error_400_includes_status(self, adapter: OpenAISubscriptionAdapter) -> None:
         error = adapter.map_error(400, {"error": {"message": "Bad request"}})
         assert "400" in str(error)
         assert "Bad request" in str(error)
+        assert error.http_status == 400
 
     def test_map_error_401_mentions_reauth(self, adapter: OpenAISubscriptionAdapter) -> None:
         error = adapter.map_error(401, {"error": {"message": "Unauthorized", "code": "invalid_api_key"}})
         assert "re-authenticate" in str(error)
+        assert error.http_status == 401
 
     def test_map_error_403_cloudflare_html(self, adapter: OpenAISubscriptionAdapter) -> None:
         error = adapter.map_error(
@@ -353,6 +356,7 @@ class TestMapError:
         msg = str(error).lower()
         assert "cloudflare" in msg
         assert "not an api key problem" in msg
+        assert error.http_status == 403
 
     def test_map_error_403_cloudflare_message_does_not_say_retry_wont_help(
         self, adapter: OpenAISubscriptionAdapter,
@@ -370,6 +374,7 @@ class TestMapError:
         msg = str(error)
         assert "access denied" in msg
         assert "cloudflare" not in msg.lower()
+        assert error.http_status == 403
 
     def test_map_error_cf_sets_is_cloudflare(self, adapter: OpenAISubscriptionAdapter) -> None:
         error = adapter.map_error(
@@ -388,6 +393,11 @@ class TestMapError:
     def test_map_error_429_is_cloudflare_false(self, adapter: OpenAISubscriptionAdapter) -> None:
         error = adapter.map_error(429, {"error": {"message": "Rate limited"}})
         assert error.is_cloudflare is False
+
+    def test_map_error_500_sets_http_status(self, adapter: OpenAISubscriptionAdapter) -> None:
+        error = adapter.map_error(500, {"error": {"message": "Internal error"}})
+        assert error.http_status == 500
+        assert "500" in str(error)
 
 
 # ── Cloudflare HTML detection ──────────────────────────────────────────────
