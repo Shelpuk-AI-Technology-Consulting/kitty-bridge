@@ -71,6 +71,15 @@ def run_setup_wizard(store: ProfileStore, cred_store: CredentialStore) -> Profil
     from kitty.providers.registry import get_provider as _get_provider
     provider_adapter = _get_provider(provider)
 
+    provider_config: dict = {}
+    if provider_adapter.requires_custom_url:
+        while True:
+            base_url = prompt_text("API base URL (e.g. https://api.deepseek.com/v1): ")
+            if base_url and base_url.strip():
+                provider_config = {"base_url": base_url.strip()}
+                break
+            print_error("Base URL is required for this provider")
+
     if provider_adapter.requires_oauth:
         print_step(2, 6, "OAuth login")
         from kitty.cli.auth_cmd import run_oauth_for_provider
@@ -141,6 +150,7 @@ def run_setup_wizard(store: ProfileStore, cred_store: CredentialStore) -> Profil
         provider=provider,  # type: ignore[arg-type]
         model=model,
         auth_ref=auth_ref,
+        provider_config=provider_config,
         is_default=set_default,
     )
 
