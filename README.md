@@ -7,8 +7,7 @@
   </a>
   <img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT">
   <img src="https://img.shields.io/github/actions/workflow/status/Shelpuk-AI-Technology-Consulting/kitty-code/ci.yml?branch=main" alt="CI">
-  <a href="https://pypistats.org/packages/kitty-bridge">
-  <a href="https://pepy.tech/projects/kitty-bridge">
+  <a href="https://pepy.tech/projects/kitty-bridge" target="_blank" rel="noopener noreferrer">
     <img src="https://static.pepy.tech/badge/kitty-bridge" alt="Total PyPI downloads">
   </a>
 </p>
