@@ -1202,7 +1202,6 @@ class BridgeServer:
                         translator.reset()
                         finish_events.clear()
                         if self._backends and self._current_backend_idx >= 0:
-                            self._mark_backend_unhealthy(self._current_backend_idx)
                             if self._any_healthy_backend() and attempt < max_attempts - 1:
                                 self._select_backend()
                                 self._normalize_model(cc_request)
@@ -1783,7 +1782,6 @@ class BridgeServer:
                         if translator.response_was_empty and finish_events:
                             retried = False
                             if self._backends and self._current_backend_idx >= 0:
-                                self._mark_backend_unhealthy(self._current_backend_idx)
                                 if self._any_healthy_backend() and attempt < max_attempts - 1:
                                     translator.reset()
                                     finish_events.clear()
@@ -2250,7 +2248,6 @@ class BridgeServer:
                         translator.reset()
                         finish_events.clear()
                         if self._backends and self._current_backend_idx >= 0:
-                            self._mark_backend_unhealthy(self._current_backend_idx)
                             if self._any_healthy_backend() and attempt < max_attempts - 1:
                                 self._select_backend()
                                 self._normalize_model(cc_request)
@@ -2374,13 +2371,10 @@ class BridgeServer:
                 cc_response = await self._make_upstream_request(cc_request, retry_rate_limit=False)
                 if not self._is_empty_cc_response(cc_response):
                     return cc_response
-                # Empty response — mark backend unhealthy and try next
+                # Empty response — try next backend
                 last_response = cc_response
-                idx = self._current_backend_idx
-                if idx >= 0:
-                    self._mark_backend_unhealthy(idx)
                 logger.info(
-                    "Backend attempt %d/%d returned empty response, marking unhealthy",
+                    "Backend attempt %d/%d returned empty response, trying next",
                     attempt + 1,
                     n_backends,
                 )
@@ -2863,7 +2857,6 @@ class BridgeServer:
                     # Check for empty response (pass-through: no content bytes written)
                     if not has_content:
                         if self._backends and self._current_backend_idx >= 0:
-                            self._mark_backend_unhealthy(self._current_backend_idx)
                             if self._any_healthy_backend() and attempt < max_attempts - 1:
                                 self._select_backend()
                                 self._normalize_model(cc_request)

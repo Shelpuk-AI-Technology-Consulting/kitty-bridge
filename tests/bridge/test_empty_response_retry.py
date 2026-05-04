@@ -354,7 +354,7 @@ class TestEmptyResponseBalancing:
                 assert "World" in content
                 assert content.count("event: message_start") == 1
 
-        assert server._backend_health[0]["healthy"] is False
+        assert server._backend_health[0]["healthy"] is True
         assert server._backend_health[1]["healthy"] is True
         await server.stop_async()
 
@@ -395,7 +395,7 @@ class TestEmptyResponseBalancing:
                 body = await resp.json()
                 assert "Hello!" in body["content"][0]["text"]
 
-        assert server._backend_health[0]["healthy"] is False
+        assert server._backend_health[0]["healthy"] is True
         assert server._backend_health[1]["healthy"] is True
         await server.stop_async()
 
