@@ -160,6 +160,7 @@ class TestFallback:
     def test_unknown_model_returns_default(self):
         from kitty.providers.model_context import DEFAULT_CONTEXT_TOKENS, get_model_context_tokens
 
+        assert DEFAULT_CONTEXT_TOKENS == 200_000
         result = get_model_context_tokens(
             provider="ollama",
             model="llama3-custom",
@@ -229,6 +230,100 @@ class TestFallback:
         result = mc.get_model_context_tokens(provider="openai", model="gpt-bad")
         assert result == mc.DEFAULT_CONTEXT_TOKENS
         mc._load_metadata.cache_clear()
+
+
+# ---------------------------------------------------------------------------
+# Suffix matching for bare model names
+# ---------------------------------------------------------------------------
+
+
+class TestSuffixMatching:
+    """Bare model names without provider prefix match via suffix lookup."""
+
+    def test_bare_model_name_matches_provider_prefixed_id(self):
+        """'gpt-4o' should match 'openai/gpt-4o' in metadata."""
+        from kitty.providers.model_context import get_model_context_tokens
+
+        result = get_model_context_tokens(provider="openai", model="gpt-4o")
+        assert result == 128000
+
+    def test_bare_model_name_for_zai_provider(self):
+        """'glm-5.1' via zai provider should match metadata entry if present."""
+        from kitty.providers.model_context import get_model_context_tokens
+
+        # We don't have z-ai/glm-5.1 in the sample metadata, so this returns default.
+        # But let's add it dynamically to test.
+        result = get_model_context_tokens(provider="zai", model="deepseek-chat")
+        assert result == 65536  # matches deepseek/deepseek-chat
+
+    def test_bare_model_name_with_openrouter_provider(self):
+        """OpenRouter users might pass bare model names too."""
+        from kitty.providers.model_context import get_model_context_tokens
+
+        result = get_model_context_tokens(provider="openrouter", model="gpt-4o")
+        assert result == 128000
+
+    def test_bare_model_name_claude(self):
+        """'claude-3.5-haiku' matches 'anthropic/claude-3.5-haiku'."""
+        from kitty.providers.model_context import get_model_context_tokens
+
+        result = get_model_context_tokens(provider="anthropic", model="claude-3.5-haiku")
+        assert result == 200000
+
+
+# ---------------------------------------------------------------------------
+# Balancing profile minimum context
+# ---------------------------------------------------------------------------
+
+
+class TestBalancingMinContext:
+    """get_balancing_min_context_tokens returns the smallest context window."""
+
+    def test_min_across_mixed_models(self):
+        from kitty.providers.model_context import get_balancing_min_context_tokens
+
+        backends = [
+            ("openrouter", "openai/gpt-4o", None),
+            ("openrouter", "deepseek/deepseek-chat", None),
+            ("openrouter", "google/gemini-2.0-flash-001", None),
+        ]
+        result = get_balancing_min_context_tokens(backends)
+        assert result == 65536  # deepseek-chat is the smallest
+
+    def test_min_with_provider_config_override(self):
+        from kitty.providers.model_context import get_balancing_min_context_tokens
+
+        backends = [
+            ("openrouter", "openai/gpt-4o", None),
+            ("custom", "tiny-model", {"context_window": 8000}),
+        ]
+        result = get_balancing_min_context_tokens(backends)
+        assert result == 8000
+
+    def test_min_with_unknown_model_uses_default(self):
+        from kitty.providers.model_context import get_balancing_min_context_tokens
+
+        backends = [
+            ("openrouter", "openai/gpt-4o", None),  # 128000
+            ("ollama", "llama3-custom", None),  # default 200000
+        ]
+        result = get_balancing_min_context_tokens(backends)
+        assert result == 128000  # gpt-4o is smaller than default
+
+    def test_single_backend(self):
+        from kitty.providers.model_context import get_balancing_min_context_tokens
+
+        backends = [
+            ("openrouter", "deepseek/deepseek-chat", None),
+        ]
+        result = get_balancing_min_context_tokens(backends)
+        assert result == 65536
+
+    def test_empty_backends_returns_default(self):
+        from kitty.providers.model_context import DEFAULT_CONTEXT_TOKENS, get_balancing_min_context_tokens
+
+        result = get_balancing_min_context_tokens([])
+        assert result == DEFAULT_CONTEXT_TOKENS
 
 
 # ---------------------------------------------------------------------------

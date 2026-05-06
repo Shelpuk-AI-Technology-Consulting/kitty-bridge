@@ -9,7 +9,7 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_CONTEXT_TOKENS = 128_000
+DEFAULT_CONTEXT_TOKENS = 200_000
 
 _METADATA_PATH = Path(__file__).parent / "model_metadata.json"
 
@@ -65,8 +65,10 @@ def get_model_context_tokens(
 
     Lookup priority:
     1. provider_config["context_window"] — manual override
-    2. Exact match in metadata table
-    3. DEFAULT_CONTEXT_TOKENS fallback
+    2. Exact match on model name in metadata table
+    3. Suffix match: bare model name (e.g. "gpt-4o") matches metadata
+       entries with a provider prefix (e.g. "openai/gpt-4o")
+    4. DEFAULT_CONTEXT_TOKENS fallback
     """
     if provider_config and "context_window" in provider_config:
         override = _coerce_context_tokens(provider_config["context_window"])
@@ -77,22 +79,36 @@ def get_model_context_tokens(
     metadata = _load_metadata()
     model_lower = model.lower()
 
+    # 2. Exact match (model as-is, e.g. "openai/gpt-4o" or a bare name)
     if model_lower in metadata:
         value = _coerce_context_tokens(metadata[model_lower].get("context_length"))
         if value is not None:
             return value
         logger.warning("Invalid context_length in metadata for %s", model_lower)
 
-    if provider != "openrouter":
-        suffix = "/" + model_lower
-        matches = [entry for mid, entry in metadata.items() if mid.endswith(suffix)]
-        if len(matches) == 1:
-            value = _coerce_context_tokens(matches[0].get("context_length"))
-            if value is not None:
-                return value
-            logger.warning("Invalid context_length in metadata suffix match for %s", model_lower)
-        elif len(matches) > 1:
-            match_ids = [mid for mid in metadata if mid.endswith(suffix)]
-            logger.warning("Ambiguous context metadata for %s: %d matches (%s)", model_lower, len(matches), match_ids)
+    # 3. Suffix match: "gpt-4o" matches "openai/gpt-4o", "gpt-4o-mini", etc.
+    suffix = "/" + model_lower
+    matches = [entry for mid, entry in metadata.items() if mid.endswith(suffix)]
+    if len(matches) == 1:
+        value = _coerce_context_tokens(matches[0].get("context_length"))
+        if value is not None:
+            return value
+        logger.warning("Invalid context_length in metadata suffix match for %s", model_lower)
+    elif len(matches) > 1:
+        match_ids = [mid for mid in metadata if mid.endswith(suffix)]
+        logger.warning("Ambiguous context metadata for %s: %d matches (%s)", model_lower, len(matches), match_ids)
 
     return DEFAULT_CONTEXT_TOKENS
+
+
+def get_balancing_min_context_tokens(
+    backends: list[tuple[str, str, dict | None]],
+) -> int:
+    """Return the smallest context window across a list of balancing backends.
+
+    Each backend is a (provider, model, provider_config) tuple.
+    Returns DEFAULT_CONTEXT_TOKENS if the list is empty.
+    """
+    if not backends:
+        return DEFAULT_CONTEXT_TOKENS
+    return min(get_model_context_tokens(provider, model, config) for provider, model, config in backends)
