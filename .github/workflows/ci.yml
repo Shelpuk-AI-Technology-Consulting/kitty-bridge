@@ -7,6 +7,10 @@ on:
     branches: [main]
   schedule:
     - cron: "3 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   update-metadata:
@@ -22,16 +26,32 @@ jobs:
       - name: Install dependencies
         run: pip install -e ".[dev]"
 
-      - name: Fetch and check model metadata
+      - name: Fetch model metadata
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
         run: |
           if [ -n "$OPENROUTER_API_KEY" ]; then
             python scripts/script_update_model_metadata_table.py
-            git diff --exit-code -- src/kitty/providers/model_metadata.json
           else
-            echo "OPENROUTER_API_KEY not set; skipping metadata update check"
+            echo "OPENROUTER_API_KEY not set; skipping metadata update"
           fi
+
+      - name: Commit refreshed model metadata
+        if: github.event_name != 'pull_request'
+        run: |
+          if git diff --quiet -- src/kitty/providers/model_metadata.json; then
+            echo "Model metadata is already up to date"
+          else
+            git add src/kitty/providers/model_metadata.json
+            git -c user.name="github-actions[bot]" \
+                -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+                commit -m "Update OpenRouter model metadata"
+            git push
+          fi
+
+      - name: Check model metadata is current
+        if: github.event_name == 'pull_request'
+        run: git diff --exit-code -- src/kitty/providers/model_metadata.json
 
   test:
     runs-on: ubuntu-latest
