@@ -836,17 +836,6 @@ class TestCustomTransportCloudflareClassification:
         finally:
             await server.stop_async()
 
-        # Verify the backend was marked unhealthy with cloudflare failure kind
+        # Verify the backend was marked unhealthy after cloudflare error
         health = server._backend_health[0]
         assert health["healthy"] is False
-        # The cooldown is capped to _SINGLE_BACKEND_COOLDOWN_CAP (30s) for single-backend
-        # profiles, but the key distinction is that failure_kind="cloudflare" was used
-        # (which triggers family-level abuse cooldown, not stream error cooldown).
-        # Verify by checking the cooldown is NOT the stream error base (30s from
-        # _get_stream_error_cooldown) — both happen to be 30 for single-backend, so
-        # instead verify the family abuse was triggered via _family_cooldowns.
-        family = server._get_backend_family(0)
-        if family is not None:
-            assert family in server._family_cooldown, (
-                "CF error should have triggered family-level cooldown"
-            )

@@ -356,8 +356,11 @@ class TestAuthFailureBlacklisting:
             await server.stop_async()
 
     @pytest.mark.asyncio
-    async def test_401_single_backend_returns_auth_error(self):
+    async def test_401_single_backend_returns_auth_error(self, monkeypatch):
         """Single backend with 401 returns a clean auth error to the agent."""
+        import kitty.bridge.server as _srv
+
+        monkeypatch.setattr(_srv, "_EMPTY_FINAL_DELAYS", [0.0, 0.0])
         server = _make_balancing_server(n_backends=1)
         port = await server.start_async()
         try:
@@ -367,6 +370,13 @@ class TestAuthFailureBlacklisting:
                     status=401,
                     payload={"error": {"message": "Unauthorized"}},
                 )
+                # Register enough mocks for final-retry attempts
+                for _ in range(2):
+                    m.post(
+                        "https://api0.example.com/v1/chat/completions",
+                        status=401,
+                        payload={"error": {"message": "Unauthorized"}},
+                    )
 
                 async with aiohttp.ClientSession() as session, session.post(
                     f"http://127.0.0.1:{port}/v1/chat/completions",

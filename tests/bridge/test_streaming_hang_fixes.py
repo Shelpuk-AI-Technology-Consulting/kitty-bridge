@@ -104,23 +104,28 @@ class TestStreamingReadTimeout:
     """P1: Streaming handlers must not hang indefinitely when upstream stops responding."""
 
     @pytest.mark.asyncio
-    async def test_messages_stream_upstream_timeout_returns_error(self):
+    async def test_messages_stream_upstream_timeout_returns_error(self, monkeypatch):
         """When upstream never responds, bridge must return an error within timeout.
 
         Before fix: session.post() hangs forever (total=None, no sock_read).
         After fix: sock_read timeout triggers, bridge returns error to client.
         """
+        import kitty.bridge.server as _srv
+
+        monkeypatch.setattr(_srv, "_EMPTY_FINAL_DELAYS", [0.0, 0.0])
+
         adapter = StubLauncher(BridgeProtocol.MESSAGES_API)
         provider = StubProvider()
         server = BridgeServer(adapter, provider, "test-key")
         port = await server.start_async()
         try:
             with aioresponses(passthrough=["http://127.0.0.1"]) as m:
-                # Simulate upstream that never responds by raising TimeoutError
-                m.post(
-                    "https://api.example.com/v1/chat/completions",
-                    exception=asyncio.TimeoutError(),
-                )
+                # All attempts timeout (4 original + 2 final)
+                for _ in range(6):
+                    m.post(
+                        "https://api.example.com/v1/chat/completions",
+                        exception=asyncio.TimeoutError(),
+                    )
 
                 async with (
                     aiohttp.ClientSession() as session,
@@ -261,8 +266,12 @@ class TestMessagesStreamDebugLogging:
             await server.stop_async()
 
     @pytest.mark.asyncio
-    async def test_messages_stream_logs_upstream_error_on_non_200(self, caplog):
+    async def test_messages_stream_logs_upstream_error_on_non_200(self, caplog, monkeypatch):
         """Verify _stream_messages logs upstream error body on non-200."""
+        import kitty.bridge.server as _srv
+
+        monkeypatch.setattr(_srv, "_EMPTY_FINAL_DELAYS", [0.0, 0.0])
+
         adapter = StubLauncher(BridgeProtocol.MESSAGES_API)
         provider = StubProvider()
         server = BridgeServer(adapter, provider, "test-key")
@@ -271,7 +280,7 @@ class TestMessagesStreamDebugLogging:
             with caplog.at_level(logging.DEBUG, logger="kitty.bridge.server"):
                 with aioresponses(passthrough=["http://127.0.0.1"]) as m:
                     # Server retries on 500 — register enough mock responses
-                    for _ in range(4):
+                    for _ in range(6):
                         m.post(
                             "https://api.example.com/v1/chat/completions",
                             status=500,
@@ -514,8 +523,12 @@ class TestNon200ErrorLogging:
     """P5: Upstream non-200 error bodies must be logged at ERROR level."""
 
     @pytest.mark.asyncio
-    async def test_messages_stream_logs_500_error_body(self, caplog):
+    async def test_messages_stream_logs_500_error_body(self, caplog, monkeypatch):
         """Upstream 500 error body must be logged."""
+        import kitty.bridge.server as _srv
+
+        monkeypatch.setattr(_srv, "_EMPTY_FINAL_DELAYS", [0.0, 0.0])
+
         adapter = StubLauncher(BridgeProtocol.MESSAGES_API)
         provider = StubProvider()
         server = BridgeServer(adapter, provider, "test-key")
@@ -524,7 +537,7 @@ class TestNon200ErrorLogging:
             with caplog.at_level(logging.DEBUG, logger="kitty.bridge.server"):
                 with aioresponses(passthrough=["http://127.0.0.1"]) as m:
                     # Server retries on 500 — register enough mock responses
-                    for _ in range(4):
+                    for _ in range(6):
                         m.post(
                             "https://api.example.com/v1/chat/completions",
                             status=500,

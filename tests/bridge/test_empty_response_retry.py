@@ -8,6 +8,7 @@ import aiohttp
 import pytest
 from aioresponses import aioresponses
 
+import kitty.bridge.server as _server_module
 from kitty.bridge.server import BridgeServer
 from kitty.launchers.base import LauncherAdapter, SpawnConfig
 from kitty.profiles.schema import Profile
@@ -221,7 +222,7 @@ class TestEmptyResponseNonBalancing:
         }
 
         with aioresponses(passthrough=["http://127.0.0.1"]) as m:
-            for _ in range(4):
+            for _ in range(6):
                 m.post("https://api.example.com/v1/chat/completions", payload=EMPTY_CC_RESPONSE)
 
             async with aiohttp.ClientSession() as session, session.post(url, json=request_body) as resp:
@@ -279,7 +280,7 @@ class TestEmptyResponseNonBalancing:
         }
 
         with aioresponses(passthrough=["http://127.0.0.1"]) as m:
-            for _ in range(4):
+            for _ in range(6):
                 m.post(
                     "https://api.example.com/v1/chat/completions",
                     body='data: {"choices":[{"delta":{}, "finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
@@ -413,10 +414,128 @@ class TestEmptyResponseBalancing:
         }
 
         with aioresponses(passthrough=["http://127.0.0.1"]) as m:
-            # Both backends return empty for all attempts
-            for url_prefix in ("api0", "api1"):
-                for _ in range(2):
-                    m.post(f"https://{url_prefix}.example.com/v1/chat/completions", payload=EMPTY_CC_RESPONSE)
+            for _ in range(4):
+                m.post("https://api0.example.com/v1/chat/completions", payload=EMPTY_CC_RESPONSE)
+                m.post("https://api1.example.com/v1/chat/completions", payload=EMPTY_CC_RESPONSE)
+
+            async with aiohttp.ClientSession() as session, session.post(url, json=request_body) as resp:
+                assert resp.status == 200
+                body = await resp.json()
+                assert "Upstream model returned an empty response" in body["content"][0]["text"]
+
+        await server.stop_async()
+
+
+class TestEmptyResponseFinalRetries:
+    """Final retries before fallback on empty responses."""
+
+    @pytest.mark.asyncio
+    async def test_streaming_final_retry_recovers(self, monkeypatch):
+        monkeypatch.setattr(_server_module, "_EMPTY_FINAL_DELAYS", [0.0, 0.0])
+        server = _make_balancing_server(2)
+        port = await server.start_async()
+        url = f"http://127.0.0.1:{port}/v1/messages"
+
+        request_body = {
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": True,
+        }
+
+        empty_stream = 'data: {"choices":[{"delta":{}, "finish_reason":"stop"}]}\n\ndata: [DONE]\n\n'
+        success_stream = (
+            'data: {"choices":[{"delta":{"content":"Recovered"}}]}\n\n'
+            'data: {"choices":[{"delta":{}, "finish_reason":"stop"}]}\n\ndata: [DONE]\n\n'
+        )
+
+        with aioresponses(passthrough=["http://127.0.0.1"]) as m:
+            m.post("https://api0.example.com/v1/chat/completions", body=empty_stream)
+            m.post("https://api1.example.com/v1/chat/completions", body=empty_stream)
+            m.post("https://api0.example.com/v1/chat/completions", body=empty_stream)
+            m.post("https://api1.example.com/v1/chat/completions", body=empty_stream)
+            m.post("https://api0.example.com/v1/chat/completions", body=success_stream)
+
+            async with aiohttp.ClientSession() as session, session.post(url, json=request_body) as resp:
+                assert resp.status == 200
+                content = await resp.text()
+                assert "Recovered" in content
+                assert "Upstream model returned an empty response" not in content
+
+        await server.stop_async()
+
+    @pytest.mark.asyncio
+    async def test_streaming_final_retries_fallback(self, monkeypatch):
+        monkeypatch.setattr(_server_module, "_EMPTY_FINAL_DELAYS", [0.0, 0.0])
+        server = _make_balancing_server(2)
+        port = await server.start_async()
+        url = f"http://127.0.0.1:{port}/v1/messages"
+
+        request_body = {
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": True,
+        }
+
+        empty_stream = 'data: {"choices":[{"delta":{}, "finish_reason":"stop"}]}\n\ndata: [DONE]\n\n'
+
+        with aioresponses(passthrough=["http://127.0.0.1"]) as m:
+            # 8 original attempts (4 per backend) + 2 final-retry attempts = 10 total
+            for _ in range(10):
+                m.post("https://api0.example.com/v1/chat/completions", body=empty_stream)
+                m.post("https://api1.example.com/v1/chat/completions", body=empty_stream)
+
+            async with aiohttp.ClientSession() as session, session.post(url, json=request_body) as resp:
+                assert resp.status == 200
+                content = await resp.text()
+                assert "Upstream model returned an empty response" in content
+
+        await server.stop_async()
+
+    @pytest.mark.asyncio
+    async def test_non_streaming_final_retry_recovers(self, monkeypatch):
+        monkeypatch.setattr(_server_module, "_EMPTY_FINAL_DELAYS", [0.0, 0.0])
+        server = _make_balancing_server(2)
+        port = await server.start_async()
+        url = f"http://127.0.0.1:{port}/v1/messages"
+
+        request_body = {
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": False,
+        }
+
+        with aioresponses(passthrough=["http://127.0.0.1"]) as m:
+            # Normal loop: 2 backends, each returns empty once
+            m.post("https://api0.example.com/v1/chat/completions", payload=EMPTY_CC_RESPONSE)
+            m.post("https://api1.example.com/v1/chat/completions", payload=EMPTY_CC_RESPONSE)
+            # Final retries: OK responses
+            m.post("https://api0.example.com/v1/chat/completions", payload=OK_CC_RESPONSE)
+            m.post("https://api1.example.com/v1/chat/completions", payload=OK_CC_RESPONSE)
+
+            async with aiohttp.ClientSession() as session, session.post(url, json=request_body) as resp:
+                assert resp.status == 200
+                body = await resp.json()
+                assert "Hello!" in body["content"][0]["text"]
+
+        await server.stop_async()
+
+    @pytest.mark.asyncio
+    async def test_non_streaming_final_retries_fallback(self, monkeypatch):
+        monkeypatch.setattr(_server_module, "_EMPTY_FINAL_DELAYS", [0.0, 0.0])
+        server = _make_balancing_server(2)
+        port = await server.start_async()
+        url = f"http://127.0.0.1:{port}/v1/messages"
+
+        request_body = {
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": False,
+        }
+
+        with aioresponses(passthrough=["http://127.0.0.1"]) as m:
+            for _ in range(6):
+                m.post("https://api0.example.com/v1/chat/completions", payload=EMPTY_CC_RESPONSE)
+                m.post("https://api1.example.com/v1/chat/completions", payload=EMPTY_CC_RESPONSE)
 
             async with aiohttp.ClientSession() as session, session.post(url, json=request_body) as resp:
                 assert resp.status == 200

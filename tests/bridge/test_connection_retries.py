@@ -198,16 +198,20 @@ class TestMessagesConnectionRetries:
             await server.stop_async()
 
     @pytest.mark.asyncio
-    async def test_timeout_exhausted_sends_error(self):
+    async def test_timeout_exhausted_sends_error(self, monkeypatch):
         """TimeoutError on all attempts — agent receives one error event."""
+        import kitty.bridge.server as _srv
+
+        monkeypatch.setattr(_srv, "_EMPTY_FINAL_DELAYS", [0.0, 0.0])
+
         adapter = StubLauncher(BridgeProtocol.MESSAGES_API)
         provider = StubProvider()
         server = BridgeServer(adapter, provider, "test-key")
         port = await server.start_async()
         try:
             with aioresponses(passthrough=["http://127.0.0.1"]) as m:
-                # All attempts timeout
-                for _ in range(4):  # 1 initial + 3 retries
+                # All attempts timeout (4 original + 2 final)
+                for _ in range(6):
                     m.post(
                         "https://api.example.com/v1/chat/completions",
                         exception=asyncio.TimeoutError(),

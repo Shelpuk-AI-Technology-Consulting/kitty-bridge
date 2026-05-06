@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import re
 import subprocess
+import sys
 import tarfile
 import zipfile
 from pathlib import Path
@@ -34,7 +35,7 @@ def built_artifacts() -> dict[str, Path]:
     DIST_DIR.mkdir(exist_ok=True)
     if not list(DIST_DIR.glob("*.whl")):
         subprocess.run(
-            ["python", "-m", "build", "--no-isolation"],
+            [sys.executable, "-m", "build", "--no-isolation"],
             cwd=ROOT,
             check=True,
             capture_output=True,

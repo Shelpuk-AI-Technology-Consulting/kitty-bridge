@@ -480,12 +480,11 @@ class TestCircuitBreakerRetry:
 
         await server.stop_async()
 
-    def test_family_cooldown_expires_and_recovers(self):
+    def test_rate_limited_backend_recovers_after_cooldown(self):
         server = _make_server_with_families(["family-a", "family-b"], cooldown=0)
 
         server._mark_backend_unhealthy(0, cooldown=0, failure_kind="rate_limit")
 
-        assert server._get_family_cooldown("family-a") is None
         _, key, _, _, _ = server._get_next_backend()
         assert key in ("key-0", "key-1")
         assert server._backend_health[0]["healthy"] is True
@@ -499,16 +498,18 @@ class TestCircuitBreakerRetry:
         assert "key-0" in seen
         assert "key-1" in seen
 
-    def test_family_429_then_403_escalates_same_family_cooldown(self):
+    def test_429_and_cloudflare_only_affect_failed_backend(self):
         server = _make_server_with_families(["family-a", "family-a", "family-b"])
+
         server._mark_backend_unhealthy(0, cooldown=300, failure_kind="rate_limit")
-        first_cooldown = server._get_family_cooldown("family-a")
-        assert first_cooldown is not None
+        assert server._backend_health[0]["healthy"] is False
+        assert server._backend_health[1]["healthy"] is True
+        assert server._backend_health[2]["healthy"] is True
 
         server._mark_backend_unhealthy(1, cooldown=300, failure_kind="cloudflare")
-        second_cooldown = server._get_family_cooldown("family-a")
-        assert second_cooldown is not None
-        assert second_cooldown > first_cooldown
+        assert server._backend_health[0]["healthy"] is False
+        assert server._backend_health[1]["healthy"] is False
+        assert server._backend_health[2]["healthy"] is True
 
     @pytest.mark.asyncio
     async def test_first_two_fail_third_succeeds(self):
@@ -758,34 +759,30 @@ class TestLeastRecentlyFailedBackend:
 class TestFamilyCooldown:
     """Family-level anti-abuse cooldown after 429/403."""
 
-    def test_429_marks_family_cooldown(self):
-        """After a 429, the backend's provider family should be in cooldown."""
+    def test_429_only_marks_failed_backend(self):
+        """After a 429, only the failed backend is unhealthy — siblings unaffected."""
         server = _make_server_with_families(["family-a", "family-a", "family-b"])
-        assert server._get_family_cooldown("family-a") is None
 
         server._mark_backend_unhealthy(0, cooldown=300, failure_kind="rate_limit")
-        assert server._get_family_cooldown("family-a") is not None
+        assert server._backend_health[0]["healthy"] is False
+        assert server._backend_health[1]["healthy"] is True
+        assert server._backend_health[2]["healthy"] is True
 
-    def test_429_family_cooldown_skips_same_family(self):
-        """After backend-0 gets 429, backend-1 (same family) should be deprioritized."""
+    def test_429_sibling_backend_still_selectable(self):
+        """After backend-0 gets 429, backend-1 (same family) should still be selectable."""
         server = _make_server_with_families(["family-a", "family-a", "family-b"])
         server._mark_backend_unhealthy(0, cooldown=300, failure_kind="rate_limit")
 
-        # backend-1 is healthy but same family — should prefer backend-2
-        for _ in range(20):
-            _, key, _, _, _ = server._get_next_backend()
-            assert key in ("key-1", "key-2"), f"Got {key}"
-
-        # In practice backend-2 should dominate; allow backend-1 occasionally
-        # since it's still healthy, just deprioritized
-        counts = {"key-1": 0, "key-2": 0}
+        # backend-1 is healthy and NOT deprioritized by family cooldown
+        keys_seen = set()
         random.seed(42)
         for _ in range(100):
             _, key, _, _, _ = server._get_next_backend()
-            counts[key] += 1
-        assert counts["key-2"] > counts["key-1"], (
-            f"family-b backend should dominate: {counts}"
-        )
+            keys_seen.add(key)
+
+        # backend-1 and backend-2 should both appear
+        assert "key-1" in keys_seen, "Sibling in same family should still be selected"
+        assert "key-2" in keys_seen, "Backend in different family should be selected"
 
     def test_different_family_not_affected(self):
         """A 429 on family-a should not affect family-b backends."""
@@ -796,48 +793,19 @@ class TestFamilyCooldown:
         _, key, _, _, _ = server._get_next_backend()
         assert key == "key-1"
 
-    def test_family_cooldown_expires(self):
-        """Family cooldown should expire based on the cooldown value."""
-        server = _make_server_with_families(["family-a", "family-b"], cooldown=0)
-        server._mark_backend_unhealthy(0, cooldown=0, failure_kind="rate_limit")
 
-        # With cooldown=0, family cooldown should expire immediately
-        _, key, _, _, _ = server._get_next_backend()
-        assert key in ("key-0", "key-1")
 
-    def test_cloudflare_403_escalates_family_cooldown(self):
-        """A Cloudflare 403 should produce a longer family cooldown than a plain 429."""
+    def test_cloudflare_403_only_marks_failed_backend(self):
+        """A Cloudflare 403 should only mark the failed backend unhealthy."""
         server = _make_server_with_families(["family-a", "family-b"], cooldown=300)
 
-        # First, a 429
-        server._mark_backend_unhealthy(0, cooldown=300, failure_kind="rate_limit")
-        first_cooldown = server._get_family_cooldown("family-a")
-
-        # Then a 403 Cloudflare on same family
         server._mark_backend_unhealthy(0, cooldown=300, failure_kind="cloudflare")
-        second_cooldown = server._get_family_cooldown("family-a")
+        assert server._backend_health[0]["healthy"] is False
+        assert server._backend_health[1]["healthy"] is True
 
-        assert second_cooldown > first_cooldown, (
-            f"Cloudflare 403 should escalate: {second_cooldown} vs {first_cooldown}"
-        )
 
-    def test_all_families_unhealthy_still_returns_backend(self):
-        """When all families are in cooldown, still return a backend."""
-        server = _make_server_with_families(["family-a", "family-b"], cooldown=9999)
-        server._mark_backend_unhealthy(0, cooldown=9999, failure_kind="rate_limit")
-        server._mark_backend_unhealthy(1, cooldown=9999, failure_kind="rate_limit")
 
-        _, key, _, _, _ = server._get_next_backend()
-        assert key in ("key-0", "key-1")
 
-    def test_no_backends_has_empty_family_state(self):
-        server = BridgeServer(
-            adapter=StubLauncher(),
-            provider=StubProvider(),
-            resolved_key="key",
-            model="model",
-        )
-        assert server._get_family_cooldown("anything") is None
 
 
 # -- Phase 1: Backend exhaustion fixes ------------------------------------------
