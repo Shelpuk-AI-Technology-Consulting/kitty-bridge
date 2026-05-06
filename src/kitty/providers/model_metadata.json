@@ -68,7 +68,7 @@
 {"id": "deepseek/deepseek-v4-flash", "name": "DeepSeek: DeepSeek V4 Flash", "context_length": 1048576, "max_completion_tokens": 384000, "created": 1777000666},
 {"id": "deepseek/deepseek-v4-pro", "name": "DeepSeek: DeepSeek V4 Pro", "context_length": 1048576, "max_completion_tokens": 384000, "created": 1777000679},
 {"id": "essentialai/rnj-1-instruct", "name": "EssentialAI: Rnj 1 Instruct", "context_length": 32768, "max_completion_tokens": null, "created": 1765094847},
-{"id": "google/gemini-2.0-flash-001", "name": "Google: Gemini 2.0 Flash", "context_length": 1048576, "max_completion_tokens": 8192, "created": 1738769413},
+{"id": "google/gemini-2.0-flash-001", "name": "Google: Gemini 2.0 Flash", "context_length": 1000000, "max_completion_tokens": 8192, "created": 1738769413},
 {"id": "google/gemini-2.0-flash-lite-001", "name": "Google: Gemini 2.0 Flash Lite", "context_length": 1048576, "max_completion_tokens": 8192, "created": 1740506212},
 {"id": "google/gemini-2.5-flash", "name": "Google: Gemini 2.5 Flash", "context_length": 1048576, "max_completion_tokens": 65535, "created": 1750172488},
 {"id": "google/gemini-2.5-flash-image", "name": "Google: Nano Banana (Gemini 2.5 Flash Image)", "context_length": 32768, "max_completion_tokens": 32768, "created": 1759870431},
