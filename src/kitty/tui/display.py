@@ -29,16 +29,18 @@ __all__ = [
     "status_spinner",
 ]
 
-KITTY_THEME = Theme({
-    "kitty.ok": "green",
-    "kitty.err": "red",
-    "kitty.warn": "yellow",
-    "kitty.info": "blue",
-    "kitty.title": "bold",
-    "kitty.accent": "cyan bold",
-    "kitty.muted": "dim",
-    "kitty.border": "blue",
-})
+KITTY_THEME = Theme(
+    {
+        "kitty.ok": "green",
+        "kitty.err": "red",
+        "kitty.warn": "yellow",
+        "kitty.info": "blue",
+        "kitty.title": "bold",
+        "kitty.accent": "cyan bold",
+        "kitty.muted": "dim",
+        "kitty.border": "blue",
+    }
+)
 
 
 def _should_enable_color() -> bool:

@@ -77,9 +77,7 @@ async def run_auth_openai(profile_store: ProfileStore, cred_store: CredentialSto
     print_section("kitty auth openai")
 
     # Step 1: Run OAuth flow (shared helper)
-    auth_ref, _session_path = await run_oauth_for_provider(
-        profile_store, cred_store, "openai_subscription"
-    )
+    auth_ref, _session_path = await run_oauth_for_provider(profile_store, cred_store, "openai_subscription")
 
     # Step 2: Prompt for model name
     model = prompt_text("Model name (default: gpt-5.3-codex): ")

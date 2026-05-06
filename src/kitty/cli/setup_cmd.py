@@ -69,6 +69,7 @@ def run_setup_wizard(store: ProfileStore, cred_store: CredentialStore) -> Profil
 
     # Step 2: Credential — OAuth flow or API key depending on provider
     from kitty.providers.registry import get_provider as _get_provider
+
     provider_adapter = _get_provider(provider)
 
     provider_config: dict = {}
@@ -84,9 +85,7 @@ def run_setup_wizard(store: ProfileStore, cred_store: CredentialStore) -> Profil
         print_step(2, 6, "OAuth login")
         from kitty.cli.auth_cmd import run_oauth_for_provider
 
-        auth_ref, _session_path = asyncio.run(
-            run_oauth_for_provider(store, cred_store, provider)
-        )
+        auth_ref, _session_path = asyncio.run(run_oauth_for_provider(store, cred_store, provider))
     else:
         print_step(2, 6, "API key")
         existing_auth_ref = _find_reusable_auth_ref(store, cred_store, provider)

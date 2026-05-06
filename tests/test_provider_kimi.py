@@ -163,15 +163,20 @@ class TestKimiCodeAdapter:
         assert result["usage"] == {}
 
     def test_parse_response_usage_null(self):
-        result = self.adapter.parse_response({
-            "choices": [{"message": {"role": "assistant", "content": "hi"}, "finish_reason": "stop"}],
-            "usage": None,
-        })
+        result = self.adapter.parse_response(
+            {
+                "choices": [{"message": {"role": "assistant", "content": "hi"}, "finish_reason": "stop"}],
+                "usage": None,
+            }
+        )
         assert result["content"] == "hi"
         assert result["usage"] == {}
 
     def test_build_request_temperature_zero(self):
         result = self.adapter.build_request(
-            model="kimi-for-coding", messages=SAMPLE_MESSAGES, stream=False, temperature=0,
+            model="kimi-for-coding",
+            messages=SAMPLE_MESSAGES,
+            stream=False,
+            temperature=0,
         )
         assert result["temperature"] == 0

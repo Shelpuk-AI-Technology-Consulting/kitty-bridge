@@ -301,7 +301,9 @@ class TestNonStreamingUsageLog:
         adapter = StubLauncher(BridgeProtocol.MESSAGES_API)
         provider = StubProvider()
         server = BridgeServer(
-            adapter, provider, "test-key",
+            adapter,
+            provider,
+            "test-key",
             model="test-model",
             logging_enabled=True,
             _usage_log_path=log_path,
@@ -310,10 +312,13 @@ class TestNonStreamingUsageLog:
         try:
             with aioresponses(passthrough=["http://127.0.0.1"]) as m:
                 m.post("https://api.example.com/v1/chat/completions", payload=UPSTREAM_RESPONSE)
-                async with aiohttp.ClientSession() as session, session.post(
-                    f"http://127.0.0.1:{port}/v1/messages",
-                    json=_make_messages_request(stream=False),
-                ) as resp:
+                async with (
+                    aiohttp.ClientSession() as session,
+                    session.post(
+                        f"http://127.0.0.1:{port}/v1/messages",
+                        json=_make_messages_request(stream=False),
+                    ) as resp,
+                ):
                     assert resp.status == 200
 
             entries = _read_usage_log(log_path)
@@ -331,7 +336,9 @@ class TestNonStreamingUsageLog:
         adapter = StubLauncher(BridgeProtocol.RESPONSES_API)
         provider = StubProvider()
         server = BridgeServer(
-            adapter, provider, "test-key",
+            adapter,
+            provider,
+            "test-key",
             model="test-model",
             logging_enabled=True,
             _usage_log_path=log_path,
@@ -340,10 +347,13 @@ class TestNonStreamingUsageLog:
         try:
             with aioresponses(passthrough=["http://127.0.0.1"]) as m:
                 m.post("https://api.example.com/v1/chat/completions", payload=UPSTREAM_RESPONSE)
-                async with aiohttp.ClientSession() as session, session.post(
-                    f"http://127.0.0.1:{port}/v1/responses",
-                    json=_make_responses_request(stream=False),
-                ) as resp:
+                async with (
+                    aiohttp.ClientSession() as session,
+                    session.post(
+                        f"http://127.0.0.1:{port}/v1/responses",
+                        json=_make_responses_request(stream=False),
+                    ) as resp,
+                ):
                     assert resp.status == 200
 
             entries = _read_usage_log(log_path)
@@ -359,7 +369,9 @@ class TestNonStreamingUsageLog:
         adapter = StubLauncher(BridgeProtocol.CHAT_COMPLETIONS_API)
         provider = StubProvider()
         server = BridgeServer(
-            adapter, provider, "test-key",
+            adapter,
+            provider,
+            "test-key",
             model="test-model",
             logging_enabled=True,
             _usage_log_path=log_path,
@@ -368,10 +380,13 @@ class TestNonStreamingUsageLog:
         try:
             with aioresponses(passthrough=["http://127.0.0.1"]) as m:
                 m.post("https://api.example.com/v1/chat/completions", payload=UPSTREAM_RESPONSE)
-                async with aiohttp.ClientSession() as session, session.post(
-                    f"http://127.0.0.1:{port}/v1/chat/completions",
-                    json=_make_chat_completions_request(stream=False),
-                ) as resp:
+                async with (
+                    aiohttp.ClientSession() as session,
+                    session.post(
+                        f"http://127.0.0.1:{port}/v1/chat/completions",
+                        json=_make_chat_completions_request(stream=False),
+                    ) as resp,
+                ):
                     assert resp.status == 200
 
             entries = _read_usage_log(log_path)
@@ -387,7 +402,9 @@ class TestNonStreamingUsageLog:
         adapter = StubLauncher(BridgeProtocol.MESSAGES_API)
         provider = StubProvider()
         server = BridgeServer(
-            adapter, provider, "test-key",
+            adapter,
+            provider,
+            "test-key",
             model="test-model",
             logging_enabled=True,
             _usage_log_path=log_path,
@@ -396,10 +413,13 @@ class TestNonStreamingUsageLog:
         try:
             with aioresponses(passthrough=["http://127.0.0.1"]) as m:
                 m.post("https://api.example.com/v1/chat/completions", payload=UPSTREAM_RESPONSE_NO_USAGE)
-                async with aiohttp.ClientSession() as session, session.post(
-                    f"http://127.0.0.1:{port}/v1/messages",
-                    json=_make_messages_request(stream=False),
-                ) as resp:
+                async with (
+                    aiohttp.ClientSession() as session,
+                    session.post(
+                        f"http://127.0.0.1:{port}/v1/messages",
+                        json=_make_messages_request(stream=False),
+                    ) as resp,
+                ):
                     assert resp.status == 200
 
             entries = _read_usage_log(log_path)
@@ -419,7 +439,9 @@ class TestNonStreamingLoggingDisabled:
         adapter = StubLauncher(BridgeProtocol.MESSAGES_API)
         provider = StubProvider()
         server = BridgeServer(
-            adapter, provider, "test-key",
+            adapter,
+            provider,
+            "test-key",
             model="test-model",
             logging_enabled=False,
             _usage_log_path=log_path,
@@ -428,10 +450,13 @@ class TestNonStreamingLoggingDisabled:
         try:
             with aioresponses(passthrough=["http://127.0.0.1"]) as m:
                 m.post("https://api.example.com/v1/chat/completions", payload=UPSTREAM_RESPONSE)
-                async with aiohttp.ClientSession() as session, session.post(
-                    f"http://127.0.0.1:{port}/v1/messages",
-                    json=_make_messages_request(stream=False),
-                ) as resp:
+                async with (
+                    aiohttp.ClientSession() as session,
+                    session.post(
+                        f"http://127.0.0.1:{port}/v1/messages",
+                        json=_make_messages_request(stream=False),
+                    ) as resp,
+                ):
                     assert resp.status == 200
 
             assert not log_path.exists()
@@ -451,7 +476,9 @@ class TestStreamingUsageLog:
         adapter = StubLauncher(BridgeProtocol.MESSAGES_API)
         provider = StubProvider()
         server = BridgeServer(
-            adapter, provider, "test-key",
+            adapter,
+            provider,
+            "test-key",
             model="test-model",
             logging_enabled=True,
             _usage_log_path=log_path,
@@ -464,10 +491,13 @@ class TestStreamingUsageLog:
                     body=_streaming_chunks(),
                     content_type="text/event-stream",
                 )
-                async with aiohttp.ClientSession() as session, session.post(
-                    f"http://127.0.0.1:{port}/v1/messages",
-                    json=_make_messages_request(stream=True),
-                ) as resp:
+                async with (
+                    aiohttp.ClientSession() as session,
+                    session.post(
+                        f"http://127.0.0.1:{port}/v1/messages",
+                        json=_make_messages_request(stream=True),
+                    ) as resp,
+                ):
                     assert resp.status == 200
                     # Consume the stream
                     await resp.read()
@@ -487,7 +517,9 @@ class TestStreamingUsageLog:
         adapter = StubLauncher(BridgeProtocol.RESPONSES_API)
         provider = StubProvider()
         server = BridgeServer(
-            adapter, provider, "test-key",
+            adapter,
+            provider,
+            "test-key",
             model="test-model",
             logging_enabled=True,
             _usage_log_path=log_path,
@@ -500,10 +532,13 @@ class TestStreamingUsageLog:
                     body=_streaming_chunks(),
                     content_type="text/event-stream",
                 )
-                async with aiohttp.ClientSession() as session, session.post(
-                    f"http://127.0.0.1:{port}/v1/responses",
-                    json=_make_responses_request(stream=True),
-                ) as resp:
+                async with (
+                    aiohttp.ClientSession() as session,
+                    session.post(
+                        f"http://127.0.0.1:{port}/v1/responses",
+                        json=_make_responses_request(stream=True),
+                    ) as resp,
+                ):
                     assert resp.status == 200
                     await resp.read()
 
@@ -520,7 +555,9 @@ class TestStreamingUsageLog:
         adapter = StubLauncher(BridgeProtocol.CHAT_COMPLETIONS_API)
         provider = StubProvider()
         server = BridgeServer(
-            adapter, provider, "test-key",
+            adapter,
+            provider,
+            "test-key",
             model="test-model",
             logging_enabled=True,
             _usage_log_path=log_path,
@@ -533,10 +570,13 @@ class TestStreamingUsageLog:
                     body=_streaming_chunks(),
                     content_type="text/event-stream",
                 )
-                async with aiohttp.ClientSession() as session, session.post(
-                    f"http://127.0.0.1:{port}/v1/chat/completions",
-                    json=_make_chat_completions_request(stream=True),
-                ) as resp:
+                async with (
+                    aiohttp.ClientSession() as session,
+                    session.post(
+                        f"http://127.0.0.1:{port}/v1/chat/completions",
+                        json=_make_chat_completions_request(stream=True),
+                    ) as resp,
+                ):
                     assert resp.status == 200
                     await resp.read()
 
@@ -557,7 +597,9 @@ class TestStreamingLoggingDisabled:
         adapter = StubLauncher(BridgeProtocol.MESSAGES_API)
         provider = StubProvider()
         server = BridgeServer(
-            adapter, provider, "test-key",
+            adapter,
+            provider,
+            "test-key",
             model="test-model",
             logging_enabled=False,
             _usage_log_path=log_path,
@@ -570,10 +612,13 @@ class TestStreamingLoggingDisabled:
                     body=_streaming_chunks(),
                     content_type="text/event-stream",
                 )
-                async with aiohttp.ClientSession() as session, session.post(
-                    f"http://127.0.0.1:{port}/v1/messages",
-                    json=_make_messages_request(stream=True),
-                ) as resp:
+                async with (
+                    aiohttp.ClientSession() as session,
+                    session.post(
+                        f"http://127.0.0.1:{port}/v1/messages",
+                        json=_make_messages_request(stream=True),
+                    ) as resp,
+                ):
                     assert resp.status == 200
                     await resp.read()
 
@@ -594,7 +639,9 @@ class TestProfileNameInLog:
         adapter = StubLauncher(BridgeProtocol.MESSAGES_API)
         provider = StubProvider()
         server = BridgeServer(
-            adapter, provider, "test-key",
+            adapter,
+            provider,
+            "test-key",
             model="test-model",
             logging_enabled=True,
             profile_name="my-dev-profile",
@@ -604,10 +651,13 @@ class TestProfileNameInLog:
         try:
             with aioresponses(passthrough=["http://127.0.0.1"]) as m:
                 m.post("https://api.example.com/v1/chat/completions", payload=UPSTREAM_RESPONSE)
-                async with aiohttp.ClientSession() as session, session.post(
-                    f"http://127.0.0.1:{port}/v1/messages",
-                    json=_make_messages_request(stream=False),
-                ) as resp:
+                async with (
+                    aiohttp.ClientSession() as session,
+                    session.post(
+                        f"http://127.0.0.1:{port}/v1/messages",
+                        json=_make_messages_request(stream=False),
+                    ) as resp,
+                ):
                     assert resp.status == 200
 
             entries = _read_usage_log(log_path)

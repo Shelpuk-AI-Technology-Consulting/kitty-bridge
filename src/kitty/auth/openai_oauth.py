@@ -80,9 +80,7 @@ class OAuthTokenExchangeError(Exception):
     def __init__(self, error: str, error_description: str | None = None) -> None:
         self.error = error
         self.error_description = error_description or ""
-        super().__init__(
-            f"{error}: {error_description}" if error_description else error
-        )
+        super().__init__(f"{error}: {error_description}" if error_description else error)
 
 
 class OAuthAuthorizationError(Exception):
@@ -91,9 +89,7 @@ class OAuthAuthorizationError(Exception):
     def __init__(self, error: str, error_description: str | None = None) -> None:
         self.error = error
         self.error_description = error_description or ""
-        super().__init__(
-            f"{error}: {error_description}" if error_description else error
-        )
+        super().__init__(f"{error}: {error_description}" if error_description else error)
 
 
 # ── URL builder ──────────────────────────────────────────────────────────
@@ -178,8 +174,7 @@ async def _start_callback_server(
 
     async def handle_index(request: web.Request) -> web.Response:
         return web.Response(
-            text="<html><body><p>Waiting for OpenAI authorization...</p>"
-            "<p>You can close this tab.</p></body></html>",
+            text="<html><body><p>Waiting for OpenAI authorization...</p><p>You can close this tab.</p></body></html>",
             content_type="text/html",
         )
 
@@ -206,8 +201,7 @@ async def _start_callback_server(
             code_future.set_result(oauth_error)
             return web.Response(
                 status=400,
-                text=f"<html><body><p>Authorization error: {error}</p>"
-                f"<p>{error_description}</p></body></html>",
+                text=f"<html><body><p>Authorization error: {error}</p><p>{error_description}</p></body></html>",
                 content_type="text/html",
             )
 
@@ -397,13 +391,9 @@ async def run_oauth_flow(http: aiohttp.ClientSession | None = None) -> OAuthSess
 
         # Wait for callback with timeout
         try:
-            result = await asyncio.wait_for(
-                code_future, timeout=OAUTH_TIMEOUT_SECONDS
-            )
+            result = await asyncio.wait_for(code_future, timeout=OAUTH_TIMEOUT_SECONDS)
         except asyncio.TimeoutError as exc:
-            raise OAuthTimeoutError(
-                f"No OAuth callback received within {OAUTH_TIMEOUT_SECONDS} seconds"
-            ) from exc
+            raise OAuthTimeoutError(f"No OAuth callback received within {OAUTH_TIMEOUT_SECONDS} seconds") from exc
 
         # Handle OAuth errors returned via the callback
         if isinstance(result, OAuthAuthorizationError):
@@ -427,14 +417,11 @@ async def run_oauth_flow(http: aiohttp.ClientSession | None = None) -> OAuthSess
         # Fails for org accounts without Platform API org mapping —
         # in that case we use the access_token directly as Bearer auth.
         try:
-            api_key = await _exchange_id_token_for_api_key(
-                id_token, access_token, CLIENT_ID, http
-            )
+            api_key = await _exchange_id_token_for_api_key(id_token, access_token, CLIENT_ID, http)
             tokens["api_key"] = api_key
         except OAuthTokenExchangeError as exc:
             logger.warning(
-                "API key exchange skipped (%s). "
-                "Using access_token directly for ChatGPT subscription.",
+                "API key exchange skipped (%s). Using access_token directly for ChatGPT subscription.",
                 exc.error,
             )
     finally:

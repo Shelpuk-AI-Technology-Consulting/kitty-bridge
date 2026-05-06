@@ -268,4 +268,3 @@ class TestBackupRestore:
         assert "ANTHROPIC_AUTH_TOKEN" not in env
         assert "ANTHROPIC_MODEL" not in env
         assert env["API_TIMEOUT_MS"] == "3000000"
-

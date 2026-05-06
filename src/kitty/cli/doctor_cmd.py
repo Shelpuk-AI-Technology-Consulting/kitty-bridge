@@ -73,9 +73,7 @@ def run_doctor(
 
     # Per-profile credential checks
     for profile in profiles:
-        checks.append(
-            (f"Credentials for {profile.name!r}", _make_credential_check(cred_store, profile))
-        )
+        checks.append((f"Credentials for {profile.name!r}", _make_credential_check(cred_store, profile)))
 
     checklist = LiveChecklist("kitty doctor")
     failures = checklist.run_checks(checks)
@@ -90,6 +88,7 @@ def run_doctor(
 
 def _make_target_check(name: str):
     """Create a check function for a launcher target binary."""
+
     def check() -> tuple[bool, str]:
         if name not in _ADAPTERS:
             return False, f"Unknown target: {name!r}"
@@ -97,27 +96,32 @@ def _make_target_check(name: str):
         if binary_path is not None:
             return True, f"binary found at {binary_path}"
         return False, "binary not found on PATH or common install directories"
+
     return check
 
 
 def _make_default_profile_check(resolver: ProfileResolver):
     """Create a check function for the default profile."""
+
     def check() -> tuple[bool, str]:
         try:
             default = resolver.resolve_default()
             return True, default.name
         except NoDefaultProfileError:
             return False, "No default profile set"
+
     return check
 
 
 def _make_credential_check(cred_store: CredentialStore, profile: Profile):
     """Create a check function for a profile's credentials."""
+
     def check() -> tuple[bool, str]:
         key = cred_store.get(profile.auth_ref)
         if key is not None:
             return True, f"resolved ({len(key)} chars)"
         return False, f"auth_ref {profile.auth_ref!r} not found"
+
     return check
 
 

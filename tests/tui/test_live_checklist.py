@@ -58,10 +58,12 @@ class TestLiveChecklistNonTTY:
     def test_run_checks_returns_failure_count(self) -> None:
         with patch("sys.stdout", new=StringIO()), patch("sys.stderr", new=StringIO()):
             cl = LiveChecklist("test")
-            failures = cl.run_checks([
-                ("ok check", lambda: (True, "fine")),
-                ("bad check", lambda: (False, "broken")),
-            ])
+            failures = cl.run_checks(
+                [
+                    ("ok check", lambda: (True, "fine")),
+                    ("bad check", lambda: (False, "broken")),
+                ]
+            )
         assert failures == 1
 
     def test_run_checks_catches_exceptions(self) -> None:
@@ -77,10 +79,12 @@ class TestLiveChecklistNonTTY:
     def test_run_checks_all_pass_returns_zero(self) -> None:
         with patch("sys.stdout", new=StringIO()):
             cl = LiveChecklist("test")
-            failures = cl.run_checks([
-                ("a", lambda: (True, "")),
-                ("b", lambda: (True, "ok")),
-            ])
+            failures = cl.run_checks(
+                [
+                    ("a", lambda: (True, "")),
+                    ("b", lambda: (True, "ok")),
+                ]
+            )
         assert failures == 0
 
 
@@ -108,11 +112,13 @@ class TestLiveChecklistTTY:
             mock_live.return_value.__exit__ = MagicMock(return_value=None)
             cl = self._make_tty_checklist()
             with patch("sys.stdout", new=StringIO()):
-                failures = cl.run_checks([
-                    ("a", lambda: (True, "")),
-                    ("b", lambda: (False, "err")),
-                    ("c", lambda: (True, "ok")),
-                ])
+                failures = cl.run_checks(
+                    [
+                        ("a", lambda: (True, "")),
+                        ("b", lambda: (False, "err")),
+                        ("c", lambda: (True, "ok")),
+                    ]
+                )
         assert failures == 1
 
     def test_run_checks_exception_caught(self) -> None:

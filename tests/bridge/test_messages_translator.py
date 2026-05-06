@@ -790,9 +790,7 @@ class TestTranslateStreamChunk:
         events2 = self.t.translate_stream_chunk(msg_id, model, chunk2)
 
         # Must produce ZERO events — no second message lifecycle, no fallback text
-        assert events2 == [], (
-            f"Duplicate finish chunk should produce no events, got: {events2}"
-        )
+        assert events2 == [], f"Duplicate finish chunk should produce no events, got: {events2}"
 
     def test_translator_reuse_across_requests(self):
         """A new message_id must reset _finished so the translator can handle multiple requests."""
@@ -812,13 +810,9 @@ class TestTranslateStreamChunk:
             "choices": [{"index": 0, "delta": {"content": "bye"}, "finish_reason": "stop"}],
         }
         events2 = self.t.translate_stream_chunk(msg_id2, model, chunk2)
-        assert any("message_stop" in e for e in events2), (
-            "Second request should emit message_stop"
-        )
+        assert any("message_stop" in e for e in events2), "Second request should emit message_stop"
         content_deltas = [e for e in events2 if "content_block_delta" in e]
-        assert any('"bye"' in e for e in content_deltas), (
-            "Second request should emit its content"
-        )
+        assert any('"bye"' in e for e in content_deltas), "Second request should emit its content"
 
     def test_reasoning_delta_produces_thinking_block(self):
         """Streaming reasoning_content deltas must map to thinking blocks in Messages API."""

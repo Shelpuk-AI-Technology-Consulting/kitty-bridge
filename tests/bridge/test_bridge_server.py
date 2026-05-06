@@ -449,15 +449,18 @@ class TestStreamConnectionReset:
                     headers={"Content-Type": "text/event-stream"},
                 )
 
-                async with aiohttp.ClientSession() as session, session.post(
-                    f"http://127.0.0.1:{port}/v1/messages",
-                    json={
-                        "model": "test-model",
-                        "messages": [{"role": "user", "content": "hi"}],
-                        "max_tokens": 1024,
-                        "stream": True,
-                    },
-                ) as resp:
+                async with (
+                    aiohttp.ClientSession() as session,
+                    session.post(
+                        f"http://127.0.0.1:{port}/v1/messages",
+                        json={
+                            "model": "test-model",
+                            "messages": [{"role": "user", "content": "hi"}],
+                            "max_tokens": 1024,
+                            "stream": True,
+                        },
+                    ) as resp,
+                ):
                     assert resp.status == 200
                     body = await resp.read()
                     assert len(body) > 0
@@ -697,6 +700,7 @@ class TestModelOverride:
 
 
 # ── Cloudflare detection ──────────────────────────────────────────────────
+
 
 class TestCloudflareDetection:
     def test_detects_cloudflare_block(self) -> None:

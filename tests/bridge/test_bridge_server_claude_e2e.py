@@ -368,10 +368,13 @@ class TestClaudeCodeWithSystemPrompt:
         try:
             with aioresponses(passthrough=["http://127.0.0.1"]) as m:
                 m.post(UPSTREAM_URL, payload=UPSTREAM_TEXT_RESPONSE)
-                async with aiohttp.ClientSession() as session, session.post(
-                    f"http://127.0.0.1:{port}/v1/messages",
-                    json=_claude_code_request_with_system(),
-                ) as resp:
+                async with (
+                    aiohttp.ClientSession() as session,
+                    session.post(
+                        f"http://127.0.0.1:{port}/v1/messages",
+                        json=_claude_code_request_with_system(),
+                    ) as resp,
+                ):
                     assert resp.status == 200
                     data = await resp.json()
                     assert data["type"] == "message"
@@ -383,8 +386,7 @@ class TestClaudeCodeWithSystemPrompt:
                     assert sent_json["messages"][0] == {
                         "role": "system",
                         "content": (
-                            "You are Claude Code, an AI coding assistant. "
-                            "You help with software engineering tasks."
+                            "You are Claude Code, an AI coding assistant. You help with software engineering tasks."
                         ),
                     }
         finally:
@@ -689,9 +691,7 @@ class TestClaudeCodeStreamingRoundTrip:
                         "choices": [
                             {
                                 "index": 0,
-                                "delta": {
-                                    "tool_calls": [{"index": 0, "function": {"arguments": '"main.py"'}}]
-                                },
+                                "delta": {"tool_calls": [{"index": 0, "function": {"arguments": '"main.py"'}}]},
                                 "finish_reason": None,
                             }
                         ],

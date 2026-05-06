@@ -69,8 +69,7 @@ class CheckboxMenu:
             return None
 
         choices: list[Any] = [
-            questionary.Choice(title=opt, value=opt, checked=opt in self._default_checked)
-            for opt in self._options
+            questionary.Choice(title=opt, value=opt, checked=opt in self._default_checked) for opt in self._options
         ]
 
         kwargs: dict[str, Any] = {"choices": choices}

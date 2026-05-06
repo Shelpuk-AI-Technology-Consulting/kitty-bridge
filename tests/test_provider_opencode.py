@@ -266,7 +266,9 @@ class TestOpenCodeGoBuildRequest:
 
     def test_build_request_basic(self):
         result = self.adapter.build_request(
-            model="glm-5", messages=SAMPLE_MESSAGES, stream=True,
+            model="glm-5",
+            messages=SAMPLE_MESSAGES,
+            stream=True,
         )
         assert result["model"] == "glm-5"
         assert result["messages"] == SAMPLE_MESSAGES
@@ -275,7 +277,10 @@ class TestOpenCodeGoBuildRequest:
     def test_build_request_with_tools(self):
         tools = [{"type": "function", "function": {"name": "f", "parameters": {}}}]
         result = self.adapter.build_request(
-            model="kimi-k2.5", messages=SAMPLE_MESSAGES, stream=False, tools=tools,
+            model="kimi-k2.5",
+            messages=SAMPLE_MESSAGES,
+            stream=False,
+            tools=tools,
         )
         assert result["tools"] == tools
 

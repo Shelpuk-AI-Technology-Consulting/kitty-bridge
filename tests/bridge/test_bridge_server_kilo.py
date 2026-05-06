@@ -78,10 +78,13 @@ class TestChatCompletionsEndpoint:
         port = await server.start_async()
         try:
             # /v1/chat/completions should exist
-            async with aiohttp.ClientSession() as session, session.post(
-                f"http://127.0.0.1:{port}/v1/chat/completions",
-                json={"model": "x", "messages": []},
-            ) as resp:
+            async with (
+                aiohttp.ClientSession() as session,
+                session.post(
+                    f"http://127.0.0.1:{port}/v1/chat/completions",
+                    json={"model": "x", "messages": []},
+                ) as resp,
+            ):
                 # May get 200 or upstream error, but NOT 404
                 assert resp.status != 404
         finally:
@@ -109,9 +112,7 @@ class TestChatCompletionsEndpoint:
         server = _make_server()
         port = await server.start_async()
         try:
-            async with aiohttp.ClientSession() as session, session.get(
-                f"http://127.0.0.1:{port}/healthz"
-            ) as resp:
+            async with aiohttp.ClientSession() as session, session.get(f"http://127.0.0.1:{port}/healthz") as resp:
                 assert resp.status == 200
                 assert await resp.json() == {"status": "ok"}
         finally:

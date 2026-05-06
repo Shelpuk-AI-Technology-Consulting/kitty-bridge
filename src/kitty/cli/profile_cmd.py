@@ -155,6 +155,7 @@ def _create_profile_flow(store: ProfileStore, cred_store: CredentialStore) -> Pr
 
     # Step 2: Credential — OAuth flow or API key depending on provider
     from kitty.providers.registry import get_provider as _get_provider
+
     provider_adapter = _get_provider(provider)
 
     # Step 2a: Custom base URL (for providers that require user-specified endpoint)
@@ -171,9 +172,7 @@ def _create_profile_flow(store: ProfileStore, cred_store: CredentialStore) -> Pr
         # OAuth path: launch browser flow
         from kitty.cli.auth_cmd import run_oauth_for_provider
 
-        auth_ref, _session_path = asyncio.run(
-            run_oauth_for_provider(store, cred_store, provider)
-        )
+        auth_ref, _session_path = asyncio.run(run_oauth_for_provider(store, cred_store, provider))
     else:
         # API key path — offer reuse if a same-provider profile exists
         existing_auth_ref = _find_reusable_auth_ref(store, cred_store, provider)
@@ -310,6 +309,7 @@ def _edit_profile_flow(store: ProfileStore, cred_store: CredentialStore, profile
         return
 
     from kitty.providers.registry import get_provider as _get_provider
+
     provider_adapter = _get_provider(profile.provider)
     is_oauth = provider_adapter.requires_oauth
 
@@ -334,9 +334,7 @@ def _edit_profile_flow(store: ProfileStore, cred_store: CredentialStore, profile
             # Re-run OAuth flow to get fresh session
             from kitty.cli.auth_cmd import run_oauth_for_provider
 
-            new_auth_ref, _new_session_path = asyncio.run(
-                run_oauth_for_provider(store, cred_store, profile.provider)
-            )
+            new_auth_ref, _new_session_path = asyncio.run(run_oauth_for_provider(store, cred_store, profile.provider))
             updates["auth_ref"] = new_auth_ref
         else:
             new_key = prompt_secret("Enter new API key: ")
@@ -433,17 +431,12 @@ def _delete_profile_flow(store: ProfileStore, cred_store: CredentialStore) -> No
                     print_status(f"Removed {selected!r} from balancing profile {bp.name!r}")
                 else:
                     store.delete(bp.name)
-                    print_warning(
-                        f"Balancing profile {bp.name!r} deleted — would have fewer than 2 members"
-                    )
+                    print_warning(f"Balancing profile {bp.name!r} deleted — would have fewer than 2 members")
 
         # Clean up credential if no other profile shares the same auth_ref
         store.delete(selected)
         if isinstance(target_backend, Profile):
-            remaining = [
-                b for b in store.load_all()
-                if b.auth_ref == target_backend.auth_ref
-            ]
+            remaining = [b for b in store.load_all() if b.auth_ref == target_backend.auth_ref]
             if not remaining:
                 cred_store.delete(target_backend.auth_ref)
             # Promote another profile to default if the deleted one was default

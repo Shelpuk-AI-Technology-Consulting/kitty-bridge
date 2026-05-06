@@ -18,6 +18,7 @@ from kitty.auth.oauth_session import (
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
+
 @pytest.fixture()
 def fresh_tokens() -> dict:
     """Tokens that are freshly issued (far future expiry)."""
@@ -46,6 +47,7 @@ def expired_tokens() -> dict:
 @pytest.fixture()
 def session_factory():
     """Factory that creates OAuthSession with configurable expiry."""
+
     def _make(
         expires_in: float = 3600,
         created_at: float | None = None,
@@ -62,10 +64,12 @@ def session_factory():
             api_key_expires_at=now + (api_key_expires_in if api_key_expires_in else expires_in),
             _file_path=None,
         )
+
     return _make
 
 
 # ── Serialization ───────────────────────────────────────────────────────────
+
 
 class TestSerialization:
     def test_to_dict_round_trip_preserves_all_fields(self, session_factory) -> None:
@@ -124,6 +128,7 @@ class TestSerialization:
 
 # ── Expiry helpers ───────────────────────────────────────────────────────────
 
+
 class TestExpiryProperties:
     def test_access_token_not_expired_when_fresh(self, session_factory) -> None:
         # Expires in 1 hour
@@ -146,6 +151,7 @@ class TestExpiryProperties:
 
 # ── get_valid_api_key ───────────────────────────────────────────────────────
 
+
 class TestGetValidApiKey:
     @pytest.mark.asyncio
     async def test_returns_key_when_fresh_awaitable(self, session_factory) -> None:
@@ -161,13 +167,17 @@ class TestGetValidApiKey:
         session = session_factory(expires_in=-100, api_key_expires_in=3600)
         with aioresponses() as m:
             # First POST: refresh_token grant → new tokens
-            m.post(OAUTH_TOKEN_URL, status=200, payload={
-                "access_token": "at_new",
-                "refresh_token": "rt_new",
-                "id_token": "id_new",
-                "api_key": "sk_new",
-                "expires_in": 3600,
-            })
+            m.post(
+                OAUTH_TOKEN_URL,
+                status=200,
+                payload={
+                    "access_token": "at_new",
+                    "refresh_token": "rt_new",
+                    "id_token": "id_new",
+                    "api_key": "sk_new",
+                    "expires_in": 3600,
+                },
+            )
             # Second POST: token-exchange grant → new API key
             m.post(OAUTH_TOKEN_URL, status=200, payload={"openai_api_key": "sk_new"})
 
@@ -182,13 +192,17 @@ class TestGetValidApiKey:
     async def test_refresh_triggered_when_api_key_expired(self, session_factory) -> None:
         session = session_factory(expires_in=-100, api_key_expires_in=-100)
         with aioresponses() as m:
-            m.post(OAUTH_TOKEN_URL, status=200, payload={
-                "access_token": "at_new2",
-                "refresh_token": "rt_new2",
-                "id_token": "id_new2",
-                "api_key": "sk_new2",
-                "expires_in": 3600,
-            })
+            m.post(
+                OAUTH_TOKEN_URL,
+                status=200,
+                payload={
+                    "access_token": "at_new2",
+                    "refresh_token": "rt_new2",
+                    "id_token": "id_new2",
+                    "api_key": "sk_new2",
+                    "expires_in": 3600,
+                },
+            )
             m.post(OAUTH_TOKEN_URL, status=200, payload={"openai_api_key": "sk_new2"})
 
             async with aiohttp.ClientSession() as http:
@@ -200,13 +214,17 @@ class TestGetValidApiKey:
         # Access token expires in 30 seconds (within 60s margin) → proactive refresh
         session = session_factory(expires_in=30, api_key_expires_in=3600)
         with aioresponses() as m:
-            m.post(OAUTH_TOKEN_URL, status=200, payload={
-                "access_token": "at_proactive",
-                "refresh_token": "rt_proactive",
-                "id_token": "id_proactive",
-                "api_key": "sk_proactive",
-                "expires_in": 3600,
-            })
+            m.post(
+                OAUTH_TOKEN_URL,
+                status=200,
+                payload={
+                    "access_token": "at_proactive",
+                    "refresh_token": "rt_proactive",
+                    "id_token": "id_proactive",
+                    "api_key": "sk_proactive",
+                    "expires_in": 3600,
+                },
+            )
             m.post(OAUTH_TOKEN_URL, status=200, payload={"openai_api_key": "sk_proactive"})
 
             async with aiohttp.ClientSession() as http:
@@ -218,10 +236,14 @@ class TestGetValidApiKey:
     async def test_refresh_raises_oauth_refresh_failed_on_invalid_grant(self, session_factory) -> None:
         session = session_factory(expires_in=-100, api_key_expires_in=3600)
         with aioresponses() as m:
-            m.post(OAUTH_TOKEN_URL, status=400, payload={
-                "error": "invalid_grant",
-                "error_description": "Token revoked",
-            })
+            m.post(
+                OAUTH_TOKEN_URL,
+                status=400,
+                payload={
+                    "error": "invalid_grant",
+                    "error_description": "Token revoked",
+                },
+            )
 
             async with aiohttp.ClientSession() as http:
                 with pytest.raises(OAuthRefreshFailed) as exc_info:
@@ -241,6 +263,7 @@ class TestGetValidApiKey:
 
 
 # ── File persistence ───────────────────────────────────────────────────────
+
 
 class TestFilePersistence:
     def test_save_and_load_round_trip(self, tmp_path: Path, session_factory) -> None:

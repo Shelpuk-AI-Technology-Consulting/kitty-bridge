@@ -153,9 +153,7 @@ class OAuthSession:
         logger.debug("OAuth session saved to %s", path)
 
     @classmethod
-    def create_session_file(
-        cls, session: OAuthSession, auth_ref: str, config_dir: Path
-    ) -> OAuthSession:
+    def create_session_file(cls, session: OAuthSession, auth_ref: str, config_dir: Path) -> OAuthSession:
         """Set _file_path and persist the session.
 
         Args:
@@ -235,9 +233,7 @@ class OAuthSession:
             api_key = await self._exchange_api_key(http)
             self.api_key = api_key
         except OAuthTokenExchangeFailed:
-            logger.warning(
-                "API key exchange failed during refresh; using access_token directly"
-            )
+            logger.warning("API key exchange failed during refresh; using access_token directly")
             self.api_key = None
         self.api_key_expires_at = time.time() + expires_in
 
@@ -280,9 +276,7 @@ class OAuthSession:
 
     # ── Public API ─────────────────────────────────────────────────────────
 
-    async def get_valid_api_key(
-        self, http: aiohttp.ClientSession, *, force_refresh: bool = False
-    ) -> str:
+    async def get_valid_api_key(self, http: aiohttp.ClientSession, *, force_refresh: bool = False) -> str:
         """Return a valid bearer token, refreshing if needed.
 
         Returns the exchanged API key if available; otherwise falls back to the

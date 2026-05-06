@@ -28,10 +28,12 @@ _ANTHROPIC_VERSION = "2023-06-01"
 _DEFAULT_MAX_TOKENS = 4096
 
 # Models served via the Anthropic Messages API endpoint.
-_MESSAGES_MODELS: frozenset[str] = frozenset({
-    "minimax-m2.5",
-    "minimax-m2.7",
-})
+_MESSAGES_MODELS: frozenset[str] = frozenset(
+    {
+        "minimax-m2.5",
+        "minimax-m2.7",
+    }
+)
 
 # stop_reason → finish_reason
 _STOP_REASON_MAP: dict[str | None, str] = {
@@ -145,9 +147,13 @@ class OpenCodeGoAdapter(ProviderAdapter):
                 # Anthropic events have "type" field with specific values
                 event_type = data.get("type", "")
                 if event_type in (
-                    "message_start", "message_delta", "message_stop",
-                    "content_block_start", "content_block_stop",
-                    "content_block_delta", "ping",
+                    "message_start",
+                    "message_delta",
+                    "message_stop",
+                    "content_block_start",
+                    "content_block_stop",
+                    "content_block_delta",
+                    "ping",
                 ):
                     return self._translate_anthropic_stream_event(raw_bytes)
                 # Otherwise it's a Chat Completions event — passthrough
@@ -155,9 +161,7 @@ class OpenCodeGoAdapter(ProviderAdapter):
 
         return [raw_bytes]
 
-    def translate_upstream_stream_event_for_model(
-        self, raw_bytes: bytes, model: str
-    ) -> list[bytes]:
+    def translate_upstream_stream_event_for_model(self, raw_bytes: bytes, model: str) -> list[bytes]:
         """Translate SSE events, routing based on model."""
         if _is_messages_model(model):
             return self._translate_anthropic_stream_event(raw_bytes)
@@ -212,9 +216,7 @@ class OpenCodeGoAdapter(ProviderAdapter):
                 {
                     "name": t.get("function", {}).get("name", ""),
                     "description": t.get("function", {}).get("description", ""),
-                    "input_schema": t.get("function", {}).get(
-                        "parameters", {"type": "object", "properties": {}}
-                    ),
+                    "input_schema": t.get("function", {}).get("parameters", {"type": "object", "properties": {}}),
                 }
                 for t in cc_request["tools"]
             ]
@@ -229,23 +231,27 @@ class OpenCodeGoAdapter(ProviderAdapter):
             content_blocks.append({"type": "text", "text": text})
         for tc in msg.get("tool_calls", []):
             func = tc.get("function", {})
-            content_blocks.append({
-                "type": "tool_use",
-                "id": tc.get("id", f"toolu_{uuid.uuid4().hex[:24]}"),
-                "name": func.get("name", ""),
-                "input": json.loads(func.get("arguments", "{}")),
-            })
+            content_blocks.append(
+                {
+                    "type": "tool_use",
+                    "id": tc.get("id", f"toolu_{uuid.uuid4().hex[:24]}"),
+                    "name": func.get("name", ""),
+                    "input": json.loads(func.get("arguments", "{}")),
+                }
+            )
         return {"role": "assistant", "content": content_blocks or ""}
 
     @staticmethod
     def _translate_tool_result_msg(msg: dict) -> dict:
         return {
             "role": "user",
-            "content": [{
-                "type": "tool_result",
-                "tool_use_id": msg.get("tool_call_id", ""),
-                "content": msg.get("content", ""),
-            }],
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": msg.get("tool_call_id", ""),
+                    "content": msg.get("content", ""),
+                }
+            ],
         }
 
     def _translate_from_anthropic(self, raw: dict) -> dict:

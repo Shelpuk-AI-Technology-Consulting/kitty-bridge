@@ -18,6 +18,7 @@ from kitty.profiles.store import ProfileStore
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _make_profile(
     name: str = "test-profile",
     provider: str = "zai_regular",
@@ -52,39 +53,47 @@ def cred_store(store):
 # mocking targets are resolved at test time, not import time.
 # ---------------------------------------------------------------------------
 
+
 def _import_create_profile_flow():
     from kitty.cli.profile_cmd import _create_profile_flow
+
     return _create_profile_flow
 
 
 def _import_create_balancing_flow():
     from kitty.cli.profile_cmd import _create_balancing_flow
+
     return _create_balancing_flow
 
 
 def _import_edit_profile_flow():
     from kitty.cli.profile_cmd import _edit_profile_flow
+
     return _edit_profile_flow
 
 
 def _import_edit_balancing_flow():
     from kitty.cli.profile_cmd import _edit_balancing_flow
+
     return _edit_balancing_flow
 
 
 def _import_find_reusable_auth_ref():
     from kitty.cli.profile_cmd import _find_reusable_auth_ref
+
     return _find_reusable_auth_ref
 
 
 def _import_run_profile_menu():
     from kitty.cli.profile_cmd import run_profile_menu
+
     return run_profile_menu
 
 
 # ---------------------------------------------------------------------------
 # run_profile_menu guard
 # ---------------------------------------------------------------------------
+
 
 class TestRunProfileMenuGuard:
     def test_non_tty_raises(self, store: ProfileStore) -> None:
@@ -97,6 +106,7 @@ class TestRunProfileMenuGuard:
 # ---------------------------------------------------------------------------
 # _find_reusable_auth_ref
 # ---------------------------------------------------------------------------
+
 
 class TestFindReusableAuthRef:
     def test_returns_none_when_no_profiles(self, store: ProfileStore, cred_store: CredentialStore) -> None:
@@ -129,6 +139,7 @@ class TestFindReusableAuthRef:
 # ---------------------------------------------------------------------------
 # _create_profile_flow (T12–T14)
 # ---------------------------------------------------------------------------
+
 
 class TestCreateProfileFlow:
     def test_creates_profile_with_new_key(self, store: ProfileStore, cred_store: CredentialStore) -> None:
@@ -191,6 +202,7 @@ class TestCreateProfileFlow:
     def test_cancelled_provider_raises(self, store: ProfileStore, cred_store: CredentialStore) -> None:
         """Cancelling provider selection raises NonTTYError."""
         from kitty.tui.prompts import NonTTYError
+
         create = _import_create_profile_flow()
         with patch("kitty.cli.profile_cmd.SelectionMenu.show", return_value=None), pytest.raises(NonTTYError):
             create(store, cred_store)
@@ -199,6 +211,7 @@ class TestCreateProfileFlow:
 # ---------------------------------------------------------------------------
 # _create_balancing_flow (T15–T16)
 # ---------------------------------------------------------------------------
+
 
 class TestCreateBalancingFlow:
     def test_creates_balancing_profile_via_checkbox(self, store: ProfileStore) -> None:
@@ -253,6 +266,7 @@ class TestCreateBalancingFlow:
 # ---------------------------------------------------------------------------
 # _edit_profile_flow (T17–T18)
 # ---------------------------------------------------------------------------
+
 
 class TestEditProfileFlow:
     def test_updates_model(self, store: ProfileStore, cred_store: CredentialStore) -> None:
@@ -328,6 +342,7 @@ class TestEditProfileFlow:
 # _edit_balancing_flow (T19–T21)
 # ---------------------------------------------------------------------------
 
+
 class TestEditBalancingFlow:
     def test_adds_member(self, store: ProfileStore) -> None:
         """T19: Add a member to balancing profile."""
@@ -395,6 +410,7 @@ class TestEditBalancingFlow:
 # Duplicate name guard
 # ---------------------------------------------------------------------------
 
+
 class TestDuplicateNameGuard:
     def test_create_profile_rejects_duplicate_name_then_accepts_new(
         self, store: ProfileStore, cred_store: CredentialStore
@@ -441,15 +457,15 @@ class TestDuplicateNameGuard:
 # Credential cleanup on profile delete
 # ---------------------------------------------------------------------------
 
+
 def _import_delete_profile_flow():
     from kitty.cli.profile_cmd import _delete_profile_flow
+
     return _delete_profile_flow
 
 
 class TestDeleteCredentialCleanup:
-    def test_deletes_orphaned_credential_when_last_user(
-        self, store: ProfileStore, cred_store: CredentialStore
-    ) -> None:
+    def test_deletes_orphaned_credential_when_last_user(self, store: ProfileStore, cred_store: CredentialStore) -> None:
         """When the last profile using an auth_ref is deleted, the credential is cleaned up."""
         delete = _import_delete_profile_flow()
         p = _make_profile("todelete")
@@ -490,6 +506,7 @@ class TestDeleteCredentialCleanup:
 # ---------------------------------------------------------------------------
 # Delete cascade: removing from balancing profiles
 # ---------------------------------------------------------------------------
+
 
 class TestDeleteWithBalancingCascade:
     def test_deleting_profile_removes_from_balancing(self, store, cred_store):
@@ -660,6 +677,7 @@ class TestDeleteWithBalancingCascade:
 # OAuth provider create flow
 # ---------------------------------------------------------------------------
 
+
 def _make_oauth_session() -> OAuthSession:
     return OAuthSession(
         client_id="app_test",
@@ -675,12 +693,14 @@ def _make_oauth_session() -> OAuthSession:
 
 def _mock_run_oauth_for_provider(session: OAuthSession):
     """Create an async mock for run_oauth_for_provider."""
+
     async def _fake(profile_store, cred_store, provider):
         auth_ref = str(uuid.uuid4())
         config_dir = profile_store._path.parent
         persisted = OAuthSession.create_session_file(session, auth_ref, config_dir)
         cred_store.set(auth_ref, str(persisted._file_path))
         return auth_ref, str(persisted._file_path)
+
     return AsyncMock(side_effect=_fake)
 
 
@@ -719,9 +739,7 @@ class TestCreateProfileFlowOAuth:
 
         assert profile.model == "gpt-5.3-codex"
 
-    def test_oauth_provider_session_file_is_accessible(
-        self, store: ProfileStore, cred_store: CredentialStore
-    ) -> None:
+    def test_oauth_provider_session_file_is_accessible(self, store: ProfileStore, cred_store: CredentialStore) -> None:
         """Credential store holds a path to an existing session file for OAuth profiles."""
         create = _import_create_profile_flow()
         session = _make_oauth_session()
@@ -743,6 +761,7 @@ class TestCreateProfileFlowOAuth:
 # OAuth provider edit flow
 # ---------------------------------------------------------------------------
 
+
 class TestEditProfileFlowOAuth:
     def test_shows_reauthenticate_for_oauth_provider(self, store: ProfileStore, cred_store: CredentialStore) -> None:
         """Edit menu shows 'Re-authenticate' instead of 'API Key' for OAuth providers."""
@@ -754,9 +773,12 @@ class TestEditProfileFlowOAuth:
         cred_store.set(p.auth_ref, "/fake/path.json")
 
         with (
-            patch("kitty.cli.profile_cmd.SelectionMenu.show", side_effect=[
-                "Re-authenticate",  # field selection
-            ]),
+            patch(
+                "kitty.cli.profile_cmd.SelectionMenu.show",
+                side_effect=[
+                    "Re-authenticate",  # field selection
+                ],
+            ),
             patch("kitty.cli.auth_cmd.run_oauth_for_provider", _mock_run_oauth_for_provider(session)),
             patch("kitty.cli.profile_cmd.prompt_secret") as mock_secret,
         ):
@@ -790,6 +812,7 @@ class TestEditProfileFlowOAuth:
 # _create_profile_flow — custom URL providers (Custom OpenAI-Compatible)
 # ---------------------------------------------------------------------------
 
+
 class TestCreateProfileFlowCustomURL:
     def test_prompts_for_base_url_and_creates_profile(self, store: ProfileStore, cred_store: CredentialStore) -> None:
         """Custom URL provider prompts for base URL, stores it in provider_config."""
@@ -797,11 +820,14 @@ class TestCreateProfileFlowCustomURL:
         with (
             patch("kitty.cli.profile_cmd.SelectionMenu.show", return_value=PROVIDER_LABELS["custom_openai"]),
             patch("kitty.cli.profile_cmd._find_reusable_auth_ref", return_value=None),
-            patch("kitty.cli.profile_cmd.prompt_text", side_effect=[
-                "https://api.deepseek.com/v1",  # base URL
-                "deepseek-chat",                  # model
-                "my-deepseek",                    # profile name
-            ]),
+            patch(
+                "kitty.cli.profile_cmd.prompt_text",
+                side_effect=[
+                    "https://api.deepseek.com/v1",  # base URL
+                    "deepseek-chat",  # model
+                    "my-deepseek",  # profile name
+                ],
+            ),
             patch("kitty.cli.profile_cmd.prompt_secret", return_value="sk-deepseek-key"),
             patch("kitty.cli.profile_cmd.prompt_confirm", return_value=True),
         ):
@@ -819,12 +845,15 @@ class TestCreateProfileFlowCustomURL:
         with (
             patch("kitty.cli.profile_cmd.SelectionMenu.show", return_value=PROVIDER_LABELS["custom_openai"]),
             patch("kitty.cli.profile_cmd._find_reusable_auth_ref", return_value=None),
-            patch("kitty.cli.profile_cmd.prompt_text", side_effect=[
-                "",                                   # empty base URL → rejected
-                "https://api.deepseek.com/v1",        # valid base URL
-                "deepseek-chat",                      # model
-                "my-profile",                         # profile name
-            ]),
+            patch(
+                "kitty.cli.profile_cmd.prompt_text",
+                side_effect=[
+                    "",  # empty base URL → rejected
+                    "https://api.deepseek.com/v1",  # valid base URL
+                    "deepseek-chat",  # model
+                    "my-profile",  # profile name
+                ],
+            ),
             patch("kitty.cli.profile_cmd.prompt_secret", return_value="sk-key"),
             patch("kitty.cli.profile_cmd.prompt_confirm", return_value=True),
             patch("kitty.cli.profile_cmd.print_error") as mock_error,
@@ -841,11 +870,14 @@ class TestCreateProfileFlowCustomURL:
         with (
             patch("kitty.cli.profile_cmd.SelectionMenu.show", return_value=PROVIDER_LABELS["custom_openai"]),
             patch("kitty.cli.profile_cmd._find_reusable_auth_ref", return_value=None),
-            patch("kitty.cli.profile_cmd.prompt_text", side_effect=[
-                "http://localhost:8000/v1",  # HTTP base URL
-                "llama3.2",                  # model
-                "local-llm",                 # profile name
-            ]),
+            patch(
+                "kitty.cli.profile_cmd.prompt_text",
+                side_effect=[
+                    "http://localhost:8000/v1",  # HTTP base URL
+                    "llama3.2",  # model
+                    "local-llm",  # profile name
+                ],
+            ),
             patch("kitty.cli.profile_cmd.prompt_secret", return_value="not-needed"),
             patch("kitty.cli.profile_cmd.prompt_confirm", return_value=True),
         ):
@@ -854,7 +886,9 @@ class TestCreateProfileFlowCustomURL:
         assert profile.provider_config == {"base_url": "http://localhost:8000/v1"}
 
     def test_non_custom_url_provider_skips_base_url_prompt(
-        self, store: ProfileStore, cred_store: CredentialStore,
+        self,
+        store: ProfileStore,
+        cred_store: CredentialStore,
     ) -> None:
         """Regular provider (e.g. zai_regular) does NOT get prompted for base URL."""
         create = _import_create_profile_flow()
@@ -870,4 +904,3 @@ class TestCreateProfileFlowCustomURL:
         # prompt_text should be called exactly twice: model + name (not base URL)
         assert mock_text.call_count == 2
         assert profile.provider_config == {}
-

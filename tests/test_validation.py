@@ -185,11 +185,7 @@ async def test_validate_dirty_key_returns_invalid(mock_session_cls):
     """A key containing newlines/CR triggers a clear user-facing error."""
     provider = MockProvider()
     mock_session = AsyncMock()
-    mock_session.post = MagicMock(
-        side_effect=ValueError(
-            "Newline, carriage return, or null byte detected in headers."
-        )
-    )
+    mock_session.post = MagicMock(side_effect=ValueError("Newline, carriage return, or null byte detected in headers."))
     mock_session.__aenter__ = AsyncMock(return_value=mock_session)
     mock_session.__aexit__ = AsyncMock(return_value=False)
     mock_session_cls.return_value = mock_session

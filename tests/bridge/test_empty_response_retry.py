@@ -155,15 +155,25 @@ class TestEmptyResponseDetection:
 
     def test_empty_string_is_empty(self):
         server = _make_server(1)
-        assert server._is_empty_cc_response({
-            "choices": [{"message": {"content": ""}}],
-        }) is True
+        assert (
+            server._is_empty_cc_response(
+                {
+                    "choices": [{"message": {"content": ""}}],
+                }
+            )
+            is True
+        )
 
     def test_whitespace_is_empty(self):
         server = _make_server(1)
-        assert server._is_empty_cc_response({
-            "choices": [{"message": {"content": "   "}}],
-        }) is True
+        assert (
+            server._is_empty_cc_response(
+                {
+                    "choices": [{"message": {"content": "   "}}],
+                }
+            )
+            is True
+        )
 
     def test_no_choices_is_empty(self):
         server = _make_server(1)
@@ -171,9 +181,14 @@ class TestEmptyResponseDetection:
 
     def test_tool_calls_not_empty(self):
         server = _make_server(1)
-        assert server._is_empty_cc_response({
-            "choices": [{"message": {"content": None, "tool_calls": [{"id": "1"}]}}],
-        }) is False
+        assert (
+            server._is_empty_cc_response(
+                {
+                    "choices": [{"message": {"content": None, "tool_calls": [{"id": "1"}]}}],
+                }
+            )
+            is False
+        )
 
     def test_text_content_not_empty(self):
         server = _make_server(1)

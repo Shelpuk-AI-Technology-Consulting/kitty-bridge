@@ -521,7 +521,7 @@ class TestBalancingAllCustomTransport:
                 b'data: {"type":"response.output_item.done",'
                 b'"item":{"type":"message","content":[{"type":"output_text","text":"hi"}]}}\n\n'
             ),
-            b'data: [DONE]\n\n',
+            b"data: [DONE]\n\n",
         ]
 
         # Create 2 custom-transport backends
@@ -588,7 +588,7 @@ class TestBalancingAllCustomTransport:
                 b'data: {"type":"response.output_item.done",'
                 b'"item":{"type":"message","content":[{"type":"output_text","text":"hi"}]}}\n\n'
             ),
-            b'data: [DONE]\n\n',
+            b"data: [DONE]\n\n",
         ]
 
         backends = []
@@ -728,13 +728,14 @@ class TestBalancingAllCustomTransport:
                 return UPSTREAM_RESPONSE
 
         stream_provider = BedrockAdapter()
+
         async def _fake_stream(req, write):
             await write(b'data: {"type":"response.created","response":{"id":"resp_test","status":"in_progress"}}\n\n')
             await write(
-                b'data: {"type":"response.output_text.delta","delta":"hello",'
-                b'"response":{"id":"resp_test"}}\n\n'
+                b'data: {"type":"response.output_text.delta","delta":"hello","response":{"id":"resp_test"}}\n\n'
             )
-            await write(b'data: [DONE]\n\n')
+            await write(b"data: [DONE]\n\n")
+
         stream_provider.stream_request = AsyncMock(side_effect=_fake_stream)
 
         backends = [

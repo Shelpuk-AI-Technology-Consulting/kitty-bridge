@@ -14,10 +14,15 @@ class ProviderAdapter(ABC):
     """
 
     # Internal metadata keys that must never be sent upstream.
-    _INTERNAL_KEYS = frozenset({
-        "_reasoning_effort", "_thinking_enabled",
-        "_resolved_key", "_provider_config", "_original_body",
-    })
+    _INTERNAL_KEYS = frozenset(
+        {
+            "_reasoning_effort",
+            "_thinking_enabled",
+            "_resolved_key",
+            "_provider_config",
+            "_original_body",
+        }
+    )
 
     @property
     @abstractmethod

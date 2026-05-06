@@ -152,6 +152,7 @@ class TestRunSetupWizard:
     def test_wizard_reuses_existing_key(self, store: ProfileStore, cred_store: CredentialStore) -> None:
         """T22: wizard offers key reuse when same-provider profile exists; accepted → shared auth_ref."""
         import uuid as _uuid
+
         existing_ref = str(_uuid.uuid4())
 
         with (
@@ -170,16 +171,15 @@ class TestRunSetupWizard:
     def test_wizard_cancelled_at_provider_step_raises(self, store: ProfileStore, cred_store: CredentialStore) -> None:
         """T23: Cancelling provider selection raises NonTTYError."""
         from kitty.tui.prompts import NonTTYError
-        with (
-            _mock_tty(),
-            patch(f"{_MOD}.SelectionMenu.show", return_value=None),pytest.raises(NonTTYError)
-        ):
+
+        with _mock_tty(), patch(f"{_MOD}.SelectionMenu.show", return_value=None), pytest.raises(NonTTYError):
             run_setup_wizard(store, cred_store)
 
 
 # ---------------------------------------------------------------------------
 # OAuth provider path in setup wizard
 # ---------------------------------------------------------------------------
+
 
 def _make_oauth_session() -> OAuthSession:
     return OAuthSession(
@@ -196,18 +196,22 @@ def _make_oauth_session() -> OAuthSession:
 
 def _mock_run_oauth_for_provider(session: OAuthSession):
     """Create an async mock for run_oauth_for_provider."""
+
     async def _fake(profile_store, cred_store, provider):
         auth_ref = str(uuid.uuid4())
         config_dir = profile_store._path.parent
         persisted = OAuthSession.create_session_file(session, auth_ref, config_dir)
         cred_store.set(auth_ref, str(persisted._file_path))
         return auth_ref, str(persisted._file_path)
+
     return AsyncMock(side_effect=_fake)
 
 
 class TestSetupWizardOAuth:
     def test_oauth_provider_launches_browser_not_key_prompt(
-        self, store: ProfileStore, cred_store: CredentialStore,
+        self,
+        store: ProfileStore,
+        cred_store: CredentialStore,
     ) -> None:
         """When openai_subscription is selected, OAuth flow runs instead of API key prompt."""
         session = _make_oauth_session()

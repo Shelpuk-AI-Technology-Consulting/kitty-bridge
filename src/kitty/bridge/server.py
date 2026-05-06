@@ -37,6 +37,11 @@ from kitty.cloudflare import is_cloudflare_block
 from kitty.launchers.base import LauncherAdapter
 from kitty.profiles.schema import Profile
 from kitty.providers.base import ProviderAdapter, ProviderError
+from kitty.providers.model_context import (
+    get_balancing_min_context_tokens,
+    get_model_context_tokens,
+    tokens_to_chars,
+)
 from kitty.types import BridgeProtocol
 
 __all__ = ["BridgeServer"]
@@ -318,7 +323,8 @@ class BridgeServer:
             if len(self._backends) == 1 and health["cooldown"] > _SINGLE_BACKEND_COOLDOWN_CAP:
                 logger.debug(
                     "Capping single-backend cooldown from %ds to %ds",
-                    health["cooldown"], _SINGLE_BACKEND_COOLDOWN_CAP,
+                    health["cooldown"],
+                    _SINGLE_BACKEND_COOLDOWN_CAP,
                 )
                 health["cooldown"] = _SINGLE_BACKEND_COOLDOWN_CAP
 
@@ -400,12 +406,8 @@ class BridgeServer:
         health = self._backend_health[backend_idx]
         count = health.get("transport_error_count", 0)
         base = self._backend_cooldown
-        cooldown = int(base * (1.5 ** count))
+        cooldown = int(base * (1.5**count))
         return min(cooldown, base * 2)
-
-
-
-
 
     @staticmethod
     def _is_upstream_stream_error(chunk: dict) -> bool:
@@ -471,8 +473,11 @@ class BridgeServer:
             healthy = self._backend_health[idx]["healthy"]
             logger.debug(
                 "Selected backend: profile=%s provider=%s model=%s healthy=%s idx=%d",
-                profile_name, getattr(provider, "provider_type", type(provider).__name__),
-                self._active_model, healthy, idx,
+                profile_name,
+                getattr(provider, "provider_type", type(provider).__name__),
+                self._active_model,
+                healthy,
+                idx,
             )
         else:
             logger.debug(
@@ -885,7 +890,9 @@ class BridgeServer:
                             cc_request["_provider_config"] = self._active_provider_config
                             logger.info(
                                 "Custom-transport failover: attempt %d/%d (%s), switching backend",
-                                attempt + 1, n_backends, exc,
+                                attempt + 1,
+                                n_backends,
+                                exc,
                             )
                             continue
                     # All backends exhausted or single-backend mode — surface error
@@ -942,7 +949,9 @@ class BridgeServer:
                     delay = _EMPTY_FINAL_DELAYS[attempt - _original_max_attempts]
                     logger.warning(
                         "Empty upstream response: final retry in %.1fs (%d/%d)",
-                        delay, attempt + 1, max_attempts,
+                        delay,
+                        attempt + 1,
+                        max_attempts,
                     )
                     await asyncio.sleep(delay)
                 async with session.post(url, json=upstream_body, headers=headers, timeout=stream_timeout) as upstream:
@@ -1093,9 +1102,7 @@ class BridgeServer:
                     # Handle in-stream error failover
                     if stream_error:
                         if events_emitted:
-                            logger.warning(
-                                "Responses stream error after client events emitted; not retrying"
-                            )
+                            logger.warning("Responses stream error after client events emitted; not retrying")
                         elif attempt < max_attempts - 1:
                             translator.reset()
                             finish_events.clear()
@@ -1362,7 +1369,9 @@ class BridgeServer:
                             cc_request["_provider_config"] = self._active_provider_config
                             logger.info(
                                 "Custom-transport failover: attempt %d/%d (%s), switching backend",
-                                attempt + 1, max_attempts, exc,
+                                attempt + 1,
+                                max_attempts,
+                                exc,
                             )
                             continue
                     # All backends exhausted or single-backend mode — surface error
@@ -1381,7 +1390,8 @@ class BridgeServer:
                     raw_bytes = b"".join(raw_chunks)
                     logger.debug(
                         "Custom-transport collected %d chunks, %d bytes raw SSE",
-                        len(raw_chunks), len(raw_bytes),
+                        len(raw_chunks),
+                        len(raw_bytes),
                     )
 
                     from kitty.providers.openai_subscription import OpenAISubscriptionAdapter
@@ -1423,9 +1433,7 @@ class BridgeServer:
                             btype = block.get("type")
                             if btype == "thinking":
                                 await s.write(
-                                    format_content_block_start_event(
-                                        idx, {"type": "thinking", "thinking": ""}
-                                    ).encode()
+                                    format_content_block_start_event(idx, {"type": "thinking", "thinking": ""}).encode()
                                 )
                                 await s.write(
                                     format_content_block_delta_event(
@@ -1435,9 +1443,7 @@ class BridgeServer:
                                 await s.write(format_content_block_stop_event(idx).encode())
                             elif btype == "text":
                                 await s.write(
-                                    format_content_block_start_event(
-                                        idx, {"type": "text", "text": ""}
-                                    ).encode()
+                                    format_content_block_start_event(idx, {"type": "text", "text": ""}).encode()
                                 )
                                 await s.write(
                                     format_content_block_delta_event(
@@ -1467,9 +1473,7 @@ class BridgeServer:
 
                         stop_reason = result.get("stop_reason", "end_turn")
                         await s.write(
-                            format_message_delta_event(
-                                {"stop_reason": stop_reason, "stop_sequence": None}, {}
-                            ).encode()
+                            format_message_delta_event({"stop_reason": stop_reason, "stop_sequence": None}, {}).encode()
                         )
                         await s.write(format_message_stop_event().encode())
                     except (ConnectionResetError, BrokenPipeError, OSError):
@@ -1504,7 +1508,9 @@ class BridgeServer:
                     delay = _EMPTY_FINAL_DELAYS[attempt - _original_max_attempts]
                     logger.warning(
                         "Empty upstream response: final retry in %.1fs (%d/%d)",
-                        delay, attempt + 1, max_attempts,
+                        delay,
+                        attempt + 1,
+                        max_attempts,
                     )
                     await asyncio.sleep(delay)
                 try:
@@ -2011,7 +2017,9 @@ class BridgeServer:
                             cc_request["_provider_config"] = self._active_provider_config
                             logger.info(
                                 "Custom-transport failover: attempt %d/%d (%s), switching backend",
-                                attempt + 1, n_backends, exc,
+                                attempt + 1,
+                                n_backends,
+                                exc,
                             )
                             continue
                     # All backends exhausted or single-backend mode — surface error
@@ -2052,7 +2060,9 @@ class BridgeServer:
                     delay = _EMPTY_FINAL_DELAYS[attempt - _original_max_attempts]
                     logger.warning(
                         "Empty upstream response: final retry in %.1fs (%d/%d)",
-                        delay, attempt + 1, max_attempts,
+                        delay,
+                        attempt + 1,
+                        max_attempts,
                     )
                     await asyncio.sleep(delay)
                 async with session.post(url, json=upstream_body, headers=headers, timeout=stream_timeout) as upstream:
@@ -2534,7 +2544,9 @@ class BridgeServer:
                             cc_request["_provider_config"] = self._active_provider_config
                             logger.info(
                                 "Custom-transport failover: attempt %d/%d (%s), switching backend",
-                                attempt + 1, n_backends, exc,
+                                attempt + 1,
+                                n_backends,
+                                exc,
                             )
                             continue
                     error_status, error_type = self._map_provider_error(exc)
@@ -2607,9 +2619,11 @@ class BridgeServer:
                         for i, tc in enumerate(msg.get("tool_calls", [])):
                             args = tc.get("function", {}).get("arguments", "")
                             if args:
-                                await sr.write(_cc_chunk(
-                                    {"tool_calls": [{"index": i, "function": {"arguments": args}}]},
-                                ))
+                                await sr.write(
+                                    _cc_chunk(
+                                        {"tool_calls": [{"index": i, "function": {"arguments": args}}]},
+                                    )
+                                )
 
                         # Finish
                         await sr.write(
@@ -2647,7 +2661,9 @@ class BridgeServer:
                     delay = _EMPTY_FINAL_DELAYS[attempt - _original_max_attempts]
                     logger.warning(
                         "Empty upstream response: final retry in %.1fs (%d/%d)",
-                        delay, attempt + 1, max_attempts,
+                        delay,
+                        attempt + 1,
+                        max_attempts,
                     )
                     await asyncio.sleep(delay)
                 # Reset stream state for each retry attempt
@@ -2771,9 +2787,7 @@ class BridgeServer:
                                     last_usage = chunk["usage"]
                                 # Forward non-error chunk
                                 raw_line_bytes = f"{line}\n\n".encode()
-                                for translated in self._active_provider.translate_upstream_stream_event(
-                                    raw_line_bytes
-                                ):
+                                for translated in self._active_provider.translate_upstream_stream_event(raw_line_bytes):
                                     has_content = True
                                     await sr.write(translated)
                         except (ConnectionResetError, BrokenPipeError, OSError):
@@ -2789,9 +2803,7 @@ class BridgeServer:
                             data_str = line[6:]
                             if data_str.strip() == "[DONE]":
                                 raw_line_bytes = f"{line}\n\n".encode()
-                                for translated in self._active_provider.translate_upstream_stream_event(
-                                    raw_line_bytes
-                                ):
+                                for translated in self._active_provider.translate_upstream_stream_event(raw_line_bytes):
                                     has_content = True
                                     await sr.write(translated)
                             else:
@@ -2960,7 +2972,6 @@ class BridgeServer:
                 logger.debug("Normalized model: %s -> %s", model, normalized)
             cc_request["model"] = normalized
 
-
     def _compact_messages(self, messages: list[dict], max_messages_chars: int | None = None) -> list[dict]:
         """Compact message history to prevent upstream context window overflow.
 
@@ -2990,10 +3001,12 @@ class BridgeServer:
             if msg.get("role") == "tool" and isinstance(msg.get("content"), str):
                 content_len = len(msg["content"])
                 if content_len > _TOOL_RESULT_TRUNCATION_LIMIT:
-                    compacted.append({
-                        **msg,
-                        "content": f"[Tool output truncated — original size: {content_len:,} chars]",
-                    })
+                    compacted.append(
+                        {
+                            **msg,
+                            "content": f"[Tool output truncated — original size: {content_len:,} chars]",
+                        }
+                    )
                 else:
                     compacted.append(msg)
             else:
@@ -3002,9 +3015,10 @@ class BridgeServer:
         size_after_truncation = len(json.dumps(compacted, ensure_ascii=False))
         if size_after_truncation <= compaction_threshold:
             logger.info(
-                "Context compaction: tool result truncation reduced size from %d to %d chars "
-                "(%d messages)",
-                original_size, size_after_truncation, len(compacted),
+                "Context compaction: tool result truncation reduced size from %d to %d chars (%d messages)",
+                original_size,
+                size_after_truncation,
+                len(compacted),
             )
             return compacted
 
@@ -3102,16 +3116,47 @@ class BridgeServer:
             logger.info(
                 "Context compaction: guaranteed-fit fallback dropped %d head and %d tail blocks, "
                 "reducing messages from %d to %d and size from %d to %d chars (budget %s)",
-                head_dropped, tail_dropped, len(compacted), len(result), original_size, result_size,
+                head_dropped,
+                tail_dropped,
+                len(compacted),
+                len(result),
+                original_size,
+                result_size,
                 "met" if budget_met else "NOT met — cannot shrink further",
             )
         else:
             logger.info(
-                "Context compaction: head+tail pruning reduced messages from %d to %d "
-                "and size from %d to %d chars",
-                len(compacted), len(result), original_size, result_size,
+                "Context compaction: head+tail pruning reduced messages from %d to %d and size from %d to %d chars",
+                len(compacted),
+                len(result),
+                original_size,
+                result_size,
             )
         return result
+
+    def _get_max_context_chars(self) -> int:
+        """Compute the max request size in chars based on model context window.
+
+        For balancing profiles, uses the smallest context across all backends.
+        For single backends, uses the model's context window.
+        Falls back to _MAX_REQUEST_CHARS when no model info is available.
+        The result is capped at _MAX_REQUEST_CHARS (absolute safety limit).
+        """
+        if self._backends:
+            backend_tuples = [(b[0].provider_type, b[2].model, b[2].provider_config) for b in self._backends]
+            context_tokens = get_balancing_min_context_tokens(backend_tuples)
+            return min(tokens_to_chars(context_tokens), _MAX_REQUEST_CHARS)
+
+        if self._active_model:
+            provider_type = self._active_provider.provider_type
+            context_tokens = get_model_context_tokens(
+                provider_type,
+                self._active_model,
+                self._active_provider_config,
+            )
+            return min(tokens_to_chars(context_tokens), _MAX_REQUEST_CHARS)
+
+        return _MAX_REQUEST_CHARS
 
     def _apply_compaction(self, cc_request: dict) -> None:
         """Compact request messages in place before applying request-size guardrails.
@@ -3131,7 +3176,8 @@ class BridgeServer:
         non_msg = {k: v for k, v in cc_request.items() if k != "messages"}
         overhead = len(json.dumps(non_msg, ensure_ascii=False))
         # Budget for messages = max request size - overhead (with safety margin)
-        messages_budget = max(0, _MAX_REQUEST_CHARS - overhead - 10_000)  # 10K margin for JSON punctuation
+        max_chars = self._get_max_context_chars()
+        messages_budget = max(0, max_chars - overhead - 10_000)  # 10K margin for JSON punctuation
 
         cc_request["messages"] = self._compact_messages(
             cc_request["messages"],
@@ -3145,11 +3191,12 @@ class BridgeServer:
         immediately if it's too large.
         """
         request_size = len(json.dumps(cc_request, ensure_ascii=False))
-        if request_size > _MAX_REQUEST_CHARS:
+        max_chars = self._get_max_context_chars()
+        if request_size > max_chars:
             logger.warning(
                 "Request body size %d chars exceeds safe limit (%d) — rejecting",
                 request_size,
-                _MAX_REQUEST_CHARS,
+                max_chars,
             )
             return web.json_response(
                 {
@@ -3277,7 +3324,6 @@ class BridgeServer:
                 "API key is invalid, expired, or lacks permission. "
                 "Update your API key with 'kitty setup'."
             )
-
 
         code, error_message = BridgeServer._extract_error_fields(body)
 

@@ -394,3 +394,35 @@ class TestMissingMetadata:
         result = mc.get_model_context_tokens(provider="openai", model="gpt-4o")
         assert result == mc.DEFAULT_CONTEXT_TOKENS
         mc._load_metadata.cache_clear()
+
+
+# ---------------------------------------------------------------------------
+# Token-to-char conversion
+# ---------------------------------------------------------------------------
+
+
+class TestTokensToChars:
+    """tokens_to_chars converts token counts to character estimates."""
+
+    def test_default_context_to_chars(self):
+        from kitty.providers.model_context import DEFAULT_CONTEXT_TOKENS, tokens_to_chars
+
+        assert tokens_to_chars(DEFAULT_CONTEXT_TOKENS) == 800_000
+
+    def test_known_context_values(self):
+        from kitty.providers.model_context import tokens_to_chars
+
+        assert tokens_to_chars(128_000) == 512_000
+        assert tokens_to_chars(1_048_576) == 4_194_304
+        assert tokens_to_chars(65_536) == 262_144
+
+    def test_zero_tokens(self):
+        from kitty.providers.model_context import tokens_to_chars
+
+        assert tokens_to_chars(0) == 0
+
+    def test_uses_constant_factor(self):
+        from kitty.providers.model_context import TOKENS_TO_CHARS_FACTOR, tokens_to_chars
+
+        assert tokens_to_chars(1) == TOKENS_TO_CHARS_FACTOR
+        assert TOKENS_TO_CHARS_FACTOR == 4

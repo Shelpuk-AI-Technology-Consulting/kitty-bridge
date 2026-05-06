@@ -316,37 +316,38 @@ class TestMessagesConnectionRetries:
         server = BridgeServer(adapter, provider, "test-key")
         port = await server.start_async()
         try:
-            with caplog.at_level(logging.DEBUG, logger="kitty.bridge.server"), aioresponses(
-                passthrough=["http://127.0.0.1"]
-            ) as m:
-                    m.post(
-                        "https://api.example.com/v1/chat/completions",
-                        exception=asyncio.TimeoutError(),
-                    )
-                    m.post(
-                        "https://api.example.com/v1/chat/completions",
-                        body=b"".join(_make_messages_stream_body()),
-                        headers={"Content-Type": "text/event-stream"},
-                    )
+            with (
+                caplog.at_level(logging.DEBUG, logger="kitty.bridge.server"),
+                aioresponses(passthrough=["http://127.0.0.1"]) as m,
+            ):
+                m.post(
+                    "https://api.example.com/v1/chat/completions",
+                    exception=asyncio.TimeoutError(),
+                )
+                m.post(
+                    "https://api.example.com/v1/chat/completions",
+                    body=b"".join(_make_messages_stream_body()),
+                    headers={"Content-Type": "text/event-stream"},
+                )
 
-                    async with (
-                        aiohttp.ClientSession() as session,
-                        session.post(
-                            f"http://127.0.0.1:{port}/v1/messages",
-                            json={
-                                "model": "test-model",
-                                "messages": [{"role": "user", "content": "hi"}],
-                                "max_tokens": 1024,
-                                "stream": True,
-                            },
-                            timeout=aiohttp.ClientTimeout(total=30),
-                        ) as resp,
-                    ):
-                        await resp.read()
+                async with (
+                    aiohttp.ClientSession() as session,
+                    session.post(
+                        f"http://127.0.0.1:{port}/v1/messages",
+                        json={
+                            "model": "test-model",
+                            "messages": [{"role": "user", "content": "hi"}],
+                            "max_tokens": 1024,
+                            "stream": True,
+                        },
+                        timeout=aiohttp.ClientTimeout(total=30),
+                    ) as resp,
+                ):
+                    await resp.read()
 
-                    # Should have a retry debug log
-                    retry_msgs = [r for r in caplog.records if "retrying" in r.message.lower()]
-                    assert len(retry_msgs) > 0, f"Expected retry log, got: {[r.message for r in caplog.records]}"
+                # Should have a retry debug log
+                retry_msgs = [r for r in caplog.records if "retrying" in r.message.lower()]
+                assert len(retry_msgs) > 0, f"Expected retry log, got: {[r.message for r in caplog.records]}"
         finally:
             await server.stop_async()
 
@@ -488,38 +489,39 @@ class TestDebugLogTruncation:
         server = BridgeServer(adapter, provider, "test-key", debug=True)
         port = await server.start_async()
         try:
-            with caplog.at_level(logging.DEBUG, logger="kitty.bridge.server"), aioresponses(
-                passthrough=["http://127.0.0.1"]
-            ) as m:
-                    m.post(
-                        "https://api.example.com/v1/chat/completions",
-                        body=b"".join(_make_messages_stream_body()),
-                        headers={"Content-Type": "text/event-stream"},
-                    )
+            with (
+                caplog.at_level(logging.DEBUG, logger="kitty.bridge.server"),
+                aioresponses(passthrough=["http://127.0.0.1"]) as m,
+            ):
+                m.post(
+                    "https://api.example.com/v1/chat/completions",
+                    body=b"".join(_make_messages_stream_body()),
+                    headers={"Content-Type": "text/event-stream"},
+                )
 
-                    # Send a request with a large body
-                    large_content = "x" * 5000
-                    async with (
-                        aiohttp.ClientSession() as session,
-                        session.post(
-                            f"http://127.0.0.1:{port}/v1/messages",
-                            json={
-                                "model": "test-model",
-                                "messages": [{"role": "user", "content": large_content}],
-                                "max_tokens": 1024,
-                                "stream": True,
-                            },
-                        ) as resp,
-                    ):
-                        await resp.read()
+                # Send a request with a large body
+                large_content = "x" * 5000
+                async with (
+                    aiohttp.ClientSession() as session,
+                    session.post(
+                        f"http://127.0.0.1:{port}/v1/messages",
+                        json={
+                            "model": "test-model",
+                            "messages": [{"role": "user", "content": large_content}],
+                            "max_tokens": 1024,
+                            "stream": True,
+                        },
+                    ) as resp,
+                ):
+                    await resp.read()
 
-                    # Check that the log entry is truncated
-                    body_logs = [r for r in caplog.records if "Request body:" in r.message]
-                    assert len(body_logs) > 0
-                    for record in body_logs:
-                        # The log message should be shorter than the full body
-                        if "chars total" in record.message:
-                            # It was truncated — good
-                            assert len(record.message) < 3000
+                # Check that the log entry is truncated
+                body_logs = [r for r in caplog.records if "Request body:" in r.message]
+                assert len(body_logs) > 0
+                for record in body_logs:
+                    # The log message should be shorter than the full body
+                    if "chars total" in record.message:
+                        # It was truncated — good
+                        assert len(record.message) < 3000
         finally:
             await server.stop_async()

@@ -53,8 +53,10 @@ def _make_oauth_session() -> OAuthSession:
 
 def _mock_run_oauth_for_provider(session: OAuthSession):
     """Create an async mock for run_oauth_for_provider that returns (auth_ref, path)."""
+
     async def _fake_run(profile_store, cred_store, provider):
         import uuid
+
         auth_ref = str(uuid.uuid4())
         config_dir = profile_store._path.parent
         persisted = OAuthSession.create_session_file(session, auth_ref, config_dir)
@@ -66,9 +68,7 @@ def _mock_run_oauth_for_provider(session: OAuthSession):
 
 
 class TestRunOauthForProvider:
-    def test_creates_session_file_and_stores_path(
-        self, store: ProfileStore, cred_store: CredentialStore
-    ) -> None:
+    def test_creates_session_file_and_stores_path(self, store: ProfileStore, cred_store: CredentialStore) -> None:
         """run_oauth_for_provider creates a session file and stores the path."""
         session = _make_oauth_session()
 
@@ -78,18 +78,14 @@ class TestRunOauthForProvider:
         ):
             from kitty.cli.auth_cmd import run_oauth_for_provider
 
-            auth_ref, session_path = asyncio.run(
-                run_oauth_for_provider(store, cred_store, "openai_subscription")
-            )
+            auth_ref, session_path = asyncio.run(run_oauth_for_provider(store, cred_store, "openai_subscription"))
 
         assert auth_ref is not None
         stored_path = cred_store.get(auth_ref)
         assert stored_path == session_path
         assert Path(session_path).exists()
 
-    def test_raises_on_oauth_failure(
-        self, store: ProfileStore, cred_store: CredentialStore
-    ) -> None:
+    def test_raises_on_oauth_failure(self, store: ProfileStore, cred_store: CredentialStore) -> None:
         """OAuth flow failure is printed and re-raised."""
 
         class OAuthFailure(Exception):
@@ -103,9 +99,7 @@ class TestRunOauthForProvider:
             from kitty.cli.auth_cmd import run_oauth_for_provider
 
             with pytest.raises(OAuthFailure):
-                asyncio.run(
-                    run_oauth_for_provider(store, cred_store, "openai_subscription")
-                )
+                asyncio.run(run_oauth_for_provider(store, cred_store, "openai_subscription"))
 
         mock_error.assert_called()
         assert "OAuth flow failed" in mock_error.call_args[0][0]
@@ -118,9 +112,7 @@ class TestRunOauthForProvider:
             from kitty.cli.auth_cmd import run_oauth_for_provider
 
             with pytest.raises(NonTTYError):
-                asyncio.run(
-                    run_oauth_for_provider(store, cred_store, "openai_subscription")
-                )
+                asyncio.run(run_oauth_for_provider(store, cred_store, "openai_subscription"))
 
 
 class TestAuthOpenaiProfileCreation:
@@ -181,9 +173,7 @@ class TestAuthOpenaiProfileCreation:
         assert data["client_id"] == session.client_id
         assert data["api_key"] == session.api_key
 
-    def test_auth_cmd_asks_for_model_and_profile_name(
-        self, store: ProfileStore, cred_store: CredentialStore
-    ) -> None:
+    def test_auth_cmd_asks_for_model_and_profile_name(self, store: ProfileStore, cred_store: CredentialStore) -> None:
         """Command prompts for model name and profile name via prompt_text."""
         session = _make_oauth_session()
 
@@ -223,9 +213,7 @@ class TestAuthOpenaiProfileCreation:
         assert profile.model == "gpt-5.3-codex"
         assert profile.name == "openai-sub"
 
-    def test_auth_cmd_raises_if_oauth_flow_fails(
-        self, store: ProfileStore, cred_store: CredentialStore
-    ) -> None:
+    def test_auth_cmd_raises_if_oauth_flow_fails(self, store: ProfileStore, cred_store: CredentialStore) -> None:
         """OAuth flow failure propagates to caller."""
 
         class OAuthFailure(Exception):
@@ -268,9 +256,7 @@ class TestAuthOpenaiProfileCreation:
         warn_call = mock_warn.call_args[0][0]
         assert "validation failed" in warn_call
 
-    def test_auth_cmd_non_tty_raises(
-        self, store: ProfileStore, cred_store: CredentialStore
-    ) -> None:
+    def test_auth_cmd_non_tty_raises(self, store: ProfileStore, cred_store: CredentialStore) -> None:
         """Non-TTY environment raises NonTTYError."""
         from kitty.tui.prompts import NonTTYError
 

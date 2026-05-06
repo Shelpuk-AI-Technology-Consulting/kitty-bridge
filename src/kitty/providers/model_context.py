@@ -11,6 +11,14 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_CONTEXT_TOKENS = 200_000
 
+TOKENS_TO_CHARS_FACTOR = 4
+
+
+def tokens_to_chars(tokens: int) -> int:
+    """Convert a token count to an estimated character count."""
+    return tokens * TOKENS_TO_CHARS_FACTOR
+
+
 _METADATA_PATH = Path(__file__).parent / "model_metadata.json"
 
 

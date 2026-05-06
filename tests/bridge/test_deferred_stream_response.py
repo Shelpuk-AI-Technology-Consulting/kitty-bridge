@@ -265,9 +265,7 @@ class TestDeferredStreamResponse:
                         json=_STREAMING_MESSAGES_REQUEST,
                     ) as resp,
                 ):
-                    assert resp.status >= 400, (
-                        f"Expected HTTP error but got {resp.status} in balancing mode"
-                    )
+                    assert resp.status >= 400, f"Expected HTTP error but got {resp.status} in balancing mode"
                     data = await resp.json()
                     assert data["type"] == "error"
             finally:

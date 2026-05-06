@@ -173,12 +173,22 @@ class TestClearScreen:
 class TestKittyTheme:
     def test_theme_defines_all_semantic_styles(self) -> None:
         from kitty.tui.display import KITTY_THEME
-        for name in ("kitty.ok", "kitty.err", "kitty.warn", "kitty.info",
-                      "kitty.title", "kitty.accent", "kitty.muted", "kitty.border"):
+
+        for name in (
+            "kitty.ok",
+            "kitty.err",
+            "kitty.warn",
+            "kitty.info",
+            "kitty.title",
+            "kitty.accent",
+            "kitty.muted",
+            "kitty.border",
+        ):
             assert name in KITTY_THEME.styles
 
     def test_consoles_use_theme(self) -> None:
         from kitty.tui.display import KITTY_THEME, _console, _stderr_console
+
         # Consoles constructed with theme= should resolve custom style names
         # Print via the console and verify the style is in the stack
         assert _console._theme_stack is not None
@@ -188,11 +198,13 @@ class TestKittyTheme:
 
     def test_no_color_env_strips_ansi(self) -> None:
         import os
+
         buf = StringIO()
         with patch("sys.stdout", buf), patch.dict(os.environ, {"NO_COLOR": "1"}):
             from rich.console import Console
 
             from kitty.tui.display import KITTY_THEME
+
             c = Console(theme=KITTY_THEME, file=buf, no_color=True)
             c.print("[kitty.ok]✓[/kitty.ok] test")
         output = buf.getvalue()
@@ -207,13 +219,14 @@ class TestKittyTheme:
             # We need to re-import or re-create console because it's a singleton
             # For testing we can create a new one with the same logic we intend to use
             from kitty.tui.display import _should_enable_color
+
             color_enabled = _should_enable_color()
             assert color_enabled is True, "FORCE_COLOR should override NO_COLOR"
-
 
     def test_display_uses_no_inline_color_strings(self) -> None:
         import re
         from pathlib import Path
+
         src = Path(__file__).resolve().parent.parent.parent / "src" / "kitty" / "tui" / "display.py"
         content = src.read_text()
         # Look for [red], [green], [blue], [yellow], [bold], [dim], [cyan]
@@ -233,8 +246,9 @@ class TestKittyTheme:
             if in_theme:
                 continue
             # Check for non-kitty color/style references
-            assert not re.search(r'\[(red|green|blue|yellow|bold\s+cyan|bold\s+blue|bold|dim|cyan)\b', line), \
+            assert not re.search(r"\[(red|green|blue|yellow|bold\s+cyan|bold\s+blue|bold|dim|cyan)\b", line), (
                 f"Inline color found in display.py: {line.strip()}"
+            )
 
 
 class TestPrintPanel:
@@ -242,6 +256,7 @@ class TestPrintPanel:
         buf = StringIO()
         with patch("sys.stdout", buf):
             from kitty.tui.display import print_panel
+
             print_panel("My Title", "Hello world")
         output = buf.getvalue()
         assert "My Title" in output
@@ -251,6 +266,7 @@ class TestPrintPanel:
         buf = StringIO()
         with patch("sys.stdout", buf):
             from kitty.tui.display import print_panel
+
             print_panel("Title", "Content")
         output = buf.getvalue()
         # Panel renders box-drawing characters for borders
@@ -263,6 +279,7 @@ class TestStatusSpinner:
             mock_console.status.return_value.__enter__ = lambda s: None
             mock_console.status.return_value.__exit__ = lambda s, *a: None
             from kitty.tui.display import status_spinner
+
             with status_spinner("Loading..."):
                 pass
         mock_console.status.assert_called_once()
@@ -272,6 +289,7 @@ class TestStatusSpinner:
             mock_console.status.return_value.__enter__ = lambda s: None
             mock_console.status.return_value.__exit__ = lambda s, *a: None
             from kitty.tui.display import status_spinner
+
             with status_spinner("Validating key"):
                 pass
         call_args = mock_console.status.call_args[0][0]

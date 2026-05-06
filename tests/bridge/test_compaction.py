@@ -14,6 +14,7 @@ from kitty.bridge.server import (
 from kitty.launchers.base import LauncherAdapter, SpawnConfig
 from kitty.profiles.schema import Profile
 from kitty.providers.base import ProviderAdapter
+from kitty.providers.model_context import DEFAULT_CONTEXT_TOKENS, tokens_to_chars
 from kitty.types import BridgeProtocol
 
 # ── Stub adapters for testing ───────────────────────────────────────────────
@@ -82,9 +83,7 @@ def _make_tool_call_block(call_id: str, tool_name: str, result_content: str) -> 
         {
             "role": "assistant",
             "content": None,
-            "tool_calls": [
-                {"id": call_id, "type": "function", "function": {"name": tool_name, "arguments": "{}"}}
-            ],
+            "tool_calls": [{"id": call_id, "type": "function", "function": {"name": tool_name, "arguments": "{}"}}],
         },
         {
             "role": "tool",
@@ -255,9 +254,13 @@ class TestCompactMessagesToolResultTruncation:
         messages = [
             {"role": "system", "content": "System"},
             {"role": "user", "content": "Do something"},
-            {"role": "assistant", "content": "Let me check", "tool_calls": [
-                {"id": "call_123", "type": "function", "function": {"name": "read_file", "arguments": "{}"}}
-            ]},
+            {
+                "role": "assistant",
+                "content": "Let me check",
+                "tool_calls": [
+                    {"id": "call_123", "type": "function", "function": {"name": "read_file", "arguments": "{}"}}
+                ],
+            },
             {
                 "role": "tool",
                 "content": large_content,
@@ -388,6 +391,7 @@ class TestCompactMessagesLogging:
 
     def test_logs_compaction_summary(self, caplog):
         import logging
+
         server = _make_server()
         messages = _make_large_messages(200)
 
@@ -544,18 +548,14 @@ class TestCompactMessagesGuaranteedFit:
             {
                 "role": "assistant",
                 "content": None,
-                "tool_calls": [
-                    {"id": "call_1", "type": "function", "function": {"name": "read", "arguments": "{}"}}
-                ],
+                "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "read", "arguments": "{}"}}],
             },
             {"role": "tool", "content": "T" * 200_000, "tool_call_id": "call_1"},
             {"role": "assistant", "content": "A" * 200_000},
             {
                 "role": "assistant",
                 "content": None,
-                "tool_calls": [
-                    {"id": "call_2", "type": "function", "function": {"name": "write", "arguments": "{}"}}
-                ],
+                "tool_calls": [{"id": "call_2", "type": "function", "function": {"name": "write", "arguments": "{}"}}],
             },
             {"role": "tool", "content": "R" * 200_000, "tool_call_id": "call_2"},
             {"role": "assistant", "content": "Final answer"},
@@ -572,7 +572,6 @@ class TestCompactMessagesGuaranteedFit:
             assert prev.get("tool_calls") is not None
             call_ids = {tc["id"] for tc in prev["tool_calls"]}
             assert tr["tool_call_id"] in call_ids
-
 
 
 class TestRequestSizeAccountingForTools:
@@ -687,7 +686,6 @@ class TestRequestSizeAccountingForTools:
             f"limit: {_MAX_REQUEST_CHARS}"
         )
 
-
     def test_request_rejected_when_tools_plus_compacted_messages_exceed_limit(self):
         """BUG: compacted messages fit, but tools push the full request over the limit.
 
@@ -742,3 +740,135 @@ class TestRequestSizeAccountingForTools:
             f"Full request should fit after tools-aware compaction. "
             f"Full size: {full_size:,}, limit: {_MAX_REQUEST_CHARS:,}"
         )
+
+
+# ---------------------------------------------------------------------------
+# _get_max_context_chars — context-aware char budget
+# ---------------------------------------------------------------------------
+
+
+class TestGetMaxContextChars:
+    """_get_max_context_chars derives the char budget from model metadata."""
+
+    def test_no_model_returns_absolute_cap(self):
+        """When no model is configured, fall back to _MAX_REQUEST_CHARS."""
+        server = _make_server()
+        assert server._get_max_context_chars() == _MAX_REQUEST_CHARS
+
+    def test_known_model_returns_context_derived_chars(self):
+        """When a model with known context is set, return tokens_to_chars(context)."""
+        server = _make_server()
+        server._active_provider = StubProvider()
+        server._active_model = "openai/gpt-4o"
+        server._active_provider_config = {}
+        server._backends = None
+        # gpt-4o has 128k context in metadata → 128000 * 4 = 512000
+        assert server._get_max_context_chars() == 512_000
+
+    def test_unknown_model_returns_default_chars(self):
+        """When the model is set but metadata is missing, use DEFAULT_CONTEXT_TOKENS."""
+        server = _make_server()
+        server._active_provider = StubProvider()
+        server._active_model = "nonexistent-model-xyz"
+        server._active_provider_config = {}
+        server._backends = None
+        expected = tokens_to_chars(DEFAULT_CONTEXT_TOKENS)  # 800k
+        assert server._get_max_context_chars() == expected
+
+    def test_balancing_uses_min_context(self):
+        """For balancing profiles, use the smallest context across all backends."""
+        server = _make_server()
+        # Simulate balancing with 2 backends: gpt-4o (128k) and deepseek-chat (163_840)
+        p1 = StubProvider()
+        profile1 = Profile(
+            name="p1",
+            provider="openrouter",
+            model="openai/gpt-4o",
+            auth_ref="dd7f361b-3794-4343-a917-906760d3cde4",
+        )
+        p2 = StubProvider()
+        profile2 = Profile(
+            name="p2",
+            provider="openrouter",
+            model="deepseek/deepseek-chat",
+            auth_ref="76df9193-5b84-4824-8c35-a1dce9c01d64",
+        )
+        server._backends = [
+            (p1, "key1", profile1),
+            (p2, "key2", profile2),
+        ]
+        # Min: gpt-4o 128000 → 128000 * 4 = 512000
+        assert server._get_max_context_chars() == 512_000
+
+    def test_provider_config_override(self):
+        """Manual context_window in provider_config overrides metadata."""
+        server = _make_server()
+        server._active_provider = StubProvider()
+        server._active_model = "openai/gpt-4o"
+        server._active_provider_config = {"context_window": 50_000}
+        server._backends = None
+        # Override: 50000 * 4 = 200000
+        assert server._get_max_context_chars() == 200_000
+
+    def test_huge_context_capped_at_max_request_chars(self):
+        """Models with very large context are capped at _MAX_REQUEST_CHARS."""
+        server = _make_server()
+        server._active_provider = StubProvider()
+        server._active_model = "google/gemini-2.0-flash-001"
+        server._active_provider_config = {}
+        server._backends = None
+        # gemini has 1M context → 4M chars, capped at _MAX_REQUEST_CHARS (4M)
+        assert server._get_max_context_chars() == _MAX_REQUEST_CHARS
+
+
+# ---------------------------------------------------------------------------
+# Context-aware compaction and size checking
+# ---------------------------------------------------------------------------
+
+
+class TestContextAwareCompaction:
+    """Compaction and request-size checks use model-derived char limits."""
+
+    def test_compaction_uses_model_context(self):
+        """Compaction threshold is derived from model context, not hardcoded."""
+        server = _make_server()
+        server._active_provider = StubProvider()
+        server._active_model = "openai/gpt-4o"  # 128k → 512k chars
+        server._active_provider_config = {}
+        server._backends = None
+
+        # Create messages that exceed 70% of 512k (~358k) but are under 70% of 4M (~2.8M)
+        messages = [{"role": "system", "content": "System"}]
+        for i in range(30):
+            role = "user" if i % 2 == 0 else "assistant"
+            messages.append({"role": role, "content": f"Message {i} " * 3000})
+        raw_size = len(json.dumps(messages, ensure_ascii=False))
+        assert raw_size > 358_000, f"Need >358k chars, got {raw_size:,}"
+
+        cc_request = {"model": "gpt-4o", "messages": messages}
+        server._apply_compaction(cc_request)
+        result_size = len(json.dumps(cc_request["messages"], ensure_ascii=False))
+        # After compaction, messages should be smaller
+        assert result_size < raw_size, "Compaction should have reduced messages"
+
+    def test_size_check_uses_model_context(self):
+        """_check_request_size rejects based on model-derived limit, not hardcoded."""
+        server = _make_server()
+        server._active_provider = StubProvider()
+        server._active_model = "openai/gpt-4o"  # 128k → 512k chars
+        server._active_provider_config = {}
+        server._backends = None
+
+        # Create a request that exceeds 512k but is under 4M
+        large_content = "A" * 600_000
+        cc_request = {
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": large_content}],
+        }
+        full_size = len(json.dumps(cc_request, ensure_ascii=False))
+        assert full_size > 512_000, f"Need >512k chars, got {full_size:,}"
+        assert full_size < _MAX_REQUEST_CHARS, f"Should be under 4M, got {full_size:,}"
+
+        result = server._check_request_size(cc_request)
+        assert result is not None, "Should reject request exceeding model context"
+        assert result.status == 400

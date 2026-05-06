@@ -260,16 +260,24 @@ def main() -> None:
             parser.error("No default profile configured. Create one with 'kitty setup' first.")
             sys.exit(1)
         _run_bridge(
-            backend, cred_store,
-            debug=args.debug, debug_file=args.debug_file, validate=not args.no_validate,
+            backend,
+            cred_store,
+            debug=args.debug,
+            debug_file=args.debug_file,
+            validate=not args.no_validate,
             logging_enabled=args.logging or args.log_file is not None,
             usage_log_path=args.log_file,
         )
     elif result.adapter is not None and (result.backend is not None or result.profile is not None):
         backend = result.backend or result.profile
         exit_code = _launch_target(
-            result.adapter, backend, cred_store, result.extra_args,
-            debug=args.debug, debug_file=args.debug_file, validate=not args.no_validate,
+            result.adapter,
+            backend,
+            cred_store,
+            result.extra_args,
+            debug=args.debug,
+            debug_file=args.debug_file,
+            validate=not args.no_validate,
             logging_enabled=args.logging or args.log_file is not None,
             usage_log_path=args.log_file,
         )
@@ -285,6 +293,7 @@ def _run_auth(profile_store: object, cred_store: object, extra_args: list[str]) 
     args = extra_args or []
     if not args or args[0] == "openai":
         import asyncio
+
         asyncio.run(run_auth_openai(profile_store, cred_store))  # type: ignore[arg-type]
     else:
         print(f"Unknown auth provider: {args[0]!r}")
@@ -363,8 +372,11 @@ def _run_bridge(
 
     if isinstance(backend, BalancingProfile):
         _run_bridge_balancing(
-            backend, cred_store,
-            debug=debug, debug_file=debug_file, validate=validate,
+            backend,
+            cred_store,
+            debug=debug,
+            debug_file=debug_file,
+            validate=validate,
             logging_enabled=logging_enabled,
             usage_log_path=usage_log_path,
         )
@@ -495,8 +507,7 @@ def _run_bridge_balancing(
         port = await server.start_async()
 
         members_info = "\n".join(
-            f"  • [kitty.accent]{mp.name}[/kitty.accent] ({mp.provider}/{mp.model})"
-            for mp in member_profiles
+            f"  • [kitty.accent]{mp.name}[/kitty.accent] ({mp.provider}/{mp.model})" for mp in member_profiles
         )
         print_panel(
             "Kitty Bridge Mode (Balancing)",
@@ -550,8 +561,13 @@ def _launch_target(
 
     if isinstance(backend, BalancingProfile):
         return _launch_target_balancing(
-            adapter, backend, cred_store, extra_args,
-            debug=effective_debug, validate=validate, logging_enabled=logging_enabled,
+            adapter,
+            backend,
+            cred_store,
+            extra_args,
+            debug=effective_debug,
+            validate=validate,
+            logging_enabled=logging_enabled,
             usage_log_path=usage_log_path,
         )
 

@@ -69,6 +69,8 @@ def _codex_backoff(attempt: int) -> float:
     millis = _CODEX_RETRY_BASE_DELAY_MS * exp
     jitter = random.uniform(0.9, 1.1)  # noqa: S311
     return (millis * jitter) / 1000.0
+
+
 # Codex CLI version sent in the version header.
 # The checked-in reference workspace has 0.0.0 (dev placeholder), but
 # the real released Codex CLI version is used in production builds.
@@ -100,14 +102,23 @@ def _resolve_ca_cert_path() -> str | None:
         return path
     return None
 
+
 # Cloudflare cookie allowlist — matches Codex CLI's chatgpt_cloudflare_cookies.rs.
 # Only these cookie names are preserved for ChatGPT hosts; all others are stripped
 # to avoid triggering Cloudflare bot detection with stale or unrelated cookies.
-_CF_COOKIE_ALLOWLIST = frozenset({
-    "__cf_bm", "__cflb", "__cfruid", "__cfseq",
-    "__cfwaitingroom", "_cfuvid", "cf_clearance",
-    "cf_ob_info", "cf_use_ob",
-})
+_CF_COOKIE_ALLOWLIST = frozenset(
+    {
+        "__cf_bm",
+        "__cflb",
+        "__cfruid",
+        "__cfseq",
+        "__cfwaitingroom",
+        "_cfuvid",
+        "cf_clearance",
+        "cf_ob_info",
+        "cf_use_ob",
+    }
+)
 _CF_COOKIE_PREFIX = "cf_chl_"
 # ChatGPT hosts for CF cookie filtering — matches Codex CLI's chatgpt_hosts.rs.
 # Exact matches + subdomain suffixes for chatgpt.com and chatgpt-staging.com.
@@ -207,7 +218,8 @@ class OpenAISubscriptionAdapter(OpenAIAdapter):
             self._curl_session_instance = curl_cffi.requests.AsyncSession(**kwargs)
             logger.debug(
                 "Created curl_cffi session with impersonate=%s, ca_path=%s",
-                _CODEX_IMPERSONATE, ca_path,
+                _CODEX_IMPERSONATE,
+                ca_path,
             )
             # Defensive: strip any non-CF cookies at session init
             self._filter_cloudflare_cookies(self._curl_session_instance.cookies)
@@ -245,9 +257,7 @@ class OpenAISubscriptionAdapter(OpenAIAdapter):
         arch = platform.machine()
         return f"codex_cli_rs/{__version__} ({os_type} {os_version}; {arch})"
 
-    def _build_codex_headers(
-        self, access_token: str, id_token: str
-    ) -> dict[str, str]:
+    def _build_codex_headers(self, access_token: str, id_token: str) -> dict[str, str]:
         """Build headers matching the Codex CLI (reqwest + rustls).
 
         Matches the headers sent by the real Codex CLI binary:
@@ -349,19 +359,27 @@ class OpenAISubscriptionAdapter(OpenAIAdapter):
         cf_cookies = [
             f"{c.name}={c.value[:8]}..." if len(c.value) > 8 else f"{c.name}={c.value}"
             for c in jar
-            if _is_chatgpt_host(c.domain)
-            and (c.name in _CF_COOKIE_ALLOWLIST or c.name.startswith(_CF_COOKIE_PREFIX))
+            if _is_chatgpt_host(c.domain) and (c.name in _CF_COOKIE_ALLOWLIST or c.name.startswith(_CF_COOKIE_PREFIX))
         ]
         if cf_cookies:
             logger.debug("CF cookies present for chatgpt hosts (%d): %s", len(cf_cookies), cf_cookies)
         else:
             logger.debug("No CF cookies present for chatgpt hosts")
 
-    _ALLOWED_RESPONSES_PARAMS = frozenset({
-        "model", "stream", "store", "instructions", "input",
-        "tools", "tool_choice", "parallel_tool_calls", "include",
-        "reasoning",
-    })
+    _ALLOWED_RESPONSES_PARAMS = frozenset(
+        {
+            "model",
+            "stream",
+            "store",
+            "instructions",
+            "input",
+            "tools",
+            "tool_choice",
+            "parallel_tool_calls",
+            "include",
+            "reasoning",
+        }
+    )
 
     @staticmethod
     def _prepare_responses_body(original_body: dict) -> dict:
@@ -454,7 +472,8 @@ class OpenAISubscriptionAdapter(OpenAIAdapter):
                 force_refresh = _auth_step == 2
                 try:
                     access_token = await session.get_valid_api_key(
-                        oauth_http, force_refresh=force_refresh,
+                        oauth_http,
+                        force_refresh=force_refresh,
                     )
                 except OAuthRefreshFailed as exc:
                     raise ProviderError(
@@ -480,7 +499,9 @@ class OpenAISubscriptionAdapter(OpenAIAdapter):
                         if _attempt < _CODEX_RETRY_MAX_ATTEMPTS:
                             logger.debug(
                                 "Codex backend transport error (attempt %d/%d): %s",
-                                _attempt + 1, _CODEX_RETRY_MAX_ATTEMPTS + 1, exc,
+                                _attempt + 1,
+                                _CODEX_RETRY_MAX_ATTEMPTS + 1,
+                                exc,
                             )
                             await asyncio.sleep(_codex_backoff(_attempt + 1))
                             continue
@@ -494,26 +515,26 @@ class OpenAISubscriptionAdapter(OpenAIAdapter):
                             cf_sig = get_cloudflare_signature(raw)
                             logger.debug(
                                 "CF block detected in make_request: signature=%s, body_len=%d",
-                                cf_sig, len(raw),
+                                cf_sig,
+                                len(raw),
                             )
                             if _attempt < _CODEX_RETRY_MAX_ATTEMPTS:
                                 logger.warning(
-                                    "Codex backend blocked by Cloudflare challenge "
-                                    "(signature=%s), retrying",
+                                    "Codex backend blocked by Cloudflare challenge (signature=%s), retrying",
                                     cf_sig,
                                 )
                                 await asyncio.sleep(_codex_backoff(_attempt + 1))
                                 continue
-                            logger.warning(
-                                "Codex backend blocked by Cloudflare challenge after retries"
-                            )
+                            logger.warning("Codex backend blocked by Cloudflare challenge after retries")
                             raise self.map_error(resp.status_code, {"error": {"message": raw}})
 
                         # 5xx server error — retry if attempts remain
                         if resp.status_code >= 500 and _attempt < _CODEX_RETRY_MAX_ATTEMPTS:
                             logger.debug(
                                 "Codex backend %d error (attempt %d/%d), retrying",
-                                resp.status_code, _attempt + 1, _CODEX_RETRY_MAX_ATTEMPTS + 1,
+                                resp.status_code,
+                                _attempt + 1,
+                                _CODEX_RETRY_MAX_ATTEMPTS + 1,
                             )
                             await asyncio.sleep(_codex_backoff(_attempt + 1))
                             continue
@@ -607,7 +628,8 @@ class OpenAISubscriptionAdapter(OpenAIAdapter):
                 force_refresh = _auth_step == 2
                 try:
                     access_token = await session.get_valid_api_key(
-                        oauth_http, force_refresh=force_refresh,
+                        oauth_http,
+                        force_refresh=force_refresh,
                     )
                 except OAuthRefreshFailed as exc:
                     raise ProviderError(
@@ -636,7 +658,9 @@ class OpenAISubscriptionAdapter(OpenAIAdapter):
                         if _attempt < _CODEX_RETRY_MAX_ATTEMPTS:
                             logger.debug(
                                 "Codex backend transport error (attempt %d/%d): %s",
-                                _attempt + 1, _CODEX_RETRY_MAX_ATTEMPTS + 1, exc,
+                                _attempt + 1,
+                                _CODEX_RETRY_MAX_ATTEMPTS + 1,
+                                exc,
                             )
                             await asyncio.sleep(_codex_backoff(_attempt + 1))
                             continue
@@ -650,26 +674,26 @@ class OpenAISubscriptionAdapter(OpenAIAdapter):
                             cf_sig = get_cloudflare_signature(raw)
                             logger.debug(
                                 "CF block detected in stream_request: signature=%s, body_len=%d",
-                                cf_sig, len(raw),
+                                cf_sig,
+                                len(raw),
                             )
                             if _attempt < _CODEX_RETRY_MAX_ATTEMPTS:
                                 logger.warning(
-                                    "Codex backend blocked by Cloudflare challenge "
-                                    "(signature=%s), retrying",
+                                    "Codex backend blocked by Cloudflare challenge (signature=%s), retrying",
                                     cf_sig,
                                 )
                                 await asyncio.sleep(_codex_backoff(_attempt + 1))
                                 continue
-                            logger.warning(
-                                "Codex backend blocked by Cloudflare challenge after retries"
-                            )
+                            logger.warning("Codex backend blocked by Cloudflare challenge after retries")
                             raise self.map_error(resp.status_code, {"error": {"message": raw}})
 
                         # 5xx server error — retry if attempts remain
                         if resp.status_code >= 500 and _attempt < _CODEX_RETRY_MAX_ATTEMPTS:
                             logger.debug(
                                 "Codex backend %d error (attempt %d/%d), retrying",
-                                resp.status_code, _attempt + 1, _CODEX_RETRY_MAX_ATTEMPTS + 1,
+                                resp.status_code,
+                                _attempt + 1,
+                                _CODEX_RETRY_MAX_ATTEMPTS + 1,
                             )
                             await asyncio.sleep(_codex_backoff(_attempt + 1))
                             continue
@@ -705,7 +729,9 @@ class OpenAISubscriptionAdapter(OpenAIAdapter):
                             _stream_attempt += 1
                             logger.info(
                                 "Codex backend stream reset (attempt %d/%d), retrying: %s",
-                                _stream_attempt, _STREAM_RECV_ERROR_RETRIES + 1, exc,
+                                _stream_attempt,
+                                _STREAM_RECV_ERROR_RETRIES + 1,
+                                exc,
                             )
                             last_exc = exc
                             continue
@@ -743,12 +769,24 @@ class OpenAISubscriptionAdapter(OpenAIAdapter):
         (e.g. via /v1/chat/completions) to an openai_subscription profile.
         """
         # CC params that have no Responses API equivalent
-        _cc_only_params = frozenset({
-            "temperature", "top_p", "max_tokens", "max_completion_tokens",
-            "frequency_penalty", "presence_penalty", "logprobs",
-            "top_logprobs", "response_format", "stop", "n",
-            "stream_options", "seed", "logit_bias",
-        })
+        _cc_only_params = frozenset(
+            {
+                "temperature",
+                "top_p",
+                "max_tokens",
+                "max_completion_tokens",
+                "frequency_penalty",
+                "presence_penalty",
+                "logprobs",
+                "top_logprobs",
+                "response_format",
+                "stop",
+                "n",
+                "stream_options",
+                "seed",
+                "logit_bias",
+            }
+        )
         dropped = set(cc_request) & _cc_only_params
         if dropped:
             logger.debug("CC parameters with no Codex equivalent (dropped): %s", sorted(dropped))
@@ -772,35 +810,39 @@ class OpenAISubscriptionAdapter(OpenAIAdapter):
                     "content": [],
                 }
                 if content:
-                    item["content"].append(
-                        {"type": "output_text", "text": str(content)}
-                    )
+                    item["content"].append({"type": "output_text", "text": str(content)})
                 for tc in msg.get("tool_calls", []):
                     func = tc.get("function", {})
-                    input_items.append({
-                        "type": "function_call",
-                        "call_id": tc.get("id", ""),
-                        "name": func.get("name", ""),
-                        "arguments": func.get("arguments", ""),
-                    })
+                    input_items.append(
+                        {
+                            "type": "function_call",
+                            "call_id": tc.get("id", ""),
+                            "name": func.get("name", ""),
+                            "arguments": func.get("arguments", ""),
+                        }
+                    )
                 if item["content"]:
                     input_items.append(item)
 
             elif role == "user":
                 if content:
-                    input_items.append({
-                        "type": "message",
-                        "role": "user",
-                        "content": [{"type": "input_text", "text": str(content)}],
-                    })
+                    input_items.append(
+                        {
+                            "type": "message",
+                            "role": "user",
+                            "content": [{"type": "input_text", "text": str(content)}],
+                        }
+                    )
 
             elif role == "tool":
                 # Tool result → function_call_output
-                input_items.append({
-                    "type": "function_call_output",
-                    "call_id": msg.get("tool_call_id", ""),
-                    "output": str(content),
-                })
+                input_items.append(
+                    {
+                        "type": "function_call_output",
+                        "call_id": msg.get("tool_call_id", ""),
+                        "output": str(content),
+                    }
+                )
 
         body: dict = {
             "model": cc_request.get("model", "gpt-5.4"),
@@ -817,12 +859,14 @@ class OpenAISubscriptionAdapter(OpenAIAdapter):
             resp_tools = []
             for tool in cc_tools:
                 func = tool.get("function", {})
-                resp_tools.append({
-                    "type": "function",
-                    "name": func.get("name", ""),
-                    "description": func.get("description", ""),
-                    "parameters": func.get("parameters", {}),
-                })
+                resp_tools.append(
+                    {
+                        "type": "function",
+                        "name": func.get("name", ""),
+                        "description": func.get("description", ""),
+                        "parameters": func.get("parameters", {}),
+                    }
+                )
             body["tools"] = resp_tools
 
         if cc_request.get("tool_choice"):
@@ -886,15 +930,17 @@ class OpenAISubscriptionAdapter(OpenAIAdapter):
                 item = event.get("item", {})
                 if item.get("type") == "function_call":
                     idx = len(tool_calls)
-                    tool_calls.append({
-                        "index": idx,
-                        "id": item.get("call_id", f"call_{idx}"),
-                        "type": "function",
-                        "function": {
-                            "name": item.get("name", ""),
-                            "arguments": "",
-                        },
-                    })
+                    tool_calls.append(
+                        {
+                            "index": idx,
+                            "id": item.get("call_id", f"call_{idx}"),
+                            "type": "function",
+                            "function": {
+                                "name": item.get("name", ""),
+                                "arguments": "",
+                            },
+                        }
+                    )
 
             elif event_type == "response.output_item.done":
                 # Some backends include full item data in the done event
@@ -902,20 +948,20 @@ class OpenAISubscriptionAdapter(OpenAIAdapter):
                 if item.get("type") == "function_call":
                     call_id = item.get("call_id", "")
                     # Check if we already registered this call from .added
-                    existing = next(
-                        (tc for tc in tool_calls if tc["id"] == call_id), None
-                    )
+                    existing = next((tc for tc in tool_calls if tc["id"] == call_id), None)
                     if existing is None:
                         idx = len(tool_calls)
-                        tool_calls.append({
-                            "index": idx,
-                            "id": call_id or f"call_{idx}",
-                            "type": "function",
-                            "function": {
-                                "name": item.get("name", ""),
-                                "arguments": item.get("arguments", ""),
-                            },
-                        })
+                        tool_calls.append(
+                            {
+                                "index": idx,
+                                "id": call_id or f"call_{idx}",
+                                "type": "function",
+                                "function": {
+                                    "name": item.get("name", ""),
+                                    "arguments": item.get("arguments", ""),
+                                },
+                            }
+                        )
                         if call_id and item.get("arguments"):
                             tool_args[call_id] = item["arguments"]
                     elif call_id and item.get("arguments"):
@@ -937,20 +983,20 @@ class OpenAISubscriptionAdapter(OpenAIAdapter):
                 for item in resp_data.get("output", []):
                     if item.get("type") == "function_call":
                         call_id = item.get("call_id", "")
-                        existing = next(
-                            (tc for tc in tool_calls if tc["id"] == call_id), None
-                        )
+                        existing = next((tc for tc in tool_calls if tc["id"] == call_id), None)
                         if existing is None:
                             idx = len(tool_calls)
-                            tool_calls.append({
-                                "index": idx,
-                                "id": call_id or f"call_{idx}",
-                                "type": "function",
-                                "function": {
-                                    "name": item.get("name", ""),
-                                    "arguments": item.get("arguments", ""),
-                                },
-                            })
+                            tool_calls.append(
+                                {
+                                    "index": idx,
+                                    "id": call_id or f"call_{idx}",
+                                    "type": "function",
+                                    "function": {
+                                        "name": item.get("name", ""),
+                                        "arguments": item.get("arguments", ""),
+                                    },
+                                }
+                            )
                             if call_id and item.get("arguments"):
                                 tool_args[call_id] = item["arguments"]
                         elif call_id and item.get("arguments"):
@@ -972,10 +1018,12 @@ class OpenAISubscriptionAdapter(OpenAIAdapter):
                 if not tc["function"]["arguments"]:
                     logger.warning(
                         "Tool call '%s' (id=%s) has empty arguments after SSE parsing",
-                        tc["function"]["name"], tc["id"],
+                        tc["function"]["name"],
+                        tc["id"],
                     )
                     # Dump raw SSE for diagnosis
                     import tempfile
+
                     try:
                         dump_path = Path(tempfile.gettempdir()) / "kitty_codex_sse_dump.txt"
                         dump_path.write_bytes(raw)
@@ -1014,15 +1062,12 @@ class OpenAISubscriptionAdapter(OpenAIAdapter):
         msg = error_obj.get("message", str(error_obj)) if isinstance(error_obj, dict) else str(error_obj)
         if status_code == 401:
             err = ProviderError(
-                f"OpenAI subscription auth failed. "
-                f"Please re-authenticate with 'kitty auth openai'. Details: {msg}"
+                f"OpenAI subscription auth failed. Please re-authenticate with 'kitty auth openai'. Details: {msg}"
             )
             err.http_status = 401
             return err
         if status_code == 429:
-            err = ProviderError(
-                f"OpenAI subscription rate limited: {msg}"
-            )
+            err = ProviderError(f"OpenAI subscription rate limited: {msg}")
             err.http_status = 429
             return err
         if status_code == 403:
@@ -1035,15 +1080,11 @@ class OpenAISubscriptionAdapter(OpenAIAdapter):
                 err.is_cloudflare = True
                 err.http_status = 403
                 return err
-            err = ProviderError(
-                f"OpenAI subscription access denied: {msg}"
-            )
+            err = ProviderError(f"OpenAI subscription access denied: {msg}")
             err.http_status = 403
             return err
         if status_code >= 500:
-            err = ProviderError(
-                f"OpenAI subscription server error {status_code}: {msg}"
-            )
+            err = ProviderError(f"OpenAI subscription server error {status_code}: {msg}")
             err.http_status = status_code
             return err
         err = ProviderError(f"OpenAI subscription error {status_code}: {msg}")

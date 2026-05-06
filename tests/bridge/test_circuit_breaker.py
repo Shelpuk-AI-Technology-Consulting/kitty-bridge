@@ -334,7 +334,7 @@ class TestCircuitBreakerRetry:
             b'"model":"test-model"}\n\n'
             b'data: {"id":"chatcmpl-1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],'
             b'"model":"test-model"}\n\n'
-            b'data: [DONE]\n\n'
+            b"data: [DONE]\n\n"
         )
 
         with aioresponses(passthrough=["http://127.0.0.1"]) as m:
@@ -793,8 +793,6 @@ class TestFamilyCooldown:
         _, key, _, _, _ = server._get_next_backend()
         assert key == "key-1"
 
-
-
     def test_cloudflare_403_only_marks_failed_backend(self):
         """A Cloudflare 403 should only mark the failed backend unhealthy."""
         server = _make_server_with_families(["family-a", "family-b"], cooldown=300)
@@ -802,10 +800,6 @@ class TestFamilyCooldown:
         server._mark_backend_unhealthy(0, cooldown=300, failure_kind="cloudflare")
         assert server._backend_health[0]["healthy"] is False
         assert server._backend_health[1]["healthy"] is True
-
-
-
-
 
 
 # -- Phase 1: Backend exhaustion fixes ------------------------------------------
@@ -919,7 +913,7 @@ class TestSingleBackendCooldownCap:
             b'"model":"test-model"}\n\n'
             b'data: {"id":"chatcmpl-1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],'
             b'"model":"test-model"}\n\n'
-            b'data: [DONE]\n\n'
+            b"data: [DONE]\n\n"
         )
 
         with aioresponses(passthrough=["http://127.0.0.1"]) as m:

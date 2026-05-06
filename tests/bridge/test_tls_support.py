@@ -64,9 +64,10 @@ class TestTLSSupport:
 
             # Connect without TLS verification (self-signed)
             conn = aiohttp.TCPConnector(ssl=False)
-            async with aiohttp.ClientSession(connector=conn) as session, session.get(
-                f"https://127.0.0.1:{port}/healthz"
-            ) as resp:
+            async with (
+                aiohttp.ClientSession(connector=conn) as session,
+                session.get(f"https://127.0.0.1:{port}/healthz") as resp,
+            ):
                 assert resp.status == 200
         finally:
             await server.stop_async()
@@ -95,9 +96,7 @@ class TestTLSSupport:
         try:
             import aiohttp
 
-            async with aiohttp.ClientSession() as session, session.get(
-                f"http://127.0.0.1:{port}/healthz"
-            ) as resp:
+            async with aiohttp.ClientSession() as session, session.get(f"http://127.0.0.1:{port}/healthz") as resp:
                 assert resp.status == 200
         finally:
             await server.stop_async()

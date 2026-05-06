@@ -132,9 +132,7 @@ class TestApiKeyAuthMiddleware:
         server = _make_server(keys_file=None)
         port = await server.start_async()
         try:
-            async with aiohttp.ClientSession() as session, session.get(
-                f"http://127.0.0.1:{port}/healthz"
-            ) as resp:
+            async with aiohttp.ClientSession() as session, session.get(f"http://127.0.0.1:{port}/healthz") as resp:
                 assert resp.status == 200
         finally:
             await server.stop_async()
@@ -179,9 +177,7 @@ class TestApiKeyAuthMiddleware:
         server = _make_server(keys_file=str(keys))
         port = await server.start_async()
         try:
-            async with aiohttp.ClientSession() as session, session.get(
-                f"http://127.0.0.1:{port}/healthz"
-            ) as resp:
+            async with aiohttp.ClientSession() as session, session.get(f"http://127.0.0.1:{port}/healthz") as resp:
                 assert resp.status == 401
         finally:
             await server.stop_async()

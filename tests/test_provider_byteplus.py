@@ -175,7 +175,6 @@ class TestBytePlusAdapter:
         result = self.adapter.parse_response(response)
         assert result["usage"] == {}
 
-
     def test_normalize_model_name_strips_byteplus_prefix(self):
         assert self.adapter.normalize_model_name("byteplus/ark-code-latest") == "ark-code-latest"
 
@@ -199,4 +198,3 @@ class TestBytePlusAdapter:
         assert headers["Authorization"] == "Bearer sk-test-key"
         assert headers["Content-Type"] == "application/json"
         assert headers["User-Agent"] == "claude-code/1.0"
-

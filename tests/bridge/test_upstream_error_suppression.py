@@ -124,7 +124,7 @@ class TestBalancingStreamErrorSuppress:
                         'data: {"id":"c","model":"m",'
                         '"choices":[{"index":0,"delta":{"content":"Hi"}}],'
                         '"error":{"code":502,"message":"Provider error"}}\n\n'
-                        'data: [DONE]\n\n'
+                        "data: [DONE]\n\n"
                     ),
                 )
                 m.post(
@@ -136,13 +136,16 @@ class TestBalancingStreamErrorSuppress:
                         'data: {"id":"c","model":"m",'
                         '"choices":[{"index":0,"delta":{},'
                         '"finish_reason":"stop"}]}\n\n'
-                        'data: [DONE]\n\n'
+                        "data: [DONE]\n\n"
                     ),
                 )
-                async with aiohttp.ClientSession() as session, session.post(
-                    f"http://127.0.0.1:{port}/v1/chat/completions",
-                    json={"model": "test", "messages": [{"role": "user", "content": "hi"}], "stream": True},
-                ) as resp:
+                async with (
+                    aiohttp.ClientSession() as session,
+                    session.post(
+                        f"http://127.0.0.1:{port}/v1/chat/completions",
+                        json={"model": "test", "messages": [{"role": "user", "content": "hi"}], "stream": True},
+                    ) as resp,
+                ):
                     assert resp.status == 200
                     body = await resp.text()
                     # Agent must NOT see the raw error chunk
@@ -167,10 +170,13 @@ class TestBalancingStreamErrorSuppress:
                     "https://api1.example.com/v1/chat/completions",
                     body='data: {"error":{"code":502,"message":"Provider error"}}\n\ndata: [DONE]\n\n',
                 )
-                async with aiohttp.ClientSession() as session, session.post(
-                    f"http://127.0.0.1:{port}/v1/chat/completions",
-                    json={"model": "test", "messages": [{"role": "user", "content": "hi"}], "stream": True},
-                ) as resp:
+                async with (
+                    aiohttp.ClientSession() as session,
+                    session.post(
+                        f"http://127.0.0.1:{port}/v1/chat/completions",
+                        json={"model": "test", "messages": [{"role": "user", "content": "hi"}], "stream": True},
+                    ) as resp,
+                ):
                     assert resp.status == 200
                     body = await resp.text()
                     # Agent must NOT see raw upstream error content
@@ -196,10 +202,13 @@ class TestNonBalancingStreamErrorSuppress:
                     "https://api.example.com/v1/chat/completions",
                     body='data: {"error":{"code":502,"message":"Provider error"}}\n\ndata: [DONE]\n\n',
                 )
-                async with aiohttp.ClientSession() as session, session.post(
-                    f"http://127.0.0.1:{port}/v1/chat/completions",
-                    json={"model": "test", "messages": [{"role": "user", "content": "hi"}], "stream": True},
-                ) as resp:
+                async with (
+                    aiohttp.ClientSession() as session,
+                    session.post(
+                        f"http://127.0.0.1:{port}/v1/chat/completions",
+                        json={"model": "test", "messages": [{"role": "user", "content": "hi"}], "stream": True},
+                    ) as resp,
+                ):
                     assert resp.status == 200
                     body = await resp.text()
                     assert "Provider error" not in body
@@ -225,10 +234,13 @@ class TestStreamErrorLogLevel:
                     body='data: {"error":{"code":502,"message":"Provider error"}}\n\ndata: [DONE]\n\n',
                 )
                 with caplog.at_level(logging.WARNING, logger="kitty.bridge"):
-                    async with aiohttp.ClientSession() as session, session.post(
-                        f"http://127.0.0.1:{port}/v1/chat/completions",
-                        json={"model": "test", "messages": [{"role": "user", "content": "hi"}], "stream": True},
-                    ) as resp:
+                    async with (
+                        aiohttp.ClientSession() as session,
+                        session.post(
+                            f"http://127.0.0.1:{port}/v1/chat/completions",
+                            json={"model": "test", "messages": [{"role": "user", "content": "hi"}], "stream": True},
+                        ) as resp,
+                    ):
                         await resp.read()
 
                 # The warning should be logged; no ERROR-level stream chunk messages
@@ -254,10 +266,13 @@ class TestStreamErrorCooldownExponentialBackoff:
                     "https://api0.example.com/v1/chat/completions",
                     body='data: {"error":{"code":502}}\n\ndata: [DONE]\n\n',
                 )
-                async with aiohttp.ClientSession() as session, session.post(
-                    f"http://127.0.0.1:{port}/v1/chat/completions",
-                    json={"model": "test", "messages": [{"role": "user", "content": "hi"}], "stream": True},
-                ) as resp:
+                async with (
+                    aiohttp.ClientSession() as session,
+                    session.post(
+                        f"http://127.0.0.1:{port}/v1/chat/completions",
+                        json={"model": "test", "messages": [{"role": "user", "content": "hi"}], "stream": True},
+                    ) as resp,
+                ):
                     await resp.read()
 
             # Backend-0 should have cooldown = 30s (first failure)
@@ -277,10 +292,13 @@ class TestStreamErrorCooldownExponentialBackoff:
                     "https://api0.example.com/v1/chat/completions",
                     body='data: {"error":{"code":502}}\n\ndata: [DONE]\n\n',
                 )
-                async with aiohttp.ClientSession() as session, session.post(
-                    f"http://127.0.0.1:{port}/v1/chat/completions",
-                    json={"model": "test", "messages": [{"role": "user", "content": "hi"}], "stream": True},
-                ) as resp:
+                async with (
+                    aiohttp.ClientSession() as session,
+                    session.post(
+                        f"http://127.0.0.1:{port}/v1/chat/completions",
+                        json={"model": "test", "messages": [{"role": "user", "content": "hi"}], "stream": True},
+                    ) as resp,
+                ):
                     await resp.read()
 
                 # Second request fails
@@ -288,10 +306,13 @@ class TestStreamErrorCooldownExponentialBackoff:
                     "https://api0.example.com/v1/chat/completions",
                     body='data: {"error":{"code":502}}\n\ndata: [DONE]\n\n',
                 )
-                async with aiohttp.ClientSession() as session, session.post(
-                    f"http://127.0.0.1:{port}/v1/chat/completions",
-                    json={"model": "test", "messages": [{"role": "user", "content": "hi"}], "stream": True},
-                ) as resp:
+                async with (
+                    aiohttp.ClientSession() as session,
+                    session.post(
+                        f"http://127.0.0.1:{port}/v1/chat/completions",
+                        json={"model": "test", "messages": [{"role": "user", "content": "hi"}], "stream": True},
+                    ) as resp,
+                ):
                     await resp.read()
 
             # Backend-0 cooldown should have doubled: 30 -> 60
@@ -320,10 +341,13 @@ class TestAuthFailureBlacklisting:
                 )
                 m.post("https://api1.example.com/v1/chat/completions", payload=UPSTREAM_OK)
 
-                async with aiohttp.ClientSession() as session, session.post(
-                    f"http://127.0.0.1:{port}/v1/chat/completions",
-                    json={"model": "test", "messages": [{"role": "user", "content": "hi"}], "stream": True},
-                ) as resp:
+                async with (
+                    aiohttp.ClientSession() as session,
+                    session.post(
+                        f"http://127.0.0.1:{port}/v1/chat/completions",
+                        json={"model": "test", "messages": [{"role": "user", "content": "hi"}], "stream": True},
+                    ) as resp,
+                ):
                     assert resp.status == 200
 
                 # Backend-0 should have a very long cooldown (auth blacklisting)
@@ -345,10 +369,13 @@ class TestAuthFailureBlacklisting:
                 )
                 m.post("https://api1.example.com/v1/chat/completions", payload=UPSTREAM_OK)
 
-                async with aiohttp.ClientSession() as session, session.post(
-                    f"http://127.0.0.1:{port}/v1/chat/completions",
-                    json={"model": "test", "messages": [{"role": "user", "content": "hi"}]},
-                ) as resp:
+                async with (
+                    aiohttp.ClientSession() as session,
+                    session.post(
+                        f"http://127.0.0.1:{port}/v1/chat/completions",
+                        json={"model": "test", "messages": [{"role": "user", "content": "hi"}]},
+                    ) as resp,
+                ):
                     assert resp.status == 200
                     body = await resp.json()
                     assert body["choices"][0]["message"]["content"] == "Hello!"
@@ -378,10 +405,13 @@ class TestAuthFailureBlacklisting:
                         payload={"error": {"message": "Unauthorized"}},
                     )
 
-                async with aiohttp.ClientSession() as session, session.post(
-                    f"http://127.0.0.1:{port}/v1/chat/completions",
-                    json={"model": "test", "messages": [{"role": "user", "content": "hi"}]},
-                ) as resp:
+                async with (
+                    aiohttp.ClientSession() as session,
+                    session.post(
+                        f"http://127.0.0.1:{port}/v1/chat/completions",
+                        json={"model": "test", "messages": [{"role": "user", "content": "hi"}]},
+                    ) as resp,
+                ):
                     assert resp.status == 401
         finally:
             await server.stop_async()
@@ -404,8 +434,10 @@ class TestCCStreamErrorAfterContent:
         server = _make_balancing_server(n_backends=2)
         port = await server.start_async()
         try:
-            with aioresponses(passthrough=["http://127.0.0.1"]) as m, \
-                 patch("kitty.bridge.server.random.choices", return_value=[0]):
+            with (
+                aioresponses(passthrough=["http://127.0.0.1"]) as m,
+                patch("kitty.bridge.server.random.choices", return_value=[0]),
+            ):
                 # Backend-0: sends content first, then an error chunk
                 m.post(
                     "https://api0.example.com/v1/chat/completions",
@@ -413,7 +445,7 @@ class TestCCStreamErrorAfterContent:
                         'data: {"id":"c","model":"m",'
                         '"choices":[{"index":0,"delta":{"content":"Hello partial"}}]}\n\n'
                         'data: {"error":{"code":502,"message":"Provider error"}}\n\n'
-                        'data: [DONE]\n\n'
+                        "data: [DONE]\n\n"
                     ),
                 )
                 # Backend-1 would succeed, but should NOT be called
@@ -426,13 +458,16 @@ class TestCCStreamErrorAfterContent:
                         'data: {"id":"c","model":"m",'
                         '"choices":[{"index":0,"delta":{},'
                         '"finish_reason":"stop"}]}\n\n'
-                        'data: [DONE]\n\n'
+                        "data: [DONE]\n\n"
                     ),
                 )
-                async with aiohttp.ClientSession() as session, session.post(
-                    f"http://127.0.0.1:{port}/v1/chat/completions",
-                    json={"model": "test", "messages": [{"role": "user", "content": "hi"}], "stream": True},
-                ) as resp:
+                async with (
+                    aiohttp.ClientSession() as session,
+                    session.post(
+                        f"http://127.0.0.1:{port}/v1/chat/completions",
+                        json={"model": "test", "messages": [{"role": "user", "content": "hi"}], "stream": True},
+                    ) as resp,
+                ):
                     assert resp.status == 200
                     body = await resp.text()
                     # The partial content must be present
@@ -456,8 +491,10 @@ class TestCCStreamErrorAfterContent:
         server = _make_balancing_server(n_backends=2)
         port = await server.start_async()
         try:
-            with aioresponses(passthrough=["http://127.0.0.1"]) as m, \
-                 patch("kitty.bridge.server.random.choices", side_effect=[[0], [1]]):
+            with (
+                aioresponses(passthrough=["http://127.0.0.1"]) as m,
+                patch("kitty.bridge.server.random.choices", side_effect=[[0], [1]]),
+            ):
                 # Backend-0: error chunk with no prior content
                 m.post(
                     "https://api0.example.com/v1/chat/completions",
@@ -473,13 +510,16 @@ class TestCCStreamErrorAfterContent:
                         'data: {"id":"c","model":"m",'
                         '"choices":[{"index":0,"delta":{},'
                         '"finish_reason":"stop"}]}\n\n'
-                        'data: [DONE]\n\n'
+                        "data: [DONE]\n\n"
                     ),
                 )
-                async with aiohttp.ClientSession() as session, session.post(
-                    f"http://127.0.0.1:{port}/v1/chat/completions",
-                    json={"model": "test", "messages": [{"role": "user", "content": "hi"}], "stream": True},
-                ) as resp:
+                async with (
+                    aiohttp.ClientSession() as session,
+                    session.post(
+                        f"http://127.0.0.1:{port}/v1/chat/completions",
+                        json={"model": "test", "messages": [{"role": "user", "content": "hi"}], "stream": True},
+                    ) as resp,
+                ):
                     assert resp.status == 200
                     body = await resp.text()
                     # Backend-1's content must be present — retry happened
@@ -504,8 +544,10 @@ class TestGeminiStreamErrorAfterContent:
         server = _make_balancing_server(n_backends=2)
         port = await server.start_async()
         try:
-            with aioresponses(passthrough=["http://127.0.0.1"]) as m, \
-                 patch("kitty.bridge.server.random.choices", return_value=[0]):
+            with (
+                aioresponses(passthrough=["http://127.0.0.1"]) as m,
+                patch("kitty.bridge.server.random.choices", return_value=[0]),
+            ):
                 # Backend-0: sends content first, then an error chunk
                 m.post(
                     "https://api0.example.com/v1/chat/completions",
@@ -513,7 +555,7 @@ class TestGeminiStreamErrorAfterContent:
                         'data: {"id":"c","model":"m",'
                         '"choices":[{"index":0,"delta":{"content":"Hello partial"}}]}\n\n'
                         'data: {"error":{"code":502,"message":"Provider error"}}\n\n'
-                        'data: [DONE]\n\n'
+                        "data: [DONE]\n\n"
                     ),
                 )
                 # Backend-1 should NOT be called
@@ -526,13 +568,16 @@ class TestGeminiStreamErrorAfterContent:
                         'data: {"id":"c","model":"m",'
                         '"choices":[{"index":0,"delta":{},'
                         '"finish_reason":"stop"}]}\n\n'
-                        'data: [DONE]\n\n'
+                        "data: [DONE]\n\n"
                     ),
                 )
-                async with aiohttp.ClientSession() as session, session.post(
-                    f"http://127.0.0.1:{port}/v1beta/models/model-0:streamGenerateContent",
-                    json={"contents": [{"role": "user", "parts": [{"text": "hi"}]}]},
-                ) as resp:
+                async with (
+                    aiohttp.ClientSession() as session,
+                    session.post(
+                        f"http://127.0.0.1:{port}/v1beta/models/model-0:streamGenerateContent",
+                        json={"contents": [{"role": "user", "parts": [{"text": "hi"}]}]},
+                    ) as resp,
+                ):
                     assert resp.status == 200
                     body = await resp.text()
                     # The partial content must be present

@@ -22,9 +22,7 @@ class TestOpenAISubscriptionReasoning:
     def test_prepare_responses_body_preserves_reasoning_from_original(self) -> None:
         original = {
             "model": "gpt-5.4",
-            "input": [
-                {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]}
-            ],
+            "input": [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]}],
             "reasoning": {"effort": "high"},
         }
         result = OpenAISubscriptionAdapter._prepare_responses_body(original)
@@ -33,9 +31,7 @@ class TestOpenAISubscriptionReasoning:
     def test_prepare_responses_body_injects_reasoning_from_cc_request(self) -> None:
         original = {
             "model": "gpt-5.4",
-            "input": [
-                {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]}
-            ],
+            "input": [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]}],
             "_reasoning_effort": "high",
         }
         result = OpenAISubscriptionAdapter._prepare_responses_body(original)
@@ -73,9 +69,7 @@ class TestOpenAISubscriptionReasoning:
     def test_prepare_responses_body_no_reasoning_when_absent(self) -> None:
         original = {
             "model": "gpt-5.4",
-            "input": [
-                {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]}
-            ],
+            "input": [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]}],
         }
         result = OpenAISubscriptionAdapter._prepare_responses_body(original)
         assert "reasoning" not in result

@@ -85,9 +85,7 @@ class BedrockAdapter(ProviderAdapter):
         try:
             import boto3
         except ImportError as err:
-            raise ProviderError(
-                "boto3 is required for the Bedrock provider. Install with: pip install boto3"
-            ) from err
+            raise ProviderError("boto3 is required for the Bedrock provider. Install with: pip install boto3") from err
 
         region = self.get_region(provider_config)
 

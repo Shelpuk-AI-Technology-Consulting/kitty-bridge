@@ -1,6 +1,5 @@
 """Tests for rate limit / quota exhaustion detection and circuit breaker."""
 
-
 from kitty.bridge.server import BridgeServer
 
 # ── _is_rate_limit_error ───────────────────────────────────────────────────
@@ -21,10 +20,7 @@ class TestIsRateLimitError:
         body = {
             "error": {
                 "code": "1310",
-                "message": (
-                    "Weekly/Monthly Limit Exhausted. "
-                    "Your limit will reset at 2026-04-13 01:37:41"
-                ),
+                "message": ("Weekly/Monthly Limit Exhausted. Your limit will reset at 2026-04-13 01:37:41"),
             }
         }
         assert BridgeServer._is_rate_limit_error(400, body) is True

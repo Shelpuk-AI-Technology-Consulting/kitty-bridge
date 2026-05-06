@@ -28,10 +28,7 @@ class TestGoogleAIStudioAdapter:
         assert self.adapter.provider_type == "google_aistudio"
 
     def test_default_base_url(self):
-        assert (
-            self.adapter.default_base_url
-            == "https://generativelanguage.googleapis.com/v1beta/openai"
-        )
+        assert self.adapter.default_base_url == "https://generativelanguage.googleapis.com/v1beta/openai"
 
     def test_build_request_basic(self):
         result = self.adapter.build_request(
@@ -216,16 +213,10 @@ class TestGoogleAIStudioAdapter:
         assert "Unknown error" in str(exc)
 
     def test_normalize_model_name_strips_prefix(self):
-        assert (
-            self.adapter.normalize_model_name("google_aistudio/gemini-2.5-flash")
-            == "gemini-2.5-flash"
-        )
+        assert self.adapter.normalize_model_name("google_aistudio/gemini-2.5-flash") == "gemini-2.5-flash"
 
     def test_normalize_model_name_strips_prefix_case_insensitive(self):
-        assert (
-            self.adapter.normalize_model_name("GOOGLE_AISTUDIO/gemini-pro")
-            == "gemini-pro"
-        )
+        assert self.adapter.normalize_model_name("GOOGLE_AISTUDIO/gemini-pro") == "gemini-pro"
 
     def test_normalize_model_name_no_prefix_unchanged(self):
         assert self.adapter.normalize_model_name("gemini-2.5-flash") == "gemini-2.5-flash"

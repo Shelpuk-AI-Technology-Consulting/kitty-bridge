@@ -38,6 +38,7 @@ SCOPE = "openid profile email offline_access"
 
 # ── Fixtures ─────────────────────────────────────────────────────────────
 
+
 @pytest.fixture()
 def code_verifier() -> str:
     """A valid 43-char PKCE code verifier."""
@@ -52,6 +53,7 @@ def state() -> str:
 
 # ── build_auth_url ────────────────────────────────────────────────────────
 
+
 class TestBuildAuthUrl:
     def test_build_auth_url_contains_required_params(self, code_verifier: str) -> None:
         """Authorization URL has all required OAuth + PKCE params."""
@@ -59,7 +61,7 @@ class TestBuildAuthUrl:
 
         assert url.startswith(OAUTH_AUTH_URL + "?")
         # Parse query string and decode URL-encoded values
-        query = url[len(OAUTH_AUTH_URL) + 1:]
+        query = url[len(OAUTH_AUTH_URL) + 1 :]
         parsed = urllib.parse.parse_qs(query, strict_parsing=True)
         # parse_qs returns dict of lists; flatten to single values
         params = {k: v[0] for k, v in parsed.items()}
@@ -83,6 +85,7 @@ class TestBuildAuthUrl:
 
 
 # ── Callback server ──────────────────────────────────────────────────────
+
 
 class TestCallbackServer:
     """Tests for the local OAuth callback HTTP server."""
@@ -166,6 +169,7 @@ class TestCallbackServer:
 
 # ── Port conflict ─────────────────────────────────────────────────────────
 
+
 class TestPortConflict:
     @pytest.mark.asyncio
     async def test_port_conflict_tries_alternate_ports(self) -> None:
@@ -225,6 +229,7 @@ class TestPortConflict:
 
 # ── Timeout ───────────────────────────────────────────────────────────────
 
+
 class TestTimeout:
     @pytest.mark.asyncio
     async def test_flow_times_out_if_no_callback(self) -> None:
@@ -260,6 +265,7 @@ class TestTimeout:
 
 
 # ── Token exchange ────────────────────────────────────────────────────────
+
 
 class TestExchangeCodeForTokens:
     @pytest.mark.asyncio
@@ -314,9 +320,7 @@ class TestExchangeIdTokenForApiKey:
             )
 
             async with aiohttp.ClientSession() as http:
-                result = await _exchange_id_token_for_api_key(
-                    id_token, access_token, CLIENT_ID, http
-                )
+                result = await _exchange_id_token_for_api_key(id_token, access_token, CLIENT_ID, http)
 
         assert result == "sk-exchanged-key-123"
         assert captured_body.get("grant_type") == TOKEN_EXCHANGE_GRANT
@@ -328,6 +332,7 @@ class TestExchangeIdTokenForApiKey:
 
 
 # ── run_oauth_flow integration ─────────────────────────────────────────────
+
 
 class TestRunOAuthFlow:
     @pytest.mark.asyncio
@@ -348,9 +353,7 @@ class TestRunOAuthFlow:
             async def on_callback(request: aiohttp.web.Request) -> aiohttp.web.Response:
                 if not srv_future.done():
                     srv_future.set_result(request.query.get("code", "test-code"))
-                return aiohttp.web.Response(
-                    text="<html><body>You can close this tab.</body></html>"
-                )
+                return aiohttp.web.Response(text="<html><body>You can close this tab.</body></html>")
 
             app.router.add_get("/auth/callback", on_callback)
 
@@ -396,6 +399,7 @@ class TestRunOAuthFlow:
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────
+
 
 def _capture_body(captured: dict[str, Any], kwargs: dict[str, Any]) -> None:
     """Extract the POST form data from aioresponses kwargs into *captured*."""

@@ -140,11 +140,7 @@ class OllamaAdapter(ProviderAdapter):
         Returns:
             Request dict to send to Ollama.
         """
-        return {
-            k: v
-            for k, v in cc_request.items()
-            if k not in self._INTERNAL_KEYS
-        }
+        return {k: v for k, v in cc_request.items() if k not in self._INTERNAL_KEYS}
 
     def translate_from_upstream(self, raw_response: dict) -> dict:
         """Translate an Ollama response to Chat Completions format.

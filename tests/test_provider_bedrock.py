@@ -470,8 +470,9 @@ class TestBedrockMakeRequest:
         mock_client = MagicMock()
         mock_client.converse.side_effect = Exception("ThrottlingException")
 
-        with patch.object(adapter, "_get_boto3_client", return_value=mock_client), pytest.raises(
-            Exception, match="ThrottlingException"
+        with (
+            patch.object(adapter, "_get_boto3_client", return_value=mock_client),
+            pytest.raises(Exception, match="ThrottlingException"),
         ):
             await adapter.make_request(cc_request)
 

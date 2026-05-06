@@ -63,33 +63,45 @@ PROVIDER_LABELS: dict[str, str] = {
 }
 
 PROVIDER_SECTIONS: list[tuple[str, list[str]]] = [
-    ("-- Regular API Key --", [
-        "bedrock",
-        "anthropic",
-        "byteplus",
-        "google_aistudio",
-        "vertex",
-        "azure",
-        "minimax",
-        "openai",
-        "openrouter",
-        "zai_regular",
-    ]),
-    ("-- Coding Plans / Subscriptions --", [
-        "fireworks",
-        "kimi",
-        "novita",
-        "openai_subscription",
-        "opencode_go",
-        "mimo",
-        "zai_coding",
-    ]),
-    ("-- Local LLMs --", [
-        "ollama",
-    ]),
-    ("-- Generic --", [
-        "custom_openai",
-    ]),
+    (
+        "-- Regular API Key --",
+        [
+            "bedrock",
+            "anthropic",
+            "byteplus",
+            "google_aistudio",
+            "vertex",
+            "azure",
+            "minimax",
+            "openai",
+            "openrouter",
+            "zai_regular",
+        ],
+    ),
+    (
+        "-- Coding Plans / Subscriptions --",
+        [
+            "fireworks",
+            "kimi",
+            "novita",
+            "openai_subscription",
+            "opencode_go",
+            "mimo",
+            "zai_coding",
+        ],
+    ),
+    (
+        "-- Local LLMs --",
+        [
+            "ollama",
+        ],
+    ),
+    (
+        "-- Generic --",
+        [
+            "custom_openai",
+        ],
+    ),
 ]
 
 
