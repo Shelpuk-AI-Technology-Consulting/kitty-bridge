@@ -167,6 +167,10 @@ class BedrockAdapter(ProviderAdapter):
         """Translate assistant message with optional tool_calls."""
         content_blocks: list[dict] = []
 
+        reasoning = msg.get("reasoning_content")
+        if reasoning:
+            content_blocks.append({"reasoningContent": {"text": reasoning}})
+
         text = msg.get("content")
         if text:
             content_blocks.append({"text": text})

@@ -204,7 +204,20 @@ class TestBedrockTranslateToUpstream:
     def test_assistant_tool_calls_become_tool_use_blocks(self):
         cc = {
             "model": "anthropic.claude-sonnet-4-20250514",
-            "messages": CC_MESSAGES_WITH_TOOLS,
+            "messages": [
+                {"role": "user", "content": "What's the weather?"},
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "call_abc",
+                            "type": "function",
+                            "function": {"name": "get_weather", "arguments": '{"city": "London"}'},
+                        }
+                    ],
+                },
+            ],
             "stream": False,
         }
         result = self.adapter.translate_to_upstream(cc)
@@ -214,6 +227,34 @@ class TestBedrockTranslateToUpstream:
         assert len(tool_use_blocks) == 1
         assert tool_use_blocks[0]["toolUse"]["name"] == "get_weather"
         assert tool_use_blocks[0]["toolUse"]["input"] == {"city": "London"}
+        assert not any("reasoningContent" in b for b in assistant_msg["content"])
+
+    def test_assistant_reasoning_content_becomes_reasoning_block(self):
+        cc = {
+            "model": "anthropic.claude-sonnet-4-20250514",
+            "messages": [
+                {"role": "user", "content": "What's the weather?"},
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "reasoning_content": "I should check the weather tool first.",
+                    "tool_calls": [
+                        {
+                            "id": "call_abc",
+                            "type": "function",
+                            "function": {"name": "get_weather", "arguments": '{"city": "London"}'},
+                        }
+                    ],
+                },
+            ],
+            "stream": False,
+        }
+        result = self.adapter.translate_to_upstream(cc)
+        assistant_msg = result["messages"][1]
+        assert assistant_msg["content"][0] == {
+            "reasoningContent": {"text": "I should check the weather tool first."},
+        }
+        assert "toolUse" in assistant_msg["content"][1]
 
     def test_tool_result_becomes_tool_result_block(self):
         cc = {

@@ -133,6 +133,10 @@ class AnthropicAdapter(ProviderAdapter):
         """Translate an assistant message with optional tool_calls to Anthropic content blocks."""
         content_blocks: list[dict] = []
 
+        reasoning = msg.get("reasoning_content")
+        if reasoning:
+            content_blocks.append({"type": "thinking", "thinking": reasoning})
+
         text = msg.get("content")
         if text:
             content_blocks.append({"type": "text", "text": text})

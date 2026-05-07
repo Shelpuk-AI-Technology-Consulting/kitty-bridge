@@ -16,6 +16,7 @@ CC_MESSAGES_TOOLS = [
     {
         "role": "assistant",
         "content": None,
+        "reasoning_content": "I should check the weather tool first.",
         "tool_calls": [
             {
                 "id": "call_abc",
@@ -195,11 +196,23 @@ class TestAnthropicTranslateToUpstream:
     def test_assistant_tool_calls_become_content_blocks(self):
         cc = {
             "model": "claude-sonnet-4-6",
-            "messages": CC_MESSAGES_TOOLS,
+            "messages": [
+                {"role": "user", "content": "What's the weather?"},
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "call_abc",
+                            "type": "function",
+                            "function": {"name": "get_weather", "arguments": '{"city": "London"}'},
+                        }
+                    ],
+                },
+            ],
             "stream": False,
         }
         result = self.adapter.translate_to_upstream(cc)
-        # Assistant message should have content blocks with tool_use
         assistant_msg = result["messages"][1]
         assert assistant_msg["role"] == "assistant"
         assert isinstance(assistant_msg["content"], list)
@@ -207,6 +220,40 @@ class TestAnthropicTranslateToUpstream:
         assert len(tool_use_blocks) == 1
         assert tool_use_blocks[0]["name"] == "get_weather"
         assert tool_use_blocks[0]["input"] == {"city": "London"}
+        assert not any(b["type"] == "thinking" for b in assistant_msg["content"])
+
+    def test_assistant_reasoning_content_becomes_thinking_before_tool_use(self):
+        cc = {
+            "model": "claude-sonnet-4-6",
+            "messages": CC_MESSAGES_TOOLS,
+            "stream": False,
+        }
+        result = self.adapter.translate_to_upstream(cc)
+        assistant_msg = result["messages"][1]
+        assert assistant_msg["content"][0] == {
+            "type": "thinking",
+            "thinking": "I should check the weather tool first.",
+        }
+        assert assistant_msg["content"][1]["type"] == "tool_use"
+
+    def test_assistant_reasoning_content_becomes_thinking_before_text(self):
+        cc = {
+            "model": "claude-sonnet-4-6",
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": "I'll explain.",
+                    "reasoning_content": "I should answer directly.",
+                }
+            ],
+            "stream": False,
+        }
+        result = self.adapter.translate_to_upstream(cc)
+        assistant_msg = result["messages"][0]
+        assert assistant_msg["content"] == [
+            {"type": "thinking", "thinking": "I should answer directly."},
+            {"type": "text", "text": "I'll explain."},
+        ]
 
     def test_tool_result_message_becomes_user_with_tool_result_block(self):
         cc = {
