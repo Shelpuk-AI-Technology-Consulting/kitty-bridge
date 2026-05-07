@@ -500,9 +500,12 @@ class TestTranslateResponse:
             "usage": {"prompt_tokens": 10, "completion_tokens": 50, "total_tokens": 60},
         }
         result = self.t.translate_response(cc_response)
-        assert len(result["content"]) == 1
+        # thinking-only response must include fallback text block
+        assert len(result["content"]) == 2
         assert result["content"][0]["type"] == "thinking"
         assert result["content"][0]["thinking"] == "Deep thinking..."
+        assert result["content"][1]["type"] == "text"
+        assert "retry" in result["content"][1]["text"].lower()
 
 
 # ── translate_stream_chunk ─────────────────────────────────────────────────
@@ -872,3 +875,61 @@ class TestTranslateStreamChunk:
         text_starts = [e for e in events2 if "content_block_start" in e]
         assert len(text_starts) == 1
         assert '"index": 1' in text_starts[0]
+
+    def test_thinking_only_finish_emits_fallback_text(self):
+        """When the stream produces only thinking and no text, fallback text must be added."""
+        msg_id = self._make_message_id()
+        model = "kimi-k2"
+
+        # Reasoning chunk
+        chunk1 = {
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {"reasoning_content": "Deep thinking..."},
+                    "finish_reason": None,
+                }
+            ],
+        }
+        self.t.translate_stream_chunk(msg_id, model, chunk1)
+
+        # Finish chunk with no text
+        chunk2 = {
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {},
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 50, "total_tokens": 60},
+        }
+        events = self.t.translate_stream_chunk(msg_id, model, chunk2)
+        event_blob = "\n".join(events)
+
+        # Must contain a fallback text block after thinking
+        assert "retry" in event_blob.lower() or "/clear" in event_blob
+
+    def test_thinking_only_finalized_interrupted_stream_emits_fallback_text(self):
+        """When an interrupted stream has only a thinking block open, fallback text must be added."""
+        msg_id = self._make_message_id()
+        model = "kimi-k2"
+
+        # Reasoning chunk to open a thinking block
+        chunk = {
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {"reasoning_content": "Thinking..."},
+                    "finish_reason": None,
+                }
+            ],
+        }
+        self.t.translate_stream_chunk(msg_id, model, chunk)
+
+        # Finalize the interrupted stream
+        events = self.t.finalize_interrupted_stream()
+        event_blob = "\n".join(events)
+
+        # Must contain fallback text
+        assert "retry" in event_blob.lower() or "/clear" in event_blob

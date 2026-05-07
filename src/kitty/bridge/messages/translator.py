@@ -68,14 +68,11 @@ class MessagesTranslator:
             return []
 
         events: list[str] = []
-        has_content_blocks = (
-            bool(self._tool_call_buffers)
-            or self._text_block_opened
-            or self._thinking_block_opened
-            or self._content_block_index > 0
-        )
+        had_thinking = self._thinking_block_opened
+        had_text_or_tools = self._text_block_opened or bool(self._tool_call_buffers)
+        had_any_content = had_thinking or had_text_or_tools or self._content_block_index > 0
 
-        if not has_content_blocks:
+        if not had_any_content:
             fallback_text = self._fallback_assistant_text()
             events.append(
                 format_content_block_start_event(
@@ -105,6 +102,24 @@ class MessagesTranslator:
         for block_index in sorted({meta["block_index"] for meta in self._tool_call_meta.values()}):
             events.append(format_content_block_stop_event(block_index))
 
+        # If only thinking was emitted, add fallback text
+        if had_thinking and not had_text_or_tools:
+            fallback_text = self._fallback_assistant_text()
+            events.append(
+                format_content_block_start_event(
+                    self._content_block_index,
+                    {"type": "text", "text": ""},
+                )
+            )
+            events.append(
+                format_content_block_delta_event(
+                    self._content_block_index,
+                    {"type": "text_delta", "text": fallback_text},
+                )
+            )
+            events.append(format_content_block_stop_event(self._content_block_index))
+            self._content_block_index += 1
+
         events.append(
             format_message_delta_event(
                 delta={"stop_reason": "end_turn", "stop_sequence": None},
@@ -115,7 +130,7 @@ class MessagesTranslator:
 
         self.reset()
         self._finished = True
-        self._last_was_empty = not has_content_blocks
+        self._last_was_empty = not had_any_content
         return events
 
     # ── Request translation ───────────────────────────────────────────────
@@ -369,8 +384,9 @@ class MessagesTranslator:
                 }
             )
 
-        # Defensive fallback: never emit empty assistant output when no tool call exists.
-        if not content and not tool_calls:
+        # Defensive fallback: never emit thinking-only or empty assistant output.
+        has_text = any(b.get("type") == "text" for b in content)
+        if not has_text and not tool_calls:
             content.append({"type": "text", "text": self._fallback_assistant_text(message)})
             self._last_was_empty = True
         else:
@@ -523,13 +539,10 @@ class MessagesTranslator:
         # Finish
         finish_reason = choice.get("finish_reason")
         if finish_reason is not None and not self._finished:
-            has_content_blocks = (
-                bool(self._tool_call_buffers)
-                or self._text_block_opened
-                or self._thinking_block_opened
-                or self._content_block_index > 0
-            )
-            if not has_content_blocks:
+            had_thinking = self._thinking_block_opened
+            had_text_or_tools = self._text_block_opened or bool(self._tool_call_buffers)
+            had_any_content = had_thinking or had_text_or_tools or self._content_block_index > 0
+            if not had_any_content:
                 fallback_text = self._fallback_assistant_text()
                 self._emit_message_start_if_needed(events, message_id, model)
                 events.append(
@@ -564,6 +577,24 @@ class MessagesTranslator:
                 meta = self._tool_call_meta[idx]
                 events.append(format_content_block_stop_event(meta["block_index"]))
 
+            # If only thinking was emitted (no text, no tool calls), add fallback text
+            if had_thinking and not had_text_or_tools:
+                fallback_text = self._fallback_assistant_text()
+                events.append(
+                    format_content_block_start_event(
+                        self._content_block_index,
+                        {"type": "text", "text": ""},
+                    )
+                )
+                events.append(
+                    format_content_block_delta_event(
+                        self._content_block_index,
+                        {"type": "text_delta", "text": fallback_text},
+                    )
+                )
+                events.append(format_content_block_stop_event(self._content_block_index))
+                self._content_block_index += 1
+
             # Map stop reason
             stop_reason = TranslationEngine.map_finish_reason(finish_reason)
             usage = chunk.get("usage") or {}
@@ -586,6 +617,6 @@ class MessagesTranslator:
             # (some models/providers emit a second empty finish chunk after reset).
             # Set AFTER reset() so the flag survives the state cleanup.
             self._finished = True
-            self._last_was_empty = not has_content_blocks
+            self._last_was_empty = not had_any_content
 
         return events
