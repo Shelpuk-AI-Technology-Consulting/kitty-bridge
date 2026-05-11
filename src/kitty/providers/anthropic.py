@@ -106,7 +106,7 @@ class AnthropicAdapter(ProviderAdapter):
                 continue  # already handled above
 
             if role == "assistant":
-                anthropic["messages"].append(self._translate_assistant_msg(msg))
+                anthropic["messages"].append(self._translate_assistant_msg(msg, cc_request))
             elif role == "tool":
                 anthropic["messages"].append(self._translate_tool_result_msg(msg))
             else:
@@ -129,13 +129,22 @@ class AnthropicAdapter(ProviderAdapter):
 
         return anthropic
 
-    def _translate_assistant_msg(self, msg: dict) -> dict:
-        """Translate an assistant message with optional tool_calls to Anthropic content blocks."""
+    def _translate_assistant_msg(self, msg: dict, cc_request: dict | None = None) -> dict:
+        """Translate an assistant message with optional tool_calls to Anthropic content blocks.
+
+        Args:
+            msg: CC-format assistant message dict.
+            cc_request: Full CC request dict, used to check ``_thinking_enabled``.
+                        Pass ``None`` to suppress empty thinking block injection.
+        """
         content_blocks: list[dict] = []
 
         reasoning = msg.get("reasoning_content")
+        thinking_enabled = (cc_request or {}).get("_thinking_enabled")
         if reasoning:
             content_blocks.append({"type": "thinking", "thinking": reasoning})
+        elif thinking_enabled:
+            content_blocks.append({"type": "thinking", "thinking": ""})
 
         text = msg.get("content")
         if text:
@@ -148,7 +157,7 @@ class AnthropicAdapter(ProviderAdapter):
                     "type": "tool_use",
                     "id": tc.get("id", f"toolu_{uuid.uuid4().hex[:24]}"),
                     "name": func.get("name", ""),
-                    "input": json.loads(func.get("arguments", "{}")),
+                    "input": json.loads(func.get("arguments") or "{}"),
                 }
             )
 

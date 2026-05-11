@@ -145,7 +145,7 @@ class BedrockAdapter(ProviderAdapter):
                 continue
 
             if role == "assistant":
-                bedrock["messages"].append(self._translate_assistant_msg(msg))
+                bedrock["messages"].append(self._translate_assistant_msg(msg, cc_request))
             elif role == "tool":
                 bedrock["messages"].append(self._translate_tool_result_msg(msg))
             else:
@@ -163,13 +163,22 @@ class BedrockAdapter(ProviderAdapter):
 
         return bedrock
 
-    def _translate_assistant_msg(self, msg: dict) -> dict:
-        """Translate assistant message with optional tool_calls."""
+    def _translate_assistant_msg(self, msg: dict, cc_request: dict | None = None) -> dict:
+        """Translate assistant message with optional tool_calls.
+
+        Args:
+            msg: CC-format assistant message dict.
+            cc_request: Full CC request dict, used to check ``_thinking_enabled``.
+                        Pass ``None`` to suppress empty reasoningContent block injection.
+        """
         content_blocks: list[dict] = []
 
         reasoning = msg.get("reasoning_content")
+        thinking_enabled = (cc_request or {}).get("_thinking_enabled")
         if reasoning:
             content_blocks.append({"reasoningContent": {"text": reasoning}})
+        elif thinking_enabled:
+            content_blocks.append({"reasoningContent": {"text": ""}})
 
         text = msg.get("content")
         if text:

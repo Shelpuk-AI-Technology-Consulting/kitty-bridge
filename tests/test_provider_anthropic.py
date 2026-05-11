@@ -495,3 +495,125 @@ class TestAnthropicNormalizeModelName:
     def test_strips_provider_prefix(self):
         """If someone passes openrouter-style prefix, strip it."""
         assert self.adapter.normalize_model_name("anthropic/claude-sonnet-4-6") == "claude-sonnet-4-6"
+
+
+class TestThinkingEnabledToolCallGap:
+    """Regression tests for: thinking enabled but assistant tool-call messages lack reasoning_content.
+
+    When _thinking_enabled is True, the upstream Anthropic API requires every assistant message
+    to contain a thinking block.  Historical tool-call messages that predate the thinking turn
+    will not have reasoning_content, so the bridge must inject an empty thinking block.
+    """
+
+    def setup_method(self):
+        self.adapter = AnthropicAdapter()
+
+    def test_thinking_enabled_tool_call_without_reasoning_gets_empty_thinking(self):
+        cc = {
+            "model": "claude-sonnet-4-6",
+            "messages": [
+                {"role": "user", "content": "What's the weather?"},
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "call_abc",
+                            "type": "function",
+                            "function": {"name": "get_weather", "arguments": '{"city": "London"}'},
+                        }
+                    ],
+                },
+                {"role": "tool", "tool_call_id": "call_abc", "content": "15°C"},
+                {"role": "user", "content": "Thanks"},
+                {
+                    "role": "assistant",
+                    "content": "You're welcome!",
+                    "reasoning_content": "No further tool use needed.",
+                },
+            ],
+            "stream": False,
+            "_thinking_enabled": True,
+        }
+        result = self.adapter.translate_to_upstream(cc)
+        assert result["thinking"] == {"type": "enabled", "budget_tokens": 10000}
+
+        # First assistant message has tool_calls but no reasoning_content
+        assistant_with_tools = result["messages"][1]
+        assert assistant_with_tools["role"] == "assistant"
+        thinking_blocks = [b for b in assistant_with_tools["content"] if b["type"] == "thinking"]
+        assert len(thinking_blocks) == 1, "Should inject empty thinking block when thinking enabled"
+        assert thinking_blocks[0]["thinking"] == ""
+
+    def test_thinking_enabled_text_only_assistant_without_reasoning_gets_empty_thinking(self):
+        cc = {
+            "model": "claude-sonnet-4-6",
+            "messages": [
+                {"role": "user", "content": "Hello"},
+                {"role": "assistant", "content": "Hi there!"},
+                {"role": "user", "content": "Thanks"},
+                {
+                    "role": "assistant",
+                    "content": "You're welcome!",
+                    "reasoning_content": "Simple greeting exchange.",
+                },
+            ],
+            "stream": False,
+            "_thinking_enabled": True,
+        }
+        result = self.adapter.translate_to_upstream(cc)
+        first_assistant = result["messages"][1]
+        thinking_blocks = [b for b in first_assistant["content"] if b["type"] == "thinking"]
+        assert len(thinking_blocks) == 1, "Should inject empty thinking for text-only assistant"
+        assert thinking_blocks[0]["thinking"] == ""
+
+    def test_thinking_not_enabled_no_injection(self):
+        cc = {
+            "model": "claude-sonnet-4-6",
+            "messages": [
+                {"role": "user", "content": "What's the weather?"},
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "call_abc",
+                            "type": "function",
+                            "function": {"name": "get_weather", "arguments": '{"city": "London"}'},
+                        }
+                    ],
+                },
+            ],
+            "stream": False,
+        }
+        result = self.adapter.translate_to_upstream(cc)
+        assert "thinking" not in result
+        assistant_msg = result["messages"][1]
+        thinking_blocks = [b for b in assistant_msg["content"] if b["type"] == "thinking"]
+        assert len(thinking_blocks) == 0, "No thinking block injected when thinking not enabled"
+
+    def test_thinking_enabled_existing_reasoning_preserved(self):
+        cc = {
+            "model": "claude-sonnet-4-6",
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "reasoning_content": "Existing reasoning here.",
+                    "tool_calls": [
+                        {
+                            "id": "call_abc",
+                            "type": "function",
+                            "function": {"name": "get_weather", "arguments": '{"city": "London"}'},
+                        }
+                    ],
+                },
+            ],
+            "stream": False,
+            "_thinking_enabled": True,
+        }
+        result = self.adapter.translate_to_upstream(cc)
+        assistant_msg = result["messages"][0]
+        thinking_blocks = [b for b in assistant_msg["content"] if b["type"] == "thinking"]
+        assert len(thinking_blocks) == 1
+        assert thinking_blocks[0]["thinking"] == "Existing reasoning here."
