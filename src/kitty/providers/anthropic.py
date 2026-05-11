@@ -123,7 +123,10 @@ class AnthropicAdapter(ProviderAdapter):
 
         # Restore thinking from normalized effort metadata
         if cc_request.get("_thinking_enabled"):
-            anthropic["thinking"] = {"type": "enabled", "budget_tokens": 10000}
+            # Anthropic requires budget_tokens >= 1024 and budget_tokens < max_tokens.
+            max_tokens = max(anthropic.get("max_tokens", _DEFAULT_MAX_TOKENS), 1025)
+            anthropic["max_tokens"] = max_tokens
+            anthropic["thinking"] = {"type": "enabled", "budget_tokens": max_tokens - 1}
         elif cc_request.get("_thinking_enabled") is False:
             anthropic["thinking"] = {"type": "disabled"}
 

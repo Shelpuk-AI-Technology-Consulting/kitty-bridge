@@ -536,7 +536,7 @@ class TestThinkingEnabledToolCallGap:
             "_thinking_enabled": True,
         }
         result = self.adapter.translate_to_upstream(cc)
-        assert result["thinking"] == {"type": "enabled", "budget_tokens": 10000}
+        assert result["thinking"]["type"] == "enabled"
 
         # First assistant message has tool_calls but no reasoning_content
         assistant_with_tools = result["messages"][1]
@@ -617,3 +617,45 @@ class TestThinkingEnabledToolCallGap:
         thinking_blocks = [b for b in assistant_msg["content"] if b["type"] == "thinking"]
         assert len(thinking_blocks) == 1
         assert thinking_blocks[0]["thinking"] == "Existing reasoning here."
+
+
+class TestThinkingBudgetTokensUncapped:
+    """budget_tokens must be max_tokens - 1, not a hardcoded cap."""
+
+    def setup_method(self):
+        self.adapter = AnthropicAdapter()
+
+    def test_budget_tokens_equals_max_tokens_minus_one(self):
+        cc = {
+            "model": "claude-sonnet-4-6",
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 128000,
+            "stream": False,
+            "_thinking_enabled": True,
+        }
+        result = self.adapter.translate_to_upstream(cc)
+        assert result["max_tokens"] == 128000
+        assert result["thinking"]["budget_tokens"] == 127999
+
+    def test_budget_tokens_default_max_tokens(self):
+        cc = {
+            "model": "claude-sonnet-4-6",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": False,
+            "_thinking_enabled": True,
+        }
+        result = self.adapter.translate_to_upstream(cc)
+        assert result["max_tokens"] == 4096
+        assert result["thinking"]["budget_tokens"] == 4095
+
+    def test_budget_tokens_small_max_tokens_clamped_to_minimum(self):
+        cc = {
+            "model": "claude-sonnet-4-6",
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 512,
+            "stream": False,
+            "_thinking_enabled": True,
+        }
+        result = self.adapter.translate_to_upstream(cc)
+        assert result["max_tokens"] == 1025
+        assert result["thinking"]["budget_tokens"] == 1024

@@ -199,7 +199,8 @@ class TestAnthropicReasoning:
             "_thinking_enabled": True,
         }
         result = adapter.translate_to_upstream(cc)
-        assert result["thinking"] == {"type": "enabled", "budget_tokens": 10000}
+        assert result["thinking"]["type"] == "enabled"
+        assert result["thinking"]["budget_tokens"] == 1024  # clamped to minimum (1024 < 1023)
         assert "_reasoning_effort" not in result
         assert "_thinking_enabled" not in result
 
