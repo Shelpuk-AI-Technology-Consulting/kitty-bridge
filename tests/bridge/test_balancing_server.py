@@ -9,7 +9,7 @@ from aioresponses import aioresponses
 
 from kitty.bridge.server import BridgeServer
 from kitty.launchers.base import LauncherAdapter, SpawnConfig
-from kitty.providers.base import ProviderAdapter
+from kitty.providers.base import ProviderAdapter, ProviderError
 from kitty.providers.bedrock import BedrockAdapter
 from kitty.types import BridgeProtocol
 
@@ -77,6 +77,110 @@ def _make_backends(n: int):
         profile = Profile(name=f"profile-{i}", provider="openai", model=f"model-{i}", auth_ref=str(uuid.uuid4()))
         backends.append((provider, key, profile))
     return backends
+
+
+class TestAllBackendsUnhealthyFallback:
+    """Tests for all-unhealthy backend fallback behavior."""
+
+    def test_all_unhealthy_fast_fails_when_cooldowns_far_future(self):
+        from kitty.bridge.server import AllBackendsUnhealthyError
+
+        backends = _make_backends(3)
+        server = BridgeServer(
+            adapter=StubLauncher(),
+            provider=backends[0][0],
+            resolved_key="key-0",
+            model="test-model",
+            backends=backends,
+        )
+        now = 1000.0
+        for idx in range(3):
+            health = server._backend_health[idx]
+            health["healthy"] = False
+            health["failed_at"] = now
+            health["cooldown"] = 300
+
+        with (
+            patch("kitty.bridge.server.time.monotonic", return_value=now + 10),
+            pytest.raises(AllBackendsUnhealthyError) as exc_info,
+        ):
+            server._get_next_backend()
+
+        assert exc_info.value.retry_after == 290
+        assert len(exc_info.value.backends) == 3
+
+    def test_all_unhealthy_does_not_fast_fail_when_retry_soon(self):
+        backends = _make_backends(3)
+        server = BridgeServer(
+            adapter=StubLauncher(),
+            provider=backends[0][0],
+            resolved_key="key-0",
+            model="test-model",
+            backends=backends,
+        )
+        now = 1000.0
+        for idx in range(3):
+            health = server._backend_health[idx]
+            health["healthy"] = False
+            health["failed_at"] = now
+            health["cooldown"] = 300
+
+        with patch("kitty.bridge.server.time.monotonic", return_value=now + 250):
+            provider, key, model, _config, idx = server._get_next_backend()
+
+        assert idx in {0, 1, 2}
+        assert key == f"key-{idx}"
+        assert model == f"model-{idx}"
+        assert provider is backends[idx][0]
+
+    def test_all_unhealthy_near_retry_selection_is_not_deterministic_oldest(self):
+        backends = _make_backends(4)
+        server = BridgeServer(
+            adapter=StubLauncher(),
+            provider=backends[0][0],
+            resolved_key="key-0",
+            model="test-model",
+            backends=backends,
+        )
+        now = 1000.0
+        for idx in range(4):
+            health = server._backend_health[idx]
+            health["healthy"] = False
+            health["failed_at"] = now - idx
+            health["cooldown"] = 300
+
+        selected = set()
+        with patch("kitty.bridge.server.time.monotonic", return_value=now + 250):
+            for _ in range(100):
+                *_rest, idx = server._get_next_backend()
+                selected.add(idx)
+
+        assert len(selected) > 1
+
+    @pytest.mark.asyncio()
+    async def test_healthz_returns_backend_status(self):
+        backends = _make_backends(2)
+        server = BridgeServer(
+            adapter=StubLauncher(),
+            provider=backends[0][0],
+            resolved_key="key-0",
+            model="test-model",
+            backends=backends,
+        )
+        now = 1000.0
+        server._backend_health[1]["healthy"] = False
+        server._backend_health[1]["failed_at"] = now
+        server._backend_health[1]["cooldown"] = 300
+
+        with patch("kitty.bridge.server.time.monotonic", return_value=now + 10):
+            response = await server._handle_healthz(None)
+
+        assert response.status == 200
+        assert response.text is not None
+        assert '"status": "ok"' in response.text
+        assert '"backends"' in response.text
+        assert '"name": "profile-1"' in response.text
+        assert '"remaining_cooldown": 290' in response.text
 
 
 class TestRandomSelection:
@@ -840,3 +944,163 @@ class TestCustomTransportCloudflareClassification:
         # Verify the backend was marked unhealthy after cloudflare error
         health = server._backend_health[0]
         assert health["healthy"] is False
+
+
+# ── Auth error classification and profile-specific message tests ───────────
+
+
+class AuthFailingCustomProvider(StubProvider):
+    """Custom-transport provider that always raises auth errors."""
+
+    @property
+    def use_custom_transport(self) -> bool:
+        return True
+
+    async def make_request(self, cc_request: dict) -> dict:
+        from kitty.providers.base import ProviderError
+
+        err = ProviderError("Authentication refresh failed: refresh_token_reused")
+        err.http_status = 401
+        raise err
+
+    async def stream_request(self, cc_request: dict, write) -> None:
+        from kitty.providers.base import ProviderError
+
+        err = ProviderError("Authentication refresh failed: refresh_token_reused")
+        err.http_status = 401
+        raise err
+
+
+class TestAuthErrorClassification:
+    """Tests for auth failure classification and profile-specific messaging."""
+
+    def test_provider_error_401_classifies_as_auth(self):
+        """ProviderError with http_status=401 is classified as 'auth'."""
+        from kitty.providers.base import ProviderError
+
+        err = ProviderError("auth failure")
+        err.http_status = 401
+        assert BridgeServer._provider_error_failure_kind(err) == "auth"
+
+    def test_provider_error_429_classifies_as_rate_limit(self):
+        """ProviderError with http_status=429 is classified as 'rate_limit'."""
+        from kitty.providers.base import ProviderError
+
+        err = ProviderError("rate limited")
+        err.http_status = 429
+        assert BridgeServer._provider_error_failure_kind(err) == "rate_limit"
+
+    def test_provider_error_0_classifies_as_hard(self):
+        """ProviderError with default http_status=0 is classified as 'hard'."""
+        from kitty.providers.base import ProviderError
+
+        err = ProviderError("some error")
+        assert BridgeServer._provider_error_failure_kind(err) == "hard"
+
+    def test_custom_transport_auth_error_message_includes_backend_profile_name(self):
+        """Auth errors surface the backend profile name with re-login guidance."""
+        from kitty.providers.base import ProviderError
+
+        backends = _make_backends(2)
+        server = BridgeServer(
+            adapter=StubLauncher(),
+            provider=backends[0][0],
+            resolved_key="key-0",
+            model="test-model",
+            backends=backends,
+        )
+        server._current_backend_idx = 1
+
+        err = ProviderError("Authentication refresh failed: refresh_token_reused")
+        err.http_status = 401
+
+        msg = server._custom_transport_error_message(err)
+
+        assert "profile-1" in msg, f"Expected profile name in message, got: {msg}"
+        assert "kitty auth openai" in msg, f"Expected re-login command in message, got: {msg}"
+        assert "refresh_token_reused" in msg
+
+    def test_non_auth_error_message_not_rewritten(self):
+        """Non-auth errors pass through unchanged."""
+        from kitty.providers.base import ProviderError
+
+        backends = _make_backends(2)
+        server = BridgeServer(
+            adapter=StubLauncher(),
+            provider=backends[0][0],
+            resolved_key="key-0",
+            model="test-model",
+            backends=backends,
+        )
+        server._current_backend_idx = 1
+
+        err = ProviderError("rate limited")
+        err.http_status = 429
+
+        msg = server._custom_transport_error_message(err)
+        assert msg == "rate limited"
+
+
+class TestRateLimitRetryAfter:
+    """Tests for ProviderError.retry_after propagation through the bridge."""
+
+    def test_provider_error_has_retry_after_default_none(self):
+        from kitty.providers.base import ProviderError
+
+        err = ProviderError("some error")
+        assert err.retry_after is None
+
+    def test_provider_error_retry_after_settable(self):
+        from kitty.providers.base import ProviderError
+
+        err = ProviderError("rate limited")
+        err.retry_after = 42
+        assert err.retry_after == 42
+
+    def test_rate_limit_failure_kind_uses_retry_after_cooldown(self):
+        """When a ProviderError with http_status=429 carries retry_after, the
+        bridge should use that value as the backend cooldown instead of the
+        default 300s."""
+        backends = _make_backends(2)
+        server = BridgeServer(
+            adapter=StubLauncher(),
+            provider=backends[0][0],
+            resolved_key="key-0",
+            model="test-model",
+            backends=backends,
+        )
+        server._current_backend_idx = 0
+
+        err = ProviderError("rate limited")
+        err.http_status = 429
+        err.retry_after = 17
+
+        kind = server._provider_error_failure_kind(err)
+        assert kind == "rate_limit"
+
+        server._mark_backend_unhealthy(
+            0,
+            failure_kind=kind,
+            cooldown=err.retry_after,
+        )
+        health = server._backend_health[0]
+        assert health["healthy"] is False
+        assert health["cooldown"] == 17
+
+    def test_rate_limit_without_retry_after_uses_default_cooldown(self):
+        """When retry_after is not set, the default backend_cooldown is used."""
+        backends = _make_backends(2)
+        server = BridgeServer(
+            adapter=StubLauncher(),
+            provider=backends[0][0],
+            resolved_key="key-0",
+            model="test-model",
+            backends=backends,
+        )
+
+        err = ProviderError("rate limited")
+        err.http_status = 429
+
+        server._mark_backend_unhealthy(0, failure_kind="rate_limit")
+        health = server._backend_health[0]
+        assert health["cooldown"] == 300

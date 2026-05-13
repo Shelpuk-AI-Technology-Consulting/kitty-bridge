@@ -320,13 +320,31 @@ class MessagesTranslator:
         return ""
 
     @staticmethod
-    def _fallback_assistant_text(message: dict | None = None) -> str:
+    def _fallback_assistant_text(message: dict | None = None, *, context: dict | None = None) -> str:
         """Return an actionable fallback when upstream emits empty assistant output."""
         if isinstance(message, dict):
             refusal = message.get("refusal")
             if isinstance(refusal, str) and refusal.strip():
                 return refusal
-        return _EMPTY_ASSISTANT_FALLBACK_TEXT
+        if not context:
+            return _EMPTY_ASSISTANT_FALLBACK_TEXT
+        parts = [_EMPTY_ASSISTANT_FALLBACK_TEXT]
+        provider = context.get("provider")
+        model = context.get("model")
+        attempts = context.get("attempts")
+        retry_after = context.get("retry_after")
+        if provider or model or attempts is not None:
+            meta = []
+            if provider:
+                meta.append(str(provider))
+            if model:
+                meta.append(str(model))
+            if attempts is not None:
+                meta.append(f"after {attempts} attempts")
+            parts.append(f"({', '.join(meta)})" if meta else "")
+        if retry_after is not None:
+            parts.append(f"Retry in ~{retry_after}s.")
+        return " ".join(p for p in parts if p)
 
     def _emit_message_start_if_needed(self, events: list[str], message_id: str, model: str) -> None:
         """Emit `message_start` once per streaming response."""
@@ -347,7 +365,7 @@ class MessagesTranslator:
 
     # ── Response translation (sync) ──────────────────────────────────────
 
-    def translate_response(self, cc_response: dict) -> dict:
+    def translate_response(self, cc_response: dict, *, context: dict | None = None) -> dict:
         """Convert a Chat Completions response to a Messages API response."""
         choices = cc_response.get("choices") or [{}]
         choice = choices[0]
@@ -387,7 +405,7 @@ class MessagesTranslator:
         # Defensive fallback: never emit thinking-only or empty assistant output.
         has_text = any(b.get("type") == "text" for b in content)
         if not has_text and not tool_calls:
-            content.append({"type": "text", "text": self._fallback_assistant_text(message)})
+            content.append({"type": "text", "text": self._fallback_assistant_text(message, context=context)})
             self._last_was_empty = True
         else:
             self._last_was_empty = False

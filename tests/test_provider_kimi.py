@@ -180,3 +180,136 @@ class TestKimiCodeAdapter:
             temperature=0,
         )
         assert result["temperature"] == 0
+
+
+class TestKimiThinkingEnabledToolCallGap:
+    """Regression tests for: when thinking mode is enabled, assistant messages
+    with tool_calls but no reasoning_content must get an empty reasoning_content
+    injected.  Kimi rejects requests with:
+      'thinking is enabled but reasoning_content is missing in assistant tool
+       call message at index N'
+    """
+
+    def setup_method(self):
+        self.adapter = KimiCodeAdapter()
+
+    def test_thinking_enabled_tool_call_without_reasoning_gets_empty_reasoning(self):
+        """Assistant message with tool_calls but no reasoning_content gets
+        empty reasoning_content injected when _thinking_enabled is True."""
+        cc = {
+            "model": "kimi-for-coding",
+            "messages": [
+                {"role": "user", "content": "check the weather"},
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "call_001",
+                            "type": "function",
+                            "function": {"name": "get_weather", "arguments": '{"city": "London"}'},
+                        }
+                    ],
+                },
+                {"role": "tool", "tool_call_id": "call_001", "content": "Sunny, 22C"},
+                {"role": "user", "content": "thanks"},
+            ],
+            "stream": True,
+            "_thinking_enabled": True,
+        }
+        result = self.adapter.translate_to_upstream(cc)
+
+        # Internal keys must be stripped
+        assert "_thinking_enabled" not in result
+
+        # Assistant message with tool_calls must now have reasoning_content
+        assistant_msg = result["messages"][1]
+        assert assistant_msg["role"] == "assistant"
+        assert "reasoning_content" in assistant_msg
+        assert assistant_msg["reasoning_content"] == ""
+        assert assistant_msg["tool_calls"] is not None
+
+    def test_thinking_enabled_text_only_assistant_gets_empty_reasoning(self):
+        """Assistant message with text content but no reasoning_content also
+        gets empty reasoning_content when _thinking_enabled is True."""
+        cc = {
+            "model": "kimi-for-coding",
+            "messages": [
+                {"role": "user", "content": "hello"},
+                {"role": "assistant", "content": "Hi there!"},
+                {"role": "user", "content": "bye"},
+            ],
+            "stream": False,
+            "_thinking_enabled": True,
+        }
+        result = self.adapter.translate_to_upstream(cc)
+
+        assistant_msg = result["messages"][1]
+        assert assistant_msg["reasoning_content"] == ""
+
+    def test_existing_reasoning_content_not_overwritten(self):
+        """Assistant messages that already have reasoning_content are left as-is."""
+        cc = {
+            "model": "kimi-for-coding",
+            "messages": [
+                {"role": "user", "content": "think about it"},
+                {
+                    "role": "assistant",
+                    "content": "The answer is 42",
+                    "reasoning_content": "I analyzed the problem...",
+                },
+                {"role": "user", "content": "thanks"},
+            ],
+            "stream": False,
+            "_thinking_enabled": True,
+        }
+        result = self.adapter.translate_to_upstream(cc)
+
+        assistant_msg = result["messages"][1]
+        assert assistant_msg["reasoning_content"] == "I analyzed the problem..."
+
+    def test_no_injection_when_thinking_disabled(self):
+        """No reasoning_content is injected when _thinking_enabled is not set."""
+        cc = {
+            "model": "kimi-for-coding",
+            "messages": [
+                {"role": "user", "content": "check"},
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "call_002",
+                            "type": "function",
+                            "function": {"name": "run", "arguments": "{}"},
+                        }
+                    ],
+                },
+                {"role": "tool", "tool_call_id": "call_002", "content": "done"},
+                {"role": "user", "content": "ok"},
+            ],
+            "stream": False,
+        }
+        result = self.adapter.translate_to_upstream(cc)
+
+        assistant_msg = result["messages"][1]
+        assert "reasoning_content" not in assistant_msg
+
+    def test_non_assistant_messages_not_modified(self):
+        """User and tool messages are never modified by reasoning_content injection."""
+        cc = {
+            "model": "kimi-for-coding",
+            "messages": [
+                {"role": "user", "content": "hello"},
+                {"role": "assistant", "content": "Hi", "tool_calls": []},
+                {"role": "tool", "tool_call_id": "t1", "content": "result"},
+            ],
+            "stream": False,
+            "_thinking_enabled": True,
+        }
+        result = self.adapter.translate_to_upstream(cc)
+
+        assert result["messages"][0]["role"] == "user"
+        assert "reasoning_content" not in result["messages"][0]
+        assert result["messages"][2]["role"] == "tool"
+        assert "reasoning_content" not in result["messages"][2]

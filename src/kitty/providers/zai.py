@@ -65,10 +65,17 @@ class _ZaiBase(ProviderAdapter):
         result = {k: v for k, v in cc_request.items() if k not in self._INTERNAL_KEYS}
         effort = cc_request.get("_reasoning_effort")
         thinking = cc_request.get("_thinking_enabled")
-        if effort and effort != "none" or thinking:
+        thinking_active = (effort and effort != "none") or thinking
+        if thinking_active:
             result["thinking"] = {"type": "enabled"}
         elif thinking is False or effort == "none":
             result["thinking"] = {"type": "disabled"}
+
+        if thinking_active:
+            messages = result.get("messages")
+            if messages:
+                result["messages"] = self._inject_empty_reasoning_content(messages)
+
         return result
 
 

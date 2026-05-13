@@ -260,13 +260,24 @@ class TestFailureWeightedSelection:
         assert "key-1" not in keys
 
     def test_all_unhealthy_still_returns_backend(self):
-        """When ALL backends are unhealthy, return next one anyway (let it fail naturally)."""
-        server = _make_server(2, cooldown=9999)
+        """When ALL backends are unhealthy but cooldown is near-expiry, return one anyway."""
+        server = _make_server(2, cooldown=30)
         server._mark_backend_unhealthy(0)
         server._mark_backend_unhealthy(1)
 
         _, key, _, _, _ = server._get_next_backend()
         assert key in ("key-0", "key-1")
+
+    def test_all_unhealthy_fast_fails_when_cooldown_far_future(self):
+        """When ALL backends are unhealthy with long cooldowns, raise fast-fail error."""
+        from kitty.bridge.server import AllBackendsUnhealthyError
+
+        server = _make_server(2, cooldown=9999)
+        server._mark_backend_unhealthy(0)
+        server._mark_backend_unhealthy(1)
+
+        with pytest.raises(AllBackendsUnhealthyError):
+            server._get_next_backend()
 
     def test_non_balancing_unaffected(self):
         """Non-balancing mode (no backends) works as before."""
@@ -730,30 +741,33 @@ class TestTransportErrorCooldown:
 class TestLeastRecentlyFailedBackend:
     """When all backends are unhealthy, prefer the one that failed longest ago."""
 
-    def test_prefers_least_recently_failed(self):
-        server = _make_server(3, cooldown=9999)
-        # Mark all unhealthy in sequence with small time gaps
+    def test_prefers_near_expiry_backends_are_randomized(self):
+        """When all backends unhealthy but within fast-fail threshold, selection is randomized."""
+        server = _make_server(3, cooldown=30)
         server._mark_backend_unhealthy(0)
-        server._backend_health[0]["failed_at"] = time.monotonic() - 10  # 10s ago
+        server._backend_health[0]["failed_at"] = time.monotonic() - 10
         server._mark_backend_unhealthy(1)
-        server._backend_health[1]["failed_at"] = time.monotonic() - 5  # 5s ago
+        server._backend_health[1]["failed_at"] = time.monotonic() - 5
         server._mark_backend_unhealthy(2)
-        server._backend_health[2]["failed_at"] = time.monotonic() - 1  # 1s ago
+        server._backend_health[2]["failed_at"] = time.monotonic() - 1
 
-        # Should always pick backend 0 (failed longest ago)
-        for _ in range(10):
+        selected = set()
+        for _ in range(50):
             _, key, _, _, _ = server._get_next_backend()
-            assert key == "key-0", f"Expected key-0 (least recently failed), got {key}"
+            selected.add(key)
+
+        assert len(selected) > 1
 
     def test_two_backends_picks_older(self):
-        server = _make_server(2, cooldown=9999)
+        """With cooldown=0 and failed_at in the past, both are eligible."""
+        server = _make_server(2, cooldown=0)
         server._mark_backend_unhealthy(0)
         server._backend_health[0]["failed_at"] = time.monotonic() - 20
         server._mark_backend_unhealthy(1)
         server._backend_health[1]["failed_at"] = time.monotonic() - 1
 
         _, key, _, _, _ = server._get_next_backend()
-        assert key == "key-0"
+        assert key in ("key-0", "key-1")
 
 
 class TestFamilyCooldown:

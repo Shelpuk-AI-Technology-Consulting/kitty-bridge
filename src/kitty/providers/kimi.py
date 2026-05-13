@@ -71,6 +71,24 @@ class KimiCodeAdapter(ProviderAdapter):
             result["tool_calls"] = message["tool_calls"]
         return result
 
+    def translate_to_upstream(self, cc_request: dict) -> dict:
+        """Translate CC request to Kimi upstream format.
+
+        Strips internal keys.  When ``_thinking_enabled`` is True, injects
+        an empty ``reasoning_content`` into assistant messages that lack it —
+        Kimi rejects requests where thinking-mode assistant messages have no
+        ``reasoning_content``.
+        """
+        thinking_enabled = cc_request.get("_thinking_enabled")
+        result = {k: v for k, v in cc_request.items() if k not in self._INTERNAL_KEYS}
+
+        if thinking_enabled:
+            messages = result.get("messages")
+            if messages:
+                result["messages"] = self._inject_empty_reasoning_content(messages)
+
+        return result
+
     def map_error(self, status_code: int, body: dict) -> Exception:
         error_msg = body.get("error", {}) if isinstance(body.get("error"), dict) else body.get("error", "Unknown error")
         return ProviderError(f"Kimi Code error {status_code}: {error_msg}")

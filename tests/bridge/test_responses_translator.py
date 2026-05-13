@@ -356,7 +356,7 @@ class TestTranslateRequest:
         assert "The answer is 4." in output_text
 
     def test_strip_thinking_tags_entire_content(self):
-        """When content is only thinking tags, no text output item is produced."""
+        """When content is only thinking tags, fallback text is emitted."""
         cc_response = {
             "id": "chatcmpl-456",
             "model": "MiniMax-M2.7",
@@ -373,9 +373,10 @@ class TestTranslateRequest:
             "usage": {"prompt_tokens": 5, "completion_tokens": 10, "total_tokens": 15},
         }
         result = self.t.translate_response(cc_response)
-        # No text output item since all content was thinking tags
         text_items = [o for o in result["output"] if o["type"] == "message"]
-        assert len(text_items) == 0
+        assert len(text_items) == 1
+        assert "retry" in text_items[0]["content"][0]["text"].lower()
+        assert self.t.response_was_empty
 
 
 # ── translate_response ──────────────────────────────────────────────────────

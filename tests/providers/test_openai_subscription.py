@@ -352,6 +352,33 @@ class TestMapError:
         assert "Rate limited" in str(error)
         assert error.http_status == 429
 
+    def test_map_error_429_with_retry_after_header(self, adapter: OpenAISubscriptionAdapter) -> None:
+        """429 error gets retry_after set when response has Retry-After header."""
+        error = adapter.map_error(429, {"error": {"message": "Rate limited"}})
+        assert error.http_status == 429
+        assert error.retry_after is None
+
+        # Simulate attaching Retry-After from response headers
+        mock_resp = unittest.mock.MagicMock()
+        mock_resp.headers = {"Retry-After": "17"}
+        adapter._attach_retry_after(error, mock_resp)
+        assert error.retry_after == 17
+
+    def test_map_error_429_without_retry_after_header(self, adapter: OpenAISubscriptionAdapter) -> None:
+        """429 error without Retry-After header leaves retry_after as None."""
+        error = adapter.map_error(429, {"error": {"message": "Rate limited"}})
+        mock_resp = unittest.mock.MagicMock()
+        mock_resp.headers = {}
+        adapter._attach_retry_after(error, mock_resp)
+        assert error.retry_after is None
+
+    def test_parse_retry_after_accepts_float_seconds(self, adapter: OpenAISubscriptionAdapter) -> None:
+        assert adapter._parse_retry_after("1.5") == 1
+
+    def test_parse_retry_after_has_one_second_floor(self, adapter: OpenAISubscriptionAdapter) -> None:
+        assert adapter._parse_retry_after("0") == 1
+        assert adapter._parse_retry_after("-10") == 1
+
     def test_map_error_400_includes_status(self, adapter: OpenAISubscriptionAdapter) -> None:
         error = adapter.map_error(400, {"error": {"message": "Bad request"}})
         assert "400" in str(error)
@@ -1646,6 +1673,83 @@ class TestMakeRequestCfRetry:
     """Test that make_request retries once on CF 403 before giving up."""
 
     @pytest.mark.asyncio()
+    async def test_reloads_session_and_resets_curl_after_first_cf_block(
+        self,
+        adapter: OpenAISubscriptionAdapter,
+        fresh_session: tuple[OAuthSession, Path],
+        tmp_path: Path,
+    ) -> None:
+        """First CF 403 should trigger a session reload and curl-session reset.
+
+        The first retry should use a fresh session from disk instead of the cached
+        one, and it should recreate the curl session to refresh TLS/cookies.
+        """
+        _, session_path = fresh_session
+        cc_request = {
+            "model": "gpt-5.4",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": False,
+            "_resolved_key": str(session_path),
+        }
+
+        cf_resp = _make_mock_codex_response(status_code=403, text=_CLOUDFLARE_HTML)
+        sse_body = (
+            b'data: {"type":"response.completed","response":'
+            b'{"model":"gpt-5.4","status":"completed"}}\n\n'
+            b"data: [DONE]\n\n"
+        )
+        ok_resp = _make_mock_codex_response(status_code=200, content=sse_body)
+
+        mock_session = unittest.mock.AsyncMock()
+        mock_session.post = unittest.mock.AsyncMock(side_effect=[cf_resp, ok_resp])
+
+        fresh_disk_session = OAuthSession(
+            client_id="app_test",
+            access_token="at_fresh",
+            refresh_token="rt_fresh",
+            id_token=_make_id_token("acct-1234"),
+            api_key="api_key_fresh",
+            access_token_expires_at=time.time() + 3600,
+            api_key_expires_at=time.time() + 3600,
+            _file_path=str(session_path),
+        )
+        fresh_disk_session.save()
+
+        reload_calls: list[str] = []
+        reset_calls = 0
+        original_load = adapter._load_session
+
+        def _tracked_load(cc_req: dict) -> OAuthSession:
+            reload_calls.append(cc_req["_resolved_key"])
+            return original_load(cc_req)
+
+        def _tracked_reset() -> None:
+            nonlocal reset_calls
+            reset_calls += 1
+            adapter._curl_session_instance = None
+
+        with (
+            unittest.mock.patch.object(adapter, "_load_session", side_effect=_tracked_load),
+            unittest.mock.patch.object(adapter, "_reset_curl_session", side_effect=_tracked_reset),
+            unittest.mock.patch.object(
+                OpenAISubscriptionAdapter,
+                "_curl_session",
+                new_callable=unittest.mock.PropertyMock,
+                return_value=mock_session,
+            ),
+        ):
+            mock_aiohttp_session = unittest.mock.MagicMock()
+            mock_aiohttp_session.__aenter__ = unittest.mock.AsyncMock(return_value=mock_aiohttp_session)
+            mock_aiohttp_session.__aexit__ = unittest.mock.AsyncMock(return_value=False)
+            with unittest.mock.patch("aiohttp.ClientSession", return_value=mock_aiohttp_session):
+                result = await adapter.make_request(cc_request)
+
+        assert mock_session.post.await_count == 2
+        assert len(reload_calls) >= 2
+        assert reset_calls == 1
+        assert result["model"] == "gpt-5.4"
+
+    @pytest.mark.asyncio()
     async def test_retries_on_cf_block_then_succeeds(
         self,
         adapter: OpenAISubscriptionAdapter,
@@ -2544,3 +2648,241 @@ class TestStreamRequest401Recovery:
 
         assert mock_session.post.await_count == 3
         assert written == []
+
+
+# ── OAuth session cache tests ─────────────────────────────────────────────
+
+
+class TestOAuthSessionCache:
+    """Tests for the adapter-level session cache that prevents concurrent
+    refresh_token_reused errors by sharing one OAuthSession instance (and
+    its _refresh_lock) across requests for the same session file.
+    """
+
+    def test_load_session_returns_cached_instance_for_unchanged_file(
+        self,
+        adapter: OpenAISubscriptionAdapter,
+        fresh_session: tuple[OAuthSession, Path],
+    ) -> None:
+        """Two consecutive loads return the same cached OAuthSession object."""
+        _, session_path = fresh_session
+        cc_req: dict = {"_resolved_key": str(session_path)}
+
+        first = adapter._load_session(cc_req)
+        second = adapter._load_session(cc_req)
+
+        assert first is second, "Expected same OAuthSession instance from cache"
+        assert first._refresh_lock is second._refresh_lock
+
+    def test_load_session_reloads_when_file_changes_on_disk(
+        self,
+        adapter: OpenAISubscriptionAdapter,
+        fresh_session: tuple[OAuthSession, Path],
+    ) -> None:
+        """Cache detects external session file changes and reloads."""
+        original_session, session_path = fresh_session
+        cc_req: dict = {"_resolved_key": str(session_path)}
+
+        first = adapter._load_session(cc_req)
+        assert first.access_token == "at_fresh"
+
+        # Simulate external re-login: write a new session to the same file
+        new_session = OAuthSession(
+            client_id="app_test",
+            access_token="at_externally_updated",
+            refresh_token="rt_new",
+            id_token=_make_id_token("acct-1234"),
+            api_key=None,
+            access_token_expires_at=time.time() + 3600,
+            api_key_expires_at=time.time() + 3600,
+            _file_path=str(session_path),
+        )
+        new_session.save()
+
+        # Force mtime change (some filesystems have coarse granularity)
+        os.utime(str(session_path), ns=(0, 0))
+
+        reloaded = adapter._load_session(cc_req)
+
+        assert reloaded is not first, "Expected a new instance after file change"
+        assert reloaded.access_token == "at_externally_updated"
+
+    @pytest.mark.asyncio
+    async def test_concurrent_requests_share_one_refresh(
+        self,
+        adapter: OpenAISubscriptionAdapter,
+        tmp_path: Path,
+    ) -> None:
+        """Two concurrent get_valid_api_key calls on cached sessions trigger
+        only one OAuth refresh (the shared _refresh_lock serializes them).
+        """
+        now = time.time()
+        id_token = _make_id_token("acct-1234")
+        session = OAuthSession(
+            client_id="app_test",
+            access_token="at_expired",
+            refresh_token="rt_shared",
+            id_token=id_token,
+            api_key=None,
+            access_token_expires_at=now - 100,  # expired
+            api_key_expires_at=now - 100,
+            _file_path=str(tmp_path / "oauth_session.json"),
+        )
+        session.save()
+
+        cc_req: dict = {"_resolved_key": str(tmp_path / "oauth_session.json")}
+
+        s1 = adapter._load_session(cc_req)
+        s2 = adapter._load_session(cc_req)
+        assert s1 is s2
+
+        refresh_count = 0
+
+        async def _counting_refresh(self_refresh, http):
+            nonlocal refresh_count
+            refresh_count += 1
+            s1.access_token = "at_refreshed"
+            s1.access_token_expires_at = time.time() + 3600
+            s1.api_key = "ak_refreshed"
+            s1.api_key_expires_at = time.time() + 3600
+            s1.refresh_token = "rt_rotated"
+
+        with unittest.mock.patch.object(type(s1), "_refresh", _counting_refresh):
+            import asyncio
+
+            results = await asyncio.gather(
+                s1.get_valid_api_key(unittest.mock.AsyncMock()),
+                s2.get_valid_api_key(unittest.mock.AsyncMock()),
+            )
+
+        assert refresh_count == 1, f"Expected 1 refresh, got {refresh_count}"
+        assert results[0] == "ak_refreshed"
+        assert results[1] == "ak_refreshed"
+
+
+class TestOAuthRefreshErrorClassification:
+    """Tests for OAuthRefreshFailed being raised as ProviderError with
+    http_status=401 so the bridge classifies auth failures correctly.
+    """
+
+    @pytest.mark.asyncio
+    async def test_make_request_refresh_failure_sets_http_status_401(
+        self,
+        adapter: OpenAISubscriptionAdapter,
+        fresh_session: tuple[OAuthSession, Path],
+    ) -> None:
+        """OAuthRefreshFailed in make_request raises ProviderError with http_status=401."""
+        from kitty.providers.base import ProviderError
+
+        _, session_path = fresh_session
+        now = time.time()
+        expired = OAuthSession(
+            client_id="app_test",
+            access_token="at_expired",
+            refresh_token="rt_expired",
+            id_token=_make_id_token("acct-1234"),
+            api_key=None,
+            access_token_expires_at=now - 100,
+            api_key_expires_at=now - 100,
+            _file_path=str(session_path),
+        )
+        expired.save()
+
+        cc_req: dict = {
+            "model": "gpt-5.4",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": False,
+            "_resolved_key": str(session_path),
+            "_provider_config": {},
+        }
+
+        # Mock aiohttp that returns refresh_token_reused error from OAuth endpoint
+        mock_aiohttp = unittest.mock.MagicMock()
+        mock_aiohttp.__aenter__ = unittest.mock.AsyncMock(return_value=mock_aiohttp)
+        mock_aiohttp.__aexit__ = unittest.mock.AsyncMock(return_value=False)
+
+        refresh_resp = unittest.mock.MagicMock()
+        refresh_resp.status = 400
+        refresh_resp.json = unittest.mock.AsyncMock(
+            return_value={
+                "error": "refresh_token_reused",
+                "error_description": "Refresh token has already been used",
+            }
+        )
+        refresh_cm = unittest.mock.MagicMock()
+        refresh_cm.__aenter__ = unittest.mock.AsyncMock(return_value=refresh_resp)
+        refresh_cm.__aexit__ = unittest.mock.AsyncMock(return_value=False)
+        mock_aiohttp.post.return_value = refresh_cm
+
+        with (
+            unittest.mock.patch("aiohttp.ClientSession", return_value=mock_aiohttp),
+            pytest.raises(ProviderError) as exc_info,
+        ):
+            await adapter.make_request(cc_req)
+
+        assert exc_info.value.http_status == 401, (
+            f"Expected http_status=401 for auth failure, got {exc_info.value.http_status}"
+        )
+        assert "refresh_token_reused" in str(exc_info.value)
+
+    @pytest.mark.asyncio
+    async def test_stream_request_refresh_failure_sets_http_status_401(
+        self,
+        adapter: OpenAISubscriptionAdapter,
+        fresh_session: tuple[OAuthSession, Path],
+    ) -> None:
+        """OAuthRefreshFailed in stream_request raises ProviderError with http_status=401."""
+        from kitty.providers.base import ProviderError
+
+        _, session_path = fresh_session
+        now = time.time()
+        expired = OAuthSession(
+            client_id="app_test",
+            access_token="at_expired",
+            refresh_token="rt_expired",
+            id_token=_make_id_token("acct-1234"),
+            api_key=None,
+            access_token_expires_at=now - 100,
+            api_key_expires_at=now - 100,
+            _file_path=str(session_path),
+        )
+        expired.save()
+
+        cc_req: dict = {
+            "model": "gpt-5.4",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": True,
+            "_resolved_key": str(session_path),
+            "_provider_config": {},
+        }
+
+        mock_aiohttp = unittest.mock.MagicMock()
+        mock_aiohttp.__aenter__ = unittest.mock.AsyncMock(return_value=mock_aiohttp)
+        mock_aiohttp.__aexit__ = unittest.mock.AsyncMock(return_value=False)
+
+        refresh_resp = unittest.mock.MagicMock()
+        refresh_resp.status = 400
+        refresh_resp.json = unittest.mock.AsyncMock(
+            return_value={
+                "error": "refresh_token_reused",
+                "error_description": "Refresh token has already been used",
+            }
+        )
+        refresh_cm = unittest.mock.MagicMock()
+        refresh_cm.__aenter__ = unittest.mock.AsyncMock(return_value=refresh_resp)
+        refresh_cm.__aexit__ = unittest.mock.AsyncMock(return_value=False)
+        mock_aiohttp.post.return_value = refresh_cm
+
+        written: list[bytes] = []
+
+        async def mock_write(data: bytes) -> None:
+            written.append(data)
+
+        with (
+            unittest.mock.patch("aiohttp.ClientSession", return_value=mock_aiohttp),
+            pytest.raises(ProviderError) as exc_info,
+        ):
+            await adapter.stream_request(cc_req, mock_write)
+
+        assert exc_info.value.http_status == 401
+        assert "refresh_token_reused" in str(exc_info.value)

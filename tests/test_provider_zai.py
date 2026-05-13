@@ -210,3 +210,76 @@ class TestZaiCodingAdapter:
     def test_normalize_model_name_inherits_from_base(self):
         assert self.adapter.normalize_model_name("zai/glm-5.1") == "glm-5.1"
         assert self.adapter.normalize_model_name("glm-5.1") == "glm-5.1"
+
+
+class TestZaiThinkingEnabledToolCallGap:
+    """Regression tests for: when thinking mode is enabled, assistant messages
+    with tool_calls but no reasoning_content must get an empty reasoning_content
+    injected.  Z.AI sends top-level ``thinking: enabled`` and its upstream may
+    require reasoning_content on all assistant messages.
+    """
+
+    def setup_method(self):
+        self.adapter = ZaiCodingAdapter()
+
+    def test_thinking_enabled_tool_call_gets_empty_reasoning(self):
+        cc = {
+            "model": "glm-5.1",
+            "messages": [
+                {"role": "user", "content": "check"},
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {"id": "call_001", "type": "function", "function": {"name": "run", "arguments": "{}"}},
+                    ],
+                },
+                {"role": "tool", "tool_call_id": "call_001", "content": "done"},
+                {"role": "user", "content": "ok"},
+            ],
+            "stream": True,
+            "_thinking_enabled": True,
+        }
+        result = self.adapter.translate_to_upstream(cc)
+
+        assert "_thinking_enabled" not in result
+        assert result["thinking"] == {"type": "enabled"}
+
+        assistant_msg = result["messages"][1]
+        assert assistant_msg["reasoning_content"] == ""
+
+    def test_reasoning_effort_alone_gets_empty_reasoning(self):
+        cc = {
+            "model": "glm-5.1",
+            "messages": [
+                {"role": "user", "content": "think"},
+                {"role": "assistant", "content": "answer"},
+            ],
+            "stream": False,
+            "_reasoning_effort": "low",
+        }
+        result = self.adapter.translate_to_upstream(cc)
+
+        assert result["thinking"] == {"type": "enabled"}
+        assert result["messages"][1]["reasoning_content"] == ""
+
+    def test_no_injection_when_thinking_disabled(self):
+        cc = {
+            "model": "glm-5.1",
+            "messages": [
+                {"role": "user", "content": "hi"},
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {"id": "c1", "type": "function", "function": {"name": "x", "arguments": "{}"},
+                        }
+                    ],
+                },
+                {"role": "tool", "tool_call_id": "c1", "content": "ok"},
+            ],
+            "stream": False,
+        }
+        result = self.adapter.translate_to_upstream(cc)
+
+        assert "reasoning_content" not in result["messages"][1]

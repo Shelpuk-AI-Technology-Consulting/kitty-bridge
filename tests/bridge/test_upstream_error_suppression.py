@@ -339,7 +339,7 @@ class TestAuthFailureBlacklisting:
                     status=401,
                     payload={"error": {"message": "Unauthorized"}},
                 )
-                m.post("https://api1.example.com/v1/chat/completions", payload=UPSTREAM_OK)
+                m.post("https://api1.example.com/v1/chat/completions", payload=UPSTREAM_OK, repeat=True)
 
                 async with (
                     aiohttp.ClientSession() as session,

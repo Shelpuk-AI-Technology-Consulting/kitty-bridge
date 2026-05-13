@@ -455,6 +455,51 @@ class TestTranslateResponse:
         assert result["content"][0]["type"] == "text"
         assert result["content"][0]["text"] == "Policy refusal from upstream"
 
+    def test_empty_assistant_output_with_context_includes_provider_model(self):
+        cc_response = {
+            "id": "chatcmpl-empty",
+            "model": "gpt-4o",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {"role": "assistant", "content": None},
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {"prompt_tokens": 42, "completion_tokens": 0, "total_tokens": 42},
+        }
+
+        result = self.t.translate_response(
+            cc_response,
+            context={"provider": "openai", "model": "gpt-4o", "attempts": 3},
+        )
+        text = result["content"][0]["text"]
+        assert "retry" in text.lower()
+        assert "/clear" in text
+        assert "openai" in text.lower()
+        assert "gpt-4o" in text
+
+    def test_empty_assistant_output_without_context_keeps_default(self):
+        cc_response = {
+            "id": "chatcmpl-empty",
+            "model": "gpt-4o",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {"role": "assistant", "content": None},
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {"prompt_tokens": 42, "completion_tokens": 0, "total_tokens": 42},
+        }
+
+        result = self.t.translate_response(cc_response)
+        text = result["content"][0]["text"]
+        assert text == (
+            "Upstream model returned an empty response. Please retry. "
+            "If the context is full, use /clear to reset the conversation."
+        )
+
     def test_response_with_reasoning_content_mapped_to_thinking_block(self):
         """Chat Completions responses with reasoning_content must be mapped
         to thinking blocks in Messages API."""

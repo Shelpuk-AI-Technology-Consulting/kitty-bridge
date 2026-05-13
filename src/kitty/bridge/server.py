@@ -67,6 +67,16 @@ _RATE_LIMIT_PATTERNS = ("limit exhaust", "rate limit", "quota exceeded", "usage 
 _CLIENT_MAX_SIZE = 16 * 1024 * 1024  # 16 MiB
 _STREAM_READ_TIMEOUT = 120  # seconds — upstream must respond with first byte within this
 _SINGLE_BACKEND_COOLDOWN_CAP = 30  # seconds — cap cooldown for single-backend profiles
+_ALL_UNHEALTHY_FAST_FAIL_THRESHOLD = 60  # seconds — fast-fail if soonest retry exceeds this
+
+
+class AllBackendsUnhealthyError(Exception):
+    """Raised when all backends are unhealthy and the soonest retry exceeds the fast-fail threshold."""
+
+    def __init__(self, backends: list[dict], retry_after: int) -> None:
+        self.backends = backends
+        self.retry_after = retry_after
+        super().__init__(f"All {len(backends)} backends unhealthy; retry_after={retry_after}s")
 _MAX_REQUEST_CHARS = 4_000_000  # ~1.2M estimated tokens; requests larger than this are rejected
 _COMPACTION_CHAR_THRESHOLD = int(_MAX_REQUEST_CHARS * 0.7)  # Trigger compaction at 70% of max size
 _COMPACTION_TAIL_COUNT = 20  # Minimum number of recent messages to preserve
@@ -263,13 +273,13 @@ class BridgeServer:
                 provider, key, profile = backend
                 return provider, key, profile.model, profile.provider_config, idx  # type: ignore[union-attr]
 
-            # All backends unhealthy — choose the least recently failed backend
-            # so we recover the oldest failure first instead of pure random.
             if require_streaming:
-                logger.warning("All %d backends unhealthy or non-stream-capable, attempting request anyway", n)
+                logger.warning("All %d backends unhealthy or non-stream-capable", n)
             else:
-                logger.warning("All %d backends unhealthy, attempting request anyway", n)
+                logger.warning("All %d backends unhealthy", n)
             candidates = []
+            backend_status = []
+            now = time.monotonic()
             for idx in range(n):
                 provider = self._backends[idx][0]
                 if require_streaming and type(provider).stream_request is ProviderAdapter.stream_request:
@@ -278,12 +288,32 @@ class BridgeServer:
                     continue
                 health = self._backend_health[idx]
                 failed_at = health["failed_at"]
-                if failed_at is None:
-                    candidates.append((0.0, idx))
-                else:
-                    candidates.append((failed_at, idx))
+                remaining = 0
+                if failed_at is not None:
+                    elapsed = now - failed_at
+                    remaining = max(0, int(health["cooldown"] - elapsed))
+                backend_status.append(
+                    {
+                        "name": self._backends[idx][2].name,
+                        "healthy": False,
+                        "remaining_cooldown": remaining,
+                    }
+                )
+                candidates.append((remaining, idx))
             if candidates:
-                _failed_at, idx = min(candidates, key=lambda item: item[0])
+                retry_after = min(remaining for remaining, _idx in candidates)
+                if retry_after > _ALL_UNHEALTHY_FAST_FAIL_THRESHOLD:
+                    raise AllBackendsUnhealthyError(backend_status, retry_after)
+                near_retry_indices = [
+                    idx for remaining, idx in candidates
+                    if remaining <= _ALL_UNHEALTHY_FAST_FAIL_THRESHOLD
+                ]
+                idx = random.choice(near_retry_indices)
+                logger.warning(
+                    "All backends unhealthy, attempting near-expiry backend %s (retry_after=%ds)",
+                    self._backends[idx][2].name,
+                    retry_after,
+                )
             else:
                 idx = random.randint(0, n - 1)
             backend = self._backends[idx]
@@ -425,6 +455,17 @@ class BridgeServer:
             if delta.get("type") == "error" or delta.get("error") is not None:
                 return True
         return False
+
+    def _empty_response_context(self) -> dict:
+        """Build diagnostic context for empty-response fallback text."""
+        ctx: dict = {}
+        if self._backends and 0 <= self._current_backend_idx < len(self._backends):
+            provider = self._backends[self._current_backend_idx][0]
+            ctx["provider"] = provider.provider_type
+            ctx["model"] = self._model
+            total = 1 + len(_EMPTY_RETRY_DELAYS) + len(_EMPTY_FINAL_DELAYS)
+            ctx["attempts"] = total
+        return ctx
 
     @staticmethod
     def _is_empty_cc_response(cc_response: dict) -> bool:
@@ -764,7 +805,27 @@ class BridgeServer:
     # ── Health check ──────────────────────────────────────────────────────
 
     async def _handle_healthz(self, request: web.Request) -> web.Response:
-        return web.json_response({"status": "ok"})
+        if not self._backends:
+            return web.json_response({"status": "ok"})
+        now = time.monotonic()
+        backends = []
+        any_healthy = False
+        for idx, (_provider, _key, profile) in enumerate(self._backends):
+            health = self._backend_health[idx]
+            remaining = 0
+            if not health["healthy"] and health["failed_at"] is not None:
+                remaining = max(0, int(health["cooldown"] - (now - health["failed_at"])))
+            if health["healthy"] or remaining == 0:
+                any_healthy = True
+            backends.append(
+                {
+                    "name": profile.name,
+                    "healthy": health["healthy"],
+                    "remaining_cooldown": remaining,
+                    "failure_count": health.get("failure_count", 0),
+                }
+            )
+        return web.json_response({"status": "ok" if any_healthy else "degraded", "backends": backends})
 
     async def _handle_models(self, request: web.Request) -> web.Response:
         """Return OpenAI-compatible model list."""
@@ -834,12 +895,13 @@ class BridgeServer:
                 status=exc.status,
             )
         except Exception as exc:
+            error_msg = self._custom_transport_error_message(exc)
             return web.json_response(
-                {"error": {"code": "internal_error", "message": str(exc)}},
+                {"error": {"code": "internal_error", "message": error_msg}},
                 status=500,
             )
 
-        result = translator.translate_response(cc_response)
+        result = translator.translate_response(cc_response, context=self._empty_response_context())
         self._log_usage(cc_response.get("usage"))
         if self._backends and self._current_backend_idx >= 0:
             self._mark_backend_healthy(self._current_backend_idx)
@@ -881,9 +943,17 @@ class BridgeServer:
                         self._mark_backend_unhealthy(
                             self._current_backend_idx,
                             failure_kind=kind,
+                            cooldown=self._retry_after_from_exc(exc),
                         )
-                        if self._any_healthy_backend() and attempt < n_backends - 1:
-                            self._select_backend(require_streaming=True)
+                        if self._any_healthy_backend(require_streaming=True) and attempt < n_backends - 1:
+                            try:
+                                self._select_backend(require_streaming=True)
+                            except AllBackendsUnhealthyError as all_unhealthy:
+                                logger.warning(
+                                    "All streaming backends unhealthy (fast-fail), retry_after=%ds",
+                                    all_unhealthy.retry_after,
+                                )
+                                break
                             self._normalize_model(cc_request)
                             self._active_provider.normalize_request(cc_request)
                             cc_request["_resolved_key"] = self._active_key
@@ -896,7 +966,7 @@ class BridgeServer:
                             )
                             continue
                     # All backends exhausted or single-backend mode — surface error
-                    error_msg = str(exc)
+                    error_msg = self._custom_transport_error_message(exc)
                     error_status, _ = self._map_provider_error(exc)
                     error_code = "rate_limit_exhausted" if error_status == 429 else "upstream_error"
                     error_event = responses_format_error(
@@ -1284,12 +1354,13 @@ class BridgeServer:
                 status=exc.status,
             )
         except Exception as exc:
+            error_msg = self._custom_transport_error_message(exc)
             return web.json_response(
-                {"type": "error", "error": {"type": "api_error", "message": str(exc)}},
+                {"type": "error", "error": {"type": "api_error", "message": error_msg}},
                 status=500,
             )
 
-        result = translator.translate_response(cc_response)
+        result = translator.translate_response(cc_response, context=self._empty_response_context())
         self._log_usage(cc_response.get("usage"))
         if self._backends and self._current_backend_idx >= 0:
             self._mark_backend_healthy(self._current_backend_idx)
@@ -1361,8 +1432,15 @@ class BridgeServer:
                             self._current_backend_idx,
                             failure_kind=kind,
                         )
-                        if self._any_healthy_backend() and attempt < max_attempts - 1:
-                            self._select_backend(require_streaming=True)
+                        if self._any_healthy_backend(require_streaming=True) and attempt < max_attempts - 1:
+                            try:
+                                self._select_backend(require_streaming=True)
+                            except AllBackendsUnhealthyError as all_unhealthy:
+                                logger.warning(
+                                    "All streaming backends unhealthy (fast-fail), retry_after=%ds",
+                                    all_unhealthy.retry_after,
+                                )
+                                break
                             self._normalize_model(cc_request)
                             self._active_provider.normalize_request(cc_request)
                             cc_request["_resolved_key"] = self._active_key
@@ -1375,7 +1453,7 @@ class BridgeServer:
                             )
                             continue
                     # All backends exhausted or single-backend mode — surface error
-                    error_msg = str(exc)
+                    error_msg = self._custom_transport_error_message(exc)
                     error_status, error_type = self._map_provider_error(exc)
                     error_data = {"type": "error", "error": {"type": error_type, "message": error_msg}}
                     if sr is None:
@@ -1401,7 +1479,7 @@ class BridgeServer:
                         "Parsed CC response: %s",
                         json.dumps(cc_response, ensure_ascii=False)[:2000],
                     )
-                    result = translator.translate_response(cc_response)
+                    result = translator.translate_response(cc_response, context=self._empty_response_context())
                     logger.debug(
                         "Translated Messages API result: %s",
                         json.dumps(result, ensure_ascii=False)[:2000],
@@ -1962,12 +2040,13 @@ class BridgeServer:
                 status=exc.status,
             )
         except Exception as exc:
+            error_msg = self._custom_transport_error_message(exc)
             return web.json_response(
-                {"error": {"code": 500, "message": str(exc)}},
+                {"error": {"code": 500, "message": error_msg}},
                 status=500,
             )
 
-        result = translator.translate_response(cc_response)
+        result = translator.translate_response(cc_response, context=self._empty_response_context())
         self._log_usage(cc_response.get("usage"))
         if self._backends and self._current_backend_idx >= 0:
             self._mark_backend_healthy(self._current_backend_idx)
@@ -2008,9 +2087,17 @@ class BridgeServer:
                         self._mark_backend_unhealthy(
                             self._current_backend_idx,
                             failure_kind=kind,
+                            cooldown=self._retry_after_from_exc(exc),
                         )
-                        if self._any_healthy_backend() and attempt < n_backends - 1:
-                            self._select_backend(require_streaming=True)
+                        if self._any_healthy_backend(require_streaming=True) and attempt < n_backends - 1:
+                            try:
+                                self._select_backend(require_streaming=True)
+                            except AllBackendsUnhealthyError as all_unhealthy:
+                                logger.warning(
+                                    "All streaming backends unhealthy (fast-fail), retry_after=%ds",
+                                    all_unhealthy.retry_after,
+                                )
+                                break
                             self._normalize_model(cc_request)
                             self._active_provider.normalize_request(cc_request)
                             cc_request["_resolved_key"] = self._active_key
@@ -2023,7 +2110,7 @@ class BridgeServer:
                             )
                             continue
                     # All backends exhausted or single-backend mode — surface error
-                    error_msg = str(exc)
+                    error_msg = self._custom_transport_error_message(exc)
                     error_status, _ = self._map_provider_error(exc)
                     error_code = error_status if error_status != 502 else "stream_error"
                     error_sse = f"data: {json.dumps({'error': {'code': error_code, 'message': error_msg}})}\n\n"
@@ -2347,7 +2434,11 @@ class BridgeServer:
 
         for attempt in range(n_backends):
             if attempt > 0:
-                self._select_backend()
+                try:
+                    self._select_backend()
+                except AllBackendsUnhealthyError:
+                    logger.warning("All backends unhealthy (fast-fail), aborting retry loop")
+                    break
                 self._normalize_model(cc_request)
                 self._active_provider.normalize_request(cc_request)
 
@@ -2385,7 +2476,12 @@ class BridgeServer:
                 last_exc = exc
                 idx = self._current_backend_idx
                 if idx >= 0:
-                    self._mark_backend_unhealthy(idx)
+                    failure_kind = self._provider_error_failure_kind(exc)
+                    self._mark_backend_unhealthy(
+                        idx,
+                        failure_kind=failure_kind,
+                        cooldown=self._retry_after_from_exc(exc),
+                    )
                 logger.info(
                     "Backend attempt %d/%d failed (%s), retrying",
                     attempt + 1,
@@ -2402,7 +2498,11 @@ class BridgeServer:
                 delay,
             )
             await asyncio.sleep(delay)
-            self._select_backend()
+            try:
+                self._select_backend()
+            except AllBackendsUnhealthyError:
+                logger.warning("All backends unhealthy (fast-fail), aborting final retry loop")
+                break
             self._normalize_model(cc_request)
             self._active_provider.normalize_request(cc_request)
             try:
@@ -2425,7 +2525,12 @@ class BridgeServer:
                 last_exc = exc
                 idx = self._current_backend_idx
                 if idx >= 0:
-                    self._mark_backend_unhealthy(idx)
+                    failure_kind = self._provider_error_failure_kind(exc)
+                    self._mark_backend_unhealthy(
+                        idx,
+                        failure_kind=failure_kind,
+                        cooldown=self._retry_after_from_exc(exc),
+                    )
                 continue
 
             if not self._is_empty_cc_response(cc_response):
@@ -2487,8 +2592,9 @@ class BridgeServer:
                 status=exc.status,
             )
         except Exception as exc:
+            error_msg = self._custom_transport_error_message(exc)
             return web.json_response(
-                {"error": {"message": str(exc), "type": "internal_error"}},
+                {"error": {"message": error_msg, "type": "internal_error"}},
                 status=500,
             )
 
@@ -2535,9 +2641,17 @@ class BridgeServer:
                         self._mark_backend_unhealthy(
                             self._current_backend_idx,
                             failure_kind=kind,
+                            cooldown=self._retry_after_from_exc(exc),
                         )
-                        if self._any_healthy_backend() and attempt < n_backends - 1:
-                            self._select_backend(require_streaming=True)
+                        if self._any_healthy_backend(require_streaming=True) and attempt < n_backends - 1:
+                            try:
+                                self._select_backend(require_streaming=True)
+                            except AllBackendsUnhealthyError as all_unhealthy:
+                                logger.warning(
+                                    "All streaming backends unhealthy (fast-fail), retry_after=%ds",
+                                    all_unhealthy.retry_after,
+                                )
+                                break
                             self._normalize_model(cc_request)
                             self._active_provider.normalize_request(cc_request)
                             cc_request["_resolved_key"] = self._active_key
@@ -3389,6 +3503,33 @@ class BridgeServer:
         if _is_transport_error(exc):
             return "transport"
         return "hard"
+
+    @staticmethod
+    def _retry_after_from_exc(exc: Exception) -> int | None:
+        """Extract a retry-after cooldown from a ProviderError, if present."""
+        if isinstance(exc, ProviderError):
+            return getattr(exc, "retry_after", None)
+        return None
+
+    def _custom_transport_error_message(self, exc: Exception) -> str:
+        """Build an actionable error message for custom-transport failures.
+
+        For auth failures, includes the backend profile name and re-login
+        command. Non-auth errors pass through unchanged.
+        """
+        msg = str(exc)
+        if self._provider_error_failure_kind(exc) != "auth":
+            return msg
+        profile_name = self._profile_name
+        if self._backends and 0 <= self._current_backend_idx < len(self._backends):
+            profile_name = self._backends[self._current_backend_idx][2].name
+        provider = self._active_provider
+        auth_command = getattr(provider, "auth_command", None) or "kitty auth openai"
+        return (
+            f"Authentication failed for profile '{profile_name}'. "
+            f"Please re-login with: {auth_command}. "
+            f"Details: {msg}"
+        )
 
     def _build_upstream_url(self) -> str:
         base = self._active_provider.build_base_url(self._active_provider_config).rstrip("/")

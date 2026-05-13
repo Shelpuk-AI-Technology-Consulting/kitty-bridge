@@ -36,6 +36,32 @@ __all__ = ["ResponsesTranslator"]
 
 # MiniMax interleaved thinking tags: <اخل>...</اخل>
 _THINKING_TAG_RE = re.compile(r"<\u0627\u062e\u0644>.*?</\u0627\u062e\u0644>", re.DOTALL)
+_EMPTY_ASSISTANT_FALLBACK_TEXT = (
+    "Upstream model returned an empty response. Please retry. "
+    "If the context is full, use /clear to reset the conversation."
+)
+
+
+def _empty_assistant_fallback_text(context: dict | None = None) -> str:
+    if not context:
+        return _EMPTY_ASSISTANT_FALLBACK_TEXT
+    provider = context.get("provider")
+    model = context.get("model")
+    attempts = context.get("attempts")
+    retry_after = context.get("retry_after")
+    parts = [_EMPTY_ASSISTANT_FALLBACK_TEXT]
+    meta = []
+    if provider:
+        meta.append(str(provider))
+    if model:
+        meta.append(str(model))
+    if attempts is not None:
+        meta.append(f"after {attempts} attempts")
+    if meta:
+        parts.append(f"({', '.join(meta)})")
+    if retry_after is not None:
+        parts.append(f"Retry in ~{retry_after}s.")
+    return " ".join(parts)
 
 
 def _strip_thinking_tags(text: str) -> str:
@@ -256,7 +282,7 @@ class ResponsesTranslator:
 
     # ── Response translation (sync) ──────────────────────────────────────
 
-    def translate_response(self, cc_response: dict) -> dict:
+    def translate_response(self, cc_response: dict, *, context: dict | None = None) -> dict:
         """Convert a Chat Completions response to a Responses API response."""
         choices = cc_response.get("choices", [])
         choice = choices[0] if choices else {}
@@ -307,6 +333,19 @@ class ResponsesTranslator:
         status = "completed"
         if finish_reason == "length":
             status = "incomplete"
+
+        if not output:
+            self._last_was_empty = True
+            fallback = _empty_assistant_fallback_text(context)
+            output.append(
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": fallback}],
+                }
+            )
+        else:
+            self._last_was_empty = False
 
         usage = cc_response.get("usage", {})
         return {

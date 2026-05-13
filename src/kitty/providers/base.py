@@ -128,6 +128,23 @@ class ProviderAdapter(ABC):
         """
         return {k: v for k, v in cc_request.items() if k not in self._INTERNAL_KEYS}
 
+    def _inject_empty_reasoning_content(self, messages: list[dict]) -> list[dict]:
+        """Inject empty reasoning_content into assistant messages that lack it.
+
+        Some providers (Kimi, Z.AI) require all assistant messages to have
+        ``reasoning_content`` when thinking mode is enabled.  Returns the
+        original list reference if no injection was needed.
+        """
+        modified = False
+        new_messages = []
+        for msg in messages:
+            if msg.get("role") == "assistant" and "reasoning_content" not in msg:
+                new_messages.append({**msg, "reasoning_content": ""})
+                modified = True
+            else:
+                new_messages.append(msg)
+        return new_messages if modified else messages
+
     def translate_from_upstream(self, raw_response: dict) -> dict:
         """Translate an upstream JSON response into Chat Completions format.
 
@@ -256,6 +273,7 @@ class ProviderError(Exception):
 
     is_cloudflare = False
     http_status: int = 0
+    retry_after: int | None = None
 
 
 __all__ = ["ProviderAdapter", "ProviderError"]

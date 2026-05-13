@@ -186,6 +186,7 @@ class OpenAISubscriptionAdapter(OpenAIAdapter):
 
     def __init__(self) -> None:
         self._curl_session_instance: curl_cffi.requests.AsyncSession | None = None
+        self._oauth_session_cache: dict[str, tuple[int, int, OAuthSession]] = {}
 
     @property
     def requires_oauth(self) -> bool:
@@ -282,8 +283,7 @@ class OpenAISubscriptionAdapter(OpenAIAdapter):
             headers["ChatGPT-Account-Id"] = account_id
         return headers
 
-    @staticmethod
-    def _load_session(cc_request: dict) -> OAuthSession:
+    def _load_session(self, cc_request: dict) -> OAuthSession:
         """Load the OAuthSession from the resolved key file path."""
         key = cc_request.get("_resolved_key")
         if not key:
@@ -291,7 +291,40 @@ class OpenAISubscriptionAdapter(OpenAIAdapter):
         session_file = Path(key)
         if not session_file.exists():
             raise ProviderError(f"OAuth session file not found: {session_file}")
-        return OAuthSession.load(session_file)
+
+        stat = session_file.stat()
+        cache_key = str(session_file.resolve())
+        cached = self._oauth_session_cache.get(cache_key)
+        if cached is not None:
+            cached_mtime_ns, cached_size, cached_session = cached
+            if cached_mtime_ns == stat.st_mtime_ns and cached_size == stat.st_size:
+                return cached_session
+
+        session = OAuthSession.load(session_file)
+        self._oauth_session_cache[cache_key] = (stat.st_mtime_ns, stat.st_size, session)
+        return session
+
+    def _update_session_cache_stat(self, session: OAuthSession) -> None:
+        """Refresh cache metadata after a session writes rotated tokens."""
+        if not session._file_path:
+            return
+        session_file = Path(session._file_path)
+        with contextlib.suppress(OSError):
+            stat = session_file.stat()
+            cache_key = str(session_file.resolve())
+            self._oauth_session_cache[cache_key] = (stat.st_mtime_ns, stat.st_size, session)
+
+    def _invalidate_session_cache(self, cc_request: dict) -> None:
+        """Remove the cached session entry so next _load_session reads from disk."""
+        key = cc_request.get("_resolved_key")
+        if not key:
+            return
+        cache_key = str(Path(key).resolve())
+        self._oauth_session_cache.pop(cache_key, None)
+
+    def _reset_curl_session(self) -> None:
+        """Discard the current curl session so a fresh one is created on next use."""
+        self._curl_session_instance = None
 
     @staticmethod
     def _handle_curl_error(exc: Exception) -> ProviderError:
@@ -476,11 +509,14 @@ class OpenAISubscriptionAdapter(OpenAIAdapter):
                         force_refresh=force_refresh,
                     )
                 except OAuthRefreshFailed as exc:
-                    raise ProviderError(
+                    err = ProviderError(
                         f"Authentication refresh failed. "
                         f"Please re-authenticate with 'kitty auth openai'. Details: {exc}"
-                    ) from exc
+                    )
+                    err.http_status = 401
+                    raise err from exc
 
+                self._update_session_cache_stat(session)
                 headers = self._build_codex_headers(access_token, session.id_token)
                 self._filter_cloudflare_cookies(self._curl_session.cookies)
                 self._log_cf_cookies(self._curl_session.cookies)
@@ -519,6 +555,15 @@ class OpenAISubscriptionAdapter(OpenAIAdapter):
                                 len(raw),
                             )
                             if _attempt < _CODEX_RETRY_MAX_ATTEMPTS:
+                                if _attempt == 0:
+                                    logger.info(
+                                        "CF block: refreshing session and curl connection before retry",
+                                    )
+                                    with contextlib.suppress(Exception):
+                                        self._invalidate_session_cache(cc_request)
+                                        self._reset_curl_session()
+                                        session = self._load_session(cc_request)
+                                        self._update_session_cache_stat(session)
                                 logger.warning(
                                     "Codex backend blocked by Cloudflare challenge (signature=%s), retrying",
                                     cf_sig,
@@ -550,7 +595,9 @@ class OpenAISubscriptionAdapter(OpenAIAdapter):
                             body = json.loads(raw)
                         if not body:
                             body = {"error": {"message": raw}}
-                        raise self.map_error(resp.status_code, body)
+                        err = self.map_error(resp.status_code, body)
+                        self._attach_retry_after(err, resp)
+                        raise err
                     break  # success — exit retry loop
 
                 if not got_401:
@@ -632,11 +679,14 @@ class OpenAISubscriptionAdapter(OpenAIAdapter):
                         force_refresh=force_refresh,
                     )
                 except OAuthRefreshFailed as exc:
-                    raise ProviderError(
+                    err = ProviderError(
                         f"Authentication refresh failed. "
                         f"Please re-authenticate with 'kitty auth openai'. Details: {exc}"
-                    ) from exc
+                    )
+                    err.http_status = 401
+                    raise err from exc
 
+                self._update_session_cache_stat(session)
                 headers = self._build_codex_headers(access_token, session.id_token)
                 self._filter_cloudflare_cookies(self._curl_session.cookies)
                 self._log_cf_cookies(self._curl_session.cookies)
@@ -678,6 +728,15 @@ class OpenAISubscriptionAdapter(OpenAIAdapter):
                                 len(raw),
                             )
                             if _attempt < _CODEX_RETRY_MAX_ATTEMPTS:
+                                if _attempt == 0:
+                                    logger.info(
+                                        "CF block: refreshing session and curl connection before retry",
+                                    )
+                                    with contextlib.suppress(Exception):
+                                        self._invalidate_session_cache(cc_request)
+                                        self._reset_curl_session()
+                                        session = self._load_session(cc_request)
+                                        self._update_session_cache_stat(session)
                                 logger.warning(
                                     "Codex backend blocked by Cloudflare challenge (signature=%s), retrying",
                                     cf_sig,
@@ -710,7 +769,9 @@ class OpenAISubscriptionAdapter(OpenAIAdapter):
                         logger.debug("Codex backend error %d: %s", resp.status_code, raw[:500])
                         if not body:
                             body = {"error": {"message": raw}}
-                        raise self.map_error(resp.status_code, body)
+                        err = self.map_error(resp.status_code, body)
+                        self._attach_retry_after(err, resp)
+                        raise err
 
                     # Stream SSE chunks to the downstream client.  Do NOT call
                     # resp.close() — curl_cffi's internal cleanup callback releases
@@ -1056,6 +1117,25 @@ class OpenAISubscriptionAdapter(OpenAIAdapter):
 
     # Delegate to shared utility; keep thin wrapper for backward compat
     _is_cloudflare_block = staticmethod(is_cloudflare_block)
+
+    @staticmethod
+    def _parse_retry_after(value: object) -> int | None:
+        if value is None:
+            return None
+        try:
+            seconds = int(float(str(value).strip()))
+        except (TypeError, ValueError):
+            return None
+        return max(1, seconds)
+
+    def _attach_retry_after(self, err: Exception, resp: object) -> None:
+        if not isinstance(err, ProviderError) or err.http_status != 429:
+            return
+        headers = getattr(resp, "headers", None) or {}
+        retry_after = self._parse_retry_after(headers.get("Retry-After") or headers.get("retry-after"))
+        if retry_after is not None:
+            err.retry_after = retry_after
+            logger.info("OpenAI subscription rate limited; retry_after=%ds", retry_after)
 
     def map_error(self, status_code: int, body: dict) -> Exception:
         error_obj = body.get("error", body)

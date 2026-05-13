@@ -192,7 +192,7 @@ class GeminiTranslator:
 
     # ── Response translation ─────────────────────────────────────────────────
 
-    def translate_response(self, cc_response: dict) -> dict:
+    def translate_response(self, cc_response: dict, *, context: dict | None = None) -> dict:
         """Convert a Chat Completions response to Gemini generateContent format."""
         choice = cc_response.get("choices", [{}])[0]
         message = choice.get("message", {})
