@@ -725,6 +725,123 @@ class TestCloudflareDetection:
         assert BridgeServer._should_retry_stream(503, "service unavailable") is True
 
 
+class TestCloudflareCooldownSoftening:
+    """First-hit Cloudflare blocks should use a short transient cooldown and
+    skip family-level escalation; only repeat hits should escalate."""
+
+    def _make_server_with_backend(self) -> BridgeServer:
+        """Build a minimal BridgeServer with one backend for unit-testing
+        ``_mark_backend_unhealthy`` / ``_mark_backend_healthy``."""
+        import uuid
+
+        adapter = StubLauncher(BridgeProtocol.RESPONSES_API)
+        provider = StubProvider()
+        profile = Profile(name="cf-test", provider="openai", model="m", auth_ref=str(uuid.uuid4()))
+        return BridgeServer(
+            adapter,
+            provider,
+            "test-key",
+            backends=[(provider, "test-key", profile)],
+            backend_cooldown=300,
+        )
+
+    def test_first_hit_uses_short_cooldown_and_skips_family_abuse(self) -> None:
+        from kitty.bridge.server import _CLOUDFLARE_FIRST_HIT_COOLDOWN
+
+        server = self._make_server_with_backend()
+        server._mark_backend_unhealthy(0, failure_kind="cloudflare")
+
+        health = server._backend_health[0]
+        assert health["healthy"] is False
+        assert health["cloudflare_error_count"] == 1
+        assert health["cooldown"] == _CLOUDFLARE_FIRST_HIT_COOLDOWN
+        # No family-level escalation on the first hit.
+        assert server._family_cooldown == {}
+
+    def test_second_hit_escalates_to_family_cooldown(self) -> None:
+        server = self._make_server_with_backend()
+        server._mark_backend_unhealthy(0, failure_kind="cloudflare")
+        server._mark_backend_unhealthy(0, failure_kind="cloudflare")
+
+        health = server._backend_health[0]
+        assert health["cloudflare_error_count"] == 2
+        # Single-backend cooldown is capped, but family-abuse should now be active.
+        family = server._get_backend_family(0)
+        assert family in server._family_cooldown
+        assert server._family_cooldown[family]["abuse_count"] == 1
+
+    def test_mark_backend_healthy_resets_cloudflare_counter(self) -> None:
+        server = self._make_server_with_backend()
+        server._mark_backend_unhealthy(0, failure_kind="cloudflare")
+        assert server._backend_health[0]["cloudflare_error_count"] == 1
+
+        server._mark_backend_healthy(0)
+        assert server._backend_health[0]["cloudflare_error_count"] == 0
+        assert server._backend_health[0]["healthy"] is True
+
+
+class TestCloudflareDecisionHelper:
+    """``_decide_cloudflare_action`` controls the per-attempt action the
+    streaming sites take on a Cloudflare 403."""
+
+    def _make_server(self, n_backends: int = 2) -> BridgeServer:
+        import uuid
+
+        adapter = StubLauncher(BridgeProtocol.RESPONSES_API)
+        provider = StubProvider()
+        profiles = [
+            Profile(name=f"cf-b{i}", provider="openai", model="m", auth_ref=str(uuid.uuid4()))
+            for i in range(n_backends)
+        ]
+        backends = [(provider, f"k{i}", p) for i, p in enumerate(profiles)]
+        return BridgeServer(
+            adapter,
+            provider,
+            "k0",
+            backends=backends,
+            backend_cooldown=300,
+        )
+
+    def test_first_attempt_returns_retry_same(self) -> None:
+        server = self._make_server(n_backends=1)
+        server._current_backend_idx = 0
+        cf_retried: set[int] = set()
+
+        action = server._decide_cloudflare_action(
+            attempt=0, max_attempts=4, cf_retried=cf_retried,
+        )
+        assert action == "retry_same"
+        assert 0 in cf_retried
+        # No marking happens on retry_same.
+        assert server._backend_health[0]["healthy"] is True
+
+    def test_second_attempt_after_retry_marks_unhealthy_and_fails_over(self) -> None:
+        server = self._make_server(n_backends=2)
+        server._current_backend_idx = 0
+        cf_retried: set[int] = {0}  # backend 0 already retried this request
+
+        action = server._decide_cloudflare_action(
+            attempt=1, max_attempts=8, cf_retried=cf_retried,
+        )
+        assert action == "failover"
+        # Marks backend 0 unhealthy with cloudflare failure kind.
+        assert server._backend_health[0]["healthy"] is False
+        assert server._backend_health[0]["cloudflare_error_count"] == 1
+        # Backend 1 still healthy and reachable.
+        assert server._any_healthy_backend() is True
+
+    def test_surface_when_no_alternates_and_already_retried(self) -> None:
+        server = self._make_server(n_backends=1)
+        server._current_backend_idx = 0
+        cf_retried: set[int] = {0}
+
+        action = server._decide_cloudflare_action(
+            attempt=1, max_attempts=2, cf_retried=cf_retried,
+        )
+        assert action == "surface"
+        assert server._backend_health[0]["healthy"] is False
+
+
 class TestCloudflareRegression:
     @pytest.mark.asyncio
     async def test_non_streaming_cloudflare_403_returns_cloudflare_message(self):

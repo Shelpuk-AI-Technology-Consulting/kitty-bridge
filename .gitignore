@@ -17,3 +17,5 @@
 *.pyc
 **/__pycache__/
 src/kitty/__pycache__
+.idea
+uv.lock
