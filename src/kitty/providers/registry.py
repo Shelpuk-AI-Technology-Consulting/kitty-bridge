@@ -15,6 +15,7 @@ from kitty.providers.mimo import MimoAdapter
 from kitty.providers.minimax import MiniMaxAdapter
 from kitty.providers.novita import NovitaAdapter
 from kitty.providers.ollama import OllamaAdapter
+from kitty.providers.ollama_cloud import OllamaCloudAdapter
 from kitty.providers.openai import OpenAIAdapter
 from kitty.providers.openai_subscription import OpenAISubscriptionAdapter
 from kitty.providers.opencode import OpenCodeGoAdapter
@@ -42,6 +43,7 @@ _registry: dict[str, type[ProviderAdapter]] = {
     "kimi": KimiCodeAdapter,
     "mimo": MimoAdapter,
     "byteplus": BytePlusAdapter,
+    "ollama_cloud": OllamaCloudAdapter,
 }
 
 

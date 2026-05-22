@@ -256,6 +256,7 @@ Point your tool at `http://localhost:<port>` and it just works.
 | Fireworks FirePass  | `fireworks`           |                                                   |
 | Kimi Code           | `kimi`                |                                                   |
 | Novita AI           | `novita`              |                                                   |
+| Ollama Cloud        | `ollama_cloud`        | Hosted models via ollama.com API                  |
 | OpenAI ChatGPT Plan | `openai_subscription` | Uses your ChatGPT Plus/Pro subscription via OAuth |
 | OpenCode Go         | `opencode_go`         |                                                   |
 | Xiaomi MiMo         | `mimo`                |                                                   |
@@ -521,6 +522,13 @@ kitty setup
 # Base URL: http://localhost:11434/v1
 # Model: llama3
 ```
+
+### What is the difference between Ollama and Ollama Cloud?
+
+- **Ollama** — connects to a local or remote Ollama instance using its OpenAI-compatible endpoint. No API key needed
+  for local deployments.
+- **Ollama Cloud** — connects to [ollama.com](https://ollama.com) cloud models using an API key. No local GPU required.
+  Some models require a paid subscription.
 
 ### Does Kitty record my prompts or send data anywhere?
 

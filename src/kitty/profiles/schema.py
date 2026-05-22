@@ -36,6 +36,7 @@ _PROVIDER_TYPES = Literal[
     "kimi",
     "mimo",
     "byteplus",
+    "ollama_cloud",
 ]
 
 PROVIDER_LIST: list[str] = list(typing.get_args(_PROVIDER_TYPES))
@@ -53,6 +54,7 @@ PROVIDER_LABELS: dict[str, str] = {
     "mimo": "Xiaomi MiMo",
     "novita": "Novita AI",
     "ollama": "Ollama",
+    "ollama_cloud": "Ollama Cloud",
     "opencode_go": "OpenCode Go",
     "openai": "OpenAI",
     "openai_subscription": "OpenAI ChatGPT Plan",
@@ -84,6 +86,7 @@ PROVIDER_SECTIONS: list[tuple[str, list[str]]] = [
             "fireworks",
             "kimi",
             "novita",
+            "ollama_cloud",
             "openai_subscription",
             "opencode_go",
             "mimo",

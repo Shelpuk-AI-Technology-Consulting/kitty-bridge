@@ -1472,9 +1472,12 @@ class BridgeServer:
                         len(raw_bytes),
                     )
 
-                    from kitty.providers.openai_subscription import OpenAISubscriptionAdapter
+                    if hasattr(self._active_provider, "parse_stream_to_cc_response"):
+                        cc_response = self._active_provider.parse_stream_to_cc_response(raw_bytes)
+                    else:
+                        from kitty.providers.openai_subscription import OpenAISubscriptionAdapter
 
-                    cc_response = OpenAISubscriptionAdapter._parse_sse_to_response(raw_bytes)
+                        cc_response = OpenAISubscriptionAdapter._parse_sse_to_response(raw_bytes)
                     logger.debug(
                         "Parsed CC response: %s",
                         json.dumps(cc_response, ensure_ascii=False)[:2000],
@@ -2676,9 +2679,12 @@ class BridgeServer:
                     break
                 else:
                     raw_bytes = b"".join(raw_chunks)
-                    from kitty.providers.openai_subscription import OpenAISubscriptionAdapter
+                    if hasattr(self._active_provider, "parse_stream_to_cc_response"):
+                        cc_response = self._active_provider.parse_stream_to_cc_response(raw_bytes)
+                    else:
+                        from kitty.providers.openai_subscription import OpenAISubscriptionAdapter
 
-                    cc_response = OpenAISubscriptionAdapter._parse_sse_to_response(raw_bytes)
+                        cc_response = OpenAISubscriptionAdapter._parse_sse_to_response(raw_bytes)
 
                     # Re-emit as Chat Completions SSE stream
                     response_id = cc_response.get("id", "chatcmpl-sub")
