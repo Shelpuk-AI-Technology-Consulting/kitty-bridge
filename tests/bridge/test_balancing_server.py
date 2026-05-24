@@ -1146,6 +1146,15 @@ class TestCrossModeFailover:
     """Verify that when a custom-transport backend fails, the bridge falls
     through to a standard streaming backend instead of surfacing the error."""
 
+    # Shared SSE chunks for standard Chat Completions upstream mock.
+    _SSE_CHUNKS = (
+        b'data: {"id":"test","choices":[{"index":0,"delta":{"content":"Hi"},'
+        b'"finish_reason":null}],"model":"test"}\n\n'
+        b'data: {"id":"test","choices":[{"index":0,"delta":{},'
+        b'"finish_reason":"stop"}],"model":"test","usage":null}\n\n'
+        b"data: [DONE]\n\n"
+    )
+
     def _make_cross_mode_server(self):
         """Create a balancing server with a failing custom-transport backend
         and a healthy standard backend, forcing selection order [0, 1]."""
@@ -1201,20 +1210,16 @@ class TestCrossModeFailover:
             "max_tokens": 100,
         }
 
-        sse_chunks = [
-            b'data: {"id":"test","choices":[{"index":0,"delta":{"content":"Hi"},"finish_reason":null}],"model":"test"}\n\n',
-            b'data: {"id":"test","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"model":"test","usage":null}\n\n',
-            b"data: [DONE]\n\n",
-        ]
-
         with aioresponses(passthrough=["http://127.0.0.1"]) as m:
-            m.post("https://standard.example.com/v1/chat/completions", body=b"".join(sse_chunks))
+            m.post("https://standard.example.com/v1/chat/completions", body=self._SSE_CHUNKS)
             try:
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(url, json=request_body) as resp:
-                        assert resp.status == 200
-                        body = await resp.read()
-                        assert b"Hi" in body
+                async with (
+                    aiohttp.ClientSession() as session,
+                    session.post(url, json=request_body) as resp,
+                ):
+                    assert resp.status == 200
+                    body = await resp.read()
+                    assert b"Hi" in body
             finally:
                 await server.stop_async()
 
@@ -1234,20 +1239,16 @@ class TestCrossModeFailover:
             "stream": True,
         }
 
-        sse_chunks = [
-            b'data: {"id":"test","choices":[{"index":0,"delta":{"content":"Hi"},"finish_reason":null}],"model":"test"}\n\n',
-            b'data: {"id":"test","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"model":"test","usage":null}\n\n',
-            b"data: [DONE]\n\n",
-        ]
-
         with aioresponses(passthrough=["http://127.0.0.1"]) as m:
-            m.post("https://standard.example.com/v1/chat/completions", body=b"".join(sse_chunks))
+            m.post("https://standard.example.com/v1/chat/completions", body=self._SSE_CHUNKS)
             try:
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(url, json=request_body) as resp:
-                        assert resp.status == 200
-                        body = await resp.read()
-                        assert b"Hi" in body
+                async with (
+                    aiohttp.ClientSession() as session,
+                    session.post(url, json=request_body) as resp,
+                ):
+                    assert resp.status == 200
+                    body = await resp.read()
+                    assert b"Hi" in body
             finally:
                 await server.stop_async()
 
@@ -1267,20 +1268,16 @@ class TestCrossModeFailover:
             "stream": True,
         }
 
-        sse_chunks = [
-            b'data: {"id":"test","choices":[{"index":0,"delta":{"content":"Hi!"},"finish_reason":null}],"model":"test"}\n\n',
-            b'data: {"id":"test","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"model":"test","usage":null}\n\n',
-            b"data: [DONE]\n\n",
-        ]
-
         with aioresponses(passthrough=["http://127.0.0.1"]) as m:
-            m.post("https://standard.example.com/v1/chat/completions", body=b"".join(sse_chunks))
+            m.post("https://standard.example.com/v1/chat/completions", body=self._SSE_CHUNKS)
             try:
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(url, json=request_body) as resp:
-                        assert resp.status == 200
-                        body = await resp.read()
-                        assert b"Hi" in body
+                async with (
+                    aiohttp.ClientSession() as session,
+                    session.post(url, json=request_body) as resp,
+                ):
+                    assert resp.status == 200
+                    body = await resp.read()
+                    assert b"Hi" in body
             finally:
                 await server.stop_async()
 
@@ -1298,23 +1295,16 @@ class TestCrossModeFailover:
             "contents": [{"role": "user", "parts": [{"text": "hello"}]}],
         }
 
-        sse_chunks = [
-            b'data: {"id":"test","choices":[{"index":0,"delta":{"content":"Hi!"},"finish_reason":null}],"model":"test"}\n\n',
-            b'data: {"id":"test","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"model":"test","usage":null}\n\n',
-            b"data: [DONE]\n\n",
-        ]
-
         with aioresponses(passthrough=["http://127.0.0.1"]) as m:
-            m.post(
-                "https://standard.example.com/v1/chat/completions",
-                body=b"".join(sse_chunks),
-            )
+            m.post("https://standard.example.com/v1/chat/completions", body=self._SSE_CHUNKS)
             try:
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(url, json=request_body) as resp:
-                        assert resp.status == 200
-                        body = await resp.read()
-                        assert b"Hi" in body
+                async with (
+                    aiohttp.ClientSession() as session,
+                    session.post(url, json=request_body) as resp,
+                ):
+                    assert resp.status == 200
+                    body = await resp.read()
+                    assert b"Hi" in body
             finally:
                 await server.stop_async()
 

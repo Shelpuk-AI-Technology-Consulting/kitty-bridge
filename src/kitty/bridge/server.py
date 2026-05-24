@@ -1035,7 +1035,7 @@ class BridgeServer:
                             cc_request.pop("_provider_config", None)
                             cc_request.pop("_original_body", None)
                             logger.info(
-                                "Custom-transport cross-mode failover: attempt %d/%d (%s), switching to standard backend",
+                                "Cross-mode failover: attempt %d/%d (%s), switching to standard backend",
                                 attempt + 1,
                                 n_backends,
                                 exc,
@@ -1549,7 +1549,7 @@ class BridgeServer:
                             cc_request.pop("_provider_config", None)
                             cc_request.pop("_original_body", None)
                             logger.info(
-                                "Custom-transport cross-mode failover: attempt %d/%d (%s), switching to standard backend",
+                                "Cross-mode failover: attempt %d/%d (%s), switching to standard backend",
                                 attempt + 1,
                                 max_attempts,
                                 exc,
@@ -2248,7 +2248,7 @@ class BridgeServer:
                             cc_request.pop("_resolved_key", None)
                             cc_request.pop("_provider_config", None)
                             logger.info(
-                                "Custom-transport cross-mode failover: attempt %d/%d (%s), switching to standard backend",
+                                "Cross-mode failover: attempt %d/%d (%s), switching to standard backend",
                                 attempt + 1,
                                 n_backends,
                                 exc,
@@ -2829,7 +2829,7 @@ class BridgeServer:
                             cc_request.pop("_provider_config", None)
                             cc_request.pop("_original_body", None)
                             logger.info(
-                                "Custom-transport cross-mode failover: attempt %d/%d (%s), switching to standard backend",
+                                "Cross-mode failover: attempt %d/%d (%s), switching to standard backend",
                                 attempt + 1,
                                 n_backends,
                                 exc,
