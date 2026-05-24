@@ -977,9 +977,17 @@ class BridgeServer:
             self._log_backend_selection()
 
             n_backends = len(self._backends) if self._backends else 1
+            _bytes_written = False
+
+            async def _tracked_write(data: bytes) -> None:
+                nonlocal _bytes_written
+                _bytes_written = True
+                await sr.write(data)
+
             for attempt in range(n_backends):
+                _bytes_written = False
                 try:
-                    await self._active_provider.stream_request(cc_request, sr.write)
+                    await self._active_provider.stream_request(cc_request, _tracked_write)
                 except Exception as exc:
                     logger.warning("Custom-transport stream failed: %s", exc)
                     if self._backends and self._current_backend_idx >= 0:
@@ -1009,6 +1017,30 @@ class BridgeServer:
                                 exc,
                             )
                             continue
+                        # No custom-transport backend healthy — try cross-mode failover to standard backend.
+                        # Only safe when no bytes were emitted to sr yet.
+                        if (
+                            not _bytes_written
+                            and self._any_healthy_backend()
+                            and attempt < n_backends - 1
+                        ):
+                            try:
+                                self._select_backend()
+                            except AllBackendsUnhealthyError:
+                                logger.warning("Cross-mode failover: all backends unhealthy")
+                                break
+                            self._normalize_model(cc_request)
+                            self._active_provider.normalize_request(cc_request)
+                            cc_request.pop("_resolved_key", None)
+                            cc_request.pop("_provider_config", None)
+                            cc_request.pop("_original_body", None)
+                            logger.info(
+                                "Custom-transport cross-mode failover: attempt %d/%d (%s), switching to standard backend",
+                                attempt + 1,
+                                n_backends,
+                                exc,
+                            )
+                            break
                     # All backends exhausted or single-backend mode — surface error
                     error_msg = self._custom_transport_error_message(exc)
                     error_status, _ = self._map_provider_error(exc)
@@ -1028,11 +1060,19 @@ class BridgeServer:
             cc_request.pop("_resolved_key", None)
             cc_request.pop("_provider_config", None)
             cc_request.pop("_original_body", None)
-            try:
-                await sr.write_eof()
-            except (ConnectionResetError, BrokenPipeError, OSError):
-                logger.debug("Client disconnected before stream EOF")
-            return sr
+            # If cross-mode failover switched to a non-custom-transport provider,
+            # fall through to the standard streaming path below.
+            if not self._active_provider.use_custom_transport:
+                logger.info(
+                    "Cross-mode failover: entering standard streaming path with %s",
+                    type(self._active_provider).__name__,
+                )
+            else:
+                try:
+                    await sr.write_eof()
+                except (ConnectionResetError, BrokenPipeError, OSError):
+                    logger.debug("Client disconnected before stream EOF")
+                return sr
 
         # Emit response.created and response.in_progress via translator
         start_events = translator.translate_stream_start(response_id, model)
@@ -1496,6 +1536,25 @@ class BridgeServer:
                                 exc,
                             )
                             continue
+                        # No custom-transport backend healthy — try cross-mode failover to standard backend
+                        if self._any_healthy_backend() and attempt < max_attempts - 1:
+                            try:
+                                self._select_backend()
+                            except AllBackendsUnhealthyError:
+                                logger.warning("Cross-mode failover: all backends unhealthy")
+                                break
+                            self._normalize_model(cc_request)
+                            self._active_provider.normalize_request(cc_request)
+                            cc_request.pop("_resolved_key", None)
+                            cc_request.pop("_provider_config", None)
+                            cc_request.pop("_original_body", None)
+                            logger.info(
+                                "Custom-transport cross-mode failover: attempt %d/%d (%s), switching to standard backend",
+                                attempt + 1,
+                                max_attempts,
+                                exc,
+                            )
+                            break
                     # All backends exhausted or single-backend mode — surface error
                     error_msg = self._custom_transport_error_message(exc)
                     error_status, error_type = self._map_provider_error(exc)
@@ -1608,12 +1667,20 @@ class BridgeServer:
 
             cc_request.pop("_resolved_key", None)
             cc_request.pop("_provider_config", None)
-            if sr is not None:
-                try:
-                    await sr.write_eof()
-                except (ConnectionResetError, BrokenPipeError, OSError):
-                    logger.debug("Client disconnected before stream EOF")
-            return sr
+            # If cross-mode failover switched to a non-custom-transport provider,
+            # fall through to the standard streaming path below.
+            if not self._active_provider.use_custom_transport:
+                logger.info(
+                    "Cross-mode failover: entering standard streaming path with %s",
+                    type(self._active_provider).__name__,
+                )
+            else:
+                if sr is not None:
+                    try:
+                        await sr.write_eof()
+                    except (ConnectionResetError, BrokenPipeError, OSError):
+                        logger.debug("Client disconnected before stream EOF")
+                return sr
 
         try:
             session = await self._get_session()
@@ -2124,9 +2191,17 @@ class BridgeServer:
             self._log_backend_selection()
 
             n_backends = len(self._backends) if self._backends else 1
+            _bytes_written = False
+
+            async def _tracked_write(data: bytes) -> None:
+                nonlocal _bytes_written
+                _bytes_written = True
+                await sr.write(data)
+
             for attempt in range(n_backends):
+                _bytes_written = False
                 try:
-                    await self._active_provider.stream_request(cc_request, sr.write)
+                    await self._active_provider.stream_request(cc_request, _tracked_write)
                 except Exception as exc:
                     logger.warning("Custom-transport stream failed: %s", exc)
                     if self._backends and self._current_backend_idx >= 0:
@@ -2156,6 +2231,29 @@ class BridgeServer:
                                 exc,
                             )
                             continue
+                        # No custom-transport backend healthy — try cross-mode failover to standard backend.
+                        # Only safe when no bytes were emitted to sr yet.
+                        if (
+                            not _bytes_written
+                            and self._any_healthy_backend()
+                            and attempt < n_backends - 1
+                        ):
+                            try:
+                                self._select_backend()
+                            except AllBackendsUnhealthyError:
+                                logger.warning("Cross-mode failover: all backends unhealthy")
+                                break
+                            self._normalize_model(cc_request)
+                            self._active_provider.normalize_request(cc_request)
+                            cc_request.pop("_resolved_key", None)
+                            cc_request.pop("_provider_config", None)
+                            logger.info(
+                                "Custom-transport cross-mode failover: attempt %d/%d (%s), switching to standard backend",
+                                attempt + 1,
+                                n_backends,
+                                exc,
+                            )
+                            break
                     # All backends exhausted or single-backend mode — surface error
                     error_msg = self._custom_transport_error_message(exc)
                     error_status, _ = self._map_provider_error(exc)
@@ -2170,11 +2268,19 @@ class BridgeServer:
 
             cc_request.pop("_resolved_key", None)
             cc_request.pop("_provider_config", None)
-            try:
-                await sr.write_eof()
-            except (ConnectionResetError, BrokenPipeError, OSError):
-                logger.debug("Client disconnected before stream EOF")
-            return sr
+            # If cross-mode failover switched to a non-custom-transport provider,
+            # fall through to the standard streaming path below.
+            if not self._active_provider.use_custom_transport:
+                logger.info(
+                    "Cross-mode failover: entering standard streaming path with %s",
+                    type(self._active_provider).__name__,
+                )
+            else:
+                try:
+                    await sr.write_eof()
+                except (ConnectionResetError, BrokenPipeError, OSError):
+                    logger.debug("Client disconnected before stream EOF")
+                return sr
 
         try:
             session = await self._get_session()
@@ -2710,6 +2816,25 @@ class BridgeServer:
                                 exc,
                             )
                             continue
+                        # No custom-transport backend healthy — try cross-mode failover to standard backend
+                        if self._any_healthy_backend() and attempt < n_backends - 1:
+                            try:
+                                self._select_backend()
+                            except AllBackendsUnhealthyError:
+                                logger.warning("Cross-mode failover: all backends unhealthy")
+                                break
+                            self._normalize_model(cc_request)
+                            self._active_provider.normalize_request(cc_request)
+                            cc_request.pop("_resolved_key", None)
+                            cc_request.pop("_provider_config", None)
+                            cc_request.pop("_original_body", None)
+                            logger.info(
+                                "Custom-transport cross-mode failover: attempt %d/%d (%s), switching to standard backend",
+                                attempt + 1,
+                                n_backends,
+                                exc,
+                            )
+                            break
                     error_status, error_type = self._map_provider_error(exc)
                     upstream_status = error_status
                     error_payload = {
@@ -2801,11 +2926,19 @@ class BridgeServer:
 
             cc_request.pop("_resolved_key", None)
             cc_request.pop("_provider_config", None)
-            try:
-                await sr.write_eof()
-            except (ConnectionResetError, BrokenPipeError, OSError):
-                logger.debug("Client disconnected before stream EOF")
-            return sr
+            # If cross-mode failover switched to a non-custom-transport provider,
+            # fall through to the standard streaming path below.
+            if not self._active_provider.use_custom_transport:
+                logger.info(
+                    "Cross-mode failover: entering standard streaming path with %s",
+                    type(self._active_provider).__name__,
+                )
+            else:
+                try:
+                    await sr.write_eof()
+                except (ConnectionResetError, BrokenPipeError, OSError):
+                    logger.debug("Client disconnected before stream EOF")
+                return sr
 
         try:
             session = await self._get_session()

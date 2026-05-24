@@ -1104,3 +1104,219 @@ class TestRateLimitRetryAfter:
         server._mark_backend_unhealthy(0, failure_kind="rate_limit")
         health = server._backend_health[0]
         assert health["cooldown"] == 300
+
+
+# ── Cross-mode failover tests (custom-transport → standard backend) ─────────
+
+
+class _FailingCustomTransportProvider(ProviderAdapter):
+    """Custom-transport provider that always raises a ProviderError(400)."""
+
+    @property
+    def provider_type(self) -> str:
+        return "failing-custom"
+
+    @property
+    def default_base_url(self) -> str:
+        return "https://failing.example.com/v1"
+
+    @property
+    def use_custom_transport(self) -> bool:
+        return True
+
+    def build_request(self, model: str, messages: list[dict], **kwargs) -> dict:
+        return {"model": model, "messages": messages}
+
+    def translate_to_upstream(self, cc_request: dict) -> dict:
+        return {"model": cc_request["model"], "messages": cc_request["messages"]}
+
+    def parse_response(self, response_data: dict) -> dict:
+        return response_data
+
+    def map_error(self, status_code: int, body: dict) -> Exception:
+        return Exception(f"Error {status_code}")
+
+    async def stream_request(self, cc_request: dict, write) -> None:
+        err = ProviderError("OpenAI subscription error 400: ")
+        err.http_status = 400
+        raise err
+
+
+class TestCrossModeFailover:
+    """Verify that when a custom-transport backend fails, the bridge falls
+    through to a standard streaming backend instead of surfacing the error."""
+
+    def _make_cross_mode_server(self):
+        """Create a balancing server with a failing custom-transport backend
+        and a healthy standard backend, forcing selection order [0, 1]."""
+        import uuid
+
+        from kitty.profiles.schema import Profile
+
+        failing_provider = _FailingCustomTransportProvider()
+        standard_provider = StubProvider(
+            provider_type="standard", base_url="https://standard.example.com/v1"
+        )
+        backends = [
+            (failing_provider, "failing-key", Profile(
+                name="failing", provider="openai_subscription", model="fail-model",
+                auth_ref=str(uuid.uuid4()),
+            )),
+            (standard_provider, "standard-key", Profile(
+                name="standard", provider="openai", model="std-model",
+                auth_ref=str(uuid.uuid4()),
+            )),
+        ]
+        server = BridgeServer(
+            adapter=None,
+            provider=backends[0][0],
+            resolved_key="failing-key",
+            model="fail-model",
+            backends=backends,
+        )
+        return server, backends
+
+    def _patch_selection_order(self, server):
+        """Force backend selection order: 0 first, then 1."""
+        _pick = iter([0, 1, 0, 1])
+
+        def _fixed_get_next(self=server, **kwargs):
+            idx = next(_pick)
+            provider, key, profile = self._backends[idx]
+            return provider, key, profile.model, {}, idx
+
+        server._get_next_backend = _fixed_get_next
+
+    @pytest.mark.asyncio
+    async def test_messages_stream_cross_mode_failover(self):
+        """Messages API: custom transport 400 → standard backend succeeds."""
+        server, _ = self._make_cross_mode_server()
+        self._patch_selection_order(server)
+        port = await server.start_async()
+        url = f"http://127.0.0.1:{port}/v1/messages"
+        request_body = {
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "hello"}],
+            "stream": True,
+            "max_tokens": 100,
+        }
+
+        sse_chunks = [
+            b'data: {"id":"test","choices":[{"index":0,"delta":{"content":"Hi"},"finish_reason":null}],"model":"test"}\n\n',
+            b'data: {"id":"test","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"model":"test","usage":null}\n\n',
+            b"data: [DONE]\n\n",
+        ]
+
+        with aioresponses(passthrough=["http://127.0.0.1"]) as m:
+            m.post("https://standard.example.com/v1/chat/completions", body=b"".join(sse_chunks))
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(url, json=request_body) as resp:
+                        assert resp.status == 200
+                        body = await resp.read()
+                        assert b"Hi" in body
+            finally:
+                await server.stop_async()
+
+        # Verify cross-mode failover: failing backend was used first (failure_count increased).
+        assert server._backend_health[0]["failure_count"] >= 1
+
+    @pytest.mark.asyncio
+    async def test_responses_stream_cross_mode_failover(self):
+        """Responses API: custom transport 400 → standard backend succeeds."""
+        server, _ = self._make_cross_mode_server()
+        self._patch_selection_order(server)
+        port = await server.start_async()
+        url = f"http://127.0.0.1:{port}/v1/responses"
+        request_body = {
+            "model": "test-model",
+            "input": [{"type": "message", "role": "user", "content": "hello"}],
+            "stream": True,
+        }
+
+        sse_chunks = [
+            b'data: {"id":"test","choices":[{"index":0,"delta":{"content":"Hi"},"finish_reason":null}],"model":"test"}\n\n',
+            b'data: {"id":"test","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"model":"test","usage":null}\n\n',
+            b"data: [DONE]\n\n",
+        ]
+
+        with aioresponses(passthrough=["http://127.0.0.1"]) as m:
+            m.post("https://standard.example.com/v1/chat/completions", body=b"".join(sse_chunks))
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(url, json=request_body) as resp:
+                        assert resp.status == 200
+                        body = await resp.read()
+                        assert b"Hi" in body
+            finally:
+                await server.stop_async()
+
+        # Cross-mode failover succeeded — failing backend was used first.
+        assert server._backend_health[0]["failure_count"] >= 1
+
+    @pytest.mark.asyncio
+    async def test_chat_completions_stream_cross_mode_failover(self):
+        """Chat Completions API: custom transport 400 → standard backend succeeds."""
+        server, _ = self._make_cross_mode_server()
+        self._patch_selection_order(server)
+        port = await server.start_async()
+        url = f"http://127.0.0.1:{port}/v1/chat/completions"
+        request_body = {
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "hello"}],
+            "stream": True,
+        }
+
+        sse_chunks = [
+            b'data: {"id":"test","choices":[{"index":0,"delta":{"content":"Hi!"},"finish_reason":null}],"model":"test"}\n\n',
+            b'data: {"id":"test","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"model":"test","usage":null}\n\n',
+            b"data: [DONE]\n\n",
+        ]
+
+        with aioresponses(passthrough=["http://127.0.0.1"]) as m:
+            m.post("https://standard.example.com/v1/chat/completions", body=b"".join(sse_chunks))
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(url, json=request_body) as resp:
+                        assert resp.status == 200
+                        body = await resp.read()
+                        assert b"Hi" in body
+            finally:
+                await server.stop_async()
+
+        # Cross-mode failover succeeded.
+        assert b"Hi" in body
+
+    @pytest.mark.asyncio
+    async def test_gemini_stream_cross_mode_failover(self):
+        """Gemini API: custom transport 400 → standard backend succeeds."""
+        server, _ = self._make_cross_mode_server()
+        self._patch_selection_order(server)
+        port = await server.start_async()
+        url = f"http://127.0.0.1:{port}/v1beta/models/test-model:streamGenerateContent"
+        request_body = {
+            "contents": [{"role": "user", "parts": [{"text": "hello"}]}],
+        }
+
+        sse_chunks = [
+            b'data: {"id":"test","choices":[{"index":0,"delta":{"content":"Hi!"},"finish_reason":null}],"model":"test"}\n\n',
+            b'data: {"id":"test","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"model":"test","usage":null}\n\n',
+            b"data: [DONE]\n\n",
+        ]
+
+        with aioresponses(passthrough=["http://127.0.0.1"]) as m:
+            m.post(
+                "https://standard.example.com/v1/chat/completions",
+                body=b"".join(sse_chunks),
+            )
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(url, json=request_body) as resp:
+                        assert resp.status == 200
+                        body = await resp.read()
+                        assert b"Hi" in body
+            finally:
+                await server.stop_async()
+
+        # Cross-mode failover succeeded — failing backend was used first.
+        assert server._backend_health[0]["failure_count"] >= 1
