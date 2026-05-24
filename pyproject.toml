@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "kitty-bridge"
-version = "0.7.0"
+version = "1.0.0"
 description = "Kitty Bridge — launch coding agents through a local API bridge"
 readme = "README.md"
 license = "MIT"
@@ -14,7 +14,7 @@ authors = [
 ]
 keywords = ["coding-agent", "cli", "api-bridge", "codex", "claude-code", "llm"]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
