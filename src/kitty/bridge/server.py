@@ -67,6 +67,7 @@ _RATE_LIMIT_PATTERNS = ("limit exhaust", "rate limit", "quota exceeded", "usage 
 _CLIENT_MAX_SIZE = 16 * 1024 * 1024  # 16 MiB
 _STREAM_READ_TIMEOUT = 120  # seconds — upstream must respond with first byte within this
 _SINGLE_BACKEND_COOLDOWN_CAP = 30  # seconds — cap cooldown for single-backend profiles
+_CLOUDFLARE_FIRST_HIT_COOLDOWN = 15  # seconds — short cooldown for first Cloudflare block
 _ALL_UNHEALTHY_FAST_FAIL_THRESHOLD = 60  # seconds — fast-fail if soonest retry exceeds this
 
 
@@ -195,6 +196,7 @@ class BridgeServer:
         self._backends = backends
 
         self._backend_cooldown = backend_cooldown
+        self._family_cooldown: dict[str, dict] = {}
 
         # Backend health tracking (parallel to _backends)
         self._backend_health: list[dict] = []
@@ -207,6 +209,7 @@ class BridgeServer:
                     "stream_error_count": 0,
                     "failure_count": 0,
                     "transport_error_count": 0,
+                    "cloudflare_error_count": 0,
                 }
                 for _ in backends
             ]
@@ -322,6 +325,17 @@ class BridgeServer:
 
         return self._provider, self._resolved_key, self._model, self._provider_config or {}, -1
 
+    def _get_backend_family(self, index: int) -> str:
+        if not self._backends or index < 0 or index >= len(self._backends):
+            return "default"
+        provider = self._backends[index][0]
+        provider_type = getattr(provider, "provider_type", None)
+        if callable(provider_type):
+            return str(provider_type())
+        if provider_type is not None:
+            return str(provider_type)
+        return type(provider).__name__
+
     def _mark_backend_unhealthy(self, index: int, *, cooldown: int | None = None, failure_kind: str = "hard") -> None:
         """Mark a backend as unhealthy and log the event.
 
@@ -343,7 +357,24 @@ class BridgeServer:
         health["failed_at"] = time.monotonic()
         health["failure_count"] = health.get("failure_count", 0) + 1
 
-        if failure_kind == "auth":
+        if failure_kind == "cloudflare":
+            health["cloudflare_error_count"] = health.get("cloudflare_error_count", 0) + 1
+            if health["cloudflare_error_count"] == 1:
+                health["cooldown"] = _CLOUDFLARE_FIRST_HIT_COOLDOWN
+            elif cooldown is not None:
+                health["cooldown"] = cooldown
+            else:
+                health["cooldown"] = self._backend_cooldown
+                if len(self._backends) == 1 and health["cooldown"] > _SINGLE_BACKEND_COOLDOWN_CAP:
+                    health["cooldown"] = _SINGLE_BACKEND_COOLDOWN_CAP
+                family = self._get_backend_family(index)
+                family_health = self._family_cooldown.setdefault(
+                    family,
+                    {"abuse_count": 0, "failed_at": time.monotonic(), "cooldown": self._backend_cooldown},
+                )
+                family_health["abuse_count"] = family_health.get("abuse_count", 0) + 1
+                family_health["failed_at"] = time.monotonic()
+        elif failure_kind == "auth":
             health["cooldown"] = _AUTH_COOLDOWN
         elif cooldown is not None:
             health["cooldown"] = cooldown
@@ -410,6 +441,19 @@ class BridgeServer:
         health["failed_at"] = None
         health["stream_error_count"] = 0
         health["transport_error_count"] = 0
+        health["cloudflare_error_count"] = 0
+
+    def _decide_cloudflare_action(
+        self, *, attempt: int, max_attempts: int, cf_retried: set[int],
+    ) -> str:
+        idx = self._current_backend_idx
+        if idx not in cf_retried:
+            cf_retried.add(idx)
+            return "retry_same"
+        self._mark_backend_unhealthy(idx, failure_kind="cloudflare")
+        if self._any_healthy_backend() and attempt < max_attempts - 1:
+            return "failover"
+        return "surface"
 
     def _get_stream_error_cooldown(self, backend_idx: int) -> int:
         """Return cooldown for a transient stream error on the given backend.
