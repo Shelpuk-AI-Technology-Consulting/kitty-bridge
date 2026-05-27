@@ -82,7 +82,15 @@ class CustomOpenAIAdapter(ProviderAdapter):
         return result
 
     def translate_to_upstream(self, cc_request: dict) -> dict:
-        return {k: v for k, v in cc_request.items() if k not in self._INTERNAL_KEYS}
+        result = {k: v for k, v in cc_request.items() if k not in self._INTERNAL_KEYS}
+        effort = cc_request.get("_reasoning_effort")
+        thinking = cc_request.get("_thinking_enabled")
+        thinking_active = (effort and effort != "none") or thinking
+        if thinking_active:
+            messages = result.get("messages")
+            if messages:
+                result["messages"] = self._inject_empty_reasoning_content(messages)
+        return result
 
     def translate_from_upstream(self, raw_response: dict) -> dict:
         return raw_response

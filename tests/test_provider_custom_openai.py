@@ -165,6 +165,55 @@ class TestCustomOpenAITranslation:
         result = adapter.translate_to_upstream(req)
         assert result == {"model": "m", "messages": [], "temperature": 0.5, "tools": []}
 
+    def test_translate_to_upstream_injects_empty_reasoning_content_when_thinking_enabled(self):
+        adapter = CustomOpenAIAdapter()
+        req = {
+            "model": "deepseek-v4-pro",
+            "messages": [
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "content": "hello"},
+                {"role": "assistant", "content": "done", "reasoning_content": "thoughts"},
+            ],
+            "_thinking_enabled": True,
+        }
+        result = adapter.translate_to_upstream(req)
+        assert result["messages"] == [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "hello", "reasoning_content": ""},
+            {"role": "assistant", "content": "done", "reasoning_content": "thoughts"},
+        ]
+
+    def test_translate_to_upstream_injects_when_reasoning_effort_only(self):
+        """Activation via _reasoning_effort without explicit _thinking_enabled."""
+        adapter = CustomOpenAIAdapter()
+        req = {
+            "model": "deepseek-v4-pro",
+            "messages": [{"role": "assistant", "content": "hello"}],
+            "_reasoning_effort": "high",
+        }
+        result = adapter.translate_to_upstream(req)
+        assert result["messages"] == [{"role": "assistant", "content": "hello", "reasoning_content": ""}]
+
+    def test_translate_to_upstream_does_not_inject_reasoning_content_when_thinking_disabled(self):
+        adapter = CustomOpenAIAdapter()
+        req = {
+            "model": "deepseek-v4-pro",
+            "messages": [{"role": "assistant", "content": "hello"}],
+            "_reasoning_effort": "none",
+        }
+        result = adapter.translate_to_upstream(req)
+        assert result["messages"] == [{"role": "assistant", "content": "hello"}]
+
+    def test_translate_to_upstream_no_injection_without_thinking_signal(self):
+        """No injection when neither _thinking_enabled nor _reasoning_effort is set."""
+        adapter = CustomOpenAIAdapter()
+        req = {
+            "model": "deepseek-v4-pro",
+            "messages": [{"role": "assistant", "content": "hello"}],
+        }
+        result = adapter.translate_to_upstream(req)
+        assert result["messages"] == [{"role": "assistant", "content": "hello"}]
+
     def test_translate_from_upstream_passthrough(self):
         adapter = CustomOpenAIAdapter()
         resp = {"choices": [{"message": {"content": "hi"}}]}
