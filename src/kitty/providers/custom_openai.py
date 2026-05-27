@@ -81,11 +81,28 @@ class CustomOpenAIAdapter(ProviderAdapter):
             result["tool_calls"] = message["tool_calls"]
         return result
 
+    def _detect_thinking_from_messages(self, messages: list[dict]) -> bool:
+        """Return True if any assistant message already has ``reasoning_content``.
+
+        When the upstream provider defaults thinking to enabled (e.g. DeepSeek)
+        but the agent does not send an explicit ``thinking`` signal, the presence
+        of ``reasoning_content`` in any assistant message proves thinking is
+        active and reasoning echo-back is required.
+        """
+        return any(
+            msg.get("role") == "assistant" and "reasoning_content" in msg
+            for msg in messages
+        )
+
     def translate_to_upstream(self, cc_request: dict) -> dict:
         result = {k: v for k, v in cc_request.items() if k not in self._INTERNAL_KEYS}
         effort = cc_request.get("_reasoning_effort")
         thinking = cc_request.get("_thinking_enabled")
         thinking_active = (effort and effort != "none") or thinking
+        if not thinking_active:
+            messages = result.get("messages")
+            if messages and self._detect_thinking_from_messages(messages):
+                thinking_active = True
         if thinking_active:
             messages = result.get("messages")
             if messages:

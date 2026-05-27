@@ -205,7 +205,8 @@ class TestCustomOpenAITranslation:
         assert result["messages"] == [{"role": "assistant", "content": "hello"}]
 
     def test_translate_to_upstream_no_injection_without_thinking_signal(self):
-        """No injection when neither _thinking_enabled nor _reasoning_effort is set."""
+        """No injection when neither _thinking_enabled nor _reasoning_effort is set,
+        and no assistant message carries reasoning_content."""
         adapter = CustomOpenAIAdapter()
         req = {
             "model": "deepseek-v4-pro",
@@ -213,6 +214,52 @@ class TestCustomOpenAITranslation:
         }
         result = adapter.translate_to_upstream(req)
         assert result["messages"] == [{"role": "assistant", "content": "hello"}]
+
+    def test_translate_to_upstream_auto_detects_thinking_from_reasoning_content(self):
+        """When no explicit thinking flag is set but conversation history already
+        contains assistant messages with reasoning_content, auto-detect that
+        thinking mode is active and inject empty reasoning_content where missing."""
+        adapter = CustomOpenAIAdapter()
+        req = {
+            "model": "deepseek-v4-pro",
+            "messages": [
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "content": "first reply"},
+                {"role": "user", "content": "more"},
+                {"role": "assistant", "content": "second reply", "reasoning_content": "deep thoughts"},
+                {"role": "assistant", "content": "third reply"},
+            ],
+        }
+        result = adapter.translate_to_upstream(req)
+        assert result["messages"] == [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "first reply", "reasoning_content": ""},
+            {"role": "user", "content": "more"},
+            {"role": "assistant", "content": "second reply", "reasoning_content": "deep thoughts"},
+            {"role": "assistant", "content": "third reply", "reasoning_content": ""},
+        ]
+
+    def test_translate_to_upstream_auto_detect_does_not_trigger_from_user_message(self):
+        """Auto-detection only looks at role=assistant messages, not user messages
+        that might happen to have a reasoning_content key."""
+        adapter = CustomOpenAIAdapter()
+        req = {
+            "model": "deepseek-v4-pro",
+            "messages": [
+                {"role": "user", "content": "hi", "reasoning_content": "not real"},
+                {"role": "assistant", "content": "reply"},
+            ],
+        }
+        result = adapter.translate_to_upstream(req)
+        assert result["messages"] == [
+            {"role": "user", "content": "hi", "reasoning_content": "not real"},
+            {"role": "assistant", "content": "reply"},
+        ]
+
+    def test_detect_thinking_from_messages_empty_list(self):
+        """Empty message list returns False."""
+        adapter = CustomOpenAIAdapter()
+        assert adapter._detect_thinking_from_messages([]) is False
 
     def test_translate_from_upstream_passthrough(self):
         adapter = CustomOpenAIAdapter()
