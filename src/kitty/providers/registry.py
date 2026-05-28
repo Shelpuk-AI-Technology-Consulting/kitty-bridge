@@ -22,10 +22,12 @@ from kitty.providers.opencode import OpenCodeGoAdapter
 from kitty.providers.openrouter import OpenRouterAdapter
 from kitty.providers.vertex import VertexAIAdapter
 from kitty.providers.zai import ZaiCodingAdapter, ZaiRegularAdapter
+from kitty.providers.zai_anthropic import ZaiAnthropicAdapter
 
 _registry: dict[str, type[ProviderAdapter]] = {
     "zai_regular": ZaiRegularAdapter,
-    "zai_coding": ZaiCodingAdapter,
+    "zai_coding": ZaiAnthropicAdapter,
+    "zai_coding_cc": ZaiCodingAdapter,
     "minimax": MiniMaxAdapter,
     "novita": NovitaAdapter,
     "ollama": OllamaAdapter,

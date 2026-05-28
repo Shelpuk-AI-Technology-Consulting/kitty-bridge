@@ -522,6 +522,14 @@ class BridgeServer:
 
         Used to detect empty upstream responses (HTTP 200 but no meaningful output).
         """
+        if cc_response.get("type") == "message":
+            content_blocks = cc_response.get("content", [])
+            return not any(
+                isinstance(block, dict)
+                and block.get("type") in {"text", "tool_use"}
+                and (block.get("text") or block.get("id"))
+                for block in content_blocks
+            )
         choices = cc_response.get("choices", [])
         if not choices:
             return True
@@ -1418,12 +1426,18 @@ class BridgeServer:
         logger.debug("Request body: %s", json.dumps(body, indent=2, ensure_ascii=False))
 
         translator = MessagesTranslator(thinking_warned=self._thinking_warned)
-        cc_request = translator.translate_request(body)
-        self._normalize_model(cc_request)
-        self._active_provider.normalize_request(cc_request)
-        self._thinking_warned = translator.thinking_warned
-
-        logger.debug("Translated CC request: %s", json.dumps(cc_request, indent=2, ensure_ascii=False))
+        if self._active_provider.use_native_messages:
+            cc_request = dict(body)
+            cc_request["_native_messages_request"] = True
+            self._normalize_model(cc_request)
+            self._active_provider.normalize_request(cc_request)
+            logger.debug("Native Messages request: %s", json.dumps(cc_request, indent=2, ensure_ascii=False))
+        else:
+            cc_request = translator.translate_request(body)
+            self._normalize_model(cc_request)
+            self._active_provider.normalize_request(cc_request)
+            self._thinking_warned = translator.thinking_warned
+            logger.debug("Translated CC request: %s", json.dumps(cc_request, indent=2, ensure_ascii=False))
 
         # Compact messages before size check
         self._apply_compaction(cc_request)
@@ -1451,7 +1465,10 @@ class BridgeServer:
                 status=500,
             )
 
-        result = translator.translate_response(cc_response, context=self._empty_response_context())
+        if self._active_provider.use_native_messages:
+            result = cc_response
+        else:
+            result = translator.translate_response(cc_response, context=self._empty_response_context())
         self._log_usage(cc_response.get("usage"))
         if self._backends and self._current_backend_idx >= 0:
             self._mark_backend_healthy(self._current_backend_idx)
@@ -1786,6 +1803,15 @@ class BridgeServer:
                             break
 
                         # Success path — stream the response
+                        if self._active_provider.use_native_messages:
+                            # Native Messages: forward raw SSE bytes to client
+                            async for chunk_bytes in upstream.content:
+                                s = await _ensure_prepared()
+                                await s.write(chunk_bytes)
+                                events_emitted = True
+                            stream_ok = True
+                            break
+
                         line_buffer = ""
                         done = False
                         stream_error = False
@@ -3782,6 +3808,8 @@ class BridgeServer:
                     last_body = await resp.text()
 
                 if last_status < 400:
+                    if self._active_provider.use_native_messages and isinstance(last_body, dict) and last_body.get("type") == "message":
+                        return last_body
                     return self._active_provider.translate_from_upstream(last_body)
 
                 # In balancing mode (retry_rate_limit=False), raise 429 immediately

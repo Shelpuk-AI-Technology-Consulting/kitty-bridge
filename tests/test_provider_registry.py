@@ -11,13 +11,17 @@ from kitty.providers.registry import _registry, get_provider
 class TestProviderRegistrySync:
     """Cross-module consistency: _PROVIDER_TYPES Literal must match _registry keys."""
 
+    # Registry keys that are internal-only (not exposed in the user-facing TUI).
+    _INTERNAL_ONLY_KEYS: frozenset[str] = frozenset({"zai_coding_cc"})
+
     def test_provider_literal_matches_registry(self):
         """_PROVIDER_TYPES in schema.py must match _registry keys in registry.py."""
         literal_values = set(get_args(_PROVIDER_TYPES))
         registry_keys = set(_registry.keys())
-        assert literal_values == registry_keys, (
+        expected_registry = literal_values | self._INTERNAL_ONLY_KEYS
+        assert expected_registry == registry_keys, (
             f"Mismatch: Literal has {literal_values - registry_keys} extra, "
-            f"registry has {registry_keys - literal_values} extra"
+            f"registry has {registry_keys - expected_registry} extra"
         )
 
 

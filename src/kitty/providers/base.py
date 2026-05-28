@@ -21,6 +21,7 @@ class ProviderAdapter(ABC):
             "_resolved_key",
             "_provider_config",
             "_original_body",
+            "_native_messages_request",
         }
     )
 
@@ -219,6 +220,16 @@ class ProviderAdapter(ABC):
         Override in providers that authenticate via a browser-based OAuth flow
         (e.g. OpenAI ChatGPT subscription).  When True, profile creation
         wizards launch the OAuth flow instead of prompting for an API key.
+        """
+        return False
+
+    @property
+    def use_native_messages(self) -> bool:
+        """Whether this provider accepts Anthropic Messages API bodies directly.
+
+        When True, the bridge's ``/v1/messages`` path skips the Messages →
+        Chat Completions translation layer and forwards Messages API request,
+        response, and SSE event formats directly through this adapter.
         """
         return False
 
