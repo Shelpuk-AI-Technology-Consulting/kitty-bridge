@@ -7,7 +7,7 @@ import aiohttp
 import pytest
 from aioresponses import aioresponses
 
-from kitty.bridge.server import BridgeServer
+from kitty.bridge.server import _CLIENT_MAX_SIZE, BridgeServer
 from kitty.launchers.base import LauncherAdapter, SpawnConfig
 from kitty.profiles.schema import Profile
 from kitty.providers.base import ProviderAdapter
@@ -148,6 +148,57 @@ class TestHealthCheck:
                 assert resp.status == 200
                 data = await resp.json()
                 assert data == {"status": "ok"}
+        finally:
+            await server.stop_async()
+
+
+class TestEarlyErrorConnectionClose:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("protocol", "path"),
+        [
+            (BridgeProtocol.RESPONSES_API, "/v1/responses"),
+            (BridgeProtocol.MESSAGES_API, "/v1/messages"),
+            (BridgeProtocol.CHAT_COMPLETIONS_API, "/v1/chat/completions"),
+            (BridgeProtocol.GEMINI_API, "/v1beta/models/test-model:generateContent"),
+        ],
+    )
+    async def test_invalid_json_closes_connection(self, protocol, path):
+        adapter = StubLauncher(protocol)
+        provider = StubProvider()
+        server = BridgeServer(adapter, provider, "test-key")
+        port = await server.start_async()
+        try:
+            async with (
+                aiohttp.ClientSession() as session,
+                session.post(
+                    f"http://127.0.0.1:{port}{path}",
+                    data=b'{"model":"test-model","messages":[',
+                    headers={"Content-Type": "application/json"},
+                ) as resp,
+            ):
+                    assert resp.status == 400
+                    assert resp.headers.get("Connection") == "close"
+        finally:
+            await server.stop_async()
+
+    @pytest.mark.asyncio
+    async def test_chat_completions_oversized_body_closes_connection(self):
+        adapter = StubLauncher(BridgeProtocol.CHAT_COMPLETIONS_API)
+        provider = StubProvider()
+        server = BridgeServer(adapter, provider, "test-key")
+        port = await server.start_async()
+        try:
+            async with (
+                aiohttp.ClientSession() as session,
+                session.post(
+                    f"http://127.0.0.1:{port}/v1/chat/completions",
+                    data=b'{"payload":"' + (b"x" * (_CLIENT_MAX_SIZE + 1)) + b'"}',
+                    headers={"Content-Type": "application/json"},
+                ) as resp,
+            ):
+                    assert resp.status == 400
+                    assert resp.headers.get("Connection") == "close"
         finally:
             await server.stop_async()
 

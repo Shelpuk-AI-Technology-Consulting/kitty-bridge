@@ -500,6 +500,11 @@ class BridgeServer:
                 return True
         return False
 
+
+    @staticmethod
+    def _error_response(data: dict, *, status: int = 400) -> web.Response:
+        return web.json_response(data, status=status, headers={"Connection": "close"})
+
     def _empty_response_context(self) -> dict:
         """Build diagnostic context for empty-response fallback text."""
         ctx: dict = {}
@@ -785,7 +790,7 @@ class BridgeServer:
         token = auth_header[7:] if auth_header.startswith("Bearer ") else None
 
         if not token or token not in self._keys_entries:
-            return web.json_response({"error": "Unauthorized"}, status=401)
+            return self._error_response({"error": "Unauthorized"}, status=401)
 
         # Store key info for access logging
         key_hash = hashlib.sha256(token.encode()).hexdigest()[:8]
@@ -896,10 +901,14 @@ class BridgeServer:
         self._select_backend()
         try:
             body = await request.json()
+        except web.HTTPRequestEntityTooLarge:
+            logger.warning("Responses API request body exceeded %d bytes", _CLIENT_MAX_SIZE)
+            return self._error_response(
+                {"error": {"code": "invalid_request", "message": "Request body too large"}},
+            )
         except (json.JSONDecodeError, Exception):
-            return web.json_response(
+            return self._error_response(
                 {"error": {"code": "invalid_request", "message": "Invalid JSON body"}},
-                status=400,
             )
 
         logger.debug("═══ RESPONSES API REQUEST ═══")
@@ -1394,17 +1403,15 @@ class BridgeServer:
             body = await request.json()
         except web.HTTPRequestEntityTooLarge:
             logger.warning("Messages API request body exceeded %d bytes", _CLIENT_MAX_SIZE)
-            return web.json_response(
+            return self._error_response(
                 {
                     "type": "error",
                     "error": {"type": "invalid_request_error", "message": "Request body too large"},
                 },
-                status=400,
             )
         except (json.JSONDecodeError, Exception):
-            return web.json_response(
+            return self._error_response(
                 {"type": "error", "error": {"type": "invalid_request_error", "message": "Invalid JSON body"}},
-                status=400,
             )
 
         logger.debug("═══ MESSAGES API REQUEST ═══")
@@ -2108,10 +2115,14 @@ class BridgeServer:
 
         try:
             body = await request.json()
+        except web.HTTPRequestEntityTooLarge:
+            logger.warning("Gemini request body exceeded %d bytes", _CLIENT_MAX_SIZE)
+            return self._error_response(
+                {"error": {"code": 400, "message": "Request body too large"}},
+            )
         except (json.JSONDecodeError, Exception):
-            return web.json_response(
+            return self._error_response(
                 {"error": {"code": 400, "message": "Invalid JSON body"}},
-                status=400,
             )
 
         logger.debug("═══ GEMINI API REQUEST ═══ model=%s", model_from_path)
@@ -2710,10 +2721,14 @@ class BridgeServer:
         self._select_backend()
         try:
             body = await request.json()
+        except web.HTTPRequestEntityTooLarge:
+            logger.warning("Chat Completions request body exceeded %d bytes", _CLIENT_MAX_SIZE)
+            return self._error_response(
+                {"error": {"message": "Request body too large", "type": "invalid_request_error"}},
+            )
         except (json.JSONDecodeError, Exception):
-            return web.json_response(
+            return self._error_response(
                 {"error": {"message": "Invalid JSON body", "type": "invalid_request_error"}},
-                status=400,
             )
 
         logger.debug("═══ CHAT COMPLETIONS PASS-THROUGH REQUEST ═══")
@@ -3495,7 +3510,7 @@ class BridgeServer:
                 request_size,
                 max_chars,
             )
-            return web.json_response(
+            return self._error_response(
                 {
                     "type": "error",
                     "error": {
@@ -3508,7 +3523,6 @@ class BridgeServer:
                         ),
                     },
                 },
-                status=400,
             )
         return None
 
