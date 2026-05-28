@@ -22,6 +22,8 @@
 {"id": "anthropic/claude-opus-4.6-fast", "name": "Anthropic: Claude Opus 4.6 (Fast)", "context_length": 1000000, "max_completion_tokens": 128000, "created": 1775592472},
 {"id": "anthropic/claude-opus-4.7", "name": "Anthropic: Claude Opus 4.7", "context_length": 1000000, "max_completion_tokens": 128000, "created": 1776351100},
 {"id": "anthropic/claude-opus-4.7-fast", "name": "Anthropic: Claude Opus 4.7 (Fast)", "context_length": 1000000, "max_completion_tokens": 128000, "created": 1778613011},
+{"id": "anthropic/claude-opus-4.8", "name": "Anthropic: Claude Opus 4.8", "context_length": 1000000, "max_completion_tokens": 128000, "created": 1779905091},
+{"id": "anthropic/claude-opus-4.8-fast", "name": "Anthropic: Claude Opus 4.8 (Fast)", "context_length": 1000000, "max_completion_tokens": 128000, "created": 1779913703},
 {"id": "anthropic/claude-sonnet-4", "name": "Anthropic: Claude Sonnet 4", "context_length": 1000000, "max_completion_tokens": 64000, "created": 1747930371},
 {"id": "anthropic/claude-sonnet-4.5", "name": "Anthropic: Claude Sonnet 4.5", "context_length": 1000000, "max_completion_tokens": 64000, "created": 1759161676},
 {"id": "anthropic/claude-sonnet-4.6", "name": "Anthropic: Claude Sonnet 4.6", "context_length": 1000000, "max_completion_tokens": 128000, "created": 1771342990},
