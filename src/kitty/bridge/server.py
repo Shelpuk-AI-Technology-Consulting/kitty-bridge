@@ -3808,7 +3808,11 @@ class BridgeServer:
                     last_body = await resp.text()
 
                 if last_status < 400:
-                    if self._active_provider.use_native_messages and isinstance(last_body, dict) and last_body.get("type") == "message":
+                    if (
+                        self._active_provider.use_native_messages
+                        and isinstance(last_body, dict)
+                        and last_body.get("type") == "message"
+                    ):
                         return last_body
                     return self._active_provider.translate_from_upstream(last_body)
 

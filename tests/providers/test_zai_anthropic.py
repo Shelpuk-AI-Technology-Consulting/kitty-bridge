@@ -171,7 +171,11 @@ class TestZaiAnthropicTranslateFromUpstreamNative:
 
 class TestZaiAnthropicStreamEvent:
     def test_anthropic_event_passthrough(self, adapter: ZaiAnthropicAdapter) -> None:
-        event = b'data: {"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","content":[],"model":"m","stop_reason":null,"usage":{"input_tokens":0,"output_tokens":0}}}\n\n'
+        event = (
+            b'data: {"type":"message_start","message":{"id":"msg_1","type":"message"'
+            b',"role":"assistant","content":[],"model":"m","stop_reason":null'
+            b',"usage":{"input_tokens":0,"output_tokens":0}}}\n\n'
+        )
         result = adapter.translate_upstream_stream_event(event)
         assert result == [event]
 
@@ -264,6 +268,10 @@ class TestZaiAnthropicCCFallback:
     def test_cc_stream_event_uses_anthropic_translation(self, adapter: ZaiAnthropicAdapter) -> None:
         """CC SSE events should be passed through super().translate_upstream_stream_event."""
         # This is a CC-format SSE event — should be delegated to AnthropicAdapter
-        cc_event = b'data: {"id":"chatcmpl-1","object":"chat.completion.chunk","created":0,"model":"m","choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":null}]}\n\n'
+        cc_event = (
+            b'data: {"id":"chatcmpl-1","object":"chat.completion.chunk"'
+            b',"created":0,"model":"m","choices":[{"index":0'
+            b',"delta":{"content":"hi"},"finish_reason":null}]}\n\n'
+        )
         result = adapter.translate_upstream_stream_event(cc_event)
         assert len(result) == 1
