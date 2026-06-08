@@ -32,6 +32,7 @@ _PROVIDER_TYPES = Literal[
     "fireworks",
     "google_aistudio",
     "opencode_go",
+    "custom_anthropic",
     "custom_openai",
     "kimi",
     "mimo",
@@ -46,6 +47,7 @@ PROVIDER_LABELS: dict[str, str] = {
     "azure": "MS Azure",
     "bedrock": "AWS Bedrock",
     "byteplus": "BytePlus",
+    "custom_anthropic": "Custom Anthropic-Compatible",
     "custom_openai": "Custom OpenAI-Compatible",
     "fireworks": "Fireworks FirePass",
     "google_aistudio": "Google AI Studio",
@@ -102,6 +104,7 @@ PROVIDER_SECTIONS: list[tuple[str, list[str]]] = [
     (
         "-- Generic --",
         [
+            "custom_anthropic",
             "custom_openai",
         ],
     ),
