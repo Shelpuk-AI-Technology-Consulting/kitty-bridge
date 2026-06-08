@@ -47,6 +47,10 @@ class CustomAnthropicAdapter(AnthropicAdapter):
     def upstream_path(self) -> str:
         return "/v1/messages"
 
+    def normalize_model_name(self, model: str) -> str:
+        """Pass model name through unchanged — user provides the exact upstream name."""
+        return model
+
     @property
     def requires_custom_url(self) -> bool:
         return True

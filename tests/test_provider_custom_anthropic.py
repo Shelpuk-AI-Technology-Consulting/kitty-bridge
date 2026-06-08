@@ -329,17 +329,22 @@ class TestCustomAnthropicErrorMapping:
 
 
 class TestCustomAnthropicNormalizeModel:
-    """Test normalize_model_name — inherited from AnthropicAdapter."""
+    """Test normalize_model_name — identity passthrough (user-provided exact name)."""
 
-    def test_strips_provider_prefix(self):
-        """AnthropicAdapter strips prefixes like 'anthropic/'."""
+    def test_passthrough_unmodified(self):
+        """Model names are passed through exactly as the user typed them."""
         adapter = CustomAnthropicAdapter()
-        assert adapter.normalize_model_name("anthropic/claude-sonnet-4-6") == "claude-sonnet-4-6"
+        assert adapter.normalize_model_name("mimo-v2.5-pro") == "mimo-v2.5-pro"
 
-    def test_normalizes_version_separators(self):
-        """AnthropicAdapter replaces '.' with '-' for model versions."""
+    def test_passthrough_with_prefix(self):
+        """Provider prefixes are NOT stripped — the user's name is exact."""
         adapter = CustomAnthropicAdapter()
-        assert adapter.normalize_model_name("claude-3.5-sonnet") == "claude-3-5-sonnet"
+        assert adapter.normalize_model_name("anthropic/claude-sonnet-4-6") == "anthropic/claude-sonnet-4-6"
+
+    def test_passthrough_with_dots(self):
+        """Dots are NOT replaced with dashes — the user's name is exact."""
+        adapter = CustomAnthropicAdapter()
+        assert adapter.normalize_model_name("claude-3.5-sonnet") == "claude-3.5-sonnet"
 
     def test_passthrough_clean_name(self):
         adapter = CustomAnthropicAdapter()
