@@ -20,6 +20,7 @@ _PROVIDER_TYPES = Literal[
     "zai_regular",
     "zai_coding",
     "minimax",
+    "minimax_token",
     "novita",
     "ollama",
     "openai",
@@ -53,6 +54,7 @@ PROVIDER_LABELS: dict[str, str] = {
     "google_aistudio": "Google AI Studio",
     "kimi": "Kimi Code",
     "minimax": "MiniMax",
+    "minimax_token": "MiniMax Token Plan",
     "mimo": "Xiaomi MiMo",
     "novita": "Novita AI",
     "ollama": "Ollama",
@@ -87,6 +89,7 @@ PROVIDER_SECTIONS: list[tuple[str, list[str]]] = [
         [
             "fireworks",
             "kimi",
+            "minimax_token",
             "novita",
             "ollama_cloud",
             "openai_subscription",

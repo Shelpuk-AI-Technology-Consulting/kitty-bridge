@@ -328,7 +328,13 @@ class MessagesTranslator:
                 return refusal
         if not context:
             return _EMPTY_ASSISTANT_FALLBACK_TEXT
-        parts = [_EMPTY_ASSISTANT_FALLBACK_TEXT]
+
+        upstream_error = context.get("upstream_error")
+        if upstream_error:
+            parts: list[str] = [str(upstream_error)]
+        else:
+            parts = [_EMPTY_ASSISTANT_FALLBACK_TEXT]
+
         provider = context.get("provider")
         model = context.get("model")
         attempts = context.get("attempts")

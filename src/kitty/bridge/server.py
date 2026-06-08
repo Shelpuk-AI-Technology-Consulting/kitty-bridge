@@ -54,6 +54,14 @@ _DEBUG_LOG_PATH = _DEBUG_LOG_DIR / "bridge.log"
 
 _MAX_RETRIES = 3
 _RETRYABLE_STATUSES = {429, 500, 502, 503, 504}
+
+# Provider error codes that indicate a permanent failure for this request.
+# Even when returned with a 5xx status, these should not be retried.
+_NON_RETRYABLE_ERROR_CODES = frozenset({
+    "1211",  # Z.AI: Unknown Model
+    "1261",  # Z.AI: Prompt exceeds max length (context too large)
+    "2013",  # Minimax: Context window exceeds limit
+})
 _AUTH_FAILURE_STATUSES = {401}  # 403 handled as Cloudflare
 _AUTH_COOLDOWN = 86400  # 24h — effectively permanent per session
 _BACKOFF_BASE = 1.0
@@ -505,9 +513,15 @@ class BridgeServer:
     def _error_response(data: dict, *, status: int = 400) -> web.Response:
         return web.json_response(data, status=status, headers={"Connection": "close"})
 
-    def _empty_response_context(self) -> dict:
-        """Build diagnostic context for empty-response fallback text."""
+    def _empty_response_context(self, upstream_error: str | None = None) -> dict:
+        """Build diagnostic context for empty-response fallback text.
+
+        When ``upstream_error`` is provided, the actual upstream error message
+        is used in the fallback instead of the generic empty-response text.
+        """
         ctx: dict = {}
+        if upstream_error:
+            ctx["upstream_error"] = upstream_error
         if self._backends and 0 <= self._current_backend_idx < len(self._backends):
             provider = self._backends[self._current_backend_idx][0]
             ctx["provider"] = provider.provider_type
@@ -3583,9 +3597,22 @@ class BridgeServer:
         """Return True if a streaming error should trigger a retry / backend switch."""
         if BridgeServer._is_cloudflare_block(status, error_body):
             return False
+        if BridgeServer._is_non_retryable_error_code(status, error_body):
+            return False
         if status in _RETRYABLE_STATUSES:
             return True
         return BridgeServer._is_rate_limit_error(status, error_body)
+
+    @staticmethod
+    def _is_non_retryable_error_code(status: int, body: object) -> bool:
+        """Return True if the upstream error body contains a non-retryable error code.
+
+        Some providers return permanent-failure error codes with 5xx HTTP status
+        (e.g. Z.AI returns code 1211 "Unknown Model" on HTTP 500).  These should
+        not be retried because the same request will always fail.
+        """
+        code, _message = BridgeServer._extract_error_fields(body)
+        return bool(code and code in _NON_RETRYABLE_ERROR_CODES)
 
     @staticmethod
     def _extract_error_fields(body: object) -> tuple[str, str]:
@@ -3819,6 +3846,9 @@ class BridgeServer:
                 # In balancing mode (retry_rate_limit=False), raise 429 immediately
                 # so the caller can fail over to another backend.
                 if last_status == 429 and not retry_rate_limit:
+                    raise UpstreamError(last_status, last_body)
+
+                if self._is_non_retryable_error_code(last_status, last_body):
                     raise UpstreamError(last_status, last_body)
 
                 if last_status in _RETRYABLE_STATUSES and attempt < _MAX_RETRIES:
