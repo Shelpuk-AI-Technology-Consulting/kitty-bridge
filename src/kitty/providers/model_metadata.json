@@ -148,6 +148,7 @@
 {"id": "moonshotai/kimi-k2.6:free", "name": "MoonshotAI: Kimi K2.6 (free)", "context_length": 262144, "max_completion_tokens": null, "created": 1776699402},
 {"id": "morph/morph-v3-fast", "name": "Morph: Morph V3 Fast", "context_length": 81920, "max_completion_tokens": 38000, "created": 1751910002},
 {"id": "morph/morph-v3-large", "name": "Morph: Morph V3 Large", "context_length": 262144, "max_completion_tokens": 131072, "created": 1751910858},
+{"id": "nex-agi/nex-n2-pro:free", "name": "Nex AGI: Nex-N2-Pro (free)", "context_length": 262144, "max_completion_tokens": 262144, "created": 1780937140},
 {"id": "nousresearch/hermes-3-llama-3.1-405b", "name": "Nous: Hermes 3 405B Instruct", "context_length": 131072, "max_completion_tokens": 16384, "created": 1723766400},
 {"id": "nousresearch/hermes-3-llama-3.1-405b:free", "name": "Nous: Hermes 3 405B Instruct (free)", "context_length": 131072, "max_completion_tokens": null, "created": 1723766400},
 {"id": "nousresearch/hermes-3-llama-3.1-70b", "name": "Nous: Hermes 3 70B Instruct", "context_length": 131072, "max_completion_tokens": 16384, "created": 1723939200},
