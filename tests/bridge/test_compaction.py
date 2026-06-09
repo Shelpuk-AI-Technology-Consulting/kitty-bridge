@@ -814,10 +814,10 @@ class TestGetMaxContextChars:
         """Models with very large context are capped at _MAX_REQUEST_CHARS."""
         server = _make_server()
         server._active_provider = StubProvider()
-        server._active_model = "google/gemini-2.0-flash-001"
+        server._active_model = "google/gemini-2.5-flash"
         server._active_provider_config = {}
         server._backends = None
-        # gemini has 1M context → 4M chars, capped at _MAX_REQUEST_CHARS (4M)
+        # gemini has 1M context → ~4.2M chars, capped at _MAX_REQUEST_CHARS (4M)
         assert server._get_max_context_chars() == _MAX_REQUEST_CHARS
 
 
