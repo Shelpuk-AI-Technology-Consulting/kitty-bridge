@@ -87,6 +87,28 @@ class TestIsNonRetryableErrorCode:
         """Empty dict body is retryable."""
         assert BridgeServer._is_non_retryable_error_code(500, {}) is False
 
+    # ── Bracket-format errors (Z.AI Anthropic endpoint) ───────────────────
+
+    def test_1211_bracket_format(self):
+        """Code 1211 in Z.AI bracket format [code][message][request_id]."""
+        body = "[1211][Unknown Model, please check the model code.][20260609162344079a9712de6f4db2]"
+        assert BridgeServer._is_non_retryable_error_code(500, body) is True
+
+    def test_1261_bracket_format(self):
+        """Code 1261 in Z.AI bracket format."""
+        body = "[1261][Prompt exceeds max length][abc123]"
+        assert BridgeServer._is_non_retryable_error_code(500, body) is True
+
+    def test_bracket_format_without_square_brackets_is_retryable(self):
+        """Plain text without matching bracket codes is retryable."""
+        body = "Model temporarily unavailable, please retry later"
+        assert BridgeServer._is_non_retryable_error_code(500, body) is False
+
+    def test_1234_bracket_format_is_retryable(self):
+        """Code 1234 (network failure) in bracket format is still retryable."""
+        body = "[1234][Network error][abc]"
+        assert BridgeServer._is_non_retryable_error_code(500, body) is False
+
 
 # ── Unit tests for _should_retry_stream integration ───────────────────────────
 
@@ -118,6 +140,11 @@ class TestShouldRetryStreamWithNonRetryableCodes:
         """Code 1234 (network failure) on 500 is still retryable."""
         body = json.dumps({"error": {"code": "1234", "message": "Network error"}})
         assert BridgeServer._should_retry_stream(500, body) is True
+
+    def test_1211_bracket_on_500_not_retryable(self):
+        """1211 in Z.AI bracket format with HTTP 500 is NOT retryable."""
+        body = "[1211][Unknown Model, please check the model code.][req123]"
+        assert BridgeServer._should_retry_stream(500, body) is False
 
 
 # ── Fix 2: upstream error surfaced in fallback text ──────────────────────────

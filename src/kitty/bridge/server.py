@@ -3610,9 +3610,21 @@ class BridgeServer:
         Some providers return permanent-failure error codes with 5xx HTTP status
         (e.g. Z.AI returns code 1211 "Unknown Model" on HTTP 500).  These should
         not be retried because the same request will always fail.
+
+        Handles both structured JSON bodies (``{"error": {"code": "1211"}}``) and
+        plain-text bracket-format errors (``[1211][Unknown Model][request_id]``)
+        returned by some Anthropic-protocol endpoints.
         """
         code, _message = BridgeServer._extract_error_fields(body)
-        return bool(code and code in _NON_RETRYABLE_ERROR_CODES)
+        if code and code in _NON_RETRYABLE_ERROR_CODES:
+            return True
+        # Z.AI Anthropic endpoint returns errors as plain text in the format
+        # ``[code][message][request_id]``, which _extract_error_fields cannot parse.
+        if isinstance(body, str):
+            for non_retryable_code in _NON_RETRYABLE_ERROR_CODES:
+                if f"[{non_retryable_code}]" in body:
+                    return True
+        return False
 
     @staticmethod
     def _extract_error_fields(body: object) -> tuple[str, str]:
