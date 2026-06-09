@@ -25,7 +25,7 @@ classifiers = [
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 dependencies = [
-    "aiohttp>=3.9",
+    "aiohttp>=3.9,<3.14",
     "curl_cffi>=0.7",
     "pydantic>=2.0",
     "keyring>=23.0",
