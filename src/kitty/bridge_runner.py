@@ -99,7 +99,7 @@ def main() -> None:
             if not key:
                 print(f"No API key for profile {mp.name!r}", file=sys.stderr)
                 sys.exit(1)
-            backends.append((get_provider(mp.provider), key, mp))
+            backends.append((get_provider(mp.provider, mp.provider_config), key, mp))
 
         server = BridgeServer(
             adapter=None,
@@ -128,7 +128,7 @@ def main() -> None:
 
         server = BridgeServer(
             adapter=None,
-            provider=get_provider(profile.provider),
+            provider=get_provider(profile.provider, profile.provider_config),
             resolved_key=resolved_key,
             host=host,
             port=port,

@@ -1,11 +1,14 @@
-"""MiniMax Token Plan Anthropic adapter — native Messages API passthrough.
+"""MiniMax Token Plan Anthropic adapter — translated CC→Messages by default.
 
 Routes Claude Code Messages API requests through MiniMax's Anthropic-compatible
-endpoint (``https://api.minimax.io/anthropic``), passing the Messages API format
-directly without the intermediate Chat Completions translation layer.
+endpoint (``https://api.minimax.io/anthropic``).
 
-For Claude Code (Messages API path), the bridge detects ``use_native_messages``
-and skips the MessagesTranslator, forwarding the raw Messages API body.
+By default the bridge runs the standard ``MessagesTranslator`` →
+``AnthropicAdapter.translate_to_upstream`` path, which produces a clean
+Anthropic Messages body that the upstream accepts. The raw-body native
+passthrough (``use_native_messages=True``) is still available as an opt-in
+for users who have a specific need to forward the untranslated body
+(e.g. to exercise fields the translator strips).
 
 For other clients (Responses API, Chat Completions), the inherited
 ``AnthropicAdapter`` CC↔Messages translation is used automatically.
@@ -16,6 +19,21 @@ Region support:
 
   The region is configured via ``provider_config["region"] == "cn"`` in the
   profile.  When no region is set, the global endpoint is used.
+
+Native passthrough opt-in:
+  - ``MiniMaxTokenAnthropicAdapter(native_messages=True)``
+  - ``MiniMaxTokenAnthropicAdapter(provider_config={"native_messages": True})``
+
+  Why opt-in instead of default: MiniMax's Anthropic-compatible endpoint
+  rejects the raw Claude Code body with HTTP 400 because it sends fields
+  the translator strips (``context_management``, ``output_config``,
+  ``thinking: {type: "adaptive"}``, ``cache_control`` on system blocks,
+  advanced ``metadata``). The translated path produces a clean body that
+  the upstream accepts. Native passthrough also bypasses the
+  request-compaction grouping logic which is Chat-Completions-format
+  aware; large requests can lose the ``tool_use`` → ``tool_result`` pairing
+  and surface as ``invalid params, tool call result does not follow tool
+  call (2013)`` from MiniMax.
 """
 
 from __future__ import annotations
@@ -32,13 +50,35 @@ _CN_URL = "https://api.minimaxi.com/anthropic"
 
 
 class MiniMaxTokenAnthropicAdapter(AnthropicAdapter):
-    """MiniMax Token Plan adapter using the native Anthropic Messages API endpoint.
+    """MiniMax Token Plan adapter.
 
-    Extends ``AnthropicAdapter`` to reuse CC↔Messages translation for
-    non-Claude Code clients (Responses API, Chat Completions), while
-    enabling direct Messages passthrough when the server signals the
-    request is already in Messages format via ``_native_messages_request``.
+    Default: translated path (CC → Anthropic Messages via the inherited
+    ``AnthropicAdapter``).
+
+    Opt-in: native passthrough (``use_native_messages=True``) forwards the
+    raw Claude Code body to the upstream. See module docstring for caveats.
     """
+
+    def __init__(
+        self,
+        *,
+        native_messages: bool = False,
+        provider_config: dict | None = None,
+    ) -> None:
+        self._native_messages_override = self._resolve_native_messages(native_messages, provider_config)
+
+    @staticmethod
+    def _resolve_native_messages(native_messages: bool, provider_config: dict | None) -> bool:
+        """Resolve the ``use_native_messages`` flag from kwargs and provider_config.
+
+        ``provider_config["native_messages"]`` takes precedence over the
+        explicit kwarg so the profile-driven setting wins. Any non-falsy
+        value enables the override; explicit ``False`` in provider_config
+        forces the translated path.
+        """
+        if isinstance(provider_config, dict) and "native_messages" in provider_config:
+            return bool(provider_config["native_messages"])
+        return bool(native_messages)
 
     @property
     def provider_type(self) -> str:
@@ -50,7 +90,7 @@ class MiniMaxTokenAnthropicAdapter(AnthropicAdapter):
 
     @property
     def use_native_messages(self) -> bool:
-        return True
+        return self._native_messages_override
 
     def build_base_url(self, provider_config: dict | None) -> str:
         if provider_config and provider_config.get("region") == "cn":
@@ -72,6 +112,10 @@ class MiniMaxTokenAnthropicAdapter(AnthropicAdapter):
         return super().translate_from_upstream(raw_response)
 
     def translate_upstream_stream_event(self, raw_bytes: bytes) -> list[bytes]:
+        # Native-passthrough opt-in: forward raw Anthropic SSE bytes
+        # untouched. We still attempt to detect the event types so non-
+        # Anthropic SSE (e.g. accidental CC stream) falls through to the
+        # inherited CC→Messages translation.
         raw_str = raw_bytes.decode("utf-8", errors="replace").strip()
         if not raw_str:
             return []

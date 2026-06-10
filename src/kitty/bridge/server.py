@@ -60,7 +60,12 @@ _RETRYABLE_STATUSES = {429, 500, 502, 503, 504}
 _NON_RETRYABLE_ERROR_CODES = frozenset({
     "1211",  # Z.AI: Unknown Model
     "1261",  # Z.AI: Prompt exceeds max length (context too large)
-    "2013",  # Minimax: Context window exceeds limit
+    "2013",  # Minimax: Context window too large OR tool-call validation
+             # failure (e.g. "tool call result does not follow tool call").
+             # Both indicate the request will not succeed against the same
+             # backend with the same conversation state; in a balancing
+             # profile the bridge still fails over to the next backend, in
+             # a single-backend profile the user must /clear.
 })
 _AUTH_FAILURE_STATUSES = {401}  # 403 handled as Cloudflare
 _AUTH_COOLDOWN = 86400  # 24h — effectively permanent per session
@@ -3519,9 +3524,39 @@ class BridgeServer:
         so that the full request fits within ``_MAX_REQUEST_CHARS``.
 
         Requests without messages are left unchanged.
+
+        Safety net for ``use_native_messages`` providers: the compaction
+        grouping logic in ``_compact_messages`` is Chat-Completions-format
+        aware — it groups ``assistant(tool_calls) + tool(result)`` as an
+        atomic block. When the provider forwards the raw Anthropic Messages
+        body, ``tool_use`` is a content block on the assistant message and
+        the following message is ``user`` with a ``tool_result`` block; the
+        grouping misses the pairing and the pruner can drop the
+        ``assistant(tool_use)`` while keeping the following
+        ``user(tool_result)``. MiniMax then returns ``invalid params, tool
+        call result does not follow tool call (2013)``. We log a warning if
+        the provider is in native passthrough mode and the request exceeds
+        the compaction threshold so operators see a signal if a future
+        provider re-introduces this combination.
         """
         if "messages" not in cc_request:
             return
+
+        # Safety-net warning: if the active provider is in native passthrough
+        # mode and the request is large enough to risk compaction, log it.
+        if self._active_provider.use_native_messages:
+            request_size = len(json.dumps(cc_request, ensure_ascii=False))
+            if request_size > _COMPACTION_CHAR_THRESHOLD:
+                logger.warning(
+                    "Native passthrough provider (%s) sending large request (%d chars) "
+                    "above compaction threshold (%d). Compaction grouping is "
+                    "Chat-Completions-format aware and may orphan tool_result blocks "
+                    "whose tool_use was in the head. Set native_messages=False in the "
+                    "profile or pre-compact the request to avoid this.",
+                    type(self._active_provider).__name__,
+                    request_size,
+                    _COMPACTION_CHAR_THRESHOLD,
+                )
 
         # Compute the size of the non-message payload (tools, model, etc.)
         # so that messages + overhead stays within _MAX_REQUEST_CHARS.
@@ -3708,7 +3743,6 @@ class BridgeServer:
         searchable = f"{details}\n{error_message}".lower()
         is_context_too_large = (
             code == "1261"
-            or code == "2013"
             or "exceeds max length" in searchable
             or "prompt exceeds" in searchable
             or "context length" in searchable
@@ -3719,6 +3753,23 @@ class BridgeServer:
         if is_context_too_large:
             return (
                 "The conversation context has grown too large for the upstream model's context window. "
+                "Use /clear to reset the conversation context."
+            )
+
+        # Minimax code 2013 reused for tool-call validation:
+        # "tool call result does not follow tool call". This is a client-side
+        # conversation-state error — the request body has a tool_result
+        # block whose tool_use_id has no matching tool_use. The conversation
+        # needs to be reset before the request can succeed against the
+        # same backend.
+        is_tool_call_validation = (
+            "tool call result" in searchable
+            or "does not follow tool call" in searchable
+        )
+        if is_tool_call_validation:
+            return (
+                "The conversation history has a broken tool_use/tool_result pairing "
+                "(upstream returned: tool call result does not follow tool call). "
                 "Use /clear to reset the conversation context."
             )
 

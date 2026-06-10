@@ -244,3 +244,64 @@ class TestTranslateUpstreamError:
         code, message = BridgeServer._extract_error_fields({"error": {"code": "5000", "message": inner}})
         assert code == "5000"
         assert "context window" in message
+
+    # ── Minimax code 2013 reused for tool-call validation ───────────────
+
+    def test_minimax_2013_tool_call_validation_dict_body(self):
+        """Minimax 2013 with 'tool call result does not follow tool call' returns
+        a tool-pairing-specific /clear message distinct from the context-window hint.
+        """
+        inner_error = json.dumps(
+            {
+                "type": "error",
+                "error": {
+                    "type": "bad_request_error",
+                    "message": "invalid params, tool call result does not follow tool call (2013)",
+                    "http_code": "400",
+                },
+                "request_id": "abc123",
+            }
+        )
+        body = {
+            "type": "error",
+            "error": {"type": "api_error", "message": inner_error},
+        }
+        result = self._call(400, body)
+        assert "/clear" in result
+        assert "tool" in result.lower() or "pairing" in result.lower()
+        # The context-window hint must not be returned for the tool-call case
+        assert "context has grown too large" not in result
+
+    def test_minimax_2013_tool_call_validation_string_body(self):
+        """Minimax 2013 tool-call validation with raw JSON string body."""
+        inner_error = json.dumps(
+            {
+                "type": "error",
+                "error": {
+                    "type": "bad_request_error",
+                    "message": "invalid params, tool call result does not follow tool call (2013)",
+                    "http_code": "400",
+                },
+            }
+        )
+        body = json.dumps(
+            {
+                "type": "error",
+                "error": {"type": "api_error", "message": inner_error},
+            }
+        )
+        result = self._call(400, body)
+        assert "/clear" in result
+        assert "context has grown too large" not in result
+
+    def test_minimax_2013_tool_call_validation_text_only(self):
+        """The phrase 'tool call result does not follow tool call' is specific
+        enough to detect on its own (no code 2013 required) and return the
+        /clear hint. The user can recover from this state by clearing the
+        conversation, regardless of which provider returned the error.
+        """
+        body = {"error": {"message": "tool call result does not follow tool call"}}
+        result = self._call(400, body)
+        assert "/clear" in result
+        # Tool-call-specific phrasing, not the context-window hint
+        assert "broken tool_use/tool_result pairing" in result

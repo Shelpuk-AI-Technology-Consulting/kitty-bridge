@@ -26,7 +26,10 @@ class TestMessagesTranslatorReasoning:
         assert result["_thinking_enabled"] is True
         assert result["_reasoning_effort"] == "high"
 
-    def test_thinking_disabled_sets_no_effort(self) -> None:
+    def test_thinking_disabled_is_preserved(self) -> None:
+        """Explicit ``thinking: {type: disabled}`` is a user configuration
+        and must be preserved so Anthropic-compatible upstreams receive it.
+        """
         t = MessagesTranslator()
         req = {
             "model": "claude-3-opus",
@@ -35,8 +38,38 @@ class TestMessagesTranslatorReasoning:
             "messages": [{"role": "user", "content": "hi"}],
         }
         result = t.translate_request(req)
-        assert "_thinking_enabled" not in result
+        assert result["_thinking_enabled"] is False
         assert "_reasoning_effort" not in result
+
+    def test_effort_is_preserved(self) -> None:
+        """Top-level Claude Code ``effort`` controls reasoning depth and
+        must be passed to Anthropic-compatible upstreams.
+        """
+        t = MessagesTranslator()
+        req = {
+            "model": "claude-3-opus",
+            "max_tokens": 1024,
+            "effort": "xhigh",
+            "messages": [{"role": "user", "content": "hi"}],
+        }
+        result = t.translate_request(req)
+        assert result["_effort"] == "xhigh"
+
+    def test_thinking_adaptive_is_preserved(self) -> None:
+        """Claude Code can send ``thinking: {type: adaptive}``; keep the
+        original mode so AnthropicAdapter can restore it verbatim.
+        """
+        t = MessagesTranslator()
+        req = {
+            "model": "claude-3-opus",
+            "max_tokens": 1024,
+            "thinking": {"type": "adaptive"},
+            "messages": [{"role": "user", "content": "hi"}],
+        }
+        result = t.translate_request(req)
+        assert result["_thinking_adaptive"] is True
+        assert result["_thinking_enabled"] is True
+        assert result["_reasoning_effort"] == "high"
 
     def test_no_thinking_backward_compatible(self) -> None:
         t = MessagesTranslator()

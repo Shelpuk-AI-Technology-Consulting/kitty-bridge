@@ -122,13 +122,25 @@ class AnthropicAdapter(ProviderAdapter):
             anthropic["tools"] = self._translate_tools(cc_request["tools"])
 
         # Restore thinking from normalized effort metadata
-        if cc_request.get("_thinking_enabled"):
+        if cc_request.get("_thinking_adaptive"):
+            # Claude Code sent thinking: {type: "adaptive"} — forward it
+            # verbatim to the Anthropic-compatible upstream.  This lets the
+            # provider decide the budget automatically.
+            anthropic["thinking"] = {"type": "adaptive"}
+        elif cc_request.get("_thinking_enabled"):
             # Anthropic requires budget_tokens >= 1024 and budget_tokens < max_tokens.
             max_tokens = max(anthropic.get("max_tokens", _DEFAULT_MAX_TOKENS), 1025)
             anthropic["max_tokens"] = max_tokens
             anthropic["thinking"] = {"type": "enabled", "budget_tokens": max_tokens - 1}
         elif cc_request.get("_thinking_enabled") is False:
             anthropic["thinking"] = {"type": "disabled"}
+
+        # Restore the effort parameter for Anthropic-compatible upstreams.
+        # Claude Code sends this to control reasoning depth (e.g. "low",
+        # "medium", "high", "xhigh").  The Anthropic Messages API accepts
+        # it as a top-level parameter alongside thinking.
+        if cc_request.get("_effort"):
+            anthropic["effort"] = cc_request["_effort"]
 
         return anthropic
 

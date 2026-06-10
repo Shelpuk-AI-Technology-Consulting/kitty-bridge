@@ -392,7 +392,10 @@ def _run_bridge(
         sys.exit(1)
 
     # Get provider adapter
-    provider = get_provider(profile.provider)  # type: ignore[union-attr]
+    provider = get_provider(
+        profile.provider,  # type: ignore[union-attr]
+        getattr(profile, "provider_config", None),
+    )
 
     # Validate API key if requested
     if validate:
@@ -484,7 +487,7 @@ def _run_bridge_balancing(
         if not key:
             print_error(f"No API key found for member profile {mp.name!r}")
             sys.exit(1)
-        provider = get_provider(mp.provider)
+        provider = get_provider(mp.provider, mp.provider_config)
         backends.append((provider, key, mp))
 
     # Create bridge server with balancing backends
@@ -574,7 +577,10 @@ def _launch_target(
     profile = backend
     return launch(
         adapter=adapter,  # type: ignore[arg-type]
-        provider=get_provider(profile.provider),  # type: ignore[union-attr]
+        provider=get_provider(
+            profile.provider,  # type: ignore[union-attr]
+            getattr(profile, "provider_config", None),
+        ),
         profile=profile,  # type: ignore[arg-type]
         cred_store=cred_store,  # type: ignore[arg-type]
         extra_args=extra_args,
@@ -615,7 +621,7 @@ def _launch_target_balancing(
 
             print_error(f"No API key found for member profile {mp.name!r}")
             return 1
-        provider = get_provider(mp.provider)
+        provider = get_provider(mp.provider, mp.provider_config)
         backends.append((provider, key, mp))
 
     # Use first member's provider/model for adapter spawn config

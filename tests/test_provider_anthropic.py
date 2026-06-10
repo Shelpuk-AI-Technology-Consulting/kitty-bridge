@@ -659,3 +659,83 @@ class TestThinkingBudgetTokensUncapped:
         result = self.adapter.translate_to_upstream(cc)
         assert result["max_tokens"] == 1025
         assert result["thinking"]["budget_tokens"] == 1024
+
+
+class TestEffortAndThinkingPreservation:
+    """AnthropicAdapter must restore effort and thinking: {type: adaptive}
+    from the normalized CC request metadata so Anthropic-compatible
+    upstreams receive the user's reasoning configuration unchanged.
+    """
+
+    def setup_method(self):
+        self.adapter = AnthropicAdapter()
+
+    def test_effort_restored_to_upstream(self):
+        cc = {
+            "model": "claude-sonnet-4-6",
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 4096,
+            "stream": False,
+            "_effort": "xhigh",
+        }
+        result = self.adapter.translate_to_upstream(cc)
+        assert result["effort"] == "xhigh"
+
+    def test_effort_low_restored(self):
+        cc = {
+            "model": "claude-sonnet-4-6",
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 4096,
+            "stream": False,
+            "_effort": "low",
+        }
+        result = self.adapter.translate_to_upstream(cc)
+        assert result["effort"] == "low"
+
+    def test_no_effort_when_not_set(self):
+        cc = {
+            "model": "claude-sonnet-4-6",
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 4096,
+            "stream": False,
+        }
+        result = self.adapter.translate_to_upstream(cc)
+        assert "effort" not in result
+
+    def test_thinking_adaptive_restored(self):
+        cc = {
+            "model": "claude-sonnet-4-6",
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 4096,
+            "stream": False,
+            "_thinking_adaptive": True,
+            "_thinking_enabled": True,
+        }
+        result = self.adapter.translate_to_upstream(cc)
+        assert result["thinking"] == {"type": "adaptive"}
+
+    def test_thinking_disabled_restored(self):
+        cc = {
+            "model": "claude-sonnet-4-6",
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 4096,
+            "stream": False,
+            "_thinking_enabled": False,
+        }
+        result = self.adapter.translate_to_upstream(cc)
+        assert result["thinking"] == {"type": "disabled"}
+
+    def test_effort_with_thinking_adaptive(self):
+        """Both effort and thinking: {type: adaptive} can coexist."""
+        cc = {
+            "model": "claude-sonnet-4-6",
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 4096,
+            "stream": False,
+            "_effort": "high",
+            "_thinking_adaptive": True,
+            "_thinking_enabled": True,
+        }
+        result = self.adapter.translate_to_upstream(cc)
+        assert result["effort"] == "high"
+        assert result["thinking"] == {"type": "adaptive"}

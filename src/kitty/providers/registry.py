@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import inspect
+
 from kitty.providers.anthropic import AnthropicAdapter
 from kitty.providers.azure import AzureOpenAIAdapter
 from kitty.providers.base import ProviderAdapter
@@ -53,11 +55,33 @@ _registry: dict[str, type[ProviderAdapter]] = {
 }
 
 
-def get_provider(provider_type: str) -> ProviderAdapter:
+def _supports_provider_config(cls: type[ProviderAdapter]) -> bool:
+    """Return True if the adapter's ``__init__`` accepts a ``provider_config`` kwarg.
+
+    Used by ``get_provider`` to forward profile-driven configuration
+    (``provider_config``) to adapters that opt into reading it (e.g.
+    ``MiniMaxTokenAnthropicAdapter`` for the ``native_messages`` flag).
+    Adapters that have not been updated to accept ``provider_config``
+    continue to work unchanged — they are constructed without the
+    argument and ignore the value at the registry level.
+    """
+    try:
+        sig = inspect.signature(cls.__init__)
+    except (TypeError, ValueError):
+        return False
+    return "provider_config" in sig.parameters
+
+
+def get_provider(provider_type: str, provider_config: dict | None = None) -> ProviderAdapter:
     """Look up a provider adapter by type string.
 
     Args:
-        provider_type: One of the supported provider type strings (see ``_registry`` keys).
+        provider_type: One of the supported provider type strings (see
+            ``_registry`` keys).
+        provider_config: Optional profile-driven configuration to forward
+            to the adapter. Only adapters whose ``__init__`` accepts a
+            ``provider_config`` kwarg receive it; older adapters are
+            constructed without the argument. Defaults to ``None``.
 
     Returns:
         An instantiated ProviderAdapter.
@@ -68,6 +92,8 @@ def get_provider(provider_type: str) -> ProviderAdapter:
     cls = _registry.get(provider_type)
     if cls is None:
         raise KeyError(f"Unknown provider type: {provider_type!r}. Available: {sorted(_registry)}")
+    if provider_config is not None and _supports_provider_config(cls):
+        return cls(provider_config=provider_config)
     return cls()
 
 

@@ -207,6 +207,68 @@ class TestCreateProfileFlow:
         with patch("kitty.cli.profile_cmd.SelectionMenu.show", return_value=None), pytest.raises(NonTTYError):
             create(store, cred_store)
 
+    def test_minimax_token_prompts_for_native_messages_default_false(
+        self, store: ProfileStore, cred_store: CredentialStore
+    ) -> None:
+        """T-MiniMax-1: minimax_token profile creation prompts for native
+        passthrough; default answer is no, and the resulting profile has no
+        ``native_messages`` in provider_config.
+        """
+        create = _import_create_profile_flow()
+        with (
+            patch("kitty.cli.profile_cmd.SelectionMenu.show", return_value=PROVIDER_LABELS["minimax_token"]),
+            patch("kitty.cli.profile_cmd._find_reusable_auth_ref", return_value=None),
+            patch("kitty.cli.profile_cmd.prompt_secret", return_value="sk-test-key"),
+            patch("kitty.cli.profile_cmd.prompt_text", side_effect=["m", "myprofile"]),
+            patch("kitty.cli.profile_cmd.prompt_confirm", return_value=False),
+        ):
+            profile = create(store, cred_store)
+
+        assert profile.provider == "minimax_token"
+        # Default (no) → native_messages is not set in provider_config
+        assert profile.provider_config.get("native_messages") is None
+
+    def test_minimax_token_prompts_for_native_messages_when_user_accepts(
+        self, store: ProfileStore, cred_store: CredentialStore
+    ) -> None:
+        """T-MiniMax-2: minimax_token profile creation sets
+        ``provider_config["native_messages"]=True`` when the user opts in.
+        """
+        create = _import_create_profile_flow()
+        with (
+            patch("kitty.cli.profile_cmd.SelectionMenu.show", return_value=PROVIDER_LABELS["minimax_token"]),
+            patch("kitty.cli.profile_cmd._find_reusable_auth_ref", return_value=None),
+            patch("kitty.cli.profile_cmd.prompt_secret", return_value="sk-test-key"),
+            patch("kitty.cli.profile_cmd.prompt_text", side_effect=["m", "myprofile"]),
+            patch("kitty.cli.profile_cmd.prompt_confirm", side_effect=[True, True]),
+            # first confirm: native passthrough yes
+            # second confirm: set as default
+        ):
+            profile = create(store, cred_store)
+
+        assert profile.provider == "minimax_token"
+        assert profile.provider_config.get("native_messages") is True
+
+    def test_other_providers_do_not_prompt_for_native_messages(
+        self, store: ProfileStore, cred_store: CredentialStore
+    ) -> None:
+        """T-MiniMax-3: providers other than minimax_token do not get the
+        native-passthrough prompt and the resulting profile has no
+        ``native_messages`` in provider_config.
+        """
+        create = _import_create_profile_flow()
+        with (
+            patch("kitty.cli.profile_cmd.SelectionMenu.show", return_value=PROVIDER_LABELS["zai_regular"]),
+            patch("kitty.cli.profile_cmd._find_reusable_auth_ref", return_value=None),
+            patch("kitty.cli.profile_cmd.prompt_secret", return_value="sk-test-key"),
+            patch("kitty.cli.profile_cmd.prompt_text", side_effect=["m", "myprofile"]),
+            patch("kitty.cli.profile_cmd.prompt_confirm", return_value=True),
+        ):
+            profile = create(store, cred_store)
+
+        assert profile.provider == "zai_regular"
+        assert "native_messages" not in profile.provider_config
+
 
 # ---------------------------------------------------------------------------
 # _create_balancing_flow (T15–T16)

@@ -192,6 +192,13 @@ class MessagesTranslator:
             if key in messages_request:
                 result[key] = messages_request[key]
 
+        # Preserve the effort parameter for Anthropic-compatible upstreams.
+        # Claude Code sends this to control reasoning depth (e.g. "low",
+        # "medium", "high", "xhigh").  The Anthropic Messages API accepts
+        # it as a top-level parameter.
+        if "effort" in messages_request:
+            result["_effort"] = messages_request["effort"]
+
         # Extract thinking config into normalized effort metadata
         thinking = messages_request.get("thinking")
         if thinking and isinstance(thinking, dict):
@@ -200,6 +207,14 @@ class MessagesTranslator:
             if thinking.get("type") == "enabled":
                 result["_thinking_enabled"] = True
                 result["_reasoning_effort"] = "high"
+            elif thinking.get("type") == "adaptive":
+                # Adaptive thinking — remember the original type so
+                # AnthropicAdapter can restore it verbatim.
+                result["_thinking_adaptive"] = True
+                result["_thinking_enabled"] = True
+                result["_reasoning_effort"] = "high"
+            elif thinking.get("type") == "disabled":
+                result["_thinking_enabled"] = False
 
         return result
 

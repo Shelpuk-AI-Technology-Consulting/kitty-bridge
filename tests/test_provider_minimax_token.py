@@ -25,13 +25,59 @@ class TestMiniMaxTokenAnthropicAdapter:
         adapter = MiniMaxTokenAnthropicAdapter()
         assert adapter.upstream_path == "/v1/messages"
 
-    def test_use_native_messages(self):
+    def test_use_native_messages_default_false(self):
+        """Default behavior is the translated (CC→Messages) path, not native passthrough.
+
+        Native passthrough forwards the raw Claude Code body, which MiniMax's
+        Anthropic-compatible endpoint rejects with HTTP 400 because it sends
+        fields the translator would have stripped (``context_management``,
+        ``output_config``, ``thinking: {type: "adaptive"}``,
+        ``cache_control`` on system blocks, advanced ``metadata``). The
+        translated path produces a clean Anthropic Messages body that the
+        upstream accepts.
+        """
         adapter = MiniMaxTokenAnthropicAdapter()
-        assert adapter.use_native_messages is True
+        assert adapter.use_native_messages is False
 
     def test_use_custom_transport_false(self):
         adapter = MiniMaxTokenAnthropicAdapter()
         assert adapter.use_custom_transport is False
+
+    def test_use_native_messages_opt_in_via_kwarg(self):
+        """Opt-in to native passthrough via the ``native_messages`` keyword.
+
+        Some users may need to forward the raw Claude Code body for fields
+        the translator strips (e.g. advanced ``cache_control``,
+        ``context_management``). The opt-in is explicit and per-instance.
+        """
+        adapter = MiniMaxTokenAnthropicAdapter(native_messages=True)
+        assert adapter.use_native_messages is True
+
+    def test_use_native_messages_opt_in_via_provider_config(self):
+        """Opt-in via ``provider_config`` so the profile wizard / settings
+        can drive the flag without constructing the adapter by hand.
+        """
+        adapter = MiniMaxTokenAnthropicAdapter(
+            provider_config={"native_messages": True},
+        )
+        assert adapter.use_native_messages is True
+
+    def test_provider_config_without_flag_keeps_default(self):
+        """``provider_config`` that does not include ``native_messages``
+        falls back to the default (translated path).
+        """
+        adapter = MiniMaxTokenAnthropicAdapter(provider_config={"region": "cn"})
+        assert adapter.use_native_messages is False
+
+    def test_use_native_messages_opt_in_for_stream_event(self):
+        """The stream-event translator also routes through the override so
+        that opt-in to native passthrough forwards raw SSE bytes
+        (``message_start``/``content_block_delta``/...) instead of trying
+        to convert upstream CC chunks into Anthropic SSE.
+        """
+        adapter = MiniMaxTokenAnthropicAdapter(native_messages=True)
+        sse = b'data: {"type": "message_start", "message": {"id": "msg_1"}}\n\n'
+        assert adapter.translate_upstream_stream_event(sse) == [sse]
 
 
 class TestMiniMaxTokenBuildBaseUrl:
@@ -155,6 +201,89 @@ class TestMiniMaxTokenTranslateToUpstream:
         assert "messages" in result
         assert result["messages"] == [{"role": "user", "content": "hi"}]
         assert result["model"] == "MiniMax-M3"
+
+    def test_tool_use_id_preserved_through_default_path(self):
+        """tool_use_id ↔ tool_call_id pairing must be preserved through the
+        default (translated) path so MiniMax's
+        ``tool call result does not follow tool call (2013)`` validation
+        does not fire on a broken pairing.
+
+        Round-trip: CC ``assistant(tool_calls=[{id: "toolu_abc"}])`` + CC
+        ``tool(tool_call_id="toolu_abc")`` → Anthropic assistant
+        ``tool_use(id="toolu_abc")`` + Anthropic user
+        ``tool_result(tool_use_id="toolu_abc")``.
+        """
+        adapter = MiniMaxTokenAnthropicAdapter()
+        req = {
+            "model": "MiniMax-M3",
+            "max_tokens": 4096,
+            "messages": [
+                {"role": "user", "content": "read /etc/hostname"},
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "toolu_abc",
+                            "type": "function",
+                            "function": {
+                                "name": "read",
+                                "arguments": json.dumps({"path": "/etc/hostname"}),
+                            },
+                        }
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "toolu_abc",
+                    "content": "kitty-bridge-host",
+                },
+            ],
+        }
+        result = adapter.translate_to_upstream(req)
+        # Assistant tool_use block carries the same id
+        assistant_msg = result["messages"][1]
+        assert assistant_msg["role"] == "assistant"
+        tool_use_blocks = [b for b in assistant_msg["content"] if b.get("type") == "tool_use"]
+        assert len(tool_use_blocks) == 1
+        assert tool_use_blocks[0]["id"] == "toolu_abc"
+        # Following user tool_result block carries the same tool_use_id
+        tool_msg = result["messages"][2]
+        assert tool_msg["role"] == "user"
+        tool_result_blocks = [b for b in tool_msg["content"] if b.get("type") == "tool_result"]
+        assert len(tool_result_blocks) == 1
+        assert tool_result_blocks[0]["tool_use_id"] == "toolu_abc"
+
+    def test_thinking_block_does_not_displace_tool_use(self):
+        """An assistant message with both thinking AND tool_use must keep
+        both content blocks in the default path so that the
+        tool_use → tool_result pairing is not silently broken.
+        """
+        adapter = MiniMaxTokenAnthropicAdapter()
+        req = {
+            "model": "MiniMax-M3",
+            "max_tokens": 4096,
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": "Let me read the file first.",
+                    "reasoning_content": "I need to call read.",
+                    "tool_calls": [
+                        {
+                            "id": "toolu_xyz",
+                            "type": "function",
+                            "function": {"name": "read", "arguments": "{}"},
+                        }
+                    ],
+                },
+            ],
+        }
+        result = adapter.translate_to_upstream(req)
+        assistant_msg = result["messages"][0]
+        block_types = [b.get("type") for b in assistant_msg["content"]]
+        assert "thinking" in block_types
+        assert "text" in block_types
+        assert "tool_use" in block_types
 
 
 class TestMiniMaxTokenTranslateFromUpstream:

@@ -168,6 +168,22 @@ def _create_profile_flow(store: ProfileStore, cred_store: CredentialStore) -> Pr
                 break
             print_error("Base URL is required for this provider")
 
+    # Step 2b: Provider-specific toggles. MiniMax Token Plan defaults to the
+    # translated (CC→Messages) path because the raw Claude Code body that
+    # native passthrough forwards contains fields the upstream rejects with
+    # HTTP 400. Native passthrough remains available as an opt-in for users
+    # who specifically need it (e.g. to exercise fields the translator
+    # strips). The warning emitted by the bridge when a large request is
+    # in native passthrough mode documents the trade-off.
+    if provider == "minimax_token":
+        enable_native = prompt_confirm(
+            "Enable native Messages API passthrough? "
+            "(Recommended: no — improves compatibility with MiniMax Coding Plan.)",
+            default=False,
+        )
+        if enable_native:
+            provider_config["native_messages"] = True
+
     if provider_adapter.requires_oauth:
         # OAuth path: launch browser flow
         from kitty.cli.auth_cmd import run_oauth_for_provider

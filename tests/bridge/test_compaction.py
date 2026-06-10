@@ -872,3 +872,87 @@ class TestContextAwareCompaction:
         result = server._check_request_size(cc_request)
         assert result is not None, "Should reject request exceeding model context"
         assert result.status == 400
+
+
+class NativePassthroughProvider(StubProvider):
+    """Stub provider that simulates a provider forwarding raw Anthropic Messages."""
+
+    @property
+    def use_native_messages(self) -> bool:
+        return True
+
+
+class TestNativePassthroughCompactionWarning:
+    """Safety-net warning when a provider using ``use_native_messages=True``
+    sends a request large enough to trigger compaction.
+
+    The compaction grouping in ``_compact_messages`` is Chat-Completions-format
+    aware. When the active provider forwards the raw Anthropic Messages body,
+    ``tool_use`` is a content block on the assistant message and the
+    following message is ``user`` with a ``tool_result`` block. The grouping
+    misses the pairing and the pruner can drop the ``assistant(tool_use)``
+    while keeping the following ``user(tool_result)``. MiniMax then returns
+    ``invalid params, tool call result does not follow tool call (2013)``.
+
+    The bridge logs a warning in this case so operators see a signal if a
+    future provider re-introduces this combination.
+    """
+
+    def _make_server_with_native_provider(self) -> BridgeServer:
+        server = _make_server()
+        server._active_provider = NativePassthroughProvider()
+        server._active_model = None
+        server._active_provider_config = {}
+        server._backends = None
+        return server
+
+    def test_warning_logged_for_large_native_request(self, caplog):
+        """A request above the compaction threshold with use_native_messages=True
+        triggers a warning that names the provider class and the size."""
+        import logging
+
+        server = self._make_server_with_native_provider()
+        large_content = "A" * 3_000_000  # > 70% of _MAX_REQUEST_CHARS (4M * 0.7 = 2.8M)
+        cc_request = {
+            "model": "m",
+            "messages": [{"role": "user", "content": large_content}],
+        }
+        with caplog.at_level(logging.WARNING, logger="kitty.bridge.server"):
+            server._apply_compaction(cc_request)
+        warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+        assert any("Native passthrough provider" in r.getMessage() for r in warnings), (
+            f"Expected a 'Native passthrough provider' warning, got: "
+            f"{[r.getMessage() for r in warnings]}"
+        )
+
+    def test_no_warning_for_small_native_request(self, caplog):
+        """A request below the compaction threshold with use_native_messages=True
+        does not trigger the warning."""
+        import logging
+
+        server = self._make_server_with_native_provider()
+        cc_request = {
+            "model": "m",
+            "messages": [{"role": "user", "content": "hi"}],
+        }
+        with caplog.at_level(logging.WARNING, logger="kitty.bridge.server"):
+            server._apply_compaction(cc_request)
+        warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+        assert not any("Native passthrough provider" in r.getMessage() for r in warnings)
+
+    def test_no_warning_for_large_translated_request(self, caplog):
+        """A large request on the default (translated) path does not trigger
+        the warning — the translator produces a CC messages list whose
+        pairing is recognized by the compaction grouping."""
+        import logging
+
+        server = _make_server()  # default provider: use_native_messages=False
+        large_content = "A" * 3_000_000
+        cc_request = {
+            "model": "m",
+            "messages": [{"role": "user", "content": large_content}],
+        }
+        with caplog.at_level(logging.WARNING, logger="kitty.bridge.server"):
+            server._apply_compaction(cc_request)
+        warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+        assert not any("Native passthrough provider" in r.getMessage() for r in warnings)
