@@ -189,9 +189,7 @@ class TestFallbackTextWithUpstreamError:
 
     def test_upstream_error_without_metadata(self):
         """With upstream_error but no provider/model, still uses error message."""
-        result = MessagesTranslator._fallback_assistant_text(
-            context={"upstream_error": "Internal server error"}
-        )
+        result = MessagesTranslator._fallback_assistant_text(context={"upstream_error": "Internal server error"})
         assert "Internal server error" in result
         assert "Upstream model returned an empty response" not in result
 

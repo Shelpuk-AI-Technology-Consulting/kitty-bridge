@@ -152,11 +152,13 @@ class OllamaCloudAdapter(ProviderAdapter):
         for msg in messages:
             role = msg.get("role")
             if role == "tool":
-                result.append({
-                    "role": "tool",
-                    "tool_name": msg.get("name", ""),
-                    "content": self._flatten_content(msg.get("content", "")),
-                })
+                result.append(
+                    {
+                        "role": "tool",
+                        "tool_name": msg.get("name", ""),
+                        "content": self._flatten_content(msg.get("content", "")),
+                    }
+                )
             else:
                 translated = {"role": role}
                 content = msg.get("content")
@@ -198,14 +200,16 @@ class OllamaCloudAdapter(ProviderAdapter):
                     args = json.loads(args)
                 except json.JSONDecodeError:
                     args = {}
-            result.append({
-                "id": tc.get("id", ""),
-                "type": "function",
-                "function": {
-                    "name": func.get("name", ""),
-                    "arguments": args,
-                },
-            })
+            result.append(
+                {
+                    "id": tc.get("id", ""),
+                    "type": "function",
+                    "function": {
+                        "name": func.get("name", ""),
+                        "arguments": args,
+                    },
+                }
+            )
         return result
 
     # ── Ollama → CC response translation ───────────────────────────────
@@ -263,15 +267,17 @@ class OllamaCloudAdapter(ProviderAdapter):
             args = func.get("arguments", {})
             if isinstance(args, dict):
                 args = json.dumps(args)
-            cc_tool_calls.append({
-                "index": tc.get("function", {}).get("index", len(cc_tool_calls)),
-                "id": tc.get("id", f"call_{uuid.uuid4().hex[:24]}"),
-                "type": "function",
-                "function": {
-                    "name": func.get("name", ""),
-                    "arguments": args,
-                },
-            })
+            cc_tool_calls.append(
+                {
+                    "index": tc.get("function", {}).get("index", len(cc_tool_calls)),
+                    "id": tc.get("id", f"call_{uuid.uuid4().hex[:24]}"),
+                    "type": "function",
+                    "function": {
+                        "name": func.get("name", ""),
+                        "arguments": args,
+                    },
+                }
+            )
         return cc_tool_calls
 
     def _make_sse_chunk(
@@ -401,9 +407,7 @@ class OllamaCloudAdapter(ProviderAdapter):
                 raise self.map_error(resp.status, body)
 
             # Emit initial role chunk
-            await write(
-                self._make_sse_chunk(response_id, model, {"role": "assistant"}).encode()
-            )
+            await write(self._make_sse_chunk(response_id, model, {"role": "assistant"}).encode())
 
             stream_done = False
             line_buffer = ""
@@ -431,11 +435,7 @@ class OllamaCloudAdapter(ProviderAdapter):
                         # Final chunk — emit finish reason
                         done_reason = data.get("done_reason", "stop")
                         finish_reason = _DONE_REASON_MAP.get(done_reason, "stop")
-                        await write(
-                            self._make_sse_chunk(
-                                response_id, model, {}, finish_reason=finish_reason
-                            ).encode()
-                        )
+                        await write(self._make_sse_chunk(response_id, model, {}, finish_reason=finish_reason).encode())
                         stream_done = True
                         break
                     else:
@@ -443,18 +443,12 @@ class OllamaCloudAdapter(ProviderAdapter):
                         message = data.get("message", {})
                         content = message.get("content", "")
                         if content:
-                            await write(
-                                self._make_sse_chunk(
-                                    response_id, model, {"content": content}
-                                ).encode()
-                            )
+                            await write(self._make_sse_chunk(response_id, model, {"content": content}).encode())
                         tool_calls = message.get("tool_calls")
                         if tool_calls:
                             cc_tool_calls = self._translate_tool_calls(tool_calls)
                             await write(
-                                self._make_sse_chunk(
-                                    response_id, model, {"tool_calls": cc_tool_calls}
-                                ).encode()
+                                self._make_sse_chunk(response_id, model, {"tool_calls": cc_tool_calls}).encode()
                             )
 
                 if stream_done:
@@ -467,11 +461,7 @@ class OllamaCloudAdapter(ProviderAdapter):
                     if data.get("done"):
                         done_reason = data.get("done_reason", "stop")
                         finish_reason = _DONE_REASON_MAP.get(done_reason, "stop")
-                        await write(
-                            self._make_sse_chunk(
-                                response_id, model, {}, finish_reason=finish_reason
-                            ).encode()
-                        )
+                        await write(self._make_sse_chunk(response_id, model, {}, finish_reason=finish_reason).encode())
                 except json.JSONDecodeError:
                     pass
 

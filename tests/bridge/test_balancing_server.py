@@ -1163,18 +1163,28 @@ class TestCrossModeFailover:
         from kitty.profiles.schema import Profile
 
         failing_provider = _FailingCustomTransportProvider()
-        standard_provider = StubProvider(
-            provider_type="standard", base_url="https://standard.example.com/v1"
-        )
+        standard_provider = StubProvider(provider_type="standard", base_url="https://standard.example.com/v1")
         backends = [
-            (failing_provider, "failing-key", Profile(
-                name="failing", provider="openai_subscription", model="fail-model",
-                auth_ref=str(uuid.uuid4()),
-            )),
-            (standard_provider, "standard-key", Profile(
-                name="standard", provider="openai", model="std-model",
-                auth_ref=str(uuid.uuid4()),
-            )),
+            (
+                failing_provider,
+                "failing-key",
+                Profile(
+                    name="failing",
+                    provider="openai_subscription",
+                    model="fail-model",
+                    auth_ref=str(uuid.uuid4()),
+                ),
+            ),
+            (
+                standard_provider,
+                "standard-key",
+                Profile(
+                    name="standard",
+                    provider="openai",
+                    model="std-model",
+                    auth_ref=str(uuid.uuid4()),
+                ),
+            ),
         ]
         server = BridgeServer(
             adapter=None,

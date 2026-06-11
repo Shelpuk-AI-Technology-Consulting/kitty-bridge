@@ -155,14 +155,17 @@ class TestMiniMaxTokenTranslatedPath:
             try:
                 import aiohttp
 
-                async with aiohttp.ClientSession() as session, session.post(
-                    f"http://127.0.0.1:{server.port}/v1/messages",
-                    json={
-                        "model": "MiniMax-M3",
-                        "max_tokens": 4096,
-                        "messages": [{"role": "user", "content": "hi"}],
-                    },
-                ) as resp:
+                async with (
+                    aiohttp.ClientSession() as session,
+                    session.post(
+                        f"http://127.0.0.1:{server.port}/v1/messages",
+                        json={
+                            "model": "MiniMax-M3",
+                            "max_tokens": 4096,
+                            "messages": [{"role": "user", "content": "hi"}],
+                        },
+                    ) as resp,
+                ):
                     body = await resp.json()
                     assert resp.status == 200, body
                     assert body["content"][0]["text"] == "Hello!"
@@ -204,37 +207,40 @@ class TestMiniMaxTokenTranslatedPath:
             try:
                 import aiohttp
 
-                async with aiohttp.ClientSession() as session, session.post(
-                    f"http://127.0.0.1:{server.port}/v1/messages",
-                    json={
-                        "model": "MiniMax-M3",
-                        "max_tokens": 4096,
-                        "messages": [
-                            {"role": "user", "content": "read /etc/hostname"},
-                            {
-                                "role": "assistant",
-                                "content": [
-                                    {
-                                        "type": "tool_use",
-                                        "id": "toolu_abc",
-                                        "name": "read",
-                                        "input": {"path": "/etc/hostname"},
-                                    }
-                                ],
-                            },
-                            {
-                                "role": "user",
-                                "content": [
-                                    {
-                                        "type": "tool_result",
-                                        "tool_use_id": "toolu_abc",
-                                        "content": "kitty-host",
-                                    }
-                                ],
-                            },
-                        ],
-                    },
-                ) as resp:
+                async with (
+                    aiohttp.ClientSession() as session,
+                    session.post(
+                        f"http://127.0.0.1:{server.port}/v1/messages",
+                        json={
+                            "model": "MiniMax-M3",
+                            "max_tokens": 4096,
+                            "messages": [
+                                {"role": "user", "content": "read /etc/hostname"},
+                                {
+                                    "role": "assistant",
+                                    "content": [
+                                        {
+                                            "type": "tool_use",
+                                            "id": "toolu_abc",
+                                            "name": "read",
+                                            "input": {"path": "/etc/hostname"},
+                                        }
+                                    ],
+                                },
+                                {
+                                    "role": "user",
+                                    "content": [
+                                        {
+                                            "type": "tool_result",
+                                            "tool_use_id": "toolu_abc",
+                                            "content": "kitty-host",
+                                        }
+                                    ],
+                                },
+                            ],
+                        },
+                    ) as resp,
+                ):
                     assert resp.status == 200
             finally:
                 await server.stop_async()
@@ -245,11 +251,7 @@ class TestMiniMaxTokenTranslatedPath:
         assert sent_body["messages"][1]["role"] == "assistant"
         tu = [b for b in sent_body["messages"][1]["content"] if b.get("type") == "tool_use"][0]
         assert tu["id"] == "toolu_abc"
-        tr = [
-            b
-            for b in sent_body["messages"][2]["content"]
-            if b.get("type") == "tool_result"
-        ][0]
+        tr = [b for b in sent_body["messages"][2]["content"] if b.get("type") == "tool_result"][0]
         assert tr["tool_use_id"] == "toolu_abc"
 
     @pytest.mark.asyncio
@@ -276,16 +278,19 @@ class TestMiniMaxTokenTranslatedPath:
             try:
                 import aiohttp
 
-                async with aiohttp.ClientSession() as session, session.post(
-                    f"http://127.0.0.1:{server.port}/v1/messages",
-                    json={
-                        "model": "MiniMax-M3",
-                        "max_tokens": 4096,
-                        "messages": [{"role": "user", "content": "think hard"}],
-                        "effort": "xhigh",
-                        "thinking": {"type": "adaptive"},
-                    },
-                ) as resp:
+                async with (
+                    aiohttp.ClientSession() as session,
+                    session.post(
+                        f"http://127.0.0.1:{server.port}/v1/messages",
+                        json={
+                            "model": "MiniMax-M3",
+                            "max_tokens": 4096,
+                            "messages": [{"role": "user", "content": "think hard"}],
+                            "effort": "xhigh",
+                            "thinking": {"type": "adaptive"},
+                        },
+                    ) as resp,
+                ):
                     assert resp.status == 200
             finally:
                 await server.stop_async()
@@ -319,15 +324,18 @@ class TestMiniMaxTokenTranslatedPath:
             try:
                 import aiohttp
 
-                async with aiohttp.ClientSession() as session, session.post(
-                    f"http://127.0.0.1:{server.port}/v1/messages",
-                    json={
-                        "model": "MiniMax-M3",
-                        "max_tokens": 4096,
-                        "messages": [{"role": "user", "content": "think"}],
-                        "thinking": {"type": "adaptive"},
-                    },
-                ) as resp:
+                async with (
+                    aiohttp.ClientSession() as session,
+                    session.post(
+                        f"http://127.0.0.1:{server.port}/v1/messages",
+                        json={
+                            "model": "MiniMax-M3",
+                            "max_tokens": 4096,
+                            "messages": [{"role": "user", "content": "think"}],
+                            "thinking": {"type": "adaptive"},
+                        },
+                    ) as resp,
+                ):
                     assert resp.status == 200
             finally:
                 await server.stop_async()
@@ -336,6 +344,7 @@ class TestMiniMaxTokenTranslatedPath:
         assert sent_body.get("thinking") == {"type": "adaptive"}, (
             f"Expected thinking={{type: 'adaptive'}}, got {sent_body.get('thinking')!r}"
         )
+
     """Region selection via ``provider_config["region"]`` routes to the
     correct upstream base URL.
     """
@@ -382,18 +391,21 @@ class TestMiniMaxTokenNativeOptIn:
             try:
                 import aiohttp
 
-                async with aiohttp.ClientSession() as session, session.post(
-                    f"http://127.0.0.1:{server.port}/v1/messages",
-                    json={
-                        "model": "MiniMax-M3",
-                        "max_tokens": 4096,
-                        "messages": [{"role": "user", "content": "hi"}],
-                        # Fields the translator would strip — preserved
-                        # under native passthrough
-                        "context_management": {"edits": []},
-                        "output_config": {"format": {"type": "text"}},
-                    },
-                ) as resp:
+                async with (
+                    aiohttp.ClientSession() as session,
+                    session.post(
+                        f"http://127.0.0.1:{server.port}/v1/messages",
+                        json={
+                            "model": "MiniMax-M3",
+                            "max_tokens": 4096,
+                            "messages": [{"role": "user", "content": "hi"}],
+                            # Fields the translator would strip — preserved
+                            # under native passthrough
+                            "context_management": {"edits": []},
+                            "output_config": {"format": {"type": "text"}},
+                        },
+                    ) as resp,
+                ):
                     assert resp.status == 200
             finally:
                 await server.stop_async()
@@ -600,14 +612,17 @@ class TestMiniMaxTokenFailover:
             try:
                 import aiohttp
 
-                async with aiohttp.ClientSession() as session, session.post(
-                    f"http://127.0.0.1:{server.port}/v1/messages",
-                    json={
-                        "model": "MiniMax-M3",
-                        "max_tokens": 4096,
-                        "messages": [{"role": "user", "content": "hi"}],
-                    },
-                ) as resp:
+                async with (
+                    aiohttp.ClientSession() as session,
+                    session.post(
+                        f"http://127.0.0.1:{server.port}/v1/messages",
+                        json={
+                            "model": "MiniMax-M3",
+                            "max_tokens": 4096,
+                            "messages": [{"role": "user", "content": "hi"}],
+                        },
+                    ) as resp,
+                ):
                     body = await resp.json()
                     assert resp.status == 200, body
                     assert body["content"][0]["text"] == "from zai"
@@ -682,14 +697,17 @@ class TestMiniMaxTokenFailover:
             try:
                 import aiohttp
 
-                async with aiohttp.ClientSession() as session, session.post(
-                    f"http://127.0.0.1:{server.port}/v1/messages",
-                    json={
-                        "model": "MiniMax-M3",
-                        "max_tokens": 4096,
-                        "messages": [{"role": "user", "content": "hi"}],
-                    },
-                ) as resp:
+                async with (
+                    aiohttp.ClientSession() as session,
+                    session.post(
+                        f"http://127.0.0.1:{server.port}/v1/messages",
+                        json={
+                            "model": "MiniMax-M3",
+                            "max_tokens": 4096,
+                            "messages": [{"role": "user", "content": "hi"}],
+                        },
+                    ) as resp,
+                ):
                     body = await resp.json()
                     assert resp.status == 200, body
                     assert body["content"][0]["text"] == "recovered via zai"

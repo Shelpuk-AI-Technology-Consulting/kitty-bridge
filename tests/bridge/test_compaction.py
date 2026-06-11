@@ -285,13 +285,26 @@ class TestCompactMessagesToolResultTruncation:
     def test_truncation_preserves_tool_call_id(self):
         server = _make_server()
         large_content = "Y" * 100_000
+        # Properly paired assistant(tool_calls) + tool(result) — the test
+        # verifies that after truncation the tool_call_id is still preserved.
+        tool_call_msg = {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call_abc_456",
+                    "type": "function",
+                    "function": {"name": "t", "arguments": "{}"},
+                }
+            ],
+        }
         tool_msg = {
             "role": "tool",
             "content": large_content,
             "tool_call_id": "call_abc_456",
         }
 
-        messages = [{"role": "system", "content": "System"}, tool_msg]
+        messages = [{"role": "system", "content": "System"}, tool_call_msg, tool_msg]
         for i in range(50):
             messages.append({"role": "user" if i % 2 == 0 else "assistant", "content": "Filler " * 10000})
 
@@ -384,6 +397,308 @@ class TestCompactMessagesToolCallAtomicity:
         assert tool_call_idx + 1 < len(result)
         assert result[tool_call_idx + 1]["role"] == "tool"
         assert result[tool_call_idx + 1]["tool_call_id"] == "call_head"
+
+
+class TestCompactMessagesToolCallPairingValidation:
+    """Orphan tool results (no matching tool_use) must be dropped by compaction.
+
+    The bridge's atomic-block grouping keeps paired tool_use/tool_result
+    blocks together, but a corrupt conversation may still have a `tool`
+    message whose ``tool_call_id`` has no preceding ``assistant(tool_calls)``
+    with a matching ``tool_use.id``. The upstream rejects these requests
+    with code 2013 ("tool call result does not follow tool call"). The
+    compaction post-condition must drop these orphans before the request
+    is sent.
+    """
+
+    def test_orphan_tool_result_dropped(self):
+        """Input has a tool message with no matching tool_use; the tool is dropped."""
+        server = _make_server()
+        messages = [{"role": "system", "content": "System"}]
+        # Add large filler to force compaction
+        for i in range(200):
+            role = "user" if i % 2 == 0 else "assistant"
+            messages.append({"role": role, "content": f"Filler {i} " * 2000})
+        # Orphan tool result at the end (lands in tail)
+        messages.append(
+            {
+                "role": "tool",
+                "content": "orphan result",
+                "tool_call_id": "call_orphan_1",
+            },
+        )
+
+        assert _char_size(messages) > 2_800_000
+
+        result = server._compact_messages(messages.copy())
+
+        tool_results = [m for m in result if m.get("role") == "tool"]
+        assert tool_results == [], f"Orphan tool result must be dropped, got {tool_results}"
+        # Non-tool messages preserved
+        assert any(m.get("role") == "system" for m in result)
+
+    def test_paired_tool_result_kept(self):
+        """Properly paired assistant(tool_calls) + tool both survive."""
+        server = _make_server()
+        block = _make_tool_call_block("call_paired", "read_file", "file contents")
+
+        messages = [{"role": "system", "content": "System"}]
+        messages.extend(block)
+        messages.append({"role": "user", "content": "Thanks"})
+
+        result = server._compact_messages(messages.copy())
+
+        # Both the assistant tool_call and the tool result should survive
+        assert any(
+            m.get("role") == "assistant" and m.get("tool_calls") and m["tool_calls"][0]["id"] == "call_paired"
+            for m in result
+        )
+        assert any(m.get("role") == "tool" and m.get("tool_call_id") == "call_paired" for m in result)
+
+    def test_multiple_orphan_tool_results_all_dropped(self):
+        """Multiple orphan tool messages are all dropped, no others lost."""
+        server = _make_server()
+        messages = [{"role": "system", "content": "System"}]
+        # Add large filler to force compaction
+        for i in range(200):
+            role = "user" if i % 2 == 0 else "assistant"
+            messages.append({"role": role, "content": f"Filler {i} " * 2000})
+        # Three orphans at the end (in the tail region)
+        messages.extend(
+            [
+                {"role": "tool", "content": "orphan A", "tool_call_id": "call_orphan_a"},
+                {"role": "tool", "content": "orphan B", "tool_call_id": "call_orphan_b"},
+                {"role": "tool", "content": "orphan C", "tool_call_id": "call_orphan_c"},
+                {"role": "assistant", "content": "OK"},
+            ]
+        )
+
+        assert _char_size(messages) > 2_800_000
+
+        result = server._compact_messages(messages.copy())
+
+        # No orphans survive
+        assert not any(m.get("role") == "tool" for m in result)
+        # System message preserved
+        assert any(m.get("role") == "system" for m in result)
+
+    def test_orphan_in_tail_block_dropped_after_large_compaction(self):
+        """An orphan tool message in the tail region is dropped during compaction."""
+        server = _make_server()
+        # Valid pair at the start (likely in head)
+        valid_block = _make_tool_call_block("call_valid", "list_files", "a.py\nb.py")
+
+        messages = [{"role": "system", "content": "System"}]
+        messages.extend(valid_block)
+        # Large filler in the middle
+        for i in range(200):
+            role = "user" if i % 2 == 0 else "assistant"
+            messages.append({"role": role, "content": f"Filler {i} " * 2000})
+        # Orphan tool result at the very end (in the tail region)
+        messages.append(
+            {
+                "role": "tool",
+                "content": "orphan tail result",
+                "tool_call_id": "call_orphan_tail",
+            }
+        )
+
+        assert _char_size(messages) > 2_800_000
+
+        result = server._compact_messages(messages.copy())
+
+        # Orphan in tail must be dropped
+        assert not any(m.get("tool_call_id") == "call_orphan_tail" for m in result)
+        # Valid pair must survive
+        assert any(m.get("role") == "tool" and m.get("tool_call_id") == "call_valid" for m in result)
+
+    def test_existing_paired_messages_survive_regression(self):
+        """Regression: previously valid atomic blocks still survive the validation pass."""
+        server = _make_server()
+        block1 = _make_tool_call_block("call_a", "read", "a-content")
+        block2 = _make_tool_call_block("call_b", "write", "b-content")
+        block3 = _make_tool_call_block("call_c", "list", "c-content")
+
+        messages = [{"role": "system", "content": "System"}]
+        messages.extend(block1)
+        messages.append({"role": "assistant", "content": "thinking..."})
+        messages.extend(block2)
+        messages.append({"role": "user", "content": "next question"})
+        messages.extend(block3)
+
+        result = server._compact_messages(messages.copy())
+
+        # All three tool_use ids and all three tool result ids must be present
+        kept_tool_use_ids = {
+            tc["id"] for m in result if m.get("role") == "assistant" for tc in (m.get("tool_calls") or [])
+        }
+        kept_tool_result_ids = {m.get("tool_call_id") for m in result if m.get("role") == "tool"}
+        assert {"call_a", "call_b", "call_c"}.issubset(kept_tool_use_ids)
+        assert {"call_a", "call_b", "call_c"}.issubset(kept_tool_result_ids)
+
+
+class TestValidateToolCallPairingHelper:
+    """Unit tests for the standalone _validate_tool_call_pairing helper."""
+
+    def test_valid_input_unchanged(self):
+        server = _make_server()
+        block = _make_tool_call_block("call_x", "tool", "result")
+        messages = [{"role": "system", "content": "S"}, *block, {"role": "user", "content": "Q"}]
+
+        result = server._validate_tool_call_pairing(messages)
+
+        # Order and content preserved
+        assert result == messages
+
+    def test_orphan_dropped_with_warning(self, caplog):
+        import logging
+
+        server = _make_server()
+        messages = [
+            {"role": "user", "content": "Q"},
+            {
+                "role": "tool",
+                "content": "orphan result",
+                "tool_call_id": "call_orphan_z",
+            },
+        ]
+
+        with caplog.at_level(logging.WARNING, logger="kitty.bridge.server"):
+            result = server._validate_tool_call_pairing(messages)
+
+        # Orphan dropped
+        assert not any(m.get("role") == "tool" for m in result)
+        # Non-tool messages preserved
+        assert any(m.get("role") == "user" for m in result)
+        # Warning emitted
+        assert any("orphan" in r.message.lower() or "tool_call_id" in r.message for r in caplog.records)
+
+    def test_no_assistant_messages_keeps_input(self):
+        """Input with only user/system messages returns unchanged."""
+        server = _make_server()
+        messages = [
+            {"role": "system", "content": "S"},
+            {"role": "user", "content": "Q1"},
+            {"role": "user", "content": "Q2"},
+        ]
+
+        result = server._validate_tool_call_pairing(messages)
+
+        assert result == messages
+
+    def test_tool_result_with_matching_id_after_multiple_assistants(self):
+        """A tool result whose id appears in any preceding assistant is preserved."""
+        server = _make_server()
+        messages = [
+            {"role": "user", "content": "Q1"},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "call_first",
+                        "type": "function",
+                        "function": {"name": "t1", "arguments": "{}"},
+                    }
+                ],
+            },
+            {"role": "user", "content": "Q2"},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "call_second",
+                        "type": "function",
+                        "function": {"name": "t2", "arguments": "{}"},
+                    }
+                ],
+            },
+            {"role": "tool", "content": "second result", "tool_call_id": "call_second"},
+        ]
+
+        result = server._validate_tool_call_pairing(messages)
+
+        # The tool result for call_second must survive (matches the second assistant)
+        assert any(m.get("role") == "tool" and m.get("tool_call_id") == "call_second" for m in result)
+        # Order preserved
+        assert len(result) == len(messages)
+
+    def test_assistant_turn_with_multiple_tool_calls_keeps_all_matching_results(self):
+        """An assistant with N tool_calls keeps N corresponding tool results."""
+        server = _make_server()
+        messages = [
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {"id": "call_1", "type": "function", "function": {"name": "t1", "arguments": "{}"}},
+                    {"id": "call_2", "type": "function", "function": {"name": "t2", "arguments": "{}"}},
+                    {"id": "call_3", "type": "function", "function": {"name": "t3", "arguments": "{}"}},
+                ],
+            },
+            {"role": "tool", "content": "r1", "tool_call_id": "call_1"},
+            {"role": "tool", "content": "r2", "tool_call_id": "call_2"},
+            {"role": "tool", "content": "r3", "tool_call_id": "call_3"},
+        ]
+
+        result = server._validate_tool_call_pairing(messages)
+
+        kept_ids = {m.get("tool_call_id") for m in result if m.get("role") == "tool"}
+        assert kept_ids == {"call_1", "call_2", "call_3"}
+
+
+class TestApplyCompactionWiresValidation:
+    """Wiring tests: _apply_compaction invokes the pairing validator."""
+
+    def test_apply_compaction_drops_orphan_tool_results(self):
+        """After _apply_compaction, no orphan tool results remain in messages."""
+        server = _make_server()
+        # Build a request large enough to trigger compaction
+        messages = [{"role": "system", "content": "System"}]
+        for i in range(200):
+            role = "user" if i % 2 == 0 else "assistant"
+            messages.append({"role": role, "content": f"Filler {i} " * 2000})
+        # Add an orphan at the end
+        messages.append(
+            {
+                "role": "tool",
+                "content": "orphan result",
+                "tool_call_id": "call_orphan_apply",
+            }
+        )
+        cc_request = {"model": "test-model", "messages": messages}
+
+        server._apply_compaction(cc_request)
+
+        # No orphan tool results should remain
+        orphans = [
+            m
+            for m in cc_request["messages"]
+            if m.get("role") == "tool" and m.get("tool_call_id") == "call_orphan_apply"
+        ]
+        assert orphans == []
+
+    def test_apply_compaction_preserves_paired_messages(self):
+        """Properly paired tool_use/tool_result messages survive _apply_compaction."""
+        server = _make_server()
+        block = _make_tool_call_block("call_preserved", "read_file", "file data")
+
+        messages = [{"role": "system", "content": "System"}]
+        messages.extend(block)
+        for i in range(200):
+            role = "user" if i % 2 == 0 else "assistant"
+            messages.append({"role": role, "content": f"Filler {i} " * 2000})
+        messages.extend(block)  # second pair
+
+        cc_request = {"model": "test-model", "messages": messages}
+
+        server._apply_compaction(cc_request)
+
+        # Both blocks' tool results should still be present (atomic-block
+        # grouping keeps them; validation does not drop paired results).
+        kept_tool_result_ids = {m.get("tool_call_id") for m in cc_request["messages"] if m.get("role") == "tool"}
+        assert "call_preserved" in kept_tool_result_ids
 
 
 class TestCompactMessagesLogging:
@@ -921,8 +1236,7 @@ class TestNativePassthroughCompactionWarning:
             server._apply_compaction(cc_request)
         warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
         assert any("Native passthrough provider" in r.getMessage() for r in warnings), (
-            f"Expected a 'Native passthrough provider' warning, got: "
-            f"{[r.getMessage() for r in warnings]}"
+            f"Expected a 'Native passthrough provider' warning, got: {[r.getMessage() for r in warnings]}"
         )
 
     def test_no_warning_for_small_native_request(self, caplog):

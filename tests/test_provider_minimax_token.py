@@ -395,19 +395,23 @@ class TestMiniMaxTokenRegistry:
     def test_registry_lookup(self):
         from kitty.providers.minimax_token import MiniMaxTokenAnthropicAdapter
         from kitty.providers.registry import get_provider
+
         provider = get_provider("minimax_token")
         assert isinstance(provider, MiniMaxTokenAnthropicAdapter)
 
     def test_schema_list(self):
         from kitty.profiles.schema import PROVIDER_LIST
+
         assert "minimax_token" in PROVIDER_LIST
 
     def test_schema_label(self):
         from kitty.profiles.schema import PROVIDER_LABELS
+
         assert PROVIDER_LABELS["minimax_token"] == "MiniMax Token Plan"
 
     def test_schema_section(self):
         from kitty.profiles.schema import PROVIDER_SECTIONS
+
         coding_plans = [s for s in PROVIDER_SECTIONS if s[0] == "-- Coding Plans / Subscriptions --"]
         assert len(coding_plans) == 1
         assert "minimax_token" in coding_plans[0][1]

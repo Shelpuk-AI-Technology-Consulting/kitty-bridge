@@ -177,8 +177,8 @@ class TestEarlyErrorConnectionClose:
                     headers={"Content-Type": "application/json"},
                 ) as resp,
             ):
-                    assert resp.status == 400
-                    assert resp.headers.get("Connection") == "close"
+                assert resp.status == 400
+                assert resp.headers.get("Connection") == "close"
         finally:
             await server.stop_async()
 
@@ -197,8 +197,8 @@ class TestEarlyErrorConnectionClose:
                     headers={"Content-Type": "application/json"},
                 ) as resp,
             ):
-                    assert resp.status == 400
-                    assert resp.headers.get("Connection") == "close"
+                assert resp.status == 400
+                assert resp.headers.get("Connection") == "close"
         finally:
             await server.stop_async()
 
@@ -859,7 +859,9 @@ class TestCloudflareDecisionHelper:
         cf_retried: set[int] = set()
 
         action = server._decide_cloudflare_action(
-            attempt=0, max_attempts=4, cf_retried=cf_retried,
+            attempt=0,
+            max_attempts=4,
+            cf_retried=cf_retried,
         )
         assert action == "retry_same"
         assert 0 in cf_retried
@@ -872,7 +874,9 @@ class TestCloudflareDecisionHelper:
         cf_retried: set[int] = {0}  # backend 0 already retried this request
 
         action = server._decide_cloudflare_action(
-            attempt=1, max_attempts=8, cf_retried=cf_retried,
+            attempt=1,
+            max_attempts=8,
+            cf_retried=cf_retried,
         )
         assert action == "failover"
         # Marks backend 0 unhealthy with cloudflare failure kind.
@@ -887,7 +891,9 @@ class TestCloudflareDecisionHelper:
         cf_retried: set[int] = {0}
 
         action = server._decide_cloudflare_action(
-            attempt=1, max_attempts=2, cf_retried=cf_retried,
+            attempt=1,
+            max_attempts=2,
+            cf_retried=cf_retried,
         )
         assert action == "surface"
         assert server._backend_health[0]["healthy"] is False

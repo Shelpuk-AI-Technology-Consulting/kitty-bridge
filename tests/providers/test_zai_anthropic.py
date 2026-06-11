@@ -25,6 +25,7 @@ def _native_body(**overrides) -> dict:
 
 # ── Adapter identity ─────────────────────────────────────────────────────
 
+
 class TestZaiAnthropicIdentity:
     def test_provider_type(self, adapter: ZaiAnthropicAdapter) -> None:
         assert adapter.provider_type == "zai_coding"
@@ -41,6 +42,7 @@ class TestZaiAnthropicIdentity:
 
 # ── Auth headers ─────────────────────────────────────────────────────────
 
+
 class TestZaiAnthropicHeaders:
     def test_bearer_auth(self, adapter: ZaiAnthropicAdapter) -> None:
         headers = adapter.build_upstream_headers("sk-test-key")
@@ -54,6 +56,7 @@ class TestZaiAnthropicHeaders:
 
 
 # ── translate_to_upstream: native Messages passthrough ──────────────────
+
 
 class TestZaiAnthropicTranslateUpstreamNative:
     """Tests for the native Messages passthrough path (_native_messages_request=True)."""
@@ -133,6 +136,7 @@ class TestZaiAnthropicTranslateUpstreamNative:
 
 # ── translate_from_upstream: native Messages passthrough ────────────────
 
+
 class TestZaiAnthropicTranslateFromUpstreamNative:
     def test_messages_response_translated_to_cc(self, adapter: ZaiAnthropicAdapter) -> None:
         """Anthropic Messages responses are always translated to CC format.
@@ -169,6 +173,7 @@ class TestZaiAnthropicTranslateFromUpstreamNative:
 
 # ── translate_upstream_stream_event: Anthropic SSE passthrough ──────────
 
+
 class TestZaiAnthropicStreamEvent:
     def test_anthropic_event_passthrough(self, adapter: ZaiAnthropicAdapter) -> None:
         event = (
@@ -186,6 +191,7 @@ class TestZaiAnthropicStreamEvent:
 
 # ── normalize_model_name ────────────────────────────────────────────────
 
+
 class TestZaiAnthropicModelName:
     def test_strips_prefix(self, adapter: ZaiAnthropicAdapter) -> None:
         assert adapter.normalize_model_name("zai/claude-sonnet-4-6") == "claude-sonnet-4-6"
@@ -199,20 +205,24 @@ class TestZaiAnthropicModelName:
 
 # ── Registry ────────────────────────────────────────────────────────────
 
+
 class TestZaiAnthropicRegistry:
     def test_registry_returns_zai_anthropic(self) -> None:
         from kitty.providers.registry import get_provider
+
         provider = get_provider("zai_coding")
         assert isinstance(provider, ZaiAnthropicAdapter)
 
     def test_registry_keeps_zai_coding_cc(self) -> None:
         from kitty.providers.registry import _registry
         from kitty.providers.zai import ZaiCodingAdapter
+
         assert "zai_coding_cc" in _registry
         assert isinstance(_registry["zai_coding_cc"](), ZaiCodingAdapter)
 
 
 # ── CC format fallback (non-Claude Code clients) ───────────────────────
+
 
 class TestZaiAnthropicCCFallback:
     """Verify CC→Messages translation works for Responses/CC API clients.
@@ -227,9 +237,13 @@ class TestZaiAnthropicCCFallback:
             "messages": [
                 {"role": "system", "content": "You are helpful."},
                 {"role": "user", "content": "hi"},
-                {"role": "assistant", "content": "hello", "tool_calls": [
-                    {"id": "call_1", "type": "function", "function": {"name": "bash", "arguments": '{"cmd":"ls"}'}},
-                ]},
+                {
+                    "role": "assistant",
+                    "content": "hello",
+                    "tool_calls": [
+                        {"id": "call_1", "type": "function", "function": {"name": "bash", "arguments": '{"cmd":"ls"}'}},
+                    ],
+                },
                 {"role": "tool", "tool_call_id": "call_1", "content": "file.txt"},
             ],
             "tools": [{"type": "function", "function": {"name": "bash", "description": "run", "parameters": {}}}],

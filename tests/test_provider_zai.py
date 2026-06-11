@@ -272,7 +272,10 @@ class TestZaiThinkingEnabledToolCallGap:
                     "role": "assistant",
                     "content": None,
                     "tool_calls": [
-                        {"id": "c1", "type": "function", "function": {"name": "x", "arguments": "{}"},
+                        {
+                            "id": "c1",
+                            "type": "function",
+                            "function": {"name": "x", "arguments": "{}"},
                         }
                     ],
                 },

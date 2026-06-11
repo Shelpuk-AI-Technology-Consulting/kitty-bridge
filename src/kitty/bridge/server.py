@@ -57,16 +57,27 @@ _RETRYABLE_STATUSES = {429, 500, 502, 503, 504}
 
 # Provider error codes that indicate a permanent failure for this request.
 # Even when returned with a 5xx status, these should not be retried.
-_NON_RETRYABLE_ERROR_CODES = frozenset({
-    "1211",  # Z.AI: Unknown Model
-    "1261",  # Z.AI: Prompt exceeds max length (context too large)
-    "2013",  # Minimax: Context window too large OR tool-call validation
-             # failure (e.g. "tool call result does not follow tool call").
-             # Both indicate the request will not succeed against the same
-             # backend with the same conversation state; in a balancing
-             # profile the bridge still fails over to the next backend, in
-             # a single-backend profile the user must /clear.
-})
+_NON_RETRYABLE_ERROR_CODES = frozenset(
+    {
+        "1211",  # Z.AI: Unknown Model
+        "1261",  # Z.AI: Prompt exceeds max length (context too large)
+        "2013",  # Minimax: Context window too large OR tool-call validation
+        # failure (e.g. "tool call result does not follow tool call").
+        # The 2013 code has two distinct root causes:
+        #   1. Client-side broken pairing — the request body has a
+        #      tool_result whose tool_use_id has no matching tool_use.
+        #      The bridge now repairs this proactively: see
+        #      _apply_compaction -> _validate_tool_call_pairing.
+        #   2. Upstream streaming corruption — the upstream sent an
+        #      empty SSE body for a tool result, leaving a partial
+        #      tool message in the conversation. This is much rarer;
+        #      when it happens, the user must /clear to reset state.
+        # Both indicate the request will not succeed against the
+        # same backend with the same conversation state; in a
+        # balancing profile the bridge still fails over to the next
+        # backend, in a single-backend profile the user must /clear.
+    }
+)
 _AUTH_FAILURE_STATUSES = {401}  # 403 handled as Cloudflare
 _AUTH_COOLDOWN = 86400  # 24h — effectively permanent per session
 _BACKOFF_BASE = 1.0
@@ -91,6 +102,8 @@ class AllBackendsUnhealthyError(Exception):
         self.backends = backends
         self.retry_after = retry_after
         super().__init__(f"All {len(backends)} backends unhealthy; retry_after={retry_after}s")
+
+
 _MAX_REQUEST_CHARS = 4_000_000  # ~1.2M estimated tokens; requests larger than this are rejected
 _COMPACTION_CHAR_THRESHOLD = int(_MAX_REQUEST_CHARS * 0.7)  # Trigger compaction at 70% of max size
 _COMPACTION_TAIL_COUNT = 20  # Minimum number of recent messages to preserve
@@ -321,8 +334,7 @@ class BridgeServer:
                 if retry_after > _ALL_UNHEALTHY_FAST_FAIL_THRESHOLD:
                     raise AllBackendsUnhealthyError(backend_status, retry_after)
                 near_retry_indices = [
-                    idx for remaining, idx in candidates
-                    if remaining <= _ALL_UNHEALTHY_FAST_FAIL_THRESHOLD
+                    idx for remaining, idx in candidates if remaining <= _ALL_UNHEALTHY_FAST_FAIL_THRESHOLD
                 ]
                 idx = random.choice(near_retry_indices)
                 logger.warning(
@@ -457,7 +469,11 @@ class BridgeServer:
         health["cloudflare_error_count"] = 0
 
     def _decide_cloudflare_action(
-        self, *, attempt: int, max_attempts: int, cf_retried: set[int],
+        self,
+        *,
+        attempt: int,
+        max_attempts: int,
+        cf_retried: set[int],
     ) -> str:
         idx = self._current_backend_idx
         if idx not in cf_retried:
@@ -512,7 +528,6 @@ class BridgeServer:
             if delta.get("type") == "error" or delta.get("error") is not None:
                 return True
         return False
-
 
     @staticmethod
     def _error_response(data: dict, *, status: int = 400) -> web.Response:
@@ -1055,11 +1070,7 @@ class BridgeServer:
                             continue
                         # No custom-transport backend healthy — try cross-mode failover to standard backend.
                         # Only safe when no bytes were emitted to sr yet.
-                        if (
-                            not _bytes_written
-                            and self._any_healthy_backend()
-                            and attempt < n_backends - 1
-                        ):
+                        if not _bytes_written and self._any_healthy_backend() and attempt < n_backends - 1:
                             try:
                                 self._select_backend()
                             except AllBackendsUnhealthyError:
@@ -2289,11 +2300,7 @@ class BridgeServer:
                             continue
                         # No custom-transport backend healthy — try cross-mode failover to standard backend.
                         # Only safe when no bytes were emitted to sr yet.
-                        if (
-                            not _bytes_written
-                            and self._any_healthy_backend()
-                            and attempt < n_backends - 1
-                        ):
+                        if not _bytes_written and self._any_healthy_backend() and attempt < n_backends - 1:
                             try:
                                 self._select_backend()
                             except AllBackendsUnhealthyError:
@@ -3329,6 +3336,61 @@ class BridgeServer:
                 logger.debug("Normalized model: %s -> %s", model, normalized)
             cc_request["model"] = normalized
 
+    def _validate_tool_call_pairing(self, messages: list[dict]) -> list[dict]:
+        """Drop tool messages whose ``tool_call_id`` has no matching ``tool_use.id``.
+
+        The upstream rejects requests with code 2013 ("tool call result does
+        not follow tool call") when a ``tool`` message references a
+        ``tool_call_id`` that no preceding ``assistant(tool_calls)`` message
+        declares. This can happen when an upstream SSE stream returns an
+        empty/malformed body for a tool result, leaving a partial ``tool``
+        message in the conversation. The atomic-block grouping in
+        ``_compact_messages`` keeps pairs together, but a corrupt input
+        can still contain orphans.
+
+        This helper drops orphan ``tool`` messages in place and logs a
+        WARNING for each. Non-tool messages (system, user, assistant)
+        are never modified or reordered.
+
+        Args:
+            messages: Conversation messages to validate.
+
+        Returns:
+            Cleaned messages list with orphans removed.
+        """
+        seen_tool_use_ids: set[str] = set()
+        cleaned: list[dict] = []
+        dropped: list[str] = []
+
+        for msg in messages:
+            if msg.get("role") == "assistant":
+                for tc in msg.get("tool_calls") or []:
+                    if isinstance(tc, dict) and tc.get("id"):
+                        seen_tool_use_ids.add(tc["id"])
+                cleaned.append(msg)
+                continue
+
+            if msg.get("role") == "tool":
+                tool_call_id = msg.get("tool_call_id")
+                if tool_call_id and tool_call_id in seen_tool_use_ids:
+                    cleaned.append(msg)
+                else:
+                    dropped.append(str(tool_call_id))
+                continue
+
+            # system, user, and any other role pass through
+            cleaned.append(msg)
+
+        if dropped:
+            logger.warning(
+                "Tool-call pairing: dropped %d orphan tool result(s) with "
+                "tool_call_id(s) not matching any preceding tool_use: %s",
+                len(dropped),
+                dropped,
+            )
+
+        return cleaned
+
     def _compact_messages(self, messages: list[dict], max_messages_chars: int | None = None) -> list[dict]:
         """Compact message history to prevent upstream context window overflow.
 
@@ -3489,6 +3551,12 @@ class BridgeServer:
                 original_size,
                 result_size,
             )
+
+        # Post-condition: every tool result must reference a kept tool_use.
+        # Atomic-block grouping keeps pairs together, but a corrupt input
+        # can still contain orphans (e.g. an upstream-empty SSE response
+        # that the bridge faithfully recorded as a complete tool message).
+        result = self._validate_tool_call_pairing(result)
         return result
 
     def _get_max_context_chars(self) -> int:
@@ -3570,6 +3638,15 @@ class BridgeServer:
             cc_request["messages"],
             max_messages_chars=messages_budget,
         )
+
+        # Final safety net: drop any orphan tool_result blocks whose
+        # tool_call_id has no matching tool_use. Compaction's atomic-block
+        # grouping keeps well-formed pairs together, but a corrupt input
+        # (e.g. an upstream-empty SSE response recorded as a partial tool
+        # message) can still slip through. Without this pass the next
+        # request would trigger upstream code 2013 ("tool call result
+        # does not follow tool call").
+        cc_request["messages"] = self._validate_tool_call_pairing(cc_request["messages"])
 
     def _check_request_size(self, cc_request: dict) -> web.Response | None:
         """Return a 400 error if the translated request exceeds the safe size limit.
@@ -3762,10 +3839,7 @@ class BridgeServer:
         # block whose tool_use_id has no matching tool_use. The conversation
         # needs to be reset before the request can succeed against the
         # same backend.
-        is_tool_call_validation = (
-            "tool call result" in searchable
-            or "does not follow tool call" in searchable
-        )
+        is_tool_call_validation = "tool call result" in searchable or "does not follow tool call" in searchable
         if is_tool_call_validation:
             return (
                 "The conversation history has a broken tool_use/tool_result pairing "
@@ -3839,9 +3913,7 @@ class BridgeServer:
         provider = self._active_provider
         auth_command = getattr(provider, "auth_command", None) or "kitty auth openai"
         return (
-            f"Authentication failed for profile '{profile_name}'. "
-            f"Please re-login with: {auth_command}. "
-            f"Details: {msg}"
+            f"Authentication failed for profile '{profile_name}'. Please re-login with: {auth_command}. Details: {msg}"
         )
 
     def _build_upstream_url(self) -> str:

@@ -89,10 +89,7 @@ class CustomOpenAIAdapter(ProviderAdapter):
         of ``reasoning_content`` in any assistant message proves thinking is
         active and reasoning echo-back is required.
         """
-        return any(
-            msg.get("role") == "assistant" and "reasoning_content" in msg
-            for msg in messages
-        )
+        return any(msg.get("role") == "assistant" and "reasoning_content" in msg for msg in messages)
 
     def translate_to_upstream(self, cc_request: dict) -> dict:
         result = {k: v for k, v in cc_request.items() if k not in self._INTERNAL_KEYS}
