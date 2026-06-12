@@ -32,8 +32,6 @@ class NovitaAdapter(ProviderAdapter):
             "messages": messages,
             "stream": kwargs.get("stream", False),
         }
-        if "base_url" in kwargs and kwargs["base_url"]:
-            request["base_url"] = kwargs["base_url"]
         if "tools" in kwargs and kwargs["tools"]:
             request["tools"] = kwargs["tools"]
         for key in ("temperature", "top_p", "max_tokens"):

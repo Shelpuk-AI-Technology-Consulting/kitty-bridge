@@ -753,3 +753,47 @@ class TestThinkingEnabledToolCallGap:
         reasoning_blocks = [b for b in assistant_msg["content"] if "reasoningContent" in b]
         assert len(reasoning_blocks) == 1
         assert reasoning_blocks[0]["reasoningContent"]["text"] == "Existing reasoning here."
+
+
+class TestBedrockStreamErrorEvents:
+    """F17: Bedrock converse_stream error events must raise ProviderError."""
+
+    def _make_adapter(self):
+        return BedrockAdapter()
+
+    def test_internal_server_exception_raises_provider_error(self):
+        adapter = self._make_adapter()
+        event = {"internalServerException": {"message": "Internal failure"}}
+        with pytest.raises(ProviderError, match="Internal failure"):
+            adapter._translate_stream_event(event, "id", {})
+
+    def test_model_stream_error_exception_raises_provider_error(self):
+        adapter = self._make_adapter()
+        event = {"modelStreamErrorException": {"message": "Model overloaded"}}
+        with pytest.raises(ProviderError, match="Model overloaded"):
+            adapter._translate_stream_event(event, "id", {})
+
+    def test_throttling_exception_raises_provider_error(self):
+        adapter = self._make_adapter()
+        event = {"throttlingException": {"message": "Rate exceeded"}}
+        with pytest.raises(ProviderError, match="Rate exceeded"):
+            adapter._translate_stream_event(event, "id", {})
+
+    def test_validation_exception_raises_provider_error(self):
+        adapter = self._make_adapter()
+        event = {"validationException": {"message": "Invalid request"}}
+        with pytest.raises(ProviderError, match="Invalid request"):
+            adapter._translate_stream_event(event, "id", {})
+
+    def test_service_unavailable_exception_raises_provider_error(self):
+        adapter = self._make_adapter()
+        event = {"serviceUnavailableException": {"message": "Service unavailable"}}
+        with pytest.raises(ProviderError, match="Service unavailable"):
+            adapter._translate_stream_event(event, "id", {})
+
+    def test_unknown_event_type_returns_empty(self):
+        """Unknown event types (not errors) should return empty chunks."""
+        adapter = self._make_adapter()
+        event = {"unknownFutureEvent": {"data": "something"}}
+        chunks = adapter._translate_stream_event(event, "id", {})
+        assert chunks == []

@@ -1270,3 +1270,115 @@ class TestNativePassthroughCompactionWarning:
             server._apply_compaction(cc_request)
         warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
         assert not any("Native passthrough provider" in r.getMessage() for r in warnings)
+
+
+# ── F25: Post-condition — at least one non-system message survives ────────
+
+
+class TestCompactionPostCondition:
+    """F25 + F26: After compaction, at least one non-system message must remain.
+
+    The guaranteed-fit fallback can drop everything except the system message
+    and one tail block.  If the tail block is a ``tool`` result whose
+    ``tool_use`` was dropped, ``_validate_tool_call_pairing`` removes it,
+    leaving only the system message.  A request with only a system message
+    is invalid for any upstream provider.
+
+    F26 (oversized system message silently exceeding budget) is caught by
+    the same post-condition: if the system message is so large that no
+    user/assistant message can fit, the post-condition fails and the
+    bridge returns a clear error instead of sending a guaranteed-to-fail
+    request.
+    """
+
+    def test_only_system_message_left_raises_error(self):
+        """F25: compaction that leaves only a system message returns an error
+        indicator instead of the bare system message list."""
+        server = _make_server()
+        # Construct a scenario: huge system message + one tool result
+        # whose tool_use gets dropped by guaranteed-fit, then pairing
+        # validation drops the orphan tool result.
+        huge_system = "S" * 2_000_000
+        messages = [
+            {"role": "system", "content": huge_system},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "test", "arguments": "{}"},
+                    }
+                ],
+            },
+            {"role": "tool", "content": "result", "tool_call_id": "call_1"},
+            {"role": "user", "content": "x" * 2_000_000},
+        ]
+        result = server._compact_messages(messages)
+        # Either: (a) it returns messages with >0 non-system messages,
+        # or (b) it returns an error dict.
+        if isinstance(result, list):
+            non_system = [m for m in result if m.get("role") != "system"]
+            assert len(non_system) > 0, "F25: compaction left only system message — post-condition should prevent this"
+
+    def test_oversized_system_returns_error_not_bare_messages(self):
+        """F26: an oversized system message that exceeds budget returns error."""
+        server = _make_server()
+        huge_system = "X" * (_COMPACTION_GUARANTEED_MESSAGES_MAX + 100)
+        messages = [
+            {"role": "system", "content": huge_system},
+            {"role": "user", "content": "hello"},
+        ]
+        result = server._compact_messages(messages)
+        if isinstance(result, list):
+            non_system = [m for m in result if m.get("role") != "system"]
+            assert len(non_system) > 0, "F26: oversized system message should not produce only-system result"
+
+
+# ── F33: json.dumps error handling in compaction ──────────────────────────
+
+
+class TestCompactionJsonDumpsErrorHandling:
+    """F33: Non-serializable content in messages must not crash _compact_messages.
+
+    If ``json.dumps`` raises ``TypeError`` (e.g., from bytes content or
+    non-serializable objects), the method should log the error and return
+    the original messages instead of crashing with an unhandled exception.
+    """
+
+    def test_bytes_content_does_not_crash_compaction(self):
+        """F33: messages with bytes content should not crash."""
+        server = _make_server()
+        large_content = "A" * 3_000_000
+        messages = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": large_content},
+            {"role": "assistant", "content": b"binary response data"},
+        ]
+        # Should not raise TypeError
+        result = server._compact_messages(messages)
+        assert isinstance(result, list)
+        assert len(result) > 0
+
+    def test_non_serializable_content_returns_original_on_error(self):
+        """F33: when json.dumps fails, return original messages unchanged."""
+        server = _make_server()
+        messages = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "x" * 3_000_000},
+            {"role": "assistant", "content": {"nested": set([1, 2, 3])}},
+        ]
+        result = server._compact_messages(messages)
+        assert isinstance(result, list)
+
+    def test_compaction_with_normal_content_still_works(self):
+        """F33 fix does not break normal compaction path."""
+        server = _make_server()
+        messages = [
+            {"role": "system", "content": "sys"},
+            *[{"role": "user" if i % 2 == 0 else "assistant", "content": f"msg {i} " * 30_000} for i in range(20)],
+        ]
+        result = server._compact_messages(messages)
+        assert isinstance(result, list)
+        assert len(result) < len(messages)

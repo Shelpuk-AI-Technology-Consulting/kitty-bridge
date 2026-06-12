@@ -159,7 +159,8 @@ class TestResolveBinary:
     def test_raises_when_not_found(self):
         from kitty.cli.launcher import resolve_binary
 
-        with patch("kitty.cli.launcher.discover_binary", return_value=None), pytest.raises(SystemExit):
+        # F45: Now raises FileNotFoundError (catchable) instead of SystemExit
+        with patch("kitty.cli.launcher.discover_binary", return_value=None), pytest.raises(FileNotFoundError):
             resolve_binary("codex")
 
 

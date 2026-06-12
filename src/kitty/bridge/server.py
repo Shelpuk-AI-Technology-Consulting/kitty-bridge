@@ -3,15 +3,22 @@
 from __future__ import annotations
 
 import asyncio
+import atexit
+import contextvars
+import faulthandler
 import hashlib
 import json
 import logging
+import os
 import random
 import ssl
+import sys
 import time
+import traceback
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import NoReturn
 
 import aiohttp
 from aiohttp import web
@@ -48,6 +55,257 @@ __all__ = ["BridgeServer"]
 
 logger = logging.getLogger(__name__)
 
+# ── Crash handler state ────────────────────────────────────────────────────
+
+_crash_handlers_installed = False
+
+
+def _setup_crash_handlers(log_path: Path, *, state_path: str | None = None) -> None:
+    """Install process-level crash handlers that write to *log_path*.
+
+    Three layers, from most to least severe:
+
+    1. **faulthandler** — dumps a Python traceback on ``SIGSEGV``,
+       ``SIGABRT``, ``SIGBUS``, ``SIGFPE``.  The only way to get
+       evidence of a C-level crash.
+
+    2. **sys.excepthook** — catches unhandled Python exceptions that
+       escape the event loop.  Logs at CRITICAL with full traceback,
+       flushes log handlers, then calls ``sys.exit(1)``.
+
+    3. **atexit** — canary entry that confirms the process reached
+       the Python cleanup path (distinguishes a clean shutdown from
+       a hard kill or lock-up).
+
+    Args:
+        log_path: Path to the crash log file.
+        state_path: Optional bridge state file path.  If provided, an atexit
+            handler is registered to remove the state file during crash cleanup,
+            preventing stale PID files from persisting after a crash.
+
+    Safe to call multiple times — subsequent calls are no-ops.
+    """
+    global _crash_handlers_installed  # noqa: PLW0603
+    if _crash_handlers_installed:
+        return
+    _crash_handlers_installed = True
+
+    crash_logger = logging.getLogger("kitty.bridge")
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # faulthandler: C-level crash tracebacks
+    try:
+        log_fd = open(log_path, "a", encoding="utf-8")  # noqa: SIM115
+        faulthandler.enable(file=log_fd, all_threads=True)
+    except OSError:
+        crash_logger.warning("Could not open log file for faulthandler: %s", log_path)
+
+    # sys.excepthook: unhandled Python exceptions
+    def _crash_excepthook(exc_type: type[BaseException], exc_value: BaseException, exc_tb: object) -> NoReturn:
+        crash_logger.critical(
+            "Unhandled exception — process will exit. %s: %s\n%s",
+            exc_type.__name__,
+            exc_value,
+            "".join(traceback.format_exception(exc_type, exc_value, exc_tb)),
+        )
+        logging.shutdown()
+        sys.exit(1)
+
+    sys.excepthook = _crash_excepthook
+
+    # atexit: cleanup-path canary
+    def _atexit_canary() -> None:
+        crash_logger.info("Bridge process exiting.")
+
+    atexit.register(_atexit_canary)
+
+    # F50: Remove state file during crash cleanup so stale PID doesn't persist.
+    # sys.exit(1) in the excepthook triggers atexit handlers, so this runs
+    # during crash cleanup as well as normal shutdown.
+    if state_path is not None:
+
+        def _atexit_remove_state() -> None:
+            try:
+                from kitty.bridge.state import remove_state
+
+                remove_state(state_path)
+            except Exception:
+                pass  # Best-effort — don't crash during crash cleanup
+
+        atexit.register(_atexit_remove_state)
+
+
+# ── Native passthrough format fallback ────────────────────────────────────
+
+
+def _has_tool_use_blocks(body: dict) -> bool:
+    """Return True if any message in *body* uses Anthropic-format ``tool_use`` content blocks.
+
+    When a native-passthrough provider forwards an Anthropic Messages body,
+    Chat-Completions-only upstreams may reject ``tool_use`` blocks with
+    ``400 "unknown variant 'tool_use'"``.  This helper lets the bridge
+    detect such bodies before or after the upstream rejects them.
+    """
+    for msg in body.get("messages") or []:
+        content = msg.get("content")
+        if isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "tool_use":
+                    return True
+    return False
+
+
+def _is_tool_use_format_error(status: int, body: object) -> bool:
+    """Return True if the upstream error indicates a tool_use format mismatch.
+
+    Detects these patterns across multiple provider error formats:
+    - ``"unknown variant 'tool_use', expected 'text'"`` (serde deserialization)
+    - ``"tool call result does not follow tool call"`` (Anthropic validation)
+    - ``code 2013`` with ``"tool call result"`` (Minimax)
+
+    Only matches 400-level status codes (client errors).
+    """
+    if status < 400 or status >= 500:
+        return False
+
+    searchable = str(body).lower()
+    return ("tool call result" in searchable and "does not follow tool call" in searchable) or (
+        "unknown variant" in searchable and "tool_use" in searchable
+    )
+
+
+def _convert_native_to_cc_format(body: dict) -> dict:
+    """Convert an Anthropic Messages body to Chat Completions format.
+
+    Handles:
+    - ``system`` → ``{"role": "system", "content": "..."}``
+    - ``content`` blocks → plain strings / null
+    - ``tool_use`` → ``tool_calls``
+    - ``tool_result`` → ``{"role": "tool", ...}``
+    - Anthropic ``tools`` → CC-format tools
+    - Preserves model, stream, max_tokens, temperature, top_p
+
+    This is a subset of what ``MessagesTranslator.translate_request`` does.
+    A standalone function is used here so the fallback path has no dependency
+    on translator state (tool call buffers, thinking warnings, etc.).
+    """
+    messages: list[dict] = []
+
+    # System prompt → system message
+    system = body.get("system")
+    if system:
+        if isinstance(system, list):
+            parts = []
+            for block in system:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    parts.append(block.get("text", ""))
+                elif isinstance(block, str):
+                    parts.append(block)
+            system_text = "\n".join(parts)
+        else:
+            system_text = str(system)
+        if system_text:
+            messages.append({"role": "system", "content": system_text})
+
+    # Messages
+    for msg in body.get("messages") or []:
+        role = msg.get("role", "")
+        content = msg.get("content")
+
+        if role == "assistant" and isinstance(content, list):
+            text_blocks = [b for b in content if isinstance(b, dict) and b.get("type") == "text"]
+            tool_use_blocks = [b for b in content if isinstance(b, dict) and b.get("type") == "tool_use"]
+
+            if tool_use_blocks:
+                text = "\n".join(b.get("text", "") for b in text_blocks) if text_blocks else None
+                cc_msg: dict = {"role": "assistant", "content": text or None}
+                cc_msg["tool_calls"] = [
+                    {
+                        "id": tu.get("id", ""),
+                        "type": "function",
+                        "function": {
+                            "name": tu.get("name", ""),
+                            "arguments": json.dumps(tu.get("input", {}), ensure_ascii=False),
+                        },
+                    }
+                    for tu in tool_use_blocks
+                ]
+                messages.append(cc_msg)
+                continue
+
+            # Text-only content — flatten to string
+            text = "\n".join(b.get("text", "") for b in text_blocks)
+            messages.append({**msg, "content": text or None})
+            continue
+
+        if role == "user" and isinstance(content, list):
+            text_blocks = [b for b in content if isinstance(b, dict) and b.get("type") == "text"]
+            tool_results = [b for b in content if isinstance(b, dict) and b.get("type") == "tool_result"]
+
+            # Emit text as user message, then tool results as tool messages
+            if text_blocks:
+                text = "\n".join(b.get("text", "") for b in text_blocks)
+                messages.append({**msg, "content": text})
+
+            for tr in tool_results:
+                result_content = tr.get("content", "")
+                if isinstance(result_content, list):
+                    # tool_result content can be a content block array
+                    result_parts = []
+                    for rb in result_content:
+                        if isinstance(rb, dict) and rb.get("type") == "text":
+                            result_parts.append(rb.get("text", ""))
+                    result_content = "\n".join(result_parts)
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tr.get("tool_use_id", ""),
+                        "content": result_content if isinstance(result_content, str) else str(result_content or ""),
+                    }
+                )
+
+            if not text_blocks and not tool_results:
+                messages.append(msg)
+            continue
+
+        # String content or any other role — pass through
+        if isinstance(content, str):
+            messages.append(msg)
+        elif isinstance(content, list):
+            texts = [b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text"]
+            messages.append({**msg, "content": "\n".join(texts) if texts else ""})
+        else:
+            messages.append(msg)
+
+    result: dict = {
+        "model": body.get("model", ""),
+        "messages": messages,
+        "stream": body.get("stream", False),
+    }
+
+    if "max_tokens" in body:
+        result["max_tokens"] = body["max_tokens"]
+
+    if "tools" in body:
+        result["tools"] = [
+            {
+                "type": "function",
+                "function": {
+                    "name": t["name"],
+                    "description": t.get("description", ""),
+                    "parameters": t.get("input_schema", {}),
+                },
+            }
+            for t in body["tools"]
+        ]
+
+    for key in ("temperature", "top_p"):
+        if key in body:
+            result[key] = body[key]
+
+    return result
+
+
 # Debug log file for tracing bridge requests/responses
 _DEBUG_LOG_DIR = Path.home() / ".cache" / "kitty"
 _DEBUG_LOG_PATH = _DEBUG_LOG_DIR / "bridge.log"
@@ -79,9 +337,13 @@ _NON_RETRYABLE_ERROR_CODES = frozenset(
     }
 )
 _AUTH_FAILURE_STATUSES = {401}  # 403 handled as Cloudflare
-_AUTH_COOLDOWN = 86400  # 24h — effectively permanent per session
+_AUTH_COOLDOWN = 900  # 15 min — long enough to skip bad key, short enough to retry
 _BACKOFF_BASE = 1.0
 _EMPTY_RETRY_DELAYS = [5.0, 15.0]  # delays between retries for empty responses (non-balancing)
+# F30: These delays are coupled to max_attempts calculations in the stream
+# handlers via `max_attempts = _original_max_attempts + len(_EMPTY_FINAL_DELAYS)`.
+# Adding entries here automatically adds retry attempts; removing entries
+# reduces them.  Do NOT hardcode `+ 2` anywhere — always use len().
 _EMPTY_FINAL_DELAYS = [20.0, 40.0]  # final delays before emitting empty-response fallback
 
 # Error codes and patterns that indicate rate limiting or quota exhaustion.
@@ -93,6 +355,7 @@ _STREAM_READ_TIMEOUT = 120  # seconds — upstream must respond with first byte 
 _SINGLE_BACKEND_COOLDOWN_CAP = 30  # seconds — cap cooldown for single-backend profiles
 _CLOUDFLARE_FIRST_HIT_COOLDOWN = 15  # seconds — short cooldown for first Cloudflare block
 _ALL_UNHEALTHY_FAST_FAIL_THRESHOLD = 60  # seconds — fast-fail if soonest retry exceeds this
+_SSE_MAX_LINE_BYTES = 10 * 1024 * 1024  # 10 MiB — guards against unbounded line_buffer growth
 
 
 class AllBackendsUnhealthyError(Exception):
@@ -144,6 +407,58 @@ def _log_cloudflare_block(status: int, body: str) -> None:
     logger.debug("Upstream Cloudflare response body: %s", _truncate_for_log(body))
 
 
+def _append_sse_chunk(
+    line_buffer: bytearray,
+    chunk: bytes,
+    *,
+    max_line_bytes: int = _SSE_MAX_LINE_BYTES,
+) -> list[str]:
+    """Append a raw upstream chunk to the SSE line buffer and return complete lines.
+
+    Implements F23 (UTF-8 multi-byte survival) and F24 (unbounded buffer guard):
+
+    - Buffers raw ``bytes`` rather than decoding with ``errors="replace"``,
+      so multi-byte UTF-8 sequences split across TCP chunks are preserved
+      until a complete line boundary (``\\n``) is reached.
+    - Caps the line buffer at ``max_line_bytes``.  If exceeded, clears the
+      buffer and raises ``ValueError`` so the caller can abort the stream
+      with a clean error.
+
+    Args:
+        line_buffer: Mutable byte buffer holding partial SSE lines.
+        chunk: Raw bytes from the upstream response.
+        max_line_bytes: Hard cap on the size of any single line.
+
+    Returns:
+        List of complete lines (CR stripped) in arrival order.  The buffer is
+        updated in place — partial trailing data is left in ``line_buffer``.
+
+    Raises:
+        ValueError: If the buffer grows past ``max_line_bytes`` without a newline.
+    """
+    line_buffer.extend(chunk)
+    lines: list[str] = []
+
+    while True:
+        nl_pos = line_buffer.find(b"\n")
+        if nl_pos < 0:
+            # No complete line yet — check buffer size for F24
+            if len(line_buffer) > max_line_bytes:
+                # Abort: clear buffer and signal overflow to the caller
+                line_buffer.clear()
+                raise ValueError(f"SSE line exceeded maximum buffer size of {max_line_bytes} bytes")
+            return lines
+        raw_line = bytes(line_buffer[:nl_pos])
+        del line_buffer[: nl_pos + 1]
+        if raw_line.endswith(b"\r"):
+            raw_line = raw_line[:-1]
+        # Decode at the line boundary — the line is complete so the UTF-8
+        # sequence is guaranteed to be intact (F23 fix).
+        lines.append(raw_line.decode("utf-8", errors="replace"))
+
+    return lines  # unreachable, kept for type-checkers
+
+
 class UpstreamError(Exception):
     """Raised when the upstream provider returns a non-retryable error or retries are exhausted."""
 
@@ -151,6 +466,16 @@ class UpstreamError(Exception):
         self.status = status
         self.body = body
         super().__init__(f"Upstream error {status}: {body}")
+
+
+# Per-request backend selection context.  Each request handler calls
+# _select_backend(), which writes the chosen provider/key/model/index
+# into this context variable.  All downstream code (stream handlers,
+# health marking, usage logging) reads from the context var, ensuring
+# concurrent requests within the same event loop never accidentally
+# use another request's backend.
+_backend_context: contextvars.ContextVar[dict] = contextvars.ContextVar("backend_context")
+_EMPTY_CTX: dict = {}  # Sentinel default for _backend_context.get() — avoids per-access allocation
 
 
 class BridgeServer:
@@ -241,15 +566,75 @@ class BridgeServer:
             ]
 
         # Active backend for current request (set by _select_backend)
-        self._active_provider = provider
-        self._active_key = resolved_key
-        self._active_model = model
-        self._active_provider_config = provider_config or {}
-        self._current_backend_idx: int = -1
+        # Backing fields for context-var-aware properties — the properties
+        # delegate to _backend_context when set, falling back to these.
+        self._provider = provider
+        self._key = resolved_key
+        self._model = model
+        # Use property setter so the backing field is set correctly
+        self._active_provider_config = provider_config or {}  # noqa: PLR0206
+        self._backend_idx: int = -1
 
         # Usage logging
         self._logging_enabled = logging_enabled
         self._usage_log_path = _usage_log_path or (_DEBUG_LOG_DIR / "usage.log")
+
+    # ── Context-var-aware properties for backend selection ────────────────
+    #
+    # _select_backend() writes the chosen provider/key/model/index into both
+    # the instance (backing fields) and a module-level contextvars.ContextVar.
+    # The properties below read from the ContextVar first; concurrent requests
+    # in the same event loop see their own backend even if the instance fields
+    # have been overwritten by another request.
+    #
+    # Setters intentionally update only the backing fields.  _select_backend()
+    # calls the setters for backward compatibility, then writes the complete
+    # request-local snapshot to _backend_context.set(result).  Do not call these
+    # setters directly without also updating the ContextVar.
+
+    @property
+    def _active_provider(self) -> ProviderAdapter:
+        return _backend_context.get(_EMPTY_CTX).get("provider", self._provider)
+
+    @_active_provider.setter
+    def _active_provider(self, value: ProviderAdapter) -> None:
+        self._provider = value
+
+    @property
+    def _active_key(self) -> str:
+        return _backend_context.get(_EMPTY_CTX).get("key", self._key)
+
+    @_active_key.setter
+    def _active_key(self, value: str) -> None:
+        self._key = value
+
+    @property
+    def _active_model(self) -> str | None:
+        return _backend_context.get(_EMPTY_CTX).get("model", self._model)
+
+    @_active_model.setter
+    def _active_model(self, value: str | None) -> None:
+        self._model = value
+
+    @property
+    def _current_backend_idx(self) -> int:
+        return _backend_context.get(_EMPTY_CTX).get("idx", self._backend_idx)
+
+    @_current_backend_idx.setter
+    def _current_backend_idx(self, value: int) -> None:
+        self._backend_idx = value
+
+    @property
+    def _active_provider_config(self) -> dict:
+        return _backend_context.get(_EMPTY_CTX).get("provider_config", self.__dict__.get("_provider_config", {}))
+
+    @_active_provider_config.setter
+    def _active_provider_config(self, value: dict) -> None:
+        self.__dict__["_provider_config"] = value
+
+    def _get_backend_context(self) -> dict:
+        """Return the current request's backend context from the ContextVar."""
+        return _backend_context.get(_EMPTY_CTX)
 
     def _get_next_backend(self, *, require_streaming: bool = False) -> tuple[ProviderAdapter, str, str | None, dict]:
         """Select a healthy backend at random with equal probability.
@@ -306,6 +691,24 @@ class BridgeServer:
                 logger.warning("All %d backends unhealthy or non-stream-capable", n)
             else:
                 logger.warning("All %d backends unhealthy", n)
+            # F28: When require_streaming is True and no backends support streaming,
+            # raise AllBackendsUnhealthyError instead of falling back to non-streaming.
+            stream_capable_count = sum(
+                1
+                for idx in range(n)
+                if type(self._backends[idx][0]).stream_request is not ProviderAdapter.stream_request
+                or self._backends[idx][0].use_custom_transport
+            )
+            if require_streaming and stream_capable_count == 0:
+                backend_status = [
+                    {
+                        "name": self._backends[idx][2].name,
+                        "healthy": False,
+                        "remaining_cooldown": 0,
+                    }
+                    for idx in range(n)
+                ]
+                raise AllBackendsUnhealthyError(backend_status, 300)
             candidates = []
             backend_status = []
             now = time.monotonic()
@@ -348,7 +751,7 @@ class BridgeServer:
             provider, key, profile = backend
             return provider, key, profile.model, profile.provider_config, idx  # type: ignore[union-attr]
 
-        return self._provider, self._resolved_key, self._model, self._provider_config or {}, -1
+        return self._provider, self._resolved_key, self._model, self.__dict__.get("_provider_config") or {}, -1
 
     def _get_backend_family(self, index: int) -> str:
         if not self._backends or index < 0 or index >= len(self._backends):
@@ -466,7 +869,8 @@ class BridgeServer:
         health["failed_at"] = None
         health["stream_error_count"] = 0
         health["transport_error_count"] = 0
-        health["cloudflare_error_count"] = 0
+        # F21: decay cloudflare count instead of resetting — prevents thrash loop
+        health["cloudflare_error_count"] = max(0, health.get("cloudflare_error_count", 0) - 1)
 
     def _decide_cloudflare_action(
         self,
@@ -530,8 +934,39 @@ class BridgeServer:
         return False
 
     @staticmethod
-    def _error_response(data: dict, *, status: int = 400) -> web.Response:
-        return web.json_response(data, status=status, headers={"Connection": "close"})
+    def _error_response(data: dict, *, status: int = 400, headers: dict | None = None) -> web.Response:
+        hdrs = {"Connection": "close"}
+        if headers:
+            hdrs.update(headers)
+        return web.json_response(data, status=status, headers=hdrs)
+
+    @staticmethod
+    def _all_unhealthy_response(exc: AllBackendsUnhealthyError) -> web.Response:
+        """Build a 503 response from an AllBackendsUnhealthyError.
+
+        Includes a ``Retry-After`` header (in seconds) so clients can back off
+        instead of retrying immediately.  The body names the soonest retry
+        window and the count of exhausted backends.
+        """
+        logger.error(
+            "All %d backends unhealthy; returning 503 with Retry-After=%ds",
+            len(exc.backends),
+            exc.retry_after,
+        )
+        return BridgeServer._error_response(
+            {
+                "type": "error",
+                "error": {
+                    "type": "service_unavailable",
+                    "message": (
+                        f"All {len(exc.backends)} backends are currently unavailable. Retry after {exc.retry_after}s."
+                    ),
+                    "retry_after": exc.retry_after,
+                },
+            },
+            status=503,
+            headers={"Retry-After": str(exc.retry_after)},
+        )
 
     def _empty_response_context(self, upstream_error: str | None = None) -> dict:
         """Build diagnostic context for empty-response fallback text.
@@ -545,7 +980,7 @@ class BridgeServer:
         if self._backends and 0 <= self._current_backend_idx < len(self._backends):
             provider = self._backends[self._current_backend_idx][0]
             ctx["provider"] = provider.provider_type
-            ctx["model"] = self._model
+            ctx["model"] = self._active_model or ""
             total = 1 + len(_EMPTY_RETRY_DELAYS) + len(_EMPTY_FINAL_DELAYS)
             ctx["attempts"] = total
         return ctx
@@ -581,11 +1016,16 @@ class BridgeServer:
             return choices[0].get("finish_reason") is not None
         return False
 
-    def _select_backend(self, *, require_streaming: bool = False) -> None:
+    def _select_backend(self, *, require_streaming: bool = False) -> dict:
         """Select next backend and set active fields for the current request.
 
         When require_streaming is True, only selects backends whose provider
         overrides stream_request() from the base ProviderAdapter.
+
+        Returns a dict with ``provider``, ``key``, ``model``, and ``idx``
+        that can be used for assertion / testing.  Production code should
+        read these via the context-var-aware properties
+        (``_active_provider``, ``_current_backend_idx``, etc.).
         """
         provider, key, model, provider_config, backend_idx = self._get_next_backend(
             require_streaming=require_streaming,
@@ -595,6 +1035,20 @@ class BridgeServer:
         self._active_model = model
         self._active_provider_config = provider_config
         self._current_backend_idx = backend_idx
+
+        # Isolate this selection for the current request.  Concurrent
+        # requests within the same event loop get their own ContextVar
+        # value and never see this one, even if the instance fields are
+        # overwritten by another request's _select_backend().
+        result = {
+            "provider": provider,
+            "key": key,
+            "model": model,
+            "idx": backend_idx,
+            "provider_config": provider_config,
+        }
+        _backend_context.set(result)
+        return result
 
     def _log_backend_selection(self) -> None:
         """Log diagnostic info about the currently selected backend."""
@@ -657,6 +1111,10 @@ class BridgeServer:
             )
             bridge_logger.addHandler(fh)
 
+        # Wire process-level crash handlers so any C-level crash (SIGSEGV)
+        # or unhandled Python exception writes to the same debug log.
+        _setup_crash_handlers(log_path)
+
         return log_path
 
     def _log_usage(self, usage: dict | None) -> None:
@@ -695,6 +1153,12 @@ class BridgeServer:
     async def start_async(self) -> int:
         """Create the aiohttp app, register routes, start listening. Returns bound port."""
         self._log_path = self._setup_debug_logging()
+
+        # Crash handlers are always installed, even without --debug.
+        # When debug is off they write to the default ~/.cache/kitty/bridge.log.
+        # When debug is on, _setup_debug_logging already called this with the
+        # correct custom path; the idempotency guard makes this second call a no-op.
+        _setup_crash_handlers(_DEBUG_LOG_PATH, state_path=self._state_file)
 
         # Open access log file if configured
         if self._access_log_path:
@@ -750,7 +1214,14 @@ class BridgeServer:
                 started_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
                 tls=bool(self._tls_cert and self._tls_key),
             )
-            write_state(self._state_file, state)
+            try:
+                write_state(self._state_file, state)
+            except OSError:
+                # F49: If state write fails (disk full, permissions), clean up
+                # the running server so it doesn't become an unmanaged process.
+                logger.exception("Failed to write state file %s", self._state_file)
+                await self.stop_async()
+                raise
 
         return self._port
 
@@ -916,7 +1387,9 @@ class BridgeServer:
                     "failure_count": health.get("failure_count", 0),
                 }
             )
-        return web.json_response({"status": "ok" if any_healthy else "degraded", "backends": backends})
+        status = "ok" if any_healthy else "degraded"
+        http_status = 200 if any_healthy else 503
+        return web.json_response({"status": status, "backends": backends}, status=http_status)
 
     async def _handle_models(self, request: web.Request) -> web.Response:
         """Return OpenAI-compatible model list."""
@@ -940,7 +1413,10 @@ class BridgeServer:
     # ── Responses API handler ─────────────────────────────────────────────
 
     async def _handle_responses(self, request: web.Request) -> web.StreamResponse:
-        self._select_backend()
+        try:
+            self._select_backend()
+        except AllBackendsUnhealthyError as exc:
+            return self._all_unhealthy_response(exc)
         try:
             body = await request.json()
         except web.HTTPRequestEntityTooLarge:
@@ -948,7 +1424,8 @@ class BridgeServer:
             return self._error_response(
                 {"error": {"code": "invalid_request", "message": "Request body too large"}},
             )
-        except (json.JSONDecodeError, Exception):
+        except (json.JSONDecodeError, Exception) as exc:
+            logger.warning("Malformed JSON in Responses API request body: %s", exc)
             return self._error_response(
                 {"error": {"code": "invalid_request", "message": "Invalid JSON body"}},
             )
@@ -957,50 +1434,66 @@ class BridgeServer:
         logger.debug("Request headers: %s", dict(request.headers))
         logger.debug("Request body: %s", json.dumps(body, indent=2, ensure_ascii=False))
 
-        translator = ResponsesTranslator()
-        cc_request = translator.translate_request(body)
-        self._normalize_model(cc_request)
-        self._active_provider.normalize_request(cc_request)
-
-        logger.debug("Translated CC request: %s", json.dumps(cc_request, indent=2, ensure_ascii=False))
-
-        # Compact messages before size check
-        self._apply_compaction(cc_request)
-
-        # P4: Context size guardrail
-        size_error = self._check_request_size(cc_request)
-        if size_error is not None:
-            return size_error
-
-        if cc_request.get("stream"):
-            return await self._stream_responses(request, body, translator, cc_request)
-
-        # For custom-transport providers, attach the original Responses API body
-        # so the provider can forward it directly without CC round-trip translation.
-        if self._active_provider.use_custom_transport:
-            cc_request["_original_body"] = body
-            self._log_backend_selection()
-
         try:
-            cc_response = await self._request_with_retry(cc_request)
-        except UpstreamError as exc:
-            error_msg = self._translate_upstream_error(exc.status, exc.body)
-            return web.json_response(
-                {"error": {"code": "upstream_error", "message": error_msg}},
-                status=exc.status,
-            )
+            translator = ResponsesTranslator()
+            cc_request = translator.translate_request(body)
+            self._normalize_model(cc_request)
+            self._active_provider.normalize_request(cc_request)
+
+            logger.debug("Translated CC request: %s", json.dumps(cc_request, indent=2, ensure_ascii=False))
+
+            # Compact messages before size check
+            self._apply_compaction(cc_request)
+
+            # P4: Context size guardrail
+            size_error = self._check_request_size(cc_request)
+            if size_error is not None:
+                return size_error
+
+            if cc_request.get("stream"):
+                return await self._stream_responses(request, body, translator, cc_request)
+
+            # For custom-transport providers, attach the original Responses API body
+            # so the provider can forward it directly without CC round-trip translation.
+            if self._active_provider.use_custom_transport:
+                cc_request["_original_body"] = body
+                self._log_backend_selection()
+
+            try:
+                cc_response = await self._request_with_retry(cc_request)
+            except UpstreamError as exc:
+                error_msg = self._translate_upstream_error(exc.status, exc.body)
+                return web.json_response(
+                    {"error": {"code": "upstream_error", "message": error_msg}},
+                    status=exc.status,
+                )
+            except Exception as exc:
+                error_msg = self._custom_transport_error_message(exc)
+                return web.json_response(
+                    {"error": {"code": "internal_error", "message": error_msg}},
+                    status=500,
+                )
+
+            result = translator.translate_response(cc_response, context=self._empty_response_context())
+            self._log_usage(cc_response.get("usage"))
+            if self._backends and self._current_backend_idx >= 0:
+                self._mark_backend_healthy(self._current_backend_idx)
+            return web.json_response(result)
         except Exception as exc:
-            error_msg = self._custom_transport_error_message(exc)
+            logger.exception(
+                "Unhandled exception in Responses handler: %s: %s",
+                type(exc).__name__,
+                exc,
+            )
             return web.json_response(
-                {"error": {"code": "internal_error", "message": error_msg}},
+                {
+                    "error": {
+                        "code": "internal_error",
+                        "message": "An internal error occurred. Check kitty logs for details.",
+                    },
+                },
                 status=500,
             )
-
-        result = translator.translate_response(cc_response, context=self._empty_response_context())
-        self._log_usage(cc_response.get("usage"))
-        if self._backends and self._current_backend_idx >= 0:
-            self._mark_backend_healthy(self._current_backend_idx)
-        return web.json_response(result)
 
     async def _stream_responses(
         self,
@@ -1176,9 +1669,34 @@ class BridgeServer:
                                 self._mark_backend_unhealthy(self._current_backend_idx, failure_kind="cloudflare")
                             break
 
+                        # Native-passthrough tool_use format mismatch — convert
+                        # to CC and retry the same backend without marking it
+                        # unhealthy.  The native Anthropic format is the
+                        # preferred format; only fall back when the upstream
+                        # proves it cannot handle tool_use content blocks.
+                        if (
+                            _is_tool_use_format_error(upstream.status, error_body)
+                            and cc_request.get("_native_messages_request")
+                            and _has_tool_use_blocks(body)
+                        ):
+                            logger.warning(
+                                "tool_use format mismatch (status %d) — converting to CC and retrying same backend",
+                                upstream.status,
+                            )
+                            cc_request = _convert_native_to_cc_format(body)
+                            cc_request["_native_messages_request"] = False
+                            self._normalize_model(cc_request)
+                            self._active_provider.normalize_request(cc_request)
+                            upstream_body = self._active_provider.translate_to_upstream(cc_request)
+                            continue
+
                         # In balancing mode: mark unhealthy, try next backend
                         if self._backends and self._current_backend_idx >= 0:
-                            kind = "auth" if upstream.status in _AUTH_FAILURE_STATUSES else "hard"
+                            kind = (
+                                "auth"
+                                if upstream.status in _AUTH_FAILURE_STATUSES
+                                else ("rate_limit" if upstream.status == 429 else "hard")
+                            )
                             self._mark_backend_unhealthy(self._current_backend_idx, failure_kind=kind)
                             if self._any_healthy_backend() and attempt < max_attempts - 1:
                                 self._select_backend()
@@ -1218,7 +1736,7 @@ class BridgeServer:
                         break
 
                     # Success path — stream the response
-                    line_buffer = ""
+                    line_buffer = bytearray()  # F23+F24: byte-based buffering
                     chunk_count = 0
                     done = False
                     stream_error = False
@@ -1226,14 +1744,17 @@ class BridgeServer:
                     finish_events: list[str] = []  # buffered finish events
                     async for chunk_bytes in upstream.content:
                         chunk_count += 1
-                        raw = chunk_bytes.decode("utf-8", errors="replace")
-                        logger.debug("Upstream chunk #%d (%d bytes): %s", chunk_count, len(raw), raw[:500])
+                        logger.debug("Upstream chunk #%d (%d bytes)", chunk_count, len(chunk_bytes))
                         if done:
                             break
-                        line_buffer += raw
-                        while "\n" in line_buffer:
-                            line, line_buffer = line_buffer.split("\n", 1)
-                            line = line.rstrip("\r")
+                        try:
+                            complete_lines = _append_sse_chunk(line_buffer, chunk_bytes)
+                        except ValueError:
+                            logger.error("SSE line exceeded maximum buffer size")
+                            stream_error = True
+                            done = True
+                            break
+                        for line in complete_lines:
                             if not line:
                                 continue
                             if line.startswith("data: "):
@@ -1273,15 +1794,15 @@ class BridgeServer:
                                         events_emitted = True
 
                     logger.debug(
-                        "Upstream stream ended. chunks=%d done=%s remaining_buffer=%d chars",
+                        "Upstream stream ended. chunks=%d done=%s remaining_buffer=%d bytes",
                         chunk_count,
                         done,
                         len(line_buffer),
                     )
 
                     # Flush remaining buffer (last chunk without trailing \n)
-                    if not done and line_buffer.strip():
-                        line = line_buffer.strip()
+                    if not done and line_buffer:
+                        line = line_buffer.decode("utf-8", errors="replace").strip()
                         logger.debug("Flushing remaining buffer: %s", line[:500])
                         if line.startswith("data: "):
                             data_str = line[6:]
@@ -1436,7 +1957,10 @@ class BridgeServer:
     # ── Messages API handler ──────────────────────────────────────────────
 
     async def _handle_messages(self, request: web.Request) -> web.StreamResponse:
-        self._select_backend()
+        try:
+            self._select_backend()
+        except AllBackendsUnhealthyError as exc:
+            return self._all_unhealthy_response(exc)
         try:
             body = await request.json()
         except web.HTTPRequestEntityTooLarge:
@@ -1447,7 +1971,8 @@ class BridgeServer:
                     "error": {"type": "invalid_request_error", "message": "Request body too large"},
                 },
             )
-        except (json.JSONDecodeError, Exception):
+        except (json.JSONDecodeError, Exception) as exc:
+            logger.warning("Malformed JSON in Messages API request body: %s", exc)
             return self._error_response(
                 {"type": "error", "error": {"type": "invalid_request_error", "message": "Invalid JSON body"}},
             )
@@ -1455,54 +1980,71 @@ class BridgeServer:
         logger.debug("═══ MESSAGES API REQUEST ═══")
         logger.debug("Request body: %s", json.dumps(body, indent=2, ensure_ascii=False))
 
-        translator = MessagesTranslator(thinking_warned=self._thinking_warned)
-        if self._active_provider.use_native_messages:
-            cc_request = dict(body)
-            cc_request["_native_messages_request"] = True
-            self._normalize_model(cc_request)
-            self._active_provider.normalize_request(cc_request)
-            logger.debug("Native Messages request: %s", json.dumps(cc_request, indent=2, ensure_ascii=False))
-        else:
-            cc_request = translator.translate_request(body)
-            self._normalize_model(cc_request)
-            self._active_provider.normalize_request(cc_request)
-            self._thinking_warned = translator.thinking_warned
-            logger.debug("Translated CC request: %s", json.dumps(cc_request, indent=2, ensure_ascii=False))
-
-        # Compact messages before size check
-        self._apply_compaction(cc_request)
-
-        # P4: Context size guardrail
-        size_error = self._check_request_size(cc_request)
-        if size_error is not None:
-            return size_error
-
-        if cc_request.get("stream"):
-            return await self._stream_messages(request, body, translator, cc_request)
-
         try:
-            cc_response = await self._request_with_retry(cc_request)
-        except UpstreamError as exc:
-            error_msg = self._translate_upstream_error(exc.status, exc.body)
-            return web.json_response(
-                {"type": "error", "error": {"type": "api_error", "message": error_msg}},
-                status=exc.status,
-            )
+            translator = MessagesTranslator(thinking_warned=self._thinking_warned)
+            if self._active_provider.use_native_messages:
+                cc_request = dict(body)
+                cc_request["_native_messages_request"] = True
+                self._normalize_model(cc_request)
+                self._active_provider.normalize_request(cc_request)
+                logger.debug("Native Messages request: %s", json.dumps(cc_request, indent=2, ensure_ascii=False))
+            else:
+                cc_request = translator.translate_request(body)
+                self._normalize_model(cc_request)
+                self._active_provider.normalize_request(cc_request)
+                self._thinking_warned = translator.thinking_warned
+                logger.debug("Translated CC request: %s", json.dumps(cc_request, indent=2, ensure_ascii=False))
+
+            # Compact messages before size check
+            self._apply_compaction(cc_request)
+
+            # P4: Context size guardrail
+            size_error = self._check_request_size(cc_request)
+            if size_error is not None:
+                return size_error
+
+            if cc_request.get("stream"):
+                return await self._stream_messages(request, body, translator, cc_request)
+
+            try:
+                cc_response = await self._request_with_retry(cc_request)
+            except UpstreamError as exc:
+                error_msg = self._translate_upstream_error(exc.status, exc.body)
+                return web.json_response(
+                    {"type": "error", "error": {"type": "api_error", "message": error_msg}},
+                    status=exc.status,
+                )
+            except Exception as exc:
+                error_msg = self._custom_transport_error_message(exc)
+                return web.json_response(
+                    {"type": "error", "error": {"type": "api_error", "message": error_msg}},
+                    status=500,
+                )
+
+            if self._active_provider.use_native_messages:
+                result = cc_response
+            else:
+                result = translator.translate_response(cc_response, context=self._empty_response_context())
+            self._log_usage(cc_response.get("usage"))
+            if self._backends and self._current_backend_idx >= 0:
+                self._mark_backend_healthy(self._current_backend_idx)
+            return web.json_response(result)
         except Exception as exc:
-            error_msg = self._custom_transport_error_message(exc)
+            logger.exception(
+                "Unhandled exception in Messages handler: %s: %s",
+                type(exc).__name__,
+                exc,
+            )
             return web.json_response(
-                {"type": "error", "error": {"type": "api_error", "message": error_msg}},
+                {
+                    "type": "error",
+                    "error": {
+                        "type": "internal_error",
+                        "message": "An internal error occurred. Check kitty logs for details.",
+                    },
+                },
                 status=500,
             )
-
-        if self._active_provider.use_native_messages:
-            result = cc_response
-        else:
-            result = translator.translate_response(cc_response, context=self._empty_response_context())
-        self._log_usage(cc_response.get("usage"))
-        if self._backends and self._current_backend_idx >= 0:
-            self._mark_backend_healthy(self._current_backend_idx)
-        return web.json_response(result)
 
     async def _stream_messages(
         self,
@@ -1797,10 +2339,34 @@ class BridgeServer:
                                 await sr.write(messages_format_error(error_data).encode())
                                 break
 
+                            # Native-passthrough tool_use format mismatch — convert
+                            # to CC and retry the same backend.
+                            if (
+                                _is_tool_use_format_error(upstream.status, error_body)
+                                and cc_request.get("_native_messages_request")
+                                and _has_tool_use_blocks(body)
+                            ):
+                                logger.warning(
+                                    "tool_use format mismatch (status %d) — converting to CC and retrying same backend",
+                                    upstream.status,
+                                )
+                                cc_request = _convert_native_to_cc_format(body)
+                                cc_request["_native_messages_request"] = False
+                                self._normalize_model(cc_request)
+                                self._active_provider.normalize_request(cc_request)
+                                url = self._build_upstream_url()
+                                headers = self._build_upstream_headers()
+                                upstream_body = self._active_provider.translate_to_upstream(cc_request)
+                                continue
+
                             retryable = self._should_retry_stream(upstream.status, error_body)
                             # In balancing mode: mark unhealthy and try next backend for ANY error
                             if self._backends and self._current_backend_idx >= 0:
-                                kind = "auth" if upstream.status in _AUTH_FAILURE_STATUSES else "hard"
+                                kind = (
+                                    "auth"
+                                    if upstream.status in _AUTH_FAILURE_STATUSES
+                                    else ("rate_limit" if upstream.status == 429 else "hard")
+                                )
                                 self._mark_backend_unhealthy(self._current_backend_idx, failure_kind=kind)
                                 if self._any_healthy_backend() and attempt < max_attempts - 1:
                                     self._select_backend()
@@ -1842,7 +2408,7 @@ class BridgeServer:
                             stream_ok = True
                             break
 
-                        line_buffer = ""
+                        line_buffer = bytearray()  # F23+F24: byte-based buffering
                         done = False
                         stream_error = False
                         events_emitted = False
@@ -1852,10 +2418,14 @@ class BridgeServer:
                             if done:
                                 break
                             chunk_count += 1
-                            line_buffer += chunk_bytes.decode("utf-8", errors="replace")
-                            while "\n" in line_buffer:
-                                line, line_buffer = line_buffer.split("\n", 1)
-                                line = line.rstrip("\r")
+                            try:
+                                complete_lines = _append_sse_chunk(line_buffer, chunk_bytes)
+                            except ValueError:
+                                logger.error("SSE line exceeded maximum buffer size")
+                                stream_error = True
+                                done = True
+                                break
+                            for line in complete_lines:
                                 if not line:
                                     continue
                                 if line.startswith("data: "):
@@ -1898,8 +2468,8 @@ class BridgeServer:
                         logger.debug("Upstream stream ended. chunks=%d done=%s", chunk_count, done)
 
                         # Flush remaining buffer (last chunk without trailing \n)
-                        if not done and line_buffer.strip():
-                            line = line_buffer.strip()
+                        if not done and line_buffer:
+                            line = line_buffer.decode("utf-8", errors="replace").strip()
                             if line.startswith("data: "):
                                 data_str = line[6:]
                                 if data_str.strip() != "[DONE]":
@@ -2166,7 +2736,10 @@ class BridgeServer:
 
     async def _handle_gemini(self, request: web.Request) -> web.StreamResponse:
         """Handle Gemini generateContent / streamGenerateContent requests."""
-        self._select_backend()
+        try:
+            self._select_backend()
+        except AllBackendsUnhealthyError as exc:
+            return self._all_unhealthy_response(exc)
         model_from_path = request.match_info["model"]
 
         try:
@@ -2176,7 +2749,8 @@ class BridgeServer:
             return self._error_response(
                 {"error": {"code": 400, "message": "Request body too large"}},
             )
-        except (json.JSONDecodeError, Exception):
+        except (json.JSONDecodeError, Exception) as exc:
+            logger.warning("Malformed JSON in Gemini API request body: %s", exc)
             return self._error_response(
                 {"error": {"code": 400, "message": "Invalid JSON body"}},
             )
@@ -2279,6 +2853,7 @@ class BridgeServer:
                             cooldown=self._retry_after_from_exc(exc),
                         )
                         if self._any_healthy_backend(require_streaming=True) and attempt < n_backends - 1:
+                            translator.reset()  # F22: clear stale tool buffers before same-mode failover
                             try:
                                 self._select_backend(require_streaming=True)
                             except AllBackendsUnhealthyError as all_unhealthy:
@@ -2307,6 +2882,7 @@ class BridgeServer:
                                 logger.warning("Cross-mode failover: all backends unhealthy")
                                 break
                             self._normalize_model(cc_request)
+                            translator.reset()  # F22: clear stale tool buffers before cross-mode failover
                             self._active_provider.normalize_request(cc_request)
                             cc_request.pop("_resolved_key", None)
                             cc_request.pop("_provider_config", None)
@@ -2391,11 +2967,36 @@ class BridgeServer:
 
                         logger.error("Upstream error %d: %s", upstream.status, error_body)
 
+                        # Native-passthrough tool_use format mismatch — convert
+                        # to CC and retry the same backend.
+                        if (
+                            _is_tool_use_format_error(upstream.status, error_body)
+                            and cc_request.get("_native_messages_request")
+                            and _has_tool_use_blocks(cc_request)
+                        ):
+                            logger.warning(
+                                "tool_use format mismatch (status %d) — converting to CC and retrying same backend",
+                                upstream.status,
+                            )
+                            cc_request = _convert_native_to_cc_format(cc_request)
+                            cc_request["_native_messages_request"] = False
+                            self._normalize_model(cc_request)
+                            self._active_provider.normalize_request(cc_request)
+                            url = self._build_upstream_url()
+                            headers = self._build_upstream_headers()
+                            upstream_body = self._active_provider.translate_to_upstream(cc_request)
+                            continue
+
                         # In balancing mode: mark unhealthy, try next backend
                         if self._backends and self._current_backend_idx >= 0:
-                            kind = "auth" if upstream.status in _AUTH_FAILURE_STATUSES else "hard"
+                            kind = (
+                                "auth"
+                                if upstream.status in _AUTH_FAILURE_STATUSES
+                                else ("rate_limit" if upstream.status == 429 else "hard")
+                            )
                             self._mark_backend_unhealthy(self._current_backend_idx, failure_kind=kind)
                             if self._any_healthy_backend() and attempt < max_attempts - 1:
+                                translator.reset()  # F22: clear stale tool buffers
                                 self._select_backend()
                                 self._normalize_model(cc_request)
                                 self._active_provider.normalize_request(cc_request)
@@ -2433,7 +3034,7 @@ class BridgeServer:
                         break
 
                     # Success path — stream the response
-                    line_buffer = ""
+                    line_buffer = bytearray()  # F23+F24: byte-based buffering
                     done = False
                     stream_error = False
                     events_emitted = False
@@ -2441,10 +3042,14 @@ class BridgeServer:
                     async for chunk_bytes in upstream.content:
                         if done:
                             break
-                        line_buffer += chunk_bytes.decode("utf-8", errors="replace")
-                        while "\n" in line_buffer:
-                            line, line_buffer = line_buffer.split("\n", 1)
-                            line = line.rstrip("\r")
+                        try:
+                            complete_lines = _append_sse_chunk(line_buffer, chunk_bytes)
+                        except ValueError:
+                            logger.error("SSE line exceeded maximum buffer size")
+                            stream_error = True
+                            done = True
+                            break
+                        for line in complete_lines:
                             if not line:
                                 continue
                             if line.startswith("data: "):
@@ -2482,8 +3087,8 @@ class BridgeServer:
                                         events_emitted = True
 
                     # Flush remaining buffer
-                    if not done and line_buffer.strip():
-                        line = line_buffer.strip()
+                    if not done and line_buffer:
+                        line = line_buffer.decode("utf-8", errors="replace").strip()
                         if line.startswith("data: "):
                             data_str = line[6:]
                             if data_str.strip() != "[DONE]":
@@ -2506,6 +3111,7 @@ class BridgeServer:
                             logger.warning("Gemini stream error after client events emitted; not retrying")
                             break
                         if attempt < max_attempts - 1:
+                            translator.reset()  # F22: clear stale tool buffers
                             self._select_backend()
                             self._normalize_model(cc_request)
                             self._active_provider.normalize_request(cc_request)
@@ -2755,13 +3361,9 @@ class BridgeServer:
 
         # All attempts exhausted — return last response (translator adds fallback) or propagate error
         if last_exc is not None:
-            if isinstance(last_exc, UpstreamError):
-                raise last_exc
             raise last_exc
         # All backends returned empty — return the empty response
-        if last_response is not None:
-            return last_response
-        raise RuntimeError("All backends exhausted with no response")
+        return last_response
 
     async def _handle_chat_completions(self, request: web.Request) -> web.StreamResponse:
         """Handle Chat Completions pass-through requests.
@@ -2770,7 +3372,10 @@ class BridgeServer:
         also expects CC format.  We only apply model normalization and provider
         normalization.
         """
-        self._select_backend()
+        try:
+            self._select_backend()
+        except AllBackendsUnhealthyError as exc:
+            return self._all_unhealthy_response(exc)
         try:
             body = await request.json()
         except web.HTTPRequestEntityTooLarge:
@@ -2778,7 +3383,8 @@ class BridgeServer:
             return self._error_response(
                 {"error": {"message": "Request body too large", "type": "invalid_request_error"}},
             )
-        except (json.JSONDecodeError, Exception):
+        except (json.JSONDecodeError, Exception) as exc:
+            logger.warning("Malformed JSON in Chat Completions API request body: %s", exc)
             return self._error_response(
                 {"error": {"message": "Invalid JSON body", "type": "invalid_request_error"}},
             )
@@ -3031,7 +3637,7 @@ class BridgeServer:
                     )
                     await asyncio.sleep(delay)
                 # Reset stream state for each retry attempt
-                line_buffer = ""
+                line_buffer = bytearray()  # F23+F24: byte-based buffering
                 done = False
                 stream_error = False
                 has_content = False
@@ -3060,9 +3666,33 @@ class BridgeServer:
 
                         logger.error("Upstream error %d: %s", upstream.status, error_body)
 
+                        # Native-passthrough tool_use format mismatch — convert
+                        # to CC and retry the same backend.
+                        if (
+                            _is_tool_use_format_error(upstream.status, error_body)
+                            and cc_request.get("_native_messages_request")
+                            and _has_tool_use_blocks(cc_request)
+                        ):
+                            logger.warning(
+                                "tool_use format mismatch (status %d) — converting to CC and retrying same backend",
+                                upstream.status,
+                            )
+                            cc_request = _convert_native_to_cc_format(cc_request)
+                            cc_request["_native_messages_request"] = False
+                            self._normalize_model(cc_request)
+                            self._active_provider.normalize_request(cc_request)
+                            url = self._build_upstream_url()
+                            headers = self._build_upstream_headers()
+                            upstream_body = self._active_provider.translate_to_upstream(cc_request)
+                            continue
+
                         # In balancing mode: mark unhealthy, try next backend
                         if self._backends and self._current_backend_idx >= 0:
-                            kind = "auth" if upstream.status in _AUTH_FAILURE_STATUSES else "hard"
+                            kind = (
+                                "auth"
+                                if upstream.status in _AUTH_FAILURE_STATUSES
+                                else ("rate_limit" if upstream.status == 429 else "hard")
+                            )
                             self._mark_backend_unhealthy(self._current_backend_idx, failure_kind=kind)
                             if self._any_healthy_backend() and attempt < max_attempts - 1:
                                 self._select_backend()
@@ -3107,10 +3737,21 @@ class BridgeServer:
                             if done:
                                 break
                             chunk_count += 1
-                            line_buffer += chunk_bytes.decode("utf-8", errors="replace")
-                            while "\n" in line_buffer:
-                                line, line_buffer = line_buffer.split("\n", 1)
-                                line = line.rstrip("\r")
+                            try:
+                                complete_lines = _append_sse_chunk(line_buffer, chunk_bytes)
+                            except ValueError as exc:
+                                # F24: abort stream on unbounded line growth
+                                logger.error("SSE line exceeded maximum buffer size")
+                                _err = {"error": {"message": str(exc), "type": "upstream_error"}}
+                                error_sse = f"data: {json.dumps(_err)}\n\n"
+                                try:
+                                    await sr.write(error_sse.encode())
+                                except (ConnectionResetError, BrokenPipeError, OSError):
+                                    logger.debug("Client disconnected before overflow error could be sent")
+                                stream_error = True
+                                done = True
+                                break
+                            for line in complete_lines:
                                 if not line:
                                     continue
                                 if not line.startswith("data: "):
@@ -3161,8 +3802,8 @@ class BridgeServer:
                     logger.debug("Upstream stream ended. chunks=%d done=%s", chunk_count, done)
 
                     # Flush remaining buffer (last chunk without trailing \n)
-                    if not done and line_buffer.strip():
-                        line = line_buffer.strip()
+                    if not done and line_buffer:
+                        line = line_buffer.decode("utf-8", errors="replace").strip()
                         if line.startswith("data: "):
                             data_str = line[6:]
                             if data_str.strip() == "[DONE]":
@@ -3189,7 +3830,7 @@ class BridgeServer:
                                     ):
                                         has_content = True
                                         await sr.write(translated)
-                        line_buffer = ""  # Buffer consumed
+                        line_buffer.clear()  # Buffer consumed
 
                     # Handle in-stream error failover
                     if stream_error:
@@ -3408,7 +4049,23 @@ class BridgeServer:
         if not messages:
             return messages
 
-        original_size = len(json.dumps(messages, ensure_ascii=False))
+        # F33: Helper to safely serialize messages — returns -1 on TypeError.
+        def _safe_size(msgs: list[dict]) -> int:
+            try:
+                return len(json.dumps(msgs, ensure_ascii=False))
+            except (TypeError, ValueError):
+                return -1
+
+        original_size = _safe_size(messages)
+        if original_size < 0:
+            # F33: Non-serializable content — cannot compact, return as-is.
+            logger.error(
+                "Context compaction: json.dumps failed on original messages (%d msgs) — "
+                "returning uncompacted messages. Upstream may reject if too large.",
+                len(messages),
+            )
+            return messages
+
         compaction_threshold = _COMPACTION_CHAR_THRESHOLD if max_messages_chars is None else max_messages_chars
         guaranteed_max = _COMPACTION_GUARANTEED_MESSAGES_MAX if max_messages_chars is None else max_messages_chars
         if original_size <= compaction_threshold:
@@ -3431,7 +4088,14 @@ class BridgeServer:
             else:
                 compacted.append(msg)
 
-        size_after_truncation = len(json.dumps(compacted, ensure_ascii=False))
+        size_after_truncation = _safe_size(compacted)
+        if size_after_truncation < 0:
+            # F33: Non-serializable content in compacted form.
+            logger.error(
+                "Context compaction: json.dumps failed after tool truncation (%d msgs) — returning original messages.",
+                len(compacted),
+            )
+            return messages
         if size_after_truncation <= compaction_threshold:
             logger.info(
                 "Context compaction: tool result truncation reduced size from %d to %d chars (%d messages)",
@@ -3454,7 +4118,10 @@ class BridgeServer:
                 while j < len(compacted) and compacted[j].get("role") == "tool":
                     block_msgs.append(compacted[j])
                     j += 1
-            block_size = sum(len(json.dumps(m, ensure_ascii=False)) for m in block_msgs)
+            # F33: safely compute block size
+            block_size = _safe_size(block_msgs)
+            if block_size < 0:
+                block_size = sum(len(str(m)) for m in block_msgs)
             blocks.append((block_msgs, block_size))
             i += len(block_msgs)
 
@@ -3503,7 +4170,9 @@ class BridgeServer:
         for block_msgs, _ in tail_blocks:
             result.extend(block_msgs)
 
-        result_size = len(json.dumps(result, ensure_ascii=False))
+        result_size = _safe_size(result)
+        if result_size < 0:
+            result_size = sum(len(str(m)) for m in result)
 
         # ── Step 5: Guaranteed-fit fallback ──────────────────────────────
         # If still too large, iteratively drop oldest blocks until under budget.
@@ -3557,6 +4226,34 @@ class BridgeServer:
         # can still contain orphans (e.g. an upstream-empty SSE response
         # that the bridge faithfully recorded as a complete tool message).
         result = self._validate_tool_call_pairing(result)
+
+        # F25 + F26: Post-condition — at least one non-system message must
+        # survive.  The guaranteed-fit fallback can leave only the system
+        # message if all other blocks were dropped and the last remaining
+        # tail block (a tool result) was removed by pairing validation.
+        # An oversized system message (F26) also triggers this check.
+        non_system = [m for m in result if m.get("role") != "system"]
+        if not non_system:
+            logger.error(
+                "Context compaction: post-condition failed — only system message remains "
+                "after compaction (%d chars). System prompt may be too large for the "
+                "model context window.",
+                result_size,
+            )
+            # Return a single user message with a clear error so the upstream
+            # produces a visible error instead of a confusing 400.
+            return [
+                system_messages[0] if system_messages else {"role": "system", "content": ""},
+                {
+                    "role": "user",
+                    "content": (
+                        "[Kitty Bridge: Unable to compact conversation — the system prompt "
+                        "is too large relative to the model's context window. "
+                        "Use /clear to reset the conversation.]"
+                    ),
+                },
+            ]
+
         return result
 
     def _get_max_context_chars(self) -> int:
@@ -3684,7 +4381,12 @@ class BridgeServer:
             # Remove the total timeout so streaming responses are never cut short.
             # Keep a connect timeout to fail fast on network issues.
             timeout = aiohttp.ClientTimeout(total=None, sock_connect=30)
-            self._session = aiohttp.ClientSession(timeout=timeout)
+            # F29: Explicit connection pool limit to avoid aiohttp's default of 100.
+            # Configurable via KITTY_BRIDGE_CONN_LIMIT env var.  force_close=True
+            # prevents port exhaustion when many short-lived connections are made.
+            conn_limit = int(os.environ.get("KITTY_BRIDGE_CONN_LIMIT", "500"))
+            connector = aiohttp.TCPConnector(limit=conn_limit, force_close=True)
+            self._session = aiohttp.ClientSession(timeout=timeout, connector=connector)
         return self._session
 
     @staticmethod

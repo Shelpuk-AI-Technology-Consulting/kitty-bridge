@@ -138,6 +138,7 @@ class MiniMaxTokenAnthropicAdapter(AnthropicAdapter):
                     "content_block_stop",
                     "content_block_delta",
                     "ping",
+                    "error",
                 ):
                     return [raw_bytes]
                 return super().translate_upstream_stream_event(raw_bytes)

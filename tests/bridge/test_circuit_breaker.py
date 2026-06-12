@@ -957,7 +957,7 @@ class TestMarkBackendUnhealthyAuth:
         """Auth failure should set a very long (session-persistent) cooldown."""
         server = _make_server(3)
         server._mark_backend_unhealthy(0, failure_kind="auth")
-        assert server._backend_health[0]["cooldown"] >= 86400  # 24h
+        assert server._backend_health[0]["cooldown"] >= 900  # 15 min
 
     def test_auth_failure_resets_error_counts(self):
         """Auth failure resets stream/transport error counts like 'hard'."""
@@ -976,5 +976,5 @@ class TestMarkBackendUnhealthyAuth:
         # Simulate a long time passing — should still be unhealthy
         server._backend_health[0]["failed_at"] = time.monotonic() - 3600  # 1 hour ago
         assert not server._backend_health[0]["healthy"]
-        # Cooldown hasn't expired (86400s)
-        assert server._backend_health[0]["cooldown"] >= 86400
+        # Cooldown hasn't expired (900s)
+        assert server._backend_health[0]["cooldown"] >= 900

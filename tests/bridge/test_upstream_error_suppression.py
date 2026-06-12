@@ -351,7 +351,7 @@ class TestAuthFailureBlacklisting:
                     assert resp.status == 200
 
                 # Backend-0 should have a very long cooldown (auth blacklisting)
-                assert server._backend_health[0]["cooldown"] >= 86400
+                assert server._backend_health[0]["cooldown"] >= 900
         finally:
             await server.stop_async()
 

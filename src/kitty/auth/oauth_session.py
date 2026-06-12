@@ -140,16 +140,26 @@ class OAuthSession:
         return session
 
     def save(self) -> None:
-        """Write the session to _file_path atomically (temp file + rename)."""
+        """Write the session to _file_path atomically (temp file + rename).
+
+        F47: Uses filelock to prevent concurrent processes from overwriting
+        each other's session data.
+        """
         if self._file_path is None:
             raise ValueError("Cannot save: _file_path is not set")
+
+        import filelock
+
         path = Path(self._file_path)
-        tmp = path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(self.to_dict(), indent=2), encoding="utf-8")
-        # Set restrictive permissions before rename to avoid a brief
-        # world-readable window between the replace() and chmod().
-        tmp.chmod(0o600)
-        tmp.replace(path)
+        lock_path = str(path) + ".lock"
+        lock = filelock.FileLock(lock_path, timeout=5)
+        with lock:
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(self.to_dict(), indent=2), encoding="utf-8")
+            # Set restrictive permissions before rename to avoid a brief
+            # world-readable window between the replace() and chmod().
+            tmp.chmod(0o600)
+            tmp.replace(path)
         logger.debug("OAuth session saved to %s", path)
 
     @classmethod

@@ -32,6 +32,20 @@ _FINISH_TO_STOP: dict[str, str] = {
 }
 
 
+def _safe_json_load_args(arguments: str | None) -> dict:
+    """Parse tool call arguments, falling back to ``{}`` on malformed JSON.
+
+    Upstream models may produce syntactically invalid JSON strings for
+    tool call arguments.  Without this guard, ``json.loads`` raises an
+    unhandled ``JSONDecodeError`` that becomes a 500.
+    """
+    raw = arguments or "{}"
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+
+
 class AnthropicAdapter(ProviderAdapter):
     """Anthropic Messages API adapter.
 
@@ -172,7 +186,7 @@ class AnthropicAdapter(ProviderAdapter):
                     "type": "tool_use",
                     "id": tc.get("id", f"toolu_{uuid.uuid4().hex[:24]}"),
                     "name": func.get("name", ""),
-                    "input": json.loads(func.get("arguments") or "{}"),
+                    "input": _safe_json_load_args(func.get("arguments")),
                 }
             )
 
@@ -283,7 +297,7 @@ class AnthropicAdapter(ProviderAdapter):
         for line in raw_str.split("\n"):
             line = line.strip()
             if line.startswith("event:"):
-                line[6:].strip()
+                pass  # event type is communicated via JSON type field; no action needed
             elif line.startswith("data:"):
                 data_str = line[5:].strip()
 
@@ -297,8 +311,8 @@ class AnthropicAdapter(ProviderAdapter):
 
         data_type = data.get("type", "")
 
-        # Ignore non-content events
-        if data_type in ("ping", "content_block_start", "content_block_stop"):
+        # Ignore non-content events (F10: "error" included to prevent silent passthrough)
+        if data_type in ("ping", "content_block_start", "content_block_stop", "error"):
             return []
 
         if data_type == "message_start":

@@ -7,10 +7,10 @@ def is_cloudflare_block(status: int, body: str) -> bool:
     return get_cloudflare_signature(body) is not None
 
 
-# Order matters: specific signatures first, generic "cloudflare" last.
-# get_cloudflare_signature() returns the first match, so the generic
-# "cloudflare" catch-all only fires when no specific signature is present.
-_CF_SIGNATURES = ("cf-mitigated", "_cf_chl_opt", "cf-browser-verification", "cloudflare")
+# F48: Only specific Cloudflare signatures are matched.  The bare word
+# "cloudflare" was removed because it false-positives on any 403 body that
+# mentions Cloudflare in a URL, support contact, or incident report.
+_CF_SIGNATURES = ("cf-mitigated", "_cf_chl_opt", "cf-browser-verification")
 
 
 def get_cloudflare_signature(body: str) -> str | None:

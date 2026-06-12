@@ -150,3 +150,71 @@ class TestBridgeStateHelpers:
         loaded = load_state(state_path)
         assert loaded is not None
         assert loaded.started_at.endswith("Z")
+
+
+class TestWriteStateAtomicity:
+    """F40: write_state must use temp file + os.replace for atomic writes."""
+
+    def test_write_state_uses_os_replace(self, tmp_path, monkeypatch):
+        import os
+
+        from kitty.bridge import state as state_mod
+
+        calls = []
+        real_replace = os.replace
+
+        def recording_replace(src, dst):
+            calls.append((src, dst))
+            return real_replace(src, dst)
+
+        monkeypatch.setattr(state_mod.os, "replace", recording_replace)
+        state_path = tmp_path / "bridge_state.json"
+        write_state(
+            state_path,
+            BridgeState(pid=123, host="127.0.0.1", port=8080, profile="p", started_at="now", tls=False),
+        )
+        assert calls, "write_state should use os.replace for atomic commit"
+        src, dst = calls[0]
+        assert str(src).endswith(".tmp")
+        assert dst == state_path
+        assert not state_path.with_suffix(".json.tmp").exists()
+
+
+class TestHealthMonitor:
+    """F41: After spawn, a background health monitor polls /healthz and restarts the bridge.
+
+    A standalone ``_health_monitor(state, on_unhealthy, *, interval, timeout)`` helper
+    polls ``/healthz`` on the running bridge.  If a health-check fails, it calls
+    ``on_unhealthy`` which can restart the bridge.
+    """
+
+    def test_health_monitor_detects_unhealthy_and_invokes_callback(self):
+        import threading
+
+        from kitty.bridge.manage import _health_monitor
+
+        stop_event = threading.Event()
+        invoked = threading.Event()
+        calls = []
+
+        def on_unhealthy(state_dict: dict) -> None:
+            calls.append(state_dict)
+            invoked.set()
+
+        # state dict with a dead host:port
+        state = {"host": "127.0.0.1", "port": 1, "pid": 1, "profile": "p", "tls": False, "started_at": "now"}
+        # Run the monitor in a background thread with short interval
+        thread = threading.Thread(
+            target=_health_monitor,
+            args=(state, on_unhealthy),
+            kwargs={"interval": 0.05, "stop_event": stop_event},
+            daemon=True,
+        )
+        thread.start()
+        try:
+            # Should detect unhealthy within a few intervals
+            assert invoked.wait(timeout=5.0), "Health monitor did not invoke callback for dead port"
+        finally:
+            stop_event.set()
+            thread.join(timeout=2.0)
+        assert calls, "on_unhealthy should have been called at least once"

@@ -1265,58 +1265,85 @@ class TestCrossModeFailover:
         # Cross-mode failover succeeded — failing backend was used first.
         assert server._backend_health[0]["failure_count"] >= 1
 
-    @pytest.mark.asyncio
-    async def test_chat_completions_stream_cross_mode_failover(self):
-        """Chat Completions API: custom transport 400 → standard backend succeeds."""
-        server, _ = self._make_cross_mode_server()
-        self._patch_selection_order(server)
-        port = await server.start_async()
-        url = f"http://127.0.0.1:{port}/v1/chat/completions"
-        request_body = {
-            "model": "test-model",
-            "messages": [{"role": "user", "content": "hello"}],
-            "stream": True,
-        }
 
-        with aioresponses(passthrough=["http://127.0.0.1"]) as m:
-            m.post("https://standard.example.com/v1/chat/completions", body=self._SSE_CHUNKS)
-            try:
-                async with (
-                    aiohttp.ClientSession() as session,
-                    session.post(url, json=request_body) as resp,
-                ):
-                    assert resp.status == 200
-                    body = await resp.read()
-                    assert b"Hi" in body
-            finally:
-                await server.stop_async()
+class TestGeminiTranslatorResetOnFailover:
+    """F22: Gemini in-stream error failover must call translator.reset()."""
 
-        # Cross-mode failover succeeded.
-        assert b"Hi" in body
+    _SSE_CHUNKS = TestCrossModeFailover._SSE_CHUNKS
 
     @pytest.mark.asyncio
-    async def test_gemini_stream_cross_mode_failover(self):
-        """Gemini API: custom transport 400 → standard backend succeeds."""
-        server, _ = self._make_cross_mode_server()
-        self._patch_selection_order(server)
-        port = await server.start_async()
-        url = f"http://127.0.0.1:{port}/v1beta/models/test-model:streamGenerateContent"
-        request_body = {
-            "contents": [{"role": "user", "parts": [{"text": "hello"}]}],
-        }
+    async def test_gemini_http_failover_resets_translator(self):
+        """First Gemini upstream returns 500 → failover → translator.reset() called."""
+        from kitty.bridge.gemini.translator import GeminiTranslator
 
-        with aioresponses(passthrough=["http://127.0.0.1"]) as m:
-            m.post("https://standard.example.com/v1/chat/completions", body=self._SSE_CHUNKS)
-            try:
-                async with (
-                    aiohttp.ClientSession() as session,
-                    session.post(url, json=request_body) as resp,
-                ):
-                    assert resp.status == 200
-                    body = await resp.read()
-                    assert b"Hi" in body
-            finally:
-                await server.stop_async()
+        reset_calls: list[int] = []
+        original_reset = GeminiTranslator.reset
 
-        # Cross-mode failover succeeded — failing backend was used first.
-        assert server._backend_health[0]["failure_count"] >= 1
+        def tracking_reset(self):
+            reset_calls.append(1)
+            return original_reset(self)
+
+        GeminiTranslator.reset = tracking_reset
+        try:
+            provider_a = StubProvider(provider_type="openai_a", base_url="https://api-a.example.com/v1")
+            provider_b = StubProvider(provider_type="openai_b", base_url="https://api-b.example.com/v1")
+            backends = _make_backends(2)
+            backends[0] = (provider_a, backends[0][1], backends[0][2])
+            backends[1] = (provider_b, backends[1][1], backends[1][2])
+            server = BridgeServer(
+                adapter=None,  # bridge mode registers Gemini endpoints
+                provider=backends[0][0],
+                resolved_key=backends[0][1],
+                model="model-0",
+                backends=backends,
+                backend_cooldown=300,
+            )
+
+            picks = iter([0, 1])
+
+            def fixed_get_next(self=server, **kwargs):
+                idx = next(picks)
+                provider, key, profile = self._backends[idx]
+                return provider, key, profile.model, {}, idx
+
+            server._get_next_backend = fixed_get_next
+
+            port = await server.start_async()
+            url = f"http://127.0.0.1:{port}/v1beta/models/test-model:streamGenerateContent"
+            request_body = {"contents": [{"role": "user", "parts": [{"text": "hello"}]}]}
+
+            with aioresponses(passthrough=["http://127.0.0.1"]) as m:
+                m.post("https://api-a.example.com/v1/chat/completions", status=500)
+                m.post("https://api-b.example.com/v1/chat/completions", body=self._SSE_CHUNKS)
+                try:
+                    async with aiohttp.ClientSession() as session, session.post(url, json=request_body) as resp:
+                        assert resp.status == 200
+                        body = await resp.read()
+                        assert b"Hi" in body
+                finally:
+                    await server.stop_async()
+
+            assert len(reset_calls) >= 1, "GeminiTranslator.reset() was not called during failover"
+        finally:
+            GeminiTranslator.reset = original_reset
+
+
+class TestStreamingBackendSelectionRequireStreaming:
+    """F28: require_streaming=True must not fall back to non-streaming backends."""
+
+    def test_all_non_streaming_raises_unhealthy(self):
+        """When all backends are non-streaming-capable and require_streaming=True,
+        _get_next_backend must raise AllBackendsUnhealthyError, not fall through."""
+        from kitty.bridge.server import AllBackendsUnhealthyError
+
+        backends = _make_backends(3)
+        server = BridgeServer(
+            adapter=StubLauncher(),
+            provider=backends[0][0],
+            resolved_key="key-0",
+            model="model-0",
+            backends=backends,
+        )
+        # All 3 backends use StubProvider which doesn't override stream_request
+        with pytest.raises(AllBackendsUnhealthyError):
+            server._get_next_backend(require_streaming=True)

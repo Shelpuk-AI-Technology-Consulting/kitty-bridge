@@ -2,6 +2,7 @@
 
 __all__ = [
     "CredentialBackend",
+    "CredentialError",
     "CredentialNotFoundError",
     "CredentialStore",
     "FileBackend",
@@ -10,4 +11,4 @@ __all__ = [
 
 from kitty.credentials.file_backend import FileBackend
 from kitty.credentials.keyring_backend import KeyringBackend
-from kitty.credentials.store import CredentialBackend, CredentialNotFoundError, CredentialStore
+from kitty.credentials.store import CredentialBackend, CredentialError, CredentialNotFoundError, CredentialStore

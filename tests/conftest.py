@@ -6,6 +6,21 @@ from pathlib import Path
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _reset_backend_context() -> None:
+    """Reset the per-request backend selection context before every test.
+
+    The module-level ``_backend_context`` ContextVar in ``server.py``
+    persists across tests that run in the same thread.  This fixture
+    ensures every test starts with a clean slate so properties like
+    ``_active_provider`` and ``_current_backend_idx`` read from the
+    instance fields, not a stale context-var value from a prior test.
+    """
+    from kitty.bridge.server import _backend_context
+
+    _backend_context.set({})
+
+
 def pytest_addoption(parser: pytest.Parser) -> None:
     """Add CLI flag to include slow tests."""
     parser.addoption("--runslow", action="store_true", default=False, help="run tests marked as slow")

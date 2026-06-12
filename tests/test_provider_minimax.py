@@ -51,7 +51,8 @@ class TestMiniMaxAdapter:
         )
         assert result["model"] == "MiniMax-Text-01"
         assert result["messages"] == SAMPLE_MESSAGES
-        assert result["base_url"] == "https://api.minimaxi.com/v1"
+        assert result.get("base_url") is None
+        assert self.adapter.build_base_url({"region": "cn"}) == "https://api.minimaxi.com/v1"
 
     def test_request_building_with_custom_base(self):
         result = self.adapter.build_request(
@@ -60,7 +61,7 @@ class TestMiniMaxAdapter:
             stream=False,
             base_url="https://custom.api.example.com/v1",
         )
-        assert result["base_url"] == "https://custom.api.example.com/v1"
+        assert result.get("base_url") is None
 
     def test_request_building(self):
         result = self.adapter.build_request(

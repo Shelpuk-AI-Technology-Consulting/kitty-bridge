@@ -415,3 +415,36 @@ def _capture_body(captured: dict[str, Any], kwargs: dict[str, Any]) -> None:
     # If data is bytes, decode first
     elif isinstance(data, bytes):
         _capture_body(captured, {"data": data.decode("utf-8")})
+
+
+
+class TestOAuthTokenResponseValidation:
+    """F35: missing token fields should raise OAuthAuthorizationError, not KeyError."""
+
+    @pytest.mark.asyncio
+    async def test_missing_access_token_raises_oauth_authorization_error(self, monkeypatch):
+        """Token response missing access_token → OAuthAuthorizationError."""
+        from kitty.auth.openai_oauth import OAuthAuthorizationError, _exchange_code_for_tokens
+
+        with aioresponses() as m:
+            m.post(
+                OAUTH_TOKEN_URL,
+                payload={"id_token": "id-only", "refresh_token": "rt"},
+            )
+            async with aiohttp.ClientSession() as http:
+                with pytest.raises(OAuthAuthorizationError, match="Token response missing required fields"):
+                    await _exchange_code_for_tokens("code", "verifier", CLIENT_ID, http)
+
+    @pytest.mark.asyncio
+    async def test_missing_id_token_raises_oauth_authorization_error(self, monkeypatch):
+        """Token response missing id_token → OAuthAuthorizationError."""
+        from kitty.auth.openai_oauth import OAuthAuthorizationError, _exchange_code_for_tokens
+
+        with aioresponses() as m:
+            m.post(
+                OAUTH_TOKEN_URL,
+                payload={"access_token": "at-only", "refresh_token": "rt"},
+            )
+            async with aiohttp.ClientSession() as http:
+                with pytest.raises(OAuthAuthorizationError, match="Token response missing required fields"):
+                    await _exchange_code_for_tokens("code", "verifier", CLIENT_ID, http)

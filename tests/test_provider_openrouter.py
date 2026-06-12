@@ -70,13 +70,14 @@ class TestOpenRouterAdapter:
         assert result.get("base_url") is None
 
     def test_build_request_with_custom_base(self):
+        # F15: base_url must NOT be leaked into the CC body
         result = self.adapter.build_request(
             model="openai/gpt-4o",
             messages=SAMPLE_MESSAGES,
             stream=False,
             base_url="https://custom.example.com/v1",
         )
-        assert result["base_url"] == "https://custom.example.com/v1"
+        assert result.get("base_url") is None
 
     def test_build_request_with_tools(self):
         tools = [

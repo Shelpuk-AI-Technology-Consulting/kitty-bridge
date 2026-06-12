@@ -86,6 +86,46 @@ class TestTranslateToUpstreamDefault:
         result = adapter.translate_to_upstream(cc)
         assert result == cc  # same content — passthrough (filters internal metadata keys)
 
+    def test_strips_internal_keys(self):
+        """Internal metadata keys are stripped from the upstream body."""
+        adapter = _stub_adapter()
+        cc = {
+            "model": "gpt-4o",
+            "messages": [],
+            "_reasoning_effort": "high",
+            "_thinking_enabled": True,
+            "_resolved_key": "sk-secret",
+            "_provider_config": {"key": "val"},
+            "_original_body": {"raw": "data"},
+            "_native_messages_request": False,
+        }
+        result = adapter.translate_to_upstream(cc)
+        assert "_reasoning_effort" not in result
+        assert "_thinking_enabled" not in result
+        assert "_resolved_key" not in result
+        assert "_provider_config" not in result
+        assert "_original_body" not in result
+        assert "_native_messages_request" not in result
+        assert result["model"] == "gpt-4o"
+
+    def test_strips_base_url_defense_in_depth(self):
+        """F15: base_url must never leak into the upstream body.
+
+        The URL override is consumed by ``build_base_url()``/HTTP transport
+        — it has no place in the JSON body.  The default
+        ``translate_to_upstream`` strips it for any adapter that doesn't
+        override ``translate_to_upstream``.
+        """
+        adapter = _stub_adapter()
+        cc = {
+            "model": "gpt-4o",
+            "messages": [],
+            "base_url": "https://attacker.example.com/v1",
+        }
+        result = adapter.translate_to_upstream(cc)
+        assert "base_url" not in result
+        assert result["model"] == "gpt-4o"
+
 
 class TestTranslateFromUpstreamDefault:
     """Default translate_from_upstream returns the response unchanged."""

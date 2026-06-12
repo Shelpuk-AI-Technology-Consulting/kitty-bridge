@@ -85,13 +85,14 @@ class TestZaiRegularAdapter:
         assert result.get("base_url") is None
 
     def test_endpoint_url_custom_base(self):
+        # F15: base_url must NOT be leaked into the CC body
         result = self.adapter.build_request(
             model="gpt-4o",
             messages=SAMPLE_MESSAGES,
             stream=False,
             base_url="https://custom.api.example.com/v1",
         )
-        assert result["base_url"] == "https://custom.api.example.com/v1"
+        assert result.get("base_url") is None
 
     def test_request_building_includes_tools(self):
         result = self.adapter.build_request(
@@ -166,13 +167,14 @@ class TestZaiCodingAdapter:
         assert result.get("base_url") is None
 
     def test_endpoint_url_custom_base(self):
+        # F15: base_url must NOT be leaked into the CC body
         result = self.adapter.build_request(
             model="claude-3.5-sonnet",
             messages=SAMPLE_MESSAGES,
             stream=False,
             base_url="https://custom.api.example.com/v1",
         )
-        assert result["base_url"] == "https://custom.api.example.com/v1"
+        assert result.get("base_url") is None
 
     def test_request_building_includes_tools(self):
         result = self.adapter.build_request(

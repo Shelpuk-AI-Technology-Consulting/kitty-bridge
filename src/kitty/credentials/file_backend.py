@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
@@ -33,7 +34,8 @@ class FileBackend(CredentialBackend):
             config_dir.mkdir(parents=True, exist_ok=True)
             path = config_dir / "credentials.json"
         self._path = path
-        self._lock = filelock.FileLock(str(path) + ".lock")
+        # F38: Explicit timeout prevents indefinite hang on stale lock from crashed process.
+        self._lock = filelock.FileLock(str(path) + ".lock", timeout=5)
 
     def get(self, ref: str) -> str | None:
         try:
@@ -70,7 +72,26 @@ class FileBackend(CredentialBackend):
             if isinstance(result, dict):
                 return result
             return {}
-        except (FileNotFoundError, json.JSONDecodeError, OSError):
+        except json.JSONDecodeError:
+            # F37: Back up the corrupt file before returning empty.
+            # This prevents the next write from silently overwriting it.
+            ts = time.strftime("%Y%m%d-%H%M%S")
+            backup = self._path.with_suffix(f".json.corrupt.{ts}.{os.getpid()}")
+            logger.critical(
+                "Credentials file %s is corrupt (not valid JSON). "
+                "Backing up to %s and starting fresh. "
+                "All previously stored API keys may be lost!",
+                self._path,
+                backup,
+            )
+            with contextlib.suppress(OSError):
+                os.replace(self._path, backup)
+            # Create a fresh empty file so future writes never overwrite the
+            # corrupt original (which now lives at backup path).
+            with contextlib.suppress(OSError):
+                self._write_raw({})
+            return {}
+        except (FileNotFoundError, OSError):
             return {}
 
     def _write_raw(self, data: dict[str, Any]) -> None:

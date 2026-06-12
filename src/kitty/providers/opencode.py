@@ -18,6 +18,7 @@ import json
 import logging
 import uuid
 
+from kitty.providers.anthropic import _safe_json_load_args
 from kitty.providers.base import ProviderAdapter, ProviderError
 
 __all__ = ["OpenCodeGoAdapter"]
@@ -236,7 +237,7 @@ class OpenCodeGoAdapter(ProviderAdapter):
                     "type": "tool_use",
                     "id": tc.get("id", f"toolu_{uuid.uuid4().hex[:24]}"),
                     "name": func.get("name", ""),
-                    "input": json.loads(func.get("arguments", "{}")),
+                    "input": _safe_json_load_args(func.get("arguments")),
                 }
             )
         return {"role": "assistant", "content": content_blocks or ""}

@@ -61,7 +61,12 @@ class CustomAnthropicAdapter(AnthropicAdapter):
 
     def build_base_url(self, provider_config: dict | None) -> str:
         if provider_config and "base_url" in provider_config:
-            return provider_config["base_url"]
+            url = provider_config["base_url"]
+            if not url or not url.startswith(("http://", "https://")):
+                raise ValueError(
+                    f"Invalid base_url in provider_config: {url!r}. Must be a non-empty http:// or https:// URL."
+                )
+            return url
         return self.default_base_url
 
     def translate_to_upstream(self, cc_request: dict) -> dict:
@@ -97,6 +102,7 @@ class CustomAnthropicAdapter(AnthropicAdapter):
                     "content_block_stop",
                     "content_block_delta",
                     "ping",
+                    "error",
                 ):
                     return [raw_bytes]
                 return super().translate_upstream_stream_event(raw_bytes)

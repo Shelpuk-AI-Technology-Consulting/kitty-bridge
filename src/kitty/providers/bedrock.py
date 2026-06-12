@@ -8,6 +8,7 @@ import logging
 import uuid
 from collections.abc import Awaitable, Callable
 
+from kitty.providers.anthropic import _safe_json_load_args
 from kitty.providers.base import ProviderAdapter, ProviderError
 
 __all__ = ["BedrockAdapter"]
@@ -191,7 +192,7 @@ class BedrockAdapter(ProviderAdapter):
                     "toolUse": {
                         "toolUseId": tc.get("id", f"call_{uuid.uuid4().hex[:24]}"),
                         "name": func.get("name", ""),
-                        "input": json.loads(func.get("arguments") or "{}"),
+                        "input": _safe_json_load_args(func.get("arguments")),
                     }
                 }
             )
@@ -408,6 +409,27 @@ class BedrockAdapter(ProviderAdapter):
 
         elif "metadata" in event:
             pass  # Usage metadata — captured but not streamed to agent
+
+        # F17: Handle Bedrock error event types that were previously silently dropped.
+        # These indicate upstream failures and must surface as ProviderError so
+        # the bridge can mark the backend unhealthy and fail over.
+        else:
+            for error_key in (
+                "internalServerException",
+                "modelStreamErrorException",
+                "throttlingException",
+                "validationException",
+                "serviceUnavailableException",
+            ):
+                if error_key in event:
+                    error_data = event[error_key]
+                    msg = (
+                        error_data.get("message", str(error_data)) if isinstance(error_data, dict) else str(error_data)
+                    )
+                    err = ProviderError(f"Bedrock stream error ({error_key}): {msg}")
+                    if error_key == "throttlingException":
+                        err.http_status = 429
+                    raise err
 
         return chunks
 

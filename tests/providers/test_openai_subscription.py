@@ -2149,10 +2149,10 @@ class TestGetCloudflareSignature:
         assert get_cloudflare_signature("<html>_cf_chl_opt</html>") == "_cf_chl_opt"
 
     def test_returns_cloudflare_generic(self) -> None:
-        """The generic cloudflare signature is detected."""
+        """F48: Generic 'cloudflare' word removed — must return None."""
         from kitty.cloudflare import get_cloudflare_signature
 
-        assert get_cloudflare_signature("<html>cloudflare ray id</html>") == "cloudflare"
+        assert get_cloudflare_signature("<html>cloudflare ray id</html>") is None
 
     def test_returns_none_for_non_cf(self) -> None:
         """Non-CF bodies return None."""

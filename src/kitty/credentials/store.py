@@ -24,6 +24,10 @@ class CredentialBackend(ABC):
         """Delete a credential by reference."""
 
 
+class CredentialError(Exception):
+    """Base exception for credential storage errors (F39)."""
+
+
 class CredentialNotFoundError(Exception):
     """Raised when a credential cannot be resolved from any backend."""
 
@@ -64,4 +68,4 @@ class CredentialStore:
         return value
 
 
-__all__ = ["CredentialBackend", "CredentialNotFoundError", "CredentialStore"]
+__all__ = ["CredentialBackend", "CredentialError", "CredentialNotFoundError", "CredentialStore"]

@@ -113,13 +113,16 @@ class TestKimiCodeAdapter:
         assert result["max_tokens"] == 32768
 
     def test_build_request_with_custom_base_url(self):
+        # F15: base_url must NOT be leaked into the Chat Completions body
+        # — the CC upstream ignores the field and it can confuse third-party
+        # request loggers.  The override is applied at the HTTP layer instead.
         result = self.adapter.build_request(
             model="kimi-for-coding",
             messages=SAMPLE_MESSAGES,
             stream=False,
             base_url="https://custom.api.example.com/v1",
         )
-        assert result["base_url"] == "https://custom.api.example.com/v1"
+        assert result.get("base_url") is None
 
     def test_parse_response(self):
         result = self.adapter.parse_response(SAMPLE_RESPONSE)
@@ -313,3 +316,65 @@ class TestKimiThinkingEnabledToolCallGap:
         assert "reasoning_content" not in result["messages"][0]
         assert result["messages"][2]["role"] == "tool"
         assert "reasoning_content" not in result["messages"][2]
+
+
+class TestKimiDetectThinkingFromMessages:
+    """F18: Kimi must detect prior reasoning_content and enable thinking automatically."""
+
+    def test_detects_reasoning_in_prior_assistant_message(self):
+        """When a prior assistant message has reasoning_content, thinking should be enabled."""
+        adapter = KimiCodeAdapter()
+        messages = [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "hi", "reasoning_content": "I thought about it"},
+            {"role": "user", "content": "follow up"},
+        ]
+        request = adapter.build_request(model="test", messages=messages, stream=False)
+        assert request.get("_thinking_enabled") is True
+
+    def test_no_thinking_when_no_prior_reasoning(self):
+        """When no prior message has reasoning_content, thinking should NOT be auto-enabled."""
+        adapter = KimiCodeAdapter()
+        messages = [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "hi"},
+            {"role": "user", "content": "follow up"},
+        ]
+        request = adapter.build_request(model="test", messages=messages, stream=False)
+        assert "_thinking_enabled" not in request or request.get("_thinking_enabled") is False
+
+    def test_detects_reasoning_in_middle_message(self):
+        """reasoning_content in any assistant turn triggers detection."""
+        adapter = KimiCodeAdapter()
+        messages = [
+            {"role": "user", "content": "a"},
+            {"role": "assistant", "content": "b", "reasoning_content": "r1"},
+            {"role": "user", "content": "c"},
+            {"role": "assistant", "content": "d"},
+            {"role": "user", "content": "e"},
+        ]
+        request = adapter.build_request(model="test", messages=messages, stream=False)
+        assert request.get("_thinking_enabled") is True
+
+    def test_explicit_thinking_enabled_not_overridden(self):
+        """If thinking is already explicitly enabled, detection should not interfere."""
+        adapter = KimiCodeAdapter()
+        messages = [
+            {"role": "user", "content": "hello"},
+        ]
+        request = adapter.build_request(
+            model="test", messages=messages, stream=False,
+            thinking_enabled=True,
+        )
+        assert request.get("_thinking_enabled") is True
+
+    def test_empty_reasoning_content_does_not_trigger(self):
+        """Empty string reasoning_content should not trigger thinking."""
+        adapter = KimiCodeAdapter()
+        messages = [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "hi", "reasoning_content": ""},
+            {"role": "user", "content": "follow up"},
+        ]
+        request = adapter.build_request(model="test", messages=messages, stream=False)
+        assert "_thinking_enabled" not in request or request.get("_thinking_enabled") is False

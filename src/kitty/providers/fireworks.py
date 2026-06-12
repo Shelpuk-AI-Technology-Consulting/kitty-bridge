@@ -55,8 +55,6 @@ class FireworksAdapter(ProviderAdapter):
         }
         if "tools" in kwargs and kwargs["tools"]:
             request["tools"] = kwargs["tools"]
-        if "base_url" in kwargs and kwargs["base_url"]:
-            request["base_url"] = kwargs["base_url"]
         for key in ("temperature", "top_p", "max_tokens"):
             if key in kwargs and kwargs[key] is not None:
                 request[key] = kwargs[key]

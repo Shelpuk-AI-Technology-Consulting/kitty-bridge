@@ -25,6 +25,17 @@ class MiniMaxAdapter(ProviderAdapter):
     def default_base_url(self) -> str:
         return _GLOBAL_URL
 
+    def build_base_url(self, provider_config: dict | None = None) -> str:
+        """Return MiniMax base URL, honoring CN-region provider_config."""
+        if provider_config and provider_config.get("region") == "cn":
+            return _CN_URL
+        if provider_config and provider_config.get("base_url"):
+            url = str(provider_config["base_url"]).strip().rstrip("/")
+            if not url.startswith(("http://", "https://")):
+                raise ValueError("provider_config.base_url must be a non-empty http:// or https:// URL")
+            return url
+        return self.default_base_url
+
     def normalize_model_name(self, model: str) -> str:
         stripped = _MINIMAX_PREFIX.sub("", model, count=1)
         return stripped if stripped else model
@@ -44,12 +55,8 @@ class MiniMaxAdapter(ProviderAdapter):
             "messages": messages,
             "stream": kwargs.get("stream", False),
         }
-        # Determine base URL from provider_config region
-        provider_config = kwargs.get("provider_config", {})
-        if isinstance(provider_config, dict) and provider_config.get("region") == "cn":
-            request["base_url"] = _CN_URL
-        elif "base_url" in kwargs and kwargs["base_url"]:
-            request["base_url"] = kwargs["base_url"]
+        # F15: base_url is NOT included in the CC request body — it is
+        # handled at the HTTP layer via build_base_url / provider_config.
         if "tools" in kwargs and kwargs["tools"]:
             request["tools"] = kwargs["tools"]
         for key in ("temperature", "top_p", "max_tokens"):

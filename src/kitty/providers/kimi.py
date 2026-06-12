@@ -49,8 +49,13 @@ class KimiCodeAdapter(ProviderAdapter):
             "messages": messages,
             "stream": kwargs.get("stream", False),
         }
-        if "base_url" in kwargs and kwargs["base_url"]:
-            request["base_url"] = kwargs["base_url"]
+
+        # F18: Auto-detect thinking from message history when not explicitly set.
+        # If any prior assistant turn has reasoning_content, Kimi requires
+        # thinking to be enabled for the current request.
+        if kwargs.get("thinking_enabled") or self._detect_thinking_from_messages(messages, require_non_empty=True):
+            request["_thinking_enabled"] = True
+
         if "tools" in kwargs and kwargs["tools"]:
             request["tools"] = kwargs["tools"]
         for key in ("temperature", "top_p", "max_tokens"):

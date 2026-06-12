@@ -411,6 +411,8 @@ class OllamaCloudAdapter(ProviderAdapter):
 
             stream_done = False
             line_buffer = ""
+            _consecutive_parse_failures = 0
+            _MAX_CONSECUTIVE_PARSE_FAILURES = 20
             async for chunk_bytes in resp.content:
                 raw = chunk_bytes.decode("utf-8", errors="replace")
                 line_buffer += raw
@@ -423,8 +425,20 @@ class OllamaCloudAdapter(ProviderAdapter):
 
                     try:
                         data = json.loads(line)
+                        _consecutive_parse_failures = 0
                     except json.JSONDecodeError:
-                        logger.warning("Failed to parse Ollama NDJSON line: %s", line[:200])
+                        _consecutive_parse_failures += 1
+                        logger.warning(
+                            "Failed to parse Ollama NDJSON line (consecutive failures: %d/%d): %s",
+                            _consecutive_parse_failures,
+                            _MAX_CONSECUTIVE_PARSE_FAILURES,
+                            line[:200],
+                        )
+                        if _consecutive_parse_failures > _MAX_CONSECUTIVE_PARSE_FAILURES:
+                            raise ProviderError(
+                                f"Ollama Cloud: {_consecutive_parse_failures} consecutive "
+                                f"NDJSON parse failures — stream may be corrupted"
+                            ) from None
                         continue
 
                     # Check for in-stream error

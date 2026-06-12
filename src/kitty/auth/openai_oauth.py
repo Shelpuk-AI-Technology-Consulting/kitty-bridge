@@ -252,11 +252,20 @@ async def _exchange_code_for_tokens(
                 f"Token exchange failed (HTTP {resp.status}): {body_text}",
             )
         try:
-            return await resp.json()
+            tokens = await resp.json()
         except Exception as exc:
             raise OAuthAuthorizationError(
                 f"Malformed token response: {exc}",
             ) from exc
+        # F35: Validate required fields before returning — prevents bare KeyError
+        # when upstream returns a partial response (e.g. missing id_token).
+        if not tokens.get("access_token") or not tokens.get("id_token"):
+            logger.error(
+                "OAuth token exchange returned malformed response (missing fields): %s",
+                list(tokens.keys()),
+            )
+            raise OAuthAuthorizationError("Token response missing required fields")
+        return tokens
 
 
 async def _exchange_id_token_for_api_key(
@@ -410,8 +419,11 @@ async def run_oauth_flow(http: aiohttp.ClientSession | None = None) -> OAuthSess
     http = http or aiohttp.ClientSession()
     try:
         tokens = await _exchange_code_for_tokens(code, code_verifier, CLIENT_ID, http)
-        id_token = tokens["id_token"]
-        access_token = tokens["access_token"]
+        # F35: _exchange_code_for_tokens already validates these fields and raises
+        # OAuthAuthorizationError if missing.  Use .get() here for defense-in-depth.
+        access_token = tokens.get("access_token")
+        id_token = tokens.get("id_token")
+        assert access_token and id_token  # validated by _exchange_code_for_tokens
 
         # Exchange id_token for API key (best-effort).
         # Fails for org accounts without Platform API org mapping —

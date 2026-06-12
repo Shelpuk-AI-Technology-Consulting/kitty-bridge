@@ -31,6 +31,9 @@ def generate_systemd_unit(
     return f"""[Unit]
 Description=Kitty Bridge API Gateway
 After=network.target
+# F43: Throttle restart loops — max 3 restarts in 120 seconds
+StartLimitBurst=3
+StartLimitIntervalSec=120
 
 [Service]
 Type=simple

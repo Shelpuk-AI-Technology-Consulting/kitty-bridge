@@ -22,6 +22,9 @@ class ProviderAdapter(ABC):
             "_provider_config",
             "_original_body",
             "_native_messages_request",
+            "base_url",  # F15 defense-in-depth — URL override goes through build_base_url(),
+            # not the CC request body.  Stripping it here protects
+            # adapters that rely on the default translate_to_upstream().
         }
     )
 
@@ -145,6 +148,24 @@ class ProviderAdapter(ABC):
             else:
                 new_messages.append(msg)
         return new_messages if modified else messages
+
+    def _detect_thinking_from_messages(self, messages: list[dict], *, require_non_empty: bool = False) -> bool:
+        """Return True if any assistant message has ``reasoning_content``.
+
+        When the upstream provider defaults thinking to enabled (e.g. DeepSeek,
+        Kimi) but the agent does not send an explicit ``thinking`` signal, the
+        presence of ``reasoning_content`` in any assistant message proves
+        thinking is active and reasoning echo-back is required.
+
+        Args:
+            messages: Chat Completions message list.
+            require_non_empty: When True, only matches non-empty
+                ``reasoning_content`` (Kimi's requirement).  When False,
+                matches the key's mere presence (DeepSeek's requirement).
+        """
+        if require_non_empty:
+            return any(msg.get("role") == "assistant" and msg.get("reasoning_content") for msg in messages)
+        return any(msg.get("role") == "assistant" and "reasoning_content" in msg for msg in messages)
 
     def translate_from_upstream(self, raw_response: dict) -> dict:
         """Translate an upstream JSON response into Chat Completions format.

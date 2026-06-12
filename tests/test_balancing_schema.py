@@ -90,3 +90,24 @@ class TestBalancingProfileSerialization:
         assert "name" in data
         assert "members" in data
         assert "is_default" in data
+
+
+class TestBalancingProfileMemberExistenceValidation:
+    """F36: balancing profile members must exist in the profile store."""
+
+    def test_validate_member_existence_rejects_missing_member(self):
+        bp = BalancingProfile(name="balanced", members=["primary", "missing"])
+
+        def exists(name: str) -> bool:
+            return name == "primary"
+
+        with pytest.raises(ValueError, match="missing member"):
+            bp.validate_member_existence(exists)
+
+    def test_validate_member_existence_accepts_all_existing_members(self):
+        bp = BalancingProfile(name="balanced", members=["primary", "secondary"])
+
+        def exists(name: str) -> bool:
+            return name in {"primary", "secondary"}
+
+        assert bp.validate_member_existence(exists) is bp

@@ -73,7 +73,19 @@ class ProfileStore:
             with self._lock:
                 raw = self._path.read_text(encoding="utf-8")
                 data = json.loads(raw)
-        except (FileNotFoundError, json.JSONDecodeError, OSError):
+        except FileNotFoundError:
+            return []
+        except json.JSONDecodeError:
+            # F44: Distinguish corrupt file from missing file. A corrupt
+            # profiles.json means potential data loss — log loudly.
+            logger.warning(
+                "Profiles file %s is corrupt (not valid JSON). "
+                "All profile configurations may be lost. "
+                "Restore from backup or run 'kitty setup' to recreate.",
+                self._path,
+            )
+            return []
+        except OSError:
             return []
 
         if not isinstance(data, dict) or data.get("version") != STORE_VERSION:

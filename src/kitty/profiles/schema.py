@@ -193,6 +193,24 @@ class BalancingProfile(BaseModel):
             raise ValueError(f"balancing profile {self.name!r} must not self-reference in members")
         return self
 
+    def validate_member_existence(self, member_exists: callable) -> BalancingProfile:
+        """F36: Verify all members reference existing profiles.
+
+        Args:
+            member_exists: Callable(name) -> bool; returns True if a profile
+                with that name exists.
+
+        Raises:
+            ValueError: If any member does not exist.
+
+        Returns:
+            self (for chaining).
+        """
+        missing = [m for m in self.members if not member_exists(m)]
+        if missing:
+            raise ValueError(f"balancing profile {self.name!r} references missing member(s): {', '.join(missing)}")
+        return self
+
 
 BackendConfig = Profile | BalancingProfile
 

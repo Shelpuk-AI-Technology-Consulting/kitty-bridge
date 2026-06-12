@@ -42,13 +42,14 @@ class TestNovitaAdapter:
         assert result.get("base_url") is None
 
     def test_endpoint_url_validated_override(self):
+        # F15: base_url must NOT be leaked into the CC body
         result = self.adapter.build_request(
             model="meta-llama/llama-3.1-8b-instruct",
             messages=SAMPLE_MESSAGES,
             stream=False,
             base_url="https://custom.novita.example.com/v1",
         )
-        assert result["base_url"] == "https://custom.novita.example.com/v1"
+        assert result.get("base_url") is None
 
     def test_request_building(self):
         result = self.adapter.build_request(

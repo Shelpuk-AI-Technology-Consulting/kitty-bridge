@@ -93,15 +93,18 @@ def build_child_env(spawn_config: SpawnConfig) -> dict[str, str]:
 
 
 def resolve_binary(name: str) -> Path:
-    """Resolve a binary path, exiting with a user-friendly error if not found."""
+    """Resolve a binary path, raising FileNotFoundError if not found.
+
+    F45: Raises FileNotFoundError (catchable) instead of SystemExit (bypasses
+    cleanup ``finally`` blocks in ``launch_async``).
+    """
     path = discover_binary(name)
     if path is None:
         logger.error("Binary %r not found on PATH or common install directories", name)
-        print(
-            f"Error: '{name}' not found. Install it first or check your PATH.",
-            file=sys.stderr,
+        raise FileNotFoundError(
+            f"'{name}' not found on PATH or common install directories. "
+            "Install it first or check your PATH."
         )
-        raise SystemExit(1)
     return path
 
 

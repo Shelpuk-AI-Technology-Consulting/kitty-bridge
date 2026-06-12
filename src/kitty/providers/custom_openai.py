@@ -40,7 +40,12 @@ class CustomOpenAIAdapter(ProviderAdapter):
 
     def build_base_url(self, provider_config: dict | None) -> str:
         if provider_config and "base_url" in provider_config:
-            return provider_config["base_url"]
+            url = provider_config["base_url"]
+            if not url or not url.startswith(("http://", "https://")):
+                raise ValueError(
+                    f"Invalid base_url in provider_config: {url!r}. Must be a non-empty http:// or https:// URL."
+                )
+            return url
         return self.default_base_url
 
     def build_upstream_headers(self, api_key: str) -> dict[str, str]:
@@ -80,16 +85,6 @@ class CustomOpenAIAdapter(ProviderAdapter):
         if "tool_calls" in message:
             result["tool_calls"] = message["tool_calls"]
         return result
-
-    def _detect_thinking_from_messages(self, messages: list[dict]) -> bool:
-        """Return True if any assistant message already has ``reasoning_content``.
-
-        When the upstream provider defaults thinking to enabled (e.g. DeepSeek)
-        but the agent does not send an explicit ``thinking`` signal, the presence
-        of ``reasoning_content`` in any assistant message proves thinking is
-        active and reasoning echo-back is required.
-        """
-        return any(msg.get("role") == "assistant" and "reasoning_content" in msg for msg in messages)
 
     def translate_to_upstream(self, cc_request: dict) -> dict:
         result = {k: v for k, v in cc_request.items() if k not in self._INTERNAL_KEYS}
