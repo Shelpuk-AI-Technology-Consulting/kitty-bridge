@@ -29,11 +29,13 @@ Native passthrough opt-in:
   the translator strips (``context_management``, ``output_config``,
   ``thinking: {type: "adaptive"}``, ``cache_control`` on system blocks,
   advanced ``metadata``). The translated path produces a clean body that
-  the upstream accepts. Native passthrough also bypasses the
-  request-compaction grouping logic which is Chat-Completions-format
-  aware; large requests can lose the ``tool_use`` → ``tool_result`` pairing
-  and surface as ``invalid params, tool call result does not follow tool
-  call (2013)`` from MiniMax.
+  the upstream accepts.
+
+  Native passthrough is now safe under context compaction: the bridge's
+  compaction grouping and pairing validation are Anthropic-native-format
+  aware, so a ``tool_use`` → ``tool_result`` pair is kept atomic and never
+  orphaned (previously this could surface as ``invalid params, tool result's
+  tool id(...) not found (2013)``).
 """
 
 from __future__ import annotations

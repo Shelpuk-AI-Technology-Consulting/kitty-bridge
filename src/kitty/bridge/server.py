@@ -155,13 +155,85 @@ def _has_tool_use_blocks(body: dict) -> bool:
     return False
 
 
+def _assistant_native_tool_use_ids(msg: dict) -> list[str]:
+    """Return ``tool_use`` ids from an Anthropic-native assistant message.
+
+    In native passthrough, an assistant turn's tool calls live as
+    ``{"type": "tool_use", "id": ...}`` blocks inside the ``content`` list
+    (not a Chat-Completions ``tool_calls`` field). This extracts every such
+    id so grouping and pairing validation can treat the turn atomically.
+
+    Args:
+        msg: A single conversation message.
+
+    Returns:
+        The list of ``tool_use`` ids on the message (empty for non-assistant
+        or non-list content).
+    """
+    if msg.get("role") != "assistant":
+        return []
+    content = msg.get("content")
+    if not isinstance(content, list):
+        return []
+    ids: list[str] = []
+    for block in content:
+        if isinstance(block, dict) and block.get("type") == "tool_use":
+            tid = block.get("id")
+            if tid:
+                ids.append(tid)
+    return ids
+
+
+def _user_native_tool_result_ids(msg: dict) -> list[str]:
+    """Return ``tool_use_id`` values from ``tool_result`` blocks on a native user message.
+
+    In native passthrough, tool results are ``{"type": "tool_result",
+    "tool_use_id": ...}`` blocks on the ``user`` message that follows the
+    assistant turn (not a separate ``role == "tool"`` message).
+
+    Args:
+        msg: A single conversation message.
+
+    Returns:
+        The list of ``tool_use_id`` values on the message (empty for
+        non-user or non-list content).
+    """
+    if msg.get("role") != "user":
+        return []
+    content = msg.get("content")
+    if not isinstance(content, list):
+        return []
+    ids: list[str] = []
+    for block in content:
+        if isinstance(block, dict) and block.get("type") == "tool_result":
+            tid = block.get("tool_use_id")
+            if tid:
+                ids.append(tid)
+    return ids
+
+
+def _user_has_tool_result(msg: dict) -> bool:
+    """Return True if a native user message carries at least one ``tool_result`` block."""
+    return bool(_user_native_tool_result_ids(msg))
+
+
 def _is_tool_use_format_error(status: int, body: object) -> bool:
     """Return True if the upstream error indicates a tool_use format mismatch.
 
     Detects these patterns across multiple provider error formats:
     - ``"unknown variant 'tool_use', expected 'text'"`` (serde deserialization)
     - ``"tool call result does not follow tool call"`` (Anthropic validation)
-    - ``code 2013`` with ``"tool call result"`` (Minimax)
+    - ``code 2013`` with ``"tool call result"`` (older MiniMax wording)
+    - ``"tool result's tool id(...) not found"`` / ``"tool result not found"``
+      (current MiniMax wording, code 2013) — emitted when a ``tool_result``
+      block references a ``tool_use_id`` whose ``tool_use`` was dropped,
+      e.g. by compaction on a native-passthrough provider.
+
+    The MiniMax match keys on the phrase ``"tool result"`` plus
+    ``"not found"`` rather than the bare numeric ``2013``: a 4-digit
+    substring can appear in unrelated error bodies (timestamps, token
+    counts, model names), so matching the phrase avoids false positives
+    while still covering every provider variant of this failure mode.
 
     Only matches 400-level status codes (client errors).
     """
@@ -169,8 +241,10 @@ def _is_tool_use_format_error(status: int, body: object) -> bool:
         return False
 
     searchable = str(body).lower()
-    return ("tool call result" in searchable and "does not follow tool call" in searchable) or (
-        "unknown variant" in searchable and "tool_use" in searchable
+    return (
+        ("tool call result" in searchable and "does not follow tool call" in searchable)
+        or ("unknown variant" in searchable and "tool_use" in searchable)
+        or ("tool result" in searchable and "not found" in searchable)
     )
 
 
@@ -4000,20 +4074,29 @@ class BridgeServer:
             cc_request["model"] = normalized
 
     def _validate_tool_call_pairing(self, messages: list[dict]) -> list[dict]:
-        """Drop tool messages whose ``tool_call_id`` has no matching ``tool_use.id``.
+        """Drop tool results whose id has no matching ``tool_use``.
 
         The upstream rejects requests with code 2013 ("tool call result does
-        not follow tool call") when a ``tool`` message references a
-        ``tool_call_id`` that no preceding ``assistant(tool_calls)`` message
-        declares. This can happen when an upstream SSE stream returns an
-        empty/malformed body for a tool result, leaving a partial ``tool``
-        message in the conversation. The atomic-block grouping in
-        ``_compact_messages`` keeps pairs together, but a corrupt input
-        can still contain orphans.
+        not follow tool call" / "tool result's tool id ... not found") when a
+        tool result references an id that no preceding tool_use declares. This
+        can happen when an upstream SSE stream returns an empty/malformed body
+        for a tool result, or — for native-passthrough providers — when a
+        corrupt conversation contains an orphan tool_result whose tool_use was
+        dropped. The atomic-block grouping in ``_compact_messages`` keeps pairs
+        together, but a corrupt input can still contain orphans.
 
-        This helper drops orphan ``tool`` messages in place and logs a
-        WARNING for each. Non-tool messages (system, user, assistant)
-        are never modified or reordered.
+        Handles both request formats:
+        - Chat Completions: ``assistant(tool_calls)`` + ``role == "tool"``
+          messages with ``tool_call_id``.
+        - Anthropic native: ``assistant`` content blocks of type ``tool_use``
+          + ``user`` messages with ``tool_result`` content blocks carrying
+          ``tool_use_id``.
+
+        For a native ``user`` message that mixes a text/image block with an
+        orphan ``tool_result``, only the orphan block is stripped and the
+        message (with its surviving blocks) is kept; a message left with no
+        blocks is dropped entirely. Non-tool messages are otherwise never
+        modified or reordered.
 
         Args:
             messages: Conversation messages to validate.
@@ -4030,6 +4113,8 @@ class BridgeServer:
                 for tc in msg.get("tool_calls") or []:
                     if isinstance(tc, dict) and tc.get("id"):
                         seen_tool_use_ids.add(tc["id"])
+                # Native: tool_use ids live as content blocks.
+                seen_tool_use_ids.update(_assistant_native_tool_use_ids(msg))
                 cleaned.append(msg)
                 continue
 
@@ -4041,13 +4126,37 @@ class BridgeServer:
                     dropped.append(str(tool_call_id))
                 continue
 
-            # system, user, and any other role pass through
+            # Native: a user message may carry tool_result content blocks.
+            # Keep matching ones, strip orphans, preserve text/image/etc.
+            if msg.get("role") == "user" and isinstance(msg.get("content"), list):
+                content = msg["content"]
+                if not any(isinstance(b, dict) and b.get("type") == "tool_result" for b in content):
+                    cleaned.append(msg)
+                    continue
+                rebuilt: list[dict] = []
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "tool_result":
+                        tid = block.get("tool_use_id")
+                        if tid and tid in seen_tool_use_ids:
+                            rebuilt.append(block)
+                        else:
+                            dropped.append(str(tid))
+                    else:
+                        rebuilt.append(block)  # text, image, etc. preserved
+                if rebuilt:
+                    cleaned.append({**msg, "content": rebuilt})
+                else:
+                    # Every block was an orphan tool_result — drop the message.
+                    pass
+                continue
+
+            # system and any other role pass through
             cleaned.append(msg)
 
         if dropped:
             logger.warning(
                 "Tool-call pairing: dropped %d orphan tool result(s) with "
-                "tool_call_id(s) not matching any preceding tool_use: %s",
+                "id(s) not matching any preceding tool_use: %s",
                 len(dropped),
                 dropped,
             )
@@ -4128,8 +4237,18 @@ class BridgeServer:
             return compacted
 
         # ── Step 2: Group messages into atomic blocks ────────────────────
-        # A block is a single message, or an assistant(tool_calls) + all
-        # immediately following tool(result) messages.
+        # A block is a single message, or:
+        #   - CC format:     assistant(tool_calls) + all immediately following
+        #                    role=="tool"(result) messages.
+        #   - Anthropic      assistant with a tool_use content block + the ONE
+        #     native:        immediately following user message that carries the
+        #                    matching tool_result block(s). Anthropic puts every
+        #                    tool_result for a turn in a single user message, so
+        #                    absorbing it keeps the pair atomic and prevents
+        #                    head/tail pruning from orphaning a tool_result.
+        #     Mutually exclusive with the CC branch: native grouping triggers
+        #     only when content is a list containing tool_use blocks; CC
+        #     assistants never have such content (they use tool_calls).
         blocks: list[tuple[list[dict], int]] = []  # (messages, total_chars)
         i = 0
         while i < len(compacted):
@@ -4140,6 +4259,13 @@ class BridgeServer:
                 while j < len(compacted) and compacted[j].get("role") == "tool":
                     block_msgs.append(compacted[j])
                     j += 1
+            elif compacted[i].get("role") == "assistant" and _assistant_native_tool_use_ids(compacted[i]):
+                # Native: absorb the single following user(tool_result) message.
+                # Do NOT greedily absorb further user messages — a malformed
+                # multi-message split is caught by _validate_tool_call_pairing.
+                j = i + 1
+                if j < len(compacted) and compacted[j].get("role") == "user" and _user_has_tool_result(compacted[j]):
+                    block_msgs.append(compacted[j])
             # F33: safely compute block size
             block_size = _safe_size(block_msgs)
             if block_size < 0:
@@ -4305,45 +4431,32 @@ class BridgeServer:
     def _apply_compaction(self, cc_request: dict) -> None:
         """Compact request messages in place before applying request-size guardrails.
 
-        If the translated request contains a ``messages`` list, this method
-        compacts it using ``_compact_messages()``. The compaction budget is
-        reduced to account for non-message payload (tools, model, metadata)
-        so that the full request fits within ``_MAX_REQUEST_CHARS``.
+        If the request contains a ``messages`` list, this method compacts it
+        using ``_compact_messages()``. The compaction budget is reduced to
+        account for non-message payload (tools, model, metadata) so that the
+        full request fits within ``_MAX_REQUEST_CHARS``.
 
         Requests without messages are left unchanged.
 
-        Safety net for ``use_native_messages`` providers: the compaction
-        grouping logic in ``_compact_messages`` is Chat-Completions-format
-        aware — it groups ``assistant(tool_calls) + tool(result)`` as an
-        atomic block. When the provider forwards the raw Anthropic Messages
-        body, ``tool_use`` is a content block on the assistant message and
-        the following message is ``user`` with a ``tool_result`` block; the
-        grouping misses the pairing and the pruner can drop the
-        ``assistant(tool_use)`` while keeping the following
-        ``user(tool_result)``. MiniMax then returns ``invalid params, tool
-        call result does not follow tool call (2013)``. We log a warning if
-        the provider is in native passthrough mode and the request exceeds
-        the compaction threshold so operators see a signal if a future
-        provider re-introduces this combination.
+        ``_compact_messages`` groups ``tool_use``/``tool_result`` pairs
+        atomically in BOTH Chat-Completions and Anthropic-native formats, so
+        native-passthrough providers (``use_native_messages=True``) no longer
+        orphan a ``tool_result`` from its ``tool_use`` during head/tail
+        pruning. We emit an INFO signal when a native request is actually
+        compacted (the previously-broken path) so operators can confirm the
+        native-aware grouping is exercised in production. The static
+        ``_COMPACTION_CHAR_THRESHOLD`` is intentionally NOT used as the
+        trigger here — real compaction fires on the model-derived
+        ``messages_budget`` (often ~600K), well below that 2.8M cap.
         """
         if "messages" not in cc_request:
             return
 
-        # Safety-net warning: if the active provider is in native passthrough
-        # mode and the request is large enough to risk compaction, log it.
-        if self._active_provider.use_native_messages:
-            request_size = len(json.dumps(cc_request, ensure_ascii=False))
-            if request_size > _COMPACTION_CHAR_THRESHOLD:
-                logger.warning(
-                    "Native passthrough provider (%s) sending large request (%d chars) "
-                    "above compaction threshold (%d). Compaction grouping is "
-                    "Chat-Completions-format aware and may orphan tool_result blocks "
-                    "whose tool_use was in the head. Set native_messages=False in the "
-                    "profile or pre-compact the request to avoid this.",
-                    type(self._active_provider).__name__,
-                    request_size,
-                    _COMPACTION_CHAR_THRESHOLD,
-                )
+        native = self._active_provider.use_native_messages
+
+        # Snapshot before compaction to detect whether it actually ran.
+        pre_messages = cc_request["messages"]
+        pre_len = len(pre_messages)
 
         # Compute the size of the non-message payload (tools, model, etc.)
         # so that messages + overhead stays within _MAX_REQUEST_CHARS.
@@ -4358,13 +4471,26 @@ class BridgeServer:
             max_messages_chars=messages_budget,
         )
 
-        # Final safety net: drop any orphan tool_result blocks whose
-        # tool_call_id has no matching tool_use. Compaction's atomic-block
-        # grouping keeps well-formed pairs together, but a corrupt input
-        # (e.g. an upstream-empty SSE response recorded as a partial tool
-        # message) can still slip through. Without this pass the next
-        # request would trigger upstream code 2013 ("tool call result
-        # does not follow tool call").
+        # INFO signal: a native body was actually compacted. The grouping is
+        # tool_use/tool_result-aware for both formats, so this no longer
+        # orphans pairs — the signal confirms the previously-broken path ran
+        # and was handled. The authoritative orphan warning (if any future
+        # edge case reintroduces one) comes from _validate_tool_call_pairing.
+        if native and len(cc_request["messages"]) != pre_len:
+            logger.info(
+                "Native passthrough provider (%s) request compacted (%d → %d messages); "
+                "tool_use/tool_result pairing preserved by native-aware grouping.",
+                type(self._active_provider).__name__,
+                pre_len,
+                len(cc_request["messages"]),
+            )
+
+        # Final safety net: drop any orphan tool_result blocks whose id has no
+        # matching tool_use (both CC ``tool`` messages and native ``user``
+        # ``tool_result`` content blocks). Compaction's atomic-block grouping
+        # keeps well-formed pairs together, but a corrupt input can still slip
+        # through. Without this pass the next request would trigger upstream
+        # code 2013 ("tool result's tool id ... not found").
         cc_request["messages"] = self._validate_tool_call_pairing(cc_request["messages"])
 
     def _check_request_size(self, cc_request: dict) -> web.Response | None:
