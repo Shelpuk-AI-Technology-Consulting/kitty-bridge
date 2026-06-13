@@ -180,6 +180,32 @@ class TestIsToolUseFormatError:
             is True
         )
 
+    def test_minimax_tool_result_not_found_2013(self):
+        # The EXACT production error string captured in debug/bridge.log —
+        # MiniMax's actual variant, not the guessed "does not follow" wording.
+        assert (
+            _is_tool_use_format_error(
+                400,
+                '{"type":"error","error":{"type":"invalid_request_error",'
+                '"message":"invalid params, tool result\'s tool id'
+                '(call_f64ba2ce682a457f966bd6d7) not found (2013)"}}',
+            )
+            is True
+        )
+
+    def test_tool_result_not_found_no_code(self):
+        # Phrase-based match must work without the numeric code.
+        assert _is_tool_use_format_error(400, '{"error":{"message":"tool result not found"}}') is True
+
+    def test_not_found_alone_not_matched(self):
+        # "not found" without "tool result" must NOT match (false-positive guard).
+        assert _is_tool_use_format_error(400, '{"error":{"message":"model not found"}}') is False
+
+    def test_2013_alone_not_matched(self):
+        # Bare "2013" with an unrelated message must NOT match — justifies the
+        # phrase-based match over matching the numeric code.
+        assert _is_tool_use_format_error(400, '{"error":{"code":"2013","message":"rate limit exceeded"}}') is False
+
 
 # ── _convert_native_to_cc_format ──────────────────────────────────────────
 

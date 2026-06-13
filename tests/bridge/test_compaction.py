@@ -93,6 +93,92 @@ def _make_tool_call_block(call_id: str, tool_name: str, result_content: str) -> 
     ]
 
 
+def _make_native_tool_use_block(call_id: str, tool_name: str, result_content: str) -> list[dict]:
+    """Create an Anthropic-native atomic tool_use + tool_result pair.
+
+    Mirrors Claude Code's raw Messages body: the assistant turn carries a
+    ``tool_use`` content block, and the following user message carries the
+    matching ``tool_result`` block. This is the format native-passthrough
+    providers (CustomAnthropic, ZaiAnthropic, native MiniMax) forward.
+    """
+    return [
+        {
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": call_id,
+                    "name": tool_name,
+                    "input": {"path": "/x"},
+                }
+            ],
+        },
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": call_id,
+                    "content": result_content,
+                }
+            ],
+        },
+    ]
+
+
+def _native_tool_use_ids(messages: list[dict]) -> set[str]:
+    """Collect every native tool_use id present among assistant messages."""
+    ids: set[str] = set()
+    for m in messages:
+        if m.get("role") == "assistant" and isinstance(m.get("content"), list):
+            for b in m["content"]:
+                if isinstance(b, dict) and b.get("type") == "tool_use":
+                    ids.add(b["id"])
+    return ids
+
+
+def _native_tool_result_ids(messages: list[dict]) -> set[str]:
+    """Collect every native tool_use_id referenced by a tool_result block."""
+    ids: set[str] = set()
+    for m in messages:
+        if m.get("role") == "user" and isinstance(m.get("content"), list):
+            for b in m["content"]:
+                if isinstance(b, dict) and b.get("type") == "tool_result":
+                    ids.add(b["tool_use_id"])
+    return ids
+
+
+def _assert_no_native_orphans(messages: list[dict]) -> None:
+    """Assert every surviving tool_result id has a preceding tool_use id."""
+    results = _native_tool_result_ids(messages)
+    uses = _native_tool_use_ids(messages)
+    assert results.issubset(uses), f"Compaction orphaned native tool_result(s) {results - uses} (no matching tool_use)"
+
+
+def _find_native_tool_result_idx(messages: list[dict], tid: str) -> int | None:
+    """Index of the user message carrying a native tool_result with the given id."""
+    for idx, m in enumerate(messages):
+        if (
+            m.get("role") == "user"
+            and isinstance(m.get("content"), list)
+            and any(isinstance(b, dict) and b.get("tool_use_id") == tid for b in m["content"])
+        ):
+            return idx
+    return None
+
+
+def _find_native_tool_use_idx(messages: list[dict], tid: str) -> int | None:
+    """Index of the assistant message carrying a native tool_use with the given id."""
+    for idx, m in enumerate(messages):
+        if (
+            m.get("role") == "assistant"
+            and isinstance(m.get("content"), list)
+            and any(isinstance(b, dict) and b.get("id") == tid for b in m["content"])
+        ):
+            return idx
+    return None
+
+
 def _char_size(messages: list[dict]) -> int:
     """Estimate serialized character size of messages list."""
     return len(json.dumps(messages, ensure_ascii=False))
@@ -397,6 +483,231 @@ class TestCompactMessagesToolCallAtomicity:
         assert tool_call_idx + 1 < len(result)
         assert result[tool_call_idx + 1]["role"] == "tool"
         assert result[tool_call_idx + 1]["tool_call_id"] == "call_head"
+
+
+class TestCompactMessagesNativeToolUseAtomicity:
+    """Anthropic-native tool_use/tool_result pairs must survive compaction intact.
+
+    Native-passthrough providers (CustomAnthropic, ZaiAnthropic, native
+    MiniMax) forward the raw Messages body where tool_use is a content block
+    on the assistant message and tool_result is a content block on the
+    following user message. Compaction must group this pair atomically so
+    head/tail pruning never keeps a tool_result whose tool_use was dropped
+    (the cause of MiniMax's ``tool result's tool id(...) not found (2013)``).
+    """
+
+    def test_native_pair_kept_together_in_tail(self):
+        server = _make_server()
+        block = _make_native_tool_use_block("call_tail", "Edit", "updated ok")
+
+        messages = [{"role": "system", "content": "System"}]
+        # Filler before the pair pushes it into the tail after compaction.
+        for i in range(200):
+            role = "user" if i % 2 == 0 else "assistant"
+            messages.append({"role": role, "content": f"Filler {i} " * 2000})
+        messages.extend(block)
+
+        assert _char_size(messages) > 2_800_000
+
+        result = server._compact_messages(messages.copy())
+
+        _assert_no_native_orphans(result)
+        # The tool_result (if it survived) must be immediately preceded by its tool_use.
+        result_ids = _native_tool_result_ids(result)
+        if "call_tail" in result_ids:
+            idx = _find_native_tool_result_idx(result, "call_tail")
+            assert idx is not None and idx > 0
+            prev = result[idx - 1]
+            assert prev["role"] == "assistant"
+            assert _find_native_tool_use_idx(result, "call_tail") == idx - 1
+
+    def test_native_pair_kept_together_in_head(self):
+        server = _make_server()
+        block = _make_native_tool_use_block("call_head", "Read", "file contents")
+
+        messages = [{"role": "system", "content": "System"}]
+        messages.extend(block)
+        for i in range(200):
+            role = "user" if i % 2 == 0 else "assistant"
+            messages.append({"role": role, "content": f"Filler {i} " * 2000})
+
+        assert _char_size(messages) > 2_800_000
+
+        result = server._compact_messages(messages.copy())
+
+        _assert_no_native_orphans(result)
+        # The tool_use (if it survived) must be immediately followed by its tool_result.
+        use_idx = _find_native_tool_use_idx(result, "call_head")
+        if use_idx is not None:
+            assert use_idx + 1 < len(result)
+            nxt = result[use_idx + 1]
+            assert nxt["role"] == "user"
+            assert _find_native_tool_result_idx(result, "call_head") == use_idx + 1
+
+    def test_native_compaction_produces_no_orphan_tool_result(self):
+        """A large native tool_use at the tail boundary must not orphan its tool_result.
+
+        Deterministic: a very large ``assistant(tool_use)`` followed by a small
+        ``user(tool_result)`` plus a small trailing user message forces the
+        tail pruner to keep the trailing user + small result but drop the
+        oversized assistant — without native grouping that orphans the
+        ``tool_result`` (MiniMax's code 2013). With grouping the pair is one
+        block, so both halves are kept or both dropped — no orphan.
+        """
+        server = _make_server()
+        # Filler to fill the head region (~560K head_budget of a 2.8M threshold).
+        messages: list[dict] = [{"role": "system", "content": "System"}]
+        for i in range(60):
+            role = "user" if i % 2 == 0 else "assistant"
+            messages.append({"role": role, "content": f"Filler {i} " * 2000})
+
+        # Oversized native pair near the tail: assistant(tool_use) alone is
+        # > tail_budget (~2.24M) so the pruner must either keep the whole
+        # pair (grouping) or drop both (no pair). A small user(tool_result)
+        # right after, then a small final user message to anchor the tail.
+        big_text = "x" * 2_500_000
+        messages.append(
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": big_text},
+                    {"type": "tool_use", "id": "call_boundary", "name": "Edit", "input": {}},
+                ],
+            }
+        )
+        messages.append(
+            {
+                "role": "user",
+                "content": [{"type": "tool_result", "tool_use_id": "call_boundary", "content": "ok"}],
+            }
+        )
+        messages.append({"role": "user", "content": "thanks"})
+
+        assert _char_size(messages) > 2_800_000
+
+        result = server._compact_messages(messages.copy())
+
+        _assert_no_native_orphans(result)
+
+    def test_native_user_message_with_text_and_tool_result_kept_atomic(self):
+        """A user message carrying both text and a tool_result stays whole with its pair."""
+        server = _make_server()
+        pair = [
+            {
+                "role": "assistant",
+                "content": [{"type": "tool_use", "id": "call_mixed", "name": "Edit", "input": {}}],
+            },
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "interleaved note " * 500},
+                    {"type": "tool_result", "tool_use_id": "call_mixed", "content": "ok"},
+                ],
+            },
+        ]
+        messages = [{"role": "system", "content": "System"}]
+        for i in range(200):
+            role = "user" if i % 2 == 0 else "assistant"
+            messages.append({"role": role, "content": f"Filler {i} " * 2000})
+        messages.extend(pair)  # in tail
+
+        assert _char_size(messages) > 2_800_000
+
+        result = server._compact_messages(messages.copy())
+
+        _assert_no_native_orphans(result)
+        # If the mixed user message survived, its text block must survive too.
+        for m in result:
+            if m.get("role") == "user" and isinstance(m.get("content"), list):
+                has_result = any(b.get("tool_use_id") == "call_mixed" for b in m["content"] if isinstance(b, dict))
+                if has_result:
+                    assert any(b.get("type") == "text" for b in m["content"] if isinstance(b, dict))
+
+
+class TestValidateToolCallPairingNative:
+    """Native-format orphan tool_result detection/dropping in _validate_tool_call_pairing."""
+
+    def test_native_orphan_tool_result_dropped(self):
+        server = _make_server()
+        messages = [
+            {"role": "user", "content": "hi"},
+            {
+                "role": "user",
+                "content": [{"type": "tool_result", "tool_use_id": "call_orphan", "content": "ghost"}],
+            },
+        ]
+        result = server._validate_tool_call_pairing(messages)
+        _assert_no_native_orphans(result)
+        # The orphan block (and now-empty user message) is gone.
+        assert "call_orphan" not in _native_tool_result_ids(result)
+
+    def test_native_orphan_tool_result_strips_block_keeps_text_and_image(self):
+        """Orphan tool_result removed but text + image blocks on the same user message survive."""
+        server = _make_server()
+        image_block = {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "x"}}
+        messages = [
+            {"role": "user", "content": "hi"},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "keep me"},
+                    image_block,
+                    {"type": "tool_result", "tool_use_id": "call_orphan", "content": "ghost"},
+                ],
+            },
+        ]
+        result = server._validate_tool_call_pairing(messages)
+        _assert_no_native_orphans(result)
+        # The user message survives with text + image, orphan tool_result gone.
+        user_msgs = [m for m in result if m.get("role") == "user" and isinstance(m.get("content"), list)]
+        assert user_msgs, "user message with surviving non-tool_result blocks must be kept"
+        blocks = user_msgs[-1]["content"]
+        types = [b.get("type") for b in blocks]
+        assert "text" in types
+        assert "image" in types
+        assert "tool_result" not in types
+
+    def test_native_valid_pair_unchanged(self):
+        server = _make_server()
+        messages = [
+            {"role": "user", "content": "do x"},
+            {
+                "role": "assistant",
+                "content": [{"type": "tool_use", "id": "call_ok", "name": "Bash", "input": {}}],
+            },
+            {
+                "role": "user",
+                "content": [{"type": "tool_result", "tool_use_id": "call_ok", "content": "done"}],
+            },
+        ]
+        result = server._validate_tool_call_pairing(messages.copy())
+        _assert_no_native_orphans(result)
+        assert "call_ok" in _native_tool_use_ids(result)
+        assert "call_ok" in _native_tool_result_ids(result)
+
+    def test_native_assistant_multiple_tool_use_ids_all_results_valid(self):
+        server = _make_server()
+        messages = [
+            {"role": "user", "content": "do x and y"},
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "tool_use", "id": "call_a", "name": "Bash", "input": {}},
+                    {"type": "tool_use", "id": "call_b", "name": "Read", "input": {}},
+                ],
+            },
+            {
+                "role": "user",
+                "content": [
+                    {"type": "tool_result", "tool_use_id": "call_a", "content": "a"},
+                    {"type": "tool_result", "tool_use_id": "call_b", "content": "b"},
+                ],
+            },
+        ]
+        result = server._validate_tool_call_pairing(messages.copy())
+        _assert_no_native_orphans(result)
+        assert {"call_a", "call_b"} <= _native_tool_use_ids(result)
+        assert _native_tool_result_ids(result) == {"call_a", "call_b"}
 
 
 class TestCompactMessagesToolCallPairingValidation:
@@ -1198,19 +1509,18 @@ class NativePassthroughProvider(StubProvider):
 
 
 class TestNativePassthroughCompactionWarning:
-    """Safety-net warning when a provider using ``use_native_messages=True``
-    sends a request large enough to trigger compaction.
+    """INFO signal when a ``use_native_messages=True`` provider's request is
+    actually compacted.
 
-    The compaction grouping in ``_compact_messages`` is Chat-Completions-format
-    aware. When the active provider forwards the raw Anthropic Messages body,
-    ``tool_use`` is a content block on the assistant message and the
-    following message is ``user`` with a ``tool_result`` block. The grouping
-    misses the pairing and the pruner can drop the ``assistant(tool_use)``
-    while keeping the following ``user(tool_result)``. MiniMax then returns
-    ``invalid params, tool call result does not follow tool call (2013)``.
-
-    The bridge logs a warning in this case so operators see a signal if a
-    future provider re-introduces this combination.
+    The compaction grouping in ``_compact_messages`` groups
+    ``tool_use``/``tool_result`` pairs atomically in both Chat-Completions and
+    Anthropic-native formats, so native-passthrough providers no longer orphan
+    a ``tool_result`` from its ``tool_use``. The bridge logs an INFO record
+    when a native request is genuinely compacted (the message count changes)
+    so operators can confirm the native-aware path ran. The static
+    ``_COMPACTION_CHAR_THRESHOLD`` is NOT the trigger — real compaction fires
+    on the model-derived ``messages_budget``, so these tests force compaction
+    by shrinking that budget rather than by inflating the request.
     """
 
     def _make_server_with_native_provider(self) -> BridgeServer:
@@ -1221,55 +1531,54 @@ class TestNativePassthroughCompactionWarning:
         server._backends = None
         return server
 
-    def test_warning_logged_for_large_native_request(self, caplog):
-        """A request above the compaction threshold with use_native_messages=True
-        triggers a warning that names the provider class and the size."""
+    def test_signal_logged_when_native_compaction_runs(self, caplog, monkeypatch):
+        """A native request that is actually compacted emits the INFO signal."""
         import logging
 
         server = self._make_server_with_native_provider()
-        large_content = "A" * 3_000_000  # > 70% of _MAX_REQUEST_CHARS (4M * 0.7 = 2.8M)
-        cc_request = {
-            "model": "m",
-            "messages": [{"role": "user", "content": large_content}],
-        }
-        with caplog.at_level(logging.WARNING, logger="kitty.bridge.server"):
+        # Force compaction to run by shrinking the model-derived budget well
+        # below the payload size (mirrors the real production condition where
+        # a small balancing-backend context window triggers compaction at
+        # ~600K, far below the 2.8M static cap).
+        monkeypatch.setattr(server, "_get_max_context_chars", lambda: 100_000)
+        messages = [{"role": "system", "content": "System"}]
+        for i in range(40):
+            role = "user" if i % 2 == 0 else "assistant"
+            messages.append({"role": role, "content": f"Message {i} " * 1000})
+        cc_request = {"model": "m", "messages": messages}
+        with caplog.at_level(logging.INFO, logger="kitty.bridge.server"):
             server._apply_compaction(cc_request)
-        warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
-        assert any("Native passthrough provider" in r.getMessage() for r in warnings), (
-            f"Expected a 'Native passthrough provider' warning, got: {[r.getMessage() for r in warnings]}"
+        infos = [r for r in caplog.records if r.levelno >= logging.INFO]
+        assert any("Native passthrough provider" in r.getMessage() for r in infos), (
+            f"Expected a native-compaction INFO signal, got: {[r.getMessage() for r in infos]}"
         )
 
-    def test_no_warning_for_small_native_request(self, caplog):
-        """A request below the compaction threshold with use_native_messages=True
-        does not trigger the warning."""
+    def test_no_signal_when_native_request_not_compacted(self, caplog):
+        """A small native request that does not compact emits no signal."""
         import logging
 
         server = self._make_server_with_native_provider()
-        cc_request = {
-            "model": "m",
-            "messages": [{"role": "user", "content": "hi"}],
-        }
-        with caplog.at_level(logging.WARNING, logger="kitty.bridge.server"):
+        cc_request = {"model": "m", "messages": [{"role": "user", "content": "hi"}]}
+        with caplog.at_level(logging.INFO, logger="kitty.bridge.server"):
             server._apply_compaction(cc_request)
-        warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
-        assert not any("Native passthrough provider" in r.getMessage() for r in warnings)
+        infos = [r for r in caplog.records if r.levelno >= logging.INFO]
+        assert not any("Native passthrough provider" in r.getMessage() for r in infos)
 
-    def test_no_warning_for_large_translated_request(self, caplog):
-        """A large request on the default (translated) path does not trigger
-        the warning — the translator produces a CC messages list whose
-        pairing is recognized by the compaction grouping."""
+    def test_no_signal_for_translated_compacted_request(self, caplog, monkeypatch):
+        """A compacted request on the translated path emits no native signal."""
         import logging
 
         server = _make_server()  # default provider: use_native_messages=False
-        large_content = "A" * 3_000_000
-        cc_request = {
-            "model": "m",
-            "messages": [{"role": "user", "content": large_content}],
-        }
-        with caplog.at_level(logging.WARNING, logger="kitty.bridge.server"):
+        monkeypatch.setattr(server, "_get_max_context_chars", lambda: 100_000)
+        messages = [{"role": "system", "content": "System"}]
+        for i in range(40):
+            role = "user" if i % 2 == 0 else "assistant"
+            messages.append({"role": role, "content": f"Message {i} " * 1000})
+        cc_request = {"model": "m", "messages": messages}
+        with caplog.at_level(logging.INFO, logger="kitty.bridge.server"):
             server._apply_compaction(cc_request)
-        warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
-        assert not any("Native passthrough provider" in r.getMessage() for r in warnings)
+        infos = [r for r in caplog.records if r.levelno >= logging.INFO]
+        assert not any("Native passthrough provider" in r.getMessage() for r in infos)
 
 
 # ── F25: Post-condition — at least one non-system message survives ────────

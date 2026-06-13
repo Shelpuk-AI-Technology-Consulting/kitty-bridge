@@ -539,6 +539,100 @@ class TestMiniMaxTokenCompactionPreservesToolPairing:
             f"Compaction orphaned tool_result(s) {tool_result_ids - tool_use_ids}"
         )
 
+    @pytest.mark.asyncio
+    async def test_native_path_compaction_preserves_tool_pairing(self, monkeypatch):
+        """Native passthrough + compaction must not orphan tool_result blocks.
+
+        Reproduces the production failure (debug/bridge.log): a native-MiniMax
+        request large enough to trigger compaction via the model-derived budget
+        reached the upstream with a ``tool_result`` whose ``tool_use`` had been
+        dropped, yielding ``invalid params, tool result's tool id(...) not
+        found (2013)``. With native-aware compaction grouping the pair stays
+        atomic, so every surviving ``tool_result`` has a matching ``tool_use``.
+        """
+        sent_body: dict[str, Any] = {}
+
+        def capture(url, **kwargs):
+            sent_body.update(kwargs.get("json", {}))
+            return CallbackResult(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(_anthropic_message_response("native compacted ok")),
+            )
+
+        with aioresponses(passthrough=["http://127.0.0.1"]) as m:
+            m.post(f"{_GLOBAL_URL}{_MESSAGES_PATH}", callback=capture)
+            server = _make_server(native_messages=True)
+            # Force compaction via the dynamic model budget (the real production
+            # trigger), not the 2.8M static cap.
+            monkeypatch.setattr(server, "_get_max_context_chars", lambda: 120_000)
+            await server.start_async()
+            try:
+                import aiohttp
+
+                messages: list[dict[str, Any]] = [{"role": "user", "content": "start"}]
+                # Several native tool_use/tool_result turns, each padded so the
+                # whole conversation far exceeds the 120K budget.
+                for i in range(8):
+                    messages.append(
+                        {
+                            "role": "assistant",
+                            "content": [
+                                {
+                                    "type": "tool_use",
+                                    "id": f"call_{i}",
+                                    "name": "Edit",
+                                    "input": {"path": f"/f{i}"},
+                                }
+                            ],
+                        }
+                    )
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "tool_result",
+                                    "tool_use_id": f"call_{i}",
+                                    "content": (f"result {i} ") * 4000,
+                                }
+                            ],
+                        }
+                    )
+                body = {"model": "MiniMax-M3", "max_tokens": 4096, "messages": messages}
+
+                async with (
+                    aiohttp.ClientSession() as session,
+                    session.post(
+                        f"http://127.0.0.1:{server.port}/v1/messages",
+                        json=body,
+                    ) as resp,
+                ):
+                    assert resp.status == 200
+            finally:
+                await server.stop_async()
+
+        # Compaction must have run (message list shrank) ...
+        assert len(sent_body.get("messages", [])) < len(messages), (
+            "Expected compaction to shrink the native conversation"
+        )
+        # ... and left no orphan tool_result.
+        upstream_messages = sent_body.get("messages", [])
+        tool_use_ids: set[str] = set()
+        tool_result_ids: set[str] = set()
+        for m in upstream_messages:
+            if m.get("role") == "assistant":
+                for b in m.get("content", []) or []:
+                    if isinstance(b, dict) and b.get("type") == "tool_use":
+                        tool_use_ids.add(b["id"])
+            if m.get("role") == "user":
+                for b in m.get("content", []) or []:
+                    if isinstance(b, dict) and b.get("type") == "tool_result":
+                        tool_result_ids.add(b["tool_use_id"])
+        assert tool_result_ids.issubset(tool_use_ids), (
+            f"Native compaction orphaned tool_result(s) {tool_result_ids - tool_use_ids}"
+        )
+
 
 # ── Failover in balancing profile ──────────────────────────────────────────
 
