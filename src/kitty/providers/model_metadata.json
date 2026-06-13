@@ -142,7 +142,7 @@
 {"id": "moonshotai/kimi-k2", "name": "MoonshotAI: Kimi K2 0711", "context_length": 131072, "max_completion_tokens": 32768, "created": 1752263252},
 {"id": "moonshotai/kimi-k2-0905", "name": "MoonshotAI: Kimi K2 0905", "context_length": 262144, "max_completion_tokens": 262144, "created": 1757021147},
 {"id": "moonshotai/kimi-k2-thinking", "name": "MoonshotAI: Kimi K2 Thinking", "context_length": 262144, "max_completion_tokens": 262144, "created": 1762440622},
-{"id": "moonshotai/kimi-k2.5", "name": "MoonshotAI: Kimi K2.5", "context_length": 262144, "max_completion_tokens": 262144, "created": 1769487076},
+{"id": "moonshotai/kimi-k2.5", "name": "MoonshotAI: Kimi K2.5", "context_length": 262144, "max_completion_tokens": null, "created": 1769487076},
 {"id": "moonshotai/kimi-k2.6", "name": "MoonshotAI: Kimi K2.6", "context_length": 262144, "max_completion_tokens": 262142, "created": 1776699402},
 {"id": "moonshotai/kimi-k2.7-code", "name": "MoonshotAI: Kimi K2.7 Code", "context_length": 262144, "max_completion_tokens": null, "created": 1781266361},
 {"id": "morph/morph-v3-fast", "name": "Morph: Morph V3 Fast", "context_length": 81920, "max_completion_tokens": 38000, "created": 1751910002},
