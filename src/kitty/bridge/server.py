@@ -3253,6 +3253,14 @@ class BridgeServer:
         n_backends = len(self._backends)
         last_exc: UpstreamError | Exception | None = None
         last_response: dict | None = None
+        # F4: Count consecutive 400s — if 2+ backends reject the same body
+        # with 400, stop retrying (the request itself is malformed, not
+        # backend-specific).  Hash avoids recomputing per attempt.
+        import hashlib
+        import json as _json
+
+        body_hash = hashlib.sha256(_json.dumps(cc_request, sort_keys=True).encode()).hexdigest()[:12]
+        consecutive_400_count = 0
 
         for attempt in range(n_backends):
             if attempt > 0:
@@ -3288,6 +3296,20 @@ class BridgeServer:
                     else:
                         failure_kind = "hard"
                     self._mark_backend_unhealthy(idx, failure_kind=failure_kind)
+                # F4: After 2+ backends reject the same body with 400, stop
+                # burning healthy backends.  The request itself is bad.
+                if exc.status == 400:
+                    consecutive_400_count += 1
+                    if consecutive_400_count >= 2:
+                        logger.warning(
+                            "Request body %s rejected by %d backends (400) — "
+                            "stopping failover, surfacing error to client",
+                            body_hash,
+                            consecutive_400_count,
+                        )
+                        raise last_exc from None
+                else:
+                    consecutive_400_count = 0
                 logger.info(
                     "Backend attempt %d/%d failed (status %d), retrying",
                     attempt + 1,

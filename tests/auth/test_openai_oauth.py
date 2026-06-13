@@ -417,7 +417,6 @@ def _capture_body(captured: dict[str, Any], kwargs: dict[str, Any]) -> None:
         _capture_body(captured, {"data": data.decode("utf-8")})
 
 
-
 class TestOAuthTokenResponseValidation:
     """F35: missing token fields should raise OAuthAuthorizationError, not KeyError."""
 

@@ -2,16 +2,13 @@
 
 from __future__ import annotations
 
-import asyncio
-import json
-import os
 import tempfile
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
-from kitty.bridge.server import BridgeServer, _AUTH_COOLDOWN
+from kitty.bridge.server import _AUTH_COOLDOWN, BridgeServer
 from kitty.providers.base import ProviderAdapter
 
 
@@ -45,14 +42,13 @@ class TestF5AuthCooldown:
         )
 
 
-
 class TestF48CloudflareFalsePositive:
     """F48: Generic 'cloudflare' substring causes false positives."""
 
     def test_generic_cloudflare_word_not_detected(self):
         """A 403 body containing just the word 'cloudflare' must NOT be
         flagged as a Cloudflare block — it could be a legitimate response."""
-        from kitty.cloudflare import is_cloudflare_block, get_cloudflare_signature
+        from kitty.cloudflare import get_cloudflare_signature, is_cloudflare_block
 
         # This body contains "cloudflare" in a non-Challenge context
         body = "Your request was rejected. Please contact cloudflare support for details."
@@ -61,7 +57,7 @@ class TestF48CloudflareFalsePositive:
 
     def test_specific_signatures_still_detected(self):
         """Specific Cloudflare signatures must still be detected."""
-        from kitty.cloudflare import is_cloudflare_block, get_cloudflare_signature
+        from kitty.cloudflare import get_cloudflare_signature, is_cloudflare_block
 
         assert get_cloudflare_signature("cf-mitigated: access denied") == "cf-mitigated"
         assert is_cloudflare_block(403, "cf-mitigated: access denied") is True
@@ -80,7 +76,6 @@ class TestF48CloudflareFalsePositive:
         assert is_cloudflare_block(403, body) is False
 
 
-
 class TestF31DeadCode:
     """F31: Verify no unreachable RuntimeError remains."""
 
@@ -88,11 +83,9 @@ class TestF31DeadCode:
         """The RuntimeError('All backends exhausted') has been removed.
         Verify it no longer appears in the source."""
         import inspect
-        from kitty.bridge.server import BridgeServer
 
         source = inspect.getsource(BridgeServer._request_with_retry_balancing)
         assert "All backends exhausted with no response" not in source
-
 
 
 class TestF49StateWriteFailure:
@@ -102,9 +95,7 @@ class TestF49StateWriteFailure:
     async def test_start_async_cleans_up_on_state_write_failure(self):
         """If write_state raises OSError (e.g. disk full), the server must
         clean up its runner and not leave a running but unmanaged process."""
-        import tempfile
         from pathlib import Path
-        from unittest.mock import patch
 
         from kitty.bridge.server import BridgeServer
 
@@ -114,13 +105,14 @@ class TestF49StateWriteFailure:
 
         server = BridgeServer(None, provider, "test-key", state_file=state_file)
 
-        with patch("kitty.bridge.state.write_state", side_effect=OSError("No space left on device")):
-            with pytest.raises(OSError, match="No space left on device"):
-                await server.start_async()
+        with (
+            patch("kitty.bridge.state.write_state", side_effect=OSError("No space left on device")),
+            pytest.raises(OSError, match="No space left on device"),
+        ):
+            await server.start_async()
 
         # The runner must have been cleaned up — not left running
         assert server._runner is None
-
 
 
 class TestF50CrashHandlerStateCleanup:
@@ -128,11 +120,10 @@ class TestF50CrashHandlerStateCleanup:
 
     def test_crash_handlers_accept_state_path(self):
         """_setup_crash_handlers must accept an optional state_path parameter."""
-        import tempfile
-        from kitty.bridge.server import _setup_crash_handlers, _crash_handlers_installed
-
         # Reset so we can re-install
         import kitty.bridge.server as srv_mod
+        from kitty.bridge.server import _setup_crash_handlers
+
         srv_mod._crash_handlers_installed = False
 
         tmpdir = tempfile.mkdtemp()
@@ -141,7 +132,6 @@ class TestF50CrashHandlerStateCleanup:
 
         # Must not raise — accepts state_path
         _setup_crash_handlers(log_path, state_path=state_path)
-
 
 
 class TestF4Repeat400Guard:
@@ -156,32 +146,44 @@ class TestF4Repeat400Guard:
         import aiohttp
         from aioresponses import aioresponses
 
-        from kitty.bridge.server import BridgeServer
         from kitty.profiles.schema import Profile
         from kitty.providers.base import ProviderAdapter
 
         class _S(ProviderAdapter):
             def __init__(self, i):
                 self._i = i
+
             @property
             def provider_type(self):
                 return f"s{self._i}"
+
             @property
             def default_base_url(self):
                 return f"https://api{self._i}.example.com/v1"
+
             def build_request(self, model, messages, **kw):
                 return {"model": model, "messages": messages}
+
             def parse_response(self, d):
                 return d
+
             def map_error(self, s, b):
                 return Exception(f"e{s}")
 
         backends = []
         for i in range(3):
-            backends.append((_S(i), f"key-{i}", Profile(
-                name=f"p{i}", provider="openai", model=f"m{i}",
-                auth_ref=str(uuid.uuid4()),
-            )))
+            backends.append(
+                (
+                    _S(i),
+                    f"key-{i}",
+                    Profile(
+                        name=f"p{i}",
+                        provider="openai",
+                        model=f"m{i}",
+                        auth_ref=str(uuid.uuid4()),
+                    ),
+                )
+            )
 
         server = BridgeServer(None, backends[0][0], "k0", backends=backends)
         port = await server.start_async()
@@ -208,3 +210,28 @@ class TestF4Repeat400Guard:
         finally:
             await server.stop_async()
 
+
+class TestF16OpenCodeDeduplication:
+    """F16: OpenCode should reuse AnthropicAdapter translation logic."""
+
+    def test_opencode_inherits_anthropic_adapter(self):
+        """OpenCodeGoAdapter should subclass AnthropicAdapter for Messages routing."""
+        from kitty.providers.anthropic import AnthropicAdapter
+        from kitty.providers.opencode import OpenCodeGoAdapter
+
+        assert issubclass(OpenCodeGoAdapter, AnthropicAdapter)
+
+    def test_opencode_no_longer_defines_duplicate_translation_helpers(self):
+        """Duplicated Anthropic helper methods should not be defined in opencode.py."""
+        import inspect
+
+        from kitty.providers.opencode import OpenCodeGoAdapter
+
+        source = inspect.getsource(OpenCodeGoAdapter)
+        for name in (
+            "def _translate_to_anthropic",
+            "def _translate_from_anthropic",
+            "def _translate_anthropic_stream_event",
+            "def _translate_tool_result_msg",
+        ):
+            assert name not in source

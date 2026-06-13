@@ -102,8 +102,7 @@ def resolve_binary(name: str) -> Path:
     if path is None:
         logger.error("Binary %r not found on PATH or common install directories", name)
         raise FileNotFoundError(
-            f"'{name}' not found on PATH or common install directories. "
-            "Install it first or check your PATH."
+            f"'{name}' not found on PATH or common install directories. Install it first or check your PATH."
         )
     return path
 

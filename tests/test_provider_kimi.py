@@ -363,7 +363,9 @@ class TestKimiDetectThinkingFromMessages:
             {"role": "user", "content": "hello"},
         ]
         request = adapter.build_request(
-            model="test", messages=messages, stream=False,
+            model="test",
+            messages=messages,
+            stream=False,
             thinking_enabled=True,
         )
         assert request.get("_thinking_enabled") is True
