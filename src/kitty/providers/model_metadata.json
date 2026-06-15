@@ -53,7 +53,7 @@
 {"id": "deepseek/deepseek-v3.1-terminus", "name": "DeepSeek: DeepSeek V3.1 Terminus", "context_length": 163840, "max_completion_tokens": 32768, "created": 1758548275},
 {"id": "deepseek/deepseek-v3.2", "name": "DeepSeek: DeepSeek V3.2", "context_length": 131072, "max_completion_tokens": 64000, "created": 1764594642},
 {"id": "deepseek/deepseek-v3.2-exp", "name": "DeepSeek: DeepSeek V3.2 Exp", "context_length": 163840, "max_completion_tokens": 65536, "created": 1759150481},
-{"id": "deepseek/deepseek-v4-flash", "name": "DeepSeek: DeepSeek V4 Flash", "context_length": 1048576, "max_completion_tokens": null, "created": 1777000666},
+{"id": "deepseek/deepseek-v4-flash", "name": "DeepSeek: DeepSeek V4 Flash", "context_length": 1048576, "max_completion_tokens": 65536, "created": 1777000666},
 {"id": "deepseek/deepseek-v4-pro", "name": "DeepSeek: DeepSeek V4 Pro", "context_length": 1048576, "max_completion_tokens": 384000, "created": 1777000679},
 {"id": "essentialai/rnj-1-instruct", "name": "EssentialAI: Rnj 1 Instruct", "context_length": 32768, "max_completion_tokens": null, "created": 1765094847},
 {"id": "google/gemini-2.5-flash", "name": "Google: Gemini 2.5 Flash", "context_length": 1048576, "max_completion_tokens": 65535, "created": 1750172488},
