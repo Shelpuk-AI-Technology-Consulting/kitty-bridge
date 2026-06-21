@@ -21,6 +21,13 @@ def tokens_to_chars(tokens: int) -> int:
 
 _METADATA_PATH = Path(__file__).parent / "model_metadata.json"
 
+# Highest-priority source of model context lengths: a kitty-local, git-tracked
+# catalog of known models whose context window must not be derived from the
+# OpenRouter metadata (e.g. because the model is missing from it, or to pin a
+# stable value that does not drift when model_metadata.json is refreshed). The
+# OpenRouter refresh script writes only model_metadata.json, never this file.
+_OVERRIDES_PATH = Path(__file__).parent / "model_context_overrides.json"
+
 
 @lru_cache(maxsize=1)
 def _load_metadata() -> dict[str, dict]:
@@ -64,6 +71,85 @@ def _coerce_context_tokens(value: object) -> int | None:
         return None
 
 
+@lru_cache(maxsize=1)
+def _load_overrides() -> dict[str, int]:
+    """Load model_context_overrides.json into a {lowercase_model: tokens} dict.
+
+    Tolerates a missing or malformed file by returning an empty dict so the
+    caller falls through to the lower-priority resolution layers. Invalid
+    entries (non-dict root, non-string keys, non-positive / boolean / non-int
+    values) are dropped with a warning, mirroring ``_load_metadata``.
+    """
+    try:
+        raw = _OVERRIDES_PATH.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {}
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        logger.warning("model_context_overrides.json is not valid JSON")
+        return {}
+    if not isinstance(data, dict):
+        logger.warning("model_context_overrides.json expected an object, got %s", type(data).__name__)
+        return {}
+
+    overrides: dict[str, int] = {}
+    for key, value in data.items():
+        if not isinstance(key, str) or not key.strip():
+            logger.warning("model_context_overrides.json dropped invalid key %r", key)
+            continue
+        tokens = _coerce_context_tokens(value)
+        if tokens is None:
+            logger.warning("model_context_overrides.json dropped invalid entry for %s", key)
+            continue
+        overrides[key.lower()] = tokens
+    return overrides
+
+
+def _lookup_override(model: str) -> int | None:
+    """Return the context length from the local overrides file, or None.
+
+    Matching is case-insensitive and reuses the single-direction suffix
+    convention of the metadata lookup (the query may carry a vendor prefix
+    that a later normalize step strips; the override key is bare):
+
+    1. Exact: ``model.lower()`` is an override key.
+    2. Suffix: the query ``model.lower()`` ends with ``"/" + key`` for exactly
+       one override key (e.g. ``"z-ai/glm-5.2"`` matches the key ``"glm-5.2"``).
+       More than one suffix match is ambiguous: log a warning and return None
+       so the caller falls through, matching the metadata ambiguity behavior.
+
+    Args:
+        model: The raw model name as seen by the resolver (may be
+            vendor-prefixed).
+
+    Returns:
+        The override context length in tokens, or ``None`` when no unambiguous
+        override matches.
+    """
+    overrides = _load_overrides()
+    if not overrides:
+        return None
+
+    model_lower = model.lower()
+    # 1. Exact match.
+    if model_lower in overrides:
+        return overrides[model_lower]
+
+    # 2. Single-direction suffix match: "z-ai/glm-5.2" matches key "glm-5.2".
+    suffix_matches = [k for k in overrides if model_lower.endswith("/" + k)]
+    if len(suffix_matches) == 1:
+        return overrides[suffix_matches[0]]
+    if len(suffix_matches) > 1:
+        logger.warning(
+            "Ambiguous context override for %s: %d matches (%s)",
+            model_lower,
+            len(suffix_matches),
+            suffix_matches,
+        )
+    return None
+
+
 def get_model_context_tokens(
     provider: str,
     model: str,
@@ -72,12 +158,22 @@ def get_model_context_tokens(
     """Return the context window size in tokens for the given model.
 
     Lookup priority:
-    1. provider_config["context_window"] — manual override
-    2. Exact match on model name in metadata table
-    3. Suffix match: bare model name (e.g. "gpt-4o") matches metadata
-       entries with a provider prefix (e.g. "openai/gpt-4o")
-    4. DEFAULT_CONTEXT_TOKENS fallback
+    1. Local overrides file (model_context_overrides.json) — highest priority.
+    2. provider_config["context_window"] — per-profile manual override.
+    3. Exact match on model name in metadata table.
+    4. Suffix match: bare model name (e.g. "gpt-4o") matches metadata
+       entries with a provider prefix (e.g. "openai/gpt-4o").
+    5. DEFAULT_CONTEXT_TOKENS fallback.
+
+    WARNING: a packaged entry in the local overrides file silently trumps a
+    per-profile ``provider_config["context_window"]``. To make a profile's
+    context_window take effect for a model, omit that model from the overrides
+    file.
     """
+    override = _lookup_override(model)
+    if override is not None:
+        return override
+
     if provider_config and "context_window" in provider_config:
         override = _coerce_context_tokens(provider_config["context_window"])
         if override is not None:

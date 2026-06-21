@@ -50,7 +50,12 @@ METADATA_SAMPLE = [
 
 @pytest.fixture(autouse=True)
 def _load_sample_metadata(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    """Write a sample model_metadata.json and patch the module path."""
+    """Write a sample model_metadata.json and an empty overrides file, patch paths.
+
+    Existing tests must not be coupled to the shipped overrides catalog, so the
+    overrides file is patched to an empty object by default; ``TestLocalOverrides``
+    repopulates it per-test via ``_set_overrides``.
+    """
     metadata_file = tmp_path / "model_metadata.json"
     metadata_file.write_text(json.dumps(METADATA_SAMPLE), encoding="utf-8")
 
@@ -60,8 +65,16 @@ def _load_sample_metadata(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(mc, "_METADATA_PATH", metadata_file)
     # Force reload of metadata with patched path
     mc._load_metadata.cache_clear()
+
+    # Empty overrides file so existing tests are shielded from the shipped catalog.
+    overrides_file = tmp_path / "model_context_overrides.json"
+    overrides_file.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(mc, "_OVERRIDES_PATH", overrides_file)
+    mc._load_overrides.cache_clear()
+
     yield
     mc._load_metadata.cache_clear()
+    mc._load_overrides.cache_clear()
 
 
 # ---------------------------------------------------------------------------
@@ -91,6 +104,118 @@ class TestProviderConfigOverride:
             provider_config={"context_window": 32000},
         )
         assert result == 32000
+
+
+# ---------------------------------------------------------------------------
+# Local overrides file (highest priority)
+# ---------------------------------------------------------------------------
+
+
+OVERRIDES_CATALOG = {
+    "MiniMax-M3": 1000000,
+    "glm-5.2": 1000000,
+}
+
+
+def _set_overrides(content: dict) -> None:
+    """Write an overrides catalog to the patched _OVERRIDES_PATH and clear cache."""
+    import kitty.providers.model_context as mc
+
+    mc._OVERRIDES_PATH.write_text(json.dumps(content), encoding="utf-8")
+    mc._load_overrides.cache_clear()
+
+
+class TestLocalOverrides:
+    """The packaged model_context_overrides.json is the highest-priority source.
+
+    It outranks provider_config["context_window"], OpenRouter metadata, and the
+    default. Entries are global (provider-agnostic) and matched case-insensitively
+    with the same single-direction suffix rule the metadata lookup uses.
+    """
+
+    def test_global_minimax_m3(self):
+        from kitty.providers.model_context import get_model_context_tokens
+
+        _set_overrides(OVERRIDES_CATALOG)
+        assert get_model_context_tokens(provider="minimax_token", model="MiniMax-M3", provider_config={}) == 1_000_000
+
+    def test_global_glm_any_provider(self):
+        from kitty.providers.model_context import get_model_context_tokens
+
+        _set_overrides(OVERRIDES_CATALOG)
+        # glm-5.2 is provider-agnostic.
+        assert get_model_context_tokens(provider="zai_coding", model="glm-5.2", provider_config={}) == 1_000_000
+        assert get_model_context_tokens(provider="opencode_go", model="glm-5.2", provider_config={}) == 1_000_000
+
+    def test_suffix_match_prefixed_model(self):
+        """A vendor-prefixed query matches a bare override key (single direction)."""
+        from kitty.providers.model_context import get_model_context_tokens
+
+        _set_overrides(OVERRIDES_CATALOG)
+        assert get_model_context_tokens(provider="zai_coding", model="z-ai/glm-5.2", provider_config={}) == 1_000_000
+
+    def test_case_insensitive(self):
+        from kitty.providers.model_context import get_model_context_tokens
+
+        _set_overrides(OVERRIDES_CATALOG)
+        assert get_model_context_tokens(provider="MINIMAX_TOKEN", model="MINIMAX-M3", provider_config={}) == 1_000_000
+        assert get_model_context_tokens(provider="any", model="GLM-5.2", provider_config={}) == 1_000_000
+
+    def test_override_beats_provider_config(self):
+        """The local file is FIRST priority — it trumps a per-profile context_window."""
+        from kitty.providers.model_context import get_model_context_tokens
+
+        _set_overrides(OVERRIDES_CATALOG)
+        assert (
+            get_model_context_tokens(
+                provider="minimax_token",
+                model="MiniMax-M3",
+                provider_config={"context_window": 50000},
+            )
+            == 1_000_000
+        )
+
+    def test_provider_config_wins_when_no_override(self):
+        """When the model is not in the overrides file, provider_config still wins."""
+        from kitty.providers.model_context import get_model_context_tokens
+
+        _set_overrides(OVERRIDES_CATALOG)
+        assert (
+            get_model_context_tokens(
+                provider="openai",
+                model="gpt-4o",
+                provider_config={"context_window": 50000},
+            )
+            == 50000
+        )
+
+    def test_override_absent_falls_to_metadata(self):
+        from kitty.providers.model_context import get_model_context_tokens
+
+        _set_overrides(OVERRIDES_CATALOG)
+        assert get_model_context_tokens(provider="openai", model="gpt-4o", provider_config={}) == 128000
+
+    def test_invalid_entry_dropped(self):
+        """Non-positive / boolean values are dropped; valid entries still resolve."""
+        from kitty.providers.model_context import get_model_context_tokens
+
+        _set_overrides({"MiniMax-M3": 1000000, "bad-model": -1, "bool-model": True, "zero-model": 0})
+        assert get_model_context_tokens(provider="minimax_token", model="MiniMax-M3", provider_config={}) == 1_000_000
+        # The dropped entry does not resolve to the invalid value; it falls through.
+        assert get_model_context_tokens(provider="openai", model="bad-model", provider_config={}) != -1
+
+    def test_balancing_min_routes_through_override(self):
+        """get_balancing_min_context_tokens calls get_model_context_tokens per backend,
+        so the override applies to balancing too."""
+        from kitty.providers.model_context import get_balancing_min_context_tokens
+
+        _set_overrides(OVERRIDES_CATALOG)
+        backends = [
+            ("minimax_token", "MiniMax-M3", {}),
+            ("openai", "gpt-4o", {}),
+        ]
+        # min(1_000_000 override, 128_000 metadata) = 128_000.
+        assert get_balancing_min_context_tokens(backends) == 128000
 
 
 # ---------------------------------------------------------------------------

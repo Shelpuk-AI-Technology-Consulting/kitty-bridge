@@ -1446,6 +1446,35 @@ class TestGetMaxContextChars:
         # gemini has 1M context → ~4.2M chars, capped at _MAX_REQUEST_CHARS (4M)
         assert server._get_max_context_chars() == _MAX_REQUEST_CHARS
 
+    def test_local_overrides_file_raises_context_budget(self, monkeypatch, tmp_path):
+        """A model pinned in model_context_overrides.json takes the 4M-char cap.
+
+        Uses ``glm-5.2`` (absent from OpenRouter metadata) as the diagnostic
+        model: without the override it falls back to ``DEFAULT_CONTEXT_TOKENS``
+        (200 000 → 800 000 chars); with the override it lands at 1 000 000
+        tokens → 4 000 000 chars (capped at ``_MAX_REQUEST_CHARS``).
+        """
+        from kitty.providers import model_context as mc
+
+        overrides_file = tmp_path / "model_context_overrides.json"
+        overrides_file.write_text(json.dumps({"MiniMax-M3": 1_000_000, "glm-5.2": 1_000_000}), encoding="utf-8")
+        monkeypatch.setattr(mc, "_OVERRIDES_PATH", overrides_file)
+        mc._load_overrides.cache_clear()
+
+        server = _make_server()
+        server._active_provider = StubProvider()
+        server._active_model = "glm-5.2"
+        server._active_provider_config = {}
+        server._backends = None
+        # 1 000 000 * 4 = 4 000 000 chars == _MAX_REQUEST_CHARS cap.
+        assert server._get_max_context_chars() == _MAX_REQUEST_CHARS
+
+        # MiniMax-M3 via the minimax_token adapter also lands at the cap.
+        server._active_model = "MiniMax-M3"
+        assert server._get_max_context_chars() == _MAX_REQUEST_CHARS
+
+        mc._load_overrides.cache_clear()
+
 
 # ---------------------------------------------------------------------------
 # Context-aware compaction and size checking
