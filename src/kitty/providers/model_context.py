@@ -183,14 +183,14 @@ def get_model_context_tokens(
     metadata = _load_metadata()
     model_lower = model.lower()
 
-    # 2. Exact match (model as-is, e.g. "openai/gpt-4o" or a bare name)
+    # 3. Exact match (model as-is, e.g. "openai/gpt-4o" or a bare name)
     if model_lower in metadata:
         value = _coerce_context_tokens(metadata[model_lower].get("context_length"))
         if value is not None:
             return value
         logger.warning("Invalid context_length in metadata for %s", model_lower)
 
-    # 3. Suffix match: "gpt-4o" matches "openai/gpt-4o", "gpt-4o-mini", etc.
+    # 4. Suffix match: "gpt-4o" matches "openai/gpt-4o", "gpt-4o-mini", etc.
     suffix = "/" + model_lower
     matches = [entry for mid, entry in metadata.items() if mid.endswith(suffix)]
     if len(matches) == 1:
