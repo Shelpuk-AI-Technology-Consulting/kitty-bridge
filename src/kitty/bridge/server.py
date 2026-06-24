@@ -412,6 +412,10 @@ _NON_RETRYABLE_ERROR_CODES = frozenset(
 )
 _AUTH_FAILURE_STATUSES = {401}  # 403 handled as Cloudflare
 _AUTH_COOLDOWN = 900  # 15 min — long enough to skip bad key, short enough to retry
+# 24 h — a plan/entitlement 403 ("this model requires a subscription") will
+# not succeed for the same profile until the user upgrades, so it is parked
+# for the session instead of cycling every 15 minutes and wasting failover.
+_ENTITLEMENT_COOLDOWN = 86400
 _BACKOFF_BASE = 1.0
 _EMPTY_RETRY_DELAYS = [5.0, 15.0]  # delays between retries for empty responses (non-balancing)
 # F30: These delays are coupled to max_attempts calculations in the stream
@@ -424,6 +428,23 @@ _EMPTY_FINAL_DELAYS = [20.0, 40.0]  # final delays before emitting empty-respons
 # These trigger the circuit breaker even on non-retryable HTTP statuses (e.g. 400).
 _RATE_LIMIT_CODES = {"1310"}
 _RATE_LIMIT_PATTERNS = ("limit exhaust", "rate limit", "quota exceeded", "usage limit", "exhausted")
+
+# Substrings (lower-cased) that indicate a 403 is a plan / entitlement error
+# ("your plan does not include this model") rather than a credential error.
+# Used by :func:`is_entitlement_error` to distinguish the two: a credential
+# 401/403 is retried after 15 minutes, but a plan-entitlement 403 will not
+# succeed for the same profile until the user upgrades — so it gets a 24 h
+# cooldown and is treated as a distinct failure kind.
+_ENTITLEMENT_PATTERNS: tuple[str, ...] = (
+    "requires a subscription",
+    "upgrade for access",
+    "upgrade your plan",
+    "plan does not include",
+    "not available on your plan",
+    "not available with your",
+    "plan required",
+    "subscription required",
+)
 _CLIENT_MAX_SIZE = 16 * 1024 * 1024  # 16 MiB
 _STREAM_READ_TIMEOUT = 120  # seconds — upstream must respond with first byte within this
 _SINGLE_BACKEND_COOLDOWN_CAP = 30  # seconds — cap cooldown for single-backend profiles
@@ -446,6 +467,11 @@ _COMPACTION_CHAR_THRESHOLD = int(_MAX_REQUEST_CHARS * 0.7)  # Trigger compaction
 _COMPACTION_TAIL_COUNT = 20  # Minimum number of recent messages to preserve
 _COMPACTION_GUARANTEED_MESSAGES_MAX = int(_MAX_REQUEST_CHARS * 0.9)  # Guaranteed budget for compacted messages
 _TOOL_RESULT_TRUNCATION_LIMIT = 50_000  # Max chars for a tool result before truncation
+# Soft threshold (~180K tokens) above which a high-reasoning / long-context
+# request is likely to truncate or be rejected by upstreams like MiniMax-M3 /
+# z.ai GLM-5.2. Crossing it emits a WARNING; on-failure recovery uses it as a
+# heuristic that the request is oversized (it does NOT gate the retry itself).
+_OVERSIZED_INPUT_THRESHOLD = 600_000
 
 
 def _is_retryable_exception(exc: Exception) -> bool:
@@ -466,6 +492,33 @@ def _is_transport_error(exc: Exception) -> bool:
     # ProviderError with "connection failed" from custom-transport providers
     exc_msg = str(exc).lower()
     return bool("connection failed" in exc_msg or "connection reset" in exc_msg)
+
+
+def is_entitlement_error(status: int, body: object) -> bool:
+    """Return True if an HTTP 403 body indicates a plan / entitlement error.
+
+    The bridge treats a credential 401/403 as ``auth`` (a 15 min cooldown,
+    retried under the assumption the key may be refreshed). A plan /
+    entitlement 403 ("this model requires a subscription", "not available
+    on your plan") is different: the request will not succeed for the
+    same profile until the user upgrades, so it deserves a distinct
+    failure kind and a long cooldown. This helper detects those bodies
+    by case-insensitive substring match.
+
+    Args:
+        status: The upstream HTTP status code.
+        body: The error message body to inspect (only ``str`` is matched).
+
+    Returns:
+        True only when ``status`` is 403 and ``body`` is a string that
+        contains one of :data:`_ENTITLEMENT_PATTERNS`.
+    """
+    if status != 403:
+        return False
+    if not isinstance(body, str):
+        return False
+    lower = body.lower()
+    return any(pat in lower for pat in _ENTITLEMENT_PATTERNS)
 
 
 def _truncate_for_log(text: str, limit: int = 2000) -> str:
@@ -878,6 +931,11 @@ class BridgeServer:
                 family_health["failed_at"] = time.monotonic()
         elif failure_kind == "auth":
             health["cooldown"] = _AUTH_COOLDOWN
+        elif failure_kind == "entitlement":
+            # Plan / model entitlement error (e.g. 403 "requires a subscription"):
+            # the request will not succeed for this profile until the user
+            # upgrades, so park it for the session rather than cycling.
+            health["cooldown"] = _ENTITLEMENT_COOLDOWN
         elif cooldown is not None:
             health["cooldown"] = cooldown
         else:
@@ -1516,6 +1574,9 @@ class BridgeServer:
 
             logger.debug("Translated CC request: %s", json.dumps(cc_request, indent=2, ensure_ascii=False))
 
+            # Truncate oversized tool results before compaction runs
+            self._truncate_oversized_tool_results(cc_request)
+
             # Compact messages before size check
             self._apply_compaction(cc_request)
 
@@ -2069,6 +2130,9 @@ class BridgeServer:
                 self._thinking_warned = translator.thinking_warned
                 logger.debug("Translated CC request: %s", json.dumps(cc_request, indent=2, ensure_ascii=False))
 
+            # Truncate oversized tool results before compaction runs
+            self._truncate_oversized_tool_results(cc_request)
+
             # Compact messages before size check
             self._apply_compaction(cc_request)
 
@@ -2561,6 +2625,38 @@ class BridgeServer:
                                         logger.warning("Failed to parse flushed SSE data: %s", data_str[:200])
 
                         # Handle in-stream error failover
+                        # FI-8.3: clean upstream truncation (done=False, no error chunk)
+                        # is finalized as a partial response — NOT retried on other
+                        # backends. Re-POSTing a known-oversized body to other
+                        # upstreams cannot succeed and produces the cascade observed
+                        # in production (every backend lands in cooldown → 503).
+                        if (
+                            not done
+                            and not stream_error
+                            and events_emitted
+                            and translator._message_started
+                        ):
+                            logger.warning(
+                                "Messages stream truncated (done=False) after %d chunks; "
+                                "finalizing partial response without failover",
+                                chunk_count,
+                            )
+                            try:
+                                s = await _ensure_prepared()
+                                for event in translator.finalize_interrupted_stream():
+                                    await s.write(event.encode())
+                            except (
+                                ConnectionResetError,
+                                BrokenPipeError,
+                                OSError,
+                            ):
+                                logger.debug(
+                                    "Client disconnected before interrupted stream finalization for %s",
+                                    message_id,
+                                )
+                            break
+
+                        # Handle in-stream error failover
                         if stream_error:
                             if events_emitted:
                                 logger.warning(
@@ -2840,6 +2936,9 @@ class BridgeServer:
         self._active_provider.normalize_request(cc_request)
 
         logger.debug("Translated CC request: %s", json.dumps(cc_request, indent=2, ensure_ascii=False))
+
+        # Truncate oversized tool results before compaction runs
+        self._truncate_oversized_tool_results(cc_request)
 
         # Compact messages before size check
         self._apply_compaction(cc_request)
@@ -3336,6 +3435,9 @@ class BridgeServer:
         body_hash = hashlib.sha256(_json.dumps(cc_request, sort_keys=True).encode()).hexdigest()[:12]
         consecutive_400_count = 0
 
+        # FI-8.4: warn once if the request is oversized before the first attempt.
+        self._maybe_warn_oversized(cc_request)
+
         for attempt in range(n_backends):
             if attempt > 0:
                 try:
@@ -3360,6 +3462,36 @@ class BridgeServer:
             except UpstreamError as exc:
                 last_exc = exc
                 idx = self._current_backend_idx
+                # FI-8.4: oversized context-too-large → compact harder and
+                # retry SAME backend once, inline.  The upstream returned a
+                # legitimate error (not a transport failure), so we do NOT
+                # mark unhealthy and do NOT count toward consecutive_400.
+                # Gated on ``_is_oversized_request`` because compaction only
+                # helps when there's actually content to shrink: a 1261/2013
+                # on a small request is a spurious / hard limit error and
+                # the right move is immediate failover, not a wasted retry
+                # on the same backend.  If the compacted retry also fails,
+                # we fall through to the standard path.
+                if (
+                    exc.status in (400, 413)
+                    and BridgeServer._is_context_too_large_error(exc.status, exc.body)
+                    and self._is_oversized_request(cc_request)
+                ):
+                    logger.info(
+                        "Backend attempt %d/%d reported context-too-large; compacting tighter "
+                        "(factor=0.5) and retrying same backend (no failover, no mark-unhealthy)",
+                        attempt + 1,
+                        n_backends,
+                    )
+                    self._compact_with_tighter_budget(cc_request, factor=0.5)
+                    try:
+                        cc_response = await self._make_upstream_request(cc_request, retry_rate_limit=False)
+                        if not self._is_empty_cc_response(cc_response):
+                            return cc_response
+                        last_response = cc_response
+                        continue  # empty after compaction → standard next-backend flow
+                    except UpstreamError as retry_exc:
+                        last_exc = retry_exc  # second failure → fall through to mark-unhealthy
                 if idx >= 0:
                     if exc.status == 429:
                         failure_kind = "rate_limit"
@@ -3493,6 +3625,9 @@ class BridgeServer:
         self._active_provider.normalize_request(cc_request)
 
         logger.debug("Normalized CC request: %s", json.dumps(cc_request, indent=2, ensure_ascii=False))
+
+        # Truncate oversized tool results before compaction runs
+        self._truncate_oversized_tool_results(cc_request)
 
         # Compact messages before size check
         self._apply_compaction(cc_request)
@@ -4428,6 +4563,125 @@ class BridgeServer:
 
         return _MAX_REQUEST_CHARS
 
+    def _truncate_oversized_tool_results(self, cc_request: dict) -> int:
+        """Shrink any single oversized tool result in ``cc_request``.
+
+        Runs **before** :meth:`_apply_compaction`, unconditionally. The
+        full-request compactor (``_compact_messages``) short-circuits below
+        ``_COMPACTION_CHAR_THRESHOLD``, so its internal 50K tool-result
+        truncation never fires for large-but-under-threshold requests
+        (the exact shape that bloats a resumed conversation to ~280K
+        tokens). This pre-pass ensures a single huge old tool result is
+        always reduced, in both Chat-Completions
+        (``role=="tool"`` string content) and Anthropic-native
+        (``role=="user"`` message with ``content`` list of
+        ``tool_result`` blocks) formats.
+
+        Args:
+            cc_request: The Chat-Completions-shaped request to mutate in place.
+
+        Returns:
+            The number of oversized tool results truncated.
+        """
+        count = 0
+        messages = cc_request.get("messages")
+        if not messages:
+            return 0
+
+        for msg in messages:
+            # Chat-Completions: role == "tool" with a string content.
+            if msg.get("role") == "tool" and isinstance(msg.get("content"), str):
+                content_len = len(msg["content"])
+                if content_len > _TOOL_RESULT_TRUNCATION_LIMIT:
+                    msg["content"] = (
+                        f"[Tool output truncated — original size: {content_len:,} chars]"
+                    )
+                    count += 1
+                continue
+
+            # Anthropic-native: role == "user" with list content carrying
+            # ``tool_result`` blocks. Truncate only those whose ``content``
+            # is a string over the limit; non-string (structured) content
+            # is left untouched.
+            if msg.get("role") == "user" and isinstance(msg.get("content"), list):
+                for block in msg["content"]:
+                    if (
+                        isinstance(block, dict)
+                        and block.get("type") == "tool_result"
+                        and isinstance(block.get("content"), str)
+                        and len(block["content"]) > _TOOL_RESULT_TRUNCATION_LIMIT
+                    ):
+                        original_len = len(block["content"])
+                        block["content"] = (
+                            f"[Tool output truncated — original size: {original_len:,} chars]"
+                        )
+                        count += 1
+
+        return count
+
+    @staticmethod
+    def _is_oversized_request(cc_request: dict) -> bool:
+        """Return True if the request's messages exceed the oversized threshold.
+
+        A soft heuristic (~180K tokens): above this, a high-reasoning /
+        long-context request is likely to be truncated or rejected by
+        upstreams. Used to emit a preemptive WARNING; it does NOT gate the
+        on-failure auto-compaction retry (a context-too-large error triggers
+        recovery regardless of this size estimate).
+        """
+        messages = cc_request.get("messages")
+        if not messages:
+            return False
+        try:
+            return len(json.dumps(messages, ensure_ascii=False)) > _OVERSIZED_INPUT_THRESHOLD
+        except (TypeError, ValueError):
+            return False
+
+    def _compact_with_tighter_budget(self, cc_request: dict, factor: float = 0.5) -> None:
+        """Re-run compaction at a fraction of the model-aware budget.
+
+        Called by the on-failure oversized-recovery path after an upstream
+        reports the request is too large. ``factor`` shrinks the normal
+        messages budget so the second attempt is materially smaller than
+        the first.
+
+        Args:
+            cc_request: The Chat-Completions request to compact in place.
+            factor: Fraction of the model-aware budget to target (0 < f < 1).
+        """
+        if "messages" not in cc_request or factor <= 0:
+            return
+        non_msg = {k: v for k, v in cc_request.items() if k != "messages"}
+        try:
+            overhead = len(json.dumps(non_msg, ensure_ascii=False))
+        except (TypeError, ValueError):
+            overhead = 0
+        max_chars = self._get_max_context_chars()
+        messages_budget = max(0, int((max_chars - overhead - 10_000) * factor))
+        cc_request["messages"] = self._compact_messages(
+            cc_request["messages"],
+            max_messages_chars=messages_budget,
+        )
+
+    def _maybe_warn_oversized(self, cc_request: dict) -> None:
+        """Emit a one-time-per-request WARNING if the request is oversized."""
+        if self._is_oversized_request(cc_request):
+            provider_names = (
+                [type(b[0]).__name__ for b in self._backends]
+                if self._backends
+                else [type(self._active_provider).__name__]
+            )
+            try:
+                size = len(json.dumps(cc_request, ensure_ascii=False))
+            except (TypeError, ValueError):
+                size = -1
+            logger.warning(
+                "Request is large (~%d chars) for high-reasoning/long-context providers %s "
+                "— may truncate or be rejected; recovery (compaction) will engage if needed",
+                size,
+                provider_names,
+            )
+
     def _apply_compaction(self, cc_request: dict) -> None:
         """Compact request messages in place before applying request-size guardrails.
 
@@ -4636,6 +4890,75 @@ class BridgeServer:
         return code, message
 
     @staticmethod
+    def _is_context_too_large_error(status: int, body: object) -> bool:
+        """Return True if an upstream body indicates a context-too-large error.
+
+        Distinct from auth/entitlement (the request would succeed with a
+        smaller context, not with a different key or plan). Code ``1261``
+        is Z.AI's dedicated code; code ``2013`` is overloaded on Minimax
+        (also used for tool-call-pairing failures) so we additionally
+        require a context-window substring in the body — the
+        ``tool call result does not follow tool call`` wording does NOT
+        trigger this predicate, preserving the existing tool-call-validation
+        failure path.
+
+        The status is *not* gated here — the upstream-error-translation
+        path uses this on any status (1261/2013 can arrive on 429/500/502
+        with the /clear message expected). Callers that need a narrower
+        check (e.g. the FI-8.4 retry path) should additionally verify
+        ``status in (400, 413)``.
+
+        Args:
+            status: The upstream HTTP status code.
+            body: The error body (dict, str, or None).
+
+        Returns:
+            True when the body carries code 1261, an HTTP-413-style
+            payload-too-large status, or one of the context-window
+            substrings.
+        """
+        # HTTP 413 "Payload Too Large" unambiguously means the request body
+        # is too large — compaction may recover it, so always classify as
+        # oversized regardless of body content.
+        if status == 413:
+            return True
+
+        # Extract code + message using the same parser the error-translation
+        # path uses (handles dict, JSON string, and double-nested error
+        # wrappers).
+        code, message = BridgeServer._extract_error_fields(body)
+        searchable = f"{code or ''}\n{message or ''}".lower()
+        if code == "1261":
+            return True
+        for needle in (
+            "exceeds max length",
+            "prompt exceeds",
+            "context length",
+            "context window exceeds",
+            "exceeds context",
+            "maximum context",
+        ):
+            if needle in searchable:
+                return True
+
+        # Z.AI Anthropic endpoint may return errors as plain text in the
+        # format ``[code][message][request_id]``; check that directly.
+        if isinstance(body, str):
+            lower = body.lower()
+            for needle in (
+                "exceeds max length",
+                "prompt exceeds",
+                "context length",
+                "context window exceeds",
+                "exceeds context",
+                "maximum context",
+            ):
+                if needle in lower:
+                    return True
+
+        return False
+
+    @staticmethod
     def _translate_upstream_error(status: int, body: object) -> str:
         """Translate an upstream HTTP error into a user-friendly message.
 
@@ -4667,16 +4990,9 @@ class BridgeServer:
 
         # Z.AI code 1261: prompt exceeds model context window
         # Minimax code 2013: context window exceeds limit
+        code, error_message = BridgeServer._extract_error_fields(body)
         searchable = f"{details}\n{error_message}".lower()
-        is_context_too_large = (
-            code == "1261"
-            or "exceeds max length" in searchable
-            or "prompt exceeds" in searchable
-            or "context length" in searchable
-            or "context window exceeds" in searchable
-            or "exceeds context" in searchable
-            or "maximum context" in searchable
-        )
+        is_context_too_large = BridgeServer._is_context_too_large_error(status, body)
         if is_context_too_large:
             return (
                 "The conversation context has grown too large for the upstream model's context window. "
@@ -4719,6 +5035,8 @@ class BridgeServer:
 
         if status == 429:
             return status, "rate_limit_error"
+        if status == 403 and isinstance(exc, ProviderError) and is_entitlement_error(403, str(exc)):
+            return status, "entitlement_error"
         if status in (401, 403):
             return status, "authentication_error"
         return status, "api_error"
@@ -4729,12 +5047,29 @@ class BridgeServer:
 
         Uses ProviderError.http_status to pick the right classification so
         balancing profiles get proper cooldown and failover behavior.
+
+        Precedence: ``cloudflare`` > ``entitlement`` > ``rate_limit`` (429) >
+        ``oversized`` (400/413 context-too-large) > ``auth`` (401/403) >
+        ``transport`` > ``hard``. Entitlement outranks auth because the
+        message is what makes the request non-retryable: a 403 with a
+        "requires a subscription" body will never succeed for the same
+        profile until the user upgrades, so it gets a 24 h cooldown and a
+        distinct failure kind instead of cycling every 15 minutes.
+        ``oversized`` (context-too-large) is a recovery trigger, not a
+        cooldown tier: the on-failure retry path compacts and retries the
+        same backend instead of failing over (see FI-8.4).
         """
         if isinstance(exc, ProviderError):
             if exc.is_cloudflare:
                 return "cloudflare"
             if exc.http_status == 429:
                 return "rate_limit"
+            if exc.http_status == 403 and is_entitlement_error(403, str(exc)):
+                return "entitlement"
+            if exc.http_status in (400, 413) and BridgeServer._is_context_too_large_error(
+                exc.http_status, str(exc)
+            ):
+                return "oversized"
             if exc.http_status in (401, 403):
                 return "auth"
         if _is_transport_error(exc):
