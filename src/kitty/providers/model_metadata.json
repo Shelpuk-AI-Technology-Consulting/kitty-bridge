@@ -106,7 +106,7 @@
 {"id": "google/gemma-3n-e4b-it", "name": "Google: Gemma 3n 4B", "context_length": 32768, "max_completion_tokens": null, "created": 1747776824},
 {"id": "google/gemma-4-26b-a4b-it", "name": "Google: Gemma 4 26B A4B ", "context_length": 262144, "max_completion_tokens": 16384, "created": 1775227989},
 {"id": "google/gemma-4-26b-a4b-it:free", "name": "Google: Gemma 4 26B A4B  (free)", "context_length": 262144, "max_completion_tokens": 32768, "created": 1775227989},
-{"id": "google/gemma-4-31b-it", "name": "Google: Gemma 4 31B", "context_length": 262144, "max_completion_tokens": 16384, "created": 1775148486},
+{"id": "google/gemma-4-31b-it", "name": "Google: Gemma 4 31B", "context_length": 262144, "max_completion_tokens": 262144, "created": 1775148486},
 {"id": "google/gemma-4-31b-it:free", "name": "Google: Gemma 4 31B (free)", "context_length": 262144, "max_completion_tokens": 32768, "created": 1775148486},
 {"id": "google/lyria-3-clip-preview", "name": "Google: Lyria 3 Clip Preview", "context_length": 1048576, "max_completion_tokens": 65536, "created": 1774907255},
 {"id": "google/lyria-3-pro-preview", "name": "Google: Lyria 3 Pro Preview", "context_length": 1048576, "max_completion_tokens": 65536, "created": 1774907286},
