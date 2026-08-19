@@ -1,5 +1,4 @@
 [
-{"id": "ai21/jamba-large-1.7", "name": "AI21: Jamba Large 1.7", "context_length": 256000, "max_completion_tokens": 4096, "created": 1754669020},
 {"id": "aion-labs/aion-2.0", "name": "AionLabs: Aion-2.0", "context_length": 131072, "max_completion_tokens": 32768, "created": 1771881306},
 {"id": "aion-labs/aion-3.0", "name": "AionLabs: Aion-3.0", "context_length": 131072, "max_completion_tokens": 32768, "created": 1783443095},
 {"id": "aion-labs/aion-3.0-mini", "name": "AionLabs: Aion-3.0-Mini", "context_length": 131072, "max_completion_tokens": 32768, "created": 1783443096},
@@ -122,7 +121,6 @@
 {"id": "kwaipilot/kat-coder-air-v2.5", "name": "Kwaipilot: KAT-Coder-Air V2.5", "context_length": 256000, "max_completion_tokens": 80000, "created": 1783714590},
 {"id": "kwaipilot/kat-coder-pro-v2", "name": "Kwaipilot: KAT-Coder-Pro V2", "context_length": 262144, "max_completion_tokens": 80000, "created": 1774649310},
 {"id": "kwaipilot/kat-coder-pro-v2.5", "name": "Kwaipilot: KAT-Coder-Pro V2.5", "context_length": 256000, "max_completion_tokens": 80000, "created": 1783714589},
-{"id": "liquid/lfm-2.5-2.6b:free", "name": "LiquidAI: LFM2.5-2.6B (free)", "context_length": 128000, "max_completion_tokens": 8192, "created": 1786470519},
 {"id": "mancer/weaver", "name": "Mancer: Weaver (alpha)", "context_length": 8000, "max_completion_tokens": 6000, "created": 1690934400},
 {"id": "meituan/longcat-2.0", "name": "Meituan: LongCat 2.0", "context_length": 1048756, "max_completion_tokens": 262144, "created": 1784554658},
 {"id": "meta-llama/llama-3.1-70b-instruct", "name": "Meta: Llama 3.1 70B Instruct", "context_length": 131072, "max_completion_tokens": 16384, "created": 1721692800},
@@ -143,7 +141,7 @@
 {"id": "minimax/minimax-m2", "name": "MiniMax: MiniMax M2", "context_length": 204800, "max_completion_tokens": 131072, "created": 1761252093},
 {"id": "minimax/minimax-m2-her", "name": "MiniMax: MiniMax M2-her", "context_length": 65536, "max_completion_tokens": 2048, "created": 1769177239},
 {"id": "minimax/minimax-m2.1", "name": "MiniMax: MiniMax M2.1", "context_length": 204800, "max_completion_tokens": 131072, "created": 1766454997},
-{"id": "minimax/minimax-m2.5", "name": "MiniMax: MiniMax M2.5", "context_length": 204800, "max_completion_tokens": 196608, "created": 1770908502},
+{"id": "minimax/minimax-m2.5", "name": "MiniMax: MiniMax M2.5", "context_length": 204800, "max_completion_tokens": null, "created": 1770908502},
 {"id": "minimax/minimax-m2.7", "name": "MiniMax: MiniMax M2.7", "context_length": 204800, "max_completion_tokens": 131072, "created": 1773836697},
 {"id": "minimax/minimax-m3", "name": "MiniMax: MiniMax M3", "context_length": 1048576, "max_completion_tokens": 512000, "created": 1780245374},
 {"id": "minimax/minimax-m3:batch", "name": "MiniMax: MiniMax M3 (batch)", "context_length": 524288, "max_completion_tokens": null, "created": 1780245374},
@@ -413,5 +411,6 @@
 {"id": "~moonshotai/kimi-latest", "name": "MoonshotAI Kimi Latest", "context_length": 1048576, "max_completion_tokens": 974842, "created": 1777318428},
 {"id": "~openai/gpt-latest", "name": "OpenAI GPT Latest", "context_length": 1050000, "max_completion_tokens": 128000, "created": 1777318334},
 {"id": "~openai/gpt-mini-latest", "name": "OpenAI GPT Mini Latest", "context_length": 400000, "max_completion_tokens": 128000, "created": 1777318471},
-{"id": "~x-ai/grok-latest", "name": "xAI: Grok Latest", "context_length": 500000, "max_completion_tokens": null, "created": 1783519360}
+{"id": "~x-ai/grok-latest", "name": "xAI: Grok Latest", "context_length": 500000, "max_completion_tokens": null, "created": 1783519360},
+{"id": "~z-ai/glm-latest", "name": "Z.ai: GLM Latest", "context_length": 1048576, "max_completion_tokens": 131072, "created": 1787151053}
 ]
