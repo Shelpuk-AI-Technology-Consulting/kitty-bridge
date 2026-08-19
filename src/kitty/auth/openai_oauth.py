@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import html
 import json
 import logging
 import secrets
@@ -200,9 +201,18 @@ async def _start_callback_server(
             error_description = request.query.get("error_description", "")
             oauth_error = OAuthAuthorizationError(error, error_description)
             code_future.set_result(oauth_error)
+            # Escaped: both values come straight from the callback query
+            # string, so reflecting them raw makes this page an XSS sink for
+            # anyone who can get the browser to hit the loopback callback
+            # while a login is in progress.
             return web.Response(
                 status=400,
-                text=f"<html><body><p>Authorization error: {error}</p><p>{error_description}</p></body></html>",
+                text=(
+                    "<html><body>"
+                    f"<p>Authorization error: {html.escape(error)}</p>"
+                    f"<p>{html.escape(error_description)}</p>"
+                    "</body></html>"
+                ),
                 content_type="text/html",
             )
 
