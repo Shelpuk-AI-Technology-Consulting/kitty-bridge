@@ -234,6 +234,7 @@ class TestBridgeStatusCommandOutput:
     def test_status_names_the_address_and_says_kitty_cannot_manage_it(self, capsys):
         from kitty.bridge.manage import BridgeStatus
         from kitty.cli.main import main
+        from kitty.cli.router import BuiltinCommand, RouteResult
 
         state = BridgeState(
             pid=4321,
@@ -244,8 +245,14 @@ class TestBridgeStatusCommandOutput:
             tls=False,
         )
 
+        # Route explicitly: with an empty profile store the router sends every
+        # command to the setup wizard, so this test would otherwise pass or fail
+        # depending on whether the machine running it has profiles configured.
+        route = RouteResult(builtin=BuiltinCommand.BRIDGE_STATUS)
+
         with (
             patch("sys.argv", ["kitty", "bridge", "status"]),
+            patch("kitty.cli.router.CLIRouter.route", return_value=route),
             patch("kitty.bridge.manage.bridge_status", return_value=BridgeStatus.UNMANAGEABLE),
             patch("kitty.bridge.state.load_state", return_value=state),
             pytest.raises(SystemExit) as exc_info,
