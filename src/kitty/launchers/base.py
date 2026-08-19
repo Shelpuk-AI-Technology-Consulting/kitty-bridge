@@ -61,6 +61,18 @@ class LauncherAdapter(ABC):
             resolved_key: Raw API key string resolved from the credential store.
         """
 
+    @property
+    def default_settings_path(self) -> Path | None:
+        """Location of the agent's own settings file.
+
+        The launcher patches this file to point the agent at the local bridge.
+        Adapters whose agent has no such file return ``None``.
+
+        Returns:
+            Path to the agent's settings file, or ``None``.
+        """
+        return None
+
     def prepare_launch(
         self,
         env_overrides: dict[str, str],

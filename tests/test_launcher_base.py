@@ -1,5 +1,7 @@
 """Tests for launchers/base.py — LauncherAdapter interface, SpawnConfig, BridgeProtocol re-export."""
 
+import inspect
+
 import pytest
 
 from kitty.types import BridgeProtocol
@@ -133,42 +135,75 @@ class TestLaunchLifecycleHooks:
         assert ClaudeAdapter.cleanup_launch is not LauncherAdapter.cleanup_launch
 
 
-class TestAdaptersAreCallableTheWayTheLauncherCallsThem:
-    """Every registered adapter must accept the launcher's actual call shape.
+_REGISTERED_ADAPTERS = ("codex", "claude", "gemini", "kilo")
 
-    `cli/launcher.py` invokes the lifecycle hooks with the keyword
-    ``settings_path=``. KiloAdapter named the same parameter ``config_path``,
-    so `kitty <profile> kilo` raised TypeError before it ever spawned the agent
-    — the target was unusable. Nothing caught it because the launch path is
-    exercised per-adapter only for Claude.
+
+def _adapter(name: str):
+    """Build one of the adapters the CLI registers.
+
+    Args:
+        name: Target name as typed by the user, e.g. ``"kilo"``.
+
+    Returns:
+        The adapter instance.
+    """
+    from kitty.launchers.claude import ClaudeAdapter
+    from kitty.launchers.codex import CodexAdapter
+    from kitty.launchers.gemini import GeminiAdapter
+    from kitty.launchers.kilo import KiloAdapter
+
+    return {"codex": CodexAdapter, "claude": ClaudeAdapter, "gemini": GeminiAdapter, "kilo": KiloAdapter}[name]()
+
+
+class TestEachAdapterOwnsItsSettingsPath:
+    """The launcher must patch each agent's own config file, and no other.
+
+    It used to sniff for a module-level constant that was never an adapter
+    attribute, so the lookup always failed and every agent was handed Claude
+    Code's ``settings.json``. Kilo then wrote its provider block into that file
+    while its own config went untouched — the agent stayed misconfigured and an
+    unrelated file was modified. A signature-shape test cannot see any of that;
+    these assert on the path actually resolved.
     """
 
-    @staticmethod
-    def _registered_adapters():
-        """Return the adapters the CLI actually offers, as (name, instance)."""
-        from kitty.launchers.claude import ClaudeAdapter
-        from kitty.launchers.codex import CodexAdapter
-        from kitty.launchers.gemini import GeminiAdapter
-        from kitty.launchers.kilo import KiloAdapter
+    @pytest.mark.parametrize("name", _REGISTERED_ADAPTERS)
+    def test_settings_path_is_declared_on_the_adapter(self, name: str):
+        adapter = _adapter(name)
 
-        return [
-            ("codex", CodexAdapter()),
-            ("claude", ClaudeAdapter()),
-            ("gemini", GeminiAdapter()),
-            ("kilo", KiloAdapter()),
-        ]
+        assert hasattr(adapter, "default_settings_path"), "the launcher asks every adapter for this"
 
-    @pytest.mark.parametrize("name,adapter", _registered_adapters.__func__())
-    def test_prepare_launch_accepts_the_launcher_call_shape(self, name: str, adapter, tmp_path):
-        """Mirrors cli/launcher.py exactly: positional env, keyword settings_path."""
-        import inspect
+    def test_claude_resolves_to_claude_settings(self):
+        path = _adapter("claude").default_settings_path
 
-        signature = inspect.signature(adapter.prepare_launch)
-        signature.bind({"ANTHROPIC_BASE_URL": "http://127.0.0.1:1"}, settings_path=tmp_path / "cfg.json")
+        assert path is not None
+        assert path.name == "settings.json"
+        assert ".claude" in path.parts
 
-    @pytest.mark.parametrize("name,adapter", _registered_adapters.__func__())
-    def test_cleanup_launch_accepts_the_launcher_call_shape(self, name: str, adapter, tmp_path):
-        import inspect
+    def test_kilo_resolves_to_its_own_config_not_claudes(self):
+        """The exact confusion that corrupted an unrelated file."""
+        path = _adapter("kilo").default_settings_path
 
-        signature = inspect.signature(adapter.cleanup_launch)
-        signature.bind(None, settings_path=tmp_path / "cfg.json")
+        assert path is not None
+        assert path.name == "kilo.json"
+        assert ".claude" not in path.parts
+
+    @pytest.mark.parametrize("name", ["codex", "gemini"])
+    def test_agents_without_a_settings_file_resolve_to_none(self, name: str):
+        """None means 'do not patch anything', not 'use somebody else's file'."""
+        assert _adapter(name).default_settings_path is None
+
+    def test_no_two_adapters_share_a_settings_path(self):
+        paths = [(n, _adapter(n).default_settings_path) for n in _REGISTERED_ADAPTERS]
+        configured = [(n, p) for n, p in paths if p is not None]
+        distinct = {p for _n, p in configured}
+
+        assert len(distinct) == len(configured), f"adapters share a config file: {configured}"
+
+    @pytest.mark.parametrize("name", _REGISTERED_ADAPTERS)
+    def test_prepare_launch_accepts_the_launchers_call_shape(self, name: str, tmp_path):
+        """Mirrors cli/launcher.py: positional env, keyword settings_path."""
+        adapter = _adapter(name)
+
+        # bind() raises TypeError if the keyword does not exist — that is the assertion.
+        inspect.signature(adapter.prepare_launch).bind({"X": "1"}, settings_path=tmp_path / "cfg.json")
+        inspect.signature(adapter.cleanup_launch).bind(None, settings_path=tmp_path / "cfg.json")

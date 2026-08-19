@@ -206,3 +206,42 @@ class TestEveryStartPathIsGuarded:
         constructors = self._files_calling("BridgeServer") - {"bridge/server.py"}
 
         assert constructors == {"cli/launcher.py", "cli/main.py", "bridge_runner.py"}
+
+
+class TestTypeSuppressionsAreSpecific:
+    """R5: a clean type check must not be achieved by silencing it.
+
+    With mypy now blocking, the cheapest way to make it pass is a blanket
+    `# type: ignore`, which disables every check on that line — including the
+    class of error that turned up four real defects. Each suppression must name
+    the codes it silences, so it stops applying when the code changes.
+    """
+
+    @staticmethod
+    def _suppressions() -> list[tuple[str, int, str]]:
+        """Return every ``type: ignore`` in the source, with its location."""
+        found = []
+        for path in sorted(SRC.rglob("*.py")):
+            for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+                if "type: ignore" in line:
+                    found.append((path.relative_to(SRC).as_posix(), lineno, line.strip()))
+        return found
+
+    def test_no_bare_type_ignore(self):
+        bare = re.compile(r"type:\s*ignore(?!\[)")
+        offenders = [f"{rel}:{lineno}" for rel, lineno, line in self._suppressions() if bare.search(line)]
+
+        assert not offenders, (
+            "these suppressions disable every check on their line; name the specific "
+            f"error codes instead: {offenders}"
+        )
+
+    def test_no_blanket_file_level_suppression(self):
+        """`# mypy: ignore-errors` would silence a whole module at once."""
+        offenders = [
+            path.relative_to(SRC).as_posix()
+            for path in sorted(SRC.rglob("*.py"))
+            if re.search(r"^#\s*mypy:\s*ignore-errors", path.read_text(encoding="utf-8"), re.M)
+        ]
+
+        assert not offenders, f"whole-file type suppression found in {offenders}"

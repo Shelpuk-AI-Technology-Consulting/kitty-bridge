@@ -45,7 +45,7 @@ class CustomOpenAIAdapter(ProviderAdapter):
                 raise ValueError(
                     f"Invalid base_url in provider_config: {url!r}. Must be a non-empty http:// or https:// URL."
                 )
-            return url
+            return str(url)
         return self.default_base_url
 
     def build_upstream_headers(self, api_key: str) -> dict[str, str]:

@@ -23,7 +23,7 @@ import logging
 import secrets
 import urllib.parse
 import webbrowser
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import aiohttp
 from aiohttp import web
@@ -111,7 +111,7 @@ def _decode_jwt_payload(token: str) -> dict:
         payload += "=" * padding
     try:
         decoded = base64.urlsafe_b64decode(payload)
-        return json.loads(decoded)
+        return cast(dict, json.loads(decoded))
     except Exception:
         return {}
 
@@ -266,7 +266,7 @@ async def _exchange_code_for_tokens(
                 list(tokens.keys()),
             )
             raise OAuthAuthorizationError("Token response missing required fields")
-        return tokens
+        return cast(dict, tokens)
 
 
 async def _exchange_id_token_for_api_key(
@@ -320,7 +320,7 @@ async def _exchange_id_token_for_api_key(
                 "token_exchange_failed",
                 f"Response missing openai_api_key: {result}",
             )
-    return api_key
+    return cast(str, api_key)
 
 
 # ── Main orchestrator ────────────────────────────────────────────────────

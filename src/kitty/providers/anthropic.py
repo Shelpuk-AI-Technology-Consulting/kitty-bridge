@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import uuid
+from typing import cast
 
 from kitty.providers.base import ProviderAdapter, ProviderError
 
@@ -41,7 +42,9 @@ def _safe_json_load_args(arguments: str | None) -> dict:
     """
     raw = arguments or "{}"
     try:
-        return json.loads(raw)
+        # json.loads is typed as returning Any; the guard below covers the
+        # only failure mode, and callers require a mapping.
+        return cast(dict, json.loads(raw))
     except json.JSONDecodeError:
         return {}
 

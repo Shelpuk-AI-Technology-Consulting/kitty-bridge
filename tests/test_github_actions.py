@@ -361,3 +361,32 @@ class TestMetadataRefreshRespectsBranchProtection:
             assert "--exit-code" not in step.get("run", ""), (
                 f"step {step.get('name')!r} fails the build on metadata drift; it should report instead"
             )
+
+# ── R5/R6: the type check is enforced, and not gamed ──────
+
+
+class TestTypeCheckIsEnforced:
+    """mypy must fail the build, not merely report.
+
+    It was advisory while the codebase carried 98 errors. Those are now zero,
+    and five of them turned out to be real defects, so the check earns a gate:
+    nothing else stops the count climbing back.
+    """
+
+    def test_mypy_step_exists_and_is_blocking(self):
+        steps = _get_all_steps(_load_workflow("tests.yml"))
+        mypy_steps = [s for s in steps if "mypy" in s.get("run", "")]
+
+        assert mypy_steps, "no mypy step found in the reusable test workflow"
+        for step in mypy_steps:
+            assert not step.get("continue-on-error"), (
+                f"step {step.get('name')!r} runs mypy but swallows its failures"
+            )
+
+    def test_mypy_runs_before_the_test_suite(self):
+        """A type error should surface in seconds, not after an 11-minute run."""
+        commands = [s.get("run", "") for s in _get_all_steps(_load_workflow("tests.yml"))]
+        mypy_at = next(i for i, c in enumerate(commands) if "mypy" in c)
+        pytest_at = next(i for i, c in enumerate(commands) if "pytest" in c)
+
+        assert mypy_at < pytest_at, "mypy runs after the suite, so type errors are reported last"

@@ -66,7 +66,7 @@ class CustomAnthropicAdapter(AnthropicAdapter):
                 raise ValueError(
                     f"Invalid base_url in provider_config: {url!r}. Must be a non-empty http:// or https:// URL."
                 )
-            return url
+            return str(url)
         return self.default_base_url
 
     def translate_to_upstream(self, cc_request: dict) -> dict:

@@ -142,6 +142,15 @@ class ClaudeAdapter(LauncherAdapter):
             env_clear=list(_CONFLICTING_ENV_VARS),
         )
 
+    @property
+    def default_settings_path(self) -> Path | None:
+        """Location of Claude Code's settings file.
+
+        Returns:
+            Path to ``~/.claude/settings.json``.
+        """
+        return _DEFAULT_SETTINGS_PATH
+
     def prepare_launch(
         self,
         env_overrides: dict[str, str],

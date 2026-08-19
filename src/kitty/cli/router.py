@@ -123,7 +123,7 @@ class CLIRouter:
                 sub_builtin = _BUILTIN_MAP.get(sub_key)
                 if sub_builtin is not None:
                     return RouteResult(builtin=sub_builtin, extra_args=rest[1:])
-            backend = self._resolver.resolve_default_backend()
+            backend: BackendConfig | None = self._resolver.resolve_default_backend()
             profile = backend if isinstance(backend, Profile) else None
             return RouteResult(builtin=builtin, profile=profile, backend=backend, extra_args=rest)
 

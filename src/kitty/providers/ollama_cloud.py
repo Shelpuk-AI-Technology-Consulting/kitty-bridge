@@ -262,7 +262,7 @@ class OllamaCloudAdapter(ProviderAdapter):
     @staticmethod
     def _translate_tool_calls(tool_calls: list[dict]) -> list[dict]:
         """Translate Ollama tool calls to CC format (arguments as JSON string)."""
-        cc_tool_calls = []
+        cc_tool_calls: list[dict] = []
         for tc in tool_calls:
             func = tc.get("function", {})
             args = func.get("arguments", {})

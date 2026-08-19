@@ -33,11 +33,12 @@ jobs:
       - name: Check import layering
         run: lint-imports
 
+      # A gate, not a report. mypy found four user-visible defects the suite
+      # could not: each lived on a path tests do not execute -- an interactive
+      # terminal, a non-Linux OS, or a second implementation of an interface.
+      - name: Type check
+        run: mypy src/kitty
+
       - name: Test
         run: pytest -q
 
-      # Not yet a gate: the codebase currently has pre-existing annotation
-      # errors. Reported so the debt stays visible and can be burned down.
-      - name: Type check (informational)
-        continue-on-error: true
-        run: mypy src/kitty

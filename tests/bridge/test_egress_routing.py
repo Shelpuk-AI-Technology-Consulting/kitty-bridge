@@ -270,3 +270,11 @@ class TestRequestsActuallyGoOutProxied:
 
         assert routed
         assert all(proxy is None for _url, proxy in routed)
+
+
+class _MessagesLauncher(_StubLauncher):
+    """Launcher that makes the bridge serve the Anthropic Messages API."""
+
+    @property
+    def bridge_protocol(self) -> BridgeProtocol:
+        return BridgeProtocol.MESSAGES_API

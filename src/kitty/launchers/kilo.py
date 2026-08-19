@@ -94,6 +94,15 @@ class KiloAdapter(LauncherAdapter):
             env_clear=[],
         )
 
+    @property
+    def default_settings_path(self) -> Path | None:
+        """Location of the Kilo CLI config file.
+
+        Returns:
+            Path to ``~/.config/kilo/kilo.json``.
+        """
+        return _DEFAULT_CONFIG_PATH
+
     def prepare_launch(
         self,
         env_overrides: dict[str, str],

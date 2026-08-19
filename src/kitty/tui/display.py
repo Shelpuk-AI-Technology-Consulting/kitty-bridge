@@ -221,6 +221,9 @@ class LiveChecklist:
                 each refresh rebuilds the table. The previous version assigned to
                 a non-existent ``Row.cells`` attribute, which silently did
                 nothing and left every check showing the pending spinner.
+
+                Returns:
+                    A table reflecting every check's current status and detail.
                 """
                 table = Table.grid(padding=(0, 2))
                 table.add_column()
@@ -240,7 +243,7 @@ class LiveChecklist:
                     item.detail = detail
                     live.update(_render())
         else:
-            items: list[CheckItem] = []
+            items = []
             for label, check_fn in checks:
                 item = CheckItem(label)
                 items.append(item)

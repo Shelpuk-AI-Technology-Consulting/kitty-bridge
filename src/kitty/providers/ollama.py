@@ -53,9 +53,8 @@ class OllamaAdapter(ProviderAdapter):
         Returns:
             Base URL string.
         """
-        if provider_config and "base_url" in provider_config:
-            return provider_config["base_url"]
-        return self.default_base_url
+        url = (provider_config or {}).get("base_url")
+        return str(url) if url else self.default_base_url
 
     def build_upstream_headers(self, api_key: str) -> dict[str, str]:
         """Build headers for Ollama.

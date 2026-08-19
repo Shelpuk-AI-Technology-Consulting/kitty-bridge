@@ -169,7 +169,7 @@ def _extract_error_message(body: dict | list | str) -> str:
     if isinstance(body, dict):
         error = body.get("error")
         if isinstance(error, dict):
-            return error.get("message", str(error))
+            return str(error.get("message", str(error)))
         if isinstance(error, str):
             return error
     return str(body)

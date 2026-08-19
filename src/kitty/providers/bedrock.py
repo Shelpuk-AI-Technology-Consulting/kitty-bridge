@@ -70,7 +70,8 @@ class BedrockAdapter(ProviderAdapter):
 
     def get_region(self, provider_config: dict) -> str:
         """Get AWS region from provider_config."""
-        return provider_config.get("region", _DEFAULT_REGION)
+        region = provider_config.get("region")
+        return str(region) if region else _DEFAULT_REGION
 
     def get_profile_name(self, provider_config: dict) -> str | None:
         """Get AWS profile name from provider_config."""
