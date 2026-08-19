@@ -11,6 +11,7 @@ on:
 
 permissions:
   contents: write
+  pull-requests: write
 
 jobs:
   update-metadata:
@@ -36,22 +37,48 @@ jobs:
             echo "OPENROUTER_API_KEY not set; skipping metadata update"
           fi
 
-      - name: Commit refreshed model metadata
+      # Branch protection requires every change to main to go through a pull
+      # request, so this opens one instead of pushing directly. The previous
+      # version pushed straight to main and had been failing since that rule
+      # was added, which is why the committed metadata drifted.
+      - name: Propose refreshed model metadata
         if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BRANCH: chore/model-metadata
         run: |
           if git diff --quiet -- src/kitty/providers/model_metadata.json; then
             echo "Model metadata is already up to date"
-          else
-            git add src/kitty/providers/model_metadata.json
-            git -c user.name="github-actions[bot]" \
-                -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
-                commit -m "Update OpenRouter model metadata"
-            git push
+            exit 0
           fi
 
-      - name: Check model metadata is current
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B "$BRANCH"
+          git add src/kitty/providers/model_metadata.json
+          git commit -m "Update OpenRouter model metadata"
+          git push --force-with-lease origin "$BRANCH"
+
+          if [ -z "$(gh pr list --head "$BRANCH" --state open --json number --jq '.[].number')" ]; then
+            gh pr create --base main --head "$BRANCH"               --title "Update OpenRouter model metadata"               --body "Automated refresh of the bundled model catalogue from the OpenRouter API."
+          else
+            echo "Existing pull request updated"
+          fi
+
+      # Reported, not enforced. This compares against the OpenRouter API as it
+      # is right now, so it can drift between a refresh and a pull request
+      # through no fault of that pull request -- which used to fail unrelated
+      # work. Freshness is maintained by the scheduled refresh above.
+      - name: Report model metadata drift
         if: github.event_name == 'pull_request'
-        run: git diff --exit-code -- src/kitty/providers/model_metadata.json
+        run: |
+          if git diff --quiet -- src/kitty/providers/model_metadata.json; then
+            echo "Model metadata is current."
+          else
+            echo "::notice::Bundled model metadata differs from the live OpenRouter catalogue."
+            echo "The scheduled refresh will open a pull request; no action needed here."
+            git diff --stat -- src/kitty/providers/model_metadata.json
+          fi
 
   test:
     # Shared with publish.yml so a release runs exactly these checks.

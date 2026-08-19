@@ -309,3 +309,55 @@ class TestReleaseIsGatedOnTests:
 
         assert claimed, "expected Python version classifiers in pyproject.toml"
         assert claimed <= tested, f"classifiers claim {sorted(claimed - tested)} but CI never tests them"
+
+
+# ── R6: metadata refresh must work under branch protection ────────────────
+
+
+class TestMetadataRefreshRespectsBranchProtection:
+    """The refresh job must not push to a protected branch.
+
+    `main` requires changes to arrive via pull request. The job used to run
+    `git push` directly and had been failing on every push since that rule was
+    enabled, so the bundled catalogue silently stopped being refreshed and
+    unrelated pull requests started failing a freshness check nothing could
+    satisfy.
+    """
+
+    @pytest.fixture()
+    def steps(self) -> list[dict]:
+        workflow = _load_workflow("ci.yml")
+        return workflow["jobs"]["update-metadata"]["steps"]
+
+    def test_no_step_pushes_to_the_default_branch(self, steps: list[dict]):
+        offenders = [
+            step.get("name")
+            for step in steps
+            if re.search(r"git push(?!\s+--force-with-lease origin \"\$BRANCH\")\s*$", step.get("run", ""), re.M)
+        ]
+
+        assert not offenders, f"these steps push directly to main, which branch protection rejects: {offenders}"
+
+    def test_refresh_opens_a_pull_request(self, steps: list[dict]):
+        run_commands = " ".join(step.get("run", "") for step in steps)
+
+        assert "gh pr create" in run_commands, "the refresh must propose its change as a pull request"
+
+    def test_refresh_has_permission_to_open_one(self):
+        workflow = _load_workflow("ci.yml")
+
+        assert workflow.get("permissions", {}).get("pull-requests") == "write"
+
+    def test_pull_requests_are_not_failed_by_metadata_drift(self, steps: list[dict]):
+        """The check compares against a live API, so it can never be satisfiable.
+
+        Enforcing it means unrelated pull requests go red whenever OpenRouter
+        publishes a model between the last refresh and the pull request.
+        """
+        pr_steps = [s for s in steps if "pull_request'" in str(s.get("if", ""))]
+        assert pr_steps, "expected a pull_request-scoped metadata step"
+
+        for step in pr_steps:
+            assert "--exit-code" not in step.get("run", ""), (
+                f"step {step.get('name')!r} fails the build on metadata drift; it should report instead"
+            )
