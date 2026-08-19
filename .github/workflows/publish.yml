@@ -5,6 +5,9 @@ on:
     tags:
       - "v*"
 
+permissions:
+  contents: read
+
 jobs:
   # Gate the release on the same suite pull requests must pass. A tag that
   # fails the tests must never reach PyPI, where a version can't be reused.
