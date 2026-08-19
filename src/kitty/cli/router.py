@@ -29,6 +29,9 @@ class BuiltinCommand(str, Enum):
     BRIDGE_CONFIG = "bridge-config"
     BRIDGE_INSTALL = "bridge-install"
     BRIDGE_UNINSTALL = "bridge-uninstall"
+    EGRESS = "egress"
+    EGRESS_TEST = "egress-test"
+    EGRESS_SHOW = "egress-show"
 
 
 class RoutingError(Exception):
@@ -85,8 +88,10 @@ class CLIRouter:
             NoDefaultProfileError: If a launcher target is given but no default
                 profile is configured.
         """
-        # When the profile store is empty, always direct to setup.
-        if not self._store.get_all_backends():
+        # When the profile store is empty, always direct to setup — except for
+        # egress, which is machine-level and worth configuring or diagnosing
+        # before any profile exists.
+        if not self._store.get_all_backends() and not (args and args[0].lower() == BuiltinCommand.EGRESS.value):
             return RouteResult(builtin=BuiltinCommand.SETUP, needs_setup=True)
 
         if not args:
@@ -98,8 +103,16 @@ class CLIRouter:
 
         # 1. Built-in command match (bridge can also come after profile name)
         builtin = _BUILTIN_MAP.get(head_lower)
-        if builtin is not None and builtin != BuiltinCommand.BRIDGE:
+        if builtin is not None and builtin not in (BuiltinCommand.BRIDGE, BuiltinCommand.EGRESS):
             return RouteResult(builtin=builtin, extra_args=rest)
+
+        # 1a. Egress subcommands; bare `kitty egress` opens the menu.
+        if builtin == BuiltinCommand.EGRESS:
+            if rest:
+                sub_builtin = _BUILTIN_MAP.get(f"egress-{rest[0].lower()}")
+                if sub_builtin is not None:
+                    return RouteResult(builtin=sub_builtin, extra_args=rest[1:])
+            return RouteResult(builtin=BuiltinCommand.EGRESS, extra_args=rest)
 
         # 2. Bridge command (standalone or with profile) and bridge subcommands
         if builtin == BuiltinCommand.BRIDGE:

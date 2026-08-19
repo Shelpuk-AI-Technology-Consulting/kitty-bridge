@@ -269,3 +269,50 @@ class TestAutoSetup:
         router = CLIRouter(empty_store, adapters)
         result = router.route(["profile"])
         assert result.builtin == BuiltinCommand.SETUP
+
+
+class TestEgressRouting:
+    """R12: egress diagnostics must be reachable, including before any profile exists."""
+
+    def test_bare_egress_opens_the_menu(self, populated_store):
+        from kitty.cli.router import BuiltinCommand, CLIRouter
+
+        result = CLIRouter(populated_store, {}).route(["egress"])
+
+        assert result.builtin == BuiltinCommand.EGRESS
+
+    @pytest.mark.parametrize(
+        ("subcommand", "expected"),
+        [("test", "EGRESS_TEST"), ("show", "EGRESS_SHOW"), ("TEST", "EGRESS_TEST")],
+    )
+    def test_subcommands_dispatch(self, populated_store, subcommand: str, expected: str):
+        from kitty.cli.router import BuiltinCommand, CLIRouter
+
+        result = CLIRouter(populated_store, {}).route(["egress", subcommand])
+
+        assert result.builtin == getattr(BuiltinCommand, expected)
+        assert result.extra_args == []
+
+    def test_unknown_subcommand_still_opens_the_menu(self, populated_store):
+        from kitty.cli.router import BuiltinCommand, CLIRouter
+
+        result = CLIRouter(populated_store, {}).route(["egress", "wat"])
+
+        assert result.builtin == BuiltinCommand.EGRESS
+
+    @pytest.mark.parametrize("args", [["egress"], ["egress", "show"], ["egress", "test"]])
+    def test_reachable_with_an_empty_profile_store(self, empty_store, args: list[str]):
+        """Otherwise a fresh install could never configure its gateway."""
+        from kitty.cli.router import BuiltinCommand, CLIRouter
+
+        result = CLIRouter(empty_store, {}).route(args)
+
+        assert result.builtin != BuiltinCommand.SETUP
+        assert result.needs_setup is False
+
+    def test_other_commands_still_route_to_setup_when_empty(self, empty_store):
+        from kitty.cli.router import BuiltinCommand, CLIRouter
+
+        result = CLIRouter(empty_store, {}).route(["doctor"])
+
+        assert result.builtin == BuiltinCommand.SETUP

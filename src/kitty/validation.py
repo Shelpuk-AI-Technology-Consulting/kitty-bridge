@@ -8,6 +8,7 @@ from dataclasses import dataclass
 
 import aiohttp
 
+from kitty.egress import EgressConfig, aiohttp_session_kwargs, should_bypass
 from kitty.providers.base import ProviderAdapter
 
 logger = logging.getLogger(__name__)
@@ -29,6 +30,7 @@ async def validate_api_key(
     provider: ProviderAdapter,
     api_key: str,
     provider_config: dict | None = None,
+    egress: EgressConfig | None = None,
 ) -> ValidationResult:
     """Validate an API key by making a lightweight request to the upstream.
 
@@ -38,6 +40,10 @@ async def validate_api_key(
 
     For providers with ``use_custom_transport=True``, validation is skipped
     (they use custom auth like boto3 SigV4).
+
+    When ``egress`` is supplied the request goes through the egress proxy, and
+    a connection failure becomes fatal rather than a warning: under egress a
+    dead proxy must stop the launch, not let it proceed unproxied.
 
     Note: The validation request uses the Chat Completions format
     (``/chat/completions``). This works for all standard providers
@@ -68,10 +74,15 @@ async def validate_api_key(
     }
 
     timeout = aiohttp.ClientTimeout(total=_VALIDATION_TIMEOUT)
+    # A loopback or LAN provider (local Ollama, a custom endpoint on the LAN)
+    # must not be tunnelled: a rented proxy cannot reach the caller's own
+    # network. Such traffic never leaves the machine, so it is not a leak.
+    effective_egress = None if egress is None or should_bypass(url) else egress
+    session_kwargs = aiohttp_session_kwargs(effective_egress) if effective_egress is not None else {}
 
     try:
         async with (
-            aiohttp.ClientSession(timeout=timeout) as session,
+            aiohttp.ClientSession(timeout=timeout, **session_kwargs) as session,
             session.post(
                 url,
                 json=body,
@@ -93,6 +104,16 @@ async def validate_api_key(
         logger.warning(warning)
         return ValidationResult(valid=True, warning=warning)
     except aiohttp.ClientConnectorError as exc:
+        if effective_egress is not None:
+            # Fail closed: proceeding here would mean either no connectivity at
+            # all, or a broken proxy that a later request might bypass.
+            return ValidationResult(
+                valid=False,
+                reason=(
+                    f"Cannot reach {provider.provider_type} through the egress proxy "
+                    f"{effective_egress.masked()}: {exc}"
+                ),
+            )
         warning = f"Cannot reach {provider.provider_type} for key validation: {exc} — proceeding anyway"
         logger.warning(warning)
         return ValidationResult(valid=True, warning=warning)
@@ -107,6 +128,14 @@ async def validate_api_key(
             ),
         )
     except (aiohttp.ClientError, OSError) as exc:
+        if effective_egress is not None:
+            return ValidationResult(
+                valid=False,
+                reason=(
+                    f"Network error reaching {provider.provider_type} through the egress proxy "
+                    f"{effective_egress.masked()}: {exc}"
+                ),
+            )
         # Client-side HTTP errors (redirect, payload, etc.) — proceed
         warning = f"Key validation network error for {provider.provider_type}: {exc} — proceeding anyway"
         logger.warning(warning)

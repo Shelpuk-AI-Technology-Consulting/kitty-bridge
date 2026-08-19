@@ -13,6 +13,8 @@ from pathlib import Path
 
 from kitty.bridge.server import BridgeServer
 from kitty.credentials.store import CredentialNotFoundError, CredentialStore
+from kitty.egress import get_egress
+from kitty.egress_guard import egress_block_reason
 from kitty.launchers.base import LauncherAdapter, SpawnConfig
 from kitty.launchers.discovery import discover_binary
 from kitty.profiles.schema import Profile
@@ -144,9 +146,16 @@ async def launch_async(
         print(f"Error: {exc}", file=sys.stderr)
         return 1
 
-    # 2. Pre-flight API key validation
+    # 2. Fail closed before any network call — a provider that cannot honour
+    # the proxy would connect from this machine's own address.
+    egress_error = egress_block_reason(provider, profile, resolved_key, backends)
+    if egress_error:
+        print(f"Error: {egress_error}", file=sys.stderr)
+        return 1
+
+    # 3. Pre-flight API key validation
     if validate:
-        result = await validate_api_key(provider, resolved_key, profile.provider_config)
+        result = await validate_api_key(provider, resolved_key, profile.provider_config, egress=get_egress())
         if not result.valid:
             print(f"Error: {result.reason}", file=sys.stderr)
             print("Hint: Update your API key with 'kitty setup' or check the provider dashboard.", file=sys.stderr)
@@ -156,7 +165,7 @@ async def launch_async(
     elif debug:
         print("[kitty debug] Skipping API key validation (--no-validate)", file=sys.stderr)
 
-    # 3. Start bridge server
+    # 4. Start bridge server
     server = BridgeServer(
         adapter,
         provider,
@@ -166,6 +175,7 @@ async def launch_async(
         provider_config=profile.provider_config,
         backends=backends,
         logging_enabled=logging_enabled,
+        egress=get_egress(),
         _usage_log_path=usage_log_path,
     )
     port = await server.start_async()
@@ -353,3 +363,4 @@ def launch(
             usage_log_path=usage_log_path,
         )
         return asyncio.run(coro)
+

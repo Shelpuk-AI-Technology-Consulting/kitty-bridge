@@ -40,6 +40,7 @@ import curl_cffi.requests
 
 from kitty.auth.oauth_session import OAuthRefreshFailed, OAuthSession
 from kitty.cloudflare import get_cloudflare_signature, is_cloudflare_block
+from kitty.egress import aiohttp_session_kwargs, get_egress
 from kitty.providers.base import ProviderError
 
 # Avoid circular import — only need the parent class methods
@@ -216,6 +217,12 @@ class OpenAISubscriptionAdapter(OpenAIAdapter):
             kwargs: dict = {"impersonate": _CODEX_IMPERSONATE}
             if ca_path:
                 kwargs["verify"] = ca_path
+            # Egress must be applied here rather than after construction:
+            # _reset_curl_session() rebuilds this session mid-request when
+            # Cloudflare blocks us, and the rebuild goes through this path.
+            _egress = get_egress()
+            if _egress is not None:
+                kwargs["proxies"] = _egress.proxies_dict()
             self._curl_session_instance = curl_cffi.requests.AsyncSession(**kwargs)
             logger.debug(
                 "Created curl_cffi session with impersonate=%s, ca_path=%s",
@@ -497,7 +504,7 @@ class OpenAISubscriptionAdapter(OpenAIAdapter):
 
         resp: object | None = None
         got_401 = False
-        async with aiohttp.ClientSession() as oauth_http:
+        async with aiohttp.ClientSession(**aiohttp_session_kwargs()) as oauth_http:
             for _auth_step in range(3):
                 resp = None
                 session = self._load_session(cc_request)
@@ -667,7 +674,7 @@ class OpenAISubscriptionAdapter(OpenAIAdapter):
 
         got_401 = False
         resp: object | None = None
-        async with aiohttp.ClientSession() as oauth_http:
+        async with aiohttp.ClientSession(**aiohttp_session_kwargs()) as oauth_http:
             for _auth_step in range(3):
                 resp = None
                 session = self._load_session(cc_request)

@@ -232,6 +232,74 @@ glance. The flag only matters inside a balanced profile — launching a backup p
 
 If every member of a pool is marked backup, the pool behaves like an ordinary balanced profile.
 
+## Static Egress
+
+By default each machine running kitty talks to the LLM provider from its own IP, so ten workers look like ten
+different clients. A **static egress gateway** puts them all behind one address: point every kitty install at the same
+HTTP proxy, and every provider sees a single, stable source IP.
+
+```
+VM 1  kitty claude ─┐
+VM 2  kitty claude ─┼──► egress gateway ──► 185.123.45.67 ──► LLM provider
+VM 3  kitty codex  ─┘
+```
+
+You do not need a cloud NAT gateway. Any authenticated HTTP proxy with a dedicated static IPv4 works, including the
+$1–3/month dedicated datacenter proxies sold by providers like IPRoyal, Proxy-Cheap and Proxy-Seller. Avoid *rotating*
+or *residential* proxies — you want exactly one address that never changes.
+
+**Set it up:**
+
+```bash
+kitty egress
+# → "Configure gateway" → address, username, password → test
+```
+
+The setup ends by fetching your public IP through the proxy and showing it, so you can confirm the address providers
+will actually see before relying on it:
+
+```
+$ kitty egress test
+┌──────────────┬────────────────────────────────┐
+│ Proxy        │ http://proxy.iproyal.com:12323 │
+│ Username     │ myuser                         │
+│ Password     │ ****                           │
+│ Connectivity │ OK                             │
+│ Public IP    │ 185.123.45.67                  │
+│ Latency      │ 41 ms                          │
+└──────────────┴────────────────────────────────┘
+```
+
+Repeat on each machine, and they all share that IP. `kitty doctor` reports the gateway too.
+
+**For scripted or containerised installs** there are two non-interactive overrides, taking precedence over the stored
+gateway:
+
+```bash
+export KITTY_EGRESS_PROXY="http://user:pass@proxy.iproyal.com:12323"
+kitty claude
+
+# or per invocation
+kitty claude --egress-proxy http://user:pass@proxy.iproyal.com:12323
+```
+
+**Things worth knowing:**
+
+- **Your prompts and API keys stay private from the proxy.** kitty uses HTTP `CONNECT`, so TLS runs end-to-end between
+  kitty and the provider. The gateway only moves encrypted bytes — it never sees your API key or your conversations.
+- **Local endpoints are never tunnelled.** Loopback and private addresses — a local Ollama on `localhost:11434`, a
+  custom provider on your LAN, cloud instance metadata — connect directly, because a rented proxy cannot reach your own
+  network. That traffic never leaves the machine, so it is not a leak.
+- **It fails closed.** If a profile uses a transport that cannot honour the proxy, kitty refuses to start and tells you
+  which profile, rather than quietly connecting from the machine's own IP. AWS Bedrock in SSO mode is the current
+  example: botocore resolves those credentials outside the proxied client.
+- **Your password is not stored in a config file.** It goes to the same credential store as your API keys, referenced
+  by an opaque id, and is masked wherever kitty prints the gateway.
+- **Use a CONNECT proxy, not a TLS-terminating one.** A proxy that intercepts TLS breaks the OpenAI subscription
+  provider, which relies on a browser TLS fingerprint. Ordinary datacenter proxies are fine.
+
+To stop using a gateway, run `kitty egress` → "Remove gateway".
+
 ## Bridge Mode
 
 Bridge mode starts a standalone OpenAI-compatible API server on your machine. Use it when you want to connect tools that

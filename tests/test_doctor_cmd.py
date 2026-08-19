@@ -131,3 +131,59 @@ class TestDoctorNoDefault:
 
         # Should still return non-zero because no default
         assert exit_code != 0
+
+
+class TestDoctorEgressCheck:
+    """R13: the gateway is machine-level, so it is reported even with no profiles."""
+
+    def test_egress_check_runs_when_no_profiles_exist(self, tmp_path):
+        """A fresh install is exactly when someone is setting a gateway up."""
+        from kitty.cli.doctor_cmd import run_doctor
+        from kitty.profiles.store import ProfileStore
+
+        store = ProfileStore(path=tmp_path / "profiles.json")
+        executed: list[str] = []
+
+        def _fake_check(_cred_store):
+            def check() -> tuple[bool, str]:
+                executed.append("ran")
+                return True, "not configured"
+
+            return check
+
+        with patch("kitty.cli.doctor_cmd._make_egress_check", side_effect=_fake_check):
+            run_doctor(store)
+
+        assert executed == ["ran"], "the egress check never ran on a profile-less install"
+
+    def test_egress_check_reports_the_configured_gateway_masked(self, tmp_path):
+        from kitty.cli.doctor_cmd import _make_egress_check
+        from kitty.credentials.file_backend import FileBackend
+        from kitty.credentials.store import CredentialStore
+        from kitty.egress_store import EgressRecord, EgressStore
+
+        cred_store = CredentialStore(backends=[FileBackend(path=tmp_path / "creds.json")])
+        cred_store.set("ref", "s3cr3tpw")
+        egress_store = EgressStore(path=tmp_path / "egress.json")
+        egress_store.save(EgressRecord(proxy_url="http://proxy.example.com:3128", username="u", auth_ref="ref"))
+
+        with patch("kitty.egress_store.EgressStore", return_value=egress_store):
+            ok, detail = _make_egress_check(cred_store)()
+
+        assert ok is True
+        assert "proxy.example.com:3128" in detail
+        assert "s3cr3tpw" not in detail
+
+    def test_egress_check_reports_when_unconfigured(self, tmp_path):
+        from kitty.cli.doctor_cmd import _make_egress_check
+        from kitty.credentials.file_backend import FileBackend
+        from kitty.credentials.store import CredentialStore
+        from kitty.egress_store import EgressStore
+
+        cred_store = CredentialStore(backends=[FileBackend(path=tmp_path / "creds.json")])
+
+        with patch("kitty.egress_store.EgressStore", return_value=EgressStore(path=tmp_path / "egress.json")):
+            ok, detail = _make_egress_check(cred_store)()
+
+        assert ok is True
+        assert "not configured" in detail
