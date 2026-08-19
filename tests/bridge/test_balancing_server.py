@@ -1,5 +1,6 @@
 """Tests for bridge server random balancing — backend selection per request."""
 
+import json
 import random
 from unittest.mock import AsyncMock, patch
 
@@ -64,17 +65,30 @@ UPSTREAM_RESPONSE = {
 }
 
 
-def _make_backends(n: int):
-    """Create n (provider, key, profile_dict) tuples for balancing tests."""
+def _make_backends(n: int, backup_indices: set[int] | None = None):
+    """Create n (provider, key, profile) tuples for balancing tests.
+
+    Args:
+        n: How many backends to build.
+        backup_indices: Indices whose profile is marked as a reserve-tier
+            member (``backup=True``). Defaults to none.
+    """
     import uuid
 
     from kitty.profiles.schema import Profile
 
+    backup_indices = backup_indices or set()
     backends = []
     for i in range(n):
         provider = StubProvider(provider_type=f"stub-{i}", base_url=f"https://api{i}.example.com/v1")
         key = f"key-{i}"
-        profile = Profile(name=f"profile-{i}", provider="openai", model=f"model-{i}", auth_ref=str(uuid.uuid4()))
+        profile = Profile(
+            name=f"profile-{i}",
+            provider="openai",
+            model=f"model-{i}",
+            auth_ref=str(uuid.uuid4()),
+            backup=i in backup_indices,
+        )
         backends.append((provider, key, profile))
     return backends
 
@@ -1347,3 +1361,330 @@ class TestStreamingBackendSelectionRequireStreaming:
         # All 3 backends use StubProvider which doesn't override stream_request
         with pytest.raises(AllBackendsUnhealthyError):
             server._get_next_backend(require_streaming=True)
+
+
+class TestBackupTierSelection:
+    """Backup members form a reserve tier used only when no primary is healthy."""
+
+    @staticmethod
+    def _server(backends):
+        return BridgeServer(
+            adapter=StubLauncher(),
+            provider=backends[0][0],
+            resolved_key=backends[0][1],
+            model="model-0",
+            backends=backends,
+        )
+
+    @staticmethod
+    def _mark_unhealthy(server, indices, *, now: float, cooldown: int = 300):
+        for idx in indices:
+            health = server._backend_health[idx]
+            health["healthy"] = False
+            health["failed_at"] = now
+            health["cooldown"] = cooldown
+
+    def test_backup_never_selected_while_a_primary_is_healthy(self):
+        """R3: three healthy plans must absorb all traffic, not the metered key."""
+        backends = _make_backends(4, backup_indices={3})
+        server = self._server(backends)
+
+        random.seed(42)
+        selected = {server._get_next_backend()[1] for _ in range(200)}
+
+        assert selected == {"key-0", "key-1", "key-2"}
+
+    def test_backup_selected_when_all_primaries_unhealthy(self):
+        """R4: once every plan is in cooldown, the reserve takes over."""
+        backends = _make_backends(4, backup_indices={3})
+        server = self._server(backends)
+        now = 1000.0
+        self._mark_unhealthy(server, range(3), now=now)
+
+        with patch("kitty.bridge.server.time.monotonic", return_value=now + 10):
+            selected = {server._get_next_backend()[1] for _ in range(20)}
+
+        assert selected == {"key-3"}
+
+    def test_single_healthy_primary_still_beats_backup(self):
+        """R3: the tier boundary holds even when only one primary survives."""
+        backends = _make_backends(4, backup_indices={3})
+        server = self._server(backends)
+        now = 1000.0
+        self._mark_unhealthy(server, [0, 1], now=now)
+
+        with patch("kitty.bridge.server.time.monotonic", return_value=now + 10):
+            selected = {server._get_next_backend()[1] for _ in range(50)}
+
+        assert selected == {"key-2"}
+
+    def test_traffic_returns_to_primary_when_cooldown_expires(self):
+        """R5: recovery is automatic on the next request, without a restart."""
+        backends = _make_backends(4, backup_indices={3})
+        server = self._server(backends)
+        now = 1000.0
+        # profile-0 recovers first; the other two plans stay down.
+        self._mark_unhealthy(server, [0], now=now, cooldown=60)
+        self._mark_unhealthy(server, [1, 2], now=now, cooldown=300)
+
+        # While every primary is still cooling down, the reserve serves.
+        with patch("kitty.bridge.server.time.monotonic", return_value=now + 10):
+            assert server._get_next_backend()[1] == "key-3"
+
+        # Once profile-0's window elapses it is eligible again and outranks the reserve.
+        with patch("kitty.bridge.server.time.monotonic", return_value=now + 61):
+            selected = {server._get_next_backend()[1] for _ in range(20)}
+
+        assert selected == {"key-0"}
+
+    def test_all_backup_pool_behaves_as_flat_pool(self):
+        """R6: a pool with no primary members must not stall."""
+        backends = _make_backends(3, backup_indices={0, 1, 2})
+        server = self._server(backends)
+
+        random.seed(42)
+        selected = {server._get_next_backend()[1] for _ in range(200)}
+
+        assert selected == {"key-0", "key-1", "key-2"}
+
+    def test_lone_backup_member_is_selectable(self):
+        """R6: a single-member pool marked backup still resolves."""
+        backends = _make_backends(1, backup_indices={0})
+        server = self._server(backends)
+
+        assert server._get_next_backend()[1] == "key-0"
+
+    def test_failure_weighting_still_applies_within_the_primary_tier(self):
+        """R7: tiering must not flatten the inverse-failure_count weighting."""
+        backends = _make_backends(3, backup_indices={2})
+        server = self._server(backends)
+        server._backend_health[0]["failure_count"] = 99
+
+        random.seed(42)
+        picks = [server._get_next_backend()[1] for _ in range(200)]
+
+        assert picks.count("key-1") > picks.count("key-0")
+        assert "key-2" not in picks
+
+    def test_backup_tier_used_when_primary_is_not_stream_capable(self):
+        """R8: streaming capability is filtered before the tier split.
+
+        StubProvider inherits ProviderAdapter.stream_request, so it is excluded
+        from a streaming request; BedrockAdapter overrides it at class level.
+        """
+        backends = _make_backends(2, backup_indices={1})
+        # Backend 0 is a primary that cannot stream; backend 1 is a streaming reserve.
+        backends[1] = (BedrockAdapter(), backends[1][1], backends[1][2])
+
+        server = self._server(backends)
+
+        # Non-streaming requests still prefer the primary tier.
+        assert server._get_next_backend()[1] == "key-0"
+        # Streaming requests have no eligible primary, so the reserve is used.
+        assert server._get_next_backend(require_streaming=True)[1] == "key-1"
+
+    def test_non_balancing_mode_is_unaffected(self):
+        """R13: backup only has meaning inside a balancing pool."""
+        provider = StubProvider()
+        server = BridgeServer(
+            adapter=StubLauncher(),
+            provider=provider,
+            resolved_key="solo-key",
+            model="model-0",
+        )
+
+        assert server._backend_is_backup == []
+        assert server._get_next_backend()[4] == -1
+
+
+class TestBackupTierHealthz:
+    """R12: /healthz exposes tier membership for debugging."""
+
+    @pytest.mark.asyncio()
+    async def test_healthz_reports_backup_flag_per_backend(self):
+        backends = _make_backends(3, backup_indices={2})
+        server = BridgeServer(
+            adapter=StubLauncher(),
+            provider=backends[0][0],
+            resolved_key=backends[0][1],
+            model="model-0",
+            backends=backends,
+        )
+
+        response = await server._handle_healthz(None)
+
+        payload = json.loads(response.text)
+        assert [b["backup"] for b in payload["backends"]] == [False, False, True]
+
+
+class TestBackupTierDegradedPaths:
+    """Edge cases where the reserve tier meets the existing health machinery."""
+
+    @staticmethod
+    def _server(backends):
+        return BridgeServer(
+            adapter=StubLauncher(),
+            provider=backends[0][0],
+            resolved_key=backends[0][1],
+            model="model-0",
+            backends=backends,
+        )
+
+    def test_any_healthy_backend_counts_a_healthy_reserve(self):
+        """Deliberate design decision, guarded.
+
+        _any_healthy_backend gates "should I keep retrying?" at ~15 handler
+        sites. A healthy reserve *is* a valid next attempt, so this probe must
+        stay tier-agnostic — narrowing it to primaries would abort requests
+        while the reserve is still available.
+        """
+        backends = _make_backends(3, backup_indices={2})
+        server = self._server(backends)
+        now = 1000.0
+        for idx in (0, 1):
+            server._backend_health[idx].update({"healthy": False, "failed_at": now, "cooldown": 300})
+
+        with patch("kitty.bridge.server.time.monotonic", return_value=now + 10):
+            assert server._any_healthy_backend() is True
+
+    def test_any_healthy_backend_false_when_reserve_is_down_too(self):
+        backends = _make_backends(3, backup_indices={2})
+        server = self._server(backends)
+        now = 1000.0
+        for idx in range(3):
+            server._backend_health[idx].update({"healthy": False, "failed_at": now, "cooldown": 300})
+
+        with patch("kitty.bridge.server.time.monotonic", return_value=now + 10):
+            assert server._any_healthy_backend() is False
+
+    def test_all_unhealthy_error_reports_the_reserve_too(self):
+        """The 503 payload must account for every member, reserve included."""
+        from kitty.bridge.server import AllBackendsUnhealthyError
+
+        backends = _make_backends(3, backup_indices={2})
+        server = self._server(backends)
+        now = 1000.0
+        for idx in range(3):
+            server._backend_health[idx].update({"healthy": False, "failed_at": now, "cooldown": 300})
+
+        with (
+            patch("kitty.bridge.server.time.monotonic", return_value=now + 10),
+            pytest.raises(AllBackendsUnhealthyError) as exc_info,
+        ):
+            server._get_next_backend()
+
+        assert len(exc_info.value.backends) == 3
+        assert {b["name"] for b in exc_info.value.backends} == {"profile-0", "profile-1", "profile-2"}
+
+    def test_near_expiry_gamble_may_use_the_reserve(self):
+        """With everything down, soonest-recovery wins over tier preference."""
+        backends = _make_backends(2, backup_indices={1})
+        server = self._server(backends)
+        now = 1000.0
+        # The primary is far from recovering; the reserve is nearly back.
+        server._backend_health[0].update({"healthy": False, "failed_at": now, "cooldown": 3000})
+        server._backend_health[1].update({"healthy": False, "failed_at": now, "cooldown": 30})
+
+        with patch("kitty.bridge.server.time.monotonic", return_value=now + 20):
+            assert server._get_next_backend()[1] == "key-1"
+
+    def test_backup_and_default_flags_are_independent(self):
+        """is_default governs which backend the CLI picks; backup governs tiering."""
+        import uuid as _uuid
+
+        from kitty.profiles.schema import Profile
+
+        backends = _make_backends(2, backup_indices={1})
+        reserve = Profile(
+            name="reserve",
+            provider="openai",
+            model="model-1",
+            auth_ref=str(_uuid.uuid4()),
+            is_default=True,
+            backup=True,
+        )
+        backends[1] = (backends[1][0], backends[1][1], reserve)
+        server = self._server(backends)
+
+        random.seed(42)
+        assert {server._get_next_backend()[1] for _ in range(50)} == {"key-0"}
+
+
+class TestBackupTierEndToEndFailover:
+    """The user story: plans exhaust, the metered key takes over, no client error."""
+
+    @pytest.mark.asyncio
+    async def test_request_fails_over_to_reserve_after_primaries_return_429(self):
+        backends = _make_backends(3, backup_indices={2})
+        server = BridgeServer(
+            adapter=StubLauncher(),
+            provider=backends[0][0],
+            resolved_key=backends[0][1],
+            model="model-0",
+            backends=backends,
+        )
+        port = await server.start_async()
+        primary_urls = [f"https://api{i}.example.com/v1/chat/completions" for i in range(2)]
+        reserve_url = "https://api2.example.com/v1/chat/completions"
+
+        try:
+            with aioresponses(passthrough=["http://127.0.0.1"]) as m:
+                for url in primary_urls:
+                    m.post(url, status=429, payload={"error": "rate limited"}, repeat=True)
+                m.post(reserve_url, payload=UPSTREAM_RESPONSE, repeat=True)
+
+                async with (
+                    aiohttp.ClientSession() as session,
+                    session.post(
+                        f"http://127.0.0.1:{port}/v1/chat/completions",
+                        json={"model": "test-model", "messages": [{"role": "user", "content": "hi"}]},
+                    ) as resp,
+                ):
+                    assert resp.status == 200
+                    data = await resp.json()
+
+                assert data["choices"][0]["message"]["content"] == "Hello!"
+
+                from yarl import URL
+
+                assert m.requests.get(("POST", URL(reserve_url))), "reserve backend was never reached"
+        finally:
+            await server.stop_async()
+
+        # Both plans were demoted; the reserve stayed healthy.
+        assert server._backend_health[0]["healthy"] is False
+        assert server._backend_health[1]["healthy"] is False
+        assert server._backend_health[2]["healthy"] is True
+
+    @pytest.mark.asyncio
+    async def test_reserve_is_untouched_while_a_primary_succeeds(self):
+        backends = _make_backends(2, backup_indices={1})
+        server = BridgeServer(
+            adapter=StubLauncher(),
+            provider=backends[0][0],
+            resolved_key=backends[0][1],
+            model="model-0",
+            backends=backends,
+        )
+        port = await server.start_async()
+        reserve_url = "https://api1.example.com/v1/chat/completions"
+
+        try:
+            with aioresponses(passthrough=["http://127.0.0.1"]) as m:
+                m.post("https://api0.example.com/v1/chat/completions", payload=UPSTREAM_RESPONSE, repeat=True)
+                m.post(reserve_url, payload=UPSTREAM_RESPONSE, repeat=True)
+
+                async with aiohttp.ClientSession() as session:
+                    for _ in range(5):
+                        async with session.post(
+                            f"http://127.0.0.1:{port}/v1/chat/completions",
+                            json={"model": "test-model", "messages": [{"role": "user", "content": "hi"}]},
+                        ) as resp:
+                            assert resp.status == 200
+                            await resp.json()
+
+                from yarl import URL
+
+                assert not m.requests.get(("POST", URL(reserve_url))), "reserve took traffic while the primary was up"
+        finally:
+            await server.stop_async()

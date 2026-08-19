@@ -176,7 +176,8 @@ $ kitty claude
 ## Balanced Profiles
 
 A **balanced profile** combines multiple providers into one. Each request is sent to a randomly chosen healthy provider.
-If one provider goes down, the others pick up the slack automatically.
+If one provider goes down, the others pick up the slack automatically. Members can also be marked as
+[backup](#backup-members), so they only take traffic once the others are exhausted.
 
 **Why use it:**
 
@@ -200,6 +201,36 @@ kitty my-pool codex
 
 When you run this, each request goes to a random healthy member. If MiniMax returns an error, kitty silently retries on
 Novita or Z.AI — your agent never sees the failure.
+
+### Backup members
+
+Sometimes you don't want a member to carry its share of the traffic — you want it held in reserve. Mark a profile as a
+**backup** and it is only used when every non-backup member of the pool is unavailable.
+
+The typical setup is a set of subscription coding plans plus one pay-per-token API key:
+
+```bash
+kitty profile
+# → "Edit profile" → pick your API-key profile → "Backup" → yes
+```
+
+Now all three plans share the traffic normally. When a plan hits its usage limit — or fails for any other reason —
+kitty puts it in a cooldown. Once *every* plan is in cooldown, requests move to the API key instead of failing. As soon
+as a plan's cooldown expires it is picked up again on the next request, so you drift back onto your subscriptions
+automatically without restarting anything.
+
+Anything that makes a member unavailable counts: rate limits, exhausted quotas, expired credentials, upstream 5xx, and
+connection failures.
+
+One caveat: a member that cannot handle streaming is skipped for streaming requests regardless of tier, so a streaming
+request can reach a backup member while a non-streaming primary is still healthy. This only affects providers without
+streaming support, and matches how balanced profiles already behaved.
+
+You are asked about this when creating a profile (the default is no), and you can change it any time via
+`kitty profile → Edit profile → Backup`. The profile table shows a **Backup** column so you can see the split at a
+glance. The flag only matters inside a balanced profile — launching a backup profile directly works exactly as normal.
+
+If every member of a pool is marked backup, the pool behaves like an ordinary balanced profile.
 
 ## Bridge Mode
 
@@ -372,6 +403,8 @@ Profile names must be 1-32 characters, lowercase letters, numbers, dashes, or un
   members, it is deleted entirely.
 - Deleting the default profile automatically promotes the first remaining profile as the new default.
 - Editing a profile's API key creates a new credential entry. Other profiles sharing the old key are not affected.
+- The **backup** flag lives on the profile, not on the membership — a profile that belongs to two balanced profiles is a
+  reserve member in both. See [Backup members](#backup-members).
 
 ### Pre-flight validation
 

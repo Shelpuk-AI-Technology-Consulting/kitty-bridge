@@ -50,11 +50,14 @@ tls_key: "/path/to/key.pem"
         assert config.host == "0.0.0.0"
         assert config.port == 9090
         assert config.profile == "my-zai"
-        assert config.keys_file == "/path/to/keys.txt"
+        # Path-valued fields pass through _expand_path, which renders them with
+        # the host OS separator — compare against the same normalisation rather
+        # than hard-coding POSIX separators.
+        assert config.keys_file == str(Path("/path/to/keys.txt"))
         assert config.log_access is True
-        assert config.log_dir == "/var/log/kitty"
-        assert config.tls_cert == "/path/to/cert.pem"
-        assert config.tls_key == "/path/to/key.pem"
+        assert config.log_dir == str(Path("/var/log/kitty"))
+        assert config.tls_cert == str(Path("/path/to/cert.pem"))
+        assert config.tls_key == str(Path("/path/to/key.pem"))
 
     def test_partial_config_uses_defaults(self, tmp_path: Path):
         _write_yaml(

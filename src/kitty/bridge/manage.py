@@ -26,11 +26,33 @@ _DEFAULT_STATE_PATH = Path.home() / ".config" / "kitty" / "bridge_state.json"
 
 
 def is_pid_alive(pid: int) -> bool:
-    """Check if a process with the given PID is alive."""
+    """Check if a process with the given PID is alive.
+
+    Signal ``0`` performs no action and only probes for the process, on Windows
+    as well as POSIX — it does not terminate the target.
+
+    Args:
+        pid: Process ID to probe.
+
+    Returns:
+        True if a process with that PID exists, False otherwise.
+    """
+    # Reject non-positive PIDs before signalling. On POSIX a pid of 0 addresses
+    # the caller's whole process group and -1 addresses every process the caller
+    # may signal, so a corrupt bridge_state.json would turn stop_bridge() into a
+    # SIGTERM/SIGKILL against the user's own shell session.
+    if pid <= 0:
+        return False
     try:
         os.kill(pid, 0)
         return True
     except (ProcessLookupError, PermissionError):
+        return False
+    except OSError:
+        # Windows has no ProcessLookupError for this: OpenProcess fails with
+        # ERROR_INVALID_PARAMETER (87) for a PID that does not exist, which
+        # surfaces as a plain OSError. Without this branch every stale-state
+        # code path (bridge status/stop/start/restart) crashes on Windows.
         return False
 
 

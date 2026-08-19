@@ -242,10 +242,12 @@ class TestDeferredStreamResponse:
             profile_a.name = "a"
             profile_a.model = "test-model"
             profile_a.provider_config = {}
+            profile_a.backup = False
             profile_b = MagicMock(spec=Profile)
             profile_b.name = "b"
             profile_b.model = "test-model"
             profile_b.provider_config = {}
+            profile_b.backup = False
             backends = [
                 (provider_a, "key-a", profile_a),
                 (provider_b, "key-b", profile_b),

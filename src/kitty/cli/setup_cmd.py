@@ -20,7 +20,7 @@ __all__ = ["run_setup_wizard"]
 # it as "kitty.cli.setup_cmd._find_reusable_auth_ref" without knowing which
 # module owns it.  Without this re-export, patching the function here would
 # have no effect because setup_cmd would keep using the original reference.
-from kitty.cli.profile_cmd import _find_reusable_auth_ref  # noqa: F401
+from kitty.cli.profile_cmd import BACKUP_PROMPT, _find_reusable_auth_ref  # noqa: F401
 
 
 def run_setup_wizard(store: ProfileStore, cred_store: CredentialStore) -> Profile:
@@ -32,7 +32,8 @@ def run_setup_wizard(store: ProfileStore, cred_store: CredentialStore) -> Profil
     3. Model selection
     4. Profile name (validated)
     5. Set as default confirmation
-    6. Connectivity check (optional)
+    6. Backup (reserve-tier) confirmation
+    7. Connectivity check (optional)
 
     Args:
         store: Profile store to save the new profile.
@@ -49,7 +50,7 @@ def run_setup_wizard(store: ProfileStore, cred_store: CredentialStore) -> Profil
     print_section("kitty setup wizard")
 
     # Step 1: Provider selection
-    print_step(1, 6, "Provider selection")
+    print_step(1, 7, "Provider selection")
     choices: list = []
     _label_to_type: dict[str, str] = {}
     for header, providers in PROVIDER_SECTIONS:
@@ -82,12 +83,12 @@ def run_setup_wizard(store: ProfileStore, cred_store: CredentialStore) -> Profil
             print_error("Base URL is required for this provider")
 
     if provider_adapter.requires_oauth:
-        print_step(2, 6, "OAuth login")
+        print_step(2, 7, "OAuth login")
         from kitty.cli.auth_cmd import run_oauth_for_provider
 
         auth_ref, _session_path = asyncio.run(run_oauth_for_provider(store, cred_store, provider))
     else:
-        print_step(2, 6, "API key")
+        print_step(2, 7, "API key")
         existing_auth_ref = _find_reusable_auth_ref(store, cred_store, provider)
         if existing_auth_ref is not None:
             reuse = prompt_confirm(f"Reuse existing API key for {provider!r}?", default=True)
@@ -109,7 +110,7 @@ def run_setup_wizard(store: ProfileStore, cred_store: CredentialStore) -> Profil
             cred_store.set(auth_ref, api_key)
 
     # Step 3: Model
-    print_step(3, 6, "Model selection")
+    print_step(3, 7, "Model selection")
     _default_models = {"openai_subscription": "gpt-5.3-codex"}
     default_model = _default_models.get(provider)
     if default_model:
@@ -123,7 +124,7 @@ def run_setup_wizard(store: ProfileStore, cred_store: CredentialStore) -> Profil
         model = model.strip()
 
     # Step 4: Profile name (validated)
-    print_step(4, 6, "Profile name")
+    print_step(4, 7, "Profile name")
     is_first = len(store.load_all()) == 0
     while True:
         name = prompt_text("Enter profile name (leave empty for default): ")
@@ -140,8 +141,12 @@ def run_setup_wizard(store: ProfileStore, cred_store: CredentialStore) -> Profil
         break
 
     # Step 5: Set as default
-    print_step(5, 6, "Default profile")
+    print_step(5, 7, "Default profile")
     set_default = is_first or prompt_confirm("Set as default profile?", default=True)
+
+    # Step 6: Reserve-tier membership — only meaningful inside a balancing profile.
+    print_step(6, 7, "Backup profile")
+    backup = prompt_confirm(BACKUP_PROMPT, default=False)
 
     # Create profile
     profile = Profile(
@@ -151,13 +156,14 @@ def run_setup_wizard(store: ProfileStore, cred_store: CredentialStore) -> Profil
         auth_ref=auth_ref,
         provider_config=provider_config,
         is_default=set_default,
+        backup=backup,
     )
 
     store.save(profile)
     print_status(f"Profile {name!r} created successfully")
 
-    # Step 6: Connectivity check (optional)
-    print_step(6, 6, "Connectivity check")
+    # Step 7: Connectivity check (optional)
+    print_step(7, 7, "Connectivity check")
     if prompt_confirm("Test connectivity to provider?", default=True):
         with status_spinner("Testing connectivity..."):
             connected = _check_connectivity(provider, auth_ref)

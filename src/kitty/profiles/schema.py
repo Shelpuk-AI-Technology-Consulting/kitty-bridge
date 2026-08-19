@@ -133,6 +133,14 @@ class Profile(BaseModel):
     """A launcher-target-agnostic profile binding a provider, model, and API key reference.
 
     Profiles are shared across all launcher targets (Codex, Claude Code, etc.).
+
+    Attributes:
+        backup: Whether this profile is a reserve member of any
+            :class:`BalancingProfile` it belongs to. Reserve members are selected
+            only while no non-backup member of the pool is healthy, which lets a
+            metered API key stand behind a set of subscription plans. Ignored
+            when the profile is launched directly rather than through a
+            balancing profile.
     """
 
     model_config = {"frozen": True}
@@ -144,6 +152,7 @@ class Profile(BaseModel):
     base_url: HttpsUrl | None = None
     provider_config: dict = {}
     is_default: bool = False
+    backup: bool = False
 
     @field_validator("name")
     @classmethod
