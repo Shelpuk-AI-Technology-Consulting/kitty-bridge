@@ -34,6 +34,7 @@ from kitty.auth.oauth_session import (
     OAuthSession,
 )
 from kitty.auth.pkce import generate_code_challenge, generate_code_verifier
+from kitty.egress import aiohttp_session_kwargs
 
 if TYPE_CHECKING:
     from asyncio import Future
@@ -416,7 +417,7 @@ async def run_oauth_flow(http: aiohttp.ClientSession | None = None) -> OAuthSess
 
     # Exchange code for tokens
     close_http = http is None
-    http = http or aiohttp.ClientSession()
+    http = http or aiohttp.ClientSession(**aiohttp_session_kwargs())
     try:
         tokens = await _exchange_code_for_tokens(code, code_verifier, CLIENT_ID, http)
         # F35: _exchange_code_for_tokens already validates these fields and raises

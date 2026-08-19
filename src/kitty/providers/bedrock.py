@@ -8,6 +8,7 @@ import logging
 import uuid
 from collections.abc import Awaitable, Callable
 
+from kitty.egress import get_egress
 from kitty.providers.anthropic import _safe_json_load_args
 from kitty.providers.base import ProviderAdapter, ProviderError
 
@@ -77,6 +78,23 @@ class BedrockAdapter(ProviderAdapter):
 
     # ── boto3 client factory ─────────────────────────────────────────────
 
+    def supports_egress(self, resolved_key: str, provider_config: dict) -> bool:
+        """Bedrock honours the proxy for API calls, but not for SSO credentials.
+
+        In SSO mode botocore resolves credentials through its own clients — SSO
+        OIDC, STS, and possibly the instance metadata service — which the
+        Bedrock client's proxy configuration does not cover. Those calls would
+        leave from the machine's own address.
+
+        Args:
+            resolved_key: Stored credential; the SSO marker is detected from it.
+            provider_config: Per-profile provider configuration.
+
+        Returns:
+            True for explicit access-key credentials, False in SSO mode.
+        """
+        return not self.is_sso_mode(resolved_key)
+
     def _get_boto3_client(self, resolved_key: str, provider_config: dict):
         """Create a boto3 bedrock-runtime client.
 
@@ -90,13 +108,23 @@ class BedrockAdapter(ProviderAdapter):
 
         region = self.get_region(provider_config)
 
+        # botocore honours HTTP_PROXY/HTTPS_PROXY from the environment, but
+        # kitty never sets those (they would not cover aiohttp), so the proxy
+        # has to be passed explicitly.
+        egress = get_egress()
+        client_kwargs: dict = {}
+        if egress is not None:
+            from botocore.config import Config as _BotoConfig
+
+            client_kwargs["config"] = _BotoConfig(proxies=egress.proxies_dict())
+
         if self.is_sso_mode(resolved_key):
             profile_name = self.get_profile_name(provider_config)
             if profile_name:
                 session = boto3.Session(profile_name=profile_name, region_name=region)
             else:
                 session = boto3.Session(region_name=region)
-            return session.client("bedrock-runtime")
+            return session.client("bedrock-runtime", **client_kwargs)
         else:
             parts = self.parse_aws_credentials(resolved_key)
             access_key = parts[0]
@@ -108,7 +136,7 @@ class BedrockAdapter(ProviderAdapter):
                 aws_session_token=session_token,
                 region_name=region,
             )
-            return session.client("bedrock-runtime")
+            return session.client("bedrock-runtime", **client_kwargs)
 
     # ── CC → Bedrock request translation ─────────────────────────────────
 

@@ -63,8 +63,13 @@ def run_doctor(
     for name in _ADAPTERS:
         checks.append((f"Target {name!r}", _make_target_check(name)))
 
-    # Early exit: no profiles
+    checks.append(("Egress gateway", _make_egress_check(cred_store)))
+
+    # Early exit: no profiles. Egress is machine-level, so the checks gathered
+    # so far still run — otherwise a fresh install could never diagnose its
+    # gateway, which is exactly when someone is setting one up.
     if not profiles:
+        LiveChecklist("kitty doctor").run_checks(checks)
         print_warning("No profiles configured — run 'kitty setup' to get started")
         return 1
 
@@ -84,6 +89,27 @@ def run_doctor(
         print_section(f"{failures} check(s) failed")
 
     return failures
+
+
+def _make_egress_check(cred_store: CredentialStore):
+    """Create a check reporting the configured egress gateway.
+
+    Args:
+        cred_store: Credential store holding the proxy password.
+
+    Returns:
+        A zero-argument callable returning ``(ok, detail)``.
+    """
+
+    def check() -> tuple[bool, str]:
+        from kitty.egress_store import resolve_egress
+
+        config = resolve_egress(cred_store=cred_store)
+        if config is None:
+            return True, "not configured — traffic leaves from this machine's IP"
+        return True, f"all provider traffic routed via {config.masked()}"
+
+    return check
 
 
 def _make_target_check(name: str):

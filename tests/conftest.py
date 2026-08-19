@@ -21,6 +21,20 @@ def _reset_backend_context() -> None:
     _backend_context.set({})
 
 
+@pytest.fixture(autouse=True)
+def _reset_egress() -> None:
+    """Clear the process-wide egress configuration before every test.
+
+    ``kitty.egress`` holds the resolved proxy in a module global, because
+    provider adapters have no other channel for bridge-level settings. Without
+    this reset, a test that enables egress would silently proxy every later
+    test in the same process.
+    """
+    from kitty.egress import set_egress
+
+    set_egress(None)
+
+
 def pytest_addoption(parser: pytest.Parser) -> None:
     """Add CLI flag to include slow tests."""
     parser.addoption("--runslow", action="store_true", default=False, help="run tests marked as slow")

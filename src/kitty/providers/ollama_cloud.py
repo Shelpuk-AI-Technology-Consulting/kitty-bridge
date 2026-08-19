@@ -50,6 +50,7 @@ from collections.abc import Awaitable, Callable
 
 import aiohttp
 
+from kitty.egress import aiohttp_session_kwargs
 from kitty.providers.base import ProviderAdapter, ProviderError
 
 __all__ = ["OllamaCloudAdapter"]
@@ -300,10 +301,18 @@ class OllamaCloudAdapter(ProviderAdapter):
     # ── Session management ─────────────────────────────────────────────
 
     async def _get_session(self) -> aiohttp.ClientSession:
-        """Get or create the aiohttp session."""
+        """Get or create the aiohttp session.
+
+        The session is built with the process-wide egress proxy when one is
+        configured. This provider owns its transport, so it does not share the
+        bridge's session and must apply egress itself.
+
+        Returns:
+            The cached session, creating it if needed.
+        """
         if self._session is None or self._session.closed:
             timeout = aiohttp.ClientTimeout(total=None, sock_connect=30, sock_read=120)
-            self._session = aiohttp.ClientSession(timeout=timeout)
+            self._session = aiohttp.ClientSession(timeout=timeout, **aiohttp_session_kwargs())
         return self._session
 
     def _build_url(self, provider_config: dict) -> str:

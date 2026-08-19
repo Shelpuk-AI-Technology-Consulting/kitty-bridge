@@ -41,6 +41,7 @@ from kitty.bridge.responses.events import (
 )
 from kitty.bridge.responses.translator import ResponsesTranslator
 from kitty.cloudflare import is_cloudflare_block
+from kitty.egress import EgressConfig, should_bypass
 from kitty.providers.base import ProviderAdapter, ProviderError
 
 if TYPE_CHECKING:
@@ -634,6 +635,7 @@ class BridgeServer:
         state_file: str | None = None,
         backend_cooldown: int = 300,
         logging_enabled: bool = False,
+        egress: EgressConfig | None = None,
         _usage_log_path: Path | None = None,
     ) -> None:
         # TLS validation: both or neither
@@ -652,7 +654,12 @@ class BridgeServer:
         self._provider_config = provider_config or {}
         self._app: web.Application | None = None
         self._runner: web.AppRunner | None = None
+        # Egress proxy for public upstreams. None disables proxying.
+        self._egress = egress
         self._session: aiohttp.ClientSession | None = None
+        # Separate proxied session: aiohttp cannot opt a request out of a
+        # session-level proxy, so bypassed destinations need their own.
+        self._proxy_session: aiohttp.ClientSession | None = None
         self._thinking_warned = False
         self._log_path: Path | None = None
 
@@ -1405,6 +1412,9 @@ class BridgeServer:
         if self._session is not None and not self._session.closed:
             await self._session.close()
             self._session = None
+        if self._proxy_session is not None and not self._proxy_session.closed:
+            await self._proxy_session.close()
+            self._proxy_session = None
         self._app = None
         if self._access_log_file is not None:
             self._access_log_file.close()
@@ -1798,7 +1808,6 @@ class BridgeServer:
         terminal_status = "completed"
         last_usage: dict | None = None
         try:
-            session = await self._get_session()
             url = self._build_upstream_url()
             headers = self._build_upstream_headers()
             logger.debug("Upstream POST → %s", url)
@@ -1820,6 +1829,7 @@ class BridgeServer:
                         max_attempts,
                     )
                     await asyncio.sleep(delay)
+                session = await self._session_for(url)
                 async with session.post(url, json=upstream_body, headers=headers, timeout=stream_timeout) as upstream:
                     upstream_status = upstream.status
                     logger.debug("Upstream response status: %d", upstream.status)
@@ -2454,7 +2464,6 @@ class BridgeServer:
                 return sr
 
         try:
-            session = await self._get_session()
             url = self._build_upstream_url()
             headers = self._build_upstream_headers()
             upstream_body = self._active_provider.translate_to_upstream(cc_request)
@@ -2477,6 +2486,7 @@ class BridgeServer:
                     )
                     await asyncio.sleep(delay)
                 try:
+                    session = await self._session_for(url)
                     async with session.post(
                         url,
                         json=upstream_body,
@@ -3132,7 +3142,6 @@ class BridgeServer:
                 return sr
 
         try:
-            session = await self._get_session()
             url = self._build_upstream_url()
             headers = self._build_upstream_headers()
             upstream_body = self._active_provider.translate_to_upstream(cc_request)
@@ -3154,6 +3163,7 @@ class BridgeServer:
                         max_attempts,
                     )
                     await asyncio.sleep(delay)
+                session = await self._session_for(url)
                 async with session.post(url, json=upstream_body, headers=headers, timeout=stream_timeout) as upstream:
                     logger.debug("Upstream response status: %d", upstream.status)
 
@@ -3882,7 +3892,6 @@ class BridgeServer:
                 return sr
 
         try:
-            session = await self._get_session()
             url = self._build_upstream_url()
             headers = self._build_upstream_headers()
             upstream_body = self._active_provider.translate_to_upstream(cc_request)
@@ -3910,6 +3919,7 @@ class BridgeServer:
                 stream_error = False
                 has_content = False
                 chunk_count = 0
+                session = await self._session_for(url)
                 async with session.post(url, json=upstream_body, headers=headers, timeout=stream_timeout) as upstream:
                     upstream_status = upstream.status
                     logger.debug("Upstream response status: %d", upstream.status)
@@ -4814,18 +4824,66 @@ class BridgeServer:
             )
         return None
 
+    def _build_client_session(self, *, proxied: bool) -> aiohttp.ClientSession:
+        """Construct an upstream HTTP session.
+
+        Args:
+            proxied: Whether the session routes through the egress proxy.
+
+        Returns:
+            A configured :class:`aiohttp.ClientSession`.
+        """
+        # LLM calls can be very long (large context, extended thinking).
+        # Remove the total timeout so streaming responses are never cut short.
+        # Keep a connect timeout to fail fast on network issues.
+        timeout = aiohttp.ClientTimeout(total=None, sock_connect=30)
+        # F29: Explicit connection pool limit to avoid aiohttp's default of 100.
+        # Configurable via KITTY_BRIDGE_CONN_LIMIT env var.  force_close=True
+        # prevents port exhaustion when many short-lived connections are made.
+        conn_limit = int(os.environ.get("KITTY_BRIDGE_CONN_LIMIT", "500"))
+        connector = aiohttp.TCPConnector(limit=conn_limit, force_close=True)
+        kwargs: dict = {"timeout": timeout, "connector": connector}
+        if proxied and self._egress is not None:
+            # Session-level proxy, so a future call site cannot forget it.
+            kwargs["proxy"] = self._egress.proxy_url
+            kwargs["proxy_auth"] = self._egress.auth
+        return aiohttp.ClientSession(**kwargs)
+
+    async def _session_for(self, url: str) -> aiohttp.ClientSession:
+        """Return the session that must be used to reach a destination.
+
+        Two sessions are kept rather than one, because aiohttp resolves a
+        request's proxy as ``if proxy is None: proxy = self._default_proxy`` —
+        a request cannot opt out of its session's proxy. Loopback and private
+        destinations therefore need a session of their own, or a local Ollama
+        would be tunnelled to a remote proxy that cannot reach it.
+
+        Args:
+            url: Destination URL for the request about to be made.
+
+        Returns:
+            The proxied session for public destinations when egress is
+            configured, the direct session otherwise.
+        """
+        if self._egress is None or should_bypass(url):
+            return await self._get_session()
+
+        if self._proxy_session is None or self._proxy_session.closed:
+            self._proxy_session = self._build_client_session(proxied=True)
+        return self._proxy_session
+
     async def _get_session(self) -> aiohttp.ClientSession:
+        """Return the direct (unproxied) upstream session.
+
+        Used for loopback and private destinations, and for everything when no
+        egress proxy is configured. Public destinations under egress go through
+        :meth:`_session_for` instead.
+
+        Returns:
+            The cached direct session, creating it if needed.
+        """
         if self._session is None or self._session.closed:
-            # LLM calls can be very long (large context, extended thinking).
-            # Remove the total timeout so streaming responses are never cut short.
-            # Keep a connect timeout to fail fast on network issues.
-            timeout = aiohttp.ClientTimeout(total=None, sock_connect=30)
-            # F29: Explicit connection pool limit to avoid aiohttp's default of 100.
-            # Configurable via KITTY_BRIDGE_CONN_LIMIT env var.  force_close=True
-            # prevents port exhaustion when many short-lived connections are made.
-            conn_limit = int(os.environ.get("KITTY_BRIDGE_CONN_LIMIT", "500"))
-            connector = aiohttp.TCPConnector(limit=conn_limit, force_close=True)
-            self._session = aiohttp.ClientSession(timeout=timeout, connector=connector)
+            self._session = self._build_client_session(proxied=False)
         return self._session
 
     @staticmethod
@@ -5174,7 +5232,6 @@ class BridgeServer:
             self._log_backend_selection()
             return await self._active_provider.make_request(cc_request)
 
-        session = await self._get_session()
         url = self._build_upstream_url()
         headers = self._build_upstream_headers()
         upstream_body = self._active_provider.translate_to_upstream(cc_request)
@@ -5184,6 +5241,7 @@ class BridgeServer:
         last_status = 0
         last_body: object = {}
         for attempt in range(_MAX_RETRIES + 1):
+            session = await self._session_for(url)
             async with session.post(url, json=upstream_body, headers=headers, timeout=request_timeout) as resp:
                 last_status = resp.status
                 try:

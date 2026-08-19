@@ -73,6 +73,20 @@ def main() -> None:
     profile_store = ProfileStore()
     cred_store = CredentialStore(backends=[FileBackend()])
 
+    # Resolve egress before anything can open a socket. The background bridge
+    # gets it from the environment or the stored gateway; the proxy password is
+    # never passed on the command line, where `ps` would expose it.
+    from kitty.egress import set_egress
+    from kitty.egress_guard import egress_block_reason
+    from kitty.egress_store import resolve_egress
+
+    try:
+        egress = resolve_egress(cred_store=cred_store)
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
+    set_egress(egress)
+
     # State file — always use default path
     state_path = Path.home() / ".config" / "kitty" / "bridge_state.json"
 
@@ -101,6 +115,11 @@ def main() -> None:
                 sys.exit(1)
             backends.append((get_provider(mp.provider, mp.provider_config), key, mp))
 
+        _block = egress_block_reason(backends[0][0], members[0], backends[0][1], backends)
+        if _block:
+            print(f"Error: {_block}", file=sys.stderr)
+            sys.exit(1)
+
         server = BridgeServer(
             adapter=None,
             provider=backends[0][0],
@@ -117,6 +136,7 @@ def main() -> None:
             tls_key=tls_key,
             state_file=str(state_path),
             logging_enabled=logging_enabled,
+            egress=egress,
             _usage_log_path=usage_log_path,
         )
     else:
@@ -126,9 +146,15 @@ def main() -> None:
             print(f"No API key for profile {profile.name!r}", file=sys.stderr)
             sys.exit(1)
 
+        _guard_provider = get_provider(profile.provider, profile.provider_config)
+        _block = egress_block_reason(_guard_provider, profile, resolved_key)
+        if _block:
+            print(f"Error: {_block}", file=sys.stderr)
+            sys.exit(1)
+
         server = BridgeServer(
             adapter=None,
-            provider=get_provider(profile.provider, profile.provider_config),
+            provider=_guard_provider,
             resolved_key=resolved_key,
             host=host,
             port=port,
@@ -141,6 +167,7 @@ def main() -> None:
             tls_key=tls_key,
             state_file=str(state_path),
             logging_enabled=logging_enabled,
+            egress=egress,
             _usage_log_path=usage_log_path,
         )
 

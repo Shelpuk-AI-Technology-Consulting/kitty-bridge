@@ -14,6 +14,7 @@ import typing
 from pathlib import Path
 
 from kitty.bridge.state import load_state, remove_state
+from kitty.egress import ENV_PROXY, get_egress
 
 
 class BridgeStatus(enum.Enum):
@@ -196,6 +197,13 @@ def start_bridge(
         remove_state(state_path)
 
         # Build command to spawn
+        # The egress gateway is handed over through the environment, never
+        # argv: a proxy password on the command line is visible to `ps`.
+        child_env = dict(os.environ)
+        egress = get_egress()
+        if egress is not None:
+            child_env[ENV_PROXY] = egress.url_with_credentials()
+
         cmd = [sys.executable, "-m", "kitty.bridge_runner"]
         if host:
             cmd.extend(["--host", host])
@@ -220,6 +228,7 @@ def start_bridge(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             start_new_session=True,
+            env=child_env,
         )
 
         # Wait briefly for the process to start and write state

@@ -266,6 +266,24 @@ class ProviderAdapter(ABC):
         """
         return False
 
+    def supports_egress(self, resolved_key: str, provider_config: dict) -> bool:
+        """Whether this provider can route its traffic through an egress proxy.
+
+        Adapters that use the bridge's HTTP session inherit egress for free.
+        Only adapters owning their transport can be unable to honour it, and
+        they must say so here — when egress is configured, kitty refuses to
+        start rather than let a provider connect from the machine's own IP.
+
+        Args:
+            resolved_key: The credential this provider will use, since the
+                answer can depend on the auth mode.
+            provider_config: Per-profile provider configuration.
+
+        Returns:
+            True if all of this provider's traffic will honour the proxy.
+        """
+        return True
+
     async def make_request(self, cc_request: dict) -> dict:
         """Perform a non-streaming upstream request using custom transport.
 

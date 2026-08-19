@@ -66,6 +66,12 @@ def _build_parser():
         help="Write usage logs to PATH instead of ~/.cache/kitty/usage.log (implies --logging)",
     )
     parser.add_argument(
+        "--egress-proxy",
+        default=None,
+        metavar="URL",
+        help="Route all provider traffic through this HTTP proxy (overrides KITTY_EGRESS_PROXY and stored config)",
+    )
+    parser.add_argument(
         "command",
         nargs="*",
         help="Command to run: setup, profile, doctor, codex, claude, or a profile name.",
@@ -104,6 +110,24 @@ def main() -> None:
     cred_store = CredentialStore(backends=[FileBackend()])
     router = CLIRouter(profile_store, adapters)
 
+    # Resolve egress before any code path can open a socket, and install it
+    # process-wide so provider adapters that own their transport can see it.
+    from kitty.egress import set_egress
+    from kitty.egress_store import resolve_egress
+    from kitty.tui.display import print_error as _print_error
+
+    _is_egress_command = bool(all_command_args) and all_command_args[0].lower() == "egress"
+    try:
+        egress = resolve_egress(cli_proxy=args.egress_proxy, cred_store=cred_store)
+    except ValueError as exc:
+        # `kitty egress` is the tool for repairing a broken gateway, so it must
+        # stay reachable when the stored one no longer resolves.
+        if not _is_egress_command:
+            _print_error(str(exc))
+            sys.exit(1)
+        egress = None
+    set_egress(egress)
+
     from kitty.cli.router import RoutingError
 
     try:
@@ -112,7 +136,15 @@ def main() -> None:
         _print_unknown_command(all_command_args, adapters, profile_store)
         sys.exit(1)
 
-    if result.builtin == BuiltinCommand.SETUP:
+    if result.builtin in (BuiltinCommand.EGRESS, BuiltinCommand.EGRESS_TEST, BuiltinCommand.EGRESS_SHOW):
+        from kitty.cli.egress_cmd import run_egress_menu, run_egress_show, run_egress_test
+
+        if result.builtin == BuiltinCommand.EGRESS_TEST:
+            sys.exit(run_egress_test(cred_store))
+        if result.builtin == BuiltinCommand.EGRESS_SHOW:
+            sys.exit(run_egress_show(cred_store))
+        run_egress_menu(cred_store)
+    elif result.builtin == BuiltinCommand.SETUP:
         _run_setup(profile_store, cred_store)
     elif result.builtin == BuiltinCommand.AUTH:
         _run_auth(profile_store, cred_store, result.extra_args)
@@ -308,7 +340,7 @@ def _print_unknown_command(args: list[str], adapters: dict, store: object) -> No
 
     print()
     print("Available commands:")
-    for c in ("setup", "profile", "doctor", "cleanup", "bridge"):
+    for c in ("setup", "profile", "doctor", "cleanup", "bridge", "egress"):
         print(f"  kitty {c}")
     print()
     print("Available agents:")
@@ -366,6 +398,8 @@ def _run_bridge(
     from contextlib import suppress
 
     from kitty.bridge.server import BridgeServer
+    from kitty.egress import get_egress as _get_egress
+    from kitty.egress_guard import egress_block_reason
     from kitty.profiles.schema import BalancingProfile
     from kitty.providers.registry import get_provider
     from kitty.tui.display import print_error, print_panel, print_status, print_warning, status_spinner
@@ -405,6 +439,11 @@ def _run_bridge(
 
     # Create bridge server (no adapter for bridge mode — direct Chat Completions API)
     effective_debug: bool | str = str(debug_file) if debug_file else debug
+    _block = egress_block_reason(provider, profile, resolved_key)  # type: ignore[arg-type]
+    if _block:
+        print_error(_block)
+        sys.exit(1)
+
     server = BridgeServer(
         adapter=None,  # type: ignore[arg-type]
         provider=provider,
@@ -413,6 +452,7 @@ def _run_bridge(
         debug=effective_debug,
         provider_config=getattr(profile, "provider_config", {}),
         logging_enabled=logging_enabled,
+        egress=_get_egress(),
         _usage_log_path=usage_log_path,
     )
 
@@ -469,6 +509,8 @@ def _run_bridge_balancing(
     import sys
 
     from kitty.bridge.server import BridgeServer
+    from kitty.egress import get_egress as _get_egress
+    from kitty.egress_guard import egress_block_reason
     from kitty.profiles.resolver import ProfileResolver
 
     # Resolve all member profiles
@@ -494,6 +536,11 @@ def _run_bridge_balancing(
     effective_debug: bool | str = str(debug_file) if debug_file else debug
     first_provider = backends[0][0]
     first_key = backends[0][1]
+    _block = egress_block_reason(backends[0][0], member_profiles[0], backends[0][1], backends)
+    if _block:
+        print_error(_block)
+        sys.exit(1)
+
     server = BridgeServer(
         adapter=None,  # type: ignore[arg-type]
         provider=first_provider,
@@ -503,6 +550,7 @@ def _run_bridge_balancing(
         provider_config=member_profiles[0].provider_config,
         backends=backends,
         logging_enabled=logging_enabled,
+        egress=_get_egress(),
         _usage_log_path=usage_log_path,
     )
 
