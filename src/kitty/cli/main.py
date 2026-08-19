@@ -207,6 +207,21 @@ def main() -> None:
             scheme = "https" if state.tls else "http"
             print(f"Running: {scheme}://{state.host}:{state.port} (profile={state.profile}, PID {state.pid})")
             sys.exit(0)
+        elif status == BridgeStatus.UNMANAGEABLE:
+            state = load_state(_state_path)
+            if state is None:
+                print("Bridge is not running.")
+                sys.exit(1)
+            scheme = "https" if state.tls else "http"
+            print(
+                f"Running under another user account: {scheme}://{state.host}:{state.port} "
+                f"(profile={state.profile}, PID {state.pid})"
+            )
+            print(
+                "kitty cannot stop or restart it. Stop it from that account or from an administrator "
+                f"shell; if you are sure that process is not a kitty bridge, delete {_state_path}."
+            )
+            sys.exit(1)
         elif status == BridgeStatus.STALE:
             print("Stale state file found (process not running). Run 'kitty bridge stop' to clean up.")
             sys.exit(1)
