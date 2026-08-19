@@ -6,7 +6,13 @@ on:
       - "v*"
 
 jobs:
+  # Gate the release on the same suite pull requests must pass. A tag that
+  # fails the tests must never reach PyPI, where a version can't be reused.
+  test:
+    uses: ./.github/workflows/tests.yml
+
   publish:
+    needs: test
     runs-on: ubuntu-latest
     environment:
       name: pypi

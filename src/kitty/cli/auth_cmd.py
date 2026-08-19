@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 
 from kitty.auth.oauth_session import OAuthSession
 from kitty.auth.openai_oauth import run_oauth_flow
+from kitty.cli.profile_cmd import BACKUP_PROMPT
 from kitty.credentials.store import CredentialStore
 from kitty.profiles.schema import Profile
 from kitty.profiles.store import ProfileStore
@@ -90,16 +91,20 @@ async def run_auth_openai(profile_store: ProfileStore, cred_store: CredentialSto
     # Step 4: Ask if should be set as default
     is_default = prompt_confirm("Set as default profile?", default=True)
 
-    # Step 5: Create profile
+    # Step 5: Reserve-tier membership — only meaningful inside a balancing profile.
+    backup = prompt_confirm(BACKUP_PROMPT, default=False)
+
+    # Step 6: Create profile
     profile = Profile(
         name=profile_name,
         provider="openai_subscription",  # type: ignore[arg-type]
         model=model,
         auth_ref=auth_ref,
         is_default=is_default,
+        backup=backup,
     )
 
-    # Step 6: Validate (best-effort; custom-transport providers short-circuit)
+    # Step 7: Validate (best-effort; custom-transport providers short-circuit)
     try:
         from kitty.providers.registry import get_provider
         from kitty.validation import validate_api_key
@@ -113,7 +118,7 @@ async def run_auth_openai(profile_store: ProfileStore, cred_store: CredentialSto
     except Exception as exc:
         print_warning(f"API key validation skipped: {exc}")
 
-    # Step 7: Save profile
+    # Step 8: Save profile
     profile_store.save(profile)
     print_status(f"Profile {profile.name!r} created successfully")
 

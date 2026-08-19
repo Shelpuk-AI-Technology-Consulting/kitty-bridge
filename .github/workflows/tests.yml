@@ -1,0 +1,43 @@
+name: Tests
+
+# Reusable test suite. Called by ci.yml (pushes and pull requests) and by
+# publish.yml (tag pushes) so that a release is gated on exactly the same
+# checks a pull request must pass — there is no second, weaker definition to
+# drift out of sync.
+on:
+  workflow_call:
+
+jobs:
+  test:
+    name: Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Must track requires-python and the classifiers in pyproject.toml.
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -e ".[dev]"
+
+      - name: Lint
+        run: ruff check .
+
+      - name: Check import layering
+        run: lint-imports
+
+      - name: Test
+        run: pytest -q
+
+      # Not yet a gate: the codebase currently has pre-existing annotation
+      # errors. Reported so the debt stays visible and can be burned down.
+      - name: Type check (informational)
+        continue-on-error: true
+        run: mypy src/kitty

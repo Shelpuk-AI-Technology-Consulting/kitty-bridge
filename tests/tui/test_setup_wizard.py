@@ -12,7 +12,7 @@ from kitty.auth.oauth_session import OAuthSession
 from kitty.cli.setup_cmd import run_setup_wizard
 from kitty.credentials.file_backend import FileBackend
 from kitty.credentials.store import CredentialStore
-from kitty.profiles.schema import PROVIDER_LABELS
+from kitty.profiles.schema import PROVIDER_LABELS, Profile
 from kitty.profiles.store import ProfileStore
 
 # Patch targets for setup_cmd (it imports directly)
@@ -159,7 +159,9 @@ class TestRunSetupWizard:
             _mock_tty(),
             patch(f"{_MOD}.SelectionMenu.show", return_value=PROVIDER_LABELS["minimax"]),
             patch(f"{_MOD}._find_reusable_auth_ref", return_value=existing_ref),
-            patch(f"{_MOD}.prompt_confirm", side_effect=[True, True, False]),  # reuse=True, default=True, no conn.check
+            patch(
+                f"{_MOD}.prompt_confirm", side_effect=[True, True, False, False]
+            ),  # reuse=True, default=True, backup=False, no conn.check
             patch(f"{_MOD}.prompt_secret") as mock_secret,
             patch(f"{_MOD}.prompt_text", side_effect=["moonshot-v1", "myprofile"]),
         ):
@@ -221,7 +223,7 @@ class TestSetupWizardOAuth:
             patch(f"{_MOD}.SelectionMenu.show", return_value=PROVIDER_LABELS["openai_subscription"]),
             patch("kitty.cli.auth_cmd.run_oauth_for_provider", _mock_run_oauth_for_provider(session)),
             patch(f"{_MOD}.prompt_text", side_effect=["gpt-5.3-codex", "my-openai"]),
-            patch(f"{_MOD}.prompt_confirm", side_effect=[False]),  # set_default, no conn check
+            patch(f"{_MOD}.prompt_confirm", side_effect=[False, False]),  # backup=False, no conn check
             patch(f"{_MOD}.prompt_secret") as mock_secret,
         ):
             profile = run_setup_wizard(store, cred_store)
@@ -240,8 +242,62 @@ class TestSetupWizardOAuth:
             patch(f"{_MOD}.SelectionMenu.show", return_value=PROVIDER_LABELS["openai_subscription"]),
             patch("kitty.cli.auth_cmd.run_oauth_for_provider", _mock_run_oauth_for_provider(session)),
             patch(f"{_MOD}.prompt_text", side_effect=["", "openai-prof"]),
-            patch(f"{_MOD}.prompt_confirm", side_effect=[False]),
+            patch(f"{_MOD}.prompt_confirm", side_effect=[False, False]),  # backup=False, no conn check
         ):
             profile = run_setup_wizard(store, cred_store)
 
         assert profile.model == "gpt-5.3-codex"
+
+
+class TestSetupWizardBackupStep:
+    """R9: wizard step 6 asks for the backup flag, defaulting to No."""
+
+    def _run(self, store: ProfileStore, cred_store: CredentialStore, *, backup_answer: bool):
+        # Seed a profile so the wizard is not on its first-profile path, where
+        # "Set as default?" is skipped and the prompt order shifts.
+        store.save(
+            Profile(
+                name="seed",
+                provider="minimax",
+                model="m",
+                auth_ref=str(uuid.uuid4()),
+            )
+        )
+        with (
+            _mock_tty(),
+            patch(f"{_MOD}.SelectionMenu.show", return_value=PROVIDER_LABELS["zai_regular"]),
+            patch(f"{_MOD}._find_reusable_auth_ref", return_value=None),
+            patch(f"{_MOD}.prompt_secret", return_value="sk-test-api-key-12345"),
+            patch(f"{_MOD}.prompt_text", side_effect=["gpt-4o", "myprofile"]),
+            # set_default=False, backup=<answer>, connectivity=False. The
+            # distinct set_default answer proves the values land on the
+            # intended prompts rather than merely filling the list.
+            patch(f"{_MOD}.prompt_confirm", side_effect=[False, backup_answer, False]) as mock_confirm,
+        ):
+            return run_setup_wizard(store, cred_store), mock_confirm
+
+    def test_answering_yes_persists_backup_true(self, store: ProfileStore, cred_store: CredentialStore) -> None:
+        profile, _ = self._run(store, cred_store, backup_answer=True)
+
+        assert profile.backup is True
+        assert profile.is_default is False, "answers landed on the wrong prompts"
+
+        saved = store.get("myprofile")
+        assert saved is not None and saved.backup is True
+
+    def test_answering_no_persists_backup_false(self, store: ProfileStore, cred_store: CredentialStore) -> None:
+        profile, _ = self._run(store, cred_store, backup_answer=False)
+
+        assert profile.backup is False
+        assert profile.is_default is False
+
+    def test_backup_question_is_asked_once_and_defaults_to_no(
+        self, store: ProfileStore, cred_store: CredentialStore
+    ) -> None:
+        from kitty.cli.profile_cmd import BACKUP_PROMPT
+
+        _profile, mock_confirm = self._run(store, cred_store, backup_answer=False)
+
+        backup_calls = [c for c in mock_confirm.call_args_list if c.args and c.args[0] == BACKUP_PROMPT]
+        assert len(backup_calls) == 1
+        assert backup_calls[0].kwargs["default"] is False

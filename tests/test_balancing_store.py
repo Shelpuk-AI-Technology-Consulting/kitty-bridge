@@ -157,6 +157,111 @@ class TestBalancingStoreBackwardCompat:
         assert isinstance(backend, Profile)
 
 
+class TestBackupFlagPersistence:
+    """R2: the backup flag round-trips without a STORE_VERSION change."""
+
+    def test_backup_true_round_trips(self, tmp_path):
+        path = tmp_path / "profiles.json"
+        ProfileStore(path=path).save(_make_profile("reserve", backup=True))
+
+        reloaded = ProfileStore(path=path).get("reserve")
+        assert reloaded is not None
+        assert reloaded.backup is True
+
+    def test_backup_false_round_trips(self, tmp_path):
+        path = tmp_path / "profiles.json"
+        ProfileStore(path=path).save(_make_profile("primary", backup=False))
+
+        reloaded = ProfileStore(path=path).get("primary")
+        assert reloaded is not None
+        assert reloaded.backup is False
+
+    def test_serialized_entry_carries_backup_key(self, tmp_path):
+        path = tmp_path / "profiles.json"
+        ProfileStore(path=path).save(_make_profile("reserve", backup=True))
+
+        raw = json.loads(path.read_text())
+        assert raw["profiles"][0]["backup"] is True
+
+    def test_entry_without_backup_key_loads_as_false(self, tmp_path):
+        """A profiles.json written before this feature must still load."""
+        path = tmp_path / "profiles.json"
+        old_data = {
+            "version": 1,
+            "profiles": [
+                {"name": "legacy", "provider": "zai_regular", "model": "gpt-4o", "auth_ref": VALID_UUID},
+            ],
+        }
+        path.write_text(json.dumps(old_data))
+
+        legacy = ProfileStore(path=path).get("legacy")
+        assert legacy is not None
+        assert legacy.backup is False
+
+    def test_backup_survives_an_unrelated_upsert(self, tmp_path):
+        """Re-saving a profile must not silently drop its tier membership."""
+        path = tmp_path / "profiles.json"
+        store = ProfileStore(path=path)
+        store.save(_make_profile("reserve", backup=True))
+
+        reloaded = store.get("reserve")
+        assert reloaded is not None
+        store.save(reloaded.model_copy(update={"model": "new-model"}))
+
+        final = ProfileStore(path=path).get("reserve")
+        assert final is not None
+        assert final.model == "new-model"
+        assert final.backup is True
+
+    def test_backup_preserved_when_another_profile_becomes_default(self, tmp_path):
+        """save() rewrites is_default on other raw entries; backup must be untouched."""
+        path = tmp_path / "profiles.json"
+        store = ProfileStore(path=path)
+        store.save(_make_profile("reserve", backup=True, is_default=True))
+        store.save(_make_profile("primary", is_default=True))
+
+        reserve = ProfileStore(path=path).get("reserve")
+        assert reserve is not None
+        assert reserve.is_default is False
+        assert reserve.backup is True
+
+    def test_non_boolean_backup_value_drops_only_that_entry(self, tmp_path):
+        """A hand-corrupted value must not take the whole store down with it."""
+        path = tmp_path / "profiles.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "profiles": [
+                        {
+                            "name": "good",
+                            "provider": "zai_regular",
+                            "model": "gpt-4o",
+                            "auth_ref": VALID_UUID,
+                            "backup": True,
+                        },
+                        {
+                            "name": "corrupt",
+                            "provider": "zai_regular",
+                            "model": "gpt-4o",
+                            "auth_ref": VALID_UUID,
+                            "backup": "maybe",
+                        },
+                    ],
+                }
+            )
+        )
+
+        names = [p.name for p in ProfileStore(path=path).load_all()]
+        assert names == ["good"]
+
+    def test_store_version_unchanged(self):
+        """Bumping STORE_VERSION would make every existing profile unreadable."""
+        from kitty.profiles.store import STORE_VERSION
+
+        assert STORE_VERSION == 1
+
+
 class TestBalancingStoreCaseInsensitive:
     def test_get_backend_is_case_insensitive(self, tmp_path):
         store = ProfileStore(path=tmp_path / "profiles.json")

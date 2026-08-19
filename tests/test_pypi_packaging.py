@@ -154,8 +154,12 @@ class TestTwineCheck:
     """Verify that twine check passes cleanly."""
 
     def test_twine_check(self, built_wheel: Path, built_sdist: Path):
+        # Invoke through the running interpreter rather than a bare "twine"
+        # executable: the console script is only on PATH when the environment
+        # is activated, which is not guaranteed (and is not the case on Windows
+        # when pytest is launched by absolute path into a venv).
         result = subprocess.run(
-            ["twine", "check", str(built_wheel), str(built_sdist)],
+            [sys.executable, "-m", "twine", "check", str(built_wheel), str(built_sdist)],
             cwd=ROOT,
             capture_output=True,
             text=True,

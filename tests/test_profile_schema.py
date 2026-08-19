@@ -219,6 +219,42 @@ class TestProfileDefaults:
         )
         assert profile.provider_config == {}
 
+    def test_backup_defaults_to_false(self):
+        """R1: a profile is a primary pool member unless explicitly marked backup."""
+        profile = Profile(
+            name="test",
+            provider="zai_regular",
+            model="gpt-4o",
+            auth_ref=str(uuid.uuid4()),
+        )
+        assert profile.backup is False
+
+
+class TestProfileBackupFlag:
+    """R1: the reserve-tier flag used by balancing profiles."""
+
+    def _make(self, **overrides) -> Profile:
+        defaults = {
+            "name": "test",
+            "provider": "zai_regular",
+            "model": "gpt-4o",
+            "auth_ref": str(uuid.uuid4()),
+        }
+        defaults.update(overrides)
+        return Profile(**defaults)
+
+    def test_accepts_explicit_true(self):
+        assert self._make(backup=True).backup is True
+
+    def test_model_copy_toggles_backup(self):
+        """The edit flow mutates frozen profiles via model_copy."""
+        profile = self._make(backup=False)
+        assert profile.model_copy(update={"backup": True}).backup is True
+
+    def test_model_dump_includes_backup(self):
+        """R2: the store serialises via model_dump, so the field must appear."""
+        assert self._make(backup=True).model_dump()["backup"] is True
+
 
 class TestReservedNames:
     def test_contains_expected_names(self):

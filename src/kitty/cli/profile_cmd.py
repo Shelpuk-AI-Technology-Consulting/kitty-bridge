@@ -28,7 +28,11 @@ from kitty.tui.display import (
 from kitty.tui.menu import CheckboxMenu, SelectionMenu
 from kitty.tui.prompts import NonTTYError, check_tty, prompt_confirm, prompt_secret, prompt_text
 
-__all__ = ["run_profile_menu"]
+__all__ = ["BACKUP_PROMPT", "run_profile_menu"]
+
+# Shared across all three profile-creation paths (this module, the setup wizard,
+# and the OAuth flow) so the wording stays identical wherever it is asked.
+BACKUP_PROMPT = "Use only as a backup? (in a balancing profile, used only when all other members are unavailable)"
 
 
 def run_profile_menu(store: ProfileStore) -> None:
@@ -53,10 +57,12 @@ def run_profile_menu(store: ProfileStore) -> None:
             rows = []
             for b in backends:
                 if isinstance(b, Profile):
-                    rows.append([b.name, b.provider, b.model, "Yes" if b.is_default else "No"])
+                    rows.append(
+                        [b.name, b.provider, b.model, "Yes" if b.is_default else "No", "Yes" if b.backup else "No"]
+                    )
                 else:
-                    rows.append([b.name, f"balancing ({len(b.members)})", "—", "Yes" if b.is_default else "No"])
-            print_table(["Name", "Provider", "Model", "Default"], rows)
+                    rows.append([b.name, f"balancing ({len(b.members)})", "—", "Yes" if b.is_default else "No", "—"])
+            print_table(["Name", "Provider", "Model", "Default", "Backup"], rows)
         else:
             print("  (no profiles)")
 
@@ -243,7 +249,10 @@ def _create_profile_flow(store: ProfileStore, cred_store: CredentialStore) -> Pr
     # Step 5: Set as default?
     set_default = is_first or prompt_confirm("Set as default profile?", default=True)
 
-    # Step 6: Create and save
+    # Step 6: Reserve-tier membership — only meaningful inside a balancing profile.
+    backup = prompt_confirm(BACKUP_PROMPT, default=False)
+
+    # Step 7: Create and save
     profile = Profile(
         name=name,
         provider=provider,  # type: ignore[arg-type]
@@ -251,6 +260,7 @@ def _create_profile_flow(store: ProfileStore, cred_store: CredentialStore) -> Pr
         auth_ref=auth_ref,
         provider_config=provider_config,
         is_default=set_default,
+        backup=backup,
     )
     store.save(profile)
     print_status(f"Profile {name!r} created successfully")
@@ -313,6 +323,7 @@ def _edit_profile_flow(store: ProfileStore, cred_store: CredentialStore, profile
 
     For API-key providers: allows changing the model name and API key.
     For OAuth providers: allows changing the model and re-running OAuth.
+    Either way, the backup (reserve-tier) flag can be toggled.
 
     Args:
         store: Profile store.
@@ -330,7 +341,9 @@ def _edit_profile_flow(store: ProfileStore, cred_store: CredentialStore, profile
     is_oauth = provider_adapter.requires_oauth
 
     credential_label = "Re-authenticate" if is_oauth else "API Key"
-    options = ["Model", credential_label, "Both"]
+    # "Both" keeps its established meaning of model + credential; "Backup" is a
+    # separate choice rather than part of it.
+    options = ["Model", credential_label, "Both", "Backup"]
     field = SelectionMenu(
         f"Edit profile {profile_name!r} — what to change?",
         options,
@@ -361,6 +374,14 @@ def _edit_profile_flow(store: ProfileStore, cred_store: CredentialStore, profile
                 new_auth_ref = str(uuid.uuid4())
                 cred_store.set(new_auth_ref, new_key)
                 updates["auth_ref"] = new_auth_ref
+
+    if field == "Backup":
+        current = "yes" if profile.backup else "no"
+        new_backup = prompt_confirm(f"{BACKUP_PROMPT} (current: {current})", default=profile.backup)
+        # Only record an actual change, so re-confirming the same value still
+        # reports "No changes made" rather than rewriting the store.
+        if new_backup != profile.backup:
+            updates["backup"] = new_backup
 
     if updates:
         updated = profile.model_copy(update=updates)

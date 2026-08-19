@@ -18,7 +18,7 @@ import traceback
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import NoReturn
+from typing import TYPE_CHECKING, NoReturn
 
 import aiohttp
 from aiohttp import web
@@ -41,9 +41,15 @@ from kitty.bridge.responses.events import (
 )
 from kitty.bridge.responses.translator import ResponsesTranslator
 from kitty.cloudflare import is_cloudflare_block
-from kitty.launchers.base import LauncherAdapter
-from kitty.profiles.schema import Profile
 from kitty.providers.base import ProviderAdapter, ProviderError
+
+if TYPE_CHECKING:
+    # Type-only imports. The layering contract in pyproject.toml forbids
+    # kitty.bridge from importing kitty.launchers or kitty.profiles at runtime;
+    # `from __future__ import annotations` keeps these annotations as strings,
+    # so the server stays decoupled while remaining fully typed.
+    from kitty.launchers.base import LauncherAdapter
+    from kitty.profiles.schema import Profile
 from kitty.providers.model_context import (
     get_balancing_min_context_tokens,
     get_model_context_tokens,
@@ -692,6 +698,13 @@ class BridgeServer:
                 for _ in backends
             ]
 
+        # Reserve-tier membership (parallel to _backends), snapshotted once so
+        # selection stays a list lookup on the hot path.
+        # bool() rather than a bare read: a fixture or caller passing a profile
+        # stand-in without the attribute would otherwise store a truthy object
+        # and silently mark every member a reserve, degrading to flat selection.
+        self._backend_is_backup: list[bool] = [bool(p.backup) for _provider, _key, p in backends] if backends else []
+
         # Active backend for current request (set by _select_backend)
         # Backing fields for context-var-aware properties — the properties
         # delegate to _backend_context when set, falling back to these.
@@ -763,17 +776,33 @@ class BridgeServer:
         """Return the current request's backend context from the ContextVar."""
         return _backend_context.get(_EMPTY_CTX)
 
-    def _get_next_backend(self, *, require_streaming: bool = False) -> tuple[ProviderAdapter, str, str | None, dict]:
-        """Select a healthy backend at random with equal probability.
+    def _get_next_backend(
+        self, *, require_streaming: bool = False
+    ) -> tuple[ProviderAdapter, str, str | None, dict, int]:
+        """Select a healthy backend at random, weighted by past reliability.
 
-        Skips backends that are in cooldown (unhealthy). If all backends
-        are unhealthy, returns a random one anyway (let it fail naturally).
+        Backends in cooldown (unhealthy) are skipped. Among the remainder,
+        selection prefers the primary tier: backends whose profile has
+        ``backup=True`` are held in reserve and only become selectable once no
+        primary backend is healthy. Within the chosen tier, probability is
+        weighted inversely by lifetime ``failure_count``, so a repeatedly
+        failing peer is deprioritised.
 
-        When require_streaming is True, excludes backends whose provider does
-        not implement a custom transport stream_request() override.
+        If every backend is unhealthy, either raises
+        :class:`AllBackendsUnhealthyError` (when the soonest cooldown expiry is
+        far away) or gambles on a near-expiry backend regardless of tier.
 
-        Returns (provider, resolved_key, model, provider_config, backend_index).
-        backend_index is -1 for non-balancing mode.
+        Args:
+            require_streaming: Exclude backends whose provider does not
+                implement a custom transport ``stream_request()`` override.
+
+        Returns:
+            ``(provider, resolved_key, model, provider_config, backend_index)``.
+            ``backend_index`` is ``-1`` in non-balancing mode.
+
+        Raises:
+            AllBackendsUnhealthyError: When no backend is healthy and none is
+                close enough to cooldown expiry to be worth attempting.
         """
         if self._backends:
             n = len(self._backends)
@@ -803,13 +832,20 @@ class BridgeServer:
                         healthy_indices.append(idx)
 
             if healthy_indices:
+                # Backup members are a reserve tier: they are skipped entirely
+                # while any primary is healthy, so a metered API key standing
+                # behind subscription plans only draws traffic once every plan
+                # is in cooldown. Falls back to the full set when no primary is
+                # healthy — which also covers an all-backup pool.
+                primary_indices = [i for i in healthy_indices if not self._backend_is_backup[i]]
+                tier = primary_indices or healthy_indices
                 # Weight selection inversely by failure_count so repeatedly
                 # failing backends are deprioritised among healthy peers.
                 weights = []
-                for i in healthy_indices:
+                for i in tier:
                     w = 1.0 / (self._backend_health[i].get("failure_count", 0) + 1)
                     weights.append(w)
-                idx = random.choices(healthy_indices, weights=weights, k=1)[0]
+                idx = random.choices(tier, weights=weights, k=1)[0]
                 backend = self._backends[idx]
                 provider, key, profile = backend
                 return provider, key, profile.model, profile.provider_config, idx  # type: ignore[union-attr]
@@ -1517,6 +1553,7 @@ class BridgeServer:
                     "healthy": health["healthy"],
                     "remaining_cooldown": remaining,
                     "failure_count": health.get("failure_count", 0),
+                    "backup": self._backend_is_backup[idx],
                 }
             )
         status = "ok" if any_healthy else "degraded"

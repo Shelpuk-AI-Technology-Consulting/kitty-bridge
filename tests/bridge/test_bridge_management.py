@@ -7,6 +7,7 @@ import os
 import signal
 from contextlib import suppress
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -223,3 +224,117 @@ class TestBridgeSubcommandRouting:
         from kitty.cli.router import BuiltinCommand
 
         assert hasattr(BuiltinCommand, "BRIDGE_UNINSTALL")
+
+
+class TestIsPidAliveErrorMapping:
+    """Cross-platform mapping of os.kill(pid, 0) failures to liveness.
+
+    Signal 0 performs no action and only probes the process — on Windows as
+    well as POSIX. The platforms differ in how they report a missing PID, and
+    that difference previously crashed every stale-state code path on Windows.
+    """
+
+    def test_returns_true_when_probe_succeeds(self):
+        from kitty.bridge.manage import is_pid_alive
+
+        with patch("kitty.bridge.manage.os.kill", return_value=None) as mock_kill:
+            assert is_pid_alive(4321) is True
+
+        mock_kill.assert_called_once_with(4321, 0)
+
+    def test_process_lookup_error_means_dead(self):
+        """POSIX reports a missing PID as ProcessLookupError (ESRCH)."""
+        from kitty.bridge.manage import is_pid_alive
+
+        with patch("kitty.bridge.manage.os.kill", side_effect=ProcessLookupError()):
+            assert is_pid_alive(4321) is False
+
+    def test_permission_error_is_not_treated_as_alive(self):
+        """Pins a KNOWN-INCORRECT behaviour, deliberately left unchanged.
+
+        EPERM actually proves the process exists — it is simply not ours to
+        signal — so reporting it as dead makes ``bridge_status`` say STALE for a
+        running bridge. Changing it risks the opposite failure (signalling a
+        recycled PID belonging to someone else), so it is deferred rather than
+        flipped here. See ``.system_design/cross_platform_defects.md`` → X1
+        "Known limitation, unchanged".
+        """
+        from kitty.bridge.manage import is_pid_alive
+
+        with patch("kitty.bridge.manage.os.kill", side_effect=PermissionError()):
+            assert is_pid_alive(4321) is False
+
+    @pytest.mark.parametrize("pid", [0, -1, -12345])
+    def test_non_positive_pids_are_never_alive(self, pid: int):
+        """A PID <= 0 is not a process and must never be signalled.
+
+        On POSIX, ``kill(0, sig)`` targets the caller's entire process group and
+        ``kill(-1, sig)`` targets every process the caller may signal. A corrupt
+        or hand-edited bridge_state.json carrying such a value would otherwise
+        make ``stop_bridge`` SIGTERM then SIGKILL the user's own shell session.
+        """
+        from kitty.bridge.manage import is_pid_alive
+
+        with patch("kitty.bridge.manage.os.kill") as mock_kill:
+            assert is_pid_alive(pid) is False
+
+        mock_kill.assert_not_called()
+
+    def test_stop_bridge_never_signals_a_non_positive_pid(self, tmp_path: Path):
+        """End-to-end consequence: a corrupt state file must not kill the shell."""
+        from kitty.bridge.manage import stop_bridge
+
+        state_path = tmp_path / "state.json"
+        state_path.write_text(
+            json.dumps(
+                {
+                    "pid": 0,
+                    "host": "127.0.0.1",
+                    "port": 8080,
+                    "profile": "test",
+                    "started_at": "2026-04-11T10:30:00Z",
+                    "tls": False,
+                }
+            )
+        )
+
+        with patch("kitty.bridge.manage.os.kill") as mock_kill:
+            stop_bridge(state_path)
+
+        mock_kill.assert_not_called()
+        assert not state_path.exists()
+
+    def test_windows_invalid_parameter_oserror_means_dead(self):
+        """Windows has no ProcessLookupError here.
+
+        OpenProcess fails with ERROR_INVALID_PARAMETER (87) for a PID that does
+        not exist, surfacing as a plain OSError. Letting it escape crashed
+        bridge status/stop/start/restart on Windows whenever the recorded PID
+        was already gone — exactly the stale-state case they exist to clean up.
+        """
+        from kitty.bridge.manage import is_pid_alive
+
+        winerror_87 = OSError(22, "The parameter is incorrect", None, 87, None)
+        with patch("kitty.bridge.manage.os.kill", side_effect=winerror_87):
+            assert is_pid_alive(999999999) is False
+
+    def test_bridge_status_reports_stale_instead_of_raising(self, tmp_path: Path):
+        """The end-to-end consequence of the mapping above."""
+        from kitty.bridge.manage import BridgeStatus, bridge_status
+
+        state_path = tmp_path / "state.json"
+        write_state(
+            state_path,
+            BridgeState(
+                pid=999999999,
+                host="127.0.0.1",
+                port=8080,
+                profile="test",
+                started_at="2026-04-11T10:30:00Z",
+                tls=False,
+            ),
+        )
+
+        winerror_87 = OSError(22, "The parameter is incorrect", None, 87, None)
+        with patch("kitty.bridge.manage.os.kill", side_effect=winerror_87):
+            assert bridge_status(state_path) is BridgeStatus.STALE

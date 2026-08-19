@@ -24,6 +24,7 @@ def _make_profile(
     provider: str = "zai_regular",
     model: str = "gpt-4o",
     is_default: bool = False,
+    backup: bool = False,
 ) -> Profile:
     return Profile(
         name=name,
@@ -31,6 +32,7 @@ def _make_profile(
         model=model,
         auth_ref=str(uuid.uuid4()),
         is_default=is_default,
+        backup=backup,
     )
 
 
@@ -171,7 +173,9 @@ class TestCreateProfileFlow:
         with (
             patch("kitty.cli.profile_cmd.SelectionMenu.show", return_value=PROVIDER_LABELS["zai_regular"]),
             patch("kitty.cli.profile_cmd._find_reusable_auth_ref", return_value=existing.auth_ref),
-            patch("kitty.cli.profile_cmd.prompt_confirm", side_effect=[True, True]),  # reuse=True, default=True
+            patch(
+                "kitty.cli.profile_cmd.prompt_confirm", side_effect=[True, True, False]
+            ),  # reuse=True, default=True, backup=False
             patch("kitty.cli.profile_cmd.prompt_secret") as mock_secret,
             patch("kitty.cli.profile_cmd.prompt_text", side_effect=["gpt-4o", "newprofile"]),
         ):
@@ -190,7 +194,9 @@ class TestCreateProfileFlow:
         with (
             patch("kitty.cli.profile_cmd.SelectionMenu.show", return_value=PROVIDER_LABELS["zai_regular"]),
             patch("kitty.cli.profile_cmd._find_reusable_auth_ref", return_value=existing.auth_ref),
-            patch("kitty.cli.profile_cmd.prompt_confirm", side_effect=[False, True]),  # reuse=False, default=True
+            patch(
+                "kitty.cli.profile_cmd.prompt_confirm", side_effect=[False, True, False]
+            ),  # reuse=False, default=True, backup=False
             patch("kitty.cli.profile_cmd.prompt_secret", return_value="new-key"),
             patch("kitty.cli.profile_cmd.prompt_text", side_effect=["gpt-4o", "newprofile"]),
         ):
@@ -966,3 +972,184 @@ class TestCreateProfileFlowCustomURL:
         # prompt_text should be called exactly twice: model + name (not base URL)
         assert mock_text.call_count == 2
         assert profile.provider_config == {}
+
+
+# ---------------------------------------------------------------------------
+# Backup (reserve-tier) flag — create, edit, and display
+# ---------------------------------------------------------------------------
+
+
+class TestBackupFlagInCreateFlow:
+    """R9: profile creation asks for the backup flag, defaulting to No."""
+
+    def _run_create(self, store, cred_store, *, backup_answer: bool):
+        create = _import_create_profile_flow()
+        # Seed a profile so the flow is not on its first-profile path, where
+        # "Set as default?" is skipped entirely and the prompt order shifts.
+        store.save(_make_profile("seed", provider="minimax"))
+        with (
+            patch("kitty.cli.profile_cmd.SelectionMenu.show", return_value=PROVIDER_LABELS["zai_regular"]),
+            patch("kitty.cli.profile_cmd._find_reusable_auth_ref", return_value=None),
+            patch("kitty.cli.profile_cmd.prompt_secret", return_value="sk-test-key"),
+            patch("kitty.cli.profile_cmd.prompt_text", side_effect=["gpt-4o", "myprofile"]),
+            patch(
+                "kitty.cli.profile_cmd.prompt_confirm", side_effect=[True, backup_answer]
+            ) as mock_confirm,  # set_default=True, backup=backup_answer
+        ):
+            return create(store, cred_store), mock_confirm
+
+    def test_answering_yes_persists_backup_true(self, store: ProfileStore, cred_store: CredentialStore) -> None:
+        profile, _ = self._run_create(store, cred_store, backup_answer=True)
+
+        assert profile.backup is True
+        saved = store.get("myprofile")
+        assert saved is not None and saved.backup is True
+
+    def test_answering_no_persists_backup_false(self, store: ProfileStore, cred_store: CredentialStore) -> None:
+        profile, _ = self._run_create(store, cred_store, backup_answer=False)
+
+        assert profile.backup is False
+
+    def test_backup_question_defaults_to_no(self, store: ProfileStore, cred_store: CredentialStore) -> None:
+        """Pressing Enter (or cancelling) must leave the profile out of the reserve tier."""
+        from kitty.cli.profile_cmd import BACKUP_PROMPT
+
+        _profile, mock_confirm = self._run_create(store, cred_store, backup_answer=False)
+
+        backup_calls = [c for c in mock_confirm.call_args_list if c.args and c.args[0] == BACKUP_PROMPT]
+        assert len(backup_calls) == 1
+        assert backup_calls[0].kwargs["default"] is False
+
+
+class TestBackupFlagInEditFlow:
+    """R10: an existing profile's backup flag can be toggled."""
+
+    def test_toggles_backup_on(self, store: ProfileStore, cred_store: CredentialStore) -> None:
+        edit = _import_edit_profile_flow()
+        store.save(_make_profile("myprofile", backup=False))
+
+        with (
+            patch("kitty.cli.profile_cmd.SelectionMenu.show", return_value="Backup"),
+            patch("kitty.cli.profile_cmd.prompt_confirm", return_value=True),
+        ):
+            edit(store, cred_store, "myprofile")
+
+        saved = store.get("myprofile")
+        assert saved is not None and saved.backup is True
+
+    def test_toggles_backup_off(self, store: ProfileStore, cred_store: CredentialStore) -> None:
+        edit = _import_edit_profile_flow()
+        store.save(_make_profile("myprofile", backup=True))
+
+        with (
+            patch("kitty.cli.profile_cmd.SelectionMenu.show", return_value="Backup"),
+            patch("kitty.cli.profile_cmd.prompt_confirm", return_value=False),
+        ):
+            edit(store, cred_store, "myprofile")
+
+        saved = store.get("myprofile")
+        assert saved is not None and saved.backup is False
+
+    def test_prompt_defaults_to_current_value(self, store: ProfileStore, cred_store: CredentialStore) -> None:
+        edit = _import_edit_profile_flow()
+        store.save(_make_profile("myprofile", backup=True))
+
+        with (
+            patch("kitty.cli.profile_cmd.SelectionMenu.show", return_value="Backup"),
+            patch("kitty.cli.profile_cmd.prompt_confirm", return_value=True) as mock_confirm,
+        ):
+            edit(store, cred_store, "myprofile")
+
+        assert mock_confirm.call_args.kwargs["default"] is True
+        assert "current: yes" in mock_confirm.call_args.args[0]
+
+    def test_reconfirming_same_value_reports_no_changes(self, store: ProfileStore, cred_store: CredentialStore) -> None:
+        """An unchanged answer must not rewrite the store."""
+        edit = _import_edit_profile_flow()
+        store.save(_make_profile("myprofile", backup=True))
+
+        with (
+            patch("kitty.cli.profile_cmd.SelectionMenu.show", return_value="Backup"),
+            patch("kitty.cli.profile_cmd.prompt_confirm", return_value=True),
+            patch("kitty.cli.profile_cmd.print_info") as mock_info,
+            patch.object(ProfileStore, "save") as mock_save,
+        ):
+            edit(store, cred_store, "myprofile")
+
+        mock_save.assert_not_called()
+        mock_info.assert_called_once_with("No changes made")
+
+    def test_editing_model_preserves_backup(self, store: ProfileStore, cred_store: CredentialStore) -> None:
+        """Regression guard: model_copy must carry the flag through unrelated edits."""
+        edit = _import_edit_profile_flow()
+        store.save(_make_profile("myprofile", model="old-model", backup=True))
+
+        with (
+            patch("kitty.cli.profile_cmd.SelectionMenu.show", return_value="Model"),
+            patch("kitty.cli.profile_cmd.prompt_text", return_value="new-model"),
+        ):
+            edit(store, cred_store, "myprofile")
+
+        saved = store.get("myprofile")
+        assert saved is not None
+        assert saved.model == "new-model"
+        assert saved.backup is True
+
+    @pytest.mark.parametrize(
+        ("provider", "credential_label"),
+        [("zai_regular", "API Key"), ("openai_subscription", "Re-authenticate")],
+    )
+    def test_backup_is_offered_for_every_credential_style(
+        self, store: ProfileStore, cred_store: CredentialStore, provider: str, credential_label: str
+    ) -> None:
+        """The edit menu exposes Backup for both API-key and OAuth providers."""
+        edit = _import_edit_profile_flow()
+        store.save(_make_profile("editme", provider=provider))
+
+        with patch("kitty.cli.profile_cmd.SelectionMenu") as mock_menu_cls:
+            mock_menu_cls.return_value.show.return_value = None
+            edit(store, cred_store, "editme")
+
+        _title, options = mock_menu_cls.call_args.args
+        assert options == ["Model", credential_label, "Both", "Backup"]
+
+    def test_cancelling_the_edit_menu_leaves_backup_untouched(
+        self, store: ProfileStore, cred_store: CredentialStore
+    ) -> None:
+        edit = _import_edit_profile_flow()
+        store.save(_make_profile("myprofile", backup=True))
+
+        with (
+            patch("kitty.cli.profile_cmd.SelectionMenu.show", return_value=None),
+            patch.object(ProfileStore, "save") as mock_save,
+        ):
+            edit(store, cred_store, "myprofile")
+
+        mock_save.assert_not_called()
+        saved = store.get("myprofile")
+        assert saved is not None and saved.backup is True
+
+
+class TestBackupColumnInProfileTable:
+    """R11: the management table surfaces tier membership."""
+
+    def test_table_includes_backup_column(self, store: ProfileStore) -> None:
+        run_profile_menu = _import_run_profile_menu()
+        store.save(_make_profile("primary", backup=False))
+        store.save(_make_profile("reserve", backup=True))
+        store.save(_make_balancing("pool", ["primary", "reserve"]))
+
+        with (
+            patch("sys.stdin.isatty", return_value=True),
+            patch("kitty.cli.profile_cmd.print_table") as mock_table,
+            patch("kitty.cli.profile_cmd.SelectionMenu.show", return_value="Back"),
+        ):
+            run_profile_menu(store)
+
+        headers, rows = mock_table.call_args.args
+        assert headers == ["Name", "Provider", "Model", "Default", "Backup"]
+        assert all(len(row) == len(headers) for row in rows), "ragged row would misalign the table"
+        by_name = {row[0]: row for row in rows}
+        assert by_name["primary"][4] == "No"
+        assert by_name["reserve"][4] == "Yes"
+        assert by_name["pool"][4] == "—"

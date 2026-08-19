@@ -265,3 +265,52 @@ class TestAuthOpenaiProfileCreation:
 
             with pytest.raises(NonTTYError):
                 asyncio.run(run_auth_openai(store, cred_store))
+
+
+class TestAuthOpenaiBackupPrompt:
+    """R9: the OAuth creation path asks for the backup flag, defaulting to No.
+
+    This path builds a Profile directly rather than going through the setup
+    wizard, so it needs its own coverage — the wizard's tests do not reach it.
+    """
+
+    def _run(self, store: ProfileStore, cred_store: CredentialStore, *, backup_answer: bool):
+        session = _make_oauth_session()
+        with (
+            _mock_tty(),
+            patch(f"{_MOD}.run_oauth_for_provider", _mock_run_oauth_for_provider(session)),
+            patch(f"{_MOD}.prompt_text", side_effect=["gpt-5.3-codex", "my-openai"]),
+            # is_default=False proves the answers land on the intended prompts:
+            # a reordering would surface as is_default=True.
+            patch(f"{_MOD}.prompt_confirm", side_effect=[False, backup_answer]) as mock_confirm,
+            patch("kitty.validation.validate_api_key", new=AsyncMock(return_value=MagicMock(valid=True))),
+        ):
+            from kitty.cli.auth_cmd import run_auth_openai
+
+            return asyncio.run(run_auth_openai(store, cred_store)), mock_confirm
+
+    def test_answering_yes_persists_backup_true(self, store: ProfileStore, cred_store: CredentialStore) -> None:
+        profile, _ = self._run(store, cred_store, backup_answer=True)
+
+        assert profile.backup is True
+        assert profile.is_default is False, "answers landed on the wrong prompts"
+
+        saved = store.get("my-openai")
+        assert saved is not None and saved.backup is True
+
+    def test_answering_no_persists_backup_false(self, store: ProfileStore, cred_store: CredentialStore) -> None:
+        profile, _ = self._run(store, cred_store, backup_answer=False)
+
+        assert profile.backup is False
+        assert profile.is_default is False
+
+    def test_backup_question_is_asked_once_and_defaults_to_no(
+        self, store: ProfileStore, cred_store: CredentialStore
+    ) -> None:
+        from kitty.cli.profile_cmd import BACKUP_PROMPT
+
+        _profile, mock_confirm = self._run(store, cred_store, backup_answer=False)
+
+        backup_calls = [c for c in mock_confirm.call_args_list if c.args and c.args[0] == BACKUP_PROMPT]
+        assert len(backup_calls) == 1
+        assert backup_calls[0].kwargs["default"] is False

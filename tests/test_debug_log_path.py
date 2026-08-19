@@ -226,9 +226,14 @@ class TestEffectiveDebugWiring:
 
     def test_debug_file_overrides_to_string_path(self):
         """When --debug-file is provided, effective debug should be the path string."""
-        debug_file = Path("/tmp/my_debug.log")
+        debug_file: Path | None = Path("/tmp/my_debug.log")
         effective: bool | str = str(debug_file) if debug_file else False
-        assert effective == "/tmp/my_debug.log"
+
+        # Asserting against str(debug_file) here would be a tautology, so pin
+        # the two properties main.py actually relies on: the value carries the
+        # path (not a bool), and it is truthy so `debug` stays enabled.
+        assert isinstance(effective, str)
+        assert Path(effective) == debug_file
         assert effective  # truthy
 
     def test_no_debug_file_uses_debug_bool(self):

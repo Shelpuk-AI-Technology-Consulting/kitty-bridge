@@ -39,10 +39,37 @@ def _get_trigger(workflow: dict) -> dict:
     return workflow.get("on", {})
 
 
+def _resolve_jobs(workflow: dict) -> dict[str, dict]:
+    """Expand jobs that delegate to a local reusable workflow.
+
+    A job may either define ``steps`` itself or delegate the whole job to
+    another workflow via ``uses: ./.github/workflows/<name>.yml``. Callers care
+    about the work that actually runs, so delegated jobs are replaced by the
+    jobs of the workflow they call.
+
+    Args:
+        workflow: A parsed workflow mapping.
+
+    Returns:
+        Job name to job mapping, with delegated jobs expanded in place. Expanded
+        names are qualified as ``"<caller>/<callee>"``.
+    """
+    resolved: dict[str, dict] = {}
+    for name, job in workflow.get("jobs", {}).items():
+        uses = str(job.get("uses", ""))
+        if uses.startswith("./.github/workflows/"):
+            called = _load_workflow(Path(uses).name)
+            for sub_name, sub_job in called.get("jobs", {}).items():
+                resolved[f"{name}/{sub_name}"] = sub_job
+        else:
+            resolved[name] = job
+    return resolved
+
+
 def _get_all_steps(workflow: dict) -> list[dict]:
-    """Flatten all steps from all jobs in a workflow."""
+    """Flatten all steps from all jobs in a workflow, following reusable calls."""
     steps: list[dict] = []
-    for job in workflow.get("jobs", {}).values():
+    for job in _resolve_jobs(workflow).values():
         steps.extend(job.get("steps", []))
     return steps
 
@@ -68,7 +95,7 @@ class TestCIWorkflow:
         assert "main" in branches, "CI must trigger on PRs targeting main"
 
     def test_runs_on_ubuntu(self, workflow: dict):
-        jobs = workflow.get("jobs", {})
+        jobs = _resolve_jobs(workflow)
         for job_name, job in jobs.items():
             runs_on = job.get("runs-on", "")
             assert "ubuntu" in str(runs_on), f"Job '{job_name}' must run on ubuntu"
@@ -201,3 +228,84 @@ class TestTagVersionCheck:
         assert "TAG_VERSION" in run_cmds, "Must extract TAG_VERSION from git ref"
         assert "PYPROJECT_VERSION" in run_cmds, "Must extract version from pyproject.toml"
         assert "exit 1" in run_cmds, "Must exit on version mismatch"
+
+
+# ── R5: the same suite gates pull requests and releases ───────────────────
+
+
+class TestReleaseIsGatedOnTests:
+    """A tag must not reach PyPI without passing the checks a PR must pass.
+
+    A published version can never be reused, so an untested release is not
+    recoverable by pushing a fix — it burns the version number.
+    """
+
+    def test_publish_runs_the_test_suite_before_publishing(self):
+        workflow = _load_workflow("publish.yml")
+        jobs = workflow.get("jobs", {})
+
+        publish = jobs.get("publish")
+        assert publish is not None, "Must have a 'publish' job"
+
+        needs = publish.get("needs", [])
+        needs = [needs] if isinstance(needs, str) else needs
+        assert needs, "publish job must declare a dependency on the test job"
+
+        for dep in needs:
+            assert dep in jobs, f"publish needs unknown job {dep!r}"
+            assert str(jobs[dep].get("uses", "")).startswith("./.github/workflows/"), (
+                f"job {dep!r} must delegate to the shared reusable test workflow"
+            )
+
+    def test_publish_and_ci_call_the_same_test_workflow(self):
+        """One definition, so the release gate cannot drift from the PR gate."""
+
+        def called_workflows(name: str) -> set[str]:
+            return {
+                str(job["uses"])
+                for job in _load_workflow(name).get("jobs", {}).values()
+                if str(job.get("uses", "")).startswith("./.github/workflows/")
+            }
+
+        ci_called = called_workflows("ci.yml")
+        publish_called = called_workflows("publish.yml")
+
+        assert ci_called, "ci.yml must delegate its tests to the reusable workflow"
+        assert ci_called == publish_called, (
+            f"ci.yml calls {ci_called} but publish.yml calls {publish_called} — "
+            "a release would run different checks than a pull request"
+        )
+
+    def test_reusable_workflow_is_callable(self):
+        workflow = _load_workflow("tests.yml")
+        assert "workflow_call" in _get_trigger(workflow), "tests.yml must be reusable via workflow_call"
+
+    def test_reusable_workflow_runs_lint_imports_and_pytest(self):
+        steps = _get_all_steps(_load_workflow("tests.yml"))
+        run_cmds = " ".join(s.get("run", "") for s in steps)
+
+        assert "pytest" in run_cmds, "Must run pytest"
+        assert "ruff check" in run_cmds, "Must run ruff"
+        assert "lint-imports" in run_cmds, "Must enforce the import layering contract"
+
+    def test_blocking_steps_do_not_swallow_failures(self):
+        """continue-on-error is only acceptable on steps documented as advisory."""
+        advisory = {"Type check (informational)"}
+        for step in _get_all_steps(_load_workflow("tests.yml")):
+            if step.get("continue-on-error"):
+                assert step.get("name") in advisory, (
+                    f"step {step.get('name')!r} silently ignores failures but is not marked advisory"
+                )
+
+    def test_matrix_covers_every_supported_python(self):
+        """The tested versions must match what pyproject.toml claims to support."""
+        jobs = _load_workflow("tests.yml").get("jobs", {})
+        tested = set()
+        for job in jobs.values():
+            tested.update(str(v) for v in job.get("strategy", {}).get("matrix", {}).get("python-version", []))
+
+        pyproject = (ROOT / "pyproject.toml").read_text()
+        claimed = set(re.findall(r"Programming Language :: Python :: (\d+\.\d+)", pyproject))
+
+        assert claimed, "expected Python version classifiers in pyproject.toml"
+        assert claimed <= tested, f"classifiers claim {sorted(claimed - tested)} but CI never tests them"
