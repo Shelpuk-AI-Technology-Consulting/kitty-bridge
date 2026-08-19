@@ -145,7 +145,7 @@ class ClaudeAdapter(LauncherAdapter):
     def prepare_launch(
         self,
         env_overrides: dict[str, str],
-        settings_path: Path = _DEFAULT_SETTINGS_PATH,
+        settings_path: Path | None = None,
     ) -> str | None:
         """Temporarily patch Claude Code's settings.json to inject bridge env vars.
 
@@ -162,6 +162,7 @@ class ClaudeAdapter(LauncherAdapter):
             if there is no settings file to patch, the file is missing, or
             the JSON is malformed.
         """
+        settings_path = settings_path or _DEFAULT_SETTINGS_PATH
         logger.info("prepare_launch: settings_path=%s exists=%s", settings_path, settings_path.exists())
         if not settings_path.exists():
             logger.warning("prepare_launch: settings.json not found at %s — skipping patch", settings_path)
@@ -217,7 +218,7 @@ class ClaudeAdapter(LauncherAdapter):
     def cleanup_launch(
         self,
         original: str | None,
-        settings_path: Path = _DEFAULT_SETTINGS_PATH,
+        settings_path: Path | None = None,
     ) -> None:
         """Restore Claude Code's settings.json to its original state.
 
@@ -225,6 +226,7 @@ class ClaudeAdapter(LauncherAdapter):
             original: The content returned by :meth:`prepare_launch`.
             settings_path: Path to the Claude Code settings file (for testing).
         """
+        settings_path = settings_path or _DEFAULT_SETTINGS_PATH
         if original is None:
             return
         logger.info("cleanup_launch: restoring %s", settings_path)

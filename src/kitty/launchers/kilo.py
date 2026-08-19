@@ -97,7 +97,7 @@ class KiloAdapter(LauncherAdapter):
     def prepare_launch(
         self,
         env_overrides: dict[str, str],
-        config_path: Path = _DEFAULT_CONFIG_PATH,
+        settings_path: Path | None = None,
     ) -> str | None:
         """Write a temporary Kilo CLI config pointing at the bridge.
 
@@ -105,7 +105,7 @@ class KiloAdapter(LauncherAdapter):
             env_overrides: Env vars from ``build_spawn_config`` (unused; values
                 are read from instance attributes stashed during
                 ``build_spawn_config``).
-            config_path: Path to the Kilo CLI config file (for testing).
+            settings_path: Path to the Kilo CLI config file (for testing).
 
         Returns:
             The original file content for ``cleanup_launch``, or ``None``.
@@ -113,6 +113,7 @@ class KiloAdapter(LauncherAdapter):
         Raises:
             RuntimeError: If ``build_spawn_config`` was not called first.
         """
+        config_path = settings_path or _DEFAULT_CONFIG_PATH
         if not self._bridge_port:
             raise RuntimeError("build_spawn_config must be called before prepare_launch")
 
@@ -153,14 +154,15 @@ class KiloAdapter(LauncherAdapter):
     def cleanup_launch(
         self,
         original: str | None,
-        config_path: Path = _DEFAULT_CONFIG_PATH,
+        settings_path: Path | None = None,
     ) -> None:
         """Restore the original Kilo CLI config file.
 
         Args:
             original: The content returned by ``prepare_launch``.
-            config_path: Path to the Kilo CLI config file (for testing).
+            settings_path: Path to the Kilo CLI config file (for testing).
         """
+        config_path = settings_path or _DEFAULT_CONFIG_PATH
         if original is None:
             # We created the file from scratch; remove it
             try:
