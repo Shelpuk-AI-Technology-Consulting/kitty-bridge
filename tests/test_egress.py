@@ -158,9 +158,8 @@ class TestMasking:
 
         masked = cfg.masked()
 
+        assert masked == "http://myuser:****@proxy.example.com:12323"
         assert "s3cr3t" not in masked
-        assert "proxy.example.com:12323" in masked
-        assert "myuser" in masked
 
     def test_masked_without_credentials_is_the_plain_url(self):
         cfg = EgressConfig(proxy_url="http://proxy.example.com:3128")

@@ -216,8 +216,11 @@ class TestShowAndTest:
 
         assert run_egress_show(cred_store, store) == 0
 
+        record = store.load()
+        assert record is not None
+
         out = capsys.readouterr().out
-        assert "proxy.example.com" in out
+        assert record.proxy_url in out
         assert "sup3rs3cret" not in out
 
     def test_test_reports_the_observed_public_ip(self, store: EgressStore, cred_store: CredentialStore, capsys):

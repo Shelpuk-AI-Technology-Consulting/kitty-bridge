@@ -160,6 +160,7 @@ class TestDoctorEgressCheck:
         from kitty.cli.doctor_cmd import _make_egress_check
         from kitty.credentials.file_backend import FileBackend
         from kitty.credentials.store import CredentialStore
+        from kitty.egress import EgressConfig
         from kitty.egress_store import EgressRecord, EgressStore
 
         cred_store = CredentialStore(backends=[FileBackend(path=tmp_path / "creds.json")])
@@ -170,8 +171,9 @@ class TestDoctorEgressCheck:
         with patch("kitty.egress_store.EgressStore", return_value=egress_store):
             ok, detail = _make_egress_check(cred_store)()
 
+        expected = EgressConfig(proxy_url="http://proxy.example.com:3128", username="u", password="s3cr3tpw")
         assert ok is True
-        assert "proxy.example.com:3128" in detail
+        assert detail.endswith(expected.masked())
         assert "s3cr3tpw" not in detail
 
     def test_egress_check_reports_when_unconfigured(self, tmp_path):

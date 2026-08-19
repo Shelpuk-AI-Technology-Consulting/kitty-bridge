@@ -112,7 +112,7 @@ class TestLaunchGuard:
 
         assert reason is not None
         assert "bedrock-sso" in reason
-        assert "proxy.example.com" in reason
+        assert EGRESS.masked() in reason
         assert EGRESS.password not in reason, "the proxy password must never reach a user-facing message"
 
     def test_every_balancing_member_is_checked_not_just_the_first(self):
@@ -162,7 +162,7 @@ class TestValidationFailsClosed:
 
         assert result.valid is False
         assert result.reason is not None
-        assert "proxy.example.com" in result.reason
+        assert EGRESS.masked() in result.reason
         assert EGRESS.password not in result.reason
 
     @pytest.mark.asyncio()
@@ -171,4 +171,4 @@ class TestValidationFailsClosed:
 
         assert result.valid is False
         assert result.reason is not None
-        assert "proxy.example.com" in result.reason
+        assert EGRESS.masked() in result.reason
