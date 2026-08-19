@@ -128,7 +128,8 @@ def _health_monitor(
 def stop_bridge(state_path: Path | str | None = None) -> None:
     """Stop a running bridge instance.
 
-    Sends SIGTERM, waits up to 10 seconds, then SIGKILL if needed.
+    Sends SIGTERM, waits up to 10 seconds, then force-kills if needed (SIGKILL
+    where available, SIGTERM on Windows where it does not exist).
     Always removes the state file.
     """
     state_path = Path(state_path) if state_path else _get_state_path()
@@ -147,10 +148,15 @@ def stop_bridge(state_path: Path | str | None = None) -> None:
                 break
             time.sleep(0.1)
 
-        # Force kill if still alive
+        # Force kill if still alive. SIGKILL is POSIX-only; on Windows os.kill
+        # terminates unconditionally for any signal other than the console
+        # control events, so SIGTERM is the right fallback there. Without this,
+        # the branch raised AttributeError and skipped remove_state() below,
+        # leaving the stale state file this command exists to clear.
         if is_pid_alive(state.pid):
+            force_signal = getattr(signal, "SIGKILL", signal.SIGTERM)
             with contextlib.suppress(ProcessLookupError):
-                os.kill(state.pid, signal.SIGKILL)
+                os.kill(state.pid, force_signal)
 
     remove_state(state_path)
 

@@ -41,7 +41,7 @@ def config_path(config_dir):
 class TestPrepareLaunch:
     def test_creates_config_when_none_exists(self, adapter, config_path):
         adapter.build_spawn_config(_make_profile(), 18080, "my-api-key")
-        original = adapter.prepare_launch({"KILO_PROVIDER": "kitty"}, config_path=config_path)
+        original = adapter.prepare_launch({"KILO_PROVIDER": "kitty"}, settings_path=config_path)
 
         assert original is None  # No previous file
         assert config_path.exists()
@@ -50,7 +50,7 @@ class TestPrepareLaunch:
 
     def test_config_contains_provider_with_base_url(self, adapter, config_path):
         adapter.build_spawn_config(_make_profile(), 18080, "my-api-key")
-        adapter.prepare_launch({"KILO_PROVIDER": "kitty"}, config_path=config_path)
+        adapter.prepare_launch({"KILO_PROVIDER": "kitty"}, settings_path=config_path)
 
         data = json.loads(config_path.read_text())
         kitty = data["provider"]["kitty"]
@@ -58,14 +58,14 @@ class TestPrepareLaunch:
 
     def test_config_contains_provider_with_api_key(self, adapter, config_path):
         adapter.build_spawn_config(_make_profile(), 18080, "my-api-key")
-        adapter.prepare_launch({"KILO_PROVIDER": "kitty"}, config_path=config_path)
+        adapter.prepare_launch({"KILO_PROVIDER": "kitty"}, settings_path=config_path)
 
         data = json.loads(config_path.read_text())
         assert data["provider"]["kitty"]["options"]["apiKey"] == "my-api-key"
 
     def test_config_contains_model(self, adapter, config_path):
         adapter.build_spawn_config(_make_profile(model="gpt-4o"), 18080, "key")
-        adapter.prepare_launch({"KILO_PROVIDER": "kitty"}, config_path=config_path)
+        adapter.prepare_launch({"KILO_PROVIDER": "kitty"}, settings_path=config_path)
 
         data = json.loads(config_path.read_text())
         models = data["provider"]["kitty"]["models"]
@@ -81,7 +81,7 @@ class TestPrepareLaunch:
         config_path.write_text(json.dumps(existing))
 
         adapter.build_spawn_config(_make_profile(), 18080, "my-key")
-        original = adapter.prepare_launch({"KILO_PROVIDER": "kitty"}, config_path=config_path)
+        original = adapter.prepare_launch({"KILO_PROVIDER": "kitty"}, settings_path=config_path)
 
         data = json.loads(config_path.read_text())
         assert "openai" in data["provider"]  # Preserved
@@ -93,7 +93,7 @@ class TestPrepareLaunch:
         config_path.write_text(json.dumps(existing))
 
         adapter.build_spawn_config(_make_profile(), 18080, "key")
-        original = adapter.prepare_launch({"KILO_PROVIDER": "kitty"}, config_path=config_path)
+        original = adapter.prepare_launch({"KILO_PROVIDER": "kitty"}, settings_path=config_path)
 
         assert json.loads(original) == existing
 
@@ -101,7 +101,7 @@ class TestPrepareLaunch:
         config_path.write_text("not valid json {{{")
 
         adapter.build_spawn_config(_make_profile(), 18080, "key")
-        original = adapter.prepare_launch({"KILO_PROVIDER": "kitty"}, config_path=config_path)
+        original = adapter.prepare_launch({"KILO_PROVIDER": "kitty"}, settings_path=config_path)
 
         # Should still create valid config, original saved as-is
         assert original == "not valid json {{{"
@@ -110,7 +110,7 @@ class TestPrepareLaunch:
 
     def test_config_has_npm_field(self, adapter, config_path):
         adapter.build_spawn_config(_make_profile(), 18080, "key")
-        adapter.prepare_launch({"KILO_PROVIDER": "kitty"}, config_path=config_path)
+        adapter.prepare_launch({"KILO_PROVIDER": "kitty"}, settings_path=config_path)
 
         data = json.loads(config_path.read_text())
         assert data["provider"]["kitty"]["npm"] == "@ai-sdk/openai-compatible"
@@ -122,24 +122,24 @@ class TestCleanupLaunch:
         config_path.write_text(json.dumps(existing))
 
         adapter.build_spawn_config(_make_profile(), 18080, "key")
-        original = adapter.prepare_launch({"KILO_PROVIDER": "kitty"}, config_path=config_path)
+        original = adapter.prepare_launch({"KILO_PROVIDER": "kitty"}, settings_path=config_path)
 
         # Config now has kitty provider
         assert "kitty" in json.loads(config_path.read_text())["provider"]
 
         # Cleanup restores original
-        adapter.cleanup_launch(original, config_path=config_path)
+        adapter.cleanup_launch(original, settings_path=config_path)
         assert json.loads(config_path.read_text()) == existing
 
     def test_removes_temporary_config_when_no_original(self, adapter, config_path):
         adapter.build_spawn_config(_make_profile(), 18080, "key")
-        original = adapter.prepare_launch({"KILO_PROVIDER": "kitty"}, config_path=config_path)
+        original = adapter.prepare_launch({"KILO_PROVIDER": "kitty"}, settings_path=config_path)
 
         assert config_path.exists()
-        adapter.cleanup_launch(original, config_path=config_path)
+        adapter.cleanup_launch(original, settings_path=config_path)
         assert not config_path.exists()
 
     def test_cleanup_with_none_is_noop(self, adapter, config_path):
         # If prepare_launch was never called or returned None
-        adapter.cleanup_launch(None, config_path=config_path)
+        adapter.cleanup_launch(None, settings_path=config_path)
         assert not config_path.exists()

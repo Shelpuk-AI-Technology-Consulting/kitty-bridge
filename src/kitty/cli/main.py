@@ -13,6 +13,7 @@ __all__ = ["main", "map_child_exit_code"]
 
 if TYPE_CHECKING:
     from kitty.profiles.schema import BalancingProfile
+    from kitty.profiles.store import ProfileStore
 
 
 def map_child_exit_code(code: int) -> int:
@@ -200,6 +201,9 @@ def main() -> None:
         status = bridge_status(_state_path)
         if status == BridgeStatus.RUNNING:
             state = load_state(_state_path)
+            if state is None:
+                print("Bridge is not running.")
+                sys.exit(1)
             scheme = "https" if state.tls else "http"
             print(f"Running: {scheme}://{state.host}:{state.port} (profile={state.profile}, PID {state.pid})")
             sys.exit(0)
@@ -231,12 +235,12 @@ def main() -> None:
 
         from platformdirs import user_config_dir as _ucd
 
-        _config_path = str(_Path(_ucd("kitty")) / "bridge.yaml")
+        _service_config_path = str(_Path(_ucd("kitty")) / "bridge.yaml")
         dry_run = "--dry-run" in result.extra_args
         from kitty.bridge.service import generate_launchd_plist, generate_systemd_unit, generate_windows_script
 
         if sys.platform == "linux":
-            content = generate_systemd_unit(executable=sys.executable, config_path=_config_path)
+            content = generate_systemd_unit(executable=sys.executable, config_path=_service_config_path)
             if dry_run:
                 print(content)
             else:
@@ -249,7 +253,7 @@ def main() -> None:
                 print(f"Installed: {unit_path}")
                 print("Enable: systemctl --user enable --now kitty-bridge")
         elif sys.platform == "darwin":
-            content = generate_launchd_plist(executable=sys.executable, config_path=_config_path)
+            content = generate_launchd_plist(executable=sys.executable, config_path=_service_config_path)
             if dry_run:
                 print(content)
             else:
@@ -259,7 +263,7 @@ def main() -> None:
                 print(f"Installed: {plist_path}")
                 print("Load: launchctl load " + str(plist_path))
         else:
-            content = generate_windows_script(executable=sys.executable, config_path=_config_path)
+            content = generate_windows_script(executable=sys.executable, config_path=_service_config_path)
             if dry_run:
                 print(content)
             else:
@@ -331,7 +335,7 @@ def _run_auth(profile_store: object, cred_store: object, extra_args: list[str]) 
         print(f"Unknown auth provider: {args[0]!r}")
 
 
-def _print_unknown_command(args: list[str], adapters: dict, store: object) -> None:
+def _print_unknown_command(args: list[str], adapters: dict, store: ProfileStore) -> None:
     """Print a friendly error message for unrecognized commands."""
     from kitty.tui.display import print_error
 
@@ -419,15 +423,15 @@ def _run_bridge(
     profile = backend  # type: ignore[assignment]
 
     # Resolve API key from credential store
-    auth_ref = profile.auth_ref  # type: ignore[union-attr]
-    resolved_key = cred_store.get(auth_ref)  # type: ignore[union-attr]
+    auth_ref = profile.auth_ref  # type: ignore[attr-defined, union-attr]
+    resolved_key = cred_store.get(auth_ref)  # type: ignore[attr-defined, union-attr]
     if not resolved_key:
-        print_error(f"No API key found for profile {profile.name!r}")
+        print_error(f"No API key found for profile {profile.name!r}")  # type: ignore[attr-defined, union-attr]
         sys.exit(1)
 
     # Get provider adapter
     provider = get_provider(
-        profile.provider,  # type: ignore[union-attr]
+        profile.provider,  # type: ignore[attr-defined, union-attr]
         getattr(profile, "provider_config", None),
     )
 
@@ -448,7 +452,7 @@ def _run_bridge(
         adapter=None,  # type: ignore[arg-type]
         provider=provider,
         resolved_key=resolved_key,
-        model=profile.model,  # type: ignore[union-attr]
+        model=profile.model,  # type: ignore[attr-defined, union-attr]
         debug=effective_debug,
         provider_config=getattr(profile, "provider_config", {}),
         logging_enabled=logging_enabled,
@@ -462,9 +466,9 @@ def _run_bridge(
         print_panel(
             "Kitty Bridge Mode",
             f"[kitty.ok]Bridge server running on http://127.0.0.1:{port}[/kitty.ok]\n\n"
-            f"Profile: [kitty.accent]{profile.name}[/kitty.accent]\n"  # type: ignore[union-attr]
-            f"Provider: [kitty.accent]{profile.provider}[/kitty.accent]\n"  # type: ignore[union-attr]
-            f"Model: [kitty.accent]{profile.model}[/kitty.accent]\n\n"  # type: ignore[union-attr]
+            f"Profile: [kitty.accent]{profile.name}[/kitty.accent]\n"  # type: ignore[attr-defined, union-attr]
+            f"Provider: [kitty.accent]{profile.provider}[/kitty.accent]\n"  # type: ignore[attr-defined, union-attr]
+            f"Model: [kitty.accent]{profile.model}[/kitty.accent]\n\n"  # type: ignore[attr-defined, union-attr]
             f"Endpoints:\n"
             f"  • POST /v1/chat/completions\n"
             f"  • POST /v1/messages\n"
@@ -525,7 +529,7 @@ def _run_bridge_balancing(
     # Build backends list: (provider, resolved_key, profile)
     backends = []
     for mp in member_profiles:
-        key = cred_store.get(mp.auth_ref)  # type: ignore[union-attr]
+        key = cred_store.get(mp.auth_ref)  # type: ignore[attr-defined, union-attr]
         if not key:
             print_error(f"No API key found for member profile {mp.name!r}")
             sys.exit(1)
@@ -626,7 +630,7 @@ def _launch_target(
     return launch(
         adapter=adapter,  # type: ignore[arg-type]
         provider=get_provider(
-            profile.provider,  # type: ignore[union-attr]
+            profile.provider,  # type: ignore[attr-defined, union-attr]
             getattr(profile, "provider_config", None),
         ),
         profile=profile,  # type: ignore[arg-type]
@@ -663,7 +667,7 @@ def _launch_target_balancing(
     # Build backends list
     backends = []
     for mp in member_profiles:
-        key = cred_store.get(mp.auth_ref)  # type: ignore[union-attr]
+        key = cred_store.get(mp.auth_ref)  # type: ignore[attr-defined, union-attr]
         if not key:
             from kitty.tui.display import print_error
 

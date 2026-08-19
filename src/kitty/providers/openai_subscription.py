@@ -33,8 +33,9 @@ import platform
 import random
 import time
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
+from typing import Protocol
 
 import curl_cffi.requests
 
@@ -49,6 +50,28 @@ from kitty.providers.openai import OpenAIAdapter
 __all__ = ["OpenAISubscriptionAdapter"]
 
 logger = logging.getLogger(__name__)
+
+
+class _CurlResponse(Protocol):
+    """The part of a ``curl_cffi`` response this adapter relies on.
+
+    curl_cffi publishes no type stubs, so its response object is untyped.
+    Declaring the handful of members actually used keeps the rest of this
+    module type-checked instead of silently opting out of it.
+    """
+
+    status_code: int
+    text: str
+    content: bytes
+
+    def aiter_content(self) -> AsyncIterator[bytes]:
+        """Stream the response body.
+
+        Returns:
+            An async iterator over the body chunks.
+        """
+        ...
+
 
 # Codex backend endpoint for ChatGPT subscription access
 _CODEX_BACKEND_URL = "https://chatgpt.com/backend-api/codex/responses"
@@ -69,7 +92,7 @@ def _codex_backoff(attempt: int) -> float:
     exp = 2 ** (attempt - 1)
     millis = _CODEX_RETRY_BASE_DELAY_MS * exp
     jitter = random.uniform(0.9, 1.1)  # noqa: S311
-    return (millis * jitter) / 1000.0
+    return float((millis * jitter) / 1000.0)
 
 
 # Codex CLI version sent in the version header.
@@ -245,7 +268,8 @@ class OpenAISubscriptionAdapter(OpenAIAdapter):
             payload_b64 += "=" * missing
             payload = json.loads(__import__("base64").urlsafe_b64decode(payload_b64))
             auth_ns = payload.get("https://api.openai.com/auth", {})
-            return auth_ns.get("chatgpt_account_id")
+            account_id = auth_ns.get("chatgpt_account_id")
+            return str(account_id) if account_id is not None else None
         except Exception:
             return None
 
@@ -397,7 +421,7 @@ class OpenAISubscriptionAdapter(OpenAIAdapter):
         """Log which Cloudflare cookies are present for ChatGPT hosts."""
         jar = cookies.jar
         cf_cookies = [
-            f"{c.name}={c.value[:8]}..." if len(c.value) > 8 else f"{c.name}={c.value}"
+            f"{c.name}={(c.value or '')[:8]}..." if len(c.value or "") > 8 else f"{c.name}={c.value or ''}"
             for c in jar
             if _is_chatgpt_host(c.domain) and (c.name in _CF_COOKIE_ALLOWLIST or c.name.startswith(_CF_COOKIE_PREFIX))
         ]
@@ -502,7 +526,7 @@ class OpenAISubscriptionAdapter(OpenAIAdapter):
         # Step 0: initial attempt, Step 1: reload from disk, Step 2: force-refresh.
         import aiohttp
 
-        resp: object | None = None
+        resp: _CurlResponse | None = None
         got_401 = False
         async with aiohttp.ClientSession(**aiohttp_session_kwargs()) as oauth_http:
             for _auth_step in range(3):
@@ -617,6 +641,8 @@ class OpenAISubscriptionAdapter(OpenAIAdapter):
                     logger.warning("Codex backend 401: forcing token refresh")
 
         # Auth recovery exhausted — still 401
+        if resp is None:
+            raise ProviderError("Codex backend returned no response")
         if got_401:
             logger.warning("Codex backend 401: auth recovery exhausted")
             raw = resp.text
@@ -673,7 +699,7 @@ class OpenAISubscriptionAdapter(OpenAIAdapter):
         import aiohttp
 
         got_401 = False
-        resp: object | None = None
+        resp: _CurlResponse | None = None
         async with aiohttp.ClientSession(**aiohttp_session_kwargs()) as oauth_http:
             for _auth_step in range(3):
                 resp = None
@@ -816,6 +842,8 @@ class OpenAISubscriptionAdapter(OpenAIAdapter):
                     logger.warning("Codex backend 401: forcing token refresh")
 
         # Auth recovery exhausted — still 401
+        if resp is None:
+            raise ProviderError("Codex backend returned no response")
         if got_401:
             logger.warning("Codex backend 401: auth recovery exhausted")
             raw = resp.text
@@ -1135,7 +1163,7 @@ class OpenAISubscriptionAdapter(OpenAIAdapter):
             return None
         return max(1, seconds)
 
-    def _attach_retry_after(self, err: Exception, resp: object) -> None:
+    def _attach_retry_after(self, err: Exception, resp: _CurlResponse) -> None:
         if not isinstance(err, ProviderError) or err.http_status != 429:
             return
         headers = getattr(resp, "headers", None) or {}
@@ -1144,7 +1172,7 @@ class OpenAISubscriptionAdapter(OpenAIAdapter):
             err.retry_after = retry_after
             logger.info("OpenAI subscription rate limited; retry_after=%ds", retry_after)
 
-    def map_error(self, status_code: int, body: dict) -> Exception:
+    def map_error(self, status_code: int, body: dict) -> ProviderError:
         error_obj = body.get("error", body)
         msg = error_obj.get("message", str(error_obj)) if isinstance(error_obj, dict) else str(error_obj)
         if status_code == 401:

@@ -211,18 +211,29 @@ class LiveChecklist:
         print_section(self._title)
 
         if self._is_tty:
-            table = Table.grid(padding=(0, 2))
-            table.add_column()
-            table.add_column()
-            table.add_column()
+            items: list[CheckItem] = [CheckItem(label) for label, _ in checks]
 
-            items: list[CheckItem] = []
-            for label, _ in checks:
-                item = CheckItem(label)
-                items.append(item)
-                table.add_row(item.status_text, label, "")
+            def _render() -> Table:
+                """Build a table reflecting the current state of every check.
 
-            with Live(table, console=_console, refresh_per_second=4):
+                Rich exposes no supported way to mutate a rendered row — ``Row``
+                carries only styling, and row content lives on the columns — so
+                each refresh rebuilds the table. The previous version assigned to
+                a non-existent ``Row.cells`` attribute, which silently did
+                nothing and left every check showing the pending spinner.
+
+                Returns:
+                    A table reflecting every check's current status and detail.
+                """
+                table = Table.grid(padding=(0, 2))
+                table.add_column()
+                table.add_column()
+                table.add_column()
+                for entry in items:
+                    table.add_row(entry.status_text, entry.label, entry.detail)
+                return table
+
+            with Live(_render(), console=_console, refresh_per_second=4) as live:
                 for item, (_, check_fn) in zip(items, checks, strict=True):
                     try:
                         ok, detail = check_fn()
@@ -230,13 +241,9 @@ class LiveChecklist:
                         ok, detail = False, str(exc)
                     item.ok = ok
                     item.detail = detail
-                    table.rows[items.index(item)].cells = (
-                        item.status_text,
-                        item.label,
-                        detail,
-                    )
+                    live.update(_render())
         else:
-            items: list[CheckItem] = []
+            items = []
             for label, check_fn in checks:
                 item = CheckItem(label)
                 items.append(item)

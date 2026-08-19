@@ -69,7 +69,7 @@ class OAuthSession:
     access_token_expires_at: float  # epoch seconds
     api_key_expires_at: float  # epoch seconds
     _file_path: str | None = field(default=None, repr=False)
-    _refresh_lock: asyncio.Lock = field(default=None, repr=False)
+    _refresh_lock: asyncio.Lock | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         if self._refresh_lock is None:
@@ -282,7 +282,7 @@ class OAuthSession:
                     body.get("error_description"),
                 )
             result = await resp.json()
-        return result["openai_api_key"]
+        return str(result["openai_api_key"])
 
     # ── Public API ─────────────────────────────────────────────────────────
 
@@ -304,6 +304,7 @@ class OAuthSession:
         Raises:
             OAuthRefreshFailed: If refresh fails and cannot be recovered.
         """
+        assert self._refresh_lock is not None  # created in __post_init__
         async with self._refresh_lock:
             # Re-check after acquiring the lock — another coroutine may have refreshed
             if (

@@ -218,7 +218,7 @@ class MessagesTranslator:
 
         return result
 
-    def _translate_message(self, msg: dict) -> dict | None:
+    def _translate_message(self, msg: dict) -> dict | list[dict] | None:
         """Translate a single Messages API message to Chat Completions format.
 
         Returns the translated message dict. For user messages with multiple
@@ -371,7 +371,7 @@ class MessagesTranslator:
         """Emit `message_start` once per streaming response."""
         if self._message_started:
             return
-        message_obj = {
+        message_obj: dict = {
             "id": message_id,
             "type": "message",
             "role": "assistant",

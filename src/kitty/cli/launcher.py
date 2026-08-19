@@ -217,14 +217,10 @@ async def launch_async(
 
     # 7. Patch agent-specific external config (e.g. Claude Code settings.json)
     original_settings: str | None = None
-    settings_path: Path | None = None
-    if hasattr(adapter, "prepare_launch"):
-        # Resolve the settings path before calling prepare_launch so we can
-        # pass it explicitly for both patching and cleanup.
-        if hasattr(adapter, "_DEFAULT_SETTINGS_PATH"):
-            settings_path = adapter._DEFAULT_SETTINGS_PATH
-        else:
-            settings_path = Path.home() / ".claude" / "settings.json"
+    settings_path: Path | None = adapter.default_settings_path
+    if settings_path is not None:
+        # Each adapter owns its agent's config file. Guessing one default here
+        # previously handed every agent Claude Code's settings.json.
         original_settings = adapter.prepare_launch(
             spawn_config.env_overrides,
             settings_path=settings_path,
@@ -236,9 +232,8 @@ async def launch_async(
                 f"[kitty debug] settings.json patched (original={'saved' if original_settings else 'none'})",
                 file=sys.stderr,
             )
-    else:
-        if debug:
-            print("[kitty debug] adapter has no prepare_launch method", file=sys.stderr)
+    elif debug:
+        print(f"[kitty debug] {adapter.name} has no settings file to patch", file=sys.stderr)
 
     # 8. Spawn child process with signal forwarding
     logger.info("Launching child: %s", " ".join(cmd))
@@ -286,7 +281,7 @@ async def launch_async(
                     proc.kill()
     finally:
         # 9. Restore external config (must not prevent server shutdown on failure)
-        if hasattr(adapter, "cleanup_launch"):
+        if settings_path is not None:
             with contextlib.suppress(Exception):
                 adapter.cleanup_launch(
                     original_settings,

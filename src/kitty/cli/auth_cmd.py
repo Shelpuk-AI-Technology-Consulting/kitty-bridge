@@ -55,7 +55,7 @@ async def run_oauth_for_provider(
     config_dir = profile_store._path.parent  # type: ignore[attr-defined]
     session = OAuthSession.create_session_file(session, auth_ref, config_dir)
 
-    session_file_path = Path(session._file_path)  # type: ignore[assignment]
+    session_file_path = Path(session._file_path)  # type: ignore[arg-type, assignment]
     cred_store.set(auth_ref, str(session_file_path))
 
     return auth_ref, str(session_file_path)

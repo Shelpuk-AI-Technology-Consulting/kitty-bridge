@@ -700,7 +700,7 @@ class TestTranslateStreamChunk:
         assert self.t._tool_call_buffers == {}
         assert self.t._tool_call_meta == {}
         assert self.t._accumulated_text == ""
-        assert self.t._text_item_id is None
+        assert not self.t._text_item_id
         assert self.t._text_started is False
 
     def test_finish_with_null_usage_does_not_crash(self):
@@ -874,7 +874,7 @@ class TestTranslateStreamChunk:
         self.t.translate_stream_chunk("resp_1", chunk)
         self.t.reset()
         assert self.t._accumulated_text == ""
-        assert self.t._text_item_id is None
+        assert not self.t._text_item_id
         assert self.t._text_started is False
 
         # After reset, should work with new state
@@ -991,7 +991,7 @@ class TestSynthesizeCompletedEvents:
         self.t.translate_stream_chunk("resp_test", chunk)
         self.t.synthesize_completed_events("resp_test", "gpt-4o")
         assert self.t._accumulated_text == ""
-        assert self.t._text_item_id is None
+        assert not self.t._text_item_id
 
     def test_no_double_completed_when_finish_reason_already_sent(self):
         # Normal flow: finish_reason produces completed event

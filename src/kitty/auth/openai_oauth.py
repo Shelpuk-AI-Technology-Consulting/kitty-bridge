@@ -18,12 +18,13 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import html
 import json
 import logging
 import secrets
 import urllib.parse
 import webbrowser
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import aiohttp
 from aiohttp import web
@@ -111,7 +112,7 @@ def _decode_jwt_payload(token: str) -> dict:
         payload += "=" * padding
     try:
         decoded = base64.urlsafe_b64decode(payload)
-        return json.loads(decoded)
+        return cast(dict, json.loads(decoded))
     except Exception:
         return {}
 
@@ -200,9 +201,18 @@ async def _start_callback_server(
             error_description = request.query.get("error_description", "")
             oauth_error = OAuthAuthorizationError(error, error_description)
             code_future.set_result(oauth_error)
+            # Escaped: both values come straight from the callback query
+            # string, so reflecting them raw makes this page an XSS sink for
+            # anyone who can get the browser to hit the loopback callback
+            # while a login is in progress.
             return web.Response(
                 status=400,
-                text=f"<html><body><p>Authorization error: {error}</p><p>{error_description}</p></body></html>",
+                text=(
+                    "<html><body>"
+                    f"<p>Authorization error: {html.escape(error)}</p>"
+                    f"<p>{html.escape(error_description)}</p>"
+                    "</body></html>"
+                ),
                 content_type="text/html",
             )
 
@@ -266,7 +276,7 @@ async def _exchange_code_for_tokens(
                 list(tokens.keys()),
             )
             raise OAuthAuthorizationError("Token response missing required fields")
-        return tokens
+        return cast(dict, tokens)
 
 
 async def _exchange_id_token_for_api_key(
@@ -320,7 +330,7 @@ async def _exchange_id_token_for_api_key(
                 "token_exchange_failed",
                 f"Response missing openai_api_key: {result}",
             )
-    return api_key
+    return cast(str, api_key)
 
 
 # ── Main orchestrator ────────────────────────────────────────────────────

@@ -7,6 +7,7 @@ import os
 import signal
 from contextlib import suppress
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -338,3 +339,84 @@ class TestIsPidAliveErrorMapping:
         winerror_87 = OSError(22, "The parameter is incorrect", None, 87, None)
         with patch("kitty.bridge.manage.os.kill", side_effect=winerror_87):
             assert bridge_status(state_path) is BridgeStatus.STALE
+
+
+class TestStopBridgeForceKillIsCrossPlatform:
+    """`kitty bridge stop` must work on Windows, where SIGKILL does not exist.
+
+    The force-kill branch runs when a bridge has not exited ~10s after SIGTERM —
+    i.e. exactly when the user is trying to clear a wedged process. Raising there
+    also skipped `remove_state`, leaving behind the stale state file the command
+    exists to clean up.
+    """
+
+    @staticmethod
+    def _write_state(state_path: Path, pid: int = 4321) -> None:
+        write_state(
+            state_path,
+            BridgeState(
+                pid=pid,
+                host="127.0.0.1",
+                port=8080,
+                profile="test",
+                started_at="2026-04-11T10:30:00Z",
+                tls=False,
+            ),
+        )
+
+    def test_falls_back_to_sigterm_when_sigkill_is_unavailable(self, tmp_path: Path):
+        """Simulates win32, where signal.SIGKILL is absent."""
+        from kitty.bridge import manage
+
+        state_path = tmp_path / "state.json"
+        self._write_state(state_path)
+
+        windows_signal = SimpleNamespace(SIGTERM=signal.SIGTERM)
+        assert not hasattr(windows_signal, "SIGKILL")
+
+        with (
+            patch.object(manage, "signal", windows_signal),
+            patch.object(manage, "is_pid_alive", return_value=True),
+            patch.object(manage, "time"),
+            patch.object(manage.os, "kill") as mock_kill,
+        ):
+            manage.stop_bridge(state_path)
+
+        signals_sent = [call.args[1] for call in mock_kill.call_args_list]
+        assert signals_sent, "no signal was sent to the wedged process"
+        assert all(sig == signal.SIGTERM for sig in signals_sent)
+        assert not state_path.exists(), "the stale state file was left behind"
+
+    @pytest.mark.skipif(not hasattr(signal, "SIGKILL"), reason="POSIX-only behaviour")
+    def test_uses_sigkill_where_available(self, tmp_path: Path):
+        """POSIX behaviour must be unchanged — SIGTERM first, then SIGKILL."""
+        from kitty.bridge import manage
+
+        state_path = tmp_path / "state.json"
+        self._write_state(state_path)
+
+        with (
+            patch.object(manage, "is_pid_alive", return_value=True),
+            patch.object(manage, "time"),
+            patch.object(manage.os, "kill") as mock_kill,
+        ):
+            manage.stop_bridge(state_path)
+
+        signals_sent = [call.args[1] for call in mock_kill.call_args_list]
+        assert signals_sent[0] == signal.SIGTERM
+        assert signals_sent[-1] == signal.SIGKILL
+
+    def test_state_file_is_removed_even_if_the_signal_fails(self, tmp_path: Path):
+        from kitty.bridge import manage
+
+        state_path = tmp_path / "state.json"
+        self._write_state(state_path)
+
+        with (
+            patch.object(manage, "is_pid_alive", return_value=True),
+            patch.object(manage, "time"),
+            patch.object(manage.os, "kill", side_effect=ProcessLookupError),
+        ):
+            manage.stop_bridge(state_path)
+
+        assert not state_path.exists()

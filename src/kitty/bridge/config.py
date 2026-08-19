@@ -92,7 +92,7 @@ def load_bridge_config(
 
     config = BridgeConfig(
         host=str(_get("host", cli_host, _DEFAULT_HOST)),
-        port=int(_get("port", cli_port, _DEFAULT_PORT)),
+        port=int(_get("port", cli_port, _DEFAULT_PORT)),  # type: ignore[call-overload]  # _get returns object
         profile=_get("profile", cli_profile, None),  # type: ignore[arg-type]
         keys_file=str(_expand_path(str(_get("keys_file", None, _DEFAULT_KEYS_FILE))) or _DEFAULT_KEYS_FILE),  # type: ignore[arg-type]
         log_access=_get("log_access", cli_log_access, None),  # type: ignore[arg-type]

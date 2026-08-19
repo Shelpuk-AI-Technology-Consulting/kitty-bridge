@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sys
 from collections.abc import Callable
-from typing import Any
+from typing import Any, cast
 
 import questionary
 
@@ -32,10 +32,11 @@ class SelectionMenu:
             return None
         if not self._options:
             return None
-        return questionary.select(
+        # questionary ships no stubs; ask() returns the choice or None.
+        return cast("str | None", questionary.select(
             self._title,
             choices=self._options,
-        ).ask()
+        ).ask())
 
 
 class CheckboxMenu:
@@ -76,4 +77,4 @@ class CheckboxMenu:
         if self._validate is not None:
             kwargs["validate"] = self._validate
 
-        return questionary.checkbox(self._title, **kwargs).ask()
+        return cast("list[str] | None", questionary.checkbox(self._title, **kwargs).ask())

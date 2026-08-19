@@ -99,7 +99,7 @@ class TestLiveChecklistTTY:
 
     def test_run_checks_uses_live(self) -> None:
         with patch("kitty.tui.display.Live") as mock_live:
-            mock_live.return_value.__enter__ = MagicMock(return_value=None)
+            mock_live.return_value.__enter__ = MagicMock(return_value=mock_live.return_value)
             mock_live.return_value.__exit__ = MagicMock(return_value=None)
             cl = self._make_tty_checklist()
             with patch("sys.stdout", new=StringIO()):
@@ -108,7 +108,7 @@ class TestLiveChecklistTTY:
 
     def test_run_checks_returns_correct_failure_count(self) -> None:
         with patch("kitty.tui.display.Live") as mock_live:
-            mock_live.return_value.__enter__ = MagicMock(return_value=None)
+            mock_live.return_value.__enter__ = MagicMock(return_value=mock_live.return_value)
             mock_live.return_value.__exit__ = MagicMock(return_value=None)
             cl = self._make_tty_checklist()
             with patch("sys.stdout", new=StringIO()):
@@ -123,7 +123,7 @@ class TestLiveChecklistTTY:
 
     def test_run_checks_exception_caught(self) -> None:
         with patch("kitty.tui.display.Live") as mock_live:
-            mock_live.return_value.__enter__ = MagicMock(return_value=None)
+            mock_live.return_value.__enter__ = MagicMock(return_value=mock_live.return_value)
             mock_live.return_value.__exit__ = MagicMock(return_value=None)
             cl = self._make_tty_checklist()
 
@@ -133,3 +133,74 @@ class TestLiveChecklistTTY:
             with patch("sys.stdout", new=StringIO()):
                 failures = cl.run_checks([("boom", _boom)])
         assert failures == 1
+
+
+class TestLiveChecklistTTYRendering:
+    """What a person actually sees in a terminal.
+
+    The tests above mock ``Live`` away, so they verify the return value but
+    never the display — which is how `kitty doctor` came to show nothing but
+    pending spinners for every check while still exiting with the right code.
+    These render for real and assert on the output.
+    """
+
+    @staticmethod
+    def _render(checks: list[tuple[str, object]]) -> tuple[str, int]:
+        """Run checks through the TTY path and capture what was drawn.
+
+        Args:
+            checks: ``(label, callable)`` pairs, as ``run_checks`` takes.
+
+        Returns:
+            ``(rendered_output, failure_count)``.
+        """
+        from rich.console import Console
+
+        buf = StringIO()
+        console = Console(file=buf, width=90, force_terminal=False)
+        with (
+            patch("sys.stdout.isatty", return_value=True),
+            patch("kitty.tui.display._console", console),
+        ):
+            checklist = LiveChecklist("kitty doctor")
+            failures = checklist.run_checks(checks)  # type: ignore[arg-type]
+        return buf.getvalue(), failures
+
+    def test_resolved_checks_show_their_status_symbol(self) -> None:
+        out, failures = self._render(
+            [("Target claude", lambda: (True, "binary found")), ("Creds", lambda: (False, "no key"))]
+        )
+
+        assert "✓" in out, f"passing check never rendered its result:\n{out}"
+        assert "✗" in out, f"failing check never rendered its result:\n{out}"
+        assert failures == 1
+
+    def test_detail_text_reaches_the_user(self) -> None:
+        """A bare pass/fail is not a diagnosis — the reason has to be shown."""
+        out, _ = self._render([("Target claude", lambda: (False, "binary not found on PATH"))])
+
+        assert "binary not found on PATH" in out, f"the reason for the failure was never displayed:\n{out}"
+
+    def test_no_check_is_left_pending(self) -> None:
+        out, _ = self._render([("a", lambda: (True, "ok")), ("b", lambda: (True, "ok"))])
+
+        assert "⠿" not in out, f"a finished check is still showing the pending spinner:\n{out}"
+
+    def test_checks_sharing_a_label_both_resolve(self) -> None:
+        """Two profiles can produce identically-labelled checks."""
+        out, failures = self._render(
+            [("Credentials", lambda: (True, "resolved-first")), ("Credentials", lambda: (False, "missing-second"))]
+        )
+
+        assert "resolved-first" in out
+        assert "missing-second" in out
+        assert failures == 1
+
+    def test_a_raising_check_reports_its_exception(self) -> None:
+        def _boom() -> tuple[bool, str]:
+            raise ValueError("upstream unreachable")
+
+        out, failures = self._render([("boom", _boom)])
+
+        assert failures == 1
+        assert "upstream unreachable" in out

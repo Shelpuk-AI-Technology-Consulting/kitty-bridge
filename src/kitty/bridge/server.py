@@ -18,7 +18,8 @@ import traceback
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, NoReturn
+from types import TracebackType
+from typing import TYPE_CHECKING, NoReturn, TextIO, TypedDict, cast
 
 import aiohttp
 from aiohttp import web
@@ -108,7 +109,9 @@ def _setup_crash_handlers(log_path: Path, *, state_path: str | None = None) -> N
         crash_logger.warning("Could not open log file for faulthandler: %s", log_path)
 
     # sys.excepthook: unhandled Python exceptions
-    def _crash_excepthook(exc_type: type[BaseException], exc_value: BaseException, exc_tb: object) -> NoReturn:
+    def _crash_excepthook(
+        exc_type: type[BaseException], exc_value: BaseException, exc_tb: TracebackType | None
+    ) -> NoReturn:
         crash_logger.critical(
             "Unhandled exception — process will exit. %s: %s\n%s",
             exc_type.__name__,
@@ -608,8 +611,23 @@ class UpstreamError(Exception):
 # health marking, usage logging) reads from the context var, ensuring
 # concurrent requests within the same event loop never accidentally
 # use another request's backend.
-_backend_context: contextvars.ContextVar[dict] = contextvars.ContextVar("backend_context")
-_EMPTY_CTX: dict = {}  # Sentinel default for _backend_context.get() — avoids per-access allocation
+class _BackendContext(TypedDict, total=False):
+    """Per-request record of which balancing backend was selected.
+
+    Concurrent requests each need their own view of the chosen backend, so this
+    is carried in a ContextVar rather than on the server. Declaring the shape
+    keeps the ``_active_*`` properties typed instead of returning Any.
+    """
+
+    provider: ProviderAdapter
+    key: str
+    model: str | None
+    idx: int
+    provider_config: dict
+
+
+_backend_context: contextvars.ContextVar[_BackendContext] = contextvars.ContextVar("backend_context")
+_EMPTY_CTX: _BackendContext = {}  # Sentinel default for .get() — avoids per-access allocation
 
 
 class BridgeServer:
@@ -617,7 +635,7 @@ class BridgeServer:
 
     def __init__(
         self,
-        adapter: LauncherAdapter,
+        adapter: LauncherAdapter | None,
         provider: ProviderAdapter,
         resolved_key: str,
         host: str = "127.0.0.1",
@@ -665,7 +683,7 @@ class BridgeServer:
 
         # Access logging
         self._access_log_path = access_log_path
-        self._access_log_file = None
+        self._access_log_file: TextIO | None = None
         self._profile_name = profile_name
 
         # State file
@@ -779,7 +797,7 @@ class BridgeServer:
     def _active_provider_config(self, value: dict) -> None:
         self.__dict__["_provider_config"] = value
 
-    def _get_backend_context(self) -> dict:
+    def _get_backend_context(self) -> _BackendContext:
         """Return the current request's backend context from the ContextVar."""
         return _backend_context.get(_EMPTY_CTX)
 
@@ -1074,8 +1092,8 @@ class BridgeServer:
         # First failure: start at 30s regardless of initial cooldown
         if health["healthy"] or health.get("stream_error_count", 0) == 0:
             return 30
-        count = health.get("stream_error_count", 0)
-        return min(30 * (2**count), self._backend_cooldown)
+        count = int(health.get("stream_error_count", 0))
+        return int(min(30 * (2**count), self._backend_cooldown))
 
     def _get_transport_error_cooldown(self, backend_idx: int) -> int:
         """Return cooldown for a transport/connection-reset failure.
@@ -1191,7 +1209,7 @@ class BridgeServer:
             return choices[0].get("finish_reason") is not None
         return False
 
-    def _select_backend(self, *, require_streaming: bool = False) -> dict:
+    def _select_backend(self, *, require_streaming: bool = False) -> _BackendContext:
         """Select next backend and set active fields for the current request.
 
         When require_streaming is True, only selects backends whose provider
@@ -1215,7 +1233,7 @@ class BridgeServer:
         # requests within the same event loop get their own ContextVar
         # value and never see this one, even if the instance fields are
         # overwritten by another request's _select_backend().
-        result = {
+        result: _BackendContext = {
             "provider": provider,
             "key": key,
             "model": model,
@@ -1475,7 +1493,7 @@ class BridgeServer:
     async def _auth_middleware(self, request: web.Request, handler: object) -> web.StreamResponse:
         # If no keys configured, allow all
         if not self._keys_entries:
-            return await handler(request)  # type: ignore[misc]
+            return await handler(request)  # type: ignore[misc, no-any-return, operator]
 
         auth_header = request.headers.get("Authorization", "")
         token = auth_header[7:] if auth_header.startswith("Bearer ") else None
@@ -1493,7 +1511,7 @@ class BridgeServer:
         if mapped_profile is not None:
             request["_mapped_profile"] = mapped_profile
 
-        return await handler(request)  # type: ignore[misc]
+        return await handler(request)  # type: ignore[misc, no-any-return, operator]
 
     # ── Access log middleware ─────────────────────────────────────────────
 
@@ -1502,7 +1520,7 @@ class BridgeServer:
         start = time.monotonic()
         response: web.StreamResponse | None = None
         try:
-            response = await handler(request)  # type: ignore[misc]
+            response = await handler(request)  # type: ignore[misc, operator]
         except web.HTTPException:
             raise
         except Exception as exc:
@@ -1776,7 +1794,7 @@ class BridgeServer:
                     except (ConnectionResetError, BrokenPipeError, OSError):
                         logger.debug("Client disconnected before error event")
                     break
-                upstream_status = 200
+                upstream_status: int | None = 200
                 break
 
             cc_request.pop("_resolved_key", None)
@@ -2456,11 +2474,25 @@ class BridgeServer:
                     type(self._active_provider).__name__,
                 )
             else:
-                if sr is not None:
-                    try:
-                        await sr.write_eof()
-                    except (ConnectionResetError, BrokenPipeError, OSError):
-                        logger.debug("Client disconnected before stream EOF")
+                # Defensive. Reaching this needs the loop to exit after a
+                # transport failure but before any bytes are written, which
+                # every constructed scenario short-circuits into the 503
+                # all-backends-unhealthy response first. Kept because the
+                # alternative -- returning None -- makes aiohttp raise
+                # "handler should return a response" and the caller sees an
+                # opaque 500 with no diagnosis. Not covered by a test.
+                if sr is None:
+                    return _make_error_response(
+                        {
+                            "type": "error",
+                            "error": {"type": "api_error", "message": "Upstream returned an empty stream"},
+                        },
+                        status=_last_error_status,
+                    )
+                try:
+                    await sr.write_eof()
+                except (ConnectionResetError, BrokenPipeError, OSError):
+                    logger.debug("Client disconnected before stream EOF")
                 return sr
 
         try:
@@ -3470,6 +3502,7 @@ class BridgeServer:
 
     async def _request_with_retry_balancing(self, cc_request: dict) -> dict:
         """Balancing retry: failover across backends on errors or empty responses."""
+        assert self._backends is not None  # balancing mode only
         n_backends = len(self._backends)
         last_exc: UpstreamError | Exception | None = None
         last_response: dict | None = None
@@ -3638,6 +3671,11 @@ class BridgeServer:
         if last_exc is not None:
             raise last_exc
         # All backends returned empty — return the empty response
+        if last_response is None:
+            # Defensive: this function is only entered under `if self._backends:`,
+            # so one of last_exc/last_response is always set. Kept so the dict
+            # contract every caller relies on cannot be violated silently.
+            raise UpstreamError(502, "All backends failed without returning a response")
         return last_response
 
     async def _handle_chat_completions(self, request: web.Request) -> web.StreamResponse:
@@ -4595,7 +4633,9 @@ class BridgeServer:
         The result is capped at _MAX_REQUEST_CHARS (absolute safety limit).
         """
         if self._backends:
-            backend_tuples = [(b[0].provider_type, b[2].model, b[2].provider_config) for b in self._backends]
+            backend_tuples: list[tuple[str, str, dict | None]] = [
+                (b[0].provider_type, b[2].model, b[2].provider_config) for b in self._backends
+            ]
             context_tokens = get_balancing_min_context_tokens(backend_tuples)
             return min(tokens_to_chars(context_tokens), _MAX_REQUEST_CHARS)
 
@@ -5208,7 +5248,7 @@ class BridgeServer:
         # model-aware header construction (e.g. OpenCode Go).
         if hasattr(provider, "build_upstream_headers_for_model"):
             model = self._active_model or ""
-            return provider.build_upstream_headers_for_model(self._active_key, model)
+            return cast("dict[str, str]", provider.build_upstream_headers_for_model(self._active_key, model))  # type: ignore[attr-defined]  # optional provider hook
         return provider.build_upstream_headers(self._active_key)
 
     async def _make_upstream_request(self, cc_request: dict, *, retry_rate_limit: bool = True) -> dict:
@@ -5256,7 +5296,7 @@ class BridgeServer:
                         and last_body.get("type") == "message"
                     ):
                         return last_body
-                    return self._active_provider.translate_from_upstream(last_body)
+                    return self._active_provider.translate_from_upstream(cast(dict, last_body))
 
                 # In balancing mode (retry_rate_limit=False), raise 429 immediately
                 # so the caller can fail over to another backend.

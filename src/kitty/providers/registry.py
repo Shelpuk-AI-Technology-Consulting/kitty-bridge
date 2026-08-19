@@ -93,7 +93,7 @@ def get_provider(provider_type: str, provider_config: dict | None = None) -> Pro
     if cls is None:
         raise KeyError(f"Unknown provider type: {provider_type!r}. Available: {sorted(_registry)}")
     if provider_config is not None and _supports_provider_config(cls):
-        return cls(provider_config=provider_config)
+        return cls(provider_config=provider_config)  # type: ignore[call-arg]  # checked by _supports_provider_config
     return cls()
 
 

@@ -78,8 +78,9 @@ class ResponsesTranslator:
         self._accumulated_text: str = ""
         self._accumulated_reasoning: str = ""
         self._seq: int = 0
-        self._text_item_id: str | None = None
-        self._reasoning_item_id: str | None = None
+        # Empty string means "not started"; every read is a truthiness test.
+        self._text_item_id: str = ""
+        self._reasoning_item_id: str = ""
         self._text_started: bool = False
         self._reasoning_started: bool = False
         self._last_was_empty: bool = False
@@ -96,8 +97,8 @@ class ResponsesTranslator:
         self._accumulated_text = ""
         self._accumulated_reasoning = ""
         self._seq = 0
-        self._text_item_id = None
-        self._reasoning_item_id = None
+        self._text_item_id = ""
+        self._reasoning_item_id = ""
         self._text_started = False
         self._reasoning_started = False
         self._last_was_empty = False
@@ -219,8 +220,9 @@ class ResponsesTranslator:
                         parts.append(part)
                     # Other types: skip
             # If all parts are strings, concatenate into single string
-            if all(isinstance(p, str) for p in parts):
-                return "\n".join(parts) if parts else ""
+            text_parts = [p for p in parts if isinstance(p, str)]
+            if len(text_parts) == len(parts):
+                return "\n".join(text_parts) if parts else ""
             return parts
         return content
 

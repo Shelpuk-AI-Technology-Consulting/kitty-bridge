@@ -65,7 +65,7 @@ def _coerce_context_tokens(value: object) -> int | None:
     if isinstance(value, bool):
         return None
     try:
-        result = int(value)
+        result = int(value)  # type: ignore[call-overload]  # value comes from untyped JSON
         return result if result > 0 else None
     except (TypeError, ValueError):
         return None

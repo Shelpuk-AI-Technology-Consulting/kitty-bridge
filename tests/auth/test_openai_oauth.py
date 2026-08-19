@@ -447,3 +447,40 @@ class TestOAuthTokenResponseValidation:
             async with aiohttp.ClientSession() as http:
                 with pytest.raises(OAuthAuthorizationError, match="Token response missing required fields"):
                     await _exchange_code_for_tokens("code", "verifier", CLIENT_ID, http)
+
+
+class TestCallbackErrorPageEscaping(TestCallbackServer):
+    """The loopback callback page must not reflect its query string raw.
+
+    ``error`` and ``error_description`` arrive from the browser's redirect and
+    were interpolated straight into the HTML response, making the page kitty
+    serves during login an XSS sink for anyone who can get the browser to hit
+    the loopback callback while a login is in progress.
+    """
+
+    async def test_error_values_are_html_escaped(self, state: str) -> None:
+        code_future: asyncio.Future = asyncio.get_running_loop().create_future()
+        _, client = await self._server_client(state, code_future)
+        payload = '<script>alert("xss")</script>'
+
+        resp = await client.get(
+            "/auth/callback",
+            params={"state": state, "error": "access_denied", "error_description": payload},
+        )
+        body = await resp.text()
+
+        assert resp.status == 400
+        assert "<script>" not in body, f"unescaped markup reached the page: {body}"
+        assert "&lt;script&gt;" in body, "the description was dropped rather than escaped"
+
+    async def test_error_code_itself_is_escaped(self, state: str) -> None:
+        code_future: asyncio.Future = asyncio.get_running_loop().create_future()
+        _, client = await self._server_client(state, code_future)
+
+        resp = await client.get(
+            "/auth/callback",
+            params={"state": state, "error": "<img src=x onerror=alert(1)>"},
+        )
+        body = await resp.text()
+
+        assert "<img" not in body, f"unescaped markup reached the page: {body}"

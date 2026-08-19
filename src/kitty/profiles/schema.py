@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 import typing
 import uuid
+from collections.abc import Callable
 from typing import Literal
 
 from pydantic import BaseModel, UrlConstraints, field_validator, model_validator
@@ -202,7 +203,7 @@ class BalancingProfile(BaseModel):
             raise ValueError(f"balancing profile {self.name!r} must not self-reference in members")
         return self
 
-    def validate_member_existence(self, member_exists: callable) -> BalancingProfile:
+    def validate_member_existence(self, member_exists: Callable[[str], bool]) -> BalancingProfile:
         """F36: Verify all members reference existing profiles.
 
         Args:
