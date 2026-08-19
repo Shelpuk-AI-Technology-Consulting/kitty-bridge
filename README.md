@@ -322,6 +322,16 @@ Point your tool at `http://localhost:<port>` and it just works.
 | `POST /v1/gemini/generateContent` | Gemini             | Gemini CLI      |
 | `GET /healthz`                    | Health check       | Monitoring      |
 
+**Background bridges:** `kitty bridge start`, `stop`, `restart`, and `status` manage a bridge running in the background,
+tracked in `bridge_state.json`.
+
+If `status` reports **"Running under another user account"**, a bridge is serving at the recorded address but was started
+by a different user (via `sudo`, a service account, or another session). kitty will not stop or restart it, and will not
+start a second one beside it — signalling a process it does not own is unsafe, because the operating system may have
+recycled that process ID onto something unrelated. Stop it from the account that started it, or from an
+administrator shell. If you are sure that process is not a kitty bridge, delete `bridge_state.json` — kitty prints
+its full path in the message.
+
 ## Supported Agents
 
 | Agent                                                         | Command        | What it is               |

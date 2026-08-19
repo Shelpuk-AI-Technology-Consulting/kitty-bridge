@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import contextlib
 import enum
+import ipaddress
 import os
 import signal
+import socket
 import subprocess
 import sys
 import threading
@@ -21,39 +23,138 @@ class BridgeStatus(enum.Enum):
     RUNNING = "running"
     STOPPED = "stopped"
     STALE = "stale"  # State file exists but PID is dead
+    UNMANAGEABLE = "unmanageable"  # Bridge is serving, but under another user
 
 
 _DEFAULT_STATE_PATH = Path.home() / ".config" / "kitty" / "bridge_state.json"
 
+PROBE_TIMEOUT_SECONDS = 0.5
 
-def is_pid_alive(pid: int) -> bool:
-    """Check if a process with the given PID is alive.
+
+class ProcessLiveness(enum.Enum):
+    """Outcome of probing a PID.
+
+    Attributes:
+        ALIVE: The process exists and this user may signal it.
+        DEAD: No process holds that PID.
+        UNKNOWN: A process holds that PID but it is not ours to signal.
+    """
+
+    ALIVE = "alive"
+    DEAD = "dead"
+    UNKNOWN = "unknown"
+
+
+def probe_pid(pid: int) -> ProcessLiveness:
+    """Probe whether a process exists and whether this user may signal it.
 
     Signal ``0`` performs no action and only probes for the process, on Windows
-    as well as POSIX — it does not terminate the target.
+    as well as POSIX — it does not terminate the target. The three outcomes are
+    kept apart because they call for different handling: a permission-denied
+    probe proves the process is *running* under another account, which is the
+    opposite conclusion from a missing process, yet both raise from
+    :func:`os.kill`.
 
     Args:
         pid: Process ID to probe.
 
     Returns:
-        True if a process with that PID exists, False otherwise.
+        :attr:`ProcessLiveness.ALIVE`, :attr:`ProcessLiveness.DEAD`, or
+        :attr:`ProcessLiveness.UNKNOWN`.
     """
     # Reject non-positive PIDs before signalling. On POSIX a pid of 0 addresses
     # the caller's whole process group and -1 addresses every process the caller
     # may signal, so a corrupt bridge_state.json would turn stop_bridge() into a
     # SIGTERM/SIGKILL against the user's own shell session.
     if pid <= 0:
-        return False
+        return ProcessLiveness.DEAD
     try:
         os.kill(pid, 0)
-        return True
-    except (ProcessLookupError, PermissionError):
-        return False
+        return ProcessLiveness.ALIVE
+    except ProcessLookupError:
+        return ProcessLiveness.DEAD
+    except PermissionError:
+        # EPERM (POSIX) / ERROR_ACCESS_DENIED (Windows) proves the process
+        # exists — we simply may not signal it. Reporting it as dead is what
+        # issue #3 is about; reporting it as alive would let stop_bridge()
+        # signal a stranger's process after PID recycling.
+        return ProcessLiveness.UNKNOWN
     except OSError:
         # Windows has no ProcessLookupError for this: OpenProcess fails with
         # ERROR_INVALID_PARAMETER (87) for a PID that does not exist, which
         # surfaces as a plain OSError. Without this branch every stale-state
         # code path (bridge status/stop/start/restart) crashes on Windows.
+        return ProcessLiveness.DEAD
+
+
+def _connect_target(host: str) -> str:
+    """Map a bind address to an address this machine can connect to.
+
+    A bridge bound to a wildcard records that address verbatim in
+    ``bridge_state.json``, but a wildcard is a bind target, not a connect
+    target: Windows rejects a connect to it with ``WSAEADDRNOTAVAIL`` (10049)
+    even while the socket is listening. Such a bridge is always reachable from
+    this machine over loopback.
+
+    The check is by value rather than by spelling, because ``bridge.yaml``
+    passes ``host`` through untouched and ``::``, ``::0`` and
+    ``0:0:0:0:0:0:0:0`` all name the same unspecified address.
+
+    Args:
+        host: Host as recorded in the state file.
+
+    Returns:
+        The loopback address of the matching family for a wildcard host, and
+        ``host`` unchanged for anything else — including hostnames.
+    """
+    if host == "":
+        return "127.0.0.1"
+    # A hostname is not an address literal and is probed exactly as recorded.
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return host
+    if not address.is_unspecified:
+        return host
+    # ``is_unspecified`` is also true for the IPv4-mapped form ``::ffff:0.0.0.0``,
+    # which wants an IPv4 loopback despite reporting version 6.
+    if address.version == 6 and address.ipv4_mapped is None:
+        return "::1"
+    return "127.0.0.1"
+
+
+def bridge_reachable(host: str, port: int, timeout: float = PROBE_TIMEOUT_SECONDS) -> bool:
+    """Report whether something accepts TCP connections at ``host:port``.
+
+    Used to settle :attr:`ProcessLiveness.UNKNOWN`: a process kitty may not
+    signal is only *this* bridge if it is serving at the address the state file
+    recorded. The probe connects and immediately closes; it does not speak HTTP,
+    because ``/healthz`` sits behind the auth middleware whenever ``keys_file``
+    is set and would additionally need TLS handling for a bridge started with
+    ``--tls-cert``. Whether the connection is accepted answers the only question
+    being asked.
+
+    Args:
+        host: Host recorded in ``bridge_state.json``.
+        port: Port recorded in ``bridge_state.json``.
+        timeout: Connect timeout in seconds. The probe runs on user-facing
+            commands and never retries, so it stays short.
+
+    Note:
+        A wildcard bind address is probed over loopback instead — see
+        ``_connect_target``.
+
+    Returns:
+        True if the connection was accepted, False for any failure — refused,
+        timed out, or unresolvable.
+    """
+    target = _connect_target(host)
+    # Every failure mode here (refused, timeout, DNS, unreachable network) is an
+    # OSError subclass, and all of them mean the same thing to the caller.
+    try:
+        with socket.create_connection((target, port), timeout=timeout):
+            return True
+    except OSError:
         return False
 
 
@@ -62,13 +163,29 @@ def _get_state_path() -> Path:
 
 
 def bridge_status(state_path: Path | str | None = None) -> BridgeStatus:
-    """Check the status of the bridge."""
+    """Check the status of the bridge.
+
+    Args:
+        state_path: Path to ``bridge_state.json``; the default location is used
+            when omitted.
+
+    Returns:
+        :attr:`BridgeStatus.STOPPED` when no state file exists,
+        :attr:`BridgeStatus.RUNNING` for a bridge this user owns,
+        :attr:`BridgeStatus.UNMANAGEABLE` for one running under another account,
+        and :attr:`BridgeStatus.STALE` when the recorded process is gone.
+    """
     state_path = Path(state_path) if state_path else _get_state_path()
     state = load_state(state_path)
     if state is None:
         return BridgeStatus.STOPPED
-    if is_pid_alive(state.pid):
+    liveness = probe_pid(state.pid)
+    if liveness is ProcessLiveness.ALIVE:
         return BridgeStatus.RUNNING
+    # A PID we may not signal is only *this* bridge if it is still serving at the
+    # recorded address; otherwise the PID was recycled and the file is stale.
+    if liveness is ProcessLiveness.UNKNOWN and bridge_reachable(state.host, state.port):
+        return BridgeStatus.UNMANAGEABLE
     return BridgeStatus.STALE
 
 
@@ -129,8 +246,17 @@ def stop_bridge(state_path: Path | str | None = None) -> None:
     """Stop a running bridge instance.
 
     Sends SIGTERM, waits up to 10 seconds, then force-kills if needed (SIGKILL
-    where available, SIGTERM on Windows where it does not exist).
-    Always removes the state file.
+    where available, SIGTERM on Windows where it does not exist), and removes
+    the state file.
+
+    Args:
+        state_path: Path to ``bridge_state.json``; the default location is used
+            when omitted.
+
+    Raises:
+        SystemExit: When the recorded process is running under another user
+            account and is still serving, so kitty can neither stop it nor
+            safely forget it.
     """
     state_path = Path(state_path) if state_path else _get_state_path()
     state = load_state(state_path)
@@ -138,13 +264,34 @@ def stop_bridge(state_path: Path | str | None = None) -> None:
     if state is None:
         return
 
-    if is_pid_alive(state.pid):
+    liveness = probe_pid(state.pid)
+
+    # A PID we may not signal is never signalled: after PID recycling it would
+    # belong to an unrelated process. If the bridge is still serving, say so and
+    # keep the state file — deleting it would strand the process with nothing
+    # pointing at it. If nothing answers, the PID was recycled and the file is
+    # merely stale, which is exactly what this command exists to clear.
+    if liveness is ProcessLiveness.UNKNOWN:
+        if bridge_reachable(state.host, state.port):
+            print(
+                f"Error: Bridge (PID {state.pid}, {state.host}:{state.port}, "
+                f"profile={state.profile}) is running under another user account. "
+                f"kitty cannot stop it — stop it from that account, or as an "
+                f"administrator. The state file was left in place; delete "
+                f"{state_path} if you are sure that process is not a kitty bridge.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        remove_state(state_path)
+        return
+
+    if liveness is ProcessLiveness.ALIVE:
         with contextlib.suppress(ProcessLookupError):
             os.kill(state.pid, signal.SIGTERM)
 
         # Wait up to 10 seconds for process to exit
         for _ in range(100):
-            if not is_pid_alive(state.pid):
+            if probe_pid(state.pid) is not ProcessLiveness.ALIVE:
                 break
             time.sleep(0.1)
 
@@ -153,7 +300,7 @@ def stop_bridge(state_path: Path | str | None = None) -> None:
         # control events, so SIGTERM is the right fallback there. Without this,
         # the branch raised AttributeError and skipped remove_state() below,
         # leaving the stale state file this command exists to clear.
-        if is_pid_alive(state.pid):
+        if probe_pid(state.pid) is ProcessLiveness.ALIVE:
             force_signal = getattr(signal, "SIGKILL", signal.SIGTERM)
             with contextlib.suppress(ProcessLookupError):
                 os.kill(state.pid, force_signal)
@@ -175,6 +322,22 @@ def start_bridge(
     """Start the bridge in the background.
 
     Checks for running instances, clears stale state, spawns background process.
+
+    Args:
+        state_path: Path to ``bridge_state.json``; the default location is used
+            when omitted.
+        config_path: Path to ``bridge.yaml`` for the spawned child.
+        host: Bind address override for the child.
+        port: Bind port override for the child.
+        profile: Profile name override for the child.
+        log_access: Whether the child writes an access log.
+        tls_cert: Path to a TLS certificate for the child.
+        tls_key: Path to the matching TLS private key.
+
+    Raises:
+        SystemExit: When a bridge is already running — including one owned by
+            another user account that is still serving at the recorded address —
+            or when the spawned child fails to come up.
     """
     state_path = Path(state_path) if state_path else _get_state_path()
 
@@ -191,13 +354,28 @@ def start_bridge(
     try:
         # Check for running instance
         state = load_state(state_path)
-        if state is not None and is_pid_alive(state.pid):
-            print(
-                f"Error: Bridge is already running (PID {state.pid}, "
-                f"{state.host}:{state.port}, profile={state.profile})",
-                file=sys.stderr,
-            )
-            sys.exit(1)
+        if state is not None:
+            liveness = probe_pid(state.pid)
+            if liveness is ProcessLiveness.ALIVE:
+                print(
+                    f"Error: Bridge is already running (PID {state.pid}, "
+                    f"{state.host}:{state.port}, profile={state.profile})",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            # Another user's bridge still serving at the recorded address:
+            # starting a second one would leave the first orphaned but holding
+            # its port. An unreachable address means the PID was recycled, so
+            # the state file really is stale and the start proceeds below.
+            if liveness is ProcessLiveness.UNKNOWN and bridge_reachable(state.host, state.port):
+                print(
+                    f"Error: Bridge is already running under another user account "
+                    f"(PID {state.pid}, {state.host}:{state.port}, profile={state.profile}). "
+                    f"kitty cannot manage it — stop it from that account, or delete "
+                    f"{state_path} if you are sure that process is not a kitty bridge.",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
 
         # Clear stale state
         remove_state(state_path)
@@ -271,7 +449,19 @@ def restart_bridge(
     config_path: Path | str | None = None,
     **kwargs,
 ) -> None:
-    """Restart the bridge. Re-reads bridge.yaml for new start."""
+    """Restart the bridge. Re-reads bridge.yaml for new start.
+
+    Args:
+        state_path: Path to ``bridge_state.json``; the default location is used
+            when omitted.
+        config_path: Path to ``bridge.yaml``, re-read for the new instance.
+        **kwargs: Forwarded to :func:`start_bridge`.
+
+    Raises:
+        SystemExit: Propagated from :func:`stop_bridge` or :func:`start_bridge`.
+            A bridge running under another user account aborts the restart in
+            the stop phase, so no second instance is started beside it.
+    """
     state_path = Path(state_path) if state_path else _get_state_path()
 
     # Stop the old instance
