@@ -121,6 +121,7 @@
 {"id": "kwaipilot/kat-coder-air-v2.5", "name": "Kwaipilot: KAT-Coder-Air V2.5", "context_length": 256000, "max_completion_tokens": 80000, "created": 1783714590},
 {"id": "kwaipilot/kat-coder-pro-v2", "name": "Kwaipilot: KAT-Coder-Pro V2", "context_length": 262144, "max_completion_tokens": 80000, "created": 1774649310},
 {"id": "kwaipilot/kat-coder-pro-v2.5", "name": "Kwaipilot: KAT-Coder-Pro V2.5", "context_length": 256000, "max_completion_tokens": 80000, "created": 1783714589},
+{"id": "liquid/lfm-2.5-2.6b:free", "name": "LiquidAI: LFM2.5-2.6B (free)", "context_length": 128000, "max_completion_tokens": 8192, "created": 1786470519},
 {"id": "mancer/weaver", "name": "Mancer: Weaver (alpha)", "context_length": 8000, "max_completion_tokens": 6000, "created": 1690934400},
 {"id": "meituan/longcat-2.0", "name": "Meituan: LongCat 2.0", "context_length": 1048756, "max_completion_tokens": 262144, "created": 1784554658},
 {"id": "meta-llama/llama-3.1-70b-instruct", "name": "Meta: Llama 3.1 70B Instruct", "context_length": 131072, "max_completion_tokens": 16384, "created": 1721692800},
