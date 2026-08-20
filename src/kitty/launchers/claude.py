@@ -90,6 +90,7 @@ _SETTINGS_ENV_OVERRIDE_KEYS: tuple[str, ...] = (
     "ANTHROPIC_DEFAULT_OPUS_MODEL",
     "ANTHROPIC_DEFAULT_SONNET_MODEL",
     "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+    "CLAUDE_CODE_MAX_CONTEXT_TOKENS",
 )
 
 # Keys to remove from settings.json env block — none currently.
@@ -127,18 +128,47 @@ class ClaudeAdapter(LauncherAdapter):
     def bridge_protocol(self) -> BridgeProtocol:
         return BridgeProtocol.MESSAGES_API
 
-    def build_spawn_config(self, profile: Profile, bridge_port: int, resolved_key: str) -> SpawnConfig:
+    def build_spawn_config(
+        self,
+        profile: Profile,
+        bridge_port: int,
+        resolved_key: str,
+        *,
+        context_tokens: int | None = None,
+    ) -> SpawnConfig:
+        """Build the spawn configuration for the Claude Code child process.
+
+        Sets the bridge URL, auth, and model env vars. When ``context_tokens``
+        is a positive number it is also exported as
+        ``CLAUDE_CODE_MAX_CONTEXT_TOKENS`` so Claude Code uses the model's
+        real context window instead of its 200K fallback for non-claude
+        models. Setting it for ``claude-*`` models is harmless — Claude Code
+        ignores the variable there.
+
+        Args:
+            profile: Resolved profile with provider, model, and base_url.
+            bridge_port: Port the local bridge is listening on.
+            resolved_key: Raw API key string resolved from the credential store.
+            context_tokens: Resolved model context window in tokens, or
+                ``None`` when unknown (the key is then omitted entirely).
+
+        Returns:
+            The spawn configuration for the child process.
+        """
+        env_overrides = {
+            "ANTHROPIC_BASE_URL": f"http://127.0.0.1:{bridge_port}",
+            "ANTHROPIC_API_KEY": resolved_key,
+            "ANTHROPIC_AUTH_TOKEN": "kitty-bridge-token",
+            "ANTHROPIC_MODEL": profile.model,
+            "ANTHROPIC_DEFAULT_OPUS_MODEL": profile.model,
+            "ANTHROPIC_DEFAULT_SONNET_MODEL": profile.model,
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL": profile.model,
+        }
+        if context_tokens is not None and context_tokens > 0:
+            env_overrides["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] = str(context_tokens)
         return SpawnConfig(
             cli_args=[],
-            env_overrides={
-                "ANTHROPIC_BASE_URL": f"http://127.0.0.1:{bridge_port}",
-                "ANTHROPIC_API_KEY": resolved_key,
-                "ANTHROPIC_AUTH_TOKEN": "kitty-bridge-token",
-                "ANTHROPIC_MODEL": profile.model,
-                "ANTHROPIC_DEFAULT_OPUS_MODEL": profile.model,
-                "ANTHROPIC_DEFAULT_SONNET_MODEL": profile.model,
-                "ANTHROPIC_DEFAULT_HAIKU_MODEL": profile.model,
-            },
+            env_overrides=env_overrides,
             env_clear=list(_CONFLICTING_ENV_VARS),
         )
 

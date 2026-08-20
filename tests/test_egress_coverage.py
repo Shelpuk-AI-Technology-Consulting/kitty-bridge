@@ -36,6 +36,7 @@ _CLIENT_PATTERNS = {
 #: bridge/server.py is 5,000+ lines and is the likeliest home for the next one.
 _EXPECTED_COUNTS: dict[tuple[str, str], int] = {
     ("bridge/server.py", "aiohttp session"): 1,
+    ("providers/model_context_sync.py", "aiohttp session"): 1,
     ("providers/ollama_cloud.py", "aiohttp session"): 1,
     ("providers/openai_subscription.py", "aiohttp session"): 2,
     ("providers/openai_subscription.py", "curl_cffi session"): 1,
@@ -49,6 +50,7 @@ _EXPECTED_COUNTS: dict[tuple[str, str], int] = {
 _ALLOWLIST: dict[str, str] = {
     # Proxied: session built with proxy=/proxy_auth= when egress is configured.
     "bridge/server.py": "two sessions; _session_for() picks proxied vs direct by destination",
+    "providers/model_context_sync.py": "catalog-refresh session built with aiohttp_session_kwargs()",
     "providers/ollama_cloud.py": "session built with aiohttp_session_kwargs()",
     "providers/openai_subscription.py": "curl_cffi proxies= and OAuth sessions via aiohttp_session_kwargs()",
     "providers/bedrock.py": "botocore Config(proxies=...); SSO mode reports supports_egress()=False",

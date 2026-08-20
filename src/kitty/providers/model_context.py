@@ -7,6 +7,8 @@ import logging
 from functools import lru_cache
 from pathlib import Path
 
+from platformdirs import user_cache_dir
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_CONTEXT_TOKENS = 200_000
@@ -27,6 +29,12 @@ _METADATA_PATH = Path(__file__).parent / "model_metadata.json"
 # stable value that does not drift when model_metadata.json is refreshed). The
 # OpenRouter refresh script writes only model_metadata.json, never this file.
 _OVERRIDES_PATH = Path(__file__).parent / "model_context_overrides.json"
+
+# Cached copy of the overrides catalog synced at runtime from the kitty-bridge
+# GitHub repo (see model_context_sync). When present and valid it is a newer
+# revision of the packaged file and replaces it wholesale. Single definition
+# shared by the reader (_load_overrides) and the sync writer.
+REMOTE_OVERRIDES_CACHE_PATH = Path(user_cache_dir("kitty")) / "model_context_overrides.json"
 
 
 @lru_cache(maxsize=1)
@@ -71,39 +79,79 @@ def _coerce_context_tokens(value: object) -> int | None:
         return None
 
 
-@lru_cache(maxsize=1)
-def _load_overrides() -> dict[str, int]:
-    """Load model_context_overrides.json into a {lowercase_model: tokens} dict.
+def _parse_overrides(raw: str, source: str) -> dict[str, int] | None:
+    """Parse overrides catalog JSON text into a validated mapping.
 
-    Tolerates a missing or malformed file by returning an empty dict so the
-    caller falls through to the lower-priority resolution layers. Invalid
-    entries (non-dict root, non-string keys, non-positive / boolean / non-int
-    values) are dropped with a warning, mirroring ``_load_metadata``.
+    Invalid entries (non-string / blank keys, non-positive / boolean /
+    non-int values) are dropped with a warning, mirroring ``_load_metadata``.
+
+    Args:
+        raw: Raw JSON text of the catalog.
+        source: Human-readable source description for log messages.
+
+    Returns:
+        A ``{lowercase_model: tokens}`` mapping (possibly empty), or ``None``
+        when ``raw`` is not valid JSON or its root is not an object.
     """
-    try:
-        raw = _OVERRIDES_PATH.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        return {}
     try:
         data = json.loads(raw)
     except json.JSONDecodeError:
-        logger.warning("model_context_overrides.json is not valid JSON")
-        return {}
+        logger.warning("Model context overrides from %s are not valid JSON", source)
+        return None
     if not isinstance(data, dict):
-        logger.warning("model_context_overrides.json expected an object, got %s", type(data).__name__)
-        return {}
+        logger.warning("Model context overrides from %s expected an object, got %s", source, type(data).__name__)
+        return None
 
     overrides: dict[str, int] = {}
     for key, value in data.items():
         if not isinstance(key, str) or not key.strip():
-            logger.warning("model_context_overrides.json dropped invalid key %r", key)
+            logger.warning("Model context overrides from %s dropped invalid key %r", source, key)
             continue
         tokens = _coerce_context_tokens(value)
         if tokens is None:
-            logger.warning("model_context_overrides.json dropped invalid entry for %s", key)
+            logger.warning("Model context overrides from %s dropped invalid entry for %s", source, key)
             continue
         overrides[key.lower()] = tokens
     return overrides
+
+
+@lru_cache(maxsize=1)
+def _load_overrides() -> dict[str, int]:
+    """Load the overrides catalog, preferring the remote-synced cache.
+
+    Sources, in order:
+
+    1. The remote-synced cache at ``REMOTE_OVERRIDES_CACHE_PATH`` — when it
+       parses to a JSON object it **replaces the packaged catalog wholesale**
+       (it is a newer revision of the same file; entries removed upstream
+       must not linger via merging).
+    2. The packaged ``model_context_overrides.json``.
+
+    A missing or malformed source falls through to the next one; a missing
+    packaged file yields an empty dict so the caller falls through to the
+    lower-priority resolution layers. Invalid entries are dropped with a
+    warning, mirroring ``_load_metadata``.
+
+    Returns:
+        A ``{lowercase_model: tokens}`` dict.
+    """
+    # A valid cached copy is a newer revision of the packaged catalog.
+    try:
+        raw = REMOTE_OVERRIDES_CACHE_PATH.read_text(encoding="utf-8")
+    except OSError:
+        raw = None
+    if raw is not None:
+        parsed = _parse_overrides(raw, source=str(REMOTE_OVERRIDES_CACHE_PATH))
+        if parsed is not None:
+            return parsed
+
+    # Fall back to the catalog packaged with the wheel.
+    try:
+        raw = _OVERRIDES_PATH.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {}
+    parsed = _parse_overrides(raw, source="model_context_overrides.json")
+    return {} if parsed is None else parsed
 
 
 def _lookup_override(model: str) -> int | None:
@@ -158,7 +206,8 @@ def get_model_context_tokens(
     """Return the context window size in tokens for the given model.
 
     Lookup priority:
-    1. Local overrides file (model_context_overrides.json) — highest priority.
+    1. Overrides catalog — the remote-synced cache when valid, else the
+       packaged model_context_overrides.json — highest priority.
     2. provider_config["context_window"] — per-profile manual override.
     3. Exact match on model name in metadata table.
     4. Suffix match: bare model name (e.g. "gpt-4o") matches metadata

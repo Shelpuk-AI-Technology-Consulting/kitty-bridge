@@ -172,6 +172,11 @@ def main() -> None:
         )
 
     async def run() -> None:
+        # Refresh the model-context overrides catalog before the bridge
+        # starts. Egress is already installed above, best-effort, never raises.
+        from kitty.providers import model_context_sync
+
+        await model_context_sync.refresh_model_context_overrides()
         await server.start_async()
         stop_event = asyncio.Event()
         loop = asyncio.get_running_loop()

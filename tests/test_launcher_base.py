@@ -207,3 +207,51 @@ class TestEachAdapterOwnsItsSettingsPath:
         # bind() raises TypeError if the keyword does not exist — that is the assertion.
         inspect.signature(adapter.prepare_launch).bind({"X": "1"}, settings_path=tmp_path / "cfg.json")
         inspect.signature(adapter.cleanup_launch).bind(None, settings_path=tmp_path / "cfg.json")
+
+
+class TestBuildSpawnConfigContextTokens:
+    """AC5.4: every adapter accepts the ``context_tokens`` keyword.
+
+    ``launch_async`` always passes the resolved context window to
+    ``build_spawn_config``; only ClaudeAdapter uses it, but the others must
+    accept and ignore it so the orchestrator call site stays uniform.
+    """
+
+    @staticmethod
+    def _profile():
+        """Build a minimal valid profile for spawn-config construction."""
+        import uuid
+
+        from kitty.profiles.schema import Profile
+
+        return Profile(name="t", provider="zai_regular", model="test-model", auth_ref=str(uuid.uuid4()))
+
+    def test_base_declares_context_tokens_keyword_only(self):
+        """The interface pins the kwarg as keyword-only with a None default."""
+        from kitty.launchers.base import LauncherAdapter
+
+        params = inspect.signature(LauncherAdapter.build_spawn_config).parameters
+        assert "context_tokens" in params
+        assert params["context_tokens"].kind is inspect.Parameter.KEYWORD_ONLY
+        assert params["context_tokens"].default is None
+
+    @pytest.mark.parametrize("name", _REGISTERED_ADAPTERS)
+    def test_adapters_accept_and_survive_the_kwarg(self, name: str):
+        """Every adapter accepts the kwarg; non-Claude ones must ignore it.
+
+        Only ClaudeAdapter may emit CLAUDE_CODE_MAX_CONTEXT_TOKENS. The child
+        reads it through the environment, so a leak from any other adapter
+        would still reach Claude Code — absence is the observable contract.
+        """
+        adapter = _adapter(name)
+
+        config = adapter.build_spawn_config(
+            self._profile(),
+            bridge_port=8080,
+            resolved_key="sk-test",
+            context_tokens=1_000_000,
+        )
+
+        assert config is not None
+        if name != "claude":
+            assert "CLAUDE_CODE_MAX_CONTEXT_TOKENS" not in config.env_overrides

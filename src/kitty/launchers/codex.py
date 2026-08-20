@@ -28,8 +28,22 @@ class CodexAdapter(LauncherAdapter):
     def bridge_protocol(self) -> BridgeProtocol:
         return BridgeProtocol.RESPONSES_API
 
-    def build_spawn_config(self, profile: Profile, bridge_port: int, resolved_key: str) -> SpawnConfig:
+    def build_spawn_config(
+        self,
+        profile: Profile,
+        bridge_port: int,
+        resolved_key: str,
+        *,
+        context_tokens: int | None = None,
+    ) -> SpawnConfig:
+        """Build the spawn configuration for the Codex CLI child process.
+
+        Codex is pointed at the bridge via ``-c`` config overrides; it has no
+        use for ``context_tokens``, which is accepted and ignored so the
+        orchestrator call site stays uniform across adapters.
+        """
         del resolved_key  # Bridge handles upstream auth; key not passed to child process
+        del context_tokens  # Codex has no use for the model context window
         return SpawnConfig(
             cli_args=[
                 "-c",

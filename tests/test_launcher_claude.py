@@ -2,6 +2,8 @@
 
 import uuid
 
+import pytest
+
 from kitty.launchers.claude import ClaudeAdapter
 from kitty.profiles.schema import Profile
 from kitty.types import BridgeProtocol
@@ -107,3 +109,108 @@ class TestClaudeAdapterSpawnConfig:
         config = adapter.build_spawn_config(profile, bridge_port=4242, resolved_key="sk-test")
 
         assert "ANTHROPIC_AUTH_TOKEN" not in config.env_clear
+
+
+class TestClaudeAdapterContextTokens:
+    """build_spawn_config propagates the resolved context window (R5)."""
+
+    def test_context_tokens_sets_env_var(self):
+        """AC5.1: an explicit window becomes CLAUDE_CODE_MAX_CONTEXT_TOKENS."""
+        adapter = ClaudeAdapter()
+        config = adapter.build_spawn_config(
+            _make_profile(),
+            bridge_port=8080,
+            resolved_key="key",
+            context_tokens=1_000_000,
+        )
+
+        assert config.env_overrides["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] == "1000000"
+
+    def test_no_context_tokens_omits_key(self):
+        """AC5.2: omitting the kwarg leaves the child env untouched."""
+        adapter = ClaudeAdapter()
+        config = adapter.build_spawn_config(_make_profile(), bridge_port=8080, resolved_key="key")
+
+        assert "CLAUDE_CODE_MAX_CONTEXT_TOKENS" not in config.env_overrides
+
+    def test_none_context_tokens_omits_key(self):
+        """AC5.2: an explicit None behaves exactly like the default."""
+        adapter = ClaudeAdapter()
+        config = adapter.build_spawn_config(
+            _make_profile(),
+            bridge_port=8080,
+            resolved_key="key",
+            context_tokens=None,
+        )
+
+        assert "CLAUDE_CODE_MAX_CONTEXT_TOKENS" not in config.env_overrides
+
+    @pytest.mark.parametrize("tokens", [0, -5])
+    def test_non_positive_context_tokens_omits_key(self, tokens: int):
+        """Only a positive window is meaningful; zero/negative must not leak."""
+        adapter = ClaudeAdapter()
+        config = adapter.build_spawn_config(
+            _make_profile(),
+            bridge_port=8080,
+            resolved_key="key",
+            context_tokens=tokens,
+        )
+
+        assert "CLAUDE_CODE_MAX_CONTEXT_TOKENS" not in config.env_overrides
+
+    def test_context_tokens_stringifies_large_windows_exactly(self):
+        """The env value is the exact decimal string, even beyond 2**53.
+
+        The value travels through JSON (settings.json env block), where
+        consumers may parse numbers as floats; emitting ``str(int)`` keeps
+        arbitrarily large windows exact end to end.
+        """
+        adapter = ClaudeAdapter()
+        config = adapter.build_spawn_config(
+            _make_profile(),
+            bridge_port=8080,
+            resolved_key="key",
+            context_tokens=9_007_199_254_740_993,
+        )
+
+        assert config.env_overrides["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] == "9007199254740993"
+
+    def test_context_tokens_set_for_non_claude_models(self):
+        """R5: the window is set unconditionally — non-claude models are the point.
+
+        Claude Code ignores the var for ``claude-*`` models but falls back to
+        200K for everything else, so a guard emitting the key only for
+        claude models would invert the documented rationale and silently
+        reintroduce the early-compaction bug this task exists to fix.
+        """
+        adapter = ClaudeAdapter()
+        config = adapter.build_spawn_config(
+            _make_profile(model="qwen3.8-max"),
+            bridge_port=8080,
+            resolved_key="key",
+            context_tokens=1_000_000,
+        )
+
+        assert config.env_overrides["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] == "1000000"
+
+
+class TestInjectedKeyListsInSync:
+    """AC5.5: the context-window key must be injected AND cleaned up.
+
+    ``_SETTINGS_ENV_OVERRIDE_KEYS`` makes ``prepare_launch`` write the key
+    into settings.json; ``cleanup_cmd._KITTY_INJECTED_KEYS`` makes ``kitty
+    cleanup`` remove it after a crashed session. A key present in only one
+    list either never reaches Claude Code or survives a crash.
+    """
+
+    def test_context_key_in_settings_override_list(self):
+        """The key must be injected into settings.json by prepare_launch."""
+        from kitty.launchers.claude import _SETTINGS_ENV_OVERRIDE_KEYS
+
+        assert "CLAUDE_CODE_MAX_CONTEXT_TOKENS" in _SETTINGS_ENV_OVERRIDE_KEYS
+
+    def test_context_key_in_cleanup_list(self):
+        """The key must be removed by ``kitty cleanup`` after a crash."""
+        from kitty.cli.cleanup_cmd import _KITTY_INJECTED_KEYS
+
+        assert "CLAUDE_CODE_MAX_CONTEXT_TOKENS" in _KITTY_INJECTED_KEYS

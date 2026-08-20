@@ -35,7 +35,15 @@ class StubLauncher(LauncherAdapter):
     def bridge_protocol(self) -> BridgeProtocol:
         return self._protocol
 
-    def build_spawn_config(self, profile: Profile, bridge_port: int, resolved_key: str) -> SpawnConfig:
+    def build_spawn_config(
+        self,
+        profile: Profile,
+        bridge_port: int,
+        resolved_key: str,
+        *,
+        context_tokens: int | None = None,
+    ) -> SpawnConfig:
+        del context_tokens  # launch_async always passes it; this stub ignores it
         return SpawnConfig(
             cli_args=["-c", "import sys; sys.exit(0)"],
             env_overrides={"STUB_KEY": resolved_key},
@@ -75,6 +83,27 @@ def _make_cred_store(key: str = "sk-test-key") -> CredentialStore:
     backend = MagicMock(spec=FileBackend)
     backend.get = MagicMock(return_value=key)
     return CredentialStore(backends=[backend])
+
+
+class _Sentinel(Exception):
+    """Raised by stubbed ``start_async`` implementations to stop the flow."""
+
+
+@pytest.fixture(autouse=True)
+def _no_catalog_refresh(monkeypatch: pytest.MonkeyPatch):
+    """Keep orchestrator tests offline: no network for the catalog sync.
+
+    ``launch_async`` refreshes the model-context overrides catalog before
+    starting the bridge (R3). This default keeps every lifecycle test
+    deterministic and network-free; individual tests may re-patch the
+    attribute with a recording stand-in.
+    """
+    from kitty.providers import model_context_sync
+
+    async def _skip_refresh(**kwargs):
+        return True
+
+    monkeypatch.setattr(model_context_sync, "refresh_model_context_overrides", _skip_refresh)
 
 
 # ── Test: map_child_exit_code ────────────────────────────────────────────────
@@ -205,7 +234,8 @@ class TestLaunchLifecycle:
             def name(self) -> str:
                 return adapter_name
 
-            def build_spawn_config(self, profile, bridge_port, resolved_key):
+            def build_spawn_config(self, profile, bridge_port, resolved_key, *, context_tokens=None):
+                del context_tokens  # ignored by this stub
                 return SpawnConfig(
                     cli_args=["-c", "raise SystemExit(3)"],
                     env_overrides={},
@@ -262,3 +292,128 @@ class TestLaunchSync:
                 extra_args=[],
             )
         assert exit_code == 0
+
+
+# ── Test: overrides-catalog refresh hook (AC3.4) ────────────────────────────
+
+
+class TestLaunchRefreshesOverridesCatalog:
+    """launch_async awaits the catalog refresh before the bridge starts."""
+
+    @pytest.mark.asyncio
+    async def test_refresh_awaited_before_bridge_start(self, monkeypatch: pytest.MonkeyPatch):
+        from kitty.cli.launcher import launch_async
+        from kitty.providers import model_context_sync
+
+        order: list = []
+
+        async def fake_refresh(**kwargs):
+            order.append("refresh")
+            return True
+
+        async def fake_start_async(self):
+            order.append("start")
+            raise _Sentinel
+
+        monkeypatch.setattr(model_context_sync, "refresh_model_context_overrides", fake_refresh)
+        monkeypatch.setattr("kitty.bridge.server.BridgeServer.start_async", fake_start_async)
+
+        with pytest.raises(_Sentinel):
+            await launch_async(
+                adapter=StubLauncher(),
+                provider=StubProvider(),
+                profile=_make_profile(),
+                cred_store=_make_cred_store(),
+                validate=False,
+            )
+        assert order == ["refresh", "start"]
+
+
+# ── Test: context-window wiring (R6) ────────────────────────────────────────
+
+
+class _RecordingLauncher(StubLauncher):
+    """StubLauncher that records the ``context_tokens`` kwarg (R6)."""
+
+    def __init__(self):
+        """Initialize the protocol default and the recording list."""
+        super().__init__()
+        self.seen_context_tokens: list[int | None] = []
+
+    def build_spawn_config(self, profile, bridge_port, resolved_key, *, context_tokens=None):
+        """Record the kwarg, then build the normal stub spawn config."""
+        self.seen_context_tokens.append(context_tokens)
+        return super().build_spawn_config(profile, bridge_port, resolved_key, context_tokens=context_tokens)
+
+
+class TestLaunchPassesContextTokens:
+    """launch_async computes the context window and hands it to the adapter."""
+
+    @pytest.mark.asyncio
+    async def test_single_profile_passes_model_window(self, monkeypatch: pytest.MonkeyPatch):
+        """AC6.1/AC6.3: single profile → the get_model_context_tokens result."""
+        import kitty.providers.model_context as model_context
+        from kitty.cli.launcher import launch_async
+
+        seen_args: list[tuple] = []
+
+        def fake_get(provider, model, provider_config=None):
+            seen_args.append((provider, model, provider_config))
+            return 999_999
+
+        monkeypatch.setattr(model_context, "get_model_context_tokens", fake_get)
+        adapter = _RecordingLauncher()
+
+        with patch("kitty.cli.launcher.discover_binary", return_value=Path(sys.executable)):
+            exit_code = await launch_async(
+                adapter=adapter,
+                provider=StubProvider(),
+                profile=_make_profile(),
+                cred_store=_make_cred_store(),
+                extra_args=[],
+                validate=False,
+            )
+
+        assert exit_code == 0
+        assert adapter.seen_context_tokens == [999_999]
+        assert seen_args == [("zai_regular", "test-model", {})]
+
+    @pytest.mark.asyncio
+    async def test_balancing_passes_min_across_backends(self, monkeypatch: pytest.MonkeyPatch):
+        """AC6.2: balancing launch → get_balancing_min_context_tokens result."""
+        import kitty.providers.model_context as model_context
+        from kitty.cli.launcher import launch_async
+
+        seen_entries: list[tuple] = []
+
+        def fake_min(backends):
+            seen_entries.extend(backends)
+            return 123_456
+
+        monkeypatch.setattr(model_context, "get_balancing_min_context_tokens", fake_min)
+        adapter = _RecordingLauncher()
+
+        member_a = Profile(name="a", provider="zai_regular", model="model-a", auth_ref=str(uuid.uuid4()))
+        member_b = Profile(name="b", provider="zai_regular", model="model-b", auth_ref=str(uuid.uuid4()))
+        backends = [
+            (StubProvider(), "sk-a", member_a),
+            (StubProvider(), "sk-b", member_b),
+        ]
+
+        with patch("kitty.cli.launcher.discover_binary", return_value=Path(sys.executable)):
+            exit_code = await launch_async(
+                adapter=adapter,
+                provider=StubProvider(),
+                profile=member_a,
+                cred_store=_make_cred_store(),
+                extra_args=[],
+                validate=False,
+                backends=backends,
+            )
+
+        assert exit_code == 0
+        assert adapter.seen_context_tokens == [123_456]
+        assert seen_entries == [
+            ("stub", "model-a", {}),
+            ("stub", "model-b", {}),
+        ]

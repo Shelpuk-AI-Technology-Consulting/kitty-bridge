@@ -52,6 +52,8 @@ class LauncherAdapter(ABC):
         profile: Profile,
         bridge_port: int,
         resolved_key: str,
+        *,
+        context_tokens: int | None = None,
     ) -> SpawnConfig:
         """Build the spawn configuration for the child process.
 
@@ -59,6 +61,10 @@ class LauncherAdapter(ABC):
             profile: Resolved profile with provider, model, and base_url.
             bridge_port: Port the local bridge is listening on.
             resolved_key: Raw API key string resolved from the credential store.
+            context_tokens: Resolved model context window in tokens. Adapters
+                whose agent can use it (Claude Code) propagate it to the child
+                process; all others accept and ignore it so the orchestrator
+                call site stays uniform.
         """
 
     @property
