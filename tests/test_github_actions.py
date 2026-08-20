@@ -333,10 +333,52 @@ class TestMetadataRefreshRespectsBranchProtection:
         offenders = [
             step.get("name")
             for step in steps
-            if re.search(r"git push(?!\s+--force-with-lease origin \"\$BRANCH\")\s*$", step.get("run", ""), re.M)
+            if re.search(r"git push(?!\s+--force origin \"\$BRANCH\")\s*$", step.get("run", ""), re.M)
         ]
 
         assert not offenders, f"these steps push directly to main, which branch protection rejects: {offenders}"
+
+    def test_push_does_not_use_a_lease_it_cannot_verify(self, steps: list[dict]):
+        """``--force-with-lease`` fails outright on a shallow checkout.
+
+        actions/checkout fetches only the default branch at depth 1, so the
+        runner holds no remote-tracking ref for the refresh branch. git cannot
+        evaluate the lease and rejects the push with "stale info" whenever that
+        branch still exists on the remote -- turning main red and skipping the
+        refresh. The lease protects nothing here: the branch is this job's own
+        scratch space and is meant to be overwritten.
+        """
+        pushes = [
+            line.strip()
+            for step in steps
+            for line in step.get("run", "").splitlines()
+            if line.strip().startswith("git push")
+        ]
+
+        assert pushes, "expected the refresh to push its branch"
+        assert not [p for p in pushes if "--force-with-lease" in p], pushes
+
+    def test_refresh_does_not_run_on_every_push_to_main(self):
+        """One refresh a week, not one per merge.
+
+        The job opened a pull request on every push to main, and merging one of
+        those is itself a push to main, so the refresh partly fed itself -- #9
+        merged at 19:36:30 and #10 was opened two seconds later. On a busy day
+        that is several near-empty pull requests against a catalogue that needs
+        to be current to the week, not to the minute.
+        """
+        job = _load_workflow("ci.yml")["jobs"]["update-metadata"]
+        condition = str(job.get("if", ""))
+
+        assert condition, "update-metadata runs on every event the workflow declares, including push"
+        assert "push" in condition, f"expected the job to exclude push events, got if: {condition!r}"
+
+    def test_gating_the_refresh_does_not_stop_main_being_tested(self):
+        """The gate belongs on the job, not on the workflow's triggers."""
+        workflow = _load_workflow("ci.yml")
+
+        assert "main" in _get_trigger(workflow).get("push", {}).get("branches", [])
+        assert "if" not in workflow["jobs"]["test"]
 
     def test_refresh_opens_a_pull_request(self, steps: list[dict]):
         run_commands = " ".join(step.get("run", "") for step in steps)
