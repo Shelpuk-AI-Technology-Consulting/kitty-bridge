@@ -6,14 +6,13 @@ import json
 import os
 import signal
 import socket
-from contextlib import suppress
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 
-from kitty.bridge.state import BridgeState, load_state, write_state
+from kitty.bridge.state import BridgeState, write_state
 
 # ---------------------------------------------------------------------------
 # State-based management helpers (pure logic, no process spawning)
@@ -125,7 +124,7 @@ class TestBridgeManagementHelpers:
 
     def test_start_bridge_clears_stale_state(self, tmp_path: Path):
         """start_bridge clears stale state before starting."""
-        from kitty.bridge.manage import ProcessLiveness, probe_pid, start_bridge
+        from kitty.bridge.manage import start_bridge
 
         state_path = tmp_path / "state.json"
         state = BridgeState(
@@ -138,26 +137,29 @@ class TestBridgeManagementHelpers:
         )
         write_state(state_path, state)
 
-        # start_bridge will spawn a background process.
-        # It may actually start (if profiles exist in the test env) or fail.
-        # Either way, the stale state should be cleared first.
-        with suppress(SystemExit):
+        # Stand in for the spawned child: a real ``python -m kitty.bridge_runner``
+        # would refresh the model-context catalog over the network and write the
+        # user cache, so the suite must never spawn one. The stand-in exits at
+        # once (taking start_bridge's error path) and records whether the stale
+        # state was already cleared at spawn time.
+        state_at_spawn: list[bool] = []
+
+        def _spawn(*_args, **_kwargs):
+            state_at_spawn.append(state_path.exists())
+            return SimpleNamespace(poll=lambda: 1, stderr=None, returncode=1)
+
+        with (
+            patch("kitty.bridge.manage.subprocess.Popen", side_effect=_spawn) as mock_popen,
+            pytest.raises(SystemExit),
+        ):
             start_bridge(
                 state_path=state_path,
                 host="127.0.0.1",
                 port=0,
             )
 
-        # Clean up: kill any spawned bridge process
-        final_state = load_state(state_path)
-        if final_state is not None and probe_pid(final_state.pid) is ProcessLiveness.ALIVE:
-            os.kill(final_state.pid, signal.SIGTERM)
-
-        # The stale state should be gone (cleared before spawn)
-        # A new state file may exist if the bridge actually started
-        if state_path.exists():
-            data = json.loads(state_path.read_text())
-            assert data["pid"] != 999999999
+        mock_popen.assert_called_once()
+        assert state_at_spawn == [False], "stale state must be cleared before the spawn"
 
 
 class TestBridgeRestart:
@@ -184,9 +186,29 @@ class TestBridgeRestart:
         config_path = tmp_path / "bridge.yaml"
         config_path.write_text("port: 9091\nhost: '127.0.0.1'\nprofile: 'new-profile'\n")
 
+        # Stand in for the spawned child (see test_start_bridge_clears_stale_state):
+        # it exits at once, so restart takes its error path, and the recorded
+        # command proves the freshly read bridge.yaml is handed to the child.
+        spawned_cmd: list[str] = []
+
+        def _spawn(cmd, *_args, **_kwargs):
+            spawned_cmd.extend(cmd)
+            return SimpleNamespace(poll=lambda: 1, stderr=None, returncode=1)
+
         # restart will fail at process spawn, but should clear stale state first
-        with pytest.raises(SystemExit):
+        with (
+            patch("kitty.bridge.manage.subprocess.Popen", side_effect=_spawn) as mock_popen,
+            pytest.raises(SystemExit),
+        ):
             restart_bridge(state_path=state_path, config_path=config_path)
+
+        mock_popen.assert_called_once()
+        assert "--config" in spawned_cmd
+        assert str(config_path) in spawned_cmd
+        # No stale-state value leaks into the child: the old state's port and
+        # profile must not reappear as spawn arguments.
+        assert "--port" not in spawned_cmd
+        assert "old-profile" not in spawned_cmd
 
 
 class TestBridgeSubcommandRouting:

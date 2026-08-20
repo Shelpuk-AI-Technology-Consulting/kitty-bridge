@@ -1,6 +1,8 @@
 """Tests for model_context.py — model metadata lookup."""
 
 import json
+import os
+import time
 from pathlib import Path
 
 import pytest
@@ -54,7 +56,9 @@ def _load_sample_metadata(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
     Existing tests must not be coupled to the shipped overrides catalog, so the
     overrides file is patched to an empty object by default; ``TestLocalOverrides``
-    repopulates it per-test via ``_set_overrides``.
+    repopulates it per-test via ``_set_overrides``. The remote-synced overrides
+    cache is pointed at a nonexistent tmp path so a real cache on the machine
+    cannot leak into tests.
     """
     metadata_file = tmp_path / "model_metadata.json"
     metadata_file.write_text(json.dumps(METADATA_SAMPLE), encoding="utf-8")
@@ -70,6 +74,12 @@ def _load_sample_metadata(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     overrides_file = tmp_path / "model_context_overrides.json"
     overrides_file.write_text("{}", encoding="utf-8")
     monkeypatch.setattr(mc, "_OVERRIDES_PATH", overrides_file)
+    # Nonexistent remote-cache path: no real synced cache may leak into tests.
+    monkeypatch.setattr(
+        mc,
+        "REMOTE_OVERRIDES_CACHE_PATH",
+        tmp_path / "remote-cache" / "model_context_overrides.json",
+    )
     mc._load_overrides.cache_clear()
 
     yield
@@ -175,6 +185,16 @@ class TestLocalOverrides:
             == 1_000_000
         )
 
+    def test_override_beats_metadata_exact_and_suffix(self):
+        """The catalog outranks the metadata table on both match paths (AC2.2)."""
+        from kitty.providers.model_context import get_model_context_tokens
+
+        _set_overrides({"gpt-4o": 999_999})
+        # Metadata exact-match path: "openai/gpt-4o" is a metadata id (128000).
+        assert get_model_context_tokens(provider="openrouter", model="openai/gpt-4o", provider_config={}) == 999_999
+        # Metadata suffix path: bare "gpt-4o" would match "openai/gpt-4o".
+        assert get_model_context_tokens(provider="openai", model="gpt-4o", provider_config={}) == 999_999
+
     def test_provider_config_wins_when_no_override(self):
         """When the model is not in the overrides file, provider_config still wins."""
         from kitty.providers.model_context import get_model_context_tokens
@@ -216,6 +236,94 @@ class TestLocalOverrides:
         ]
         # min(1_000_000 override, 128_000 metadata) = 128_000.
         assert get_balancing_min_context_tokens(backends) == 128000
+
+
+# ---------------------------------------------------------------------------
+# Remote-synced overrides cache (loader preference)
+# ---------------------------------------------------------------------------
+
+
+def _set_remote_cache(content: dict | str) -> None:
+    """Write content to the patched REMOTE_OVERRIDES_CACHE_PATH and clear the cache.
+
+    Args:
+        content: A dict serialized as the cache body, or raw text (for
+            corrupt-body cases).
+    """
+    import kitty.providers.model_context as mc
+
+    raw = content if isinstance(content, str) else json.dumps(content)
+    mc.REMOTE_OVERRIDES_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    mc.REMOTE_OVERRIDES_CACHE_PATH.write_text(raw, encoding="utf-8")
+    mc._load_overrides.cache_clear()
+
+
+class TestRemoteCachePreference:
+    """A valid remote-synced cache replaces the packaged catalog wholesale.
+
+    The cached copy is a newer revision of the same file, so there is no
+    merging: entries only present in the packaged file stop resolving once a
+    valid cache exists. A corrupt or missing cache falls back to the packaged
+    file (R4 / AC4.1–AC4.3).
+    """
+
+    def test_valid_cache_wins_over_packaged(self):
+        from kitty.providers.model_context import get_model_context_tokens
+
+        _set_overrides({"MiniMax-M3": 111_111})
+        _set_remote_cache({"MiniMax-M3": 999_999})
+        assert get_model_context_tokens(provider="minimax_token", model="MiniMax-M3", provider_config={}) == 999_999
+
+    def test_valid_cache_replaces_packaged_wholesale(self):
+        """A model only in the packaged file stops resolving once a valid cache exists."""
+        from kitty.providers.model_context import DEFAULT_CONTEXT_TOKENS, get_model_context_tokens
+
+        _set_overrides({"packaged-only-model": 111_111})
+        _set_remote_cache({"MiniMax-M3": 999_999})
+        result = get_model_context_tokens(provider="any", model="packaged-only-model", provider_config={})
+        assert result == DEFAULT_CONTEXT_TOKENS
+
+    def test_corrupt_cache_falls_back_to_packaged(self):
+        from kitty.providers.model_context import get_model_context_tokens
+
+        _set_overrides({"MiniMax-M3": 111_111})
+        _set_remote_cache("this is not json {")
+        assert get_model_context_tokens(provider="minimax_token", model="MiniMax-M3", provider_config={}) == 111_111
+
+    def test_non_object_cache_falls_back_to_packaged(self):
+        from kitty.providers.model_context import get_model_context_tokens
+
+        _set_overrides({"MiniMax-M3": 111_111})
+        _set_remote_cache("[1, 2, 3]")
+        assert get_model_context_tokens(provider="minimax_token", model="MiniMax-M3", provider_config={}) == 111_111
+
+    def test_missing_cache_uses_packaged(self):
+        from kitty.providers.model_context import get_model_context_tokens
+
+        _set_overrides({"MiniMax-M3": 111_111})
+        # No _set_remote_cache call: the patched cache path does not exist.
+        assert get_model_context_tokens(provider="minimax_token", model="MiniMax-M3", provider_config={}) == 111_111
+
+    def test_empty_object_cache_replaces_packaged_wholesale(self):
+        """A valid empty object is still a valid catalog revision: zero overrides."""
+        from kitty.providers.model_context import DEFAULT_CONTEXT_TOKENS, get_model_context_tokens
+
+        _set_overrides({"MiniMax-M3": 111_111})
+        _set_remote_cache({})
+        result = get_model_context_tokens(provider="minimax_token", model="MiniMax-M3", provider_config={})
+        assert result == DEFAULT_CONTEXT_TOKENS
+
+    def test_stale_but_valid_cache_still_beats_packaged(self):
+        """TTL governs fetch attempts only — never the loader preference."""
+        import kitty.providers.model_context as mc
+        from kitty.providers.model_context import get_model_context_tokens
+
+        _set_overrides({"MiniMax-M3": 111_111})
+        _set_remote_cache({"MiniMax-M3": 999_999})
+        # Backdate the cache far beyond any TTL; the loader has no mtime logic.
+        mtime = time.time() - 10 * 365 * 24 * 3600
+        os.utime(mc.REMOTE_OVERRIDES_CACHE_PATH, (mtime, mtime))
+        assert get_model_context_tokens(provider="minimax_token", model="MiniMax-M3", provider_config={}) == 999_999
 
 
 # ---------------------------------------------------------------------------

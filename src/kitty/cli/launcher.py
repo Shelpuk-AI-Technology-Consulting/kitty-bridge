@@ -18,6 +18,7 @@ from kitty.egress_guard import egress_block_reason
 from kitty.launchers.base import LauncherAdapter, SpawnConfig
 from kitty.launchers.discovery import discover_binary
 from kitty.profiles.schema import Profile
+from kitty.providers import model_context, model_context_sync
 from kitty.providers.base import ProviderAdapter
 from kitty.validation import validate_api_key
 
@@ -125,6 +126,7 @@ async def launch_async(
     """Launch the full bridge + child process lifecycle.
 
     Steps:
+    0. Refresh the model-context overrides catalog (best-effort)
     1. Resolve API key from credential store
     2. Validate API key (pre-flight check)
     3. Start the bridge server
@@ -137,6 +139,11 @@ async def launch_async(
     10. Return mapped exit code
     """
     extra_args = extra_args or []
+
+    # 0. Refresh the model-context overrides catalog before anything else.
+    # Best-effort and never raises; the bridge must see the newest catalog
+    # revision before it starts (R3).
+    await model_context_sync.refresh_model_context_overrides()
 
     # 1. Resolve credential
     try:
@@ -183,8 +190,20 @@ async def launch_async(
     if server.log_path:
         print(f"Bridge debug log: {server.log_path}", file=sys.stderr)
 
-    # 4. Build spawn config
-    spawn_config = adapter.build_spawn_config(profile, port, resolved_key)
+    # Resolve the model context window with the same helpers the bridge uses
+    # (single source of truth, R6). Balancing launches are capped by the
+    # smallest member window so no backend is asked for more than it has.
+    if backends:
+        context_tokens = model_context.get_balancing_min_context_tokens(
+            [(backend.provider_type, member.model, member.provider_config) for backend, _key, member in backends]
+        )
+    else:
+        context_tokens = model_context.get_model_context_tokens(
+            profile.provider, profile.model, profile.provider_config
+        )
+
+    # Build spawn config
+    spawn_config = adapter.build_spawn_config(profile, port, resolved_key, context_tokens=context_tokens)
 
     # 5. Discover binary
     binary_path = resolve_binary(adapter.binary_name)

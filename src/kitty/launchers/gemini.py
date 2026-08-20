@@ -29,8 +29,22 @@ class GeminiAdapter(LauncherAdapter):
     def bridge_protocol(self) -> BridgeProtocol:
         return BridgeProtocol.GEMINI_API
 
-    def build_spawn_config(self, profile: Profile, bridge_port: int, resolved_key: str) -> SpawnConfig:
+    def build_spawn_config(
+        self,
+        profile: Profile,
+        bridge_port: int,
+        resolved_key: str,
+        *,
+        context_tokens: int | None = None,
+    ) -> SpawnConfig:
+        """Build the spawn configuration for the Gemini CLI child process.
+
+        Gemini CLI is pointed at the bridge via env vars; it has no use for
+        ``context_tokens``, which is accepted and ignored so the orchestrator
+        call site stays uniform across adapters.
+        """
         del profile  # Model selection is handled by Gemini CLI itself; not passed via env
+        del context_tokens  # Gemini CLI has no use for the model context window
         return SpawnConfig(
             cli_args=[],
             env_overrides={

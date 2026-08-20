@@ -143,6 +143,26 @@ class TestPrepareLaunch:
 
         assert original is None
 
+    def test_injects_context_tokens_into_settings_env(self, tmp_path: Path):
+        """AC5.3: the context window also lands in the settings.json env block.
+
+        That block overrides process-level env in Claude Code, so the value
+        must be written there too or the child would ignore it.
+        """
+        settings_path = tmp_path / ".claude" / "settings.json"
+        _write_settings(settings_path, env={})
+
+        adapter = ClaudeAdapter()
+        env_overrides = {
+            "ANTHROPIC_BASE_URL": "http://127.0.0.1:4242",
+            "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "1000000",
+        }
+        original = adapter.prepare_launch(env_overrides, settings_path=settings_path)
+
+        patched = json.loads(settings_path.read_text(encoding="utf-8"))
+        assert patched["env"]["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] == "1000000"
+        assert original is not None
+
 
 class TestCleanupLaunch:
     def test_restores_original_settings(self, tmp_path: Path):

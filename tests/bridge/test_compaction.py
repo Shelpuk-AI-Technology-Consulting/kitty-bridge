@@ -1453,12 +1453,21 @@ class TestGetMaxContextChars:
         model: without the override it falls back to ``DEFAULT_CONTEXT_TOKENS``
         (200 000 → 800 000 chars); with the override it lands at 1 000 000
         tokens → 4 000 000 chars (capped at ``_MAX_REQUEST_CHARS``).
+
+        The remote-synced cache path is pointed at a nonexistent tmp file:
+        the loader prefers it over ``_OVERRIDES_PATH``, so a real synced cache
+        on this machine would otherwise shadow the patched catalog.
         """
         from kitty.providers import model_context as mc
 
         overrides_file = tmp_path / "model_context_overrides.json"
         overrides_file.write_text(json.dumps({"MiniMax-M3": 1_000_000, "glm-5.2": 1_000_000}), encoding="utf-8")
         monkeypatch.setattr(mc, "_OVERRIDES_PATH", overrides_file)
+        monkeypatch.setattr(
+            mc,
+            "REMOTE_OVERRIDES_CACHE_PATH",
+            tmp_path / "remote-cache" / "model_context_overrides.json",
+        )
         mc._load_overrides.cache_clear()
 
         server = _make_server()
@@ -1466,14 +1475,17 @@ class TestGetMaxContextChars:
         server._active_model = "glm-5.2"
         server._active_provider_config = {}
         server._backends = None
-        # 1 000 000 * 4 = 4 000 000 chars == _MAX_REQUEST_CHARS cap.
-        assert server._get_max_context_chars() == _MAX_REQUEST_CHARS
+        try:
+            # 1 000 000 * 4 = 4 000 000 chars == _MAX_REQUEST_CHARS cap.
+            assert server._get_max_context_chars() == _MAX_REQUEST_CHARS
 
-        # MiniMax-M3 via the minimax_token adapter also lands at the cap.
-        server._active_model = "MiniMax-M3"
-        assert server._get_max_context_chars() == _MAX_REQUEST_CHARS
-
-        mc._load_overrides.cache_clear()
+            # MiniMax-M3 via the minimax_token adapter also lands at the cap.
+            server._active_model = "MiniMax-M3"
+            assert server._get_max_context_chars() == _MAX_REQUEST_CHARS
+        finally:
+            # Drop the patched catalog even if an assertion fails mid-test,
+            # so it cannot leak into later tests through the lru_cache.
+            mc._load_overrides.cache_clear()
 
 
 # ---------------------------------------------------------------------------

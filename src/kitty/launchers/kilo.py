@@ -81,7 +81,17 @@ class KiloAdapter(LauncherAdapter):
         profile: Profile,
         bridge_port: int,
         resolved_key: str,
+        *,
+        context_tokens: int | None = None,
     ) -> SpawnConfig:
+        """Build the spawn configuration for the Kilo CLI child process.
+
+        Kilo's provider block is written later by :meth:`prepare_launch`, so
+        this method only stashes the launch values. It has no use for
+        ``context_tokens``, which is accepted and ignored so the orchestrator
+        call site stays uniform across adapters.
+        """
+        del context_tokens  # Kilo CLI has no use for the model context window
         # Stash values for prepare_launch (called later by the orchestrator
         # with only env_overrides as argument).
         self._bridge_port = bridge_port

@@ -420,6 +420,7 @@ def _run_bridge(
     from kitty.egress import get_egress as _get_egress
     from kitty.egress_guard import egress_block_reason
     from kitty.profiles.schema import BalancingProfile
+    from kitty.providers import model_context_sync
     from kitty.providers.registry import get_provider
     from kitty.tui.display import print_error, print_panel, print_status, print_warning, status_spinner
 
@@ -476,6 +477,7 @@ def _run_bridge(
     )
 
     async def run_server() -> None:
+        await model_context_sync.refresh_model_context_overrides()
         port = await server.start_async()
 
         print_panel(
@@ -534,6 +536,7 @@ def _run_bridge_balancing(
 
     # Resolve all member profiles
     from kitty.profiles.store import ProfileStore as _PS
+    from kitty.providers import model_context_sync
     from kitty.providers.registry import get_provider
     from kitty.tui.display import print_error, print_panel, print_status, print_warning
 
@@ -574,6 +577,7 @@ def _run_bridge_balancing(
     )
 
     async def run_server() -> None:
+        await model_context_sync.refresh_model_context_overrides()
         port = await server.start_async()
 
         members_info = "\n".join(
