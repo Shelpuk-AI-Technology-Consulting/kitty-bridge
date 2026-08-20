@@ -15,6 +15,14 @@ permissions:
 
 jobs:
   update-metadata:
+    # Not on push. The refresh opened a pull request every time anything landed
+    # on main, and merging one of those is itself a push to main, so it partly
+    # fed itself -- #9 merged at 19:36:30 and #10 was opened two seconds later.
+    # The bundled catalogue is a convenience copy that needs to be current to
+    # the week, not the minute, so the weekly schedule (plus a manual run when
+    # someone wants it sooner) is the right cadence. Pull requests still get the
+    # advisory drift notice below.
+    if: github.event_name != 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -57,7 +65,13 @@ jobs:
           git checkout -B "$BRANCH"
           git add src/kitty/providers/model_metadata.json
           git commit -m "Update OpenRouter model metadata"
-          git push --force-with-lease origin "$BRANCH"
+          # Plain --force: actions/checkout fetches only main at depth 1, so
+          # there is no remote-tracking ref for $BRANCH and --force-with-lease
+          # cannot evaluate its lease -- it rejects the push as "stale info"
+          # whenever the branch still exists on the remote, turning main red and
+          # skipping the refresh. The lease guards nothing here anyway; the
+          # branch is this job's own scratch space.
+          git push --force origin "$BRANCH"
 
           if [ -z "$(gh pr list --head "$BRANCH" --state open --json number --jq '.[].number')" ]; then
             gh pr create --base main --head "$BRANCH"               --title "Update OpenRouter model metadata"               --body "Automated refresh of the bundled model catalogue from the OpenRouter API."
@@ -68,7 +82,7 @@ jobs:
       # Reported, not enforced. This compares against the OpenRouter API as it
       # is right now, so it can drift between a refresh and a pull request
       # through no fault of that pull request -- which used to fail unrelated
-      # work. Freshness is maintained by the scheduled refresh above.
+      # work. Freshness is maintained by the weekly scheduled refresh above.
       - name: Report model metadata drift
         if: github.event_name == 'pull_request'
         run: |
