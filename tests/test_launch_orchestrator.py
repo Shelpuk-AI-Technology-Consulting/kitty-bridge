@@ -9,9 +9,11 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from kitty.bridge.server import BridgeServer
 from kitty.credentials.file_backend import FileBackend
 from kitty.credentials.store import CredentialStore
 from kitty.launchers.base import LauncherAdapter, SpawnConfig
+from kitty.launchers.claude import ClaudeAdapter
 from kitty.profiles.schema import Profile
 from kitty.providers.base import ProviderAdapter
 from kitty.types import BridgeProtocol
@@ -417,3 +419,209 @@ class TestLaunchPassesContextTokens:
             ("stub", "model-a", {}),
             ("stub", "model-b", {}),
         ]
+
+
+# ── Test: per-session settings reach the child command (issue #22) ───────────
+
+
+class _RecordingClaudeAdapter(ClaudeAdapter):
+    """ClaudeAdapter that records what ``prepare_launch`` handed back.
+
+    The seam between ``prepare_launch`` and command construction is the one
+    place where the #22 fix can silently fail: kitty could write a perfectly
+    isolated session file and then never tell Claude Code about it, falling
+    back to the user-global file with no test noticing.
+    """
+
+    def __init__(self, settings_path: Path):
+        self._settings_path = settings_path
+        self.prepared: str | None = None
+
+    @property
+    def binary_name(self) -> str:
+        return "python"
+
+    @property
+    def default_settings_path(self) -> Path:
+        return self._settings_path
+
+    def build_spawn_config(self, profile, bridge_port, resolved_key, *, context_tokens=None):
+        del context_tokens
+        return SpawnConfig(
+            cli_args=["-c", "import sys; sys.exit(0)"],
+            env_overrides={"ANTHROPIC_BASE_URL": f"http://127.0.0.1:{bridge_port}"},
+            env_clear=[],
+        )
+
+    def prepare_launch(self, env_overrides, settings_path=None):
+        self.prepared = super().prepare_launch(env_overrides, settings_path=settings_path)
+        return self.prepared
+
+
+class TestSessionSettingsReachTheChild:
+    """AC11: the spawned argv must point at the file prepare_launch wrote."""
+
+    @pytest.mark.asyncio
+    async def test_spawned_command_carries_the_prepared_settings_path(self, tmp_path: Path):
+        from kitty.cli.launcher import launch_async
+
+        adapter = _RecordingClaudeAdapter(tmp_path / ".claude" / "settings.json")
+        spawned: list[list[str]] = []
+
+        # Record the argv and stand in for the child: the stub binary is the
+        # Python interpreter, which would reject Claude Code's own --settings
+        # flag. What matters here is the command kitty built.
+        async def _record(*cmd, **kwargs):
+            del kwargs
+            spawned.append(list(cmd))
+            proc = MagicMock()
+
+            async def _wait():
+                return 0
+
+            proc.wait = _wait
+            proc.pid = 4242
+            proc.returncode = 0
+            return proc
+
+        with (
+            patch("kitty.cli.launcher.discover_binary", return_value=Path(sys.executable)),
+            patch("asyncio.create_subprocess_exec", side_effect=_record),
+        ):
+            exit_code = await launch_async(
+                adapter=adapter,
+                provider=StubProvider(),
+                profile=_make_profile(),
+                cred_store=_make_cred_store(),
+                extra_args=[],
+            )
+
+        assert exit_code == 0
+        assert adapter.prepared is not None
+        argv = spawned[0]
+        assert "--settings" in argv, "kitty never told Claude Code about the session file"
+        assert argv[argv.index("--settings") + 1] == str(adapter.prepared)
+        # Global flags must precede the binary's own args.
+        assert argv.index("--settings") < argv.index("-c")
+
+    @pytest.mark.asyncio
+    async def test_settings_flag_precedes_a_user_supplied_subcommand(self, tmp_path: Path):
+        """AC4: `kitty claude mcp list` must still be routed through the bridge.
+
+        Claude Code's global options have to come before a subcommand, so a
+        regression that appended the flag after ``extra_args`` would silently
+        drop the session's routing for every subcommand invocation.
+        """
+        from kitty.cli.launcher import launch_async
+
+        adapter = _RecordingClaudeAdapter(tmp_path / ".claude" / "settings.json")
+        spawned: list[list[str]] = []
+
+        async def _record(*cmd, **kwargs):
+            del kwargs
+            spawned.append(list(cmd))
+            proc = MagicMock()
+
+            async def _wait():
+                return 0
+
+            proc.wait = _wait
+            proc.pid = 4242
+            proc.returncode = 0
+            return proc
+
+        with (
+            patch("kitty.cli.launcher.discover_binary", return_value=Path(sys.executable)),
+            patch("asyncio.create_subprocess_exec", side_effect=_record),
+        ):
+            await launch_async(
+                adapter=adapter,
+                provider=StubProvider(),
+                profile=_make_profile(),
+                cred_store=_make_cred_store(),
+                extra_args=["mcp", "list"],
+            )
+
+        argv = spawned[0]
+        assert argv.index("--settings") < argv.index("mcp")
+
+    @pytest.mark.asyncio
+    async def test_launch_fails_closed_when_the_session_file_cannot_be_written(self, tmp_path: Path, capsys):
+        """AC9: continuing would run the session on the user's own credentials,
+        bypassing the bridge, the egress guard, and usage logging."""
+        from kitty.cli import launcher as launcher_mod
+        from kitty.cli.launcher import launch_async
+
+        adapter = _RecordingClaudeAdapter(tmp_path / ".claude" / "settings.json")
+        stopped: list[bool] = []
+
+        def _boom(*_args, **_kwargs):
+            raise OSError("no space left on device")
+
+        real_stop = BridgeServer.stop_async
+
+        async def _record_stop(self):
+            stopped.append(True)
+            return await real_stop(self)
+
+        with (
+            patch("kitty.cli.launcher.discover_binary", return_value=Path(sys.executable)),
+            patch("kitty.launchers.claude.tempfile.mkstemp", side_effect=_boom),
+            patch.object(BridgeServer, "stop_async", _record_stop),
+            patch("asyncio.create_subprocess_exec") as mock_spawn,
+        ):
+            exit_code = await launch_async(
+                adapter=adapter,
+                provider=StubProvider(),
+                profile=_make_profile(),
+                cred_store=_make_cred_store(),
+                extra_args=[],
+            )
+
+        assert exit_code == 1
+        assert "session settings file" in capsys.readouterr().err
+        mock_spawn.assert_not_called()
+        assert stopped, "the bridge must be stopped when the launch aborts"
+        assert launcher_mod._atexit_cleanup_state == []
+
+
+class TestAdaptersWithoutSessionSettings:
+    """AC7: adapters that own their config file keep their existing contract."""
+
+    @pytest.mark.asyncio
+    async def test_kilo_config_is_removed_even_though_nothing_was_prepared(self, tmp_path: Path):
+        """``original is None`` means "I created this file — delete it".
+
+        Gating cleanup on the prepared value would strand a Kilo config
+        containing the real API key for anyone without a pre-existing one.
+        """
+        from kitty.cli.launcher import launch_async
+        from kitty.launchers.kilo import KiloAdapter
+
+        config_path = tmp_path / "kilo.json"
+
+        class _TmpKilo(KiloAdapter):
+            @property
+            def binary_name(self) -> str:
+                return "python"
+
+            @property
+            def default_settings_path(self) -> Path:
+                return config_path
+
+            def build_spawn_config(self, profile, bridge_port, resolved_key, *, context_tokens=None):
+                super().build_spawn_config(profile, bridge_port, resolved_key, context_tokens=context_tokens)
+                return SpawnConfig(cli_args=["-c", "import sys; sys.exit(0)"], env_overrides={}, env_clear=[])
+
+        adapter = _TmpKilo()
+        with patch("kitty.cli.launcher.discover_binary", return_value=Path(sys.executable)):
+            exit_code = await launch_async(
+                adapter=adapter,
+                provider=StubProvider(),
+                profile=_make_profile(),
+                cred_store=_make_cred_store(),
+                extra_args=[],
+            )
+
+        assert exit_code == 0
+        assert not config_path.exists(), "kitty left a Kilo config holding the real API key"

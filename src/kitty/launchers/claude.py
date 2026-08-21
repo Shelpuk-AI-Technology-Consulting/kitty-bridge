@@ -124,10 +124,14 @@ def _is_local_kitty_url(value: str) -> bool:
 def _kitty_values_present(env: object) -> bool:
     """Return ``True`` when ``env`` looks like a live kitty session wrote it.
 
-    Used by :meth:`ClaudeAdapter.prepare_launch` to decide whether an existing
-    backup file is still trustworthy (the first writer of an overlap chain
-    owns it; later writers must not clobber) and by `kitty cleanup` to decide
-    whether phase-1 crash recovery should restore from it.
+    Used only by `kitty cleanup`, to decide whether phase-1 crash recovery
+    should restore from the backup.
+
+    Deliberately broader than the launch-time check in
+    :meth:`ClaudeAdapter._warn_if_global_carries_kitty_values`, which keys on
+    the auth token alone: `kitty cleanup` is an explicit repair request, so a
+    loopback URL is signal enough, whereas warning on every launch must not
+    fire for someone running their own local proxy. Do not merge the two.
 
     Args:
         env: A parsed ``env`` block from settings.json, or anything else.
@@ -178,6 +182,20 @@ class _SessionSnapshot(str):
         return snapshot
 
 
+class _SessionSettingsFile(str):
+    """Path to this session's own Claude Code settings file.
+
+    A ``str`` subclass so it flows unchanged through the orchestrator's atexit
+    state and the adapter contract, while :meth:`ClaudeAdapter.cleanup_launch`
+    can tell it apart from the legacy bare-``str`` snapshot. The distinction is
+    load-bearing: the legacy branch writes its argument as the *entire content*
+    of the settings file, so a plain path string would overwrite the user's
+    settings.json with a path.
+    """
+
+    __slots__ = ()
+
+
 _CONFLICTING_ENV_VARS: tuple[str, ...] = (
     "ANTHROPIC_BEDROCK_BASE_URL",
     "ANTHROPIC_VERTEX_BASE_URL",
@@ -197,11 +215,6 @@ _SETTINGS_ENV_OVERRIDE_KEYS: tuple[str, ...] = (
     "CLAUDE_CODE_MAX_CONTEXT_TOKENS",
 )
 
-# Keys to remove from settings.json env block — none currently.
-# Previously removed ANTHROPIC_AUTH_TOKEN but Claude Code needs it for
-# /login checks even though the bridge uses Bearer auth.
-_SETTINGS_ENV_REMOVE_KEYS: tuple[str, ...] = ()
-
 _DEFAULT_SETTINGS_PATH = Path.home() / ".claude" / "settings.json"
 
 
@@ -214,10 +227,12 @@ class ClaudeAdapter(LauncherAdapter):
     alias overrides (``ANTHROPIC_DEFAULT_*_MODEL``) so Claude Code uses the
     profile's model regardless of which alias it picks.
 
-    Because Claude Code's ``settings.json`` ``env`` block overrides
-    process-level env vars, :meth:`prepare_launch` temporarily patches the
-    file to inject bridge-specific values, and :meth:`cleanup_launch` restores
-    the original content when the session ends.
+    Because a settings ``env`` block overrides process-level env vars,
+    :meth:`prepare_launch` writes a **per-session** settings file carrying
+    kitty's values and :meth:`settings_cli_args` points Claude Code at it with
+    ``--settings``. The user-global ``~/.claude/settings.json`` is only read
+    (for a stale-value warning), never written, so concurrent sessions cannot
+    disturb each other's configuration.
     """
 
     @property
@@ -285,108 +300,153 @@ class ClaudeAdapter(LauncherAdapter):
         """
         return _DEFAULT_SETTINGS_PATH
 
+    def settings_cli_args(self, prepared: str | None) -> list[str]:
+        """Return the CLI args that point Claude Code at the session file.
+
+        Args:
+            prepared: The value returned by :meth:`prepare_launch`.
+
+        Returns:
+            ``["--settings", <path>]``, or ``[]`` when nothing was prepared
+            (no file to point at, so no dangling flag).
+        """
+        if prepared is None:
+            return []
+        return ["--settings", str(prepared)]
+
     def prepare_launch(
         self,
         env_overrides: dict[str, str],
         settings_path: Path | None = None,
     ) -> str | None:
-        """Temporarily patch Claude Code's settings.json to inject bridge env vars.
+        """Write this session's own Claude Code settings file.
 
-        Claude Code's ``settings.json`` ``env`` block takes priority over
-        process-level environment variables.  This method injects our bridge
-        URL and model into that block so they are guaranteed to take effect.
+        Claude Code's settings ``env`` block overrides process-level
+        environment variables, so pointing it at the bridge requires a settings
+        source rather than the child's env alone. kitty writes a **per-session**
+        file and passes it as ``claude --settings <path>``: that scope outranks
+        the user, project, and local settings files, and — unlike the previous
+        design — leaves the user-global ``~/.claude/settings.json`` untouched,
+        so a second session's start cannot disturb a running session (issue
+        #22).
+
+        Only kitty's own keys are written. Claude Code merges a ``--settings``
+        ``env`` block per variable, so the user's other entries and every other
+        top-level key keep their user-scope values; copying them in would
+        freeze a snapshot of the user's configuration at launch time.
 
         Args:
             env_overrides: The env vars from :meth:`build_spawn_config`.
-            settings_path: Path to the Claude Code settings file (for testing).
+            settings_path: Location of the user-global settings file. Read
+                only, for the stale-value warning below; never written.
 
         Returns:
-            A :class:`_SessionSnapshot` of the original file content for
-            :meth:`cleanup_launch` (compares equal to the original text), or
-            ``None`` if there is no settings file to patch, the file is
-            missing, or the JSON is malformed.
+            A :class:`_SessionSettingsFile` holding the path of the file to
+            pass to ``--settings``.
+
+        Raises:
+            OSError: When the session file cannot be written. The caller must
+                fail closed — without the file the session would silently run
+                on the user's own credentials, bypassing the bridge.
         """
         settings_path = settings_path or _DEFAULT_SETTINGS_PATH
-        logger.info("prepare_launch: settings_path=%s exists=%s", settings_path, settings_path.exists())
-        if not settings_path.exists():
-            logger.warning("prepare_launch: settings.json not found at %s — skipping patch", settings_path)
-            return None
+        self._warn_if_global_carries_kitty_values(settings_path)
 
-        original = settings_path.read_text(encoding="utf-8")
+        session_env = {key: env_overrides[key] for key in _SETTINGS_ENV_OVERRIDE_KEYS if key in env_overrides}
+
+        # mkstemp (0600 on POSIX) in the OS temp dir: the OS reaps orphans left
+        # by a SIGKILL, which a kitty-owned directory would accumulate forever.
+        fd, path_str = tempfile.mkstemp(prefix="kitty-claude-settings-", suffix=".json")
         try:
-            settings = json.loads(original)
-        except json.JSONDecodeError as exc:
-            logger.error("prepare_launch: settings.json is malformed JSON: %s — skipping patch", exc)
-            return None
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump({"env": session_env}, handle, indent=2)
+        except Exception:
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(path_str)
+            raise
 
+        logger.info(
+            "prepare_launch: wrote session settings %s with env %s",
+            path_str,
+            {k: (v[:8] + "..." if isinstance(v, str) and len(v) > 8 else v) for k, v in session_env.items()},
+        )
+        return _SessionSettingsFile(path_str)
+
+    def _warn_if_global_carries_kitty_values(self, settings_path: Path) -> None:
+        """Warn when the user-global settings file still holds kitty values.
+
+        kitty no longer rewrites that file, so a session killed by a *pre-fix*
+        version would leave a dead ``127.0.0.1`` base URL there indefinitely:
+        kitty sessions would keep working (they use ``--settings``), while every
+        plain ``claude`` run failed with no hint of the cause.
+
+        Best-effort by design — a missing, unreadable, or malformed file is not
+        an error here, and must never block a launch.
+
+        Args:
+            settings_path: Location of the user-global settings file.
+        """
+        try:
+            settings = json.loads(settings_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            # ValueError covers both JSONDecodeError and UnicodeDecodeError —
+            # a settings file saved as UTF-16 (Notepad's "Unicode") must warn
+            # at most, never abort a launch.
+            return
         if not isinstance(settings, dict):
-            logger.error("prepare_launch: settings.json root is not an object — skipping patch")
-            return None
+            return
 
-        # Save the crash backup before patching. First writer of an overlap
-        # chain owns it: later sessions must not overwrite it with a file that
-        # already contains another session's patch (issue #21). Exception: a
-        # backup left behind by an ended chain (file carries no live kitty
-        # values) is stale and is refreshed, so a later session can never
-        # "restore" an ancient pre-kitty file over the user's current one.
-        if not _DEFAULT_BACKUP_PATH.exists() or not _kitty_values_present(settings.get("env")):
-            save_settings_backup(original)
-
-        env = settings.setdefault("env", {})
-
-        logger.info(
-            "prepare_launch: settings.json env before patch: %s",
-            {k: (v[:8] + "..." if isinstance(v, str) and len(v) > 8 else v) for k, v in env.items()},
-        )
-
-        # Clean up stale localhost ANTHROPIC_BASE_URL from previous crashed sessions
-        existing_base_url = env.get("ANTHROPIC_BASE_URL", "")
-        if existing_base_url and ("127.0.0.1" in existing_base_url or "localhost" in existing_base_url):
-            logger.info("prepare_launch: removing stale ANTHROPIC_BASE_URL=%s from previous session", existing_base_url)
-            env.pop("ANTHROPIC_BASE_URL", None)
-            # Also remove other kitty-injected keys from the stale session
-            for key in _SETTINGS_ENV_OVERRIDE_KEYS:
-                if key in env and key != "ANTHROPIC_BASE_URL":
-                    logger.debug("prepare_launch: removing stale %s from previous session", key)
-                    env.pop(key, None)
-
-        for key in _SETTINGS_ENV_OVERRIDE_KEYS:
-            if key in env_overrides:
-                env[key] = env_overrides[key]
-
-        for key in _SETTINGS_ENV_REMOVE_KEYS:
-            env.pop(key, None)
-
-        logger.info(
-            "prepare_launch: settings.json env after patch: %s",
-            {k: (v[:8] + "..." if isinstance(v, str) and len(v) > 8 else v) for k, v in env.items()},
-        )
-
-        _atomic_write_json(settings_path, settings)
-        injected = {key: env_overrides[key] for key in _SETTINGS_ENV_OVERRIDE_KEYS if key in env_overrides}
-        return _SessionSnapshot(original, injected)
+        # The auth token is kitty's unambiguous signature. A loopback base URL
+        # alone would also match a user's own local proxy (LiteLLM, Ollama),
+        # and `kitty cleanup` would strip their keys.
+        env = settings.get("env")
+        if isinstance(env, dict) and env.get("ANTHROPIC_AUTH_TOKEN") == "kitty-bridge-token":
+            logger.warning(
+                "%s still carries values from a crashed kitty session; plain `claude` runs may fail. "
+                "Run `kitty cleanup` to restore it.",
+                settings_path,
+            )
 
     def cleanup_launch(
         self,
         original: str | None,
         settings_path: Path | None = None,
     ) -> None:
-        """Restore Claude Code's settings.json to the user's pre-kitty state.
+        """Undo whatever :meth:`prepare_launch` set up for this session.
 
-        Overlap-aware: when the snapshot came from :meth:`prepare_launch` (a
-        :class:`_SessionSnapshot`), the file is restored only if this session
-        still owns it — every value this session injected is still present.
-        A later session (or a user edit) overwrites ownership, and its state
-        must not be disturbed. A bare string restores verbatim (legacy
-        callers/tests).
+        The normal path deletes this session's own settings file and touches
+        nothing else — it is idempotent, because the orchestrator calls it from
+        both a ``finally`` block and an ``atexit`` handler.
+
+        Two legacy paths remain for callers predating per-session isolation: a
+        :class:`_SessionSnapshot` restores the user-global file only if this
+        session still owns it (every value it injected is still present), and a
+        bare string restores that file verbatim.
 
         Args:
-            original: The content returned by :meth:`prepare_launch`.
-            settings_path: Path to the Claude Code settings file (for testing).
+            original: The value returned by :meth:`prepare_launch`.
+            settings_path: Path to the user-global settings file, used only by
+                the legacy paths.
         """
         settings_path = settings_path or _DEFAULT_SETTINGS_PATH
         if original is None:
             return
+        # Per-session file: delete this session's file and nothing else. Checked
+        # FIRST — the legacy branch below writes its argument as the entire file
+        # content, so a path string reaching it would clobber the user's settings.
+        if isinstance(original, _SessionSettingsFile):
+            try:
+                os.unlink(original)
+            except FileNotFoundError:
+                pass  # Already cleaned up: finally + atexit both call this.
+            except OSError as exc:
+                # Never fatal — the session is over either way — but do not
+                # claim success; on Windows the child may still hold the file.
+                logger.warning("cleanup_launch: could not remove %s: %s", original, exc)
+            else:
+                logger.info("cleanup_launch: removed session settings %s", original)
+            return
+
         logger.info("cleanup_launch: restoring %s", settings_path)
         try:
             if isinstance(original, _SessionSnapshot):
@@ -416,7 +476,7 @@ class ClaudeAdapter(LauncherAdapter):
         # changed the landscape — never guess by writing.
         try:
             current = json.loads(settings_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+        except (OSError, ValueError):
             logger.warning("cleanup_launch: %s missing or unreadable — leaving it alone", settings_path)
             return
 

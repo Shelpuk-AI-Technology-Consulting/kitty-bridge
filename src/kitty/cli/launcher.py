@@ -29,15 +29,16 @@ logger = logging.getLogger(__name__)
 # Module-level state for atexit cleanup.
 # Stores (adapter, original_settings_content, settings_path) after prepare_launch.
 # Cleared after successful cleanup to prevent double-restore.
-# NOTE: the "original" may be a str SUBCLASS (kitty.launchers.claude._SessionSnapshot)
-# carrying overlap-aware restore context — do not round-trip it through str(),
-# formatting, or serialisation here or in _atexit_cleanup, or that context is lost.
+# NOTE: the "original" may be a str SUBCLASS (kitty.launchers.claude's
+# _SessionSettingsFile or _SessionSnapshot) whose TYPE selects the cleanup
+# behaviour — do not round-trip it through str(), formatting, or serialisation
+# here or in _atexit_cleanup, or cleanup_launch will take the wrong branch.
 _atexit_cleanup_state: list[tuple[LauncherAdapter, str, Path]] = []
 _atexit_registered = False
 
 
 def _atexit_cleanup() -> None:
-    """Restore agent settings files that were patched by prepare_launch.
+    """Undo the agent config prepare_launch set up (delete or restore).
 
     Registered via atexit so cleanup runs even on unhandled exceptions,
     sys.exit(), or SIGTERM (which triggers normal Python shutdown).
@@ -135,8 +136,8 @@ async def launch_async(
     3. Start the bridge server
     4. Build spawn config from adapter
     5. Discover the child binary
-    6. Patch agent-specific external config
-    7. Spawn child process with signal forwarding
+    6. Prepare agent-specific external config (per-session settings file)
+    7. Build the child command and spawn it with signal forwarding
     8. Wait for child to exit
     9. Stop the bridge server
     10. Return mapped exit code
@@ -211,8 +212,45 @@ async def launch_async(
     # 5. Discover binary
     binary_path = resolve_binary(adapter.binary_name)
 
-    # 6. Build full command and environment
-    cmd = [str(binary_path)] + spawn_config.cli_args + extra_args
+    # 6. Prepare agent-specific external config (e.g. the Claude Code session
+    # settings file). Must run AFTER build_spawn_config (kilo requires it) and
+    # AFTER resolve_binary — that raises outside any try/finally, so preparing
+    # first would leave a session file behind on a missing-binary abort.
+    original_settings: str | None = None
+    settings_path: Path | None = adapter.default_settings_path
+    if settings_path is not None:
+        # Each adapter owns its agent's config file. Guessing one default here
+        # previously handed every agent Claude Code's settings.json.
+        try:
+            original_settings = adapter.prepare_launch(
+                spawn_config.env_overrides,
+                settings_path=settings_path,
+            )
+        except OSError as exc:
+            # Fail closed: without its settings file the child would fall back
+            # to the user's own settings, whose env block outranks the process
+            # env we hand it — bypassing the bridge, the egress guard, and
+            # usage logging, and billing the user's own account.
+            logger.error("Failed to prepare %s settings: %s", adapter.name, exc)
+            print(
+                f"Error: could not write the {adapter.name} session settings file: {exc}",
+                file=sys.stderr,
+            )
+            await server.stop_async()
+            return 1
+        if original_settings is not None:
+            _register_atexit_cleanup(adapter, original_settings, settings_path)
+        if debug:
+            print(
+                f"[kitty debug] {adapter.name} session settings prepared ({'yes' if original_settings else 'none'})",
+                file=sys.stderr,
+            )
+    elif debug:
+        print(f"[kitty debug] {adapter.name} has no settings file to prepare", file=sys.stderr)
+
+    # 7. Build full command and environment. settings_cli_args goes first so
+    # global flags precede any subcommand a user passed in extra_args.
+    cmd = [str(binary_path)] + adapter.settings_cli_args(original_settings) + spawn_config.cli_args + extra_args
     env = build_child_env(spawn_config)
 
     # Debug: log key env vars for diagnosing connectivity issues
@@ -236,26 +274,6 @@ async def launch_async(
             f"[kitty debug] ANTHROPIC_API_KEY={env.get('ANTHROPIC_API_KEY', '<not set>')[:8]}...",
             file=sys.stderr,
         )
-
-    # 7. Patch agent-specific external config (e.g. Claude Code settings.json)
-    original_settings: str | None = None
-    settings_path: Path | None = adapter.default_settings_path
-    if settings_path is not None:
-        # Each adapter owns its agent's config file. Guessing one default here
-        # previously handed every agent Claude Code's settings.json.
-        original_settings = adapter.prepare_launch(
-            spawn_config.env_overrides,
-            settings_path=settings_path,
-        )
-        if original_settings is not None:
-            _register_atexit_cleanup(adapter, original_settings, settings_path)
-        if debug:
-            print(
-                f"[kitty debug] settings.json patched (original={'saved' if original_settings else 'none'})",
-                file=sys.stderr,
-            )
-    elif debug:
-        print(f"[kitty debug] {adapter.name} has no settings file to patch", file=sys.stderr)
 
     # 8. Spawn child process with signal forwarding
     logger.info("Launching child: %s", " ".join(cmd))
@@ -380,4 +398,3 @@ def launch(
             usage_log_path=usage_log_path,
         )
         return asyncio.run(coro)
-

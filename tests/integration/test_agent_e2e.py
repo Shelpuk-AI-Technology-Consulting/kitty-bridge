@@ -138,10 +138,14 @@ async def _run_agent_through_bridge(
 
     # Build CLI command
     cmd = _build_agent_cmd(agent_name, prompt)
-    # Prepend any adapter-specific CLI args (e.g. Codex -c flags)
-    if spawn_config.cli_args:
-        # Insert adapter CLI args after the binary name
-        cmd = [cmd[0]] + spawn_config.cli_args + cmd[1:]
+    # Insert adapter CLI args after the binary name, mirroring launch_async:
+    # the per-session settings flag first (it must precede any subcommand),
+    # then any adapter-specific args (e.g. Codex -c flags). Without the
+    # settings flag a Claude session would silently fall back to the user's
+    # own settings and never exercise the bridge.
+    adapter_args = adapter.settings_cli_args(original_settings) + spawn_config.cli_args
+    if adapter_args:
+        cmd = [cmd[0]] + adapter_args + cmd[1:]
 
     try:
         proc = await asyncio.create_subprocess_exec(
