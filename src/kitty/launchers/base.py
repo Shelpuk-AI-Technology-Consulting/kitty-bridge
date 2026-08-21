@@ -111,10 +111,15 @@ class LauncherAdapter(ABC):
         """Restore whatever :meth:`prepare_launch` patched.
 
         Called on the normal path and again from an atexit handler, so it must
-        be safe to invoke with nothing to restore.
+        be safe to invoke with nothing to restore, and idempotent when called
+        twice with the same value. Implementations that share one settings
+        file across concurrent sessions (ClaudeAdapter) must only restore
+        state this session still owns — see ``_SessionSnapshot`` there.
 
         Args:
             original: Content returned by :meth:`prepare_launch`, or ``None``.
+                Implementations may return a ``str`` subclass carrying extra
+                restore context; a bare ``str`` must restore verbatim.
             settings_path: Location of the agent's settings file.
         """
         return None

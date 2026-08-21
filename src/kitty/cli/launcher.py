@@ -29,6 +29,9 @@ logger = logging.getLogger(__name__)
 # Module-level state for atexit cleanup.
 # Stores (adapter, original_settings_content, settings_path) after prepare_launch.
 # Cleared after successful cleanup to prevent double-restore.
+# NOTE: the "original" may be a str SUBCLASS (kitty.launchers.claude._SessionSnapshot)
+# carrying overlap-aware restore context — do not round-trip it through str(),
+# formatting, or serialisation here or in _atexit_cleanup, or that context is lost.
 _atexit_cleanup_state: list[tuple[LauncherAdapter, str, Path]] = []
 _atexit_registered = False
 

@@ -455,6 +455,34 @@ def _proxy_config(port: int, password: str = PROXY_PASSWORD) -> EgressConfig:
 
 
 @pytest.mark.skipif(_AIOHTTP_NEEDS_311, reason=_AIOHTTP_SKIP_REASON)
+class TestConcurrentSessionsThroughOneProxy:
+    """Several kitty agents share one authenticated egress gateway.
+
+    Each ``kitty`` process uses ``_probe`` (via ``kitty egress test``) and
+    makes upstream calls through the resolved gateway. The egress proxy is the
+    shared part across processes — this pins that the transport survives N
+    concurrent sessions tunnelling through one listener.
+    """
+
+    async def test_concurrent_probes_all_succeed_through_shared_proxy(
+        self,
+        connect_proxy: _ConnectProxy,
+        tls_target: _TlsTarget,
+        target_url: str,
+        aiohttp_trusts_test_ca: None,
+    ) -> None:
+        results = await asyncio.gather(
+            *(egress_cmd._probe(_proxy_config(connect_proxy.port)) for _ in range(8))
+        )
+
+        for body, _elapsed_ms, error in results:
+            assert error is None
+            assert body == TARGET_BODY
+        assert len(connect_proxy.attempts) == 8
+        assert all(a.authenticated and a.target == f"127.0.0.1:{tls_target.port}" for a in connect_proxy.attempts)
+
+
+@pytest.mark.skipif(_AIOHTTP_NEEDS_311, reason=_AIOHTTP_SKIP_REASON)
 class TestAiohttpProbeThroughHttpsProxy:
     """``kitty egress test``'s probe carries an authenticated https:// proxy."""
 
