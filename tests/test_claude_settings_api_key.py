@@ -9,8 +9,20 @@ import json
 import uuid
 from pathlib import Path
 
+import pytest
+
 from kitty.launchers.claude import ClaudeAdapter
 from kitty.profiles.schema import Profile
+
+
+@pytest.fixture(autouse=True)
+def _backup_in_tmp(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Point the crash backup at a temp file so tests never touch the real one.
+
+    Without this, prepare_launch/cleanup_launch read and write the developer's
+    actual ~/.config/kitty/claude-settings-backup.json.
+    """
+    monkeypatch.setattr("kitty.launchers.claude._DEFAULT_BACKUP_PATH", tmp_path / "claude-settings-backup.json")
 
 
 def _make_profile(model: str = "minimax-m2.7") -> Profile:

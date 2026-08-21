@@ -9,8 +9,31 @@ import uuid
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from kitty.launchers.claude import ClaudeAdapter
 from kitty.profiles.schema import Profile
+
+_BACKUP_NAME = "claude-settings-backup.json"
+
+
+@pytest.fixture(autouse=True)
+def _backup_in_tmp(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Point the crash backup at a temp file so tests never touch the real one.
+
+    Without this, prepare_launch/cleanup_launch read and write the developer's
+    actual ~/.config/kitty/claude-settings-backup.json.
+
+    Args:
+        tmp_path: Per-test temp directory.
+        monkeypatch: Pytest's monkeypatch fixture (auto-restores).
+
+    Returns:
+        The hermetic backup path (same value patched into the module).
+    """
+    backup_path = tmp_path / _BACKUP_NAME
+    monkeypatch.setattr("kitty.launchers.claude._DEFAULT_BACKUP_PATH", backup_path)
+    return backup_path
 
 
 def _make_profile(model: str = "minimax-m2.7") -> Profile:
@@ -272,3 +295,105 @@ class TestSettingsBackup:
 
         assert result is None
         mock_save.assert_not_called()
+
+    def test_prepare_refreshes_stale_backup_when_no_live_kitty_values(self, tmp_path: Path, _backup_in_tmp: Path):
+        """If a backup is left from a finished chain and the settings carry no
+        kitty values, prepare must refresh the backup to the current file so
+        later crash recovery cannot revert the user's changes."""
+        settings_path = tmp_path / ".claude" / "settings.json"
+        ancient = '{"env": {"ANTHROPIC_AUTH_TOKEN": "token-from-weeks-ago"}}'
+        _backup_in_tmp.write_text(ancient, encoding="utf-8")
+        current = _write_settings(
+            settings_path,
+            env={"ANTHROPIC_BASE_URL": "https://my-proxy.example.com", "API_TIMEOUT_MS": "3000000"},
+        )
+
+        adapter = ClaudeAdapter()
+        adapter.prepare_launch(
+            {"ANTHROPIC_BASE_URL": "http://127.0.0.1:4242"}, settings_path=settings_path
+        )
+
+        assert _backup_in_tmp.read_text(encoding="utf-8") == current, (
+            "stale backup was kept; kitty cleanup would later restore it over the user's changes"
+        )
+
+    def test_prepare_keeps_existing_backup_when_live_kitty_values_present(
+        self, tmp_path: Path, _backup_in_tmp: Path
+    ):
+        """While a chain is live the backup must NOT be overwritten by a later
+        session's snapshot — that is the AC4 contract from issue #21."""
+        settings_path = tmp_path / ".claude" / "settings.json"
+        user_original = _write_settings(
+            settings_path,
+            env={"CUSTOM_KEY": "keep-me"},
+        )
+        _backup_in_tmp.write_text(user_original, encoding="utf-8")
+
+        # Simulate session A having already patched the file (live kitty values).
+        settings_path.write_text(
+            json.dumps(
+                {
+                    "env": {
+                        "CUSTOM_KEY": "keep-me",
+                        "ANTHROPIC_BASE_URL": "http://127.0.0.1:10001",
+                        "ANTHROPIC_AUTH_TOKEN": "kitty-bridge-token",
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        adapter = ClaudeAdapter()
+        adapter.prepare_launch(
+            {"ANTHROPIC_BASE_URL": "http://127.0.0.1:10002"}, settings_path=settings_path
+        )
+
+        assert _backup_in_tmp.read_text(encoding="utf-8") == user_original
+
+
+class TestCleanupOwnership:
+    """AC8/AC9: what cleanup restores depends on who owns the file now."""
+
+    def test_cleanup_restores_snapshot_when_backup_missing(self, tmp_path: Path, _backup_in_tmp: Path):
+        """AC8: when the crash backup is gone, cleanup still restores this
+        session's snapshot — the single-session path must not depend on the backup."""
+        settings_path = tmp_path / ".claude" / "settings.json"
+        original_content = _write_settings(
+            settings_path,
+            env={"ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic"},
+        )
+
+        adapter = ClaudeAdapter()
+        original = adapter.prepare_launch(
+            {"ANTHROPIC_BASE_URL": "http://127.0.0.1:4242"}, settings_path=settings_path
+        )
+
+        # Simulate the backup disappearing before cleanup (crash recovery ran
+        # first, user deleted it).
+        _backup_in_tmp.unlink(missing_ok=True)
+        adapter.cleanup_launch(original, settings_path=settings_path)
+
+        assert settings_path.read_text(encoding="utf-8") == original_content
+
+    def test_cleanup_leaves_file_when_user_hand_edited_kitty_key(self, tmp_path: Path, _backup_in_tmp: Path):
+        """AC9: if the user changes a kitty-injected value while the session
+        runs, cleanup must not overwrite their edit with the old snapshot."""
+        settings_path = tmp_path / ".claude" / "settings.json"
+        _write_settings(settings_path, env={"CUSTOM_KEY": "keep-me"})
+
+        adapter = ClaudeAdapter()
+        original = adapter.prepare_launch(
+            {"ANTHROPIC_BASE_URL": "http://127.0.0.1:4242"}, settings_path=settings_path
+        )
+
+        # User hand-edits the injected base URL mid-session.
+        patched = json.loads(settings_path.read_text(encoding="utf-8"))
+        patched["env"]["ANTHROPIC_BASE_URL"] = "http://127.0.0.1:5555"
+        settings_path.write_text(json.dumps(patched, indent=2), encoding="utf-8")
+
+        adapter.cleanup_launch(original, settings_path=settings_path)
+
+        restored = json.loads(settings_path.read_text(encoding="utf-8"))
+        assert restored["env"]["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:5555", (
+            "cleanup overwrote the user's mid-session edit with the stale snapshot"
+        )

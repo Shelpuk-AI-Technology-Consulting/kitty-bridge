@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from urllib.parse import urlparse
 
 _DEFAULT_SETTINGS_PATH = Path.home() / ".claude" / "settings.json"
 
@@ -22,18 +21,36 @@ _KITTY_INJECTED_KEYS: tuple[str, ...] = (
 
 
 def _get_backup_path() -> Path:
-    """Return the Claude settings backup path used for exact restore."""
-    return Path.home() / ".config" / "kitty" / "claude-settings-backup.json"
+    """Return the Claude settings backup path used for exact restore.
+
+    Single-sourced from :mod:`kitty.launchers.claude` so the writer
+    (``prepare_launch``) and the crash-recovery reader can never drift apart.
+
+    Returns:
+        Path of the crash-recovery backup file.
+    """
+    # Lazy so patching the source module attribute redirects this too.
+    from kitty.launchers.claude import _DEFAULT_BACKUP_PATH
+
+    return _DEFAULT_BACKUP_PATH
 
 
 def _is_stale_base_url(value: str) -> bool:
-    """Check if an ANTHROPIC_BASE_URL points to a local kitty bridge."""
-    try:
-        parsed = urlparse(value)
-        hostname = (parsed.hostname or "").lower()
-        return hostname in ("127.0.0.1", "localhost", "::1")
-    except Exception:
-        return False
+    """Check if an ANTHROPIC_BASE_URL points to a local kitty bridge.
+
+    Delegates to the single shared detector in
+    :func:`kitty.launchers.claude._is_local_kitty_url` so the launcher and the
+    crash-recovery cleaner can never disagree about what counts as a kitty URL.
+
+    Args:
+        value: Candidate ``ANTHROPIC_BASE_URL`` value.
+
+    Returns:
+        ``True`` when the URL points at a loopback host.
+    """
+    from kitty.launchers.claude import _is_local_kitty_url
+
+    return _is_local_kitty_url(value)
 
 
 def _detect_stale_env(env: dict) -> list[str]:
@@ -93,22 +110,46 @@ def run_cleanup(settings_path: Path = _DEFAULT_SETTINGS_PATH) -> int:
     """Remove stale bridge-injected values from Claude Code's settings.json.
 
     Uses a two-phase strategy:
-    1. If a backup file exists, restore exact original content (crash recovery).
+    1. If a backup file exists AND the settings file still carries live kitty
+       values, restore the exact original content (crash recovery). A backup
+       without live kitty values is a stale leftover from an ended session
+       chain and is deleted instead of restored — restoring it would silently
+       revert the user's current settings. A missing settings file is
+       resurrected from the backup: it is the only surviving copy of the
+       user's original.
     2. Otherwise, fall back to heuristic detection of stale kitty values.
+
+    Args:
+        settings_path: Path to Claude Code's settings.json.
 
     Returns:
         0 on success, 1 on error.
     """
     backup_path = _get_backup_path()
 
-    # Phase 1: Exact restore from backup (crash recovery).
+    # Phase 1: Exact restore from backup (crash recovery) — only while a live
+    # kitty session (or a crashed one) still owns the settings file.
     if backup_path.exists():
-        if settings_path.exists() and _restore_from_backup(settings_path, backup_path):
-            return 0
+        from kitty.launchers.claude import _kitty_values_present
+
         if not settings_path.exists():
-            backup_path.unlink(missing_ok=True)
-            print(f"Removed orphaned backup {backup_path}")
-            return 0
+            # The file vanished mid-session; the backup is the only surviving
+            # original — resurrect the file rather than destroy the backup.
+            if _restore_from_backup(settings_path, backup_path):
+                return 0
+        else:
+            try:
+                current = json.loads(settings_path.read_text(encoding="utf-8"))
+                live_kitty = isinstance(current, dict) and _kitty_values_present(current.get("env"))
+            except (json.JSONDecodeError, OSError):
+                # Unreadable: assume a crashed patch and let the exact backup win.
+                live_kitty = True
+            if live_kitty:
+                if _restore_from_backup(settings_path, backup_path):
+                    return 0
+            else:
+                backup_path.unlink(missing_ok=True)
+                print(f"Removed stale backup {backup_path}")
 
     if not settings_path.exists():
         print(f"No settings file at {settings_path} — nothing to clean up.")

@@ -268,3 +268,44 @@ class TestBackupRestore:
         assert "ANTHROPIC_AUTH_TOKEN" not in env
         assert "ANTHROPIC_MODEL" not in env
         assert env["API_TIMEOUT_MS"] == "3000000"
+
+    def test_stale_backup_not_restored_when_no_live_kitty_values(self, tmp_path: Path):
+        """A backup left from an ended chain must not revert the user's settings.
+
+        The settings file carries no kitty values, so no live/crashed session
+        owns it — restoring an ancient backup would silently lose everything
+        the user changed since."""
+        settings_path = tmp_path / "settings.json"
+        backup_path = tmp_path / "claude-settings-backup.json"
+
+        ancient = {"env": {"ANTHROPIC_AUTH_TOKEN": "token-from-weeks-ago"}, "model": "opus"}
+        backup_path.write_text(json.dumps(ancient))
+        current = {"env": {"ANTHROPIC_BASE_URL": "https://my-proxy.example.com", "API_TIMEOUT_MS": "3000000"}}
+        settings_path.write_text(json.dumps(current))
+
+        with patch("kitty.cli.cleanup_cmd._get_backup_path", return_value=backup_path):
+            exit_code = run_cleanup(settings_path=settings_path)
+
+        assert exit_code == 0
+        result = json.loads(settings_path.read_text())
+        # Current settings untouched, stale backup discarded.
+        assert result["env"]["ANTHROPIC_BASE_URL"] == "https://my-proxy.example.com"
+        assert result["env"]["API_TIMEOUT_MS"] == "3000000"
+        assert not backup_path.exists()
+
+    def test_missing_settings_file_resurrected_from_backup(self, tmp_path: Path):
+        """When settings.json vanished mid-session, the backup is the only
+        surviving original — cleanup must restore it, not delete it."""
+        settings_path = tmp_path / "settings.json"
+        backup_path = tmp_path / "claude-settings-backup.json"
+
+        original = {"env": {"ANTHROPIC_AUTH_TOKEN": "my-real-token"}, "model": "opus"}
+        backup_path.write_text(json.dumps(original))
+
+        with patch("kitty.cli.cleanup_cmd._get_backup_path", return_value=backup_path):
+            exit_code = run_cleanup(settings_path=settings_path)
+
+        assert exit_code == 0
+        result = json.loads(settings_path.read_text())
+        assert result["env"]["ANTHROPIC_AUTH_TOKEN"] == "my-real-token"
+        assert not backup_path.exists()

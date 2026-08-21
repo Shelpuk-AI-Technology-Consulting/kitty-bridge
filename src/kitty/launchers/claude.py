@@ -8,6 +8,7 @@ import logging
 import os
 import tempfile
 from pathlib import Path
+from urllib.parse import urlparse
 
 from kitty.launchers.base import LauncherAdapter, SpawnConfig
 from kitty.profiles.schema import Profile
@@ -52,8 +53,17 @@ __all__ = ["ClaudeAdapter"]
 _DEFAULT_BACKUP_PATH = Path.home() / ".config" / "kitty" / "claude-settings-backup.json"
 
 
-def save_settings_backup(original: str, backup_path: Path = _DEFAULT_BACKUP_PATH) -> None:
-    """Save the original settings.json content to a backup file for crash recovery."""
+def save_settings_backup(original: str, backup_path: Path | None = None) -> None:
+    """Save the original settings.json content to a backup file for crash recovery.
+
+    Args:
+        original: Original settings.json content.
+        backup_path: Backup file location. Defaults to the module-level
+            ``_DEFAULT_BACKUP_PATH``, resolved at call time (not import time)
+            so tests can redirect it by patching the module attribute.
+    """
+    if backup_path is None:
+        backup_path = _DEFAULT_BACKUP_PATH
     try:
         backup_path.parent.mkdir(parents=True, exist_ok=True)
         _atomic_write_text(backup_path, original)
@@ -62,16 +72,110 @@ def save_settings_backup(original: str, backup_path: Path = _DEFAULT_BACKUP_PATH
         logger.warning("save_settings_backup: failed to write backup: %s", exc)
 
 
-def load_settings_backup(backup_path: Path = _DEFAULT_BACKUP_PATH) -> str | None:
-    """Load the settings backup, returning None if it doesn't exist."""
+def load_settings_backup(backup_path: Path | None = None) -> str | None:
+    """Load the settings backup, returning None if it doesn't exist.
+
+    Args:
+        backup_path: Backup file location. Defaults to the module-level
+            ``_DEFAULT_BACKUP_PATH``, resolved at call time.
+
+    Returns:
+        The backed-up settings content, or ``None`` when no backup exists.
+    """
+    if backup_path is None:
+        backup_path = _DEFAULT_BACKUP_PATH
     if not backup_path.exists():
         return None
     return backup_path.read_text(encoding="utf-8")
 
 
-def delete_settings_backup(backup_path: Path = _DEFAULT_BACKUP_PATH) -> None:
-    """Delete the settings backup file."""
+def delete_settings_backup(backup_path: Path | None = None) -> None:
+    """Delete the settings backup file.
+
+    Args:
+        backup_path: Backup file location. Defaults to the module-level
+            ``_DEFAULT_BACKUP_PATH``, resolved at call time.
+    """
+    if backup_path is None:
+        backup_path = _DEFAULT_BACKUP_PATH
     backup_path.unlink(missing_ok=True)
+
+
+def _is_local_kitty_url(value: str) -> bool:
+    """Return ``True`` when ``value`` looks like a kitty bridge URL.
+
+    All kitty-injected ``ANTHROPIC_BASE_URL`` values point at a loopback
+    interface (the local bridge), so a localhost URL in the file is a strong
+    signal that a live kitty session last wrote it.
+
+    Args:
+        value: Candidate URL string.
+
+    Returns:
+        ``True`` when the URL's hostname is loopback (v4 or v6).
+    """
+    try:
+        hostname = (urlparse(value).hostname or "").lower()
+    except Exception:
+        return False
+    return hostname in ("127.0.0.1", "localhost", "::1")
+
+
+def _kitty_values_present(env: object) -> bool:
+    """Return ``True`` when ``env`` looks like a live kitty session wrote it.
+
+    Used by :meth:`ClaudeAdapter.prepare_launch` to decide whether an existing
+    backup file is still trustworthy (the first writer of an overlap chain
+    owns it; later writers must not clobber) and by `kitty cleanup` to decide
+    whether phase-1 crash recovery should restore from it.
+
+    Args:
+        env: A parsed ``env`` block from settings.json, or anything else.
+
+    Returns:
+        ``True`` when the block carries a localhost base URL or the
+        kitty-injected auth token; ``False`` otherwise.
+    """
+    if not isinstance(env, dict):
+        return False
+    base_url = env.get("ANTHROPIC_BASE_URL")
+    if isinstance(base_url, str) and _is_local_kitty_url(base_url):
+        return True
+    return env.get("ANTHROPIC_AUTH_TOKEN") == "kitty-bridge-token"
+
+
+class _SessionSnapshot(str):
+    """Pre-launch settings snapshot annotated with this session's injections.
+
+    A ``str`` subclass so it flows unchanged through every call site that
+    already passes the snapshot text around (orchestrator, atexit state,
+    tests), while :meth:`ClaudeAdapter.cleanup_launch` can distinguish a
+    snapshot taken by :meth:`ClaudeAdapter.prepare_launch` from a bare string
+    and apply overlap-aware restore semantics.
+
+    Attributes:
+        injected: The ``env`` values this session wrote into settings.json
+            (only keys from ``_SETTINGS_ENV_OVERRIDE_KEYS``), used to decide
+            whether this session still owns the file at cleanup time.
+    """
+
+    __slots__ = ("injected",)
+
+    injected: dict[str, str]
+
+    def __new__(cls, text: str, injected: dict[str, str]) -> _SessionSnapshot:
+        """Create a snapshot of ``text`` carrying the injected env values.
+
+        Args:
+            text: The original settings.json content.
+            injected: The ``env`` values this session injected.
+
+        Returns:
+            The annotated snapshot (compares equal to ``text``).
+        """
+        snapshot = super().__new__(cls, text)
+        snapshot.injected = dict(injected)
+        return snapshot
 
 
 _CONFLICTING_ENV_VARS: tuple[str, ...] = (
@@ -197,9 +301,10 @@ class ClaudeAdapter(LauncherAdapter):
             settings_path: Path to the Claude Code settings file (for testing).
 
         Returns:
-            The original file content for :meth:`cleanup_launch`, or ``None``
-            if there is no settings file to patch, the file is missing, or
-            the JSON is malformed.
+            A :class:`_SessionSnapshot` of the original file content for
+            :meth:`cleanup_launch` (compares equal to the original text), or
+            ``None`` if there is no settings file to patch, the file is
+            missing, or the JSON is malformed.
         """
         settings_path = settings_path or _DEFAULT_SETTINGS_PATH
         logger.info("prepare_launch: settings_path=%s exists=%s", settings_path, settings_path.exists())
@@ -218,8 +323,14 @@ class ClaudeAdapter(LauncherAdapter):
             logger.error("prepare_launch: settings.json root is not an object — skipping patch")
             return None
 
-        # Save backup for crash recovery before patching.
-        save_settings_backup(original)
+        # Save the crash backup before patching. First writer of an overlap
+        # chain owns it: later sessions must not overwrite it with a file that
+        # already contains another session's patch (issue #21). Exception: a
+        # backup left behind by an ended chain (file carries no live kitty
+        # values) is stale and is refreshed, so a later session can never
+        # "restore" an ancient pre-kitty file over the user's current one.
+        if not _DEFAULT_BACKUP_PATH.exists() or not _kitty_values_present(settings.get("env")):
+            save_settings_backup(original)
 
         env = settings.setdefault("env", {})
 
@@ -252,14 +363,22 @@ class ClaudeAdapter(LauncherAdapter):
         )
 
         _atomic_write_json(settings_path, settings)
-        return original
+        injected = {key: env_overrides[key] for key in _SETTINGS_ENV_OVERRIDE_KEYS if key in env_overrides}
+        return _SessionSnapshot(original, injected)
 
     def cleanup_launch(
         self,
         original: str | None,
         settings_path: Path | None = None,
     ) -> None:
-        """Restore Claude Code's settings.json to its original state.
+        """Restore Claude Code's settings.json to the user's pre-kitty state.
+
+        Overlap-aware: when the snapshot came from :meth:`prepare_launch` (a
+        :class:`_SessionSnapshot`), the file is restored only if this session
+        still owns it — every value this session injected is still present.
+        A later session (or a user edit) overwrites ownership, and its state
+        must not be disturbed. A bare string restores verbatim (legacy
+        callers/tests).
 
         Args:
             original: The content returned by :meth:`prepare_launch`.
@@ -270,8 +389,60 @@ class ClaudeAdapter(LauncherAdapter):
             return
         logger.info("cleanup_launch: restoring %s", settings_path)
         try:
-            _atomic_write_text(settings_path, original)
-            delete_settings_backup()
+            if isinstance(original, _SessionSnapshot):
+                self._restore_owned_settings(original, settings_path)
+            else:
+                # Legacy path: caller passed plain snapshot text.
+                _atomic_write_text(settings_path, original)
+                delete_settings_backup()
         except Exception:
             logger.warning("cleanup_launch: failed to restore %s — user may need to fix manually", settings_path)
             raise
+
+    def _restore_owned_settings(self, snapshot: _SessionSnapshot, settings_path: Path) -> None:
+        """Restore settings.json if this session still owns it.
+
+        Ownership rule: this session owns the file when every env value it
+        injected is still present unchanged. Only the owner may restore. The
+        restore source is the crash backup — the first session's snapshot of
+        the user's true pre-kitty content — because a later session's own
+        snapshot is polluted with an earlier session's patch (issue #19).
+
+        Args:
+            snapshot: Pre-launch snapshot carrying this session's injected env.
+            settings_path: Path to the Claude Code settings file.
+        """
+        # Read the current file; a missing/unreadable file means someone else
+        # changed the landscape — never guess by writing.
+        try:
+            current = json.loads(settings_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            logger.warning("cleanup_launch: %s missing or unreadable — leaving it alone", settings_path)
+            return
+
+        # Without an env block or injected values ownership is unknowable;
+        # fall back to the pre-overlap verbatim restore.
+        current_env = current.get("env") if isinstance(current, dict) else None
+        if not isinstance(current_env, dict) or not snapshot.injected:
+            _atomic_write_text(settings_path, snapshot)
+            delete_settings_backup()
+            return
+
+        # Ownership check: another session or a user hand-edit means leave the
+        # file AND the backup alone (issue #19, #20).
+        owns = all(current_env.get(key) == value for key, value in snapshot.injected.items())
+        if not owns:
+            logger.info(
+                "cleanup_launch: %s no longer carries this session's values — "
+                "another session or the user owns it; leaving file and backup untouched",
+                settings_path,
+            )
+            return
+
+        # Last writer: restore the unpolluted user original from the backup,
+        # falling back to this session's snapshot if the backup is gone.
+        restore_text = load_settings_backup()
+        if restore_text is None:
+            restore_text = snapshot
+        _atomic_write_text(settings_path, restore_text)
+        delete_settings_backup()

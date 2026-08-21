@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -154,3 +155,36 @@ class TestResolveEgress:
 
         with pytest.raises(ValueError, match="reconfigure"):
             resolve_egress(store=store, cred_store=cred_store)
+
+
+class TestConcurrentResolution:
+    """Several kitty processes resolving the stored gateway at once.
+
+    Every launch resolves egress from the same shared files (``egress.json`` +
+    the credential store, both guarded by file locks). This models concurrent
+    ``kitty`` processes the way production runs them: each builds its own store
+    instances over the same on-disk paths.
+    """
+
+    def test_concurrent_resolutions_all_succeed_identically(
+        self, tmp_path, store: EgressStore, cred_store: CredentialStore
+    ):
+        ref = str(uuid.uuid4())
+        cred_store.set(ref, "shared-pass")
+        store.save(EgressRecord(proxy_url="http://proxy.example.com:3128", username="u", auth_ref=ref))
+
+        egress_path = tmp_path / "egress.json"
+        cred_path = tmp_path / "credentials.json"
+
+        def resolve_once(_):
+            return resolve_egress(
+                store=EgressStore(path=egress_path),
+                cred_store=CredentialStore(backends=[FileBackend(path=cred_path)]),
+            )
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            configs = list(pool.map(resolve_once, range(16)))
+
+        assert len(configs) == 16
+        assert all(config == configs[0] for config in configs)
+        assert configs[0].password == "shared-pass"
