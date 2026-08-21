@@ -69,10 +69,12 @@ class LauncherAdapter(ABC):
 
     @property
     def default_settings_path(self) -> Path | None:
-        """Location of the agent's own settings file.
+        """Location of the agent's own settings file, if it has one.
 
-        The launcher patches this file to point the agent at the local bridge.
-        Adapters whose agent has no such file return ``None``.
+        Adapters interact with this file differently: some patch it in place
+        for the duration of a session, while ClaudeAdapter only reads it and
+        routes the session through a per-session file instead. Adapters whose
+        agent has no such file return ``None``.
 
         Returns:
             Path to the agent's settings file, or ``None``.
@@ -97,11 +99,30 @@ class LauncherAdapter(ABC):
                 the adapter's own location.
 
         Returns:
-            The original file content, for :meth:`cleanup_launch` to restore, or
-            ``None`` when nothing was patched. Returning ``None`` is what tells
-            the launcher there is nothing to clean up.
+            A value for :meth:`cleanup_launch` to act on — the original file
+            content for adapters that patch in place, or a handle to what was
+            created (see ``ClaudeAdapter``) — or ``None`` when nothing was
+            prepared. Implementations may return a ``str`` subclass carrying
+            extra context; callers must pass it through unchanged rather than
+            round-tripping it through ``str()``.
         """
         return None
+
+    def settings_cli_args(self, prepared: str | None) -> list[str]:
+        """Return CLI args pointing the agent at a per-session settings file.
+
+        Adapters that isolate their configuration per session (ClaudeAdapter)
+        return the flag their agent uses; every other adapter inherits this
+        default and contributes nothing to the command line.
+
+        Args:
+            prepared: The value returned by :meth:`prepare_launch`.
+
+        Returns:
+            CLI arguments to insert after the binary name, or ``[]``.
+        """
+        del prepared  # unused in the default implementation
+        return []
 
     def cleanup_launch(
         self,
@@ -111,10 +132,10 @@ class LauncherAdapter(ABC):
         """Restore whatever :meth:`prepare_launch` patched.
 
         Called on the normal path and again from an atexit handler, so it must
-        be safe to invoke with nothing to restore, and idempotent when called
-        twice with the same value. Implementations that share one settings
-        file across concurrent sessions (ClaudeAdapter) must only restore
-        state this session still owns — see ``_SessionSnapshot`` there.
+        be safe to invoke with nothing to undo, and idempotent when called
+        twice with the same value. Implementations must confine themselves to
+        state this session created: a settings file shared with concurrent
+        sessions must not be rewritten on their behalf.
 
         Args:
             original: Content returned by :meth:`prepare_launch`, or ``None``.

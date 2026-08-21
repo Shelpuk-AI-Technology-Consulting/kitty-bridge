@@ -44,11 +44,21 @@ def _write_settings(path: Path, env: dict | None = None, **extra: object) -> str
     return content
 
 
-class TestApiKeyInSettingsEnv:
-    """ANTHROPIC_API_KEY must be injected into settings.json env block so
-    Claude Code authenticates with the bridge."""
+def _session_env(prepared: str | None) -> dict:
+    """Return the ``env`` block of the session file ``prepare_launch`` wrote."""
+    assert prepared is not None, "prepare_launch must produce a session settings file"
+    return json.loads(Path(prepared).read_text(encoding="utf-8"))["env"]
 
-    def test_injects_api_key_into_settings_env(self, tmp_path: Path):
+
+class TestApiKeyInSettingsEnv:
+    """The credential kitty hands Claude Code for this session.
+
+    It travels in the per-session settings file rather than the user-global one
+    (issue #22), because Claude Code's settings env outranks the process env we
+    give the child.
+    """
+
+    def test_injects_api_key(self, tmp_path: Path):
         settings_path = tmp_path / ".claude" / "settings.json"
         _write_settings(settings_path, env={})
 
@@ -57,15 +67,13 @@ class TestApiKeyInSettingsEnv:
             "ANTHROPIC_BASE_URL": "http://127.0.0.1:4242",
             "ANTHROPIC_API_KEY": "sk-test-key-123",
         }
-        adapter.prepare_launch(env_overrides, settings_path=settings_path)
+        prepared = adapter.prepare_launch(env_overrides, settings_path=settings_path)
 
-        patched = json.loads(settings_path.read_text(encoding="utf-8"))
-        assert patched["env"]["ANTHROPIC_API_KEY"] == "sk-test-key-123"
+        assert _session_env(prepared)["ANTHROPIC_API_KEY"] == "sk-test-key-123"
 
-    def test_does_not_remove_auth_token_from_settings_env(self, tmp_path: Path):
-        """ANTHROPIC_AUTH_TOKEN must be present after prepare_launch — kitty injects
-        its own value so Claude Code does not require login.  If the user had a
-        pre-existing token, kitty's value overrides it."""
+    def test_auth_token_is_kittys_not_the_users(self, tmp_path: Path):
+        """kitty always supplies its own token so Claude Code does not demand a
+        login; the user's own value must not shadow it for this session."""
         settings_path = tmp_path / ".claude" / "settings.json"
         _write_settings(
             settings_path,
@@ -76,7 +84,7 @@ class TestApiKeyInSettingsEnv:
         )
 
         adapter = ClaudeAdapter()
-        adapter.prepare_launch(
+        prepared = adapter.prepare_launch(
             {
                 "ANTHROPIC_BASE_URL": "http://127.0.0.1:4242",
                 "ANTHROPIC_AUTH_TOKEN": "kitty-bridge-token",
@@ -84,14 +92,13 @@ class TestApiKeyInSettingsEnv:
             settings_path=settings_path,
         )
 
-        patched = json.loads(settings_path.read_text(encoding="utf-8"))
-        # ANTHROPIC_AUTH_TOKEN must still be present (kitty's value)
-        assert patched["env"]["ANTHROPIC_AUTH_TOKEN"] == "kitty-bridge-token"
+        assert _session_env(prepared)["ANTHROPIC_AUTH_TOKEN"] == "kitty-bridge-token"
 
-    def test_bridge_overrides_win_over_pre_existing_settings(self, tmp_path: Path):
-        """Bridge env_overrides must win over pre-existing settings.json values."""
+    def test_bridge_values_are_the_ones_written(self, tmp_path: Path):
+        """Whatever the user has configured, the session file carries the
+        bridge's values — it outranks user scope, so these are what apply."""
         settings_path = tmp_path / ".claude" / "settings.json"
-        _write_settings(
+        user_original = _write_settings(
             settings_path,
             env={
                 "ANTHROPIC_BASE_URL": "http://127.0.0.1:8080",
@@ -101,7 +108,7 @@ class TestApiKeyInSettingsEnv:
         )
 
         adapter = ClaudeAdapter()
-        original = adapter.prepare_launch(
+        prepared = adapter.prepare_launch(
             {
                 "ANTHROPIC_BASE_URL": "http://127.0.0.1:9999",
                 "ANTHROPIC_API_KEY": "sk-from-bridge",
@@ -110,15 +117,17 @@ class TestApiKeyInSettingsEnv:
             settings_path=settings_path,
         )
 
-        patched = json.loads(settings_path.read_text(encoding="utf-8"))
-        assert patched["env"]["ANTHROPIC_API_KEY"] == "sk-from-bridge"
-        assert patched["env"]["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:9999"
+        env = _session_env(prepared)
+        assert env["ANTHROPIC_API_KEY"] == "sk-from-bridge"
+        assert env["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:9999"
+        # The user's own file is untouched throughout.
+        assert settings_path.read_text(encoding="utf-8") == user_original
 
-        adapter.cleanup_launch(original, settings_path=settings_path)
+        adapter.cleanup_launch(prepared, settings_path=settings_path)
+        assert settings_path.read_text(encoding="utf-8") == user_original
 
-    def test_roundtrip_preserves_auth_token(self, tmp_path: Path):
-        """After prepare_launch + cleanup_launch, ANTHROPIC_AUTH_TOKEN must be
-        restored to its original value."""
+    def test_roundtrip_leaves_the_users_auth_token_alone(self, tmp_path: Path):
+        """The user's own token must survive a kitty session untouched."""
         settings_path = tmp_path / ".claude" / "settings.json"
         original_content = _write_settings(
             settings_path,
@@ -129,80 +138,71 @@ class TestApiKeyInSettingsEnv:
         )
 
         adapter = ClaudeAdapter()
-        saved = adapter.prepare_launch(
+        prepared = adapter.prepare_launch(
             {"ANTHROPIC_BASE_URL": "http://127.0.0.1:4242", "ANTHROPIC_API_KEY": "sk-test"},
             settings_path=settings_path,
         )
 
-        adapter.cleanup_launch(saved, settings_path=settings_path)
+        adapter.cleanup_launch(prepared, settings_path=settings_path)
 
         restored = settings_path.read_text(encoding="utf-8")
         assert restored == original_content
-        parsed = json.loads(restored)
-        assert parsed["env"]["ANTHROPIC_AUTH_TOKEN"] == "my-secret-token"
+        assert json.loads(restored)["env"]["ANTHROPIC_AUTH_TOKEN"] == "my-secret-token"
 
 
 class TestMalformedSettings:
-    """prepare_launch must handle malformed settings.json gracefully."""
+    """A broken user settings.json must never block a launch.
 
-    def test_malformed_json_returns_none_does_not_crash(self, tmp_path: Path):
+    kitty only reads that file now (for the stale-value warning), so malformed
+    content is at most a missed warning — the session still gets its own file.
+    """
+
+    def test_malformed_json_still_routes_the_session(self, tmp_path: Path):
         settings_path = tmp_path / ".claude" / "settings.json"
         settings_path.parent.mkdir(parents=True, exist_ok=True)
-        settings_path.write_text("not valid json {{{", encoding="utf-8")
+        settings_path.write_text("{ this is not valid json", encoding="utf-8")
 
         adapter = ClaudeAdapter()
-        result = adapter.prepare_launch(
+        prepared = adapter.prepare_launch(
             {"ANTHROPIC_BASE_URL": "http://127.0.0.1:4242"},
             settings_path=settings_path,
         )
 
-        # Must return None so cleanup_launch is a no-op
-        assert result is None
-        # Original malformed content must be preserved (fail-closed)
-        assert settings_path.read_text(encoding="utf-8") == "not valid json {{{"
+        assert _session_env(prepared)["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:4242"
 
-    def test_settings_root_is_list_returns_none(self, tmp_path: Path):
+    def test_settings_root_is_list_still_routes_the_session(self, tmp_path: Path):
         settings_path = tmp_path / ".claude" / "settings.json"
         settings_path.parent.mkdir(parents=True, exist_ok=True)
-        settings_path.write_text('["some", "array"]', encoding="utf-8")
+        settings_path.write_text('["not", "an", "object"]', encoding="utf-8")
 
         adapter = ClaudeAdapter()
-        result = adapter.prepare_launch(
+        prepared = adapter.prepare_launch(
             {"ANTHROPIC_BASE_URL": "http://127.0.0.1:4242"},
             settings_path=settings_path,
         )
 
-        assert result is None
-        assert settings_path.read_text(encoding="utf-8") == '["some", "array"]'
+        assert _session_env(prepared)["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:4242"
 
 
 class TestAtomicWrite:
-    """File writes must not corrupt settings.json."""
+    """The session file must be well-formed and self-contained."""
 
-    def test_write_produces_valid_json_and_preserves_existing_fields(self, tmp_path: Path):
-        """After patching, the file must be valid JSON with no data loss."""
+    def test_session_file_is_valid_json_and_user_file_untouched(self, tmp_path: Path):
         settings_path = tmp_path / ".claude" / "settings.json"
-        original_content = _write_settings(settings_path, env={"EXISTING": "value", "ANTHROPIC_AUTH_TOKEN": "keep-me"})
+        original = _write_settings(
+            settings_path,
+            env={"EXISTING_VAR": "keep-me"},
+            model="opus",
+            someOtherField={"nested": "value"},
+        )
 
         adapter = ClaudeAdapter()
-        original = adapter.prepare_launch(
-            {
-                "ANTHROPIC_BASE_URL": "http://127.0.0.1:4242",
-                "ANTHROPIC_API_KEY": "sk-test-key",
-                "ANTHROPIC_MODEL": "minimax-m2.7",
-                "ANTHROPIC_DEFAULT_OPUS_MODEL": "minimax-m2.7",
-                "ANTHROPIC_DEFAULT_SONNET_MODEL": "minimax-m2.7",
-                "ANTHROPIC_DEFAULT_HAIKU_MODEL": "minimax-m2.7",
-            },
+        prepared = adapter.prepare_launch(
+            {"ANTHROPIC_BASE_URL": "http://127.0.0.1:4242", "ANTHROPIC_API_KEY": "sk-test"},
             settings_path=settings_path,
         )
 
-        # File must be valid JSON after patching
-        patched = json.loads(settings_path.read_text(encoding="utf-8"))
-        assert patched["env"]["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:4242"
-        assert patched["env"]["EXISTING"] == "value"  # not corrupted
-        assert patched["env"]["ANTHROPIC_AUTH_TOKEN"] == "keep-me"  # not removed
-
-        # Restore must be byte-identical to original content
-        adapter.cleanup_launch(original, settings_path=settings_path)
-        assert settings_path.read_text(encoding="utf-8") == original_content
+        session = json.loads(Path(prepared).read_text(encoding="utf-8"))
+        assert session["env"]["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:4242"
+        assert list(session) == ["env"], "the session file must only carry an env block"
+        assert settings_path.read_text(encoding="utf-8") == original

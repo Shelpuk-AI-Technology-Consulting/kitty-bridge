@@ -208,6 +208,20 @@ class TestEachAdapterOwnsItsSettingsPath:
         inspect.signature(adapter.prepare_launch).bind({"X": "1"}, settings_path=tmp_path / "cfg.json")
         inspect.signature(adapter.cleanup_launch).bind(None, settings_path=tmp_path / "cfg.json")
 
+    @pytest.mark.parametrize("name", _REGISTERED_ADAPTERS)
+    def test_settings_cli_args_returns_a_list_for_every_adapter(self, name: str):
+        """``launch_async`` splices the result straight into the child command.
+
+        The call is not wrapped in a try/except, so an adapter returning a
+        non-list (or raising) breaks every launch for that agent.
+        """
+        adapter = _adapter(name)
+
+        for prepared in (None, "some-prepared-value"):
+            args = adapter.settings_cli_args(prepared)
+            assert isinstance(args, list)
+            assert all(isinstance(item, str) for item in args)
+
 
 class TestBuildSpawnConfigContextTokens:
     """AC5.4: every adapter accepts the ``context_tokens`` keyword.

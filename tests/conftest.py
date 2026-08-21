@@ -35,6 +35,20 @@ def _reset_egress() -> None:
     set_egress(None)
 
 
+@pytest.fixture(autouse=True)
+def _session_settings_in_tmp(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep per-session agent settings files inside the test's temp directory.
+
+    ``ClaudeAdapter.prepare_launch`` creates its file with ``mkstemp`` and no
+    explicit ``dir``, which resolves to the real OS temp directory. Redirecting
+    ``tempfile.tempdir`` keeps the suite from scattering session files (each
+    holding a test credential) across the developer's machine.
+    """
+    import tempfile
+
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+
+
 def pytest_addoption(parser: pytest.Parser) -> None:
     """Add CLI flag to include slow tests."""
     parser.addoption("--runslow", action="store_true", default=False, help="run tests marked as slow")
