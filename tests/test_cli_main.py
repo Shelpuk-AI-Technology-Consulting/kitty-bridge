@@ -374,3 +374,329 @@ class TestNonTTYExit:
             pytest.raises(RuntimeError, match="wizard exploded"),
         ):
             main()
+
+
+class TestSessionSummaryFlag:
+    """The shutdown summary path is nominated on the command line (issue #26)."""
+
+    def test_parser_accepts_the_session_summary_flag(self) -> None:
+        """A4.1: the flag exists and yields a Path."""
+        from pathlib import Path
+
+        from kitty.cli.main import _build_parser
+
+        args, _unknown = _build_parser().parse_known_args(["--session-summary", "out/run.json", "claude"])
+
+        assert args.session_summary == Path("out/run.json")
+
+    def test_session_summary_defaults_to_none(self) -> None:
+        """A4.4: nothing is written unless the operator asks for it."""
+        from kitty.cli.main import _build_parser
+
+        args, _unknown = _build_parser().parse_known_args(["claude"])
+
+        assert args.session_summary is None
+
+
+# ── Bridge-mode CLI seams for the attribution surfaces (issue #26) ───────────
+
+
+class _WiringSentinel(Exception):
+    """Raised from a stubbed ``BridgeServer.__init__`` to stop the flow."""
+
+
+def _profile_stub(name: str = "my-profile") -> object:
+    """Build a minimal single-profile stand-in for bridge construction.
+
+    Args:
+        name: Profile name the attribution surfaces should report.
+
+    Returns:
+        A namespace carrying the attributes ``_run_bridge`` reads.
+    """
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        name=name,
+        provider="zai_regular",
+        model="test-model",
+        auth_ref="ref-1",
+        provider_config={},
+        backup=False,
+    )
+
+
+def _patch_bridge_prerequisites(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Neutralise everything ``_run_bridge*`` touches before constructing a server.
+
+    Args:
+        monkeypatch: The pytest monkeypatch fixture.
+    """
+    monkeypatch.setattr("kitty.egress_guard.egress_block_reason", lambda *a, **k: None)
+    monkeypatch.setattr("kitty.cli.main.egress_block_reason", lambda *a, **k: None, raising=False)
+    monkeypatch.setattr("kitty.providers.registry.get_provider", lambda *a, **k: object())
+    monkeypatch.setattr("kitty.cli.main.get_provider", lambda *a, **k: object(), raising=False)
+
+
+def _record_bridge_kwargs(monkeypatch: pytest.MonkeyPatch) -> list[dict]:
+    """Replace ``BridgeServer`` with a stub that records its keyword arguments.
+
+    Raising from ``__init__`` stops the flow before any event loop starts, so
+    the assertion runs against the exact construction call under test.
+
+    Args:
+        monkeypatch: The pytest monkeypatch fixture.
+
+    Returns:
+        A list that receives one kwargs dict per construction attempt.
+    """
+    seen: list[dict] = []
+
+    class _RecordingServer:
+        """Stand-in for ``BridgeServer`` that records and aborts."""
+
+        def __init__(self, *args, **kwargs):
+            """Record the construction kwargs, then abort the flow."""
+            seen.append(kwargs)
+            raise _WiringSentinel
+
+    monkeypatch.setattr("kitty.bridge.server.BridgeServer", _RecordingServer)
+    return seen
+
+
+def _balancing_stubs(monkeypatch: pytest.MonkeyPatch, member: object) -> None:
+    """Stub the profile store and resolver a balancing bridge builds members from.
+
+    Args:
+        monkeypatch: The pytest monkeypatch fixture.
+        member: The single member profile to resolve.
+    """
+
+    class FakeProfileStore:
+        """Stand-in for ``ProfileStore`` — constructed inside the function."""
+
+        def __init__(self, *args, **kwargs):
+            """Accept and ignore the real store's arguments."""
+
+    class FakeProfileResolver:
+        """Stand-in resolver returning one balancing member."""
+
+        def __init__(self, store):
+            """Accept and ignore the store."""
+
+        def resolve_balancing(self, name):
+            """Return the single member profile."""
+            return [member]
+
+    monkeypatch.setattr("kitty.profiles.store.ProfileStore", FakeProfileStore)
+    monkeypatch.setattr("kitty.profiles.resolver.ProfileResolver", FakeProfileResolver)
+
+
+class TestBridgeModeAttributionWiring:
+    """``kitty bridge`` must hand the bridge what the attribution surfaces need."""
+
+    def test_run_bridge_passes_the_summary_path(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A4.2: the single-profile ``kitty bridge`` path nominates the summary."""
+        from pathlib import Path
+        from types import SimpleNamespace
+
+        import kitty.cli.main as cli_main
+
+        _patch_bridge_prerequisites(monkeypatch)
+        seen = _record_bridge_kwargs(monkeypatch)
+        cred_store = SimpleNamespace(get=lambda ref: "sk-test-key")
+
+        with pytest.raises(_WiringSentinel):
+            cli_main._run_bridge(
+                _profile_stub(),
+                cred_store,
+                validate=False,
+                session_summary_path=Path("out/run.json"),
+            )
+
+        assert seen[0]["session_summary_path"] == Path("out/run.json")
+
+    def test_run_bridge_names_the_profile(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A9.1: without this the bridge calls every session "default"."""
+        from types import SimpleNamespace
+
+        import kitty.cli.main as cli_main
+
+        _patch_bridge_prerequisites(monkeypatch)
+        seen = _record_bridge_kwargs(monkeypatch)
+        cred_store = SimpleNamespace(get=lambda ref: "sk-test-key")
+
+        with pytest.raises(_WiringSentinel):
+            cli_main._run_bridge(_profile_stub(name="my-profile"), cred_store, validate=False)
+
+        assert seen[0]["profile_name"] == "my-profile"
+
+    def test_run_bridge_balancing_passes_the_summary_path(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A4.2: the balancing ``kitty bridge`` path nominates the summary too."""
+        from pathlib import Path
+        from types import SimpleNamespace
+
+        import kitty.cli.main as cli_main
+
+        _patch_bridge_prerequisites(monkeypatch)
+        _balancing_stubs(monkeypatch, _profile_stub(name="member-1"))
+        seen = _record_bridge_kwargs(monkeypatch)
+        cred_store = SimpleNamespace(get=lambda ref: "sk-test-key")
+
+        with pytest.raises(_WiringSentinel):
+            cli_main._run_bridge_balancing(
+                SimpleNamespace(name="ci-pool"),
+                cred_store,
+                validate=False,
+                session_summary_path=Path("out/pool.json"),
+            )
+
+        assert seen[0]["session_summary_path"] == Path("out/pool.json")
+
+    def test_run_bridge_balancing_names_the_pool_not_its_member(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A9.2: the session ran as a pool; naming one member misdescribes it."""
+        from types import SimpleNamespace
+
+        import kitty.cli.main as cli_main
+
+        _patch_bridge_prerequisites(monkeypatch)
+        _balancing_stubs(monkeypatch, _profile_stub(name="member-1"))
+        seen = _record_bridge_kwargs(monkeypatch)
+        cred_store = SimpleNamespace(get=lambda ref: "sk-test-key")
+
+        with pytest.raises(_WiringSentinel):
+            cli_main._run_bridge_balancing(SimpleNamespace(name="ci-pool"), cred_store, validate=False)
+
+        assert seen[0]["profile_name"] == "ci-pool"
+
+
+class TestLaunchTargetBalancingNaming:
+    """The agent-launch balancing path names the pool, not its first member."""
+
+    def test_balancing_launch_passes_the_pool_name(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A9.2 at the seam that implements it — ``_launch_target_balancing``."""
+        from types import SimpleNamespace
+
+        import kitty.cli.launcher as launcher_mod
+        import kitty.cli.main as cli_main
+
+        seen: list[dict] = []
+
+        def _record_launch(**kwargs):
+            """Record the launch kwargs instead of starting anything."""
+            seen.append(kwargs)
+            return 0
+
+        monkeypatch.setattr(launcher_mod, "launch", _record_launch)
+        monkeypatch.setattr("kitty.providers.registry.get_provider", lambda *a, **k: object())
+        _balancing_stubs(monkeypatch, _profile_stub(name="member-1"))
+        cred_store = SimpleNamespace(get=lambda ref: "sk-test-key")
+
+        exit_code = cli_main._launch_target_balancing(
+            object(),
+            SimpleNamespace(name="ci-pool"),
+            cred_store,
+            [],
+        )
+
+        assert exit_code == 0
+        assert seen[0]["profile_name"] == "ci-pool"
+
+
+class TestBridgeModePanelAdvertisesStats:
+    """An endpoint nobody is told about is an endpoint nobody uses."""
+
+    @staticmethod
+    def _capture_panel(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+        """Stub the panel renderer to capture its body, then abort the flow.
+
+        Args:
+            monkeypatch: The pytest monkeypatch fixture.
+
+        Returns:
+            A list receiving the rendered panel body.
+        """
+        bodies: list[str] = []
+
+        def _record_panel(title, body, *args, **kwargs):
+            """Record the panel body, then stop before the server blocks."""
+            bodies.append(body)
+            raise _WiringSentinel
+
+        monkeypatch.setattr("kitty.tui.display.print_panel", _record_panel)
+        return bodies
+
+    @staticmethod
+    def _stub_server(monkeypatch: pytest.MonkeyPatch) -> None:
+        """Replace ``BridgeServer`` with one that starts and stops instantly.
+
+        Args:
+            monkeypatch: The pytest monkeypatch fixture.
+        """
+
+        class _NoopServer:
+            """Stand-in for ``BridgeServer`` that never binds a socket."""
+
+            def __init__(self, *args, **kwargs):
+                """Accept and ignore the real server's arguments."""
+
+            async def start_async(self) -> int:
+                """Report a fixed port without listening."""
+                return 12345
+
+            async def stop_async(self) -> None:
+                """Do nothing — no resources were acquired."""
+
+        monkeypatch.setattr("kitty.bridge.server.BridgeServer", _NoopServer)
+
+    @staticmethod
+    def _skip_catalog_refresh(monkeypatch: pytest.MonkeyPatch) -> None:
+        """Keep the panel tests offline.
+
+        Args:
+            monkeypatch: The pytest monkeypatch fixture.
+        """
+        import kitty.providers.model_context_sync as sync
+
+        async def _skip_refresh(**kwargs):
+            """Report success without touching the network."""
+            return True
+
+        monkeypatch.setattr(sync, "refresh_model_context_overrides", _skip_refresh)
+
+    def test_single_profile_panel_lists_stats(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A8.1: the single-profile bridge panel advertises ``GET /stats``."""
+        from types import SimpleNamespace
+
+        import kitty.cli.main as cli_main
+
+        self._skip_catalog_refresh(monkeypatch)
+        _patch_bridge_prerequisites(monkeypatch)
+        self._stub_server(monkeypatch)
+        bodies = self._capture_panel(monkeypatch)
+        cred_store = SimpleNamespace(get=lambda ref: "sk-test-key")
+
+        with pytest.raises(_WiringSentinel):
+            cli_main._run_bridge(_profile_stub(), cred_store, validate=False)
+
+        assert "/stats" in bodies[0]
+        assert "/healthz" in bodies[0]
+
+    def test_balancing_panel_lists_stats(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A8.1: the balancing bridge panel advertises ``GET /stats`` too."""
+        from types import SimpleNamespace
+
+        import kitty.cli.main as cli_main
+
+        self._skip_catalog_refresh(monkeypatch)
+        _patch_bridge_prerequisites(monkeypatch)
+        _balancing_stubs(monkeypatch, _profile_stub(name="member-1"))
+        self._stub_server(monkeypatch)
+        bodies = self._capture_panel(monkeypatch)
+        cred_store = SimpleNamespace(get=lambda ref: "sk-test-key")
+
+        with pytest.raises(_WiringSentinel):
+            cli_main._run_bridge_balancing(SimpleNamespace(name="ci-pool"), cred_store, validate=False)
+
+        assert "/stats" in bodies[0]
+        assert "/healthz" in bodies[0]

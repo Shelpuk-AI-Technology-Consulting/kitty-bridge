@@ -461,6 +461,7 @@ _SINGLE_BACKEND_COOLDOWN_CAP = 30  # seconds — cap cooldown for single-backend
 _CLOUDFLARE_FIRST_HIT_COOLDOWN = 15  # seconds — short cooldown for first Cloudflare block
 _ALL_UNHEALTHY_FAST_FAIL_THRESHOLD = 60  # seconds — fast-fail if soonest retry exceeds this
 _SSE_MAX_LINE_BYTES = 10 * 1024 * 1024  # 10 MiB — guards against unbounded line_buffer growth
+_MAX_HEADER_VALUE_CHARS = 256  # cap on X-Kitty-* values — names are config-supplied, so unbounded
 
 
 class AllBackendsUnhealthyError(Exception):
@@ -482,6 +483,43 @@ _TOOL_RESULT_TRUNCATION_LIMIT = 50_000  # Max chars for a tool result before tru
 # z.ai GLM-5.2. Crossing it emits a WARNING; on-failure recovery uses it as a
 # heuristic that the request is oversized (it does NOT gate the retry itself).
 _OVERSIZED_INPUT_THRESHOLD = 600_000
+
+
+def _header_value(value: str) -> str:
+    """Return a header-safe rendering of a profile or model name.
+
+    aiohttp rejects CR, LF and NUL in header values as header injection, and
+    model ids are validated only for non-emptiness — so an unsanitised name
+    could fail *every* response on a backend, with the attribution header as
+    the sole cause.  Non-ASCII bytes do not raise but reach the consumer as
+    mojibake (RFC 9110 frames header values as ISO-8859-1), so they are folded
+    rather than passed through.
+
+    Args:
+        value: The raw name to place in a header.
+
+    Returns:
+        The name with control characters dropped, non-ASCII characters
+        replaced by ``?``, and length capped.
+    """
+    folded = value.encode("ascii", "replace").decode("ascii")
+    return "".join(ch for ch in folded if ch.isprintable())[:_MAX_HEADER_VALUE_CHARS]
+
+
+def _token_count(value: object) -> int:
+    """Return an upstream token count as an int, treating anything else as zero.
+
+    Usage blocks come from third-party providers, so a missing or malformed
+    counter must degrade the attribution record rather than fail the request
+    that produced it.
+
+    Args:
+        value: The raw value read from an upstream ``usage`` block.
+
+    Returns:
+        The value when it is an integer, otherwise ``0``.
+    """
+    return value if isinstance(value, int) else 0
 
 
 def _is_retryable_exception(exc: Exception) -> bool:
@@ -624,6 +662,7 @@ class _BackendContext(TypedDict, total=False):
     model: str | None
     idx: int
     provider_config: dict
+    attempt: int
 
 
 _backend_context: contextvars.ContextVar[_BackendContext] = contextvars.ContextVar("backend_context")
@@ -654,6 +693,7 @@ class BridgeServer:
         backend_cooldown: int = 300,
         logging_enabled: bool = False,
         egress: EgressConfig | None = None,
+        session_summary_path: str | Path | None = None,
         _usage_log_path: Path | None = None,
     ) -> None:
         # TLS validation: both or neither
@@ -743,6 +783,29 @@ class BridgeServer:
         # Usage logging
         self._logging_enabled = logging_enabled
         self._usage_log_path = _usage_log_path or (_DEBUG_LOG_DIR / "usage.log")
+
+        # Session attribution (issue #26): one accumulator behind three
+        # surfaces — GET /stats, the shutdown summary file, and the X-Kitty-*
+        # response headers — so no two records of a session can disagree about
+        # which backend and which real model served it.
+        self._stats_requests = 0
+        self._stats_attempts = 0
+        self._stats_failovers = 0
+        self._stats_retries = 0
+        self._stats_all_unhealthy = 0
+        self._stats_backend_attempts: dict[int, int] = {}
+        self._stats_models: dict[str, dict[str, int]] = {}
+        self._started_at: str | None = None
+
+        # The summary path is nominated, never guessed. The environment
+        # fallback covers bridges that never pass through the CLI parser
+        # (service mode, embedded use), which have no flag to carry it.
+        _env_summary = os.environ.get("KITTY_SESSION_SUMMARY")
+        self._session_summary_path: Path | None = None
+        if session_summary_path:
+            self._session_summary_path = Path(session_summary_path)
+        elif _env_summary:
+            self._session_summary_path = Path(_env_summary)
 
     # ── Context-var-aware properties for backend selection ────────────────
     #
@@ -896,6 +959,7 @@ class BridgeServer:
                     }
                     for idx in range(n)
                 ]
+                self._stats_all_unhealthy += 1
                 raise AllBackendsUnhealthyError(backend_status, 300)
             candidates = []
             backend_status = []
@@ -923,6 +987,7 @@ class BridgeServer:
             if candidates:
                 retry_after = min(remaining for remaining, _idx in candidates)
                 if retry_after > _ALL_UNHEALTHY_FAST_FAIL_THRESHOLD:
+                    self._stats_all_unhealthy += 1
                     raise AllBackendsUnhealthyError(backend_status, retry_after)
                 near_retry_indices = [
                     idx for remaining, idx in candidates if remaining <= _ALL_UNHEALTHY_FAST_FAIL_THRESHOLD
@@ -1229,6 +1294,14 @@ class BridgeServer:
         self._active_provider_config = provider_config
         self._current_backend_idx = backend_idx
 
+        # The attempt ordinal rides on the same ContextVar that already makes
+        # selection concurrency-safe: attempt 1 is the request itself, later
+        # attempts are its failovers or retries.  aiohttp runs each request in
+        # its own task (a fresh context copy), so a keep-alive peer cannot leak
+        # a non-zero ordinal into the next request.
+        previous = _backend_context.get(_EMPTY_CTX)
+        attempt = previous.get("attempt", 0) + 1
+
         # Isolate this selection for the current request.  Concurrent
         # requests within the same event loop get their own ContextVar
         # value and never see this one, even if the instance fields are
@@ -1239,9 +1312,166 @@ class BridgeServer:
             "model": model,
             "idx": backend_idx,
             "provider_config": provider_config,
+            "attempt": attempt,
         }
         _backend_context.set(result)
+        self._record_attempt(backend_idx, model, attempt, previous.get("idx"))
         return result
+
+    def _record_attempt(self, backend_idx: int, model: str | None, attempt: int, previous_idx: int | None) -> None:
+        """Record one upstream attempt in the session attribution counters.
+
+        A re-selection only counts as a failover when it lands on a *different*
+        backend. Several paths re-select after an empty-but-successful response,
+        and the weighted draw can return the same member; counting those as
+        failovers would inflate the one number this record exists to make
+        trustworthy.
+
+        Args:
+            backend_idx: Index of the selected backend, or ``-1`` in
+                single-backend mode.
+            model: The backend's real model — the name the work should be
+                attributed to, not the alias the client asked for.
+            attempt: The 1-based ordinal of this selection within its request.
+            previous_idx: Index selected earlier in the same request, or
+                ``None`` when this is the request's first selection.
+        """
+        self._stats_attempts += 1
+        if attempt == 1:
+            self._stats_requests += 1
+        elif backend_idx != previous_idx:
+            self._stats_failovers += 1
+        else:
+            self._stats_retries += 1
+        self._stats_backend_attempts[backend_idx] = self._stats_backend_attempts.get(backend_idx, 0) + 1
+        self._model_stats(model)["attempts"] += 1
+
+    def _attribution_headers(self) -> dict[str, str]:
+        """Return the ``X-Kitty-*`` headers describing the current request's backend.
+
+        Names the backend that produced the response's first byte. A stream
+        that fails over after that has already flushed its headers, so
+        ``/stats`` and the session summary — which count every attempt —
+        remain the authoritative record for a session.
+
+        Returns:
+            ``X-Kitty-Backend`` and ``X-Kitty-Tier``, plus ``X-Kitty-Model``
+            when a model override is configured; or an empty dict when no
+            backend was selected for this request (``/healthz``, ``/stats``).
+        """
+        ctx = _backend_context.get(_EMPTY_CTX)
+        if "idx" not in ctx:
+            return {}
+        idx = ctx["idx"]
+        if self._backends and 0 <= idx < len(self._backends):
+            name = self._backends[idx][2].name
+            tier = "backup" if self._backend_is_backup[idx] else "primary"
+        else:
+            name = self._profile_name
+            tier = "primary"
+        headers = {
+            "X-Kitty-Backend": _header_value(name),
+            "X-Kitty-Tier": tier,
+        }
+        # No configured model means the client's own model was passed through;
+        # an empty header would assert an attribution the bridge cannot make.
+        model = ctx.get("model")
+        if model:
+            headers["X-Kitty-Model"] = _header_value(model)
+        return headers
+
+    def _model_stats(self, model: str | None) -> dict[str, int]:
+        """Return the mutable attribution record for a real model name.
+
+        Args:
+            model: The backend's model, or ``None`` when no override is
+                configured and the client's own model is passed through — that
+                case is recorded under the empty string.
+
+        Returns:
+            The record for that model, created zeroed on first use.
+        """
+        return self._stats_models.setdefault(
+            model or "",
+            {"attempts": 0, "completions": 0, "input_tokens": 0, "output_tokens": 0},
+        )
+
+    def _session_stats(self) -> dict:
+        """Build the machine-readable record of what actually served this session.
+
+        This is the single document behind ``GET /stats`` and the shutdown
+        summary file, so the two can never disagree. In ``balancing`` mode
+        ``failovers == 0`` on a completed session is the explicit refutation of
+        a "the provider was unavailable" story; in ``single`` mode it is
+        structurally zero and carries no signal, so read ``mode`` first.
+
+        Three caveats a consumer needs: ``attempts`` counts backend
+        *selections*, not upstream POSTs — same-backend HTTP retries inside one
+        selection are not counted; ``all_backends_unhealthy`` counts every
+        raise, including ones a failover loop absorbed without the client
+        seeing a 503; and ``requests`` counts requests that *reached a
+        backend*, so one rejected because the whole pool was in cooldown raises
+        ``all_backends_unhealthy`` without incrementing ``requests``.
+
+        Returns:
+            A JSON-serialisable dict describing the session.
+        """
+        now = time.monotonic()
+        backends: list[dict] = []
+        # Balancing pools describe every member, healthy or not, so a consumer
+        # can see the backend that was never contacted as well as the one that
+        # served everything.
+        if self._backends:
+            for idx, (provider, _key, profile) in enumerate(self._backends):
+                health = self._backend_health[idx]
+                remaining = 0
+                if not health["healthy"] and health["failed_at"] is not None:
+                    remaining = max(0, int(health["cooldown"] - (now - health["failed_at"])))
+                backends.append(
+                    {
+                        "name": profile.name,
+                        "provider": provider.provider_type,
+                        "model": profile.model,
+                        "tier": "backup" if self._backend_is_backup[idx] else "primary",
+                        "attempts": self._stats_backend_attempts.get(idx, 0),
+                        "healthy": health["healthy"],
+                        "remaining_cooldown": remaining,
+                        "cooldown_events": health.get("failure_count", 0),
+                    }
+                )
+        else:
+            # Single-backend mode has no health tracking, but consumers must
+            # parse one shape regardless of how the bridge was launched.
+            backends.append(
+                {
+                    "name": self._profile_name,
+                    "provider": self._provider.provider_type,
+                    "model": self._model,
+                    "tier": "primary",
+                    "attempts": self._stats_backend_attempts.get(-1, 0),
+                    "healthy": True,
+                    "remaining_cooldown": 0,
+                    "cooldown_events": 0,
+                }
+            )
+        return {
+            "profile": self._profile_name,
+            "mode": "balancing" if self._backends else "single",
+            # Two bridges can be pointed at one summary path (the environment
+            # variable is inherited by children), so the record has to say
+            # which process wrote it.
+            "pid": os.getpid(),
+            "port": self._port,
+            "started_at": self._started_at,
+            "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "requests": self._stats_requests,
+            "attempts": self._stats_attempts,
+            "failovers": self._stats_failovers,
+            "retries": self._stats_retries,
+            "all_backends_unhealthy": self._stats_all_unhealthy,
+            "models_served": {model: dict(record) for model, record in self._stats_models.items()},
+            "backends": backends,
+        }
 
     def _log_backend_selection(self) -> None:
         """Log diagnostic info about the currently selected backend."""
@@ -1311,14 +1541,29 @@ class BridgeServer:
         return log_path
 
     def _log_usage(self, usage: dict | None) -> None:
-        """Append a JSONL usage entry to the usage log file.
+        """Record a completed upstream call and append a JSONL usage entry.
 
-        Fire-and-forget: failures are logged but never raised.
+        Attribution counting happens unconditionally — it is what tells a
+        consumer which real model the cost belongs to — while the usage log
+        file stays behind the opt-in ``--logging`` flag.
+
+        Fire-and-forget: file failures are logged but never raised.
+
+        Args:
+            usage: The upstream ``usage`` block, or ``None`` when the response
+                carried none.
         """
+        usage = usage or {}
+
+        # Attribute the completion and its tokens to the backend's real model.
+        model_record = self._model_stats(self._active_model)
+        model_record["completions"] += 1
+        model_record["input_tokens"] += _token_count(usage.get("prompt_tokens"))
+        model_record["output_tokens"] += _token_count(usage.get("completion_tokens"))
+
         if not self._logging_enabled:
             return
         try:
-            usage = usage or {}
             entry = {
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "profile": self._profile_name,
@@ -1345,6 +1590,7 @@ class BridgeServer:
 
     async def start_async(self) -> int:
         """Create the aiohttp app, register routes, start listening. Returns bound port."""
+        self._started_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         self._log_path = self._setup_debug_logging()
 
         # Crash handlers are always installed, even without --debug.
@@ -1368,8 +1614,14 @@ class BridgeServer:
                 file=sys.stderr,
             )
 
+        # Registration order is outermost-first. Attribution sits *inside* auth
+        # (an unauthenticated caller gets no backend details) but *outside* the
+        # access log, whose except-clause synthesises the 500 for an unhandled
+        # handler error — the "why did this model fail?" case issue #26 is
+        # about, which must carry attribution like any other response.
         self._app = web.Application(
-            client_max_size=_CLIENT_MAX_SIZE, middlewares=[self._auth_middleware, self._access_log_middleware]
+            client_max_size=_CLIENT_MAX_SIZE,
+            middlewares=[self._auth_middleware, self._attribution_middleware, self._access_log_middleware],
         )
         self._register_routes(self._app)
         self._runner = web.AppRunner(self._app)
@@ -1404,7 +1656,7 @@ class BridgeServer:
                 host=self._host,
                 port=self._port,
                 profile=self._profile_name,
-                started_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                started_at=self._started_at,
                 tls=bool(self._tls_cert and self._tls_key),
             )
             try:
@@ -1423,35 +1675,69 @@ class BridgeServer:
         return asyncio.get_event_loop().run_until_complete(self.start_async())
 
     async def stop_async(self) -> None:
-        """Gracefully stop the server and close the HTTP client session."""
-        if self._runner is not None:
-            await self._runner.cleanup()
-            self._runner = None
-        if self._session is not None and not self._session.closed:
-            await self._session.close()
-            self._session = None
-        if self._proxy_session is not None and not self._proxy_session.closed:
-            await self._proxy_session.close()
-            self._proxy_session = None
-        self._app = None
-        if self._access_log_file is not None:
-            self._access_log_file.close()
-            self._access_log_file = None
-        # Remove state file
-        if self._state_file:
-            from kitty.bridge.state import remove_state
+        """Gracefully stop the server and close the HTTP client session.
 
-            remove_state(self._state_file)
+        The session summary is written in a ``finally``: a teardown step that
+        raises must not cost a gracefully-shut-down bridge its only durable
+        record of what served the session.
+        """
+        try:
+            if self._runner is not None:
+                await self._runner.cleanup()
+                self._runner = None
+            if self._session is not None and not self._session.closed:
+                await self._session.close()
+                self._session = None
+            if self._proxy_session is not None and not self._proxy_session.closed:
+                await self._proxy_session.close()
+                self._proxy_session = None
+            self._app = None
+            if self._access_log_file is not None:
+                self._access_log_file.close()
+                self._access_log_file = None
+            # Remove state file
+            if self._state_file:
+                from kitty.bridge.state import remove_state
+
+                remove_state(self._state_file)
+        finally:
+            self._write_session_summary()
         logger.info("Bridge server stopped")
 
     def stop(self) -> None:
         """Synchronous wrapper around stop_async."""
         asyncio.get_event_loop().run_until_complete(self.stop_async())
 
+    def _write_session_summary(self) -> None:
+        """Write the session attribution document to the nominated path.
+
+        Written last, so the record covers the whole session. This is the
+        surface built for CI: the bridge is torn down at job end and a small
+        JSON file can be uploaded as an artifact without touching the
+        multi-megabyte debug log.
+
+        A failure here is logged and swallowed — observability must never be
+        able to fail the thing it observes. The catch is deliberately broad:
+        a Windows path with an embedded NUL raises ``ValueError``, not
+        ``OSError``, and that must not propagate out of ``stop_async()`` either.
+        """
+        if self._session_summary_path is None:
+            return
+        try:
+            self._session_summary_path.parent.mkdir(parents=True, exist_ok=True)
+            self._session_summary_path.write_text(
+                json.dumps(self._session_stats(), indent=2) + "\n",
+                encoding="utf-8",
+            )
+            logger.info("Session summary written to %s", self._session_summary_path)
+        except Exception as exc:
+            logger.warning("Failed to write session summary to %s: %s", self._session_summary_path, exc)
+
     # ── Route registration ────────────────────────────────────────────────
 
     def _register_routes(self, app: web.Application) -> None:
         app.router.add_get("/healthz", self._handle_healthz)
+        app.router.add_get("/stats", self._handle_stats)
 
         # Bridge mode (no adapter): register ALL protocol endpoints
         if self._adapter is None:
@@ -1512,6 +1798,29 @@ class BridgeServer:
             request["_mapped_profile"] = mapped_profile
 
         return await handler(request)  # type: ignore[misc, no-any-return, operator]
+
+    # ── Attribution middleware ────────────────────────────────────────────
+
+    @web.middleware
+    async def _attribution_middleware(self, request: web.Request, handler: object) -> web.StreamResponse:
+        """Stamp the backend attribution headers onto the outgoing response.
+
+        Streaming handlers prepare their own response and therefore stamp
+        themselves at construction time; this covers every non-streaming path
+        without touching each handler.
+
+        Args:
+            request: The inbound request.
+            handler: The next handler in the middleware chain.
+
+        Returns:
+            The handler's response, with attribution headers when it has not
+            already been sent.
+        """
+        response: web.StreamResponse = await handler(request)  # type: ignore[misc, operator]
+        if not response.prepared:
+            response.headers.update(self._attribution_headers())
+        return response
 
     # ── Access log middleware ─────────────────────────────────────────────
 
@@ -1587,6 +1896,22 @@ class BridgeServer:
         status = "ok" if any_healthy else "degraded"
         http_status = 200 if any_healthy else 503
         return web.json_response({"status": status, "backends": backends}, status=http_status)
+
+    async def _handle_stats(self, request: web.Request) -> web.Response:
+        """Serve the live session attribution record.
+
+        Sibling of ``/healthz``: where that reports whether the bridge can
+        serve the *next* request, this reports which backend and which real
+        model served the ones already made.
+
+        Args:
+            request: The inbound aiohttp request (unused).
+
+        Returns:
+            A 200 JSON response carrying the session document.
+        """
+        del request  # The document describes the session, not the caller.
+        return web.json_response(self._session_stats())
 
     async def _handle_models(self, request: web.Request) -> web.Response:
         """Return OpenAI-compatible model list."""
@@ -1707,7 +2032,11 @@ class BridgeServer:
         logger.debug("═══ STREAM RESPONSES START ═══ response_id=%s model=%s", response_id, model)
         sr = web.StreamResponse(
             status=200,
-            headers={"Content-Type": "text/event-stream", "Cache-Control": "no-cache"},
+            headers={
+                "Content-Type": "text/event-stream",
+                "Cache-Control": "no-cache",
+                **self._attribution_headers(),
+            },
         )
         await sr.prepare(request)
 
@@ -2275,7 +2604,11 @@ class BridgeServer:
             if sr is None:
                 sr = web.StreamResponse(
                     status=200,
-                    headers={"Content-Type": "text/event-stream", "Cache-Control": "no-cache"},
+                    headers={
+                        "Content-Type": "text/event-stream",
+                        "Cache-Control": "no-cache",
+                        **self._attribution_headers(),
+                    },
                 )
                 await sr.prepare(request)
             return sr
@@ -3070,7 +3403,11 @@ class BridgeServer:
 
         sr = web.StreamResponse(
             status=200,
-            headers={"Content-Type": "text/event-stream", "Cache-Control": "no-cache"},
+            headers={
+                "Content-Type": "text/event-stream",
+                "Cache-Control": "no-cache",
+                **self._attribution_headers(),
+            },
         )
         await sr.prepare(request)
 
@@ -3753,7 +4090,11 @@ class BridgeServer:
 
         sr = web.StreamResponse(
             status=200,
-            headers={"Content-Type": "text/event-stream", "Cache-Control": "no-cache"},
+            headers={
+                "Content-Type": "text/event-stream",
+                "Cache-Control": "no-cache",
+                **self._attribution_headers(),
+            },
         )
         await sr.prepare(request)
 

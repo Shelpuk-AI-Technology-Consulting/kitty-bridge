@@ -625,3 +625,128 @@ class TestAdaptersWithoutSessionSettings:
 
         assert exit_code == 0
         assert not config_path.exists(), "kitty left a Kilo config holding the real API key"
+
+
+# ── Test: session summary wiring (issue #26, R4) ────────────────────────────
+
+
+class _RecordingServer(BridgeServer):
+    """BridgeServer that records ``session_summary_path`` and aborts the launch."""
+
+    seen: list = []
+
+    def __init__(self, *args, **kwargs):
+        """Record the nominated summary path before construction."""
+        type(self).seen.append(kwargs.get("session_summary_path"))
+        super().__init__(*args, **kwargs)
+
+    async def start_async(self) -> int:
+        """Abort the launch once the constructor has been observed."""
+        raise _Sentinel
+
+
+class TestSessionSummaryWiring:
+    """The nominated summary path reaches the bridge that will write it."""
+
+    @pytest.mark.asyncio
+    async def test_launch_async_passes_the_summary_path_to_the_bridge(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ):
+        """A4.2: the agent-launch path is the one CI actually uses."""
+        from kitty.cli import launcher as launcher_mod
+
+        _RecordingServer.seen = []
+        monkeypatch.setattr(launcher_mod, "BridgeServer", _RecordingServer)
+
+        with pytest.raises(_Sentinel):
+            await launcher_mod.launch_async(
+                adapter=StubLauncher(),
+                provider=StubProvider(),
+                profile=_make_profile(),
+                cred_store=_make_cred_store(),
+                validate=False,
+                session_summary_path=tmp_path / "run.json",
+            )
+
+        assert _RecordingServer.seen == [tmp_path / "run.json"]
+
+    @pytest.mark.asyncio
+    async def test_launch_async_defaults_to_no_summary(self, monkeypatch: pytest.MonkeyPatch):
+        """A4.4: an un-nominated launch leaves the bridge writing nothing."""
+        from kitty.cli import launcher as launcher_mod
+
+        _RecordingServer.seen = []
+        monkeypatch.setattr(launcher_mod, "BridgeServer", _RecordingServer)
+
+        with pytest.raises(_Sentinel):
+            await launcher_mod.launch_async(
+                adapter=StubLauncher(),
+                provider=StubProvider(),
+                profile=_make_profile(),
+                cred_store=_make_cred_store(),
+                validate=False,
+            )
+
+        assert _RecordingServer.seen == [None]
+
+
+# ── Test: profile naming on the attribution surfaces (issue #26, R2/R5) ─────
+
+
+class _NameRecordingServer(BridgeServer):
+    """BridgeServer that records ``profile_name`` and aborts the launch."""
+
+    seen: list = []
+
+    def __init__(self, *args, **kwargs):
+        """Record the profile name the launch path chose."""
+        type(self).seen.append(kwargs.get("profile_name"))
+        super().__init__(*args, **kwargs)
+
+    async def start_async(self) -> int:
+        """Abort the launch once the constructor has been observed."""
+        raise _Sentinel
+
+
+class TestProfileNameWiring:
+    """An attribution record that calls every session "default" names nothing."""
+
+    @pytest.mark.asyncio
+    async def test_launch_names_the_profile_it_launched(self, monkeypatch: pytest.MonkeyPatch):
+        """A5.5: the single-backend header reports the profile, not a placeholder."""
+        from kitty.cli import launcher as launcher_mod
+
+        _NameRecordingServer.seen = []
+        monkeypatch.setattr(launcher_mod, "BridgeServer", _NameRecordingServer)
+
+        with pytest.raises(_Sentinel):
+            await launcher_mod.launch_async(
+                adapter=StubLauncher(),
+                provider=StubProvider(),
+                profile=_make_profile(),
+                cred_store=_make_cred_store(),
+                validate=False,
+            )
+
+        assert _NameRecordingServer.seen == ["test"]
+
+    @pytest.mark.asyncio
+    async def test_a_balancing_launch_names_the_pool_not_its_first_member(self, monkeypatch: pytest.MonkeyPatch):
+        """A2.2: the session ran as a pool; naming one member misdescribes it."""
+        from kitty.cli import launcher as launcher_mod
+
+        _NameRecordingServer.seen = []
+        monkeypatch.setattr(launcher_mod, "BridgeServer", _NameRecordingServer)
+
+        with pytest.raises(_Sentinel):
+            await launcher_mod.launch_async(
+                adapter=StubLauncher(),
+                provider=StubProvider(),
+                profile=_make_profile(),
+                cred_store=_make_cred_store(),
+                validate=False,
+                backends=[(StubProvider(), "key", _make_profile())],
+                profile_name="ci-pool",
+            )
+
+        assert _NameRecordingServer.seen == ["ci-pool"]
