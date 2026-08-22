@@ -141,8 +141,11 @@ def run_cleanup(settings_path: Path = _DEFAULT_SETTINGS_PATH) -> int:
             try:
                 current = json.loads(settings_path.read_text(encoding="utf-8"))
                 live_kitty = isinstance(current, dict) and _kitty_values_present(current.get("env"))
-            except (json.JSONDecodeError, OSError):
+            except (OSError, ValueError):
                 # Unreadable: assume a crashed patch and let the exact backup win.
+                # ValueError covers JSONDecodeError and UnicodeDecodeError alike —
+                # a settings file saved as UTF-16 (Notepad's "Unicode") must not
+                # crash the one command that repairs it.
                 live_kitty = True
             if live_kitty:
                 if _restore_from_backup(settings_path, backup_path):
@@ -158,7 +161,9 @@ def run_cleanup(settings_path: Path = _DEFAULT_SETTINGS_PATH) -> int:
     try:
         settings_text = settings_path.read_text(encoding="utf-8")
         settings = json.loads(settings_text)
-    except (json.JSONDecodeError, OSError) as exc:
+    except (OSError, ValueError) as exc:
+        # ValueError subsumes JSONDecodeError and UnicodeDecodeError, so a
+        # damaged or UTF-16 settings file is reported, never raised.
         print(f"Error: Cannot read {settings_path}: {exc}")
         return 1
 

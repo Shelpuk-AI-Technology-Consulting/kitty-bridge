@@ -309,3 +309,39 @@ class TestBackupRestore:
         result = json.loads(settings_path.read_text())
         assert result["env"]["ANTHROPIC_AUTH_TOKEN"] == "my-real-token"
         assert not backup_path.exists()
+
+
+class TestUndecodableSettings:
+    """Issue #27: a recovery command must diagnose damage, never crash on it.
+
+    ``read_text(encoding="utf-8")`` on a UTF-16 file raises ``UnicodeDecodeError``,
+    which is a ``ValueError`` — neither ``OSError`` nor ``JSONDecodeError``.
+    Notepad's "Unicode" save produces exactly such a file, and now that
+    ``cleanup`` is reachable in a broken installation this crash is on the
+    operator's path.
+    """
+
+    def test_undecodable_settings_reports_an_error(self, tmp_path: Path, capsys) -> None:
+        """The heuristic path must exit 1 with a message, not a traceback."""
+        settings_path = tmp_path / "settings.json"
+        settings_path.write_bytes(json.dumps({"env": {}}).encode("utf-16"))
+
+        with patch("kitty.cli.cleanup_cmd._get_backup_path", return_value=tmp_path / "absent.json"):
+            exit_code = run_cleanup(settings_path=settings_path)
+
+        assert exit_code == 1
+        assert "Cannot read" in capsys.readouterr().out
+
+    def test_undecodable_settings_still_restores_the_backup(self, tmp_path: Path) -> None:
+        """An unreadable file means a crashed patch, so the exact backup wins."""
+        settings_path = tmp_path / "settings.json"
+        backup_path = tmp_path / "claude-settings-backup.json"
+        settings_path.write_bytes(json.dumps({"env": {}}).encode("utf-16"))
+        backup_path.write_text(json.dumps({"model": "opus"}), encoding="utf-8")
+
+        with patch("kitty.cli.cleanup_cmd._get_backup_path", return_value=backup_path):
+            exit_code = run_cleanup(settings_path=settings_path)
+
+        assert exit_code == 0
+        assert json.loads(settings_path.read_text(encoding="utf-8")) == {"model": "opus"}
+        assert not backup_path.exists()

@@ -12,6 +12,8 @@ from kitty import __version__
 __all__ = ["main", "map_child_exit_code"]
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+
     from kitty.profiles.schema import BalancingProfile
     from kitty.profiles.store import ProfileStore
 
@@ -21,6 +23,43 @@ def map_child_exit_code(code: int) -> int:
     from kitty.cli.launcher import map_child_exit_code as _map
 
     return _map(code)
+
+
+@contextlib.contextmanager
+def _tty_required(command: str, *, note: str | None = None) -> Iterator[None]:
+    """Turn a missing terminal into a diagnosis instead of a traceback.
+
+    Interactive commands call :func:`kitty.tui.prompts.check_tty`, which raises
+    :class:`~kitty.tui.prompts.NonTTYError`. Letting that escape ``main`` prints
+    a stack trace naming an internal module, which is unreadable on a CI runner
+    and impossible for a script to act on. Exit code 2 is deliberately distinct
+    from kitty's generic failure code 1 so a caller can branch on "this needs a
+    terminal". Only ``NonTTYError`` is handled; every other exception
+    propagates.
+
+    Args:
+        command: The command word to name in the message, e.g. ``"setup"``.
+        note: Extra context appended to the message, used when the router sent
+            the operator somewhere other than the command they typed.
+
+    Yields:
+        None. The wrapped call runs inside the guard.
+
+    Raises:
+        SystemExit: With code 2 when stdin is not a terminal.
+    """
+    from kitty.tui.prompts import NonTTYError
+
+    try:
+        yield
+    except NonTTYError:
+        from kitty.tui.display import print_error
+
+        message = f"kitty {command} requires an interactive terminal (TTY)."
+        print_error(f"{message} {note}" if note else message)
+        # `from None` drops the NonTTYError context, so a caller that logs
+        # exc_info cannot re-print the traceback this exists to suppress.
+        raise SystemExit(2) from None
 
 
 def _build_parser():
@@ -97,7 +136,7 @@ def main() -> None:
     if args.debug and unknown_args:
         print(f"[kitty debug] forwarding unknown flags to agent: {unknown_args}", file=sys.stderr)
     # Lazy imports to avoid heavy dependency loading for --version/--help
-    from kitty.cli.router import BuiltinCommand, CLIRouter
+    from kitty.cli.router import RECOVERY_COMMANDS, BuiltinCommand, CLIRouter
     from kitty.credentials.file_backend import FileBackend
     from kitty.credentials.store import CredentialStore
     from kitty.launchers.claude import ClaudeAdapter
@@ -117,13 +156,15 @@ def main() -> None:
     from kitty.egress_store import resolve_egress
     from kitty.tui.display import print_error as _print_error
 
-    _is_egress_command = bool(all_command_args) and all_command_args[0].lower() == "egress"
+    _is_recovery_command = bool(all_command_args) and all_command_args[0].lower() in RECOVERY_COMMANDS
     try:
         egress = resolve_egress(cli_proxy=args.egress_proxy, cred_store=cred_store)
     except ValueError as exc:
-        # `kitty egress` is the tool for repairing a broken gateway, so it must
-        # stay reachable when the stored one no longer resolves.
-        if not _is_egress_command:
+        # The recovery commands repair a broken installation, so they must stay
+        # reachable when the stored gateway no longer resolves: `kitty egress`
+        # is what fixes the gateway, and `kitty cleanup` — which needs no egress
+        # at all — is what fixes a settings.json left behind by a killed session.
+        if not _is_recovery_command:
             _print_error(str(exc))
             sys.exit(1)
         egress = None
@@ -144,9 +185,15 @@ def main() -> None:
             sys.exit(run_egress_test(cred_store))
         if result.builtin == BuiltinCommand.EGRESS_SHOW:
             sys.exit(run_egress_show(cred_store))
-        run_egress_menu(cred_store)
+        with _tty_required("egress"):
+            run_egress_menu(cred_store)
     elif result.builtin == BuiltinCommand.SETUP:
-        _run_setup(profile_store, cred_store)
+        # `needs_setup` alone cannot identify a redirect: the router also sets it
+        # for `kitty setup` on a fresh install and for bare `kitty`, neither of
+        # which asked for anything else. Only a different typed word is a hijack.
+        _asked_for_setup = bool(all_command_args) and all_command_args[0].lower() == BuiltinCommand.SETUP.value
+        _hijacked = result.needs_setup and bool(all_command_args) and not _asked_for_setup
+        _run_setup(profile_store, cred_store, hijacked=_hijacked)
     elif result.builtin == BuiltinCommand.AUTH:
         _run_auth(profile_store, cred_store, result.extra_args)
     elif result.builtin == BuiltinCommand.PROFILE:
@@ -345,7 +392,8 @@ def _run_auth(profile_store: object, cred_store: object, extra_args: list[str]) 
     if not args or args[0] == "openai":
         import asyncio
 
-        asyncio.run(run_auth_openai(profile_store, cred_store))  # type: ignore[arg-type]
+        with _tty_required("auth"):
+            asyncio.run(run_auth_openai(profile_store, cred_store))  # type: ignore[arg-type]
     else:
         print(f"Unknown auth provider: {args[0]!r}")
 
@@ -374,16 +422,33 @@ def _print_unknown_command(args: list[str], adapters: dict, store: ProfileStore)
         print()
 
 
-def _run_setup(profile_store: object, cred_store: object) -> None:
+def _run_setup(profile_store: object, cred_store: object, *, hijacked: bool = False) -> None:
+    """Run the setup wizard, explaining itself when the router sent us here.
+
+    Args:
+        profile_store: Store the wizard writes the new profile to.
+        cred_store: Store the wizard writes the new credential to.
+        hijacked: True only when the operator typed some other command and the
+            router redirected them here. Neither a fresh-install user who typed
+            ``kitty setup`` nor a bare ``kitty`` was redirected anywhere, even
+            though the router flags both with ``needs_setup``.
+    """
     from kitty.cli.setup_cmd import run_setup_wizard
 
-    run_setup_wizard(profile_store, cred_store)  # type: ignore[arg-type]
+    note = (
+        "No profiles are configured, so setup was reached; kitty cleanup and kitty egress do not need a terminal."
+        if hijacked
+        else None
+    )
+    with _tty_required("setup", note=note):
+        run_setup_wizard(profile_store, cred_store)  # type: ignore[arg-type]
 
 
 def _run_profile_menu(profile_store: object, cred_store: object) -> None:
     from kitty.cli.profile_cmd import run_profile_menu
 
-    run_profile_menu(profile_store)  # type: ignore[arg-type]
+    with _tty_required("profile"):
+        run_profile_menu(profile_store)  # type: ignore[arg-type]
 
 
 def _run_doctor(profile_store: object) -> None:

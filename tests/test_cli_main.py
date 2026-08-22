@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import subprocess
 import sys
 import uuid
@@ -118,3 +119,258 @@ class TestCLIIntegrationPassthrough:
             # Verify extra_args were passed to launch_target
             launch_call = mock_launch.call_args
             assert launch_call[0][3] == ["--dangerously-skip-permissions", "--resume", "tui-display-polish"]
+
+
+@contextlib.contextmanager
+def _cli_run(argv: list[str], *, backends: list[object], egress: object, cleanup_exit: int = 0):
+    """Drive ``kitty.cli.main.main`` with substituted stores and a fixed egress result.
+
+    ``main`` imports its collaborators inside the function body, so patching
+    them on their source modules takes effect at call time. The profile store is
+    substituted as well, so a test never reads the developer's real
+    ``profiles.json``.
+
+    Args:
+        argv: Full ``sys.argv`` for the run, including the program name.
+        backends: What the substituted profile store reports; an empty list
+            reproduces both the fresh-install and the corrupt-store state.
+        egress: An ``Exception`` instance to raise from ``resolve_egress``, or
+            the value it should return.
+        cleanup_exit: Exit code the patched ``run_cleanup`` returns.
+
+    Yields:
+        The patched ``cleanup_cmd.run_cleanup`` mock.
+    """
+    from unittest.mock import MagicMock, patch
+
+    # Import every module `main()` loads lazily BEFORE patching. Each of these
+    # binds `resolve_egress` or `ProfileStore` with a top-level
+    # `from ... import`, so a first import triggered by `main()` while the patch
+    # is live would capture the mock permanently and leak into unrelated tests —
+    # an order-dependent failure that only shows up in some run orders.
+    import kitty.cli.auth_cmd  # noqa: F401
+    import kitty.cli.cleanup_cmd  # noqa: F401
+    import kitty.cli.doctor_cmd  # noqa: F401
+    import kitty.cli.egress_cmd  # noqa: F401
+    import kitty.cli.profile_cmd  # noqa: F401
+    import kitty.cli.router  # noqa: F401
+    import kitty.cli.setup_cmd  # noqa: F401
+    import kitty.profiles.resolver  # noqa: F401
+
+    store = MagicMock()
+    store.get_all_backends.return_value = backends
+    resolve = MagicMock(side_effect=egress) if isinstance(egress, Exception) else MagicMock(return_value=egress)
+    run_cleanup = MagicMock(return_value=cleanup_exit)
+
+    with (
+        patch("sys.argv", argv),
+        patch("kitty.profiles.store.ProfileStore", return_value=store),
+        patch("kitty.egress_store.resolve_egress", resolve),
+        patch("kitty.cli.cleanup_cmd.run_cleanup", run_cleanup),
+    ):
+        yield run_cleanup
+
+
+class TestRecoveryCommandReachability:
+    """Issue #27: ``kitty cleanup`` must survive the breakage it repairs.
+
+    The router guard is covered at the unit level in ``test_cli_router.py``.
+    These tests drive ``main()`` itself, because the second guard — egress
+    resolution — sits in ``main`` and fires before routing happens at all.
+    """
+
+    def test_cleanup_runs_when_egress_cannot_resolve(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """The trap in the issue: a poisoned gateway blocked its own repair tool."""
+        from kitty.cli.main import main
+        from kitty.egress import get_egress
+
+        broken = ValueError("stored gateway no longer resolves")
+        with (
+            _cli_run(["kitty", "cleanup"], backends=[], egress=broken) as run,
+            pytest.raises(SystemExit) as exc_info,
+        ):
+            main()
+
+        assert exc_info.value.code == 0
+        run.assert_called_once_with()
+        assert "stored gateway no longer resolves" not in capsys.readouterr().err
+        # The exemption skips the exit, not the install: no stale route leaks in.
+        assert get_egress() is None
+
+    @pytest.mark.parametrize("command", ["cleanup", "egress"])
+    def test_every_recovery_command_survives_a_broken_gateway(
+        self,
+        command: str,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Both members must clear the guard, or the shared set is only half used.
+
+        Without ``egress`` here, narrowing ``main()``'s check back to
+        ``== "cleanup"`` would keep the whole suite green.
+        """
+        from unittest.mock import patch
+
+        from kitty.cli.main import main
+
+        with (
+            _cli_run(["kitty", command], backends=[], egress=ValueError("gateway gone")) as run,
+            patch("kitty.cli.egress_cmd.run_egress_menu") as menu,
+            contextlib.suppress(SystemExit),
+        ):
+            main()
+
+        # Reaching the command at all is the claim; only `cleanup` exits.
+        reached = run if command == "cleanup" else menu
+        reached.assert_called_once()
+        assert "gateway gone" not in capsys.readouterr().err
+
+    def test_cleanup_exit_code_comes_from_run_cleanup(self) -> None:
+        """A distinctive code proves the exit is cleanup's, not the guard's 1."""
+        from kitty.cli.main import main
+
+        with (
+            _cli_run(["kitty", "cleanup"], backends=[], egress=ValueError("boom"), cleanup_exit=3),
+            pytest.raises(SystemExit) as exc_info,
+        ):
+            main()
+
+        assert exc_info.value.code == 3
+
+    def test_cleanup_runs_when_egress_resolves_normally(self) -> None:
+        """The exemption must not skip installing a healthy egress route."""
+        from unittest.mock import MagicMock
+
+        from kitty.cli.main import main
+        from kitty.egress import get_egress
+
+        sentinel = MagicMock(name="egress-config")
+        with (
+            _cli_run(["kitty", "cleanup"], backends=[], egress=sentinel) as run,
+            pytest.raises(SystemExit),
+        ):
+            main()
+
+        run.assert_called_once_with()
+        assert get_egress() is sentinel
+
+    def test_non_recovery_command_still_fails_closed(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """Fail-closed is the point of the guard; only recovery commands are exempt."""
+        from kitty.cli.main import main
+
+        with (
+            _cli_run(["kitty", "doctor"], backends=[object()], egress=ValueError("bad proxy URL")) as run,
+            pytest.raises(SystemExit) as exc_info,
+        ):
+            main()
+
+        assert exc_info.value.code == 1
+        assert "bad proxy URL" in capsys.readouterr().err
+        run.assert_not_called()
+
+
+class TestNonTTYExit:
+    """Issue #27: off a TTY the CLI must diagnose, not raise a traceback."""
+
+    @pytest.mark.parametrize("command", ["setup", "profile", "auth", "egress"])
+    def test_interactive_command_exits_2_with_a_message(
+        self,
+        command: str,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Exit 2 is distinct from the generic 1, so a CI script can branch on it."""
+        from unittest.mock import patch
+
+        from kitty.cli.main import main
+
+        with (
+            _cli_run(["kitty", command], backends=[object()], egress=None),
+            patch("sys.stdin.isatty", return_value=False),
+            pytest.raises(SystemExit) as exc_info,
+        ):
+            main()
+
+        assert exc_info.value.code == 2
+        # Rich soft-wraps at 80 columns, so collapse whitespace before matching.
+        stderr = " ".join(capsys.readouterr().err.split())
+        assert "interactive terminal" in stderr
+        assert f"kitty {command}" in stderr
+        assert "Traceback" not in stderr
+
+    def test_hijacked_setup_explains_the_redirection(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """The operator typed `doctor`; naming only `setup` is the old confusion."""
+        from unittest.mock import patch
+
+        from kitty.cli.main import main
+
+        with (
+            _cli_run(["kitty", "doctor"], backends=[], egress=None),
+            patch("sys.stdin.isatty", return_value=False),
+            pytest.raises(SystemExit) as exc_info,
+        ):
+            main()
+
+        assert exc_info.value.code == 2
+        stderr = " ".join(capsys.readouterr().err.split())
+        assert "No profiles are configured" in stderr
+        assert "kitty cleanup" in stderr
+
+    @pytest.mark.parametrize(
+        ("argv", "backends"),
+        [
+            (["kitty", "setup"], []),
+            (["kitty", "setup"], [object()]),
+            (["kitty"], []),
+            (["kitty"], [object()]),
+        ],
+        ids=["setup, fresh install", "setup, profiles present", "bare kitty, fresh install", "bare kitty, profiles"],
+    )
+    def test_no_redirection_note_when_nobody_was_redirected(
+        self,
+        argv: list[str],
+        backends: list[object],
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Only a *different* typed command means the router redirected anyone.
+
+        The router raises ``needs_setup`` in three situations — the empty-store
+        guard, an explicit ``kitty setup``, and bare ``kitty`` — so the flag on
+        its own would claim a redirection in cases where none happened. The
+        ``profiles present`` cases would additionally state something false.
+        """
+        from unittest.mock import patch
+
+        from kitty.cli.main import main
+
+        with (
+            _cli_run(argv, backends=backends, egress=None),
+            patch("sys.stdin.isatty", return_value=False),
+            pytest.raises(SystemExit),
+        ):
+            main()
+
+        stderr = " ".join(capsys.readouterr().err.split())
+        assert "kitty setup requires an interactive terminal" in stderr
+        assert "No profiles are configured" not in stderr
+
+    def test_non_tty_error_is_still_raised_by_check_tty(self) -> None:
+        """Only ``main``'s handling changes; the library contract is untouched."""
+        from unittest.mock import patch
+
+        from kitty.tui.prompts import NonTTYError, check_tty
+
+        with patch("sys.stdin.isatty", return_value=False), pytest.raises(NonTTYError):
+            check_tty()
+
+    def test_other_exceptions_still_propagate(self) -> None:
+        """The wrapper catches NonTTYError only — it must not swallow real bugs."""
+        from unittest.mock import patch
+
+        from kitty.cli.main import main
+
+        with (
+            _cli_run(["kitty", "setup"], backends=[object()], egress=None),
+            patch("sys.stdin.isatty", return_value=True),
+            patch("kitty.cli.setup_cmd.run_setup_wizard", side_effect=RuntimeError("wizard exploded")),
+            pytest.raises(RuntimeError, match="wizard exploded"),
+        ):
+            main()

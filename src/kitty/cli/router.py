@@ -10,7 +10,7 @@ from kitty.profiles.resolver import ProfileResolver
 from kitty.profiles.schema import BackendConfig, Profile
 from kitty.profiles.store import ProfileStore
 
-__all__ = ["BuiltinCommand", "CLIRouter", "RouteResult"]
+__all__ = ["RECOVERY_COMMANDS", "BuiltinCommand", "CLIRouter", "RouteResult"]
 
 
 class BuiltinCommand(str, Enum):
@@ -56,6 +56,18 @@ _BUILTIN_MAP: dict[str, BuiltinCommand] = {bc.value: bc for bc in BuiltinCommand
 # Default launcher adapter key used when routing by profile name alone.
 _DEFAULT_ADAPTER_KEY = "codex"
 
+# Commands that repair broken configuration and therefore must survive the very
+# breakage they repair: `egress` fixes an unresolvable gateway, `cleanup` fixes a
+# settings.json left polluted by a killed session. Neither needs a profile or an
+# egress route to do its work. Both front-door guards — the empty-store guard
+# below and the egress-resolution guard in cli/main.py — read this one set, so
+# the exemption cannot be granted in one place and forgotten in the other.
+# These are lowercased *first positional tokens*, not BuiltinCommand values:
+# both guards look at `args[0]` before the router applies its subcommand
+# vocabulary, so `egress test` is exempt via its head while the hyphenated
+# `egress-test` spelling would need its own entry.
+RECOVERY_COMMANDS: frozenset[str] = frozenset({BuiltinCommand.EGRESS.value, BuiltinCommand.CLEANUP.value})
+
 
 class CLIRouter:
     """Routes CLI positional arguments to built-in commands, adapters, or profiles.
@@ -66,7 +78,8 @@ class CLIRouter:
     3. Profile/backend name (case-insensitive)
     4. No match -- raise RoutingError
 
-    When no profiles exist in the store, every route resolves to SETUP.
+    When no profiles exist in the store, every route resolves to SETUP except
+    the recovery commands in :data:`RECOVERY_COMMANDS`.
     """
 
     def __init__(self, store: ProfileStore, adapters: dict[str, LauncherAdapter]) -> None:
@@ -89,9 +102,12 @@ class CLIRouter:
                 profile is configured.
         """
         # When the profile store is empty, always direct to setup — except for
-        # egress, which is machine-level and worth configuring or diagnosing
-        # before any profile exists.
-        if not self._store.get_all_backends() and not (args and args[0].lower() == BuiltinCommand.EGRESS.value):
+        # the recovery commands. The exemption is tested FIRST so a recovery
+        # command never touches the store at all: `get_all_backends` takes a
+        # file lock with no timeout, so reading it here would let a contended
+        # lock hang the very command that repairs a broken installation.
+        recovery_head = args[0].lower() if args else None
+        if recovery_head not in RECOVERY_COMMANDS and not self._store.get_all_backends():
             return RouteResult(builtin=BuiltinCommand.SETUP, needs_setup=True)
 
         if not args:
