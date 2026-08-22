@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from pathlib import Path
 
 import pytest
 
@@ -316,3 +317,114 @@ class TestEgressRouting:
         result = CLIRouter(empty_store, {}).route(["doctor"])
 
         assert result.builtin == BuiltinCommand.SETUP
+
+
+class TestCleanupRouting:
+    """Issue #27: ``cleanup`` repairs a crashed session and needs no profile.
+
+    The empty-store guard exists to send a *new* user to setup. ``cleanup``
+    reads only Claude Code's settings file, so gating it on a populated profile
+    store makes it unreachable in exactly the state it exists to repair.
+    """
+
+    def test_reachable_with_an_empty_profile_store(self, empty_store: ProfileStore) -> None:
+        """The fresh-install state must not swallow the repair command."""
+        result = CLIRouter(empty_store, {}).route(["cleanup"])
+
+        assert result.builtin == BuiltinCommand.CLEANUP
+        assert result.needs_setup is False
+
+    @pytest.mark.parametrize("head", ["CLEANUP", "Cleanup"])
+    def test_exemption_is_case_insensitive(self, empty_store: ProfileStore, head: str) -> None:
+        """The guard lower-cases the head, so the exemption must match that."""
+        result = CLIRouter(empty_store, {}).route([head])
+
+        assert result.builtin == BuiltinCommand.CLEANUP
+
+    def test_extra_args_survive_the_exemption(self, empty_store: ProfileStore) -> None:
+        """Bypassing the guard must route normally, not discard the remainder."""
+        result = CLIRouter(empty_store, {}).route(["cleanup", "--dry-run"])
+
+        assert result.builtin == BuiltinCommand.CLEANUP
+        assert result.extra_args == ["--dry-run"]
+
+    @pytest.mark.parametrize(
+        ("label", "content"),
+        [
+            ("invalid json", "{ not json"),
+            ("version mismatch", '{"version": 999, "profiles": []}'),
+        ],
+    )
+    def test_reachable_when_the_store_is_unreadable(self, tmp_path: Path, label: str, content: str) -> None:
+        """A damaged profiles.json reports zero backends, firing the same guard.
+
+        This is the CI scenario from the issue: the config files were removed
+        or damaged, and every command was hijacked as a result. Both of the
+        store's degraded branches are covered — they return ``[]`` for
+        different reasons.
+        """
+        del label  # parametrize id only
+        path = tmp_path / "profiles.json"
+        path.write_text(content, encoding="utf-8")
+
+        result = CLIRouter(ProfileStore(path=path), {}).route(["cleanup"])
+
+        assert result.builtin == BuiltinCommand.CLEANUP
+
+    def test_the_store_is_never_consulted_for_a_recovery_command(self) -> None:
+        """The exemption must short-circuit before any store IO.
+
+        ``get_all_backends`` takes a file lock with no timeout, so reading it
+        first would let a contended lock hang the repair command.
+        """
+        from unittest.mock import MagicMock
+
+        store = MagicMock()
+        store.get_all_backends.side_effect = AssertionError("the store must not be read")
+
+        result = CLIRouter(store, {}).route(["cleanup"])
+
+        assert result.builtin == BuiltinCommand.CLEANUP
+        store.get_all_backends.assert_not_called()
+
+    def test_reachable_with_a_populated_store(self, populated_store: ProfileStore) -> None:
+        """The guard is bypassed here anyway; this pins the unchanged path."""
+        result = CLIRouter(populated_store, {}).route(["cleanup"])
+
+        assert result.builtin == BuiltinCommand.CLEANUP
+
+    @pytest.mark.parametrize("args", [["doctor"], ["profile"], ["codex"], []])
+    def test_non_recovery_commands_still_route_to_setup(
+        self,
+        empty_store: ProfileStore,
+        adapters: dict[str, LauncherAdapter],
+        args: list[str],
+    ) -> None:
+        """The exemption must not widen into "the guard no longer applies"."""
+        result = CLIRouter(empty_store, adapters).route(args)
+
+        assert result.builtin == BuiltinCommand.SETUP
+        assert result.needs_setup is True
+
+
+class TestRecoveryCommandSet:
+    """Both front-door guards must read one declaration, not two literals."""
+
+    def test_contains_exactly_egress_and_cleanup(self) -> None:
+        """Growing the set is a deliberate act that has to update this test."""
+        from kitty.cli.router import RECOVERY_COMMANDS
+
+        assert set(RECOVERY_COMMANDS) == {"egress", "cleanup"}
+
+    def test_members_are_lowercase_builtin_values(self) -> None:
+        """The guards compare against ``args[0].lower()``."""
+        from kitty.cli.router import RECOVERY_COMMANDS
+
+        assert all(name == name.lower() for name in RECOVERY_COMMANDS)
+        assert all(name in {command.value for command in BuiltinCommand} for name in RECOVERY_COMMANDS)
+
+    def test_is_exported(self) -> None:
+        """It crosses a module boundary — cli/main.py imports it."""
+        from kitty.cli import router
+
+        assert "RECOVERY_COMMANDS" in router.__all__
