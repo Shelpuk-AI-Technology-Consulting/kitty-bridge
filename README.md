@@ -321,6 +321,7 @@ Point your tool at `http://localhost:<port>` and it just works.
 | `POST /v1/responses`              | OpenAI Responses   | Codex           |
 | `POST /v1/gemini/generateContent` | Gemini             | Gemini CLI      |
 | `GET /healthz`                    | Health check       | Monitoring      |
+| `GET /stats`                      | Session record     | Attribution     |
 
 **Background bridges:** `kitty bridge start`, `stop`, `restart`, and `status` manage a bridge running in the background,
 tracked in `bridge_state.json`.
@@ -331,6 +332,42 @@ start a second one beside it — signalling a process it does not own is unsafe,
 recycled that process ID onto something unrelated. Stop it from the account that started it, or from an
 administrator shell. If you are sure that process is not a kitty bridge, delete `bridge_state.json` — kitty prints
 its full path in the message.
+
+## Knowing which model actually served you
+
+kitty replaces the model name your agent asks for with the one its profile configures — that is the point of the
+product. The agent's own cost and error records therefore name the *alias*, not the model that ran. Three surfaces tell
+you the truth.
+
+**Per response.** Every proxied response carries:
+
+| Header            | Value                                                       |
+|-------------------|-------------------------------------------------------------|
+| `X-Kitty-Backend` | Profile name of the backend that served it                   |
+| `X-Kitty-Model`   | The real model sent upstream (absent if no override is set)   |
+| `X-Kitty-Tier`    | `primary` or `backup` (reserve-tier members)                 |
+
+These name the backend that produced the **first byte** of the response. A stream that fails over after that has
+already sent its headers, so `/stats` is authoritative for the session.
+
+**Live.** `GET /stats` returns JSON for the running bridge: per-backend request counts, the real models served with
+their token totals, how many times a request switched backend (`failovers`), and whether the pool was ever exhausted
+(`all_backends_unhealthy`). Like `/healthz`, it is readable without credentials unless a keys file is configured — and
+`kitty claude` deliberately runs without one.
+
+**After the run.** `--session-summary PATH` (or `KITTY_SESSION_SUMMARY`) writes the same document to a file when the
+bridge shuts down — a small artifact CI can upload, instead of a multi-megabyte debug log:
+
+```bash
+kitty --session-summary "$RUNNER_TEMP/kitty-session.json" claude -p "review this diff"
+```
+
+The summary is written on **graceful shutdown**. If the bridge is killed (job cancelled, step timeout, `SIGKILL`) there
+is no file, so poll `/stats` before teardown if you need a record from those runs.
+
+Two things the numbers do not mean: `attempts` counts backend *selections*, so it reads lower than the upstream POST
+count in the debug log (retries against the same backend are not re-selections); and in single-profile mode `failovers`
+is always `0` because there is nowhere to fail over to — check `mode` first.
 
 ## Supported Agents
 

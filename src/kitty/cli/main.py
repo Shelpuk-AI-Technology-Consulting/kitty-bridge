@@ -106,6 +106,16 @@ def _build_parser():
         help="Write usage logs to PATH instead of ~/.cache/kitty/usage.log (implies --logging)",
     )
     parser.add_argument(
+        "--session-summary",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help=(
+            "Write a machine-readable record of which backend and model served the session to PATH "
+            "on shutdown (overrides KITTY_SESSION_SUMMARY)"
+        ),
+    )
+    parser.add_argument(
         "--egress-proxy",
         default=None,
         metavar="URL",
@@ -365,6 +375,7 @@ def main() -> None:
             validate=not args.no_validate,
             logging_enabled=args.logging or args.log_file is not None,
             usage_log_path=args.log_file,
+            session_summary_path=args.session_summary,
         )
     elif result.adapter is not None and (result.backend is not None or result.profile is not None):
         backend = result.backend or result.profile
@@ -378,6 +389,7 @@ def main() -> None:
             validate=not args.no_validate,
             logging_enabled=args.logging or args.log_file is not None,
             usage_log_path=args.log_file,
+            session_summary_path=args.session_summary,
         )
         sys.exit(exit_code)
     else:
@@ -474,6 +486,7 @@ def _run_bridge(
     validate: bool = True,
     logging_enabled: bool = False,
     usage_log_path: Path | None = None,
+    session_summary_path: Path | None = None,
 ) -> None:
     """Run bridge mode — start OpenAI-compatible API server without launching agent."""
     import asyncio
@@ -498,6 +511,7 @@ def _run_bridge(
             validate=validate,
             logging_enabled=logging_enabled,
             usage_log_path=usage_log_path,
+            session_summary_path=session_summary_path,
         )
         return
 
@@ -538,6 +552,8 @@ def _run_bridge(
         provider_config=getattr(profile, "provider_config", {}),
         logging_enabled=logging_enabled,
         egress=_get_egress(),
+        session_summary_path=session_summary_path,
+        profile_name=profile.name,  # type: ignore[attr-defined, union-attr]
         _usage_log_path=usage_log_path,
     )
 
@@ -557,7 +573,8 @@ def _run_bridge(
             f"  • POST /v1/responses\n"
             f"  • POST /v1beta/models/{{model}}:generateContent\n"
             f"  • GET  /v1/models\n"
-            f"  • GET  /healthz\n\n"
+            f"  • GET  /healthz\n"
+            f"  • GET  /stats\n\n"
             f"Press Ctrl+C to stop",
         )
 
@@ -588,6 +605,7 @@ def _run_bridge_balancing(
     validate: bool = True,
     logging_enabled: bool = False,
     usage_log_path: Path | None = None,
+    session_summary_path: Path | None = None,
 ) -> None:
     """Run bridge mode with a balancing profile — random selection across healthy members."""
     import asyncio
@@ -638,6 +656,8 @@ def _run_bridge_balancing(
         backends=backends,
         logging_enabled=logging_enabled,
         egress=_get_egress(),
+        session_summary_path=session_summary_path,
+        profile_name=balancing.name,
         _usage_log_path=usage_log_path,
     )
 
@@ -659,7 +679,8 @@ def _run_bridge_balancing(
             f"  • POST /v1/responses\n"
             f"  • POST /v1beta/models/{{model}}:generateContent\n"
             f"  • GET  /v1/models\n"
-            f"  • GET  /healthz\n\n"
+            f"  • GET  /healthz\n"
+            f"  • GET  /stats\n\n"
             f"Press Ctrl+C to stop",
         )
 
@@ -691,6 +712,7 @@ def _launch_target(
     validate: bool = True,
     logging_enabled: bool = False,
     usage_log_path: Path | None = None,
+    session_summary_path: Path | None = None,
 ) -> int:
     from kitty.cli.launcher import launch
     from kitty.profiles.schema import BalancingProfile
@@ -708,6 +730,7 @@ def _launch_target(
             validate=validate,
             logging_enabled=logging_enabled,
             usage_log_path=usage_log_path,
+            session_summary_path=session_summary_path,
         )
 
     profile = backend
@@ -724,6 +747,7 @@ def _launch_target(
         validate=validate,
         logging_enabled=logging_enabled,
         usage_log_path=usage_log_path,
+        session_summary_path=session_summary_path,
     )
 
 
@@ -737,6 +761,7 @@ def _launch_target_balancing(
     validate: bool = True,
     logging_enabled: bool = False,
     usage_log_path: Path | None = None,
+    session_summary_path: Path | None = None,
 ) -> int:
     """Launch a coding agent with a balancing profile (random healthy member selection)."""
     from kitty.cli.launcher import launch
@@ -775,4 +800,6 @@ def _launch_target_balancing(
         backends=backends,
         logging_enabled=logging_enabled,
         usage_log_path=usage_log_path,
+        session_summary_path=session_summary_path,
+        profile_name=balancing.name,
     )

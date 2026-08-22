@@ -126,6 +126,8 @@ async def launch_async(
     backends: list[tuple[ProviderAdapter, str, Profile]] | None = None,
     logging_enabled: bool = False,
     usage_log_path: Path | None = None,
+    session_summary_path: Path | None = None,
+    profile_name: str | None = None,
 ) -> int:
     """Launch the full bridge + child process lifecycle.
 
@@ -187,6 +189,11 @@ async def launch_async(
         backends=backends,
         logging_enabled=logging_enabled,
         egress=get_egress(),
+        session_summary_path=session_summary_path,
+        # Attribution surfaces that call every session "default" name nothing;
+        # a balancing launch passes the pool name, which the member profile
+        # here cannot supply.
+        profile_name=profile_name or profile.name,
         _usage_log_path=usage_log_path,
     )
     port = await server.start_async()
@@ -349,6 +356,8 @@ def launch(
     backends: list[tuple[ProviderAdapter, str, Profile]] | None = None,
     logging_enabled: bool = False,
     usage_log_path: Path | None = None,
+    session_summary_path: Path | None = None,
+    profile_name: str | None = None,
 ) -> int:
     """Synchronous wrapper around launch_async."""
     try:
@@ -368,6 +377,8 @@ def launch(
                     backends=backends,
                     logging_enabled=logging_enabled,
                     usage_log_path=usage_log_path,
+                    session_summary_path=session_summary_path,
+                    profile_name=profile_name,
                 )
                 future = pool.submit(asyncio.run, coro)
                 return future.result()
@@ -382,6 +393,8 @@ def launch(
             backends=backends,
             logging_enabled=logging_enabled,
             usage_log_path=usage_log_path,
+            session_summary_path=session_summary_path,
+            profile_name=profile_name,
         )
         return loop.run_until_complete(coro)
     except RuntimeError:
@@ -396,5 +409,7 @@ def launch(
             backends=backends,
             logging_enabled=logging_enabled,
             usage_log_path=usage_log_path,
+            session_summary_path=session_summary_path,
+            profile_name=profile_name,
         )
         return asyncio.run(coro)
