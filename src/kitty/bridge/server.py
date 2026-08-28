@@ -258,6 +258,181 @@ def _is_tool_use_format_error(status: int, body: object) -> bool:
     )
 
 
+# Token pairs that identify a thinking round-trip rejection.  Both tokens of a
+# pair must be present, which keeps the bare words "thinking" and "missing"
+# from matching unrelated 4xx bodies.
+_THINKING_ROUNDTRIP_PATTERNS: tuple[tuple[str, ...], ...] = (
+    # DeepSeek, both dialects: "The `content[].thinking` / `reasoning_content`
+    # in the thinking mode must be passed back to the API."
+    ("thinking mode", "must be passed back"),
+    # Kimi's wording for the same contract: "thinking is enabled but
+    # reasoning_content is missing in assistant tool call message".  The second
+    # token carries "in assistant" because gateways echo the offending request
+    # inside the error body, where a bare "reasoning_content" plus a bare
+    # "missing" ("missing required parameter") would collide.
+    ("reasoning_content", "is missing in assistant"),
+)
+
+# The empty carrier that satisfies a thinking round-trip contract on the
+# Anthropic-shaped wire.  Copied per use so callers cannot alias it.
+_THINKING_CARRIER_BLOCK = {"type": "thinking", "thinking": ""}
+
+
+def _is_thinking_roundtrip_error(status: int, body: object) -> bool:
+    """Return True if the upstream rejected the transcript's thinking round-trip.
+
+    Providers whose thinking mode is stateful across tool calls (DeepSeek,
+    Kimi) require every assistant turn of a replayed transcript to carry the
+    reasoning the model produced — a ``thinking`` content block on an
+    Anthropic-shaped endpoint, a ``reasoning_content`` field on a Chat
+    Completions one.  A transcript whose assistant turns were authored by a
+    provider that emits neither cannot satisfy that contract, which is what a
+    mid-conversation failover across provider families produces.
+
+    This is a rejection of the request the bridge built, not evidence that the
+    backend is unwell, so the caller repairs and retries the same backend
+    rather than failing over.  See
+    :func:`_repair_thinking_roundtrip`.
+
+    Only 4xx statuses match: the same wording arriving with a 5xx is a backend
+    fault and is already covered by the retryable-status path.
+
+    Args:
+        status: The upstream HTTP status code.
+        body: The upstream error body, as text or as a parsed dict.
+
+    Returns:
+        True when the body states that thinking-mode reasoning must be passed
+        back, False otherwise.
+    """
+    if status < 400 or status >= 500:
+        return False
+    if body is None:
+        return False
+
+    searchable = str(body).lower()
+    return any(all(token in searchable for token in tokens) for tokens in _THINKING_ROUNDTRIP_PATTERNS)
+
+
+def _with_thinking_carrier(msg: dict, *, native: bool) -> dict | None:
+    """Return a copy of an assistant message carrying the thinking carrier.
+
+    Adds the empty carrier the target's thinking mode requires: a leading
+    ``{"type": "thinking", "thinking": ""}`` content block on the Anthropic
+    wire, a ``reasoning_content`` field on the Chat Completions wire.  The
+    block goes first because the Messages API requires reasoning to precede
+    text in an assistant turn.
+
+    Returns ``None`` — meaning "already satisfied, nothing to do" — for a
+    message that carries a thinking block or a ``reasoning_content`` already,
+    and for one whose ``content`` is neither a list nor a string, which is not
+    a shape the carrier can be attached to.  That is what makes the repair
+    converge: the caller retries only on a change, so a message reported as
+    changed on every pass would retry forever.
+
+    On the Chat Completions side the test is ``is None`` rather than the
+    ``not in`` used by :meth:`ProviderAdapter._inject_empty_reasoning_content`.
+    The two are deliberately different: that helper runs proactively during
+    serialization, while this one runs after it and must treat an explicit
+    ``None`` as still needing repair, yet leave an already-written ``""``
+    alone.  Do not unify them — convergence depends on this asymmetry.
+
+    Args:
+        msg: The assistant message to inspect. Never modified.
+        native: True when the enclosing body is an Anthropic Messages body,
+            False when it is a Chat Completions body.
+
+    Returns:
+        A new message dict with the carrier added, or None when the message
+        already satisfies the contract or cannot carry one.
+    """
+    if not native:
+        if msg.get("reasoning_content") is not None:
+            return None
+        return {**msg, "reasoning_content": ""}
+
+    content = msg.get("content")
+    if isinstance(content, list):
+        if any(isinstance(block, dict) and block.get("type") == "thinking" for block in content):
+            return None
+        return {**msg, "content": [dict(_THINKING_CARRIER_BLOCK), *content]}
+
+    if isinstance(content, str):
+        # A string-content turn needs the block form to carry thinking; the
+        # text survives as an explicit text block.
+        blocks: list[dict] = [dict(_THINKING_CARRIER_BLOCK)]
+        if content:
+            blocks.append({"type": "text", "text": content})
+        return {**msg, "content": blocks}
+
+    return None
+
+
+def _repair_thinking_roundtrip(body: dict, *, native: bool) -> bool:
+    """Give every assistant turn the thinking carrier its target requires.
+
+    Repairs the transcript so a backend enforcing a thinking round-trip
+    contract accepts a history authored by a different provider.  An **empty**
+    carrier is used: the reasoning of the previous provider's turns is not
+    available and inventing one would put words in the model's mouth, whereas
+    an empty carrier satisfies the contract without adding content the model
+    never produced.
+
+    Operates on the **serialized upstream body**, never on ``cc_request``.
+    That placement is what makes the repair per-backend: a later failover
+    re-serializes ``cc_request`` from scratch, so the carrier does not travel
+    to a sibling backend that never asked for it (and would reject a
+    fabricated, signature-less ``thinking`` block).  It also lets the repair
+    see carriers the provider adapter injected during serialization — Kimi,
+    Z.AI and custom-OpenAI already add ``reasoning_content`` in
+    :meth:`translate_to_upstream` — so it reports "no change" instead of
+    retrying a byte-identical request.
+
+    The dialect is passed in rather than inferred, because
+    ``{"role": "assistant", "content": "..."}`` is valid in both and guessing
+    would silently write the wrong carrier for one of them.  It must come from
+    the adapter's :attr:`ProviderAdapter.upstream_wire_is_messages_api`, not
+    from ``_native_messages_request`` — see :meth:`BridgeServer._upstream_body_for`.
+
+    Changed messages are **copied**, not edited in place, and ``messages`` is
+    replaced with a new list.  ``translate_to_upstream`` returns a shallow copy
+    whose ``messages`` list is ``cc_request``'s own, so editing a message would
+    reach back into the request that the next attempt re-serializes.
+
+    Per-message rewriting lives in :func:`_with_thinking_carrier`.
+
+    Args:
+        body: The outgoing upstream body.  Its ``messages`` key is rebound when
+            anything changes; the original list and its messages are untouched.
+        native: True when ``body`` is an Anthropic Messages body (the carrier
+            is a ``thinking`` content block), False when it is a Chat
+            Completions body (the carrier is a ``reasoning_content`` field).
+
+    Returns:
+        True if at least one assistant message was changed.  The caller must
+        only retry when this is True — a False means the transcript already
+        satisfies the contract and the rejection has another cause.
+    """
+    messages = body.get("messages")
+    if not isinstance(messages, list):
+        return False
+
+    repaired = messages.copy()
+    changed = False
+    for index, msg in enumerate(messages):
+        # The contract binds assistant turns only.
+        if not isinstance(msg, dict) or msg.get("role") != "assistant":
+            continue
+        carrier = _with_thinking_carrier(msg, native=native)
+        if carrier is not None:
+            repaired[index] = carrier
+            changed = True
+
+    if changed:
+        body["messages"] = repaired
+    return changed
+
+
 def _convert_native_to_cc_format(body: dict) -> dict:
     """Convert an Anthropic Messages body to Chat Completions format.
 
@@ -746,6 +921,15 @@ class BridgeServer:
 
         self._backend_cooldown = backend_cooldown
         self._family_cooldown: dict[str, dict] = {}
+
+        # Backends that have rejected this session's transcript for a thinking
+        # round-trip mismatch (issue #32).  A backend that rejected the
+        # transcript once will reject every later turn of it, so the repair is
+        # applied before the first attempt instead of being rediscovered at the
+        # cost of a round-trip per turn.  Indices, so -1 covers non-balancing
+        # mode.  Mutated only by `set.add` with no await in between, which is
+        # atomic across the concurrent request tasks sharing this loop.
+        self._thinking_repair_backends: set[int] = set()
 
         # Backend health tracking (parallel to _backends)
         self._backend_health: list[dict] = []
@@ -2831,7 +3015,7 @@ class BridgeServer:
         try:
             url = self._build_upstream_url()
             headers = self._build_upstream_headers()
-            upstream_body = self._active_provider.translate_to_upstream(cc_request)
+            upstream_body = self._upstream_body_for(cc_request)
             logger.debug("Upstream POST → %s", url)
 
             stream_timeout = aiohttp.ClientTimeout(total=None, sock_connect=30, sock_read=_STREAM_READ_TIMEOUT)
@@ -2874,7 +3058,7 @@ class BridgeServer:
                                         self._active_provider.normalize_request(cc_request)
                                         url = self._build_upstream_url()
                                         headers = self._build_upstream_headers()
-                                        upstream_body = self._active_provider.translate_to_upstream(cc_request)
+                                        upstream_body = self._upstream_body_for(cc_request)
                                         logger.info(
                                             "Messages stream Cloudflare failover: attempt %d/%d, switching backend",
                                             attempt + 1,
@@ -2906,7 +3090,29 @@ class BridgeServer:
                                 self._active_provider.normalize_request(cc_request)
                                 url = self._build_upstream_url()
                                 headers = self._build_upstream_headers()
-                                upstream_body = self._active_provider.translate_to_upstream(cc_request)
+                                upstream_body = self._upstream_body_for(cc_request)
+                                continue
+
+                            # Transcript the bridge malformed, not a sick backend
+                            # (issue #32): repair and retry the same backend.
+                            # A False repair means nothing changed, so retrying
+                            # would re-send identical bytes — fall through.
+                            if (
+                                attempt < max_attempts - 1
+                                and _is_thinking_roundtrip_error(upstream.status, error_body)
+                                and _repair_thinking_roundtrip(
+                                    upstream_body,
+                                    native=self._active_provider.upstream_wire_is_messages_api,
+                                )
+                            ):
+                                self._thinking_repair_backends.add(self._current_backend_idx)
+                                logger.warning(
+                                    "Backend rejected the transcript's thinking round-trip (status %d) "
+                                    "— repaired and retrying the same backend (attempt %d/%d)",
+                                    upstream.status,
+                                    attempt + 1,
+                                    max_attempts,
+                                )
                                 continue
 
                             retryable = self._should_retry_stream(upstream.status, error_body)
@@ -2924,7 +3130,7 @@ class BridgeServer:
                                     self._active_provider.normalize_request(cc_request)
                                     url = self._build_upstream_url()
                                     headers = self._build_upstream_headers()
-                                    upstream_body = self._active_provider.translate_to_upstream(cc_request)
+                                    upstream_body = self._upstream_body_for(cc_request)
                                     logger.info(
                                         "Messages stream failover: attempt %d/%d (status %d), switching backend",
                                         attempt + 1,
@@ -3096,7 +3302,7 @@ class BridgeServer:
                                 self._active_provider.normalize_request(cc_request)
                                 url = self._build_upstream_url()
                                 headers = self._build_upstream_headers()
-                                upstream_body = self._active_provider.translate_to_upstream(cc_request)
+                                upstream_body = self._upstream_body_for(cc_request)
                                 logger.info(
                                     "Messages stream in-stream error (no output yet): attempt %d/%d, switching backend",
                                     attempt + 1,
@@ -3140,7 +3346,7 @@ class BridgeServer:
                                     self._active_provider.normalize_request(cc_request)
                                     url = self._build_upstream_url()
                                     headers = self._build_upstream_headers()
-                                    upstream_body = self._active_provider.translate_to_upstream(cc_request)
+                                    upstream_body = self._upstream_body_for(cc_request)
                                     logger.info(
                                         "Messages stream empty response: attempt %d/%d, switching backend",
                                         attempt + 1,
@@ -3165,7 +3371,7 @@ class BridgeServer:
                                         self._active_provider.normalize_request(cc_request)
                                         url = self._build_upstream_url()
                                         headers = self._build_upstream_headers()
-                                        upstream_body = self._active_provider.translate_to_upstream(cc_request)
+                                        upstream_body = self._upstream_body_for(cc_request)
                                         retried = True
                                 else:
                                     logger.warning(
@@ -3223,7 +3429,7 @@ class BridgeServer:
                                     self._active_provider.normalize_request(cc_request)
                                     url = self._build_upstream_url()
                                     headers = self._build_upstream_headers()
-                                    upstream_body = self._active_provider.translate_to_upstream(cc_request)
+                                    upstream_body = self._upstream_body_for(cc_request)
                                     logger.info(
                                         "Streaming failover: backend attempt %d/%d failed (%s), switching backend",
                                         attempt + 1,
@@ -5583,6 +5789,33 @@ class BridgeServer:
         path = self._active_provider.get_upstream_path(model)
         return f"{base}{path}"
 
+    def _upstream_body_for(self, cc_request: dict) -> dict:
+        """Serialize ``cc_request`` for the backend currently selected.
+
+        Wraps :meth:`ProviderAdapter.translate_to_upstream` with the one piece
+        of per-backend shaping the bridge owns: a backend that has already
+        rejected this session's transcript for a thinking round-trip mismatch
+        gets the carrier added before the request goes out, instead of
+        rediscovering the mismatch at the cost of one rejected round-trip per
+        turn (issue #32).
+
+        Every re-serialization inside a handler must go through here, because
+        the shaping is a property of the *selected backend*: a failover that
+        re-serializes with ``translate_to_upstream`` directly would carry the
+        previous backend's carrier to a sibling that never asked for it.
+
+        Args:
+            cc_request: The normalized request. Never modified — the carrier is
+                written to the returned body only.
+
+        Returns:
+            The dict to send as the upstream JSON body.
+        """
+        upstream_body = self._active_provider.translate_to_upstream(cc_request)
+        if self._current_backend_idx in self._thinking_repair_backends:
+            _repair_thinking_roundtrip(upstream_body, native=self._active_provider.upstream_wire_is_messages_api)
+        return upstream_body
+
     def _build_upstream_headers(self) -> dict[str, str]:
         provider = self._active_provider
         # Providers that route to different endpoints per model may need
@@ -5615,7 +5848,7 @@ class BridgeServer:
 
         url = self._build_upstream_url()
         headers = self._build_upstream_headers()
-        upstream_body = self._active_provider.translate_to_upstream(cc_request)
+        upstream_body = self._upstream_body_for(cc_request)
 
         request_timeout = aiohttp.ClientTimeout(total=None, sock_connect=30, sock_read=_STREAM_READ_TIMEOUT)
 

@@ -70,6 +70,16 @@ class AnthropicAdapter(ProviderAdapter):
     def upstream_path(self) -> str:
         return "/v1/messages"
 
+    @property
+    def upstream_wire_is_messages_api(self) -> bool:
+        """Always True — every path through ``translate_to_upstream`` emits Messages API.
+
+        Subclasses either forward a native Messages body unchanged or fall back
+        to this class's Chat Completions → Messages translation, so the wire
+        shape does not depend on ``_native_messages_request``.
+        """
+        return True
+
     # ── Auth headers ─────────────────────────────────────────────────────
 
     def build_upstream_headers(self, api_key: str) -> dict[str, str]:
