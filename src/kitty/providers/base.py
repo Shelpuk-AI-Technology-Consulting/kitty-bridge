@@ -255,6 +255,22 @@ class ProviderAdapter(ABC):
         return False
 
     @property
+    def upstream_wire_is_messages_api(self) -> bool:
+        """Whether ``translate_to_upstream`` emits an Anthropic Messages body.
+
+        Distinct from :attr:`use_native_messages`, which says whether the
+        bridge may skip its own translation layer.  This one describes the
+        shape that actually goes on the wire, and the two can disagree: an
+        Anthropic-wire adapter whose ``_native_messages_request`` flag was
+        cleared (by the bridge's ``tool_use`` format fallback) still emits an
+        Anthropic body, built from the Chat Completions request.
+
+        Anything shaping the serialized body — notably the bridge's thinking
+        round-trip repair — must branch on this, never on the request flag.
+        """
+        return False
+
+    @property
     def use_custom_transport(self) -> bool:
         """Whether this provider handles its own HTTP transport.
 
