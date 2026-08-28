@@ -266,6 +266,45 @@ class TestRepairThinkingRoundtripNative:
         assert _repair_thinking_roundtrip({"model": "x"}, native=True) is False
 
 
+class TestRepairLeavesUnrepairableBodiesAlone:
+    """Convergence guards — anything the carrier cannot attach to reports no change."""
+
+    def test_assistant_without_usable_content_reports_no_change(self):
+        """A message the carrier cannot attach to must not be reported as changed.
+
+        The caller retries only on a change, so a message reported as changed
+        on every pass would retry forever.  Falling through to the normal
+        failover path is the correct outcome here.
+        """
+        body = {"messages": [{"role": "assistant", "content": None}]}
+        assert _repair_thinking_roundtrip(body, native=True) is False
+        assert body["messages"] == [{"role": "assistant", "content": None}]
+
+    def test_body_without_messages_reports_no_change(self):
+        """A Gemini-shaped body must pass through untouched.
+
+        One bridge server can register all four protocol routes, so a backend
+        in the sticky set may serialize a Gemini body, which has ``contents``
+        rather than ``messages``.
+        """
+        body = {"contents": [{"role": "model", "parts": [{"text": "hi"}]}]}
+        before = copy.deepcopy(body)
+        assert _repair_thinking_roundtrip(body, native=True) is False
+        assert body == before
+
+    def test_partial_repair_still_reports_change(self):
+        """One repairable turn beside an unrepairable one still earns a retry."""
+        body = {
+            "messages": [
+                {"role": "assistant", "content": None},
+                {"role": "assistant", "content": [{"type": "text", "text": "hi"}]},
+            ]
+        }
+        assert _repair_thinking_roundtrip(body, native=True) is True
+        assert body["messages"][0] == {"role": "assistant", "content": None}
+        assert body["messages"][1]["content"][0] == {"type": "thinking", "thinking": ""}
+
+
 class TestRepairThinkingRoundtripChatCompletions:
     """AC-2.3 on Chat-Completions-shaped bodies."""
 

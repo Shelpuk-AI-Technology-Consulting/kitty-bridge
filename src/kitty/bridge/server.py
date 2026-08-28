@@ -314,6 +314,60 @@ def _is_thinking_roundtrip_error(status: int, body: object) -> bool:
     return any(all(token in searchable for token in tokens) for tokens in _THINKING_ROUNDTRIP_PATTERNS)
 
 
+def _with_thinking_carrier(msg: dict, *, native: bool) -> dict | None:
+    """Return a copy of an assistant message carrying the thinking carrier.
+
+    Adds the empty carrier the target's thinking mode requires: a leading
+    ``{"type": "thinking", "thinking": ""}`` content block on the Anthropic
+    wire, a ``reasoning_content`` field on the Chat Completions wire.  The
+    block goes first because the Messages API requires reasoning to precede
+    text in an assistant turn.
+
+    Returns ``None`` — meaning "already satisfied, nothing to do" — for a
+    message that carries a thinking block or a ``reasoning_content`` already,
+    and for one whose ``content`` is neither a list nor a string, which is not
+    a shape the carrier can be attached to.  That is what makes the repair
+    converge: the caller retries only on a change, so a message reported as
+    changed on every pass would retry forever.
+
+    On the Chat Completions side the test is ``is None`` rather than the
+    ``not in`` used by :meth:`ProviderAdapter._inject_empty_reasoning_content`.
+    The two are deliberately different: that helper runs proactively during
+    serialization, while this one runs after it and must treat an explicit
+    ``None`` as still needing repair, yet leave an already-written ``""``
+    alone.  Do not unify them — convergence depends on this asymmetry.
+
+    Args:
+        msg: The assistant message to inspect. Never modified.
+        native: True when the enclosing body is an Anthropic Messages body,
+            False when it is a Chat Completions body.
+
+    Returns:
+        A new message dict with the carrier added, or None when the message
+        already satisfies the contract or cannot carry one.
+    """
+    if not native:
+        if msg.get("reasoning_content") is not None:
+            return None
+        return {**msg, "reasoning_content": ""}
+
+    content = msg.get("content")
+    if isinstance(content, list):
+        if any(isinstance(block, dict) and block.get("type") == "thinking" for block in content):
+            return None
+        return {**msg, "content": [dict(_THINKING_CARRIER_BLOCK), *content]}
+
+    if isinstance(content, str):
+        # A string-content turn needs the block form to carry thinking; the
+        # text survives as an explicit text block.
+        blocks: list[dict] = [dict(_THINKING_CARRIER_BLOCK)]
+        if content:
+            blocks.append({"type": "text", "text": content})
+        return {**msg, "content": blocks}
+
+    return None
+
+
 def _repair_thinking_roundtrip(body: dict, *, native: bool) -> bool:
     """Give every assistant turn the thinking carrier its target requires.
 
@@ -336,12 +390,16 @@ def _repair_thinking_roundtrip(body: dict, *, native: bool) -> bool:
 
     The dialect is passed in rather than inferred, because
     ``{"role": "assistant", "content": "..."}`` is valid in both and guessing
-    would silently write the wrong carrier for one of them.
+    would silently write the wrong carrier for one of them.  It must come from
+    the adapter's :attr:`ProviderAdapter.upstream_wire_is_messages_api`, not
+    from ``_native_messages_request`` — see :meth:`BridgeServer._upstream_body_for`.
 
     Changed messages are **copied**, not edited in place, and ``messages`` is
     replaced with a new list.  ``translate_to_upstream`` returns a shallow copy
     whose ``messages`` list is ``cc_request``'s own, so editing a message would
     reach back into the request that the next attempt re-serializes.
+
+    Per-message rewriting lives in :func:`_with_thinking_carrier`.
 
     Args:
         body: The outgoing upstream body.  Its ``messages`` key is rebound when
@@ -362,39 +420,12 @@ def _repair_thinking_roundtrip(body: dict, *, native: bool) -> bool:
     repaired = messages.copy()
     changed = False
     for index, msg in enumerate(messages):
-        # The contract binds assistant turns only; user, system and tool
-        # messages carry no reasoning to pass back.
+        # The contract binds assistant turns only.
         if not isinstance(msg, dict) or msg.get("role") != "assistant":
             continue
-
-        if not native:
-            # Chat Completions: a missing sibling field is the gap.  Tested for
-            # absence rather than falsiness so an already-repaired ``""`` is not
-            # reported as a change — the caller retries on a change, and a
-            # repair that never converges would retry forever.  Deliberately
-            # `is None` rather than the `not in` used by the sibling helper
-            # ``ProviderAdapter._inject_empty_reasoning_content``, which runs
-            # proactively during serialization: an explicit ``None`` reaches
-            # this path already serialized and still needs repairing.  Do not
-            # "unify" the two — the convergence guarantee depends on this one.
-            if msg.get("reasoning_content") is None:
-                repaired[index] = {**msg, "reasoning_content": ""}
-                changed = True
-            continue
-
-        content = msg.get("content")
-        if isinstance(content, list):
-            if any(isinstance(b, dict) and b.get("type") == "thinking" for b in content):
-                continue
-            repaired[index] = {**msg, "content": [dict(_THINKING_CARRIER_BLOCK), *content]}
-            changed = True
-        elif isinstance(content, str):
-            # A string-content turn still needs the block form to carry
-            # thinking; the text survives as an explicit text block.
-            blocks: list[dict] = [dict(_THINKING_CARRIER_BLOCK)]
-            if content:
-                blocks.append({"type": "text", "text": content})
-            repaired[index] = {**msg, "content": blocks}
+        carrier = _with_thinking_carrier(msg, native=native)
+        if carrier is not None:
+            repaired[index] = carrier
             changed = True
 
     if changed:
@@ -3062,23 +3093,10 @@ class BridgeServer:
                                 upstream_body = self._upstream_body_for(cc_request)
                                 continue
 
-                            # Thinking round-trip mismatch — this backend needs
-                            # every assistant turn of the replayed transcript to
-                            # carry its reasoning, and the turns were authored by
-                            # a provider that emits none (the cross-family
-                            # failover of issue #32).  The request the bridge
-                            # built is at fault, not the backend, so repair it
-                            # and retry the SAME backend: no health penalty, no
-                            # failover slot spent.  The repair is applied to the
-                            # outgoing body, so it binds to this backend only;
-                            # a later failover re-serializes from cc_request and
-                            # the sibling never sees a fabricated carrier.  A
-                            # False means the body already carries the carrier
-                            # (the provider adapter injected it) and retrying
-                            # would re-send identical bytes — fall through
-                            # instead.  The attempt guard comes first to skip a
-                            # pointless repair-and-log on an attempt that will
-                            # not be retried anyway.
+                            # Transcript the bridge malformed, not a sick backend
+                            # (issue #32): repair and retry the same backend.
+                            # A False repair means nothing changed, so retrying
+                            # would re-send identical bytes — fall through.
                             if (
                                 attempt < max_attempts - 1
                                 and _is_thinking_roundtrip_error(upstream.status, error_body)
