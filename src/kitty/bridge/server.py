@@ -41,6 +41,7 @@ from kitty.bridge.responses.events import (
     format_error_event as responses_format_error,
 )
 from kitty.bridge.responses.translator import ResponsesTranslator
+from kitty.bridge.tool_audit import AUDIT_MARKER, ToolUseAuditor, collect_tool_schemas, report_tool_use
 from kitty.cloudflare import is_cloudflare_block
 from kitty.egress import EgressConfig, should_bypass
 from kitty.providers.base import ProviderAdapter, ProviderError
@@ -978,6 +979,12 @@ class BridgeServer:
         self._stats_retries = 0
         self._stats_all_unhealthy = 0
         self._stats_backend_attempts: dict[int, int] = {}
+        # Malformed tool_use responses per backend index (issue #33).  Counted
+        # rather than only logged because the WARNING reaches a handler only
+        # under --debug, and the point of the ask is to distinguish "200 but
+        # garbage" from "200 and clean" in an ordinary run.  Counting only —
+        # it never influences health, cooldown or routing.
+        self._stats_malformed_tool_use: dict[int, int] = {}
         self._stats_models: dict[str, dict[str, int]] = {}
         self._started_at: str | None = None
 
@@ -1621,6 +1628,7 @@ class BridgeServer:
                         "healthy": health["healthy"],
                         "remaining_cooldown": remaining,
                         "cooldown_events": health.get("failure_count", 0),
+                        "malformed_tool_use": self._stats_malformed_tool_use.get(idx, 0),
                     }
                 )
         else:
@@ -1636,6 +1644,7 @@ class BridgeServer:
                     "healthy": True,
                     "remaining_cooldown": 0,
                     "cooldown_events": 0,
+                    "malformed_tool_use": self._stats_malformed_tool_use.get(-1, 0),
                 }
             )
         return {
@@ -1653,9 +1662,65 @@ class BridgeServer:
             "failovers": self._stats_failovers,
             "retries": self._stats_retries,
             "all_backends_unhealthy": self._stats_all_unhealthy,
+            "malformed_tool_use": sum(self._stats_malformed_tool_use.values()),
             "models_served": {model: dict(record) for model, record in self._stats_models.items()},
             "backends": backends,
         }
+
+    def _record_malformed_tool_use(self) -> None:
+        """Count one malformed ``tool_use`` against the serving backend.
+
+        Surfaced by ``GET /stats`` and the shutdown summary so the signal
+        survives a run without ``--debug``, where the auditor's WARNING reaches
+        no handler. Diagnostics only: never consulted for health or routing.
+        """
+        idx = self._current_backend_idx
+        self._stats_malformed_tool_use[idx] = self._stats_malformed_tool_use.get(idx, 0) + 1
+
+    def _backend_label(self) -> str:
+        """Return a short identifier for the backend currently serving.
+
+        Used to point a diagnostic warning at a specific pool member, which is
+        the difference between "something returned garbage" and "this profile
+        returned garbage" when a balancing pool is in play.
+
+        Returns:
+            The profile name in balancing mode, otherwise the provider type.
+        """
+        idx = self._current_backend_idx
+        if self._backends and 0 <= idx < len(self._backends):
+            return str(self._backends[idx][2].name)
+        return str(getattr(self._active_provider, "provider_type", type(self._active_provider).__name__))
+
+    def _audit_response_tool_use(self, result: object, schemas: dict[str, dict]) -> None:
+        """Report every ``tool_use`` block in a non-streaming Messages response.
+
+        The streaming paths assemble their blocks incrementally; a complete
+        response already carries them, so this only has to walk ``content``.
+
+        Args:
+            result: The Messages API response body being returned to the client.
+            schemas: Declared tool schemas from :func:`collect_tool_schemas`.
+        """
+        try:
+            if not isinstance(result, dict):
+                return
+            content = result.get("content")
+            if not isinstance(content, list):
+                return
+            backend = self._backend_label()
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "tool_use":
+                    report_tool_use(
+                        block.get("name", ""),
+                        block.get("input"),
+                        schemas,
+                        backend=backend,
+                        on_anomaly=self._record_malformed_tool_use,
+                    )
+        except Exception as exc:
+            # Diagnostics must never break a response that is otherwise fine.
+            logger.debug("%s auditing failed, continuing: %s: %s", AUDIT_MARKER, type(exc).__name__, exc)
 
     def _log_backend_selection(self) -> None:
         """Log diagnostic info about the currently selected backend."""
@@ -2741,6 +2806,7 @@ class BridgeServer:
                 result = cc_response
             else:
                 result = translator.translate_response(cc_response, context=self._empty_response_context())
+            self._audit_response_tool_use(result, collect_tool_schemas(body))
             self._log_usage(cc_response.get("usage"))
             if self._backends and self._current_backend_idx >= 0:
                 self._mark_backend_healthy(self._current_backend_idx)
@@ -2771,6 +2837,9 @@ class BridgeServer:
     ) -> web.StreamResponse:
         message_id = f"msg_{uuid.uuid4().hex[:24]}"
         model = cc_request.get("model", body.get("model", ""))
+        # The client's own tool declarations are the only ground truth for what
+        # shape a returned tool_use should have (issue #33).
+        tool_schemas = collect_tool_schemas(body)
 
         logger.debug("═══ STREAM MESSAGES START ═══ message_id=%s model=%s", message_id, model)
 
@@ -2906,6 +2975,10 @@ class BridgeServer:
                         "Translated Messages API result: %s",
                         json.dumps(result, ensure_ascii=False)[:2000],
                     )
+                    # The custom transport builds its blocks here rather than
+                    # streaming them, so it is audited from the finished result
+                    # instead of at the write boundary (issue #33).
+                    self._audit_response_tool_use(result, tool_schemas)
 
                     msg_id = result.get("id", message_id)
                     model = result.get("model", "")
@@ -3156,11 +3229,26 @@ class BridgeServer:
 
                         # Success path — stream the response
                         if self._active_provider.use_native_messages:
-                            # Native Messages: forward raw SSE bytes to client
-                            async for chunk_bytes in upstream.content:
-                                s = await _ensure_prepared()
-                                await s.write(chunk_bytes)
-                                events_emitted = True
+                            # Native Messages: forward raw SSE bytes to client.
+                            # The auditor reads the same bytes so the forwarded
+                            # tool_use inputs are recoverable from our own log
+                            # (issue #33); it never alters what is written.
+                            auditor = ToolUseAuditor(
+                                tool_schemas,
+                                backend=self._backend_label(),
+                                on_anomaly=self._record_malformed_tool_use,
+                            )
+                            try:
+                                async for chunk_bytes in upstream.content:
+                                    s = await _ensure_prepared()
+                                    await s.write(chunk_bytes)
+                                    auditor.feed(chunk_bytes)
+                                    events_emitted = True
+                            finally:
+                                # Bytes already reached the client even if the
+                                # iteration raised, so the partial tool_use is
+                                # still worth reporting.
+                                auditor.finish()
                             stream_ok = True
                             break
 
@@ -3170,6 +3258,14 @@ class BridgeServer:
                         events_emitted = False
                         chunk_count = 0
                         finish_events: list[str] = []  # buffered finish events
+                        # Fed the Messages-API events we emit, so the translated
+                        # path is audited by the same assembler as the native one
+                        # (issue #33).  Per attempt: a failover resets the stream.
+                        auditor = ToolUseAuditor(
+                            tool_schemas,
+                            backend=self._backend_label(),
+                            on_anomaly=self._record_malformed_tool_use,
+                        )
                         async for chunk_bytes in upstream.content:
                             if done:
                                 break
@@ -3218,7 +3314,9 @@ class BridgeServer:
                                     else:
                                         for event in events:
                                             s = await _ensure_prepared()
-                                            await s.write(event.encode())
+                                            encoded = event.encode()
+                                            await s.write(encoded)
+                                            auditor.feed(encoded)
                                             events_emitted = True
 
                         logger.debug("Upstream stream ended. chunks=%d done=%s", chunk_count, done)
@@ -3238,7 +3336,9 @@ class BridgeServer:
                                         else:
                                             for event in events:
                                                 s = await _ensure_prepared()
-                                                await s.write(event.encode())
+                                                encoded = event.encode()
+                                                await s.write(encoded)
+                                                auditor.feed(encoded)
                                     except json.JSONDecodeError:
                                         logger.warning("Failed to parse flushed SSE data: %s", data_str[:200])
 
@@ -3262,7 +3362,9 @@ class BridgeServer:
                             try:
                                 s = await _ensure_prepared()
                                 for event in translator.finalize_interrupted_stream():
-                                    await s.write(event.encode())
+                                    encoded = event.encode()
+                                    await s.write(encoded)
+                                    auditor.feed(encoded)
                             except (
                                 ConnectionResetError,
                                 BrokenPipeError,
@@ -3272,6 +3374,9 @@ class BridgeServer:
                                     "Client disconnected before interrupted stream finalization for %s",
                                     message_id,
                                 )
+                            # A truncated stream is exactly when a half-delivered
+                            # tool_use is worth seeing, so audit before leaving.
+                            auditor.finish()
                             break
 
                         # Handle in-stream error failover
@@ -3283,7 +3388,9 @@ class BridgeServer:
                                 try:
                                     s = await _ensure_prepared()
                                     for event in translator.finalize_interrupted_stream():
-                                        await s.write(event.encode())
+                                        encoded = event.encode()
+                                        await s.write(encoded)
+                                        auditor.feed(encoded)
                                 except (
                                     ConnectionResetError,
                                     BrokenPipeError,
@@ -3293,6 +3400,7 @@ class BridgeServer:
                                         "Client disconnected before interrupted stream finalization for %s",
                                         message_id,
                                     )
+                                auditor.finish()
                                 break
                             elif attempt < max_attempts - 1:
                                 translator.reset()
@@ -3402,7 +3510,10 @@ class BridgeServer:
                         # Write buffered finish events to client
                         s = await _ensure_prepared()
                         for event in finish_events:
-                            await s.write(event.encode())
+                            encoded = event.encode()
+                            await s.write(encoded)
+                            auditor.feed(encoded)
+                        auditor.finish()
                         self._log_usage(last_usage)
                         stream_ok = True
                         break  # Exit retry loop

@@ -355,6 +355,12 @@ their token totals, how many times a request switched backend (`failovers`), and
 (`all_backends_unhealthy`). Like `/healthz`, it is readable without credentials unless a keys file is configured — and
 `kitty claude` deliberately runs without one.
 
+`malformed_tool_use` counts responses where an upstream returned `200 OK` with a `tool_use` whose `input` contradicts
+the schema the client declared for that tool — the shape a client-side validator then rejects. It is reported per
+backend and as a session total, so a pool member returning well-formed-looking garbage is visible without re-running
+under `--debug`. It is a diagnostic only: it never marks a backend unhealthy or triggers failover. Run with `--debug`
+and `grep 'tool_use audit:'` for the offending payloads.
+
 **After the run.** `--session-summary PATH` (or `KITTY_SESSION_SUMMARY`) writes the same document to a file when the
 bridge shuts down — a small artifact CI can upload, instead of a multi-megabyte debug log:
 

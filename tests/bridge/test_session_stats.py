@@ -380,6 +380,7 @@ class TestBackendDescription:
                 "healthy": True,
                 "remaining_cooldown": 0,
                 "cooldown_events": 0,
+                "malformed_tool_use": 0,
             }
         ]
 
