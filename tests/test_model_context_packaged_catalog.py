@@ -14,6 +14,11 @@ Verified sources (2026-08, via Kindly Web Search):
   ("1,048,576-token context window").
 - ``glm-5.3``: z.ai GLM-5.3 blog ("1M-token context window"), OpenRouter
   ``z-ai/glm-5.3`` ("1,048,576 token context window").
+- ``glm-5.3-flash``: Z.AI developer docs
+  (https://docs.z.ai/guides/vlm/glm-5.3-flash) — "Context Length: 1M", and
+  "Text parameters are consistent with GLM-5.3, with support for a 1M-token
+  context window". Absent from model_metadata.json, so without this entry it
+  falls back to DEFAULT_CONTEXT_TOKENS (200k) — a five-fold under-estimate.
 - ``glm-5.2``: OpenRouter ``z-ai/glm-5.2`` = 1,048,576.
 - ``deepseek-v4-flash``: OpenRouter ``deepseek/deepseek-v4-flash`` FAQ
   ("1,048,576 token context window") for the canonical API name.
@@ -29,6 +34,7 @@ EXPECTED_CATALOG: dict[str, int] = {
     "qwen3.8-max": 1_000_000,
     "MiniMax-M3": 1_048_576,
     "glm-5.3": 1_048_576,
+    "glm-5.3-flash": 1_048_576,
     "glm-5.2": 1_048_576,
     "deepseek-v4-flash": 1_048_576,
 }
@@ -88,6 +94,7 @@ class TestPackagedCatalogSuffixSpelling:
             ("qwen/qwen3.8-max", 1_000_000),
             ("minimax/MiniMax-M3", 1_048_576),
             ("z-ai/glm-5.3", 1_048_576),
+            ("z-ai/glm-5.3-flash", 1_048_576),
             ("z-ai/glm-5.2", 1_048_576),
             ("deepseek/deepseek-v4-flash", 1_048_576),
         ],
