@@ -326,6 +326,50 @@ class TestAuditorIsTotal:
         warnings = [r for r in caplog.records if r.levelno == logging.WARNING and r.name == AUDIT_LOGGER]
         assert len(warnings) == 2, [r.getMessage() for r in warnings]
 
+    def test_a_large_chunk_of_complete_lines_does_not_disable(self):
+        """The line bound is for an *unterminated* line, not for volume.
+
+        Checking the whole buffer before draining would disable the auditor on
+        one big chunk of perfectly good SSE — and then silently miss every tool
+        call in the rest of the response.
+        """
+        auditor = ToolUseAuditor({}, backend="b")
+        filler = b"".join(
+            _sse("content_block_delta", {"type": "content_block_delta", "index": 9, "delta": {}})
+            for _ in range(20000)
+        )
+        assert len(filler) > _MAX_LINE_BYTES // 8, "filler should be substantial"
+
+        auditor.feed(filler * 8)
+        auditor.feed(_tool_use_stream("Read", '{"path":"a.py"}'))
+        auditor.finish()
+
+        assert auditor._disabled is False
+
+    def test_tool_use_after_a_long_text_stream_is_still_detected(self, caplog):
+        """The cheap pre-filter must not hide a tool call that comes later.
+
+        Events are skipped without parsing only while no block is open, so a
+        turn that talks for a long time and then calls a tool must still be
+        caught.
+        """
+        auditor = ToolUseAuditor({"StructuredOutput": STRUCTURED_OUTPUT_SCHEMA}, backend="b")
+        chatter = b"".join(
+            _sse(
+                "content_block_delta",
+                {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "hello "}},
+            )
+            for _ in range(500)
+        )
+
+        with caplog.at_level(logging.WARNING, logger=AUDIT_LOGGER):
+            auditor.feed(chatter)
+            auditor.feed(_tool_use_stream("StructuredOutput", '{"result":{"findings":[],"conversation_notes":"x"}}', 1))
+            auditor.finish()
+
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING and r.name == AUDIT_LOGGER]
+        assert len(warnings) == 1, [r.getMessage() for r in warnings]
+
     def test_line_buffer_bound_disables_the_auditor(self, caplog):
         """FR-5 — an upstream that never sends a newline must not grow it forever."""
         auditor = ToolUseAuditor({}, backend="b")

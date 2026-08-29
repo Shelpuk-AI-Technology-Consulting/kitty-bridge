@@ -35,6 +35,7 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Callable
+from dataclasses import dataclass, field
 
 __all__ = [
     "AUDIT_MARKER",
@@ -107,6 +108,25 @@ def collect_tool_schemas(messages_request: dict) -> dict[str, dict]:
         if isinstance(name, str) and isinstance(schema, dict):
             schemas[name] = schema
     return schemas
+
+
+@dataclass
+class _OpenBlock:
+    """A ``tool_use`` content block whose input is still being assembled.
+
+    Attributes:
+        name: The tool's name, from ``content_block_start``.
+        fragments: ``input_json_delta`` payloads in arrival order.
+        size: Total characters buffered, kept alongside so the bound check
+            does not re-join the fragments on every delta.
+        seeded: A non-empty ``input`` present on ``content_block_start``, used
+            only when no deltas follow.
+    """
+
+    name: str
+    fragments: list[str] = field(default_factory=list)
+    size: int = 0
+    seeded: dict | None = None
 
 
 def _summarize_keys(keys: list[str], limit: int = 10) -> str:
@@ -250,7 +270,10 @@ def report_tool_use(
             count it somewhere an operator will see without ``--debug``.
     """
     # Full input at DEBUG only — the debug log is opt-in and file-backed.
-    logger.debug("%s name=%s input=%s", AUDIT_MARKER, name, _render(tool_input))
+    # Guarded because _render serialises the whole input, which is wasted work
+    # on every request when the debug log is off (the common case).
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug("%s name=%s input=%s", AUDIT_MARKER, name, _render(tool_input))
 
     anomaly = describe_tool_input_anomaly(name, tool_input, schemas.get(name))
     if anomaly is None:
@@ -331,7 +354,7 @@ class ToolUseAuditor:
         self._on_anomaly = on_anomaly
         self._line_buffer = bytearray()
         # Open tool_use blocks by content-block index.
-        self._open: dict[int, dict] = {}
+        self._open: dict[int, _OpenBlock] = {}
         self._disabled = False
 
     def feed(self, chunk: bytes) -> None:
@@ -370,7 +393,10 @@ class ToolUseAuditor:
         """
         self._disabled = True
         self._open.clear()
-        self._line_buffer = bytearray()
+        # Cleared in place rather than rebound: `_feed` holds a local alias to
+        # this bytearray while draining, and rebinding would leave it mutating
+        # an orphan.
+        self._line_buffer.clear()
         logger.debug("%s auditing failed, disabled for this response: %s", AUDIT_MARKER, reason)
 
     def _feed(self, chunk: bytes) -> None:
@@ -380,26 +406,51 @@ class ToolUseAuditor:
             chunk: Raw bytes, exactly as written downstream.
         """
         self._line_buffer.extend(chunk)
-        if len(self._line_buffer) > _MAX_LINE_BYTES:
-            self._disable(f"SSE line exceeded {_MAX_LINE_BYTES} bytes")
-            return
-        while b"\n" in self._line_buffer:
-            raw_line, _, rest = bytes(self._line_buffer).partition(b"\n")
-            self._line_buffer = bytearray(rest)
-            line = raw_line.decode("utf-8", errors="replace").strip()
-            # Cheap pre-check: most lines are `event:` or blank, and skipping
-            # them avoids a JSON parse per line.
-            if not line.startswith("data:"):
+
+        start = 0
+        buffer = self._line_buffer
+        while (newline := buffer.find(b"\n", start)) != -1:
+            raw_line = buffer[start:newline]
+            start = newline + 1
+            # Match on bytes before decoding: most lines are `event:` or blank,
+            # and decoding them only to discard them is the bulk of the work on
+            # a path that previously did no parsing at all.
+            if not raw_line.startswith(b"data:"):
                 continue
-            payload = line[5:].strip()
-            if not payload or payload == "[DONE]":
+            payload = raw_line[5:].strip()
+            if not payload or payload == b"[DONE]":
+                continue
+            # With no block open, the only event that can matter is the
+            # `content_block_start` that opens one, and its payload always
+            # carries the literal `tool_use`. A substring scan is far cheaper
+            # than a JSON parse, and it skips every event of a turn that never
+            # calls a tool — which is most of them. Once a block is open every
+            # event is parsed, because deltas and stops both matter and both
+            # need their index read.
+            if not self._open and b"tool_use" not in payload:
                 continue
             try:
-                event = json.loads(payload)
+                event = json.loads(payload.decode("utf-8", errors="replace"))
             except json.JSONDecodeError:
                 continue
             if isinstance(event, dict):
                 self._handle(event)
+                # _handle can disable the auditor (an open-block flood), and
+                # the remaining lines in this chunk must not re-populate the
+                # state it just cleared.  Belt-and-braces: `_disable` also
+                # empties the buffer this loop is scanning, which terminates it
+                # anyway.  Stated explicitly because an earlier version relied
+                # on that coupling alone and broke the moment the drain stopped
+                # re-reading `self._line_buffer` each pass.
+                if self._disabled:
+                    return
+        del buffer[:start]
+
+        # Checked on the residual, after draining: the bound exists for a line
+        # that never terminates, and testing the whole buffer first would
+        # disable the auditor for one large chunk of perfectly good lines.
+        if len(self._line_buffer) > _MAX_LINE_BYTES:
+            self._disable(f"unterminated SSE line exceeded {_MAX_LINE_BYTES} bytes")
 
     def _handle(self, event: dict) -> None:
         """Track one Anthropic SSE event.
@@ -422,11 +473,10 @@ class ToolUseAuditor:
                     self._disable(f"more than {_MAX_OPEN_BLOCKS} open tool_use blocks")
                     return
                 seeded = block.get("input")
-                self._open[index] = {
-                    "name": block.get("name", ""),
-                    "args": [],
-                    "seeded": seeded if isinstance(seeded, dict) and seeded else None,
-                }
+                self._open[index] = _OpenBlock(
+                    name=str(block.get("name", "")),
+                    seeded=seeded if isinstance(seeded, dict) and seeded else None,
+                )
             return
 
         if event_type == "content_block_delta":
@@ -439,11 +489,11 @@ class ToolUseAuditor:
                 return
             partial = delta.get("partial_json")
             if isinstance(partial, str):
-                state["args"].append(partial)
-                state["size"] = state.get("size", 0) + len(partial)
+                state.fragments.append(partial)
+                state.size += len(partial)
                 # Abandon this block rather than the whole audit: a runaway
                 # tool call is still a stream the client is entitled to.
-                if state["size"] > _MAX_BUFFERED_ARG_CHARS:
+                if state.size > _MAX_BUFFERED_ARG_CHARS:
                     logger.debug("%s buffer exceeded for index %d, abandoning block", AUDIT_MARKER, index)
                     del self._open[index]
             return
@@ -463,13 +513,13 @@ class ToolUseAuditor:
         if state is None:
             return
 
-        text = "".join(state["args"])
+        text = "".join(state.fragments)
         if not text:
             # No deltas: either a shim that populated content_block_start, or
             # a genuinely argument-less tool call.
             report_tool_use(
-                state["name"],
-                state["seeded"] if state["seeded"] is not None else {},
+                state.name,
+                state.seeded if state.seeded is not None else {},
                 self._schemas,
                 backend=self._backend,
                 on_anomaly=self._on_anomaly,
@@ -485,7 +535,7 @@ class ToolUseAuditor:
             logger.warning(
                 "%s upstream tool_use %r arguments are not valid JSON (backend=%s, %d chars)",
                 AUDIT_MARKER,
-                state["name"],
+                state.name,
                 self._backend or "unknown",
                 len(text),
             )
@@ -494,7 +544,7 @@ class ToolUseAuditor:
             return
 
         report_tool_use(
-            state["name"],
+            state.name,
             tool_input,
             self._schemas,
             backend=self._backend,
