@@ -737,13 +737,13 @@ class TransportGrace:
         """Initialise an unstarted grace period.
 
         Args:
-            budget: Seconds of connection trouble to tolerate; defaults to
-                :data:`_TRANSPORT_GRACE_PERIOD`, read here rather than as a
-                default argument so the window stays adjustable. The clock
-                starts at the first :meth:`next_delay` call, not at
-                construction.
+            budget: Seconds of connection trouble to tolerate. ``None`` means
+                :data:`_TRANSPORT_GRACE_PERIOD`, read at first use like
+                :data:`_TRANSPORT_GRACE_DELAYS` so both knobs resolve at the
+                same moment. The clock starts at the first :meth:`next_delay`
+                call, not at construction.
         """
-        self._budget = _TRANSPORT_GRACE_PERIOD if budget is None else budget
+        self._budget = budget
         self._started_at: float | None = None
         self._retries = 0
 
@@ -768,7 +768,8 @@ class TransportGrace:
         now = time.monotonic()
         if self._started_at is None:
             self._started_at = now
-        remaining = self._budget - (now - self._started_at)
+        budget = _TRANSPORT_GRACE_PERIOD if self._budget is None else self._budget
+        remaining = budget - (now - self._started_at)
         if remaining <= 0:
             return None
         # Never sleep past the end of the window: the last retry lands on time.
@@ -3239,6 +3240,14 @@ class BridgeServer:
             # grace can use, and `attempt` counts only real backend attempts.
             for raw_attempt in range(max_attempts + len(_TRANSPORT_GRACE_DELAYS)):
                 attempt = raw_attempt - transport_grace.retries
+                # The extra iterations exist only to give grace retries back.
+                # Without this the loop could run past the last real attempt —
+                # a `continue` that does not check `attempt` (the tool_use
+                # format fallback) would then index off the end of
+                # _EMPTY_FINAL_DELAYS. Ending here keeps the pre-grace
+                # invariant: at most `max_attempts` real attempts.
+                if attempt >= max_attempts:
+                    break
                 if attempt >= _original_max_attempts:
                     delay = _EMPTY_FINAL_DELAYS[attempt - _original_max_attempts]
                     logger.warning(
@@ -3667,21 +3676,11 @@ class BridgeServer:
                 except Exception as exc:
                     if _is_retryable_exception(exc):
                         # Ride out a connection blip on the same backend before
-                        # spending its health on it (issue #38).  Only while
-                        # nothing has reached the client yet: once bytes are on
-                        # the wire a restart would duplicate them.
-                        if (
-                            _is_transport_error(exc)
-                            and sr is None
-                            and (grace_delay := transport_grace.next_delay()) is not None
-                        ):
-                            logger.warning(
-                                "Upstream connection blip (%s) on %s; retrying the same backend in %.1fs",
-                                type(exc).__name__,
-                                self._backend_label(),
-                                grace_delay,
-                            )
-                            await asyncio.sleep(grace_delay)
+                        # spending its health on it (issue #38).  `sr is None`
+                        # comes first so a drop that happened after the client
+                        # saw bytes does not spend grace it cannot use: once
+                        # bytes are on the wire a restart would duplicate them.
+                        if sr is None and await self._wait_out_transport_blip(exc, transport_grace):
                             translator.reset()
                             continue
                         # Bytes already reached the client, so a restart on any
@@ -4328,15 +4327,28 @@ class BridgeServer:
         marking failed backends as unhealthy.  Also retries empty responses
         across backends.
         """
+        # One window for the whole request, not one per upstream call: these
+        # helpers call _make_upstream_request once per backend, and a fresh
+        # grace each time would let a request spend 30s per backend.
+        grace = TransportGrace()
         if self._backends:
-            return await self._request_with_retry_balancing(cc_request)
-        return await self._request_with_retry_single(cc_request)
+            return await self._request_with_retry_balancing(cc_request, grace)
+        return await self._request_with_retry_single(cc_request, grace)
 
-    async def _request_with_retry_single(self, cc_request: dict) -> dict:
-        """Non-balancing retry: retry empty responses with backoff."""
+    async def _request_with_retry_single(self, cc_request: dict, grace: TransportGrace) -> dict:
+        """Non-balancing retry: retry empty responses with backoff.
+
+        Args:
+            cc_request: The request payload in CC format.
+            grace: The request's tolerance for upstream connection trouble,
+                opened once per request by :meth:`_request_with_retry`.
+
+        Returns:
+            The upstream response dict in CC format.
+        """
         max_attempts = len(_EMPTY_RETRY_DELAYS) + len(_EMPTY_FINAL_DELAYS) + 1
         for attempt in range(max_attempts):
-            cc_response = await self._make_upstream_request(cc_request)
+            cc_response = await self._make_upstream_request(cc_request, grace=grace)
             if not self._is_empty_cc_response(cc_response):
                 return cc_response
             if attempt < len(_EMPTY_RETRY_DELAYS):
@@ -4362,8 +4374,17 @@ class BridgeServer:
         logger.warning("Empty upstream response after %d attempts, returning fallback", max_attempts)
         return cc_response
 
-    async def _request_with_retry_balancing(self, cc_request: dict) -> dict:
-        """Balancing retry: failover across backends on errors or empty responses."""
+    async def _request_with_retry_balancing(self, cc_request: dict, grace: TransportGrace) -> dict:
+        """Balancing retry: failover across backends on errors or empty responses.
+
+        Args:
+            cc_request: The request payload in CC format.
+            grace: The request's tolerance for upstream connection trouble,
+                shared across every backend this request tries.
+
+        Returns:
+            The upstream response dict in CC format.
+        """
         assert self._backends is not None  # balancing mode only
         n_backends = len(self._backends)
         last_exc: UpstreamError | Exception | None = None
@@ -4391,7 +4412,7 @@ class BridgeServer:
                 self._active_provider.normalize_request(cc_request)
 
             try:
-                cc_response = await self._make_upstream_request(cc_request, retry_rate_limit=False)
+                cc_response = await self._make_upstream_request(cc_request, retry_rate_limit=False, grace=grace)
                 if not self._is_empty_cc_response(cc_response):
                     return cc_response
                 # Empty response — try next backend
@@ -4427,7 +4448,7 @@ class BridgeServer:
                     )
                     self._compact_with_tighter_budget(cc_request, factor=0.5)
                     try:
-                        cc_response = await self._make_upstream_request(cc_request, retry_rate_limit=False)
+                        cc_response = await self._make_upstream_request(cc_request, retry_rate_limit=False, grace=grace)
                         if not self._is_empty_cc_response(cc_response):
                             return cc_response
                         last_response = cc_response
@@ -4498,7 +4519,7 @@ class BridgeServer:
             self._normalize_model(cc_request)
             self._active_provider.normalize_request(cc_request)
             try:
-                cc_response = await self._make_upstream_request(cc_request, retry_rate_limit=False)
+                cc_response = await self._make_upstream_request(cc_request, retry_rate_limit=False, grace=grace)
             except UpstreamError as exc:
                 last_exc = exc
                 idx = self._current_backend_idx
@@ -6147,6 +6168,37 @@ class BridgeServer:
             return cast("dict[str, str]", provider.build_upstream_headers_for_model(self._active_key, model))  # type: ignore[attr-defined]  # optional provider hook
         return provider.build_upstream_headers(self._active_key)
 
+    async def _wait_out_transport_blip(self, exc: Exception, grace: TransportGrace) -> bool:
+        """Sleep out a connection blip, or report that the grace period is over.
+
+        The single place that decides whether a failure on the wire to the
+        provider is still worth another try on the same backend (issue #38).
+        Callers use the answer to choose between retrying and treating the
+        failure as a provider fault; they must not consult ``grace``
+        themselves, so the budget is spent in exactly one place.
+
+        Args:
+            exc: The failure being considered.
+            grace: The request's remaining tolerance for connection trouble.
+
+        Returns:
+            True when the caller should retry the same backend, False when the
+            failure has to be surfaced or charged to the backend's health.
+        """
+        if not _is_transport_error(exc):
+            return False
+        delay = grace.next_delay()
+        if delay is None:
+            return False
+        logger.warning(
+            "Upstream connection blip (%s) on %s; retrying the same backend in %.1fs",
+            type(exc).__name__,
+            self._backend_label(),
+            delay,
+        )
+        await asyncio.sleep(delay)
+        return True
+
     async def _open_upstream_stream(
         self,
         url: str,
@@ -6180,18 +6232,12 @@ class BridgeServer:
             try:
                 return await session.post(url, json=upstream_body, headers=headers, timeout=timeout)
             except Exception as exc:
-                grace_delay = grace.next_delay() if _is_transport_error(exc) else None
-                if grace_delay is None:
+                if not await self._wait_out_transport_blip(exc, grace):
                     raise
-                logger.warning(
-                    "Upstream connection blip (%s) on %s; retrying the same backend in %.1fs",
-                    type(exc).__name__,
-                    self._backend_label(),
-                    grace_delay,
-                )
-                await asyncio.sleep(grace_delay)
 
-    async def _make_upstream_request(self, cc_request: dict, *, retry_rate_limit: bool = True) -> dict:
+    async def _make_upstream_request(
+        self, cc_request: dict, *, retry_rate_limit: bool = True, grace: TransportGrace | None = None
+    ) -> dict:
         """Send a non-streaming request upstream.
 
         For providers with ``use_custom_transport=True``, delegates to the
@@ -6202,6 +6248,10 @@ class BridgeServer:
             cc_request: The request payload in CC format.
             retry_rate_limit: When False, 429 is not retried on this backend
                 (the caller handles failover instead).
+            grace: The request's tolerance for upstream connection trouble,
+                supplied by the caller so a request that tries several backends
+                shares one window instead of opening a fresh one per backend.
+                A new window is opened when omitted.
 
         Returns the upstream response dict (in CC format) on success.
         Raises UpstreamError(status, body) on non-retryable or exhausted failures.
@@ -6223,7 +6273,7 @@ class BridgeServer:
         # Connection blips get their own budget so they cannot eat the
         # status-retry attempts, and vice versa (issue #38).
         attempt = 0
-        transport_grace = TransportGrace()
+        transport_grace = TransportGrace() if grace is None else grace
         while True:
             session = await self._session_for(url)
             try:
@@ -6271,13 +6321,5 @@ class BridgeServer:
                 # A dropped connection to the provider is not yet a provider
                 # fault: retry it here rather than let the caller quarantine
                 # the backend on the strength of one blip.
-                grace_delay = transport_grace.next_delay() if _is_transport_error(exc) else None
-                if grace_delay is None:
+                if not await self._wait_out_transport_blip(exc, transport_grace):
                     raise
-                logger.warning(
-                    "Upstream connection blip (%s) on %s; retrying the same backend in %.1fs",
-                    type(exc).__name__,
-                    self._backend_label(),
-                    grace_delay,
-                )
-                await asyncio.sleep(grace_delay)

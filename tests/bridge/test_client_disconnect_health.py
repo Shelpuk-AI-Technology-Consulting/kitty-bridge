@@ -22,6 +22,7 @@ tests run against a local aiohttp server instead of ``aioresponses``.
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 import uuid
 from unittest.mock import patch
@@ -171,7 +172,10 @@ class _WriteFailer:
         self.fail_after = fail_after
         self.calls = 0
 
-    async def __call__(self, _self: web.StreamResponse, data: bytes = b"", *args, **kwargs) -> None:
+    async def __call__(self, *args, **kwargs) -> None:
+        # Patched onto the class as a plain instance, which is not a
+        # descriptor, so no `self` is bound and the arguments are whatever the
+        # caller passed. They are not needed: this only ever fails.
         self.calls += 1
         if self.calls > self.fail_after:
             raise aiohttp.ClientConnectionResetError("Cannot write to closing transport")
@@ -326,8 +330,13 @@ class TestClientDisconnectLeavesBackendsHealthy:
                     )
                 # Let the message_start / content_block deltas through, then die
                 # on the buffered finish events written after the upstream EOF.
-                with patch.object(web.StreamResponse, "write", _WriteFailer(fail_after=4)):
+                failer = _WriteFailer(fail_after=4)
+                with patch.object(web.StreamResponse, "write", failer):
                     await _post_stream(port)
+            assert failer.calls > failer.fail_after, (
+                "the stream produced too few events to reach the buffered finish events — "
+                "this test would otherwise silently degrade into the fail-on-first-write case"
+            )
             _assert_all_backends_untouched(server)
         finally:
             await server.stop_async()
@@ -573,39 +582,109 @@ class TestUpstreamAbortAfterBytesReachedTheClient:
             await runner.cleanup()
 
 
+class TestRetryLoopStaysBounded:
+    """Extending the Messages loop to hand grace retries back must not let it
+    run past its last real attempt — the empty-response schedule is indexed by
+    `attempt`, so an over-running loop indexes off the end of it."""
+
+    @pytest.mark.asyncio
+    async def test_upstream_errors_never_exceed_the_attempt_budget(self, short_grace):
+        server = _make_server(3)
+        port = await server.start_async()
+        max_attempts = (server_module._MAX_RETRIES + 1) * 3 + len(server_module._EMPTY_FINAL_DELAYS)
+        try:
+            with aioresponses(passthrough=["http://127.0.0.1"]) as m:
+                for i in range(3):
+                    m.post(f"https://api{i}.example.com/v1/chat/completions", status=500, body="boom", repeat=True)
+                body = await _post_stream(port)
+                posts = _count_posts(m)
+            assert posts <= max_attempts, f"{posts} upstream calls exceeds the {max_attempts}-attempt budget"
+            assert b"error" in body, "the agent should be told the request failed"
+        finally:
+            await server.stop_async()
+
+
+class TestGraceIsPerRequestNotPerBackend:
+    """The window covers a request, however many backends it touches."""
+
+    @pytest.mark.asyncio
+    async def test_non_streaming_shares_one_window_across_backends(self, short_grace, monkeypatch):
+        """`_request_with_retry` calls `_make_upstream_request` once per
+        backend; a fresh window per call would let one request spend the whole
+        tolerance three times over."""
+        windows: list[server_module.TransportGrace] = []
+        real_init = server_module.TransportGrace.__init__
+
+        def _track(self, *args, **kwargs):
+            real_init(self, *args, **kwargs)
+            windows.append(self)
+
+        monkeypatch.setattr(server_module.TransportGrace, "__init__", _track)
+
+        server = _make_server(3)
+        port = await server.start_async()
+        try:
+            with aioresponses(passthrough=["http://127.0.0.1"]) as m:
+                for i in range(3):
+                    m.post(
+                        f"https://api{i}.example.com/v1/chat/completions",
+                        exception=aiohttp.ClientConnectionResetError("blip"),
+                        repeat=True,
+                    )
+                async with (
+                    aiohttp.ClientSession() as session,
+                    session.post(
+                        f"http://127.0.0.1:{port}/v1/messages",
+                        json={
+                            "model": "test-model",
+                            "messages": [{"role": "user", "content": "hi"}],
+                            "max_tokens": 1024,
+                            "stream": False,
+                        },
+                        timeout=aiohttp.ClientTimeout(total=60),
+                    ) as resp,
+                ):
+                    await resp.read()
+            assert len(windows) == 1, f"expected one grace window for the request, got {len(windows)}"
+            assert windows[0].retries <= len(server_module._TRANSPORT_GRACE_DELAYS)
+        finally:
+            await server.stop_async()
+
+
 class TestGraceDoesNotSpendTheFailoverBudget:
     """A grace retry re-sends to the same backend, so it must not pull the
     empty-response schedule forward or consume a failover attempt."""
 
     @pytest.mark.asyncio
-    async def test_persistent_blip_does_not_reach_the_empty_response_retries(self, monkeypatch):
+    async def test_persistent_blip_does_not_reach_the_empty_response_retries(self, monkeypatch, caplog):
         """A single-backend profile hitting a dead upstream should spend its
-        grace and then fail — not also sit through the empty-response delays."""
+        grace and then fail — not also sit through the empty-response delays,
+        which are for a backend that answered with nothing, not one that never
+        answered at all.
+
+        Asserted on the log rather than on elapsed time: the delays are
+        shortened so the test stays fast, which would hide the bug from a
+        timing assertion.
+        """
         monkeypatch.setattr(server_module, "_TRANSPORT_GRACE_PERIOD", 0.05)
         monkeypatch.setattr(server_module, "_TRANSPORT_GRACE_DELAYS", (0.001, 0.001, 0.001, 0.001))
-        empty_delays_used: list[float] = []
-        real_sleep = asyncio.sleep
-
-        async def _record_sleep(delay, *args, **kwargs):
-            if delay >= 1.0:
-                empty_delays_used.append(delay)
-            return await real_sleep(0)
-
-        monkeypatch.setattr(server_module.asyncio, "sleep", _record_sleep)
+        monkeypatch.setattr(server_module, "_EMPTY_FINAL_DELAYS", [0.001, 0.001])
 
         server = _make_server(1)
         port = await server.start_async()
         try:
-            with aioresponses(passthrough=["http://127.0.0.1"]) as m:
+            with (
+                caplog.at_level(logging.WARNING, logger="kitty.bridge.server"),
+                aioresponses(passthrough=["http://127.0.0.1"]) as m,
+            ):
                 m.post(
                     "https://api0.example.com/v1/chat/completions",
                     exception=aiohttp.ClientConnectionResetError("blip"),
                     repeat=True,
                 )
                 await _post_stream(port)
-            assert empty_delays_used == [], (
-                f"grace retries pulled the empty-response schedule forward: {empty_delays_used}"
-            )
+            empty_retries = [r.getMessage() for r in caplog.records if "Empty upstream response" in r.getMessage()]
+            assert empty_retries == [], f"grace retries pulled the empty-response schedule forward: {empty_retries}"
             assert server._backend_health[0]["healthy"] is False
         finally:
             await server.stop_async()
