@@ -222,6 +222,13 @@ automatically without restarting anything.
 Anything that makes a member unavailable counts: rate limits, exhausted quotas, expired credentials, upstream 5xx, and
 connection failures.
 
+A dropped connection is given the benefit of the doubt first. For up to 30 seconds kitty retries the *same* member
+instead of cooling it down, so a brief network interruption between kitty and a provider costs a short pause rather
+than five minutes of that plan. Only a connection that keeps failing past that window counts as a failure. The same
+applies in the other direction: if your agent disconnects mid-answer — you close the terminal, hit Ctrl+C, or your
+network blips — that is charged to the agent, never to the provider, so the next request still finds every plan
+healthy.
+
 One caveat: a member that cannot handle streaming is skipped for streaming requests regardless of tier, so a streaming
 request can reach a backup member while a non-streaming primary is still healthy. This only affects providers without
 streaming support, and matches how balanced profiles already behaved.
