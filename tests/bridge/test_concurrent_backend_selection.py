@@ -176,8 +176,16 @@ class TestProviderConfigContextIsolation:
         assert "CORRUPTED" not in cfg.get("base_url", "")
 
     @pytest.mark.asyncio
-    async def test_concurrent_tasks_have_isolated_provider_config(self):
-        """Two tasks selecting different backends see different provider_configs."""
+    async def test_concurrent_tasks_have_isolated_provider_config(self, monkeypatch):
+        """Two tasks selecting different backends see different provider_configs.
+
+        The selection is pinned instead of left to ``_get_next_backend``, which
+        chooses at random: with two equally-weighted backends both tasks landed
+        on the same one about half the time, and the assertion below then failed
+        on the coin flip rather than on the isolation it is named for. Which
+        backend each task gets is incidental here — that the two do not leak
+        into each other across an ``await`` is the point.
+        """
         import uuid
 
         from kitty.profiles.schema import Profile
@@ -208,6 +216,17 @@ class TestProviderConfigContextIsolation:
             model="m",
         )
 
+        # Hand the first caller backend "a" and the second backend "b". The
+        # interleave below makes that call order deterministic, so each task
+        # knows which config it must still be seeing after its await.
+        selection_order = iter([0, 1])
+
+        def _pinned_backend(self, *, require_streaming: bool = False):
+            provider, key, profile = self._backends[next(selection_order)]
+            return provider, key, profile.model, profile.provider_config, 0
+
+        monkeypatch.setattr(BridgeServer, "_get_next_backend", _pinned_backend)
+
         results: dict = {}
 
         async def task(idx: int) -> None:
@@ -221,8 +240,6 @@ class TestProviderConfigContextIsolation:
         t2 = asyncio.create_task(task(1))
         await asyncio.gather(t1, t2)
 
-        # Both must have valid configs from the context var
-        assert results[0]
-        assert results[1]
-        # The two URLs must differ (proves each task saw its own selection)
-        assert results[0].get("base_url") != results[1].get("base_url")
+        # Each task must still see the backend it selected, not its sibling's
+        assert results[0].get("base_url") == "https://backend-a.example.com"
+        assert results[1].get("base_url") == "https://backend-b.example.com"
