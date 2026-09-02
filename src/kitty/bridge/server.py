@@ -648,6 +648,21 @@ _SSE_MAX_LINE_BYTES = 10 * 1024 * 1024  # 10 MiB — guards against unbounded li
 _MAX_HEADER_VALUE_CHARS = 256  # cap on X-Kitty-* values — names are config-supplied, so unbounded
 
 
+# Human-readable cause headlines for the all-unhealthy 503, keyed by the
+# failure kinds recorded in the backend health records.  Phrased as verb
+# phrases so they compose as "All N backends <headline>.".
+_CAUSE_HEADLINES: dict[str, str] = {
+    "rate_limit": "rate-limited by the upstream provider (429)",
+    "transport": "unreachable (connection errors) — check network/proxy",
+    "auth": "rejecting the credentials (401/403)",
+    "cloudflare": "blocked by the provider firewall (403)",
+    "entitlement": "requires a plan/subscription upgrade",
+    "oversized": "rejected as too large for the provider context window",
+    "hard": "returning provider errors",
+    "stream": "returning provider errors",
+}
+
+
 class AllBackendsUnhealthyError(Exception):
     """Raised when all backends are unhealthy and the soonest retry exceeds the fast-fail threshold."""
 
@@ -1060,6 +1075,10 @@ class BridgeServer:
                     "failure_count": 0,
                     "transport_error_count": 0,
                     "cloudflare_error_count": 0,
+                    # Kind of the failure that most recently quarantined this
+                    # backend (``None`` while healthy) — the all-unhealthy 503
+                    # reads it to tell the client *why* every backend is down.
+                    "last_failure_kind": None,
                 }
                 for _ in backends
             ]
@@ -1224,6 +1243,7 @@ class BridgeServer:
                         health["healthy"] = True
                         health["failed_at"] = None
                         health["stream_error_count"] = 0
+                        health["last_failure_kind"] = None
                         healthy_indices.append(idx)
 
             if healthy_indices:
@@ -1263,6 +1283,8 @@ class BridgeServer:
                         "name": self._backends[idx][2].name,
                         "healthy": False,
                         "remaining_cooldown": 0,
+                        # Not a failure: these backends simply cannot stream.
+                        "reason": "not_stream_capable",
                     }
                     for idx in range(n)
                 ]
@@ -1288,6 +1310,10 @@ class BridgeServer:
                         "name": self._backends[idx][2].name,
                         "healthy": False,
                         "remaining_cooldown": remaining,
+                        # Why this backend is in cooldown — surfaced in the
+                        # all-unhealthy 503 so clients can tell a rate limit
+                        # from a network outage.
+                        "reason": health.get("last_failure_kind") or "unknown",
                     }
                 )
                 candidates.append((remaining, idx))
@@ -1344,6 +1370,8 @@ class BridgeServer:
         health["healthy"] = False
         health["failed_at"] = time.monotonic()
         health["failure_count"] = health.get("failure_count", 0) + 1
+        # Remember *why* so the all-unhealthy 503 can report the cause.
+        health["last_failure_kind"] = failure_kind
 
         if failure_kind == "cloudflare":
             health["cloudflare_error_count"] = health.get("cloudflare_error_count", 0) + 1
@@ -1434,6 +1462,7 @@ class BridgeServer:
         health["failed_at"] = None
         health["stream_error_count"] = 0
         health["transport_error_count"] = 0
+        health["last_failure_kind"] = None
         # F21: decay cloudflare count instead of resetting — prevents thrash loop
         health["cloudflare_error_count"] = max(0, health.get("cloudflare_error_count", 0) - 1)
 
@@ -1511,22 +1540,75 @@ class BridgeServer:
 
         Includes a ``Retry-After`` header (in seconds) so clients can back off
         instead of retrying immediately.  The body names the soonest retry
-        window and the count of exhausted backends.
+        window and, per backend, the failure kind that took it down and when it
+        becomes retryable — so a rate limit is distinguishable from a network
+        outage without reading the bridge log.
+
+        The error ``type`` stays in the retryable ``api_error`` class for every
+        cause: Anthropic-style clients treat ``authentication_error`` /
+        ``permission_error`` / ``invalid_request_error`` as non-retryable, and
+        a cause-specific type on a 503 could make a transient outage look
+        fatal.  The cause therefore rides in the message and the structured
+        ``error.backends`` field only.
+
+        Args:
+            exc: The selection failure carrying per-backend status dicts.
+                Legacy callers pass dicts with only ``name``, so every key is
+                read with a default.
+
+        Returns:
+            The 503 JSON response with ``Retry-After`` and an enriched body.
         """
         logger.error(
             "All %d backends unhealthy; returning 503 with Retry-After=%ds",
             len(exc.backends),
             exc.retry_after,
         )
+        # Per-backend (name, reason, cooldown) triples; absent keys fall back
+        # to unknown so a minimal dict can never raise here.
+        entries = [
+            (
+                backend.get("name") or "backend",
+                backend.get("reason") or "unknown",
+                backend.get("remaining_cooldown"),
+            )
+            for backend in exc.backends
+        ]
+
+        # Unanimous known causes get a cause-specific headline; a pool of
+        # non-stream-capable backends is not a failure at all and says so;
+        # anything else keeps the neutral headline with the detail inline.
+        reasons = [reason for _name, reason, _cooldown in entries]
+        if reasons and all(reason == "not_stream_capable" for reason in reasons):
+            headline = (
+                f"No stream-capable backend is available ({len(entries)} backends cannot stream)"
+            )
+        elif reasons and len(set(reasons)) == 1 and reasons[0] in _CAUSE_HEADLINES:
+            headline = f"All {len(entries)} backends {_CAUSE_HEADLINES[reasons[0]]}"
+        else:
+            headline = f"All {len(entries)} backends are currently unavailable"
+
+        def _describe(name: str, reason: str, cooldown: int | None) -> str:
+            """Render one backend as ``name (reason[, ready in Ns])``."""
+            if cooldown is None:
+                return f"{name} ({reason})"
+            return f"{name} ({reason}, ready in {cooldown}s)"
+
+        detail = "; ".join(_describe(*entry) for entry in entries)
+        message = f"{headline}: {detail}. Retry after {exc.retry_after}s." if detail else (
+            f"{headline}. Retry after {exc.retry_after}s."
+        )
         return BridgeServer._error_response(
             {
                 "type": "error",
                 "error": {
-                    "type": "service_unavailable",
-                    "message": (
-                        f"All {len(exc.backends)} backends are currently unavailable. Retry after {exc.retry_after}s."
-                    ),
+                    "type": "api_error",
+                    "message": message,
                     "retry_after": exc.retry_after,
+                    "backends": [
+                        {"name": name, "reason": reason, "remaining_cooldown": cooldown}
+                        for name, reason, cooldown in entries
+                    ],
                 },
             },
             status=503,

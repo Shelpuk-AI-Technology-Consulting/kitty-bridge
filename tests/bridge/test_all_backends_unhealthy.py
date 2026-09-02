@@ -322,6 +322,217 @@ class TestGeminiHandlerReturns503:
             await server.stop_async()
 
 
+# ── last_failure_kind persistence ─────────────────────────────────────────
+
+
+class TestLastFailureKindPersistence:
+    """The health record remembers the failure kind that quarantined a backend,
+    so the all-unhealthy 503 can name the cause.  The memory is cleared
+    wherever the backend returns to health."""
+
+    def _make_server_with_backends(self) -> BridgeServer:
+        """Build a BridgeServer with a real backends list — health tracking
+        (and therefore ``last_failure_kind``) only exists in that mode."""
+        import uuid
+
+        from kitty.profiles.schema import Profile
+
+        provider = _StubProvider()
+        profile = Profile(name="kind-test", provider="openai", model="m", auth_ref=str(uuid.uuid4()))
+        return BridgeServer(
+            _StubLauncher(),
+            provider,
+            "test-key",
+            backends=[(provider, "test-key", profile)],
+            backend_cooldown=300,
+        )
+
+    def test_initial_value_is_none(self):
+        server = self._make_server_with_backends()
+        assert server._backend_health[0]["last_failure_kind"] is None
+
+    def test_set_by_mark_unhealthy(self):
+        server = self._make_server_with_backends()
+        server._mark_backend_unhealthy(0, failure_kind="rate_limit")
+        assert server._backend_health[0]["last_failure_kind"] == "rate_limit"
+
+    def test_cleared_by_mark_healthy(self):
+        server = self._make_server_with_backends()
+        server._mark_backend_unhealthy(0, failure_kind="rate_limit")
+        server._mark_backend_healthy(0)
+        assert server._backend_health[0]["last_failure_kind"] is None
+
+    def test_cleared_by_cooldown_expiry(self):
+        import time
+
+        server = self._make_server_with_backends()
+        server._mark_backend_unhealthy(0, failure_kind="rate_limit")
+        # Rewind failed_at past the cooldown so _select_backend sees expiry.
+        server._backend_health[0]["failed_at"] = time.monotonic() - 100_000
+        server._select_backend()
+        assert server._backend_health[0]["last_failure_kind"] is None
+
+
+# ── Enriched 503 body names the cause ─────────────────────────────────────
+
+
+def _parse(resp):
+    return json.loads(resp.text)
+
+
+class TestAllUnhealthyResponseNamesCause:
+    """The all-unhealthy 503 body must tell the user *why*: which failure kind
+    each backend hit and when it becomes retryable.  The error ``type`` stays
+    in the retryable ``api_error`` class for every cause — Anthropic clients
+    treat ``authentication_error`` / ``permission_error`` /
+    ``invalid_request_error`` as non-retryable, and a cause-specific type on a
+    503 could make Claude Code abort a transient outage.  The cause rides in
+    the message and a structured ``error.backends`` field instead."""
+
+    def _exc(self, backends, retry_after=196):
+        return AllBackendsUnhealthyError(backends, retry_after=retry_after)
+
+    def test_unanimous_rate_limit(self):
+        resp = BridgeServer._all_unhealthy_response(
+            self._exc(
+                [
+                    {"name": "secondary", "reason": "rate_limit", "remaining_cooldown": 196},
+                    {"name": "zai_coding", "reason": "rate_limit", "remaining_cooldown": 180},
+                ]
+            )
+        )
+        assert resp.status == 503
+        assert resp.headers["Retry-After"] == "196"
+        body = _parse(resp)
+        assert body["error"]["type"] == "api_error"
+        assert "rate-limited by the upstream provider" in body["error"]["message"]
+        assert "secondary" in body["error"]["message"]
+        assert "zai_coding" in body["error"]["message"]
+        assert body["error"]["backends"] == [
+            {"name": "secondary", "reason": "rate_limit", "remaining_cooldown": 196},
+            {"name": "zai_coding", "reason": "rate_limit", "remaining_cooldown": 180},
+        ]
+
+    def test_mixed_reasons_neutral_headline(self):
+        resp = BridgeServer._all_unhealthy_response(
+            self._exc(
+                [
+                    {"name": "a", "reason": "rate_limit", "remaining_cooldown": 100},
+                    {"name": "b", "reason": "transport", "remaining_cooldown": 50},
+                ]
+            )
+        )
+        body = _parse(resp)
+        assert body["error"]["type"] == "api_error"
+        assert "All 2 backends are currently unavailable" in body["error"]["message"]
+        # Both causes still visible in the per-backend list.
+        assert "a (rate_limit, ready in 100s)" in body["error"]["message"]
+        assert "b (transport, ready in 50s)" in body["error"]["message"]
+
+    def test_minimal_dict_still_503(self):
+        """Existing callers pass only ``name`` — no KeyError, no 500, no leak."""
+        resp = BridgeServer._all_unhealthy_response(self._exc([{"name": "stub"}]))
+        body = _parse(resp)
+        assert resp.status == 503
+        assert body["error"]["type"] == "api_error"
+        assert "All 1 backends are currently unavailable" in body["error"]["message"]
+        assert "stub (unknown)" in body["error"]["message"]
+        assert body["error"]["backends"] == [
+            {"name": "stub", "reason": "unknown", "remaining_cooldown": None}
+        ]
+        assert "Traceback" not in resp.text
+        assert "AllBackendsUnhealthyError" not in resp.text
+
+    def test_not_stream_capable_headline(self):
+        resp = BridgeServer._all_unhealthy_response(
+            self._exc(
+                [
+                    {"name": "a", "reason": "not_stream_capable", "remaining_cooldown": 0},
+                    {"name": "b", "reason": "not_stream_capable", "remaining_cooldown": 0},
+                ]
+            )
+        )
+        body = _parse(resp)
+        assert "No stream-capable backend is available" in body["error"]["message"]
+
+    @pytest.mark.parametrize(
+        ("reason", "headline"),
+        [
+            ("transport", "unreachable (connection errors)"),
+            ("auth", "rejecting the credentials"),
+            ("cloudflare", "blocked by the provider firewall"),
+            ("entitlement", "requires a plan/subscription upgrade"),
+            ("oversized", "too large for the provider context window"),
+            ("hard", "returning provider errors"),
+            ("stream", "returning provider errors"),
+        ],
+    )
+    def test_cause_headlines(self, reason, headline):
+        resp = BridgeServer._all_unhealthy_response(
+            self._exc([{"name": "a", "reason": reason, "remaining_cooldown": 10}])
+        )
+        assert headline in _parse(resp)["error"]["message"]
+
+    @pytest.mark.asyncio
+    async def test_messages_503_names_cause_over_http(self):
+        server = _make_server()
+        port = await server.start_async()
+        try:
+            with patch.object(
+                server,
+                "_select_backend",
+                side_effect=AllBackendsUnhealthyError(
+                    [
+                        {"name": "secondary", "reason": "rate_limit", "remaining_cooldown": 196},
+                        {"name": "zai_coding", "reason": "rate_limit", "remaining_cooldown": 180},
+                    ],
+                    retry_after=196,
+                ),
+            ):
+                async with (
+                    aiohttp.ClientSession() as session,
+                    session.post(
+                        f"http://127.0.0.1:{port}/v1/messages",
+                        json=_messages_request(),
+                        headers={"content-type": "application/json"},
+                    ) as resp,
+                ):
+                    assert resp.status == 503
+                    assert resp.headers["Retry-After"] == "196"
+                    body = await resp.json()
+                    assert body["error"]["type"] == "api_error"
+                    assert "rate-limited by the upstream provider" in body["error"]["message"]
+        finally:
+            await server.stop_async()
+
+    @pytest.mark.asyncio
+    async def test_chat_completions_503_names_cause_over_http(self):
+        server = _make_bridge_mode_server()
+        port = await server.start_async()
+        try:
+            with patch.object(
+                server,
+                "_select_backend",
+                side_effect=AllBackendsUnhealthyError(
+                    [{"name": "stub", "reason": "transport", "remaining_cooldown": 90}],
+                    retry_after=90,
+                ),
+            ):
+                async with (
+                    aiohttp.ClientSession() as session,
+                    session.post(
+                        f"http://127.0.0.1:{port}/v1/chat/completions",
+                        json=_cc_request(),
+                        headers={"content-type": "application/json"},
+                    ) as resp,
+                ):
+                    assert resp.status == 503
+                    body = await resp.json()
+                    assert "unreachable (connection errors)" in body["error"]["message"]
+        finally:
+            await server.stop_async()
+
+
 # ── Negative: success path still works ────────────────────────────────────
 
 
