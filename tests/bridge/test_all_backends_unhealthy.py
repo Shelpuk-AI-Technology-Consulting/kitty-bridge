@@ -473,6 +473,66 @@ class TestAllUnhealthyResponseNamesCause:
         )
         assert headline in _parse(resp)["error"]["message"]
 
+    @pytest.mark.parametrize(
+        "style",
+        ["anthropic", "openai_chat", "openai_responses", "google"],
+    )
+    def test_per_protocol_envelopes(self, style):
+        """Each protocol gets its native error envelope (the bridge renders
+        per-protocol shapes for all its other errors) with the shared cause
+        message and backends payload inside."""
+        resp = BridgeServer._all_unhealthy_response(
+            self._exc([{"name": "a", "reason": "rate_limit", "remaining_cooldown": 100}]),
+            style=style,
+        )
+        body = _parse(resp)
+        assert resp.status == 503
+        err = body["error"]
+        if style == "anthropic":
+            assert body["type"] == "error"
+            assert err["type"] == "api_error"
+        elif style == "google":
+            assert err["code"] == 503
+            assert err["status"] == "UNAVAILABLE"
+        elif style == "openai_responses":
+            assert err["code"] == "upstream_error"
+        else:
+            assert err["type"] == "upstream_error"
+        assert "rate-limited by the upstream provider" in err["message"]
+        assert err["backends"] == [
+            {"name": "a", "reason": "rate_limit", "remaining_cooldown": 100}
+        ]
+
+    @pytest.mark.asyncio
+    async def test_gemini_503_native_envelope_over_http(self):
+        server = _make_bridge_mode_server()
+        port = await server.start_async()
+        try:
+            with patch.object(
+                server,
+                "_select_backend",
+                side_effect=AllBackendsUnhealthyError(
+                    [{"name": "stub", "reason": "rate_limit", "remaining_cooldown": 300}],
+                    retry_after=300,
+                ),
+            ):
+                async with (
+                    aiohttp.ClientSession() as session,
+                    session.post(
+                        f"http://127.0.0.1:{port}/v1beta/models/test:generateContent",
+                        json={"contents": [{"parts": [{"text": "hi"}]}]},
+                        headers={"content-type": "application/json"},
+                    ) as resp,
+                ):
+                    assert resp.status == 503
+                    assert resp.headers.get("Retry-After") is not None
+                    body = await resp.json()
+                    assert body["error"]["code"] == 503
+                    assert body["error"]["status"] == "UNAVAILABLE"
+                    assert "rate-limited by the upstream provider" in body["error"]["message"]
+        finally:
+            await server.stop_async()
+
     @pytest.mark.asyncio
     async def test_messages_503_names_cause_over_http(self):
         server = _make_server()
@@ -528,6 +588,9 @@ class TestAllUnhealthyResponseNamesCause:
                 ):
                     assert resp.status == 503
                     body = await resp.json()
+                    # OpenAI envelope — no Anthropic "type": "error" wrapper.
+                    assert "type" not in body
+                    assert body["error"]["type"] == "upstream_error"
                     assert "unreachable (connection errors)" in body["error"]["message"]
         finally:
             await server.stop_async()

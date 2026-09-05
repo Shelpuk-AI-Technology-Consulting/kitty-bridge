@@ -1535,21 +1535,13 @@ class BridgeServer:
         return web.json_response(data, status=status, headers=hdrs)
 
     @staticmethod
-    def _all_unhealthy_response(exc: AllBackendsUnhealthyError) -> web.Response:
-        """Build a 503 response from an AllBackendsUnhealthyError.
+    def _all_unhealthy_payload(exc: AllBackendsUnhealthyError) -> dict:
+        """Compute the protocol-agnostic cause payload for the all-unhealthy 503.
 
-        Includes a ``Retry-After`` header (in seconds) so clients can back off
-        instead of retrying immediately.  The body names the soonest retry
-        window and, per backend, the failure kind that took it down and when it
-        becomes retryable — so a rate limit is distinguishable from a network
-        outage without reading the bridge log.
-
-        The error ``type`` stays in the retryable ``api_error`` class for every
-        cause: Anthropic-style clients treat ``authentication_error`` /
-        ``permission_error`` / ``invalid_request_error`` as non-retryable, and
-        a cause-specific type on a 503 could make a transient outage look
-        fatal.  The cause therefore rides in the message and the structured
-        ``error.backends`` field only.
+        The message names the soonest retry window and, per backend, the
+        failure kind that took it down and when it becomes retryable — so a
+        rate limit is distinguishable from a network outage without reading
+        the bridge log.
 
         Args:
             exc: The selection failure carrying per-backend status dicts.
@@ -1557,13 +1549,9 @@ class BridgeServer:
                 read with a default.
 
         Returns:
-            The 503 JSON response with ``Retry-After`` and an enriched body.
+            A dict with ``message``, ``retry_after`` and a ``backends`` list of
+            ``{name, reason, remaining_cooldown}`` entries.
         """
-        logger.error(
-            "All %d backends unhealthy; returning 503 with Retry-After=%ds",
-            len(exc.backends),
-            exc.retry_after,
-        )
         # Per-backend (name, reason, cooldown) triples; absent keys fall back
         # to unknown so a minimal dict can never raise here.
         entries = [
@@ -1598,22 +1586,87 @@ class BridgeServer:
         message = f"{headline}: {detail}. Retry after {exc.retry_after}s." if detail else (
             f"{headline}. Retry after {exc.retry_after}s."
         )
-        return BridgeServer._error_response(
-            {
+        return {
+            "message": message,
+            "retry_after": exc.retry_after,
+            "backends": [
+                {"name": name, "reason": reason, "remaining_cooldown": cooldown}
+                for name, reason, cooldown in entries
+            ],
+        }
+
+    @staticmethod
+    def _all_unhealthy_response(exc: AllBackendsUnhealthyError, *, style: str = "anthropic") -> web.Response:
+        """Build the 503 response for an AllBackendsUnhealthyError.
+
+        Includes a ``Retry-After`` header (in seconds) so clients can back off
+        instead of retrying immediately.  The envelope is protocol-native — the
+        bridge renders per-protocol shapes for all its other errors, so the
+        shared cause payload is wrapped in whichever dialect the calling
+        endpoint speaks.
+
+        Every type/code/status below is the retryable class of its own
+        protocol: Anthropic ``api_error`` (500-class), OpenAI
+        ``upstream_error`` (clients retry >=500 by status), Google
+        ``UNAVAILABLE``.  Cause-specific types such as ``authentication_error``
+        would be non-retryable classes and could make a transient outage look
+        fatal, so the cause rides in the message and ``backends`` only.
+
+        Args:
+            exc: The selection failure carrying per-backend status dicts.
+            style: Error dialect of the calling endpoint — ``"anthropic"``
+                (``/v1/messages``), ``"openai_chat"`` (``/v1/chat/completions``),
+                ``"openai_responses"`` (``/v1/responses``), or ``"google"``
+                (Gemini ``generateContent``).
+
+        Returns:
+            The 503 JSON response with ``Retry-After`` and an enriched,
+            protocol-native body.
+        """
+        logger.error(
+            "All %d backends unhealthy; returning 503 with Retry-After=%ds",
+            len(exc.backends),
+            exc.retry_after,
+        )
+        payload = BridgeServer._all_unhealthy_payload(exc)
+        if style == "openai_chat":
+            body = {
+                "error": {
+                    "type": "upstream_error",
+                    "message": payload["message"],
+                    "retry_after": payload["retry_after"],
+                    "backends": payload["backends"],
+                }
+            }
+        elif style == "openai_responses":
+            body = {
+                "error": {
+                    "code": "upstream_error",
+                    "message": payload["message"],
+                    "retry_after": payload["retry_after"],
+                    "backends": payload["backends"],
+                }
+            }
+        elif style == "google":
+            body = {
+                "error": {
+                    "code": 503,
+                    "message": payload["message"],
+                    "status": "UNAVAILABLE",
+                    "backends": payload["backends"],
+                }
+            }
+        else:  # anthropic
+            body = {
                 "type": "error",
                 "error": {
                     "type": "api_error",
-                    "message": message,
-                    "retry_after": exc.retry_after,
-                    "backends": [
-                        {"name": name, "reason": reason, "remaining_cooldown": cooldown}
-                        for name, reason, cooldown in entries
-                    ],
+                    "message": payload["message"],
+                    "retry_after": payload["retry_after"],
+                    "backends": payload["backends"],
                 },
-            },
-            status=503,
-            headers={"Retry-After": str(exc.retry_after)},
-        )
+            }
+        return BridgeServer._error_response(body, status=503, headers={"Retry-After": str(exc.retry_after)})
 
     def _empty_response_context(self, upstream_error: str | None = None) -> dict:
         """Build diagnostic context for empty-response fallback text.
@@ -2385,7 +2438,7 @@ class BridgeServer:
         try:
             self._select_backend()
         except AllBackendsUnhealthyError as exc:
-            return self._all_unhealthy_response(exc)
+            return self._all_unhealthy_response(exc, style="openai_responses")
         try:
             body = await request.json()
         except web.HTTPRequestEntityTooLarge:
@@ -2939,7 +2992,7 @@ class BridgeServer:
         try:
             self._select_backend()
         except AllBackendsUnhealthyError as exc:
-            return self._all_unhealthy_response(exc)
+            return self._all_unhealthy_response(exc, style="anthropic")
         try:
             body = await request.json()
         except web.HTTPRequestEntityTooLarge:
@@ -3924,7 +3977,7 @@ class BridgeServer:
         try:
             self._select_backend()
         except AllBackendsUnhealthyError as exc:
-            return self._all_unhealthy_response(exc)
+            return self._all_unhealthy_response(exc, style="google")
         model_from_path = request.match_info["model"]
 
         try:
@@ -4653,7 +4706,7 @@ class BridgeServer:
         try:
             self._select_backend()
         except AllBackendsUnhealthyError as exc:
-            return self._all_unhealthy_response(exc)
+            return self._all_unhealthy_response(exc, style="openai_chat")
         try:
             body = await request.json()
         except web.HTTPRequestEntityTooLarge:
