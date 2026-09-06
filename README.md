@@ -642,6 +642,25 @@ kitty setup
 
 The conversation has grown beyond the model's context window. Use `/clear` in the agent to reset.
 
+### Mouse wheel scrolls through previous prompts instead of the conversation (Claude Code)
+
+The wheel steps backwards through your prompt history while the transcript stays put. This is Claude Code's renderer
+setting, not the bridge — kitty writes no terminal escape sequences and never sits between your terminal and the agent.
+
+Claude Code's classic renderer leaves the wheel to your terminal. Over SSH the wheel can arrive as arrow keys, which the
+prompt box reads as history navigation. The fullscreen renderer handles the wheel inside Claude Code instead. Reported
+from PowerShell on Windows over SSH to a Linux host, with the console maximised.
+
+Switch renderer from inside the session:
+
+```
+/tui fullscreen
+```
+
+Claude Code saves the choice and relaunches with your conversation intact, so it applies to later sessions too. Run
+`/tui` with no argument to print which renderer is active. `PgUp` / `PgDn` scroll and `Ctrl+End` jumps to the latest
+message in either renderer.
+
 ### Can I use kitty with Cursor, Windsurf, or other IDEs?
 
 Yes, but with caveats. Cursor uses a proprietary protocol that Kitty cannot integrate with automatically. However, you
