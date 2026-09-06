@@ -26,7 +26,12 @@ def _load_workflow(name: str) -> dict:
     path = WORKFLOWS_DIR / name
     if not path.exists():
         pytest.fail(f"Workflow file {name} not found at {path}")
-    with open(path) as f:
+    # Explicitly UTF-8: GitHub reads workflow files as UTF-8, and these carry
+    # non-ASCII in their comments. Without this, `open()` uses the platform's
+    # locale encoding and every case in this module fails with a
+    # UnicodeDecodeError on a Windows developer's machine while passing on the
+    # Linux runner -- a suite that disagrees with itself by operating system.
+    with open(path, encoding="utf-8") as f:
         data = yaml.safe_load(f)
     # PyYAML parses `on:` as boolean True. Normalize it.
     if True in data and "on" not in data:
@@ -201,15 +206,49 @@ class TestPublishWorkflow:
 # ── R3: YAML validity ────────────────────────────────────────────────────
 
 
-class TestYAMLValidity:
-    """Verify workflow files are valid YAML."""
+def _all_workflow_names() -> list[str]:
+    """Return every workflow file, by glob rather than by enumeration.
 
-    @pytest.mark.parametrize("name", ["ci.yml", "publish.yml"])
+    Both extensions, because GitHub accepts either and a ``.yaml`` file added
+    later must not slip past a ``.yml``-only sweep.
+
+    Returns:
+        The file names, sorted.
+    """
+    found = list(WORKFLOWS_DIR.glob("*.yml")) + list(WORKFLOWS_DIR.glob("*.yaml"))
+    return sorted(path.name for path in found)
+
+
+class TestYAMLValidity:
+    """Verify workflow files are valid YAML.
+
+    🔴 **Swept, not enumerated, and this class was enumerated until a broken
+    workflow proved why that is not enough.** It named ``ci.yml`` and
+    ``publish.yml``; a malformed block scalar landed in ``claude-code-review.yml``
+    and every case here stayed green, because the file nobody listed was the file
+    nobody parsed. GitHub would have reported it only as the workflow silently
+    never running.
+    """
+
+    @pytest.mark.parametrize("name", _all_workflow_names())
     def test_workflow_is_valid_yaml(self, name: str):
         workflow = _load_workflow(name)
         assert isinstance(workflow, dict), f"{name} must parse as a dict"
         assert "on" in workflow, f"{name} must have 'on' trigger"
         assert "jobs" in workflow, f"{name} must have 'jobs' key"
+
+    def test_the_sweep_actually_found_the_workflows(self):
+        """The control: a glob that matched nothing parametrises zero cases.
+
+        Every case above would then be collected zero times and the class would
+        pass having checked nothing -- the same silent-skip shape the docstring
+        describes, one level up.
+        """
+        names = _all_workflow_names()
+
+        assert len(names) >= 4, f"the workflow sweep found only {names!r}"
+        for expected in ("ci.yml", "publish.yml", "tests.yml", "claude-code-review.yml"):
+            assert expected in names, f"{expected} was not swept"
 
 
 # ── R4: Tag version matches pyproject.toml ────────────────────────────────
@@ -304,7 +343,10 @@ class TestReleaseIsGatedOnTests:
         for job in jobs.values():
             tested.update(str(v) for v in job.get("strategy", {}).get("matrix", {}).get("python-version", []))
 
-        pyproject = (ROOT / "pyproject.toml").read_text()
+        # Explicitly UTF-8, for the reason `_load_workflow` gives: TOML is
+        # defined as UTF-8, and reading it in the platform's locale encoding
+        # fails on a Windows developer's machine while passing on the runner.
+        pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
         claimed = set(re.findall(r"Programming Language :: Python :: (\d+\.\d+)", pyproject))
 
         assert claimed, "expected Python version classifiers in pyproject.toml"
@@ -322,11 +364,19 @@ class TestMetadataRefreshRespectsBranchProtection:
     enabled, so the bundled catalogue silently stopped being refreshed and
     unrelated pull requests started failing a freshness check nothing could
     satisfy.
+
+    The job now lives in ``model-metadata.yml`` rather than ``ci.yml``. It was
+    moved when ``ci.yml`` became the merge gate: ``ci-required`` must depend on
+    every job in that file and compare each against ``success``, and this job
+    skips on ``push`` -- a skipped dependency is not a success, so keeping it
+    there would have reddened ``main`` on every merge. See that file's header.
     """
+
+    WORKFLOW = "model-metadata.yml"
 
     @pytest.fixture()
     def steps(self) -> list[dict]:
-        workflow = _load_workflow("ci.yml")
+        workflow = _load_workflow(self.WORKFLOW)
         return workflow["jobs"]["update-metadata"]["steps"]
 
     def test_no_step_pushes_to_the_default_branch(self, steps: list[dict]):
@@ -367,18 +417,26 @@ class TestMetadataRefreshRespectsBranchProtection:
         that is several near-empty pull requests against a catalogue that needs
         to be current to the week, not to the minute.
         """
-        job = _load_workflow("ci.yml")["jobs"]["update-metadata"]
-        condition = str(job.get("if", ""))
+        workflow = _load_workflow(self.WORKFLOW)
 
-        assert condition, "update-metadata runs on every event the workflow declares, including push"
-        assert "push" in condition, f"expected the job to exclude push events, got if: {condition!r}"
+        # Since the move the exclusion is expressed by the workflow's own
+        # triggers rather than by an `if:` on the job -- same outcome, one fewer
+        # queued-and-skipped job per merge. Either spelling satisfies the claim;
+        # what must not happen is the refresh running on every push to main.
+        condition = str(workflow["jobs"]["update-metadata"].get("if", ""))
+        triggers = _get_trigger(workflow)
+
+        assert "push" not in triggers or "push" in condition, (
+            "update-metadata runs on every push to main, so merging its own "
+            f"pull request re-triggers it; triggers={sorted(triggers)!r} if={condition!r}"
+        )
 
     def test_gating_the_refresh_does_not_stop_main_being_tested(self):
-        """The gate belongs on the job, not on the workflow's triggers."""
-        workflow = _load_workflow("ci.yml")
+        """Moving the refresh out must not have taken the gate's push trigger with it."""
+        ci = _load_workflow("ci.yml")
 
-        assert "main" in _get_trigger(workflow).get("push", {}).get("branches", [])
-        assert "if" not in workflow["jobs"]["test"]
+        assert "main" in _get_trigger(ci).get("push", {}).get("branches", [])
+        assert "if" not in ci["jobs"]["test"]
 
     def test_refresh_opens_a_pull_request(self, steps: list[dict]):
         run_commands = " ".join(step.get("run", "") for step in steps)
@@ -386,9 +444,17 @@ class TestMetadataRefreshRespectsBranchProtection:
         assert "gh pr create" in run_commands, "the refresh must propose its change as a pull request"
 
     def test_refresh_has_permission_to_open_one(self):
-        workflow = _load_workflow("ci.yml")
+        """Declared on the job now, not on the workflow.
 
-        assert workflow.get("permissions", {}).get("pull-requests") == "write"
+        It used to be a workflow-level grant in `ci.yml`, which meant every job
+        added to that file inherited a write token it had no use for -- and two
+        such jobs were about to be added. The grant moved with the job and is now
+        scoped to it.
+        """
+        job = _load_workflow(self.WORKFLOW)["jobs"]["update-metadata"]
+
+        assert job.get("permissions", {}).get("pull-requests") == "write"
+        assert job.get("permissions", {}).get("contents") == "write"
 
     def test_pull_requests_are_not_failed_by_metadata_drift(self, steps: list[dict]):
         """The check compares against a live API, so it can never be satisfiable.

@@ -19,3 +19,15 @@
 src/kitty/__pycache__
 .idea
 uv.lock
+
+# Written into the checkout root by .github/workflows/claude-code-review.yml.
+# Ignored so that a local run of the review scripts — and the reviewer's own
+# working copy on the runner — cannot leave them as untracked noise, or worse,
+# be committed. `conversation-full.md` reaches 160 kB on a long pull request and
+# carries the whole discussion; `review_prompt.md` carries it again alongside
+# the specification. Neither belongs in git.
+/conversation.md
+/conversation-full.md
+/changed_files.txt
+/review_prompt.md
+/artifacts/

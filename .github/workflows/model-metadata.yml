@@ -1,0 +1,121 @@
+name: Model metadata
+
+# The bundled OpenRouter catalogue refresh, and the advisory drift notice a pull
+# request gets.
+#
+# 🔴 **Split out of `ci.yml` deliberately, and the reason is structural rather
+# than tidiness.** `ci.yml` is now the merge gate: its `ci-required` job must
+# depend on every job in that file and compare each against `success`, or a job
+# added later runs, fails, and leaves the gate green. This job cannot live under
+# that rule. It is `if: github.event_name != 'push'`, so on a push to `main` it
+# skips — and a skipped dependency is not `success`, which would paint `main` red
+# on every merge. The alternative, an event-conditional excuse in the aggregate,
+# is the exemption `review_replies` already holds and which must stay at exactly
+# one: a second job carrying it is a second job nobody checks on three of the
+# four events.
+#
+# Moving it here also takes `contents: write` out of the gate workflow entirely.
+# It is the only job in this repository that needs to push a branch, and it now
+# holds that grant alone.
+#
+# ⚠️ **This job is deliberately NOT a merge gate**, and that predates the move.
+# The drift notice compares the committed catalogue against the live OpenRouter
+# API, which can change between a refresh and a pull request through no fault of
+# that pull request — it used to fail unrelated work. Freshness is maintained by
+# the weekly schedule below, not by blocking anybody.
+
+on:
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "3 5 * * 1"
+  workflow_dispatch:
+
+jobs:
+  update-metadata:
+    # Retained from `ci.yml`: the refresh opened a pull request every time
+    # anything landed on main, and merging one of those is itself a push to
+    # main, so it partly fed itself -- #9 merged at 19:36:30 and #10 was opened
+    # two seconds later. The bundled catalogue is a convenience copy that needs
+    # to be current to the week, not the minute, so the weekly schedule (plus a
+    # manual run when someone wants it sooner) is the right cadence.
+    #
+    # The `push` trigger is gone from `on:` above rather than being filtered by
+    # an `if:`, which is what that condition used to do. Same outcome, one fewer
+    # queued-and-skipped job per merge.
+    runs-on: ubuntu-latest
+    # A backstop, not a budget: this installs the package and makes one API
+    # call. Sized to notice a hang rather than to accommodate one. Six hours is
+    # the platform ceiling on this label and would be a fiction as a cap.
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -e ".[dev]"
+
+      - name: Fetch model metadata
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        run: |
+          if [ -n "$OPENROUTER_API_KEY" ]; then
+            python scripts/script_update_model_metadata_table.py
+          else
+            echo "OPENROUTER_API_KEY not set; skipping metadata update"
+          fi
+
+      # Branch protection requires every change to main to go through a pull
+      # request, so this opens one instead of pushing directly. The previous
+      # version pushed straight to main and had been failing since that rule
+      # was added, which is why the committed metadata drifted.
+      - name: Propose refreshed model metadata
+        if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BRANCH: chore/model-metadata
+        run: |
+          if git diff --quiet -- src/kitty/providers/model_metadata.json; then
+            echo "Model metadata is already up to date"
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B "$BRANCH"
+          git add src/kitty/providers/model_metadata.json
+          git commit -m "Update OpenRouter model metadata"
+          # Plain --force: actions/checkout fetches only main at depth 1, so
+          # there is no remote-tracking ref for $BRANCH and --force-with-lease
+          # cannot evaluate its lease -- it rejects the push as "stale info"
+          # whenever the branch still exists on the remote, turning main red and
+          # skipping the refresh. The lease guards nothing here anyway; the
+          # branch is this job's own scratch space.
+          git push --force origin "$BRANCH"
+
+          if [ -z "$(gh pr list --head "$BRANCH" --state open --json number --jq '.[].number')" ]; then
+            gh pr create --base main --head "$BRANCH" \
+              --title "Update OpenRouter model metadata" \
+              --body "Automated refresh of the bundled model catalogue from the OpenRouter API."
+          else
+            echo "Existing pull request updated"
+          fi
+
+      # Reported, not enforced. See the header.
+      - name: Report model metadata drift
+        if: github.event_name == 'pull_request'
+        run: |
+          if git diff --quiet -- src/kitty/providers/model_metadata.json; then
+            echo "Model metadata is current."
+          else
+            echo "::notice::Bundled model metadata differs from the live OpenRouter catalogue."
+            echo "The scheduled refresh will open a pull request; no action needed here."
+            git diff --stat -- src/kitty/providers/model_metadata.json
+          fi
