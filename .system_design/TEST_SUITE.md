@@ -186,86 +186,176 @@ trigger no test can fail — so each material mutation gets its own row.
 | P9a | Set `User-Agent` to `claude-code/1.0` | `KimiCodeAdapter`, `BytePlusAdapter`, `MimoAdapter` `.build_upstream_headers` | Always, on those three | Those providers 403 without a recognised coding-agent user-agent. Central to I2 — F1. |
 | P9b | Remove `Authorization`, add `api-key` | `MimoAdapter.build_upstream_headers` | Always | MiMo does not use Bearer auth. An auth-**scheme** change §4.3 C1's exact-set assertion must encode. |
 | P9c | Synthesise a Codex CLI `User-Agent` and a `version` header | `OpenAISubscriptionAdapter` | Always | Impersonation required by the subscription endpoint. **The two disagree — see F1.** |
-| P10 | Set `reasoning_split = True` | `MiniMaxAdapter.normalize_request` | **Unconditionally** | Makes MiniMax return thinking in `reasoning_details` instead of inline tags. Unconditional, so exempt from §3.3 assertion 2. |
-| P11 | Translate CC → Bedrock Converse | `BedrockAdapter.translate_to_upstream` | Always, on `bedrock` | A third upstream wire format M2 does not name. Custom transport — see §3.3.2. |
+| P10 | Set `reasoning_split = True` | `MiniMaxAdapter.normalize_request` | **Unconditionally** | Makes MiniMax return thinking in `reasoning_details` instead of inline tags. Unconditional, so exempt from §3.3.2 assertion 2. |
+| P11 | Translate CC → Bedrock Converse | `BedrockAdapter.translate_to_upstream` | Always, on `bedrock` | A third upstream wire format M2 does not name. Custom transport — see §3.3.4. |
 | P12 | Translate CC → Ollama `/api/chat` | `OllamaCloudAdapter.translate_to_upstream` | Always, on `ollama_cloud` | A fourth wire format. Custom transport. |
+| P13 | **Drop fourteen Chat-Completions-only parameters** — `temperature`, `top_p`, `max_tokens`, `max_completion_tokens`, `frequency_penalty`, `presence_penalty`, `logprobs`, `top_logprobs`, `response_format`, `stop`, `n`, `stream_options`, `seed`, `logit_bias` | `OpenAISubscriptionAdapter._cc_to_responses` | Always, on the **CC-origin** path | The Codex backend applies strict allowlist validation and rejects them with 400. **User-visible**: `max_tokens` and `temperature` silently do nothing on this provider. Logged at DEBUG. |
+| P14 | **Drop every parameter outside the Codex allowlist**, notably `max_output_tokens` | `OpenAISubscriptionAdapter._prepare_responses_body` | Always, on the **Responses-origin** path | Same backend restriction, different input shape — this path receives a Responses body, so the parameter is spelled `max_output_tokens`, not `max_tokens`. A single row cannot cover both paths; the sets differ. |
+| P15 | **Strip `strict` from every tool declaration** | `_prepare_responses_body` | Always, on the Responses-origin path | The Codex backend rejects it. A change to the **tool schema** the agent declared, not to a sampling parameter — a different kind of fidelity mutation and worth its own row. |
+| P16 | Rewrite content types `input_text` → `output_text` | `_convert_content_types`, called from `_prepare_responses_body` | Always, on the Responses-origin path | The Codex backend validates content types strictly. **Message-content mutation.** |
+| P17 | Inject `stream: True` and `store: False` | `_cc_to_responses` and the Responses-origin body builder | **Unconditionally**, both subscription paths | The Codex backend is streaming-only; kitty reassembles a non-streaming reply from the SSE. Note `stream: True` **overrides a non-streaming client request** — the subscription-path analogue of M11. |
+| P18 | Remove `modelId` and `stream` from the Converse payload | ``BedrockAdapter` transport (`make_request` / `stream_request`)` | Always, on `bedrock` | boto3 takes the model id as a call argument and selects streaming by choosing `converse` vs `converse_stream`, so both must leave the body. Applied **in the transport, after `translate_to_upstream`**. |
+| P19 | Overwrite `stream` | `OllamaCloudAdapter` transport (`make_request` sets `False`, `stream_request` sets `True`) | Always, on `ollama_cloud` | The transport, not the caller, decides which Ollama endpoint mode is used. Applied **after `translate_to_upstream`** has already set it from the request. |
 
 **Conditional rows are the point.** Every row whose trigger is a condition must be provably
 *inert* when that condition is absent — the sharpest form of "unless absolutely necessary", and
-what §3.3 assertion 2 tests. M1, M2, M10, P1, P6, P9a–c, P10, P11 and P12 are unconditional by
-design and are exempt from that assertion.
+what §3.3.2 assertion 2 tests, with the trigger complements §3.3.4 requires. M1, M2, M10, P1,
+P6, P9a–c, P10, P11, P12, P13, P14, P15, P16, P17, P18 and P19 are unconditional by design and
+are exempt from that assertion.
 
 **Register maintenance.** The register is the specification. A pull request that adds a mutation
 site without adding a row fails the L2 register guards (§6.2.3).
+
+#### 3.2.3 Serialization paths — where the register must actually be checked
+
+The register is only enforceable at the point where bytes are handed to a transport. That point
+is **not** `translate_to_upstream` for any of the three custom-transport providers, and assuming
+it is hid seven rows in the first draft: on `openai_subscription` the hook returns a Chat
+Completions shape and the real body is built afterwards (P13–P17), while on `bedrock` and
+`ollama_cloud` the hook builds the body and the transport then **mutates it** (P18, P19).
+
+| Path | Adapters | Where the final bytes are decided |
+|---|---|---|
+| Bridge aiohttp | the 20 default-transport adapters | The `json=` body passed to `session.post` in `_make_upstream_request` / `_open_upstream_stream` |
+| curl_cffi | `openai_subscription` | Built **inside the transport**: `_cc_to_responses` (CC-origin) or `_prepare_responses_body` (Responses-origin). The adapter hook's output is not what ships. |
+| botocore | `bedrock` | Built by `translate_to_upstream`, then **mutated** in `make_request` / `stream_request` (P18). Capture after the mutation. |
+| provider aiohttp | `ollama_cloud` | Built by `translate_to_upstream`, then **mutated** in `make_request` / `stream_request` (P19). Capture after the mutation. |
+
+Every guard and every oracle run in this document targets the right-hand column, never the hook
+that precedes it. Where the body is built in the hook and mutated in the transport, "after the
+mutation" is the boundary — capturing the hook's return value would miss P18 and P19 exactly as
+it missed P13.
 
 ### 3.3 The transparency oracle
 
 The single piece of new infrastructure that makes I1 testable.
 
 **What it is.** A test harness that runs a request through the real `BridgeServer` into a
-recording fake upstream, then diffs the captured upstream body against the inbound agent body
-and classifies every difference against the register.
+recording upstream, projects both the inbound agent body and the captured upstream body into a
+**wire-independent semantic form**, and classifies every difference against the register.
 
 ```
-inbound agent body ──► BridgeServer ──► recording upstream
-        │                                      │
-        └───────── structural diff ────────────┘
-                          │
-                classify each delta
-                          │
-     ┌────────────────────┴────────────────────┐
-claimed by a register row              unclaimed  ──► FAIL
-whose trigger was present                    │
-            │                          unclaimed delta is the
-    assert the row's                   whole point of the oracle
-    stated shape held
+inbound agent body ─────► BridgeServer ─────► recording upstream (final wire bytes)
+        │                                                 │
+   project()                                         project()
+        │                                                 │
+        ▼                                                 ▼
+  Conversation                                      Conversation
+        └──────────────── structural diff ────────────────┘
+                              │
+                    classify each delta
+                              │
+         ┌────────────────────┴────────────────────┐
+   claimed by a register row              unclaimed  ──► FAIL
+   whose trigger was present                    │
+                │                          unclaimed delta is the
+        assert the row's                   whole point of the oracle
+        stated shape held
 ```
 
-**The two assertions, in priority order.**
+#### 3.3.1 The comparison is an independent projection, never a round-trip
 
-1. **No unclaimed delta.** Any difference between inbound and upstream bodies must map to a
-   register row. This is the invariant.
-2. **No mutation without its trigger.** For each conditional row, a corpus entry that does not
-   meet the trigger must show that row's mutation *absent*. This is what stops M3/M5 quietly
-   becoming unconditional.
+An earlier draft of this design specified comparing the inbound body against a **round-trip**
+through the production translators — `translate_request` then `translate_response`. That is
+wrong twice over, and the reason is worth recording so nobody proposes it again.
 
-#### 3.3.1 The oracle is scoped by wire shape — and why
+**It is a category error.** `MessagesTranslator.translate_request` maps a Messages *request* to a
+Chat Completions *request*. `MessagesTranslator.translate_response` maps a Chat Completions
+*response* — a body whose payload is `choices` — back to a Messages *response*. They are not
+inverses and never were: composing them takes a conversation in and returns an assistant reply,
+so the input history cannot survive the trip. The same objection applies to any "inverse pair"
+assembled from the provider adapters.
 
-A direct inbound-vs-upstream diff is only meaningful where the two bodies are in the same
-protocol. On a Chat-Completions-wire provider the upstream body is CC while the inbound body is
-Anthropic Messages: *every* field differs, every delta is claimed by M2, and assertion 1 passes
-trivially while proving nothing. A test that cannot fail is worse than no test.
+**Even a real inverse would prove the wrong thing.** Using the production translator to check the
+production translator establishes self-consistency, not fidelity. A translator that drops the
+same field in both directions round-trips perfectly. The oracle must not be written in terms of
+the code under test.
 
-| Path | Adapters | Comparison | Why |
-|---|---|---|---|
-| **Native Messages wire** | `anthropic`, `zai_coding`, `custom_anthropic`, `minimax_token`, and `opencode_go` **for its Messages models only** | Inbound body vs. upstream body, directly | Same protocol both sides. "Unchanged" is literally meaningful, and this is the path the Jira premise names. |
-| **Chat Completions wire** | the remaining adapters | Inbound vs. **round-trip** (`translate_request` → `translate_response` back to the agent's protocol) | The claim that survives translation is semantic preservation, not byte equality. |
-| **Other wire** | `bedrock` (Converse), `ollama_cloud` (`/api/chat`) | Round-trip through that adapter's own pair | Neither Messages nor CC. Round-trip mode needs the adapter's own inverse, not the shared one (P11, P12). |
+**The projection.** Define one **`Conversation`** value type in the test tree:
 
-**The scoping predicate is per-request, not per-adapter.** `upstream_wire_is_messages_api` is the
-natural selector, but it cannot be trusted as an adapter-level constant: `OpenCodeGoAdapter`
-inherits `True` from `AnthropicAdapter` while its `translate_to_upstream` returns a **Chat
-Completions** body for every model outside `_MESSAGES_MODELS`. See finding F5. Until that is
-fixed, the oracle must select on the observed body shape, and an L2 guard must assert the
-property agrees with the actual output shape for every adapter × representative model.
+```
+Conversation
+  system:    ordered text parts
+  turns:     ordered [ Turn(role, parts) ]
+  tools:     ordered [ ToolDecl(name, schema) ]
+  sampling:  { max_tokens, temperature, top_p, stop, … }   # declared, may be absent
 
-#### 3.3.2 The oracle must be parametrised over transport
+Part = Text(str)
+     | ToolUse(id, name, arguments)
+     | ToolResult(tool_use_id, content, is_error)
+     | Thinking(text)
+     | Image(digest)
+```
 
-`openai_subscription`, `bedrock` and `ollama_cloud` set `use_custom_transport = True` and never
-go through `_make_upstream_request`, so §7.2's aiohttp recording upstream never sees their
-bodies. The oracle is parametrised over transport exactly as §5.5's containment harness is:
-an aiohttp recording server for the default path, a `curl_cffi`-reachable one for the
-subscription provider, and a botocore endpoint override for Bedrock. Without this, §3.4's "every
-provider" rows are false for three adapters.
+Then write one **hand-written projection per wire format** — Anthropic Messages, Chat
+Completions, OpenAI Responses, Gemini, Bedrock Converse, Ollama `/api/chat` — each written
+directly against that format's published shape and **importing nothing from `src/kitty/bridge`**.
+Six small readers, each independent of whatever kitty code produces that format. The oracle compares
+`project(inbound)` with `project(captured_upstream_bytes)`.
 
-**Diffing semantics.** Structural, not byte-level. JSON key order and whitespace are not part of
-the agent's meaning and vary with serialisation; a byte diff would fail constantly and teach
-people to ignore it. The oracle compares parsed JSON with a canonical ordering, and reports
-deltas as JSON-pointer paths so a failure names the exact field. The one exception is key
-ordering on the native path, which §4.3 C2 asserts for I2 reasons.
+This is the independent-oracle rule, and it is what makes the check meaningful across a protocol
+boundary: a Messages body and a Chat Completions body are not comparable as JSON, but their
+projections are directly comparable, because a conversation is a conversation.
 
-**What it does not do.** It does not judge whether a translation is *semantically* correct — that
-a `tool_use` block became the right `tool_calls` entry is an L1 translator claim. The oracle
+**Response translation is tested separately**, with its own projection (`Reply(parts, stop_reason,
+usage)`) over the response direction. It is a different claim and it gets a different test.
+
+#### 3.3.2 The two assertions
+
+1. **No unclaimed delta.** Every difference between the two projections must map to a register
+   row whose trigger the input met. This is the invariant.
+2. **No mutation without its trigger.** For each conditional row, an input that does *not* meet
+   the trigger must show that row's mutation **absent**. This is what stops M3/M5 quietly
+   becoming unconditional, and it is why §3.3.4 insists on trigger complements.
+
+#### 3.3.3 Bridge-introduced content is what gets the vendor-token check
+
+The projection also settles a problem a naive I2 check cannot (§4.3 C2). "The upstream body must
+not contain the string `kitty`" is **wrong** — a user may legitimately ask Claude Code to explain
+kitty-bridge, a repository path may contain the word, or a tool result may quote this very
+document. All of that must reach the provider **unchanged**, or I1 is broken in the act of
+defending I2. The two invariants would be in direct conflict.
+
+Diffing projections separates the two cases cleanly:
+
+- A part present in the upstream projection with a counterpart in the inbound projection is
+  **agent-supplied**. It is never inspected for vendor tokens, whatever it contains.
+- A part with no inbound counterpart is **bridge-introduced**. Only that set is scanned.
+
+The regression case is explicit, and belongs in the corpus (§7.1): an inbound turn whose text is
+`Please explain how kitty-bridge works` must survive byte-identically, **and** an injected vendor
+message (M13) must still be caught in the same run. A harness that cannot do both at once has
+not solved the problem.
+
+#### 3.3.4 Scoping, triggers and transports
+
+**Scoped by observed wire shape, per request.** `upstream_wire_is_messages_api` is the natural
+selector but cannot be trusted as an adapter-level constant: `OpenCodeGoAdapter` inherits `True`
+from `AnthropicAdapter` while emitting Chat Completions for every model outside
+`_MESSAGES_MODELS` (F5, KBR-7). The oracle selects the projection by the shape actually observed
+on the wire, and an L2 guard asserts the property agrees with that shape for every adapter ×
+representative model.
+
+**Triggers and their complements, across representative models.** A single fixed request cannot
+establish register completeness. For every conditional row the corpus must contain a case that
+meets the trigger and a case that does not, and both must run against every adapter for which
+the row is reachable — including each adapter's distinct model classes where routing differs
+(`opencode_go` Messages vs. CC models; `fireworks` streaming vs. non-streaming for P7).
+
+**Parametrised over transport.** `openai_subscription`, `bedrock` and `ollama_cloud` set
+`use_custom_transport = True` and never reach `_make_upstream_request`, so an aiohttp recording
+upstream never sees their bodies. The oracle runs against the recorder appropriate to each
+transport (§7.2). Without this, "every provider" is false for three adapters — and those three
+are where the least-inspected serialization code lives (§3.2.3).
+
+**Diffing semantics.** Structural, over projections. JSON key order and whitespace are not part
+of the agent's meaning and vary with serialisation; a byte diff would fail constantly and teach
+people to ignore it. Deltas are reported as paths into the `Conversation` so a failure names the
+exact turn and part. The one byte-level exception is key ordering on the native passthrough
+path, which §4.3 C2 asserts for I2 reasons.
+
+**What it does not do.** It does not judge whether a translation is *semantically apt* — that a
+`tool_use` block became the right `tool_calls` entry is an L1 translator claim. The oracle
 answers a narrower question: was anything changed that nobody declared.
 
 ### 3.4 Where I1 is proven
@@ -273,18 +363,16 @@ answers a narrower question: was anything changed that nobody declared.
 | Claim | Layer | Test |
 |---|---|---|
 | Compaction preserves `tool_use`/`tool_result` atomicity, in both CC and native shapes | L1 property | `compact(m)` contains no orphan |
-| Compaction output fits the budget **unless the system block alone exceeds it** | L1 property | The guaranteed-fit loop breaks out while still over budget when it cannot shrink further; the honest property must say so |
-| The last turn survives **unless pairing validation drops it**, in which case M13 fires | L1 property | Stated with the exception, or it fails on day one and gets weakened |
+| Compaction output fits the budget **unless the surviving set is irreducible** | L1 property | See §6.1 — the honest exception is wider than an oversized system block |
+| The last turn survives **unless it is itself truncated (M3/M4) or dropped by pairing validation (M7), in which case M13 fires** | L1 property | Stated with all three exceptions, or it fails on day one |
 | Compaction is identity below the budget | L1 property | Short-circuit at the `original_size <= compaction_threshold` guard — M5's trigger, tested directly |
 | Truncation is identity below `_TOOL_RESULT_TRUNCATION_LIMIT` | L1 property | Same shape, for M3 and M4 |
-| Protocol round-trip preserves semantic content | L1 property | Text, tool calls, tool results and their ids survive translation both ways |
-| A **below-threshold** corpus entry on a native-wire provider shows only M1 and P1 | L2 | Scoped to below-threshold deliberately: above it, M3/M5/M7 and any triggered `normalize_request` row apply to the native path too |
-| No unclaimed delta, over the whole corpus, on every native-wire provider and model | **L3** | Transparency oracle (§3.3.1), parametrised per transport (§3.3.2) |
-| Round-trip fidelity over the whole corpus, on every CC-wire and other-wire provider | **L3** | Oracle, round-trip mode |
+| Each wire projection reads its format correctly | L1 | The projections are test code and get their own tests — against published format examples, not against kitty's output |
+| A **below-threshold** corpus entry on a native-wire provider shows only M1 and P1 | L2 | Scoped to below-threshold deliberately: above it, M3/M5/M7 and any triggered provider row apply to the native path too |
+| No unclaimed delta, over the whole corpus, on every adapter × representative model × transport | **L3** | Transparency oracle (§3.3) |
+| An inbound `kitty` string survives while an injected vendor message is caught | **L3** | §3.3.3 regression case |
 | A real Claude Code session's tool calls execute correctly through kitty | L4 | Real-agent E2E (§6.4.2) |
 | Compaction has not degraded answer quality | L4 eval | §6.4.3 |
-
----
 
 ## 4. Invariant I2 — Bridge Indistinguishability
 
@@ -303,7 +391,7 @@ list of headers we happened to think of. That posture is what surfaced F3 and F4
 
 | Channel | What it exposes today | Verdict |
 |---|---|---|
-| **C1 — Request headers** | `build_upstream_headers()` constructs the set from scratch; no inbound agent header is forwarded. Four adapters supply a coding-agent `User-Agent` (P9); every other provider — including `zai_coding`, whose set is exactly `Authorization`, `anthropic-version`, `content-type` — sends aiohttp's default. | **Gap, and inconsistent.** F1. |
+| **C1 — Request headers** | `build_upstream_headers()` constructs the set from scratch; no inbound agent header is forwarded. Four adapters supply a coding-agent `User-Agent` (P9a, P9c); every other provider — including `zai_coding`, whose set is exactly `Authorization`, `anthropic-version`, `content-type` — sends aiohttp's default. | **Gap, and inconsistent.** F1. |
 | **C2 — Request body** | The register's mutations (§3.2), JSON key ordering produced by kitty's serialisation, **the literal string `[Kitty Bridge: …]` (M13)**, and **`_effort` / `_thinking_adaptive`, which are kitty-internal and reach the wire**. | **Breached.** F3 and F4. |
 | **C3 — Cross-attempt content and cadence** | Retries (`_MAX_RETRIES = 3`), failover, transport-blip re-connects, the empty-response ladder — and **four** paths that send a *different body* on a later attempt (M6, M8, M9, and failover re-normalisation). | §4.3 C3. Four declared exceptions. |
 | **C4 — Transport fingerprint** | TLS/ALPN/HTTP-2 signature of aiohttp, unlike the agent's own client. `curl_cffi` is already used for the OpenAI subscription provider precisely because that provider fingerprints TLS. | **Accepted residual risk.** §4.5. |
@@ -338,14 +426,18 @@ the difference is large; the test's job is to make it visible and stop it growin
 the build on day one — a reported baseline with a ratchet, becoming a gate once G3 closes.
 
 **C2 — Body shape (L3).** Covered by the transparency oracle (§3.3), plus two assertions the
-oracle does not give for free:
+oracle's projection makes possible and a flat scan cannot:
 
-- **No forbidden token in the body.** The same `kitty` token check C1 applies to headers, applied
-  to the serialized upstream body. This is what M13 breaches, and what nothing currently checks —
-  C1's forbidden set covers headers only, and M13's string is in a message.
+- **No vendor token in *bridge-introduced* content.** The check is emphatically **not** "the
+  serialized body must not contain `kitty`". A user may ask Claude Code to explain kitty-bridge;
+  a path may contain the word; a tool result may quote this document. All of that must reach the
+  provider unchanged — stripping it to satisfy I2 would breach I1, and the two invariants would
+  be in direct conflict. The oracle's projection diff already separates agent-supplied parts
+  from bridge-introduced ones (§3.3.3); only the latter are scanned. M13 is caught because it
+  has no inbound counterpart, while the user's sentence is not, because it does.
 - **Key order preservation on the native path.** A provider can fingerprint the JSON serialiser
-  from key ordering alone. This is the one place the oracle compares bytes rather than structure,
-  and it applies only where kitty claims to be forwarding rather than translating.
+  from key ordering alone. This is the one place the comparison is byte-level rather than
+  projected, and it applies only where kitty claims to be forwarding rather than translating.
 
 **C3 — Cross-attempt content and cadence (L3).** The design must not overstate this: kitty sends
 a different body on a later attempt in **four** distinct situations, not one.
@@ -383,7 +475,7 @@ its own ticket. F3, F4 and F5 are live breaches of invariants defined above.
 
 - **F1 — Agent identity is handled per-provider, not by policy.** *(KBR-8.)* Upstream headers are built from
   scratch, so Claude Code's `user-agent`, `x-app`, `anthropic-beta` and `x-stainless-*` never
-  reach the provider. Four adapters compensate ad hoc (P9): `KimiCodeAdapter`, `BytePlusAdapter`
+  reach the provider. Four adapters compensate ad hoc (P9a, P9c): `KimiCodeAdapter`, `BytePlusAdapter`
   and `MimoAdapter` hard-code `User-Agent: claude-code/1.0` — Kimi's carries a comment recording
   the string was on the provider's allowlist as of 2026-04-18 — and `OpenAISubscriptionAdapter`
   synthesises a Codex CLI identity. Everywhere else, including `zai_coding`, aiohttp's default
@@ -425,7 +517,7 @@ its own ticket. F3, F4 and F5 are live breaches of invariants defined above.
   says the property "describes the shape that actually goes on the wire" and that anything
   shaping the serialized body must branch on it — so a `True` that is false for most models is a
   latent defect in the thinking-repair path (M8) as well as a trap for the oracle's scoping
-  (§3.3.1). Tracked as G16 and KBR-7.
+  (§3.3.4). Tracked as G16 and KBR-7.
 
 ### 4.5 Accepted residual risk
 
@@ -490,39 +582,72 @@ records CONNECT attempts, which is the observation the harness needs.
        │   proxy  session ──────────┐               │
        └────────────────────────────┼───────────────┘
                                     ▼
-                     recording CONNECT proxy  ── CONNECT log
+                     recording CONNECT proxy  ── tunnel log
                                     │
                                     ▼
-                     recording fake upstream  ── request log
+                     recording fake upstream  ── connection + request log
 ```
 
-**The assertions.**
+#### 5.2.1 Correlate connections to tunnels, not requests to CONNECTs
 
-1. **Correlation, not peer address.** Every request the fake upstream records must correlate to
-   a `CONNECT` in the proxy's log for the same target and connection, and the two counts must be
-   equal. *Peer address cannot carry this*: with bridge, proxy and upstream all on loopback in
-   one test process, a proxied and a direct connection both present `127.0.0.1`, and both source
-   ports are ephemeral. Correlating on the proxy's own log discriminates; peer address does not.
-   (Binding the proxy's outbound socket to `127.0.0.2` is an alternative, but it needs an `lo0`
-   alias on macOS — a platform constraint the correlation approach avoids.)
-2. **Negative — traffic stops rather than leaks.** With the proxy stopped and egress configured,
-   the upstream accepts **zero** connections and the request fails. This is the assertion that
-   proves containment; assertion 1 alone is satisfied by a bridge that proxies *sometimes*.
-3. **Local bypass still works.** A loopback or `localhost` provider (a local Ollama) connects
-   directly and is not tunnelled — a rented proxy cannot reach the caller's LAN. **Applies to
-   the bridge's own sessions only**; see §5.5.
-4. **Fail-closed.** A profile whose adapter returns `supports_egress() == False` (Bedrock in SSO
-   mode) prevents startup, and the message names the profile.
+An earlier draft asserted that the count of upstream requests must equal the count of `CONNECT`
+attempts. That is wrong in both directions and would reject correct behaviour:
 
-### 5.3 The addressing trap — and why the harness uses a hostname
+- **One tunnel can carry many requests.** A transport with connection reuse issues a single
+  `CONNECT` and then sends N HTTP requests through it. The bridge's own aiohttp sessions use
+  `force_close=True` so they happen to be 1:1 today, but curl_cffi and botocore need not be —
+  and a test must not silently depend on `force_close`, which C5 and Q7 may well change.
+- **One CONNECT can carry no requests.** A rejected proxy authentication (407) or a failed TLS
+  negotiation produces a `CONNECT` attempt and no HTTP request at all.
 
-**This is the constraint that makes or breaks the harness, and it is not obvious.**
+The correct assertion is at the **connection** level: every TCP connection the upstream accepts
+must be attributable to a successful tunnel through the proxy, with any number of requests
+riding on it, and failed tunnels contributing no upstream connections.
 
-`egress.should_bypass()` returns `True` for loopback, private and link-local destinations, so
-those connect directly. The naive harness binds a fake upstream on `127.0.0.1` — which
-`should_bypass` sends *direct*, so the test proxies nothing and passes vacuously while proving
-the opposite of what it claims. Binding on a Docker network does not help: `172.16.0.0/12` is
-private and is also bypassed.
+**The join.** `ConnectAttempt` records target and authentication status only, which is not enough
+to identify a connection at both ends. Extend it to record the **proxy's outbound source port**
+for each tunnel it opens; the recording upstream already records the peer port of each accepted
+connection. Joining on that port identifies each upstream connection with the tunnel that
+created it. An upstream connection with no matching tunnel port is a bypass, and it is the only
+thing this assertion needs to catch.
+
+(Peer *address* cannot do this job: with bridge, proxy and upstream on loopback in one process,
+proxied and direct connections both present `127.0.0.1`.)
+
+#### 5.2.2 The three phases, per transport
+
+The negative assertion is the one that matters, and on its own it is dangerously easy to satisfy
+for the wrong reason — see §5.3. It must be bracketed by a positive control before it and a
+falsification control after it. All three run for **every** transport in §5.5, not just the
+bridge's own aiohttp session.
+
+| Phase | Setup | Assertion | What it rules out |
+|---|---|---|---|
+| **1. Positive control** | Egress **disabled** | The upstream is reachable **directly**, and records the connection | That the destination is unreachable for some unrelated reason — name resolution, firewall, a mis-scripted fake. Without this, phase 2 proves nothing. |
+| **2. Containment** | Egress enabled, proxy **stopped** | The upstream accepts **zero** connections, and the request fails | A direct fallback on proxy failure |
+| **2b. Containment, healthy** | Egress enabled, proxy running | Every upstream connection joins to a tunnel (§5.2.1) | A partial bypass under normal operation |
+| **3. Falsification control** | Egress enabled, proxy running, **a bypass deliberately introduced** (a patched `should_bypass` returning `True`, or a session built without the proxy) | The harness **fails** | That the harness is incapable of detecting a bypass at all |
+
+Phase 3 is not optional decoration. A containment harness that has never been shown to fail is
+indistinguishable from one that cannot fail, and §5.3 is a worked example of exactly that trap.
+
+**Two further assertions**, unchanged in substance:
+
+- **Local bypass still works.** A loopback or `localhost` provider (a local Ollama) connects
+  directly and is not tunnelled — a rented proxy cannot reach the caller's LAN. **Bridge sessions
+  only**; §5.5 explains why this is false for the custom transports.
+- **Fail-closed.** A profile whose adapter returns `supports_egress() == False` (Bedrock in SSO
+  mode) prevents startup, and the message names the profile.
+
+### 5.3 The addressing trap — and why the harness needs a positive control
+
+**Two traps live here, and the second is created by the fix for the first.**
+
+**Trap 1 — a loopback destination is bypassed.** `egress.should_bypass()` returns `True` for
+loopback, private and link-local destinations, so those connect directly. A harness that binds
+its fake upstream on `127.0.0.1` is sent *direct*, proxies nothing, and passes vacuously while
+proving the opposite of its claim. A Docker network does not help: `172.16.0.0/12` is private and
+also bypassed.
 
 The escape is in `should_bypass`'s own design. It reads `urlsplit(url).hostname` and:
 
@@ -531,19 +656,34 @@ The escape is in `should_bypass`'s own design. It reads `urlsplit(url).hostname`
 3. for anything else, returns `False` **without resolving it** — deliberately, to avoid a DNS
    round trip per request.
 
-So the harness must address the fake upstream by a **hostname outside the `localhost` family**.
-`upstream.kitty-test.invalid` is a good choice: RFC 2606 guarantees `.invalid` never resolves
-publicly, which is precisely why the harness must supply the mapping itself.
+So the harness addresses the fake upstream by a **hostname outside the `localhost` family**.
+`upstream.kitty-test.invalid` is a reasonable choice: RFC 2606 guarantees `.invalid` never
+resolves publicly, so the name cannot escape the test environment.
 
-**Name resolution, per leg.** The two legs differ, and only one needs work:
+**Trap 2 — an unresolvable name satisfies the negative test for the wrong reason.** That same
+guarantee is the problem. If the harness supplies name resolution only for the aiohttp leg, then
+on curl_cffi or botocore a genuinely broken implementation could attempt a direct connection,
+fail at DNS, and the upstream would still record **zero connections**. The negative assertion
+passes; containment was never demonstrated. The test would be green on a product that leaks on
+every other transport.
 
-- *Proxied leg* — **no resolution needed.** aiohttp's `_create_proxy_connection` resolves the
-  *proxy* and then issues `CONNECT upstream.kitty-test.invalid:443`; the test's own proxy
+This is why §5.2.2 phase 1 exists and why it is mandatory per transport: **before** asserting
+that nothing arrives, the harness must have shown that something *can* arrive directly for that
+exact transport and destination. A negative result is only evidence when the positive is
+possible.
+
+**Name resolution, per leg.**
+
+- *Proxied leg* — **no resolution needed by the client.** aiohttp's `_create_proxy_connection`
+  resolves the *proxy* and issues `CONNECT upstream.kitty-test.invalid:443`; the test's own proxy
   resolves the target. The harness owns the resolver because the harness is the proxy.
-- *Direct/bypass leg* — needs a local override. Use a monkeypatched aiohttp resolver, **not** an
-  `/etc/hosts` entry: hosts edits need administrator rights and are unavailable on most CI
-  runners, and `_build_client_session` constructs its own `TCPConnector` with no resolver
-  injection point.
+- *Direct leg* — needs a local override, **for every transport, not only aiohttp**. aiohttp takes
+  a monkeypatched resolver (`/etc/hosts` needs administrator rights and is unavailable on most CI
+  runners, and `_build_client_session` builds its own `TCPConnector` with no injection point).
+  curl_cffi and botocore need their own equivalents — curl's `resolve` mapping and a botocore
+  `endpoint_url` override respectively. If a transport cannot be given a working direct route,
+  its phase-1 control cannot pass, and its negative assertion must be reported as **unproven**
+  rather than counted as a pass.
 
 **The property that keeps the harness honest.** An L1 property test pins the premise so a future
 change to `should_bypass` cannot silently make the harness vacuous:
@@ -567,13 +707,15 @@ whether to change it is Q3.
 |---|---|---|
 | `should_bypass` classifies loopback / private / link-local / `localhost` family / public / hostname correctly | L1 + property | Enumerate IPv4 and IPv6 private ranges via `ipaddress`; assert the §5.3 hostname property |
 | `parse_proxy_url` round-trips credentials, including percent-encoded `@` and `:` | L1 property | `parse(url_with_credentials(cfg)) == cfg` |
-| No `EgressConfig` representation leaks the password | L1 property | `password not in repr(cfg) + str(cfg) + cfg.masked()` for all generated passwords |
+| No `EgressConfig` representation leaks the password | L1 property | Structural: the password component of `masked()` is exactly the mask. **Not** a substring test — see §6.1 |
 | Every outbound HTTP client is egress-aware; no source assigns `HTTP_PROXY`; no session trusts the environment | L2 structural | **Exists:** `tests/test_egress_coverage.py` |
 | **Every** `BridgeServer` construction is dominated by an `egress_block_reason` call | L2 structural | **Must be strengthened** — the existing guard is file-granular (§5.1 gap 3) |
 | An `https://` proxy carries real traffic on all three transport stacks | L2/L3 | **Exists:** `tests/test_egress_https_proxy.py` |
 | Proxy semantics under each dependency's version range | L2 | §6.2.4 |
-| Nothing reaches upstream except via the proxy, **from the bridge's own serving path** | **L3** | Sealed-network harness (§5.2) |
-| Stopping the proxy stops the traffic — no direct fallback | **L3** | §5.2 assertion 2 |
+| The destination is reachable directly with egress **disabled**, on every transport | **L3** | §5.2.2 phase 1 — the positive control. Without it the row below proves nothing (§5.3) |
+| Nothing reaches upstream except via the proxy, **from the bridge's own serving path** | **L3** | Sealed-network harness (§5.2.2 phase 2b) |
+| The harness detects a deliberately injected bypass | **L3** | §5.2.2 phase 3 — the falsification control. A containment harness never shown to fail is indistinguishable from one that cannot |
+| Stopping the proxy stops the traffic — no direct fallback | **L3** | §5.2.2 phase 2 |
 | Containment holds for each custom transport | **L3** | §5.5 |
 | kitty refuses to start when a backend cannot be proxied | L2 + L4 | Guard unit test + scenario EG-3 |
 | A developer's whole session presents one IP | L4 | Scenario EG-1 |
@@ -593,9 +735,9 @@ other outbound paths exist, and each applies the proxy **unconditionally, withou
 
 Three consequences the rest of §5 must not paper over:
 
-1. **§5.2 assertion 3 is false for these paths.** They have no bypass, so a loopback or private
-   destination *is* tunnelled. Arguably safer, but different — the design must say so rather than
-   imply uniformity.
+1. **The local-bypass assertion in §5.2.2 is false for these paths.** They have no bypass, so a
+   loopback or private destination *is* tunnelled. Arguably safer, but different — the design
+   must say so rather than imply uniformity.
 2. **The sealed-network harness proves nothing about them** unless parametrised over the
    transport. It must run over `{bridge aiohttp session, provider aiohttp session, curl_cffi
    session, botocore client}` — the shape `tests/test_egress_https_proxy.py` already uses, which
@@ -617,29 +759,51 @@ the configured egress on the two stacks that read the environment. §6.2.4 pins 
 
 **Scope.** Pure logic: the three translators, the translation engine, compaction and tool-call
 pairing, model normalisation, `should_bypass` and `parse_proxy_url`, profile schema and
-resolver, the tool-use anomaly detector, and every `ProviderAdapter` payload builder.
+resolver, the tool-use anomaly detector, every `ProviderAdapter` payload builder, and the wire
+projections the oracle depends on (§3.3.1 — test code, but code the whole of I1 rests on).
 
 **Tools.** `pytest` (present) + `hypothesis` (**to add**, dev extra only).
 
-**Command.** `pytest tests/ -q`
+**Command.** `pytest -m l1 -q` — a marker, not `pytest tests/ -q`, which runs every layer and so
+cannot be the L1 selection (§8).
 
-**Validation.** Mutation testing (below). This is the layer whose strength is actually measured.
+**Validation.** Mutation testing (below).
 
-**Property tests to add.** Example-based tests sample; these translators and the compactor are
-exactly the kind of total function where properties pay.
+**Property tests to add.**
 
 | Unit | Property |
 |---|---|
-| `MessagesTranslator` | Semantic round-trip: text, tool ids, tool names and tool results survive Messages → CC → Messages |
-| `_compact_messages` | Identity below budget · output ≤ budget **unless the system block alone exceeds it** · no orphaned pair · last block preserved **unless pairing validation drops it (then M13 fires)** · idempotent |
+| `MessagesTranslator` | Semantic round-trip **through the projections, not through the translator pair**: `project_messages(inbound)` equals `project_cc(translate_request(inbound))`. See §3.3.1 for why the translator pair cannot serve as its own oracle. |
+| `_compact_messages` | Identity below budget · no orphaned pair · idempotent · **output ≤ budget unless the surviving set is irreducible** (below) |
 | `_validate_tool_call_pairing` | Output contains no `tool_result` without a `tool_use`, in both message shapes |
 | `_truncate_oversized_tool_results` | Identity below the limit · output ≤ limit · non-tool-result content untouched |
 | `should_bypass` | Every address in a private range is bypassed · the §5.3 hostname property |
-| `parse_proxy_url` / `EgressConfig` | Credential round-trip · password never in any string form |
+| `parse_proxy_url` / `EgressConfig` | Credential round-trip · the redaction property below |
 | `describe_tool_input_anomaly` | Never reports an anomaly for input that validates against the declared schema |
+| Wire projections (§3.3.1) | Each reads its format correctly, tested against published format examples — never against kitty's own output |
 
-The two weakened properties are stated with their exceptions on purpose. A property that fails on
-day one gets weakened by whoever is on the rota, and a weakened property guards nothing.
+**The compaction budget property, stated honestly.** "Output ≤ budget" is false, and the
+exception is wider than an earlier draft claimed. The guaranteed-fit loop drops head blocks, then
+tail blocks, and `break`s while still over budget once it can shrink no further — when only the
+system message and a single tail block remain. So it exceeds the budget whenever the **surviving
+set is irreducible**, which includes a small system message plus one oversized final user turn,
+not only an oversized system block. The property must be stated that way or it fails on the first
+run and gets weakened by whoever is on the rota.
+
+**This is a product question, not just a test-wording question.** What *should* happen when the
+final turn alone will not fit? Today the request goes upstream over budget and is rejected there,
+or M13 replaces it. Neither is obviously right, and neither has been decided. The register,
+the properties and the Gherkin must agree on one answer — see Q10. Until it is decided, the
+document records current behaviour as *observed*, explicitly not as *approved*.
+
+**The redaction property, stated so it cannot false-fail.**
+`password not in repr(cfg) + str(cfg) + cfg.masked()` is wrong: `masked()` returns
+`scheme://user:****@host`, so a password that happens to equal a substring of the host or
+username fails the assertion despite correct masking. Password `proxy` with host `proxy.example`
+reproduces it. Assert the **structure** instead — parse `masked()` and assert its password
+component is exactly the mask — and test percent-encoded and URL-embedded forms as separate
+cases. For the broader "does the password reach a log" sweep, generate a distinctive sentinel
+that cannot collide with any other field.
 
 **Mutation testing.** Line coverage cannot tell a real assertion from `assert result is not
 None`. `mutmut` closes that gap.
@@ -647,29 +811,43 @@ None`. `mutmut` closes that gap.
 - **Tool:** `mutmut` (3.x; requires `fork`, so it runs on Linux CI — on Windows it needs WSL).
   Configured in `pyproject.toml` under `[tool.mutmut]`, where `source_paths` and
   `pytest_add_cli_args_test_selection` take **arrays**.
-- **Command:** `mutmut run`, then `mutmut browse` to triage and `mutmut export-cicd-stats` for
-  the CI score.
-- **In scope — not the whole codebase:** `src/kitty/bridge/messages/`,
-  `src/kitty/bridge/responses/`, `src/kitty/bridge/gemini/`, `src/kitty/bridge/engine.py`,
-  `src/kitty/bridge/tool_audit.py`, `src/kitty/egress.py`, `src/kitty/profiles/`,
-  `src/kitty/validation.py`.
-- **Why a subset.** Mutation testing on 22,700 lines would take hours and produce a survivor list
-  nobody reads. The subset is chosen by one rule: **modules whose silent misbehaviour breaches an
-  invariant**. A mutation surviving in the compactor means the suite would not notice kitty
-  eating a tool result — an I1 breach. A mutation surviving in the TUI menu means a cosmetic
-  defect. Expand when the first list is clean.
-- **Budget:** ≥ 85% killed on the in-scope set. Below that, the layer is not trusted.
+- **Test selection:** `pytest_add_cli_args_test_selection = ["-m", "l1"]`. Mutation testing
+  measures the L1 suite; letting it run L3 subsystem tests would make each mutant minutes long
+  and attribute kills to the wrong layer.
+- **Scope — narrow, but it must include the code the rationale is about.** An earlier draft
+  justified the subset by "a mutation surviving in the compactor means the suite would not notice
+  kitty eating a tool result", then excluded `server.py`, where the compactor lives. Corrected
+  scope, using `mutmut`'s function wildcards rather than whole modules:
+
+  | Target | Why |
+  |---|---|
+  | `kitty.bridge.messages.*`, `kitty.bridge.responses.*`, `kitty.bridge.gemini.*`, `kitty.bridge.engine` | Translation — I1 |
+  | `kitty.bridge.server._compact_messages*`, `_compact_with_tighter_budget*`, `_validate_tool_call_pairing*`, `_truncate_oversized_tool_results*`, `_apply_compaction*`, `_normalize_model*`, `_get_max_context_chars*` | Compaction and pairing — the I1 core, and the thing the rationale was always about |
+  | `kitty.providers.*` `translate_to_upstream` / `normalize_request` / `build_upstream_headers` | The register's provider half — I1 and I2 |
+  | `kitty.egress`, `kitty.egress_guard` | I3, including the startup guard |
+  | `kitty.bridge.tool_audit`, `kitty.profiles.*`, `kitty.validation` | Supporting correctness |
+
+  Still excluded: the TUI, the CLI wiring, the retry/health state machine. A mutation surviving
+  in a menu is a cosmetic defect; one surviving in the compactor is a silent invariant breach.
+
+- **Per-component thresholds, not one aggregate.** ≥ 85% killed **per target group** above. A
+  single aggregate over a large surface lets a weak component hide behind a strong one — and the
+  weak components here are exactly the invariant-critical ones.
 - **Triage rule:** (a) a survivor revealing a missing assertion → strengthen the test; (b)
   revealing untested behaviour → add a test; (c) genuinely equivalent → suppress at the site with
   `# pragma: no mutate` **and a comment saying why**. Never dismiss a survivor silently.
-- **Cadence:** nightly and pre-release. Per-PR would add tens of minutes to a gate that must stay
-  fast.
+- **Cadence — to be set by measurement, not assertion.** The full scoped run is nightly. Whether
+  a **changed-code** mutation run also fits the per-PR gate is an open question with a numeric
+  answer: measure the wall-clock of `mutmut run` restricted to functions touched by a
+  representative PR, and adopt it per-PR if it lands inside the budget the fast gate can absorb.
+  Rejecting per-PR mutation testing without that measurement is an assumption, not a decision.
+  Tracked as Q11.
 
 ### 6.2 L2 — Contract
 
 **Scope.** Any two artifacts that must agree but are deployed, edited or upgraded separately.
 
-**Command.** `pytest tests/contract -q`
+**Command.** `pytest -m l2 -q`
 
 **Validation.** Every structural guard must assert that its own scan finds known positives, so it
 cannot rot into a no-op. `tests/test_egress_coverage.py` already does this
@@ -715,17 +893,27 @@ sentence in that grammar. Applies to all three streaming protocols.
 
 Structural guards in the style of `tests/test_egress_coverage.py`.
 
+**The register guard runs at the serialization boundary (§3.2.3), not at `translate_to_upstream`.**
+An earlier draft specified feeding a request through `normalize_request` + `translate_to_upstream`
+and diffing the result. That misses every transformation inside a custom transport — and P13 is
+exactly that case: on `openai_subscription` those two hooks return a Chat Completions shape, and
+`_cc_to_responses` drops fourteen parameters afterwards. A guard checking the hook would have
+reported the adapter clean.
+
 | Guard | Asserts |
 |---|---|
-| **Register completeness — shape diff, not write scan** | For every registered adapter, feed a fixed CC request through `normalize_request` + `translate_to_upstream` and assert the resulting key-set and value deltas are **exactly** the union of that adapter's §3.2.2 rows. A write-scan cannot do this job: every provider mutation except P7 and the `normalize_request` overrides happens by *building and returning* a new dict, so a scan for writes to `cc_request` sees none of them — and would have missed F4 entirely. |
-| **Internal-key completeness** | AST-scan `bridge/**` for every `_`-prefixed key written into a request dict, and assert each is a member of `_INTERNAL_KEYS`. **This is the guard that catches F4.** The complementary check — that each `translate_to_upstream` override delegates to `super()` or excludes `_INTERNAL_KEYS` — is necessary but not sufficient: every override *does* strip the set today; the set is what is wrong. |
-| **Wire-shape honesty** | For every adapter × representative model, assert `upstream_wire_is_messages_api` agrees with the shape `translate_to_upstream` actually returns. Catches F5. |
-| **Forbidden vendor token** | No string literal reachable into a request body or upstream header contains `kitty` in any casing. Catches F3. |
-| **Start-path domination** | Every `BridgeServer(` construction is dominated by an `egress_block_reason(` call **at AST level**, not merely co-located in the same file. `cli/main.py` already holds two start paths (§5.1 gap 3). |
+| **Register completeness — shape diff at the wire** | For every adapter × representative model × transport, capture the body at the §3.2.3 boundary and assert the projected delta from the input is exactly the union of that adapter's register rows whose triggers the input met. **One fixed request is not sufficient** — each conditional row needs a trigger case and a complement case (§3.3.4), and adapters that route by model need one input per route. |
+| **Internal-key completeness** | AST-scan `bridge/**` for every `_`-prefixed key written into a request dict, and assert each is a member of `_INTERNAL_KEYS`. **This is the guard that catches F4 (KBR-6).** The complementary check — that each `translate_to_upstream` override delegates or excludes the set — is necessary but not sufficient: every override strips it correctly today; the set itself is what is wrong. |
+| **Wire-shape honesty** | For every adapter × representative model, assert `upstream_wire_is_messages_api` agrees with the shape observed at the serialization boundary. Catches F5 (KBR-7). |
+| **Bridge-introduced vendor token** | No content the bridge *introduces* into a request body or header contains `kitty` in any casing. Scoped by the projection diff (§3.3.3), never a flat scan of the serialized body — a flat scan would fail on a user legitimately writing the word, and "fixing" that would breach I1. Catches F3 (KBR-5). |
+| **Start-path domination** | Every `BridgeServer(` construction is dominated by an `egress_block_reason(` call **at AST level**, not merely co-located in the same file. `cli/main.py` already holds two of the five start paths (§5.1 gap 3). |
 | **Env-var register** | `_SETTINGS_ENV_OVERRIDE_KEYS` and `_CONFLICTING_ENV_VARS` (`launchers/claude.py`) match what `build_spawn_config` emits and what the README documents. |
-| **Endpoint table** | The README endpoint table matches `_register_routes`. Catches F2. |
-| **Attribution-header table** | The README's `X-Kitty-*` table matches `_attribution_headers()`, and none of those names can reach `build_upstream_headers()`. |
+| **Endpoint table** | The README endpoint table matches `_register_routes`. Catches F2 (KBR-9). |
+| **Attribution-header table** | The README's `X-Kitty-*` table matches `_attribution_headers()`, and none of those names can reach any `build_upstream_headers()`. |
 | **Flag table** | The README logging-flag table matches the CLI parser. |
+
+Every guard asserts its own scan finds known positives, so none can rot into a no-op —
+`tests/test_egress_coverage.py` already does this and is the pattern to copy.
 
 **Why guard the README specifically.** For a CLI tool the README *is* the interface
 specification — it is what a user configures against. A drifted README is a defect with the same
@@ -756,7 +944,7 @@ and the CLI with the real filesystem and real child processes.
 `tests/test_egress_https_proxy.py`. `testcontainers` only if a scenario genuinely needs process
 isolation; a local proxy and upstream do not.
 
-**Command.** `pytest tests/subsystem -q`
+**Command.** `pytest -m l3 -q`
 
 **Validation.** Each harness must carry a **negative** case proving it can fail — the sealed
 network's proxy-down assertion, the oracle's "mutation present without its trigger" case. A
@@ -765,17 +953,44 @@ each show how easily one goes vacuous.
 
 #### 6.3.1 Bridge with real sockets
 
+**Command.** `pytest -m l3 -q`
+
 | Scenario | Assertion |
 |---|---|
-| Transparency oracle over the corpus (§3.3), per wire shape and per transport | No unclaimed delta; no conditional mutation without its trigger |
-| Sealed network (§5.2), parametrised per transport (§5.5) | Everything correlates to a CONNECT; nothing when the proxy is down |
+| Transparency oracle over the corpus (§3.3), per adapter × model × transport | No unclaimed delta; every conditional row exercised with trigger **and** complement |
+| Bridge-introduced vendor token (§4.3 C2) | An inbound `kitty` string survives byte-identically; an injected vendor message is caught |
+| Sealed network (§5.2), all three phases, per transport (§5.5) | Positive control passes; zero connections with the proxy down; the falsification control fails the harness |
 | Cross-attempt content (§4.3 C3) | Transport-blip and empty-response retries byte-identical; each of M6, M8, M9 and failover re-normalisation fires only under its own trigger |
 | Connection lifecycle (§4.3 C5) | Distinct-connection count per session, against the native baseline |
-| Forbidden vendor token (§4.3 C2) | No `kitty` token in any upstream header or body, including the M13 path |
-| Streaming failover mid-response | The client sees one well-formed stream; `/stats` is authoritative for attribution, per the README's own caveat about first-byte headers |
+| **Streaming recovery — content, not just grammar** (below) | Four injection points; no duplication, no replayed tool calls, no spliced arguments |
 | Client disconnect during a stream | Upstream connection released; the backend not marked unhealthy for a client-side fault |
 | All backends unhealthy | The 503 arrives in each protocol's native error envelope |
 | Oversized request | Rejected with the protocol's own error shape, not a raw 413 |
+| `_backend_context` isolation | Concurrent requests never observe each other's backend selection. **Deterministic, so it belongs here, not in the load profile.** |
+
+**Streaming recovery needs content guarantees, not only a well-formed stream.** "The client sees
+one well-formed stream" is necessary and nowhere near sufficient: a failover that replays text
+the client already received, re-emits a `tool_use` block under a fresh id, or splices tool-call
+arguments assembled from two different attempts produces a stream in which **every SSE event is
+syntactically valid** and the conversation is corrupt. Claude Code will act on a duplicated tool
+call.
+
+Inject the failure at four points, forced deterministically with barriers or a scripted event
+sequence rather than timing:
+
+| Injection point | Assertion |
+|---|---|
+| Before any downstream byte | Clean failover; the client sees one complete stream from the second backend |
+| After text has been emitted | No text the client already received is repeated; the transcript reads as one message |
+| Mid `input_json_delta`, tool arguments partly sent | Arguments are never a splice of two attempts. Either the partial block is properly abandoned and re-opened under a new id, or the turn fails — whichever the agreed semantics say, but never a silent merge |
+| After content, before the terminal event | Exactly one terminal outcome reaches the client; `message_stop` is not duplicated or omitted |
+
+Each case asserts tool-call **identity** (ids stable within an attempt, never reused across
+attempts) and a single terminal outcome. The agreed retry semantics are a prerequisite: if they
+have not been decided, that is the finding, not a test to write around.
+
+`/stats` remains authoritative for attribution after a mid-stream failover, per the README's own
+caveat that the headers name whoever produced the first byte.
 
 #### 6.3.2 CLI with real filesystem and processes
 
@@ -796,14 +1011,13 @@ under suspicion in the KBR-1 investigation. Only a real spawn tests it.
 ### 6.4 L4 — Product
 
 **Tools.** `pytest-bdd` for the Gherkin layer (**to add**, dev extra only — no BDD runner is
-currently a dependency); `pytest` for the real-agent E2E; separate runners for evals and load.
+currently a dependency); `pytest` for the agent tests; separate runners for evals and load.
 
-**Command.** `pytest tests/acceptance -q` · `pytest tests/integration -v --runslow` · the eval
-and load runners are separate entry points.
+**Commands.** `pytest -m acceptance -q` · `pytest -m agent_smoke -q` · `pytest -m agent_live -q`
+· the eval and load runners are separate entry points (§8).
 
-**Validation.** The paired-delta band (§6.4.3), and the requirement that every scenario binds to
-an L3 harness rather than re-implementing one — an acceptance test that grows its own assertions
-has drifted into L3 and should be moved down.
+**Validation.** Every scenario binds to an L3 harness rather than re-implementing one — an
+acceptance test that grows its own assertions has drifted into L3 and should be moved down.
 
 #### 6.4.1 Gherkin acceptance
 
@@ -812,35 +1026,58 @@ The invariants written as scenarios a product owner can read and sign.
 ```gherkin
 Feature: The upstream provider cannot tell Kitty Bridge is there
 
-  Scenario: TR-1  Kitty leaves no fingerprint in the request
+  Scenario: TR-1  Kitty introduces no fingerprint of itself
     Given a profile using the Z.AI coding plan
     When Claude Code sends a turn through kitty
-    Then the request the provider receives contains no header, field or value
-         naming kitty
-    And the header set is a subset of what Claude Code sends natively
+    Then no content the bridge added to the request names kitty
 
-  Scenario: TR-2  A short turn reaches the provider unchanged
-    Given a conversation well inside the model's context window
+  @ratchet  # not gating until G3 (KBR-8) closes — see the note below
+  Scenario: TR-1c  Kitty's headers are a subset of the agent's own
+    Given a profile using the Z.AI coding plan
+    When Claude Code sends a turn through kitty
+    Then the header set is a subset of what Claude Code sends natively
+
+  Scenario: TR-1b  The agent may talk about kitty freely
+    Given a profile using the Z.AI coding plan
+    And a prompt whose text is "Please explain how kitty-bridge works"
+    When Claude Code sends that turn through kitty
+    Then the provider receives that text unchanged
+
+  Scenario: TR-2  A turn needing no adaptation reaches the provider unchanged
+    Given a native-wire provider and no thinking signal in the request
+    And a conversation inside the model's context window
+    And no tool result larger than the truncation limit
     When Claude Code sends a turn through kitty
     Then the provider receives the agent's messages with no content altered
     And the only difference from the agent's own request is the model name
+    # Preconditions matter: on a translated wire M2 rewrites everything, and a
+    # thinking signal triggers P2a, P5c-e and P8 content injection. Cf. 3.4.
 
   Scenario: TR-3  A long turn is altered only as far as necessary
     Given a conversation that exceeds the model's context window
     When Claude Code sends a turn through kitty
     Then history is compacted only as far as the budget requires
     And no tool result is separated from the call that produced it
-    And the most recent turn is preserved in full
+    And the most recent turn is preserved, unless its own tool result exceeds
+         the 50,000-char truncation limit, or it is dropped because its
+         tool_result lost the tool_use that produced it
 
+  @ratchet  # currently fails by design — this is F3/G14 (KBR-5)
   Scenario: TR-4  An unrecoverable conversation fails without naming kitty upstream
     Given a system prompt larger than the model's context window
     When Claude Code sends a turn through kitty
     Then the user is told the conversation cannot be compacted
-    And the provider receives no message naming kitty
+    And the provider receives no content naming kitty
 
 Feature: Configured egress cannot be bypassed
 
-  Scenario: EG-1  Every request presents the gateway's address
+  Scenario: EG-0  The destination is reachable directly when egress is off
+    Given no egress gateway configured
+    When kitty sends a request on each supported transport
+    Then the provider records the connection
+    # Control. Without it, EG-2 can pass because nothing could ever arrive.
+
+  Scenario: EG-1  Every request arrives through the gateway
     Given a configured egress gateway
     When Claude Code runs a session through kitty
     Then every connection the provider accepts arrived through the gateway
@@ -858,45 +1095,112 @@ Feature: Configured egress cannot be bypassed
     Then kitty refuses to start and names the profile
 ```
 
-TR-4 is the acceptance form of F3: it states the outcome the user needs (a legible error) and the
-one they must not pay for it with (the vendor name upstream), without prescribing the fix.
+**Two scenarios are `@ratchet`, and the distinction matters.** The Acceptance job gates every PR
+(§8), so a scenario asserting behaviour the product does not yet have would make `main` red on
+day one — and a permanently red gate gets disabled, taking the working scenarios with it. TR-1c
+(header parity) and TR-4 (the vendor string) both assert the *target* state of open defects: G3
+(KBR-8) and G14 (KBR-5) respectively. They run on every PR and are reported, but they do not
+gate until their defect closes, at which point the marker is removed and they become ordinary
+gating scenarios. This is the same ratchet §4.3 C1b describes for the header baseline; the
+marker exists so the promotion is a deliberate one-line change, not something anyone has to
+remember.
 
-Step definitions bind to the L3 harnesses, so the acceptance layer stays thin: it composes, it
-does not re-implement.
+**Three scenarios were corrected against the implementation, not the other way round.**
 
-#### 6.4.2 Real-agent end-to-end
+- **TR-1 / TR-1b** — the original TR-1 said the request "contains no header, field or value
+  naming kitty", which forbids a user from asking about the product. TR-1 now constrains only
+  content the bridge introduced; TR-1b pins the complement, so the pair cannot be satisfied by
+  stripping user text.
+- **TR-2** — "a short turn reaches the provider unchanged" was false: M3 tool-result truncation
+  is unconditional pre-processing and fires on a short conversation containing one 50,000-char
+  tool result. The precondition is now explicit.
+- **TR-3** — "the most recent turn is preserved in full" was false: the last turn is subject to
+  truncation and to pairing validation. It now states what the code does.
 
-`tests/integration/test_agent_e2e.py` exists and spawns real agent binaries. Keep it out of the
-default `pytest` run — it requires four agent CLIs, live credentials and live network, and a
-suite that cannot run on a laptop or in CI stops being trusted. Promote it to a **nightly** job
-with credentials in CI secrets, and extend it from two cases to cover, for Claude Code
-specifically: a plain turn, a tool-using turn, a multi-turn session with tool results, an
-extended-thinking turn, and a session that crosses the compaction threshold.
+**TR-3 and the compaction properties still depend on an undecided product question** (Q10): what
+*should* happen when the final turn alone exceeds the budget. This Gherkin records current
+behaviour; it does not ratify it. When Q10 is answered, TR-3, register rows M3–M7/M13 and the
+§6.1 properties change together or not at all.
+
+#### 6.4.2 Agent-boundary tests
+
+Two distinct things, currently conflated, with different costs and different cadences.
+
+**Agent smoke — per PR, hermetic.** The claim that kitty configures Claude Code correctly is a
+claim about *Claude Code's* settings precedence between `--settings`, the process environment and
+`~/.claude/settings.json`. Spawning an arbitrary child process does not test that; it tests
+kitty's belief about it, which is precisely the assumption under suspicion in the KBR-1
+investigation. This needs a **pinned real Claude Code binary** run against the scripted fake
+upstream (§7.2) — no live provider, no credentials, no network. One non-interactive turn is
+enough to prove the wiring: the binary starts, resolves the bridge URL from the session settings
+file, sends a request that arrives at the recorder, and exits cleanly.
+
+Pinning it in CI has real questions attached — which distribution, how tightly version-pinned, licensing for
+redistribution in a CI image — recorded as Q12 rather than assumed away.
+
+**Agent live — nightly.** `tests/integration/test_agent_e2e.py` as it exists: real binaries, real
+credentials, real providers. Keep it out of the default run — it needs four agent CLIs and live
+network, and a suite that cannot run on a laptop stops being trusted. Nightly with CI secrets,
+extended from two cases to cover, for Claude Code: a plain turn, a tool-using turn, a multi-turn
+session with tool results, an extended-thinking turn, and a session crossing the compaction
+threshold.
+
+**Neither job may skip silently.** A required job whose prerequisite is missing must **fail**,
+not pass-by-skipping. A green tick that means "we did not test this" is worse than a red one.
 
 #### 6.4.3 Answer-quality evals
 
-Compaction (M5, M6, M13) and truncation (M3, M4, P7) are the mutations that can degrade an answer
-without breaking any structural assertion. Nothing below L4 can detect that.
+Compaction (M5, M6, M13) and truncation (M3, M4, P7, P13) can degrade an answer without breaking
+any structural assertion. Nothing below L4 can detect that. But the method has to be honest about
+what it can establish.
 
-Design: a fixed set of coding tasks with objective pass criteria (the produced code compiles; the
-test it was asked to write passes). Run each through kitty and directly against the same
-provider, and compare pass rates. The metric is the **delta**, not the absolute rate — the
-absolute rate is a property of the model and moves for reasons unrelated to kitty. Sample size
-fixed in advance, run nightly, alert on a delta beyond the band (Q4).
+**What pairing does and does not buy.** Running the same task through kitty and directly against
+the same provider removes *task* variance — task difficulty is held constant. It does **not**
+cancel the model's independent sampling on each call. Two samples of the same prompt differ. So
+the design needs repetition and an interval, not a single paired run and a single number.
 
-**Why a delta rather than a threshold.** An absolute threshold on a nondeterministic system
-produces a flaky gate, and a flaky gate at L4 is worse than none: it trains people to re-run. The
-paired comparison cancels the model's own variance.
+| Element | Specification |
+|---|---|
+| **Tasks** | A fixed set with **independently authored** acceptance tests. A model-generated test that the model's own code passes establishes nothing — the same misunderstanding can be present in both. |
+| **Repetition** | N samples per task per arm, N fixed in advance and large enough for the interval below to be narrower than the margin. |
+| **Pinning** | Model id, provider, dataset revision, temperature and all sampling settings pinned and recorded with each run. An unpinned model makes the series meaningless. |
+| **Statistic** | Difference in pass rate between arms, with a confidence interval — not a point estimate. |
+| **Decision rule** | A **pre-registered regression margin**: the alert fires when the interval excludes a delta smaller than the margin. Chosen before the data, not after. |
+| **Failure attribution** | Provider outage, rate limiting and refusals are classified and excluded from the pass-rate denominator, or a bad afternoon at the provider reads as a product regression. |
+
+**The compaction arm needs a different baseline.** For an input that exceeds the model's context
+window, the direct-provider arm does not produce a worse answer — it produces a 400. There is
+nothing to compare. The baseline for compaction cases must be something that can actually answer:
+kitty against a larger-context model, or kitty with compaction thresholds relaxed. Which one is
+Q13.
+
+Q4 asks for the margin. It is one input to this design, not a substitute for it.
 
 #### 6.4.4 Load
 
-A concurrency and duration profile — many parallel sessions against one bridge, a long streaming
-response, and a sustained session — asserting the connection-pool limit
-(`KITTY_BRIDGE_CONN_LIMIT`, default 500) and `force_close=True` behave as intended, that memory
-does not grow across a long stream, and that the per-request `_backend_context` ContextVar does
-not leak between concurrent requests. Pre-release, not per-PR.
+The earlier draft said "many parallel sessions", "sustained", and "behave as intended". None of
+that is a gate — it is the "as appropriate" this document forbids elsewhere. Specified properly:
 
----
+| Element | Specification |
+|---|---|
+| **Workload** | C concurrent sessions × R requests, Poisson arrivals at rate λ, duration D, response sizes drawn from the corpus. C, R, λ and D fixed in the profile and versioned with it. |
+| **Hardware** | Named runner class and core/memory count recorded with every result. A latency number without a machine is not a number. |
+| **Streaming vs. buffered** | Measured separately. The bridge streams incrementally on the SSE paths but **buffers whole responses** on others (non-streaming `_make_upstream_request`, the subscription provider's SSE-to-response parse). "Memory does not grow across a long stream" is false as a blanket claim and must be scoped to the incremental paths. |
+
+**Metrics and gates:**
+
+- **Bridge-added latency** — p50 and p95 of (through-kitty − direct-to-fake-upstream), against a
+  fixed ceiling.
+- **Time to first output byte** on streaming paths, against a fixed ceiling.
+- **Completion rate** and **error rate** by class, against fixed floors.
+- **Bounded memory** — peak RSS stays within a fixed multiple of the largest single buffered
+  response on buffered paths; flat within a fixed band on incremental paths.
+- **Resource recovery** — open sockets and file descriptors return to baseline within a fixed
+  window after the run, proving `force_close` and the connection-limit behave under saturation.
+
+The ceilings and floors are numbers this document does not invent: they come from a first
+baseline run, recorded and then ratcheted. **`_backend_context` isolation moved to L3** (§6.3.1)
+— it is deterministic and does not need a load rig to prove.
 
 ## 7. Shared test infrastructure
 
@@ -910,12 +1214,25 @@ alongside them (the baselines C1b and C5 compare against).
 Code sends. That belief is the thing most likely to be wrong, and it drifts every time Anthropic
 ships a release. Captured bodies are evidence.
 
-**Required entries, at minimum:** plain text turn · turn with `tools` declared · assistant
-`tool_use` · user `tool_result` · extended thinking · image content block · `system` with
-`cache_control` · a transcript above the compaction budget · a single tool result above 50,000
-chars · a transcript that provokes the 400/413 recovery path (**must run against a balancing
-profile** — M6 exists only in `_request_with_retry_balancing`) · a system prompt alone larger
-than the window, to reach M13 · a malformed body for the fuzz path.
+**Coverage is driven by the register, not by intuition.** Every conditional row in §3.2 needs a
+corpus entry that meets its trigger **and** one that does not (§3.3.4); a corpus that only
+contains trigger cases cannot support assertion 2. At minimum:
+
+| Entry | Exercises |
+|---|---|
+| Plain text turn | Baseline; complement for every conditional row |
+| Turn with `tools` declared | Tool-declaration projection |
+| Assistant `tool_use` / user `tool_result` | Pairing, M7 |
+| Extended thinking | P2a/P2b, P5c, P5d, P8, M8 |
+| Image content block · `system` with `cache_control` | Projection fidelity on non-text parts |
+| Tool result just under and just over 50,000 chars | M3/M4 trigger **and** complement |
+| Transcript just under and just over the compaction budget | M5 trigger and complement |
+| Transcript provoking the upstream 400/413 recovery | M6 — **must run against a balancing profile**; `_request_with_retry` has no compaction recovery |
+| System prompt alone larger than the window | M13, and the Q10 behaviour |
+| A single final turn larger than the budget | The irreducible-set case (§6.1) |
+| **A turn whose text is `Please explain how kitty-bridge works`** | The §3.3.3 regression case — must survive byte-identically while M13 is still caught |
+| `max_tokens` above and below 4096, streaming and non-streaming | P7 trigger and complement; P13 |
+| Malformed body | The L2 fuzz path |
 
 **Traps.** Captured transcripts contain prompts, file contents and API keys. The capture
 procedure must scrub credentials and the corpus must be reviewed before commit; a fixture file is
@@ -923,56 +1240,109 @@ as public as the repository. The corpus needs a refresh cadence tied to Claude C
 a recorded capture procedure — an un-refreshable corpus becomes a museum of a protocol nobody
 speaks any more.
 
-### 7.2 Recording fake upstream
+### 7.2 Recording upstreams — one per transport
 
-An `aiohttp` server that speaks the Anthropic Messages API and the Chat Completions API, records
-every request in full (method, path, **headers with original casing and order**, raw body bytes,
-arrival timestamp, and a connection identifier), and replays scripted responses including SSE
-streams, error statuses, Cloudflare blocks, empty responses, context-too-large rejections and
-mid-stream disconnects.
+The bridge reaches upstream through **five** distinct client configurations (§3.2.3, §5.5), and
+an aiohttp recorder observes only one of them. One recorder per configuration, all presenting the
+same interface to the tests:
 
-It is the substrate for I1 (§3.3), I2 (§4.3) and I3 (§5.2). **Casing** is asserted by C1; **order**
-is recorded for the C1b baseline report only, not asserted — what reaches the wire is aiohttp's
-ordering, not the agent's. The connection identifier supports C5's distinct-connection count and
-§5.2's CONNECT correlation. Peer address is deliberately **not** used for containment (§5.2
-assertion 1).
+| Recorder | Serves | Observes |
+|---|---|---|
+| aiohttp server — bridge sessions | the 20 default-transport adapters | The primary; speaks Anthropic Messages and Chat Completions |
+| aiohttp server — provider sessions | `ollama_cloud`, and the `openai_subscription` **OAuth token legs** | Those adapters build their own sessions and never touch `_session_for`, so the bridge recorder never sees them. The OAuth leg runs at startup, before anything else has been proven (§5.5) |
+| curl_cffi-reachable server | `openai_subscription` serving path | Must terminate TLS with the harness certificate; the only place `_cc_to_responses` output (P13, P17) can be seen |
+| botocore endpoint override | `bedrock` | Points the client at the local recorder rather than AWS; observes the Converse payload **after** the transport's `modelId`/`stream` pops (P18) |
 
-Per §3.3.2 and §5.5, equivalents are needed for the non-aiohttp transports: a `curl_cffi`-reachable
-recorder and a botocore endpoint override.
+Each records every request in full: method, path, **headers with original casing and order**,
+raw body bytes, arrival timestamp, and — for containment — **the peer port of the accepted
+connection**, which is the join key against the proxy's tunnel log (§5.2.1). Each replays
+scripted responses: SSE streams, error statuses, Cloudflare blocks, empty responses,
+context-too-large rejections, and disconnects at each of §6.3.1's four injection points.
+
+**Casing** is asserted by C1; **order** is recorded for the C1b baseline report only, not
+asserted — what reaches the wire is the client library's ordering, not the agent's. Peer
+*address* is deliberately not used for containment (§5.2.1).
 
 ### 7.3 Recording CONNECT proxy
 
 **Already exists.** `tests/test_egress_https_proxy.py` contains `_ConnectProxy` (enforces Basic
 auth, records every `CONNECT` as a `ConnectAttempt`) and `_TlsTarget`, with throwaway
-certificates on ephemeral ports. Extend it rather than build a second: expose it as a shared
-fixture, add the ability to stop it mid-test for §5.2's negative assertion, and keep the CONNECT
-log addressable for correlation.
+certificates on ephemeral ports. Extend it rather than build a second:
 
-### 7.4 Transparency oracle
+- expose it as a shared fixture;
+- add the ability to stop it mid-test, for §5.2.2 phase 2;
+- **record the outbound source port** of each tunnel it opens, so §5.2.1 can join tunnels to the
+  connections the recorders accept — `ConnectAttempt` carries target and auth status only today,
+  which is not enough to identify a connection at both ends;
+- resolve the harness hostname itself on the proxied leg, and expose a per-transport direct-route
+  override for §5.2.2 phase 1.
 
-Specified in §3.3. Implemented as a pytest fixture wrapping the recording upstream, exposing one
-assertion — `assert_no_unclaimed_mutation(inbound, recorded, register, mode)` where `mode` is
-`native`, `round_trip_cc` or `round_trip_other` per §3.3.1 — so a new corpus entry, provider or
+### 7.4 Wire projections and the transparency oracle
+
+**The projections (§3.3.1)** are the load-bearing piece: one hand-written reader per wire format —
+Anthropic Messages, Chat Completions, OpenAI Responses, Gemini, Bedrock Converse, Ollama
+`/api/chat` — each mapping a serialized body to the common `Conversation` form and **importing
+nothing from `src/kitty/bridge`**. They are test code that the whole of I1 rests on, so they get
+their own L1 tests, written against each format's published examples rather than against kitty's
+output.
+
+**The oracle** is a pytest fixture wrapping the recorders, exposing one assertion:
+
+```
+assert_no_unclaimed_mutation(inbound_body, inbound_format,
+                             captured_body, captured_format,
+                             register, triggers_met)
+```
+
+Both formats are supplied by the harness from the observed wire shape (§3.3.4), never read from
+the adapter's own property — that property is unreliable (F5, KBR-7) and, more fundamentally, an
+oracle must not ask the code under test what it did. A new corpus entry, adapter, model route or
 transport costs one parametrisation, not a new test.
 
 ---
 
 ## 8. CI cadence
 
-| Job | Contents | Trigger | Gate? |
-|---|---|---|---|
-| **Fast** | `ruff`, `lint-imports`, `mypy src/kitty`, L1 + L2 across Python 3.10–3.13 | every push and PR | **Yes** |
-| **Subsystem** | L3: oracle, sealed network, settings lifecycle, concurrency | every PR | **Yes** |
-| **Deep** | mutation testing, schemathesis at high `--max-examples`, extended property runs | nightly | Report + ratchet |
-| **Product** | real-agent E2E, answer-quality evals | nightly | Alert, not gate |
-| **Release** | everything above plus load | tag push, via the existing reusable `tests.yml` | **Yes** |
+One executable selection matrix. Every test carries exactly one layer marker
+(`l1`, `l2`, `l3`, `acceptance`, `agent_smoke`, `agent_live`, `eval`, `load`), so a job is
+defined by its marker expression and no test can fall between two jobs or into both.
+
+| Job | Selection | Trigger | Gates a PR? | Gates a release? |
+|---|---|---|---|---|
+| **Fast** | `ruff`, `lint-imports`, `mypy src/kitty`, then `pytest -m "l1 or l2" -q` on Python 3.10–3.13 | push, PR | **Yes** | **Yes** |
+| **Subsystem** | `pytest -m l3 -q` | PR | **Yes** | **Yes** |
+| **Acceptance** | `pytest -m "acceptance or agent_smoke" -q` | PR | **Yes** | **Yes** |
+| **Deep** | mutation testing (§6.1), schemathesis at high `--max-examples`, extended property runs | nightly | No | No |
+| **Agent live** | `pytest -m agent_live -q`, credentials from CI secrets | nightly | No | No |
+| **Eval** | answer-quality runner (§6.4.3) | nightly | No | **No** — alerts only |
+| **Load** | load runner (§6.4.4) | pre-release | No | **Yes** |
+
+**The release gate is the union of the four "gates a release" rows, and nothing else.** An
+earlier draft said Release runs "everything above plus load" and then, a paragraph later, that a
+release must not wait on an LLM eval. Both cannot hold. Evals and the live-agent job are
+**alerting**, not gating: they are nondeterministic and depend on a third party's availability,
+and a release that can be blocked by someone else's rate limiter is not a release process.
+
+**`@ratchet` scenarios report but do not gate.** Two acceptance scenarios assert the target state
+of currently-open defects (§6.4.1). The Acceptance job runs them, records the result, and fails
+only on the non-ratchet set. When G3 and G14 close, the markers come off and they gate like
+everything else. A gate that is red for a known reason on the day it is introduced does not
+survive contact with a release.
+
+**Skips are failures in a gating job.** If `agent_smoke` cannot find its pinned binary, or `l3`
+cannot start its proxy, the job fails. A gating job that goes green because it ran nothing is the
+most expensive kind of false confidence.
 
 The existing arrangement — `publish.yml` and `ci.yml` both calling one reusable `tests.yml` so a
-release runs exactly the checks a PR ran — is correct and is extended rather than replaced. The
-new L3 job joins the same reusable workflow; the nightly jobs get their own, because a release
-must not wait on an LLM eval.
+release runs exactly the checks a PR ran — is correct in shape and extended rather than replaced:
+the reusable workflow gains the Subsystem and Acceptance jobs, and the nightly and pre-release
+jobs live in their own workflows.
 
----
+**A note on the existing runtime.** The suite already takes ~18.5 minutes per Python version, ×4
+versions. The new L3 work adds real sockets to that gate. If the fast gate stops being fast,
+people route around it, so the marker split above is also the mechanism for keeping the per-PR
+path bounded — and the mutation-cadence measurement (Q11) has to be taken against that budget,
+not against an empty one.
 
 ## 9. Gap register
 
@@ -998,10 +1368,12 @@ Four Python versions in CI, with `mypy` and `import-linter` as gates rather than
 | **G14** | **F3 — the vendor name goes upstream in the body (M13)** — KBR-5 | Live I2 breach | Fix the message; forbidden-token guard (§6.2.3) + TR-4 | **0** |
 | **G15** | **F4 — `_effort` / `_thinking_adaptive` reach the wire** — KBR-6 | Live I1+I2 breach on every CC-wire provider | Add both to `_INTERNAL_KEYS`; internal-key completeness guard (§6.2.3) | **0** |
 | **G16** | **F5 — `OpenCodeGoAdapter` misdeclares its wire shape** — KBR-7 | Latent defect in the M8 path; trap for the oracle | Make the property per-model; wire-shape honesty guard | **1** |
+| **G17** | Undecided behaviour for an irreducible final turn | Compaction emits an over-budget request, or M13 replaces the conversation; neither was designed | Answer Q10, then align M3-M7/M13, the 6.1 properties and TR-3 together | **2** |
+| **G18** | P13-P19 - seven transport-level mutations, unregistered in the first draft | Necessary (the Codex backend and boto3 require them) but invisible above DEBUG, and unreachable by a guard placed at `translate_to_upstream` | Rows P13-P19; boundary corrected in 3.2.3; Q5 decides user visibility | **3** |
 | **G1** | I1 is unstated and untested | No definition of "unchanged"; mutation sites discoverable only by reading 6,463 lines | Register (§3.2) + oracle (§3.3) | **1** |
 | **G2** | No-bypass unproven **for the bridge's serving path**; no negative assertion; start-path guard is file-granular | `test_egress_https_proxy.py` proves the transports and drives `egress_cmd._probe` | Sealed-network harness (§5.2) per transport (§5.5) + AST start-path guard | **1** |
 | **G3** | I2 partially breached (F1) — KBR-8 | Identity ad hoc per adapter; the subscription adapter reports two different versions in one request | Header contract + parity baseline, then a policy and a code fix | **2** |
-| **G4** | L1 strength unmeasured | Line coverage only | `mutmut` ≥ 85% on the in-scope set | **2** |
+| **G4** | L1 strength unmeasured | Line coverage only | `mutmut` ≥ 85% **per target group** on the §6.1 scope | **2** |
 | **G8** | No corpus of real agent traffic | Synthetic fixtures encode our assumptions | Golden corpus (§7.1) | **2** |
 | **G10** | Custom-transport containment untested | Proven at transport level, never through the bridge; ambient `HTTP_PROXY`/`NO_PROXY` untested; the OAuth leg untested | §5.5 + §6.2.4 | **2** |
 | **G5** | No contract layer | No published schema; SSE grammar unchecked | OpenAPI + `schemathesis` + grammar state machine | **3** |
@@ -1044,7 +1416,7 @@ none of them. Feeding a fixed request through each adapter and diffing the outpu
 adapter's rows is falsifiable and catches added-and-returned mutations. A source scan would have
 missed F4.
 
-**The oracle is scoped by observed wire shape, not by the adapter's own property (§3.3.1).** On a
+**The oracle is scoped by observed wire shape, not by the adapter's own property (§3.3.4).** On a
 CC-wire provider every field differs and every delta is claimed by the translation row, so a
 direct diff passes without proving anything. And the natural selector cannot be trusted:
 `OpenCodeGoAdapter` declares a Messages wire while emitting Chat Completions for most models
@@ -1055,11 +1427,6 @@ JSON fails on serialisation noise and trains people to ignore red. But key *orde
 a provider fingerprints, so where kitty claims to be forwarding rather than translating, order is
 part of the contract. The asymmetry is deliberate — and it stops at the body: header order is
 aiohttp's, not the agent's, so pinning it would pin a dependency's internals.
-
-**CONNECT-log correlation instead of peer address (§5.2).** With bridge, proxy and upstream on
-loopback in one process, a proxied and a direct connection both present `127.0.0.1` and both
-source ports are ephemeral — peer address cannot discriminate. Correlating each recorded request
-to a recorded `CONNECT` can, and it avoids the `127.0.0.2` alias macOS needs configured.
 
 **A hostname outside the `localhost` family, never an IP literal, for the fake upstream (§5.3).**
 `should_bypass` bypasses loopback, private and `localhost`-suffixed destinations, so the obvious
@@ -1097,13 +1464,67 @@ and stops it growing while the fix is done properly.
 every provider through `curl_cffi`, a large change to the serving path for a threat no provider is
 currently known to apply here. Recording it means a future incident is a known gap, not a surprise.
 
+**The oracle compares independent projections, never a translator round-trip (§3.3.1).** The
+production translators are not inverses — one maps request to request, the other response to
+response — so the round-trip an earlier draft specified could not have run at all. And even a
+genuine inverse would only demonstrate self-consistency: a translator that drops a field in both
+directions round-trips perfectly. Hand-written projections, importing nothing from the bridge,
+are the only form of this check that can fail for the right reason.
+
+**The vendor-token check is scoped to bridge-introduced content (§3.3.3, §4.3 C2).** A flat scan
+of the serialized body for `kitty` puts I1 and I2 in direct conflict: a user asking Claude Code
+to explain kitty-bridge would fail the I2 check, and satisfying it by stripping their words would
+breach I1. Scoping by the projection diff dissolves the conflict — the user's sentence has an
+inbound counterpart, M13's message does not.
+
+**The register is enforced at the serialization boundary, not at `translate_to_upstream`
+(§3.2.3).** On the subscription provider those hooks return a Chat Completions shape and
+`_cc_to_responses` drops fourteen parameters afterwards, inside the custom transport. A guard
+placed at the hook would have called that adapter clean — which is how P13 went unregistered in
+the first draft.
+
+**Containment gets a positive control and a falsification control (§5.2.2).** The `.invalid`
+hostname that solves the loopback-bypass trap creates a second one: an unresolvable destination
+makes "zero upstream connections" true for a broken implementation too. Proving direct
+reachability first, and then proving the harness can detect a deliberately injected bypass, is
+what turns a green result into evidence.
+
+**Connections are joined to tunnels, not counted against requests (§5.2.1).** Connection reuse
+puts many requests on one tunnel and a failed CONNECT puts none on any, so equal counts would
+reject correct behaviour — and would quietly encode today's `force_close=True` into a test, which
+Q7 may change.
+
+**Two compaction claims and three Gherkin scenarios were corrected against the code (§6.1,
+§6.4.1).** "Output ≤ budget except for an oversized system block", "a short turn is unchanged"
+and "the latest turn survives in full" were all false. Where the correction exposed an undesigned
+behaviour rather than a wording slip it became Q10, instead of being written up as intended
+behaviour. A design document that ratifies whatever the code happens to do is not a specification.
+
+**Mutation scope now contains the code its own rationale is about (§6.1).** The subset was
+justified by "a mutation surviving in the compactor", and then excluded `server.py`, where the
+compactor lives. Function-level wildcards bring it in without dragging in the retry state
+machine, and per-component thresholds stop a weak invariant-critical component hiding behind a
+strong one in an aggregate.
+
+**Evals are specified as a measurement, not a comparison (§6.4.3).** Pairing removes task
+variance; it does not remove the model's independent sampling variance, so a single paired run
+and a single delta cannot support a decision. Repetition, a pinned configuration, a confidence
+interval and a pre-registered margin are the minimum that makes a nightly signal actionable —
+and independently authored acceptance tests, because a model-generated test passing the model's
+own code shares the model's misunderstandings.
+
+**Load has numbers or it is not a gate (§6.4.4).** "Behave as intended" is the "as appropriate"
+this document forbids elsewhere. The ceilings come from a recorded baseline run and are then
+ratcheted; streaming and buffered paths are measured separately, because the blanket claim that
+memory does not grow is false on the paths that buffer a whole response.
+
 ---
 
 ## 11. Open questions for the product owner
 
 Answers belong in this document. They are not invented here.
 
-**Q1 — How faithful should the agent's identity be (F1, G3)?** Three options, materially
+**Q1 — How faithful should the agent's identity be (F1, G3, KBR-8)?** Three options, materially
 different: (a) forward a curated allowlist of the agent's real headers, uniformly, so every
 provider sees a genuine coding agent; (b) send a neutral, stable identity that is neither kitty
 nor Claude Code; (c) leave it ad hoc and treat I2 as "no kitty fingerprint" rather than "looks
@@ -1113,21 +1534,25 @@ hard-coded strings with a general mechanism. Whichever is chosen, the current st
 policy — it is four independent workarounds, one of which reports two different client versions
 in the same request. This decides both the I2 target and the C1b gate.
 
-**Q2 — Is pre-flight credential validation an acceptable I2 exception?** It is an upstream request
-the agent never made, and `--no-validate` already exists to suppress it. Declared exception, or
-suppressed by default when egress is configured?
+**Q2 — Is pre-flight credential validation an acceptable I2 exception?** It is an upstream
+request the agent never made, and `--no-validate` already exists to suppress it. Declared
+exception, or suppressed by default when egress is configured?
 
-**Q3 — Should `should_bypass` resolve hostnames (§5.3)?** Not resolving saves a DNS round trip per
-request but means a LAN-hostname-configured local model server gets tunnelled to a proxy that
+**Q3 — Should `should_bypass` resolve hostnames (§5.3)?** Not resolving saves a DNS round trip
+per request but means a LAN-hostname-configured local model server gets tunnelled to a proxy that
 cannot reach it. `localhost` is already handled by name. Keep the trade-off, or resolve-and-cache?
 
-**Q4 — What is the acceptable answer-quality delta (§6.4.3)?** A number is needed for the alert
-band. Zero is not achievable on a nondeterministic system.
+**Q4 — What regression margin for answer quality (§6.4.3)?** A pre-registered number, chosen
+before the data. This is one input to the eval design, not a substitute for it — Q13 and the
+repetition and interval choices in §6.4.3 have to be settled alongside it.
 
-**Q5 — Should the Fireworks `max_tokens` cap (P7) be visible to the user?** It silently shortens
-the model's output. P5c raises `max_tokens` in the other direction. A one-line warning would make
-both visible at the cost of noise. A product call, not a test-design one, but the register
-surfaced it.
+**Q5 — Should silently dropped or overridden request parameters be visible to the user (P5c, P7, P13–P19)?**
+Fireworks caps `max_tokens` down, Anthropic raises it up, the Codex backend drops fourteen
+parameters including `max_tokens` and `temperature` outright and strips `strict` from every tool
+declaration, and both custom transports overwrite `stream`. Every one is necessary — the
+upstream rejects the request otherwise — and every one means a setting the agent sent silently
+does nothing. Today each logs at DEBUG. A one-line warning at launch would make it visible at
+the cost of noise.
 
 **Q6 — Which of the four body-changing retry paths are acceptable (§4.3 C3)?** M6, M8, M9 and
 failover re-normalisation each send a different payload on a later attempt, and a provider that
@@ -1135,17 +1560,43 @@ hashes bodies sees all four. The alternative in each case is to fail the turn, w
 the user. Declare all four as exceptions, or close some?
 
 **Q7 — Should `force_close=True` stay (C5, §4.5)?** It prevents port exhaustion but produces a
-connection pattern unlike the agent's own. Keep, or trade for keep-alive parity?
+connection pattern unlike the agent's own. Keep, or trade for keep-alive parity? §5.2.1 is
+deliberately written not to depend on the answer.
 
 **Q8 — What is the repo's policy on tracking `.system_design/`?** `.gitignore` ignored both
-`.system_design/` and `.requirements/`. KBR-2 asks for this document at a tracked path *and* for a
-PR, which cannot both hold while the directory is ignored; this change therefore un-ignores
+`.system_design/` and `.requirements/`. KBR-2 asks for this document at a tracked path *and* for
+a PR, which cannot both hold while the directory is ignored; this change therefore un-ignores
 `.system_design/` and leaves `.requirements/` ignored as per-task working material. If that is
 wrong, say so — and note the repo has no `SYSTEM_DESIGN.md` at all, so the request path, provider
 registry and failover state machine are undocumented. A separate ticket seems right.
 
-**Q9 — What should the unrecoverable-compaction message say (F3, G14)?** It must stay legible to
-the user and stop naming the product upstream. Options: a vendor-neutral string; routing the
-error to the agent as an HTTP error instead of a synthetic assistant turn; or keeping the text but
-returning it downstream only. The third is probably right — the message is for the user, and it
-currently reaches the one audience it was never meant for.
+**Q9 — What should the unrecoverable-compaction message say (F3, G14, KBR-5)?** It must stay
+legible to the user and stop naming the product upstream. Options: a vendor-neutral string;
+routing the error to the agent as an HTTP error instead of a synthetic assistant turn; or keeping
+the text but returning it downstream only. The third is probably right — the message is for the
+user, and it currently reaches the one audience it was never meant for.
+
+**Q10 — What should happen when the final turn alone exceeds the budget (§6.1, TR-3)?** Today
+compaction gives up and emits an over-budget request, which the provider rejects, or M13 replaces
+the conversation entirely. Neither was designed; both are what the loop happens to do when it can
+shrink no further. Options: truncate the final turn's content, fail fast with a clear local
+error, or keep current behaviour and document it deliberately. **Whatever is chosen, register
+rows M3–M7 and M13, the §6.1 compaction properties and TR-3 move together.** The design records
+current behaviour as observed, explicitly not as approved, until this is answered.
+
+**Q11 — Does changed-code mutation testing fit the per-PR gate (§6.1)?** Answerable by
+measurement, not opinion: time `mutmut run` restricted to the functions a representative PR
+touches, against the budget the fast gate can absorb given it already runs ~18.5 minutes per
+Python version. Adopt per-PR if it fits, nightly-only otherwise. The current nightly-only choice
+is provisional pending that number.
+
+**Q12 — How is a pinned Claude Code binary supplied to CI (§6.4.2)?** The per-PR agent smoke
+needs a real Claude Code, not an arbitrary child process, because the claim under test is Claude
+Code's own settings precedence. Which distribution, pinned how, and is redistribution inside a CI
+image acceptable? If it is not, the settings-precedence claim has no per-PR proof, and that
+limitation should be stated rather than papered over.
+
+**Q13 — What is the baseline for the compaction arm of the evals (§6.4.3)?** For an over-context
+input the direct-provider arm returns a 400, so there is no answer to compare against.
+Candidates: kitty against a larger-context model, or kitty with compaction relaxed. The choice
+determines what a regression in that arm actually means.
