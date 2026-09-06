@@ -645,11 +645,13 @@ The conversation has grown beyond the model's context window. Use `/clear` in th
 ### Mouse wheel scrolls through previous prompts instead of the conversation (Claude Code)
 
 The wheel steps backwards through your prompt history while the transcript stays put. This is Claude Code's renderer
-setting, not the bridge — kitty writes no terminal escape sequences and never sits between your terminal and the agent.
+setting, not the bridge. Kitty prints its startup banner and then hands the terminal straight to the agent: it sets no
+terminal modes — no mouse tracking, no alternate screen — and writes nothing to your terminal while the agent runs.
 
-Claude Code's classic renderer leaves the wheel to your terminal. Over SSH the wheel can arrive as arrow keys, which the
-prompt box reads as history navigation. The fullscreen renderer handles the wheel inside Claude Code instead. Reported
-from PowerShell on Windows over SSH to a Linux host, with the console maximised.
+Claude Code's classic renderer keeps the conversation in your terminal's own scrollback and does not request mouse
+events. Many terminals then translate the wheel into Up/Down arrow keys, which the prompt box reads as history
+navigation. The fullscreen renderer requests mouse events and scrolls the conversation itself. Reported from PowerShell
+on Windows over SSH to a Linux host.
 
 Switch renderer from inside the session:
 
@@ -658,8 +660,11 @@ Switch renderer from inside the session:
 ```
 
 Claude Code saves the choice and relaunches with your conversation intact, so it applies to later sessions too. Run
-`/tui` with no argument to print which renderer is active. `PgUp` / `PgDn` scroll and `Ctrl+End` jumps to the latest
-message in either renderer.
+`/tui default` to switch back, or `/tui` with no argument to print which renderer is active. In fullscreen, `PgUp` /
+`PgDn` scroll and `Ctrl+End` jumps back to the latest message.
+
+One trade-off: fullscreen captures the mouse, so your terminal's own copy-on-select stops working. Hold `Shift` while
+dragging (`Option` in iTerm2, `Fn` in Terminal.app) when you want a native selection.
 
 ### Can I use kitty with Cursor, Windsurf, or other IDEs?
 
