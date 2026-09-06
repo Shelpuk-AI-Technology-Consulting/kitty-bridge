@@ -271,14 +271,28 @@ production translator establishes self-consistency, not fidelity. A translator t
 same field in both directions round-trips perfectly. The oracle must not be written in terms of
 the code under test.
 
-**The projection.** Define one **`Conversation`** value type in the test tree:
+**The projection must be total, or it hides exactly what it is looking for.** A projection that
+keeps only the semantic conversation cannot see a changed model, a dropped `stream`, a stripped
+tool `description`, or an injected metadata field — both sides project identically and the "no
+unclaimed delta" assertion passes. That blind spot would swallow **M1**, the model override that
+is the product's entire purpose, along with P6, P15, P17, P18 and P19. So the projection covers
+the whole request and accounts for every field:
 
 ```
+Request                          -- the complete request; nothing is dropped silently
+  envelope:     Envelope         -- routing and control
+  conversation: Conversation     -- semantic content
+  residual:     {key: value}     -- anything the reader did not account for
+
+Envelope
+  model, stream, store, and every other control field the format defines
+  (Bedrock's modelId and Responses' store live here too)
+
 Conversation
-  system:    ordered text parts
-  turns:     ordered [ Turn(role, parts) ]
-  tools:     ordered [ ToolDecl(name, schema) ]
-  sampling:  { max_tokens, temperature, top_p, stop, … }   # declared, may be absent
+  system:   ordered text parts
+  turns:    ordered [ Turn(role, parts) ]
+  tools:    ordered [ ToolDecl(name, description, schema, strict) ]
+  sampling: { max_tokens, temperature, top_p, stop, seed, ... } -- declared, may be absent
 
 Part = Text(str)
      | ToolUse(id, name, arguments)
@@ -287,17 +301,46 @@ Part = Text(str)
      | Image(digest)
 ```
 
-Then write one **hand-written projection per wire format** — Anthropic Messages, Chat
-Completions, OpenAI Responses, Gemini, Bedrock Converse, Ollama `/api/chat` — each written
-directly against that format's published shape and **importing nothing from `src/kitty/bridge`**.
-Six small readers, each independent of whatever kitty code produces that format. The oracle compares
-`project(inbound)` with `project(captured_upstream_bytes)`.
+**Unknown fields fail closed.** Each reader must classify **every** key in the body into exactly
+one of: mapped to the envelope, mapped to the conversation, or residual. A non-empty `residual`
+on either side **fails the run** — it is not reported as a diff and it is not ignored. An
+unaccounted field is precisely where an unregistered mutation hides, and a reader that quietly
+skips what it does not recognise is a reader that cannot prove completeness. Adding a field to a
+wire format therefore forces a deliberate decision: map it, or declare it ignored with a reason.
+
+**Every register row names the field it touches.** M1 is `envelope.model`; P17 is
+`envelope.stream` and `envelope.store`; P15 is `conversation.tools[].strict`; P13 is
+`conversation.sampling`. Without that, "claimed by a register row" is a judgement call rather
+than a lookup.
+
+Then write one **hand-written reader per wire format** — Anthropic Messages, Chat Completions,
+OpenAI Responses, Gemini, Bedrock Converse, Ollama `/api/chat` — each written directly against
+that format's published shape and **importing nothing from `src/kitty/bridge`**. Six small
+readers, each independent of whatever kitty code produces that format. The oracle compares
+`project(inbound)` with `project(captured_upstream_bytes)`, field by field, across all three
+parts.
 
 This is the independent-oracle rule, and it is what makes the check meaningful across a protocol
 boundary: a Messages body and a Chat Completions body are not comparable as JSON, but their
 projections are directly comparable, because a conversation is a conversation.
 
-**Response translation is tested separately**, with its own projection (`Reply(parts, stop_reason,
+**The oracle gets its own falsification control.** The same discipline §5.2.2 phase 3 applies to
+the containment harness applies here: a fidelity oracle never shown to fail is indistinguishable
+from one that cannot fail. Five injected mutations must each produce a failure, and they run as
+part of the suite, not once by hand:
+
+| Injected | Must be caught as |
+|---|---|
+| Change the model sent upstream to a value no profile set | unclaimed `envelope.model` delta |
+| Flip `stream` on an otherwise unchanged request | unclaimed `envelope.stream` delta |
+| Delete one tool's `description` | unclaimed `conversation.tools[].description` delta |
+| Strip `strict` from a tool where no register row applies | unclaimed `conversation.tools[].strict` delta |
+| Inject an unrecognised `x-kitty-trace` field into the body | non-empty `residual` — fails closed |
+
+The last of these is also what keeps the vendor-token check (§3.3.3) honest: bridge-added
+metadata that the projection discarded could never have been scanned for a vendor string.
+
+**Response translation is tested separately**, with its own projection (`Reply(parts, stop_reason,**Response translation is tested separately**, with its own projection (`Reply(parts, stop_reason,
 usage)`) over the response direction. It is a different claim and it gets a different test.
 
 #### 3.3.2 The two assertions
@@ -824,11 +867,20 @@ None`. `mutmut` closes that gap.
   | `kitty.bridge.messages.*`, `kitty.bridge.responses.*`, `kitty.bridge.gemini.*`, `kitty.bridge.engine` | Translation — I1 |
   | `kitty.bridge.server._compact_messages*`, `_compact_with_tighter_budget*`, `_validate_tool_call_pairing*`, `_truncate_oversized_tool_results*`, `_apply_compaction*`, `_normalize_model*`, `_get_max_context_chars*` | Compaction and pairing — the I1 core, and the thing the rationale was always about |
   | `kitty.providers.*` `translate_to_upstream` / `normalize_request` / `build_upstream_headers` | The register's provider half — I1 and I2 |
+  | `kitty.providers.openai_subscription._cc_to_responses*`, `_prepare_responses_body*`, `_convert_content_types*`, `_build_user_agent*` | P13–P17 and the F1 user-agent. These are where the subscription path's real body is built; omitting them lets the score stay healthy while nothing detects a regression in the mutations this design only just registered |
   | `kitty.egress`, `kitty.egress_guard` | I3, including the startup guard |
   | `kitty.bridge.tool_audit`, `kitty.profiles.*`, `kitty.validation` | Supporting correctness |
 
   Still excluded: the TUI, the CLI wiring, the retry/health state machine. A mutation surviving
   in a menu is a cosmetic defect; one surviving in the compactor is a silent invariant breach.
+
+- **P18 and P19 need a refactor before they can be mutation-tested.** Both live inside
+  `make_request` / `stream_request`, which open network connections, so `mutmut` cannot reach them
+  from an L1 selection. Extract the payload shaping into a pure builder — `_bedrock_body(...)`,
+  `_ollama_body(...)` — leaving the network method to call it. The builder is then unit-testable
+  and mutation-testable at L1, while the wire-capture test at L3 continues to prove the real bytes.
+  This is the "design for testability" rule applied where the current factoring is what blocks the
+  test, not the test that is hard to write.
 
 - **Per-component thresholds, not one aggregate.** ≥ 85% killed **per target group** above. A
   single aggregate over a large surface lets a weak component hide behind a strong one — and the
@@ -982,12 +1034,18 @@ sequence rather than timing:
 |---|---|
 | Before any downstream byte | Clean failover; the client sees one complete stream from the second backend |
 | After text has been emitted | No text the client already received is repeated; the transcript reads as one message |
-| Mid `input_json_delta`, tool arguments partly sent | Arguments are never a splice of two attempts. Either the partial block is properly abandoned and re-opened under a new id, or the turn fails — whichever the agreed semantics say, but never a silent merge |
+| Mid `input_json_delta`, tool arguments partly sent | Arguments are never a splice of two attempts. **The acceptance oracle here is undecided — Q14.** Until it is answered this row asserts only the negative (no silent merge, no reused id across attempts), which is weaker than the row needs to be |
 | After content, before the terminal event | Exactly one terminal outcome reaches the client; `message_stop` is not duplicated or omitted |
 
 Each case asserts tool-call **identity** (ids stable within an attempt, never reused across
-attempts) and a single terminal outcome. The agreed retry semantics are a prerequisite: if they
-have not been decided, that is the finding, not a test to write around.
+attempts) and a single terminal outcome.
+
+**The post-emission semantics are a prerequisite, and they are not decided.** Once bytes have
+reached the client, what a correct recovery even *looks like* is a product decision, not a test
+detail: abandon and re-open, fail the turn, or something else. Writing "whichever the agreed
+semantics say" into a test specification leaves it without an acceptance oracle — the same defect
+this document objects to elsewhere. It is tracked as **Q14** rather than left as prose, so the
+gap is visible in the question list where decisions are collected, not buried in a table.
 
 `/stats` remains authoritative for attribution after a mid-stream failover, per the README's own
 caveat that the headers name whoever produced the first byte.
@@ -1126,14 +1184,34 @@ behaviour; it does not ratify it. When Q10 is answered, TR-3, register rows M3�
 
 Two distinct things, currently conflated, with different costs and different cadences.
 
-**Agent smoke — per PR, hermetic.** The claim that kitty configures Claude Code correctly is a
-claim about *Claude Code's* settings precedence between `--settings`, the process environment and
-`~/.claude/settings.json`. Spawning an arbitrary child process does not test that; it tests
-kitty's belief about it, which is precisely the assumption under suspicion in the KBR-1
-investigation. This needs a **pinned real Claude Code binary** run against the scripted fake
-upstream (§7.2) — no live provider, no credentials, no network. One non-interactive turn is
-enough to prove the wiring: the binary starts, resolves the bridge URL from the session settings
-file, sends a request that arrives at the recorder, and exits cleanly.
+**Agent smoke — per PR, hermetic.** Two distinct cases, and only the second proves the claim.
+
+*Startup smoke.* A **pinned real Claude Code binary** runs one non-interactive turn against the
+scripted recorder (§7.2) — no live provider, no credentials, no network. The binary starts,
+resolves the bridge URL, its request arrives, it exits cleanly. This proves connectivity.
+
+*Precedence.* Connectivity is **not** the claim. The claim is that kitty's `--settings` file wins
+over the process environment and over `~/.claude/settings.json` — a fact about *Claude Code's*
+behaviour, not kitty's, and the assumption under suspicion in the KBR-1 investigation. A run in
+which nothing competes cannot distinguish correct precedence from accidental agreement: an
+implementation with the order backwards passes it.
+
+So the test creates a genuine conflict and points every loser at a **sentinel recorder** of its
+own:
+
+| Source | Points at | Expected |
+|---|---|---|
+| `ANTHROPIC_BASE_URL` in the child's environment | sentinel A | receives **nothing** |
+| `env.ANTHROPIC_BASE_URL` in `~/.claude/settings.json` (a temp `HOME`) | sentinel B | receives **nothing** |
+| kitty's per-session `--settings` file | the real recorder | receives **the request** |
+
+Assert on all three: the request arrives at the recorder **and** both sentinels stay silent. A
+test that checks only the recorder cannot tell "precedence is correct" from "the request went
+everywhere."
+
+*The control.* Sentinels that are never hit prove nothing unless they can be hit. A second case
+removes kitty's settings file and asserts B wins over A — demonstrating both sentinels are live
+and the harness can distinguish them. Without it, a typo in a sentinel URL reads as a pass.
 
 Pinning it in CI has real questions attached — which distribution, how tightly version-pinned, licensing for
 redistribution in a CI image — recorded as Q12 rather than assumed away.
@@ -1166,7 +1244,10 @@ the design needs repetition and an interval, not a single paired run and a singl
 | **Pinning** | Model id, provider, dataset revision, temperature and all sampling settings pinned and recorded with each run. An unpinned model makes the series meaningless. |
 | **Statistic** | Difference in pass rate between arms, with a confidence interval — not a point estimate. |
 | **Decision rule** | A **pre-registered regression margin**: the alert fires when the interval excludes a delta smaller than the margin. Chosen before the data, not after. |
-| **Failure attribution** | Provider outage, rate limiting and refusals are classified and excluded from the pass-rate denominator, or a bad afternoon at the provider reads as a product regression. |
+| **Primary outcome** | **Successes ÷ scheduled trials.** Not successes ÷ completed trials. A bridge arm that refuses 90 of 100 tasks and answers the other 10 correctly scores 10%, which is the truth; excluding refusals would score it 100% and report a catastrophic regression as a clean run. |
+| **Failure taxonomy** | Every non-success is classified and reported separately — refusal, upstream error, timeout, rate limit, harness fault — per arm. The categories are the diagnosis; they are not deductions from the denominator. A refusal is **evidence about the arm**: changed instructions or lost context cause refusals, and both are exactly what compaction can do. |
+| **Exclusions** | Only for pre-defined infrastructure incidents, applied **symmetrically to both arms** by a rule written before the run. Every exclusion is reported with its reason. |
+| **Missing-data ceiling** | If exclusions plus harness faults exceed a fixed fraction of scheduled trials, the run is **void**, not adjusted. Below that ceiling the comparison stands; above it there is no comparison to make. |
 
 **The compaction arm needs a different baseline.** For an input that exceeds the model's context
 window, the direct-provider arm does not produce a worse answer — it produces a 400. There is
@@ -1323,20 +1404,47 @@ release must not wait on an LLM eval. Both cannot hold. Evals and the live-agent
 **alerting**, not gating: they are nondeterministic and depend on a third party's availability,
 and a release that can be blocked by someone else's rate limiter is not a release process.
 
-**`@ratchet` scenarios report but do not gate.** Two acceptance scenarios assert the target state
-of currently-open defects (§6.4.1). The Acceptance job runs them, records the result, and fails
-only on the non-ratchet set. When G3 and G14 close, the markers come off and they gate like
-everything else. A gate that is red for a known reason on the day it is introduced does not
-survive contact with a release.
+**`@ratchet` exempts one named assertion, not a scenario.** A scenario-wide exemption is a
+blanket amnesty: a broken fixture, a failure in a `Given` step, or an unrelated regression inside
+that scenario all become invisible, indistinguishable from the known defect. That is a worse
+outcome than the red gate it was meant to avoid.
+
+The exemption is therefore narrow and accountable:
+
+- It attaches to **one assertion**, named, with its expected failure condition and its issue key
+  (TR-1c's header-subset assertion → KBR-8; TR-4's no-vendor-content assertion → KBR-5).
+- **Setup and every other assertion in the scenario gate normally.** If TR-4 cannot reach the
+  bridge, the job fails — that is not the known defect.
+- **An unexpected pass fails the job.** When the assertion starts passing, the defect is fixed
+  and the exemption must come off; `xfail(strict=True)` semantics, so nobody has to remember.
+- All exemptions live in one registry with their issue keys, so the list is short, visible and
+  obviously temporary rather than scattered through the suite.
+
+A gate that is red for a known reason on the day it is introduced does not survive contact with a
+release. A gate that is green because it stopped looking is worse.
 
 **Skips are failures in a gating job.** If `agent_smoke` cannot find its pinned binary, or `l3`
 cannot start its proxy, the job fails. A gating job that goes green because it ran nothing is the
 most expensive kind of false confidence.
 
-The existing arrangement — `publish.yml` and `ci.yml` both calling one reusable `tests.yml` so a
-release runs exactly the checks a PR ran — is correct in shape and extended rather than replaced:
-the reusable workflow gains the Subsystem and Acceptance jobs, and the nightly and pre-release
-jobs live in their own workflows.
+**The load gate has to be wired, not merely declared.** The table above marks Load as gating a
+release, but `publish.yml` currently depends only on the reusable `tests.yml`. Putting the load
+run in "its own workflow" would leave publication free to proceed while load fails — or while it
+never ran at all for that commit, which is the more likely failure. A row in a table is not a
+dependency.
+
+The arrangement, made explicit:
+
+- `tests.yml` — reusable. Gains the Subsystem and Acceptance jobs. Called by `ci.yml` (push, PR)
+  and by `publish.yml`.
+- `load.yml` — **reusable**, and `publish.yml` calls it too, `needs:`-gated on the tag commit, so
+  publication cannot complete without a successful load run **for that exact commit**. A
+  scheduled nightly caller of the same reusable workflow gives early warning; it does not
+  substitute for the release call, because a nightly result belongs to a different commit.
+- Nightly Deep, Agent-live and Eval workflows stand alone and gate nothing.
+
+That keeps the property the existing setup gets right — a release runs exactly the checks a PR
+ran, from one definition — while extending it to the one gate that runs only at release time.
 
 **A note on the existing runtime.** The suite already takes ~18.5 minutes per Python version, ×4
 versions. The new L3 work adds real sockets to that gate. If the fast gate stops being fast,
@@ -1448,9 +1556,12 @@ on the rota.
 a survivor list nobody reads and a nightly job nobody waits for. The subset rule — modules whose
 silent misbehaviour breaches an invariant — keeps the output actionable.
 
-**A paired delta for answer quality, not an absolute threshold (§6.4.3).** Absolute thresholds on
-LLM output are flaky, and a flaky gate at L4 trains people to re-run rather than investigate. The
-paired comparison cancels the model's own variance.
+**A paired delta for answer quality, not an absolute threshold (§6.4.3).** Absolute thresholds
+on LLM output are flaky, and a flaky gate at L4 trains people to re-run rather than investigate.
+Pairing holds *task difficulty* constant, which removes the largest nuisance term. It does **not**
+cancel the model's independent sampling on each call — which is why §6.4.3 specifies repetition,
+a confidence interval and a pre-registered margin rather than a single delta. The eval is a
+measurement, not a comparison of two numbers.
 
 **Real-agent E2E stays out of the default run (§6.4.2).** It needs four CLIs, live credentials and
 live network. A default suite that cannot run on a developer's laptop stops being run, and then
@@ -1522,7 +1633,8 @@ memory does not grow is false on the paths that buffer a whole response.
 
 ## 11. Open questions for the product owner
 
-Answers belong in this document. They are not invented here.
+Answers belong in this document. They are not invented here. Q10-Q14 are prerequisites for the
+implementation work they name — each blocks a test whose acceptance oracle depends on it.
 
 **Q1 — How faithful should the agent's identity be (F1, G3, KBR-8)?** Three options, materially
 different: (a) forward a curated allowlist of the agent's real headers, uniformly, so every
@@ -1600,3 +1712,12 @@ limitation should be stated rather than papered over.
 input the direct-provider arm returns a 400, so there is no answer to compare against.
 Candidates: kitty against a larger-context model, or kitty with compaction relaxed. The choice
 determines what a regression in that arm actually means.
+
+**Q14 — What is a correct stream recovery after bytes have reached the client (§6.3.1)?** Failover
+before the first downstream byte is unambiguous. After text has been emitted, or mid tool-call
+arguments, there is no obvious right answer: abandon the partial block and re-open under a new
+id, fail the turn and let the agent retry, or something else. Until this is decided the L3 row
+can assert only the negatives — no duplicated text, no reused tool-call id across attempts, no
+spliced arguments — which catches corruption but cannot confirm correct behaviour. This is the
+one place in the design where a test is specified without a full acceptance oracle, and it is
+recorded here rather than papered over.
