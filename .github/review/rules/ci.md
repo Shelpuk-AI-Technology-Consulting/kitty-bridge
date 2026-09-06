@@ -141,10 +141,36 @@ that overrides the child's endpoint and credentials.
   line, so a value containing a quote or `$(...)` is executed rather than
   compared. Flag the shape wherever it appears, even for a value only an admin
   can set — the next person copies it.
-- Nothing that carries a secret may be uploaded as an artifact. The kitty debug
-  log holds the bridge token and the full review prompt; only the **filtered
-  timeline** travels, and the raw file stays on the runner. A change that adds it
-  to `Upload review artifacts` is a critical finding.
+- Nothing that carries a secret may be uploaded as an artifact, and the rule
+  covers **three** files rather than one. `artifacts/` is uploaded on every run,
+  on `always()`, so anything written there is a public download.
+  - the **kitty debug log** holds the bridge token and the full review prompt;
+  - the **kitty stderr log** names the egress gateway, address and username;
+  - the **execution record** is the entire stream-json transcript — everything
+    the reviewer read, verbatim.
+
+  All three stay under `RUNNER_TEMP`, which is destroyed with the job. What
+  travels is bounded and derived: the filtered timeline, the redacted
+  diagnostic, and the extracted schema-validation errors. A change that writes
+  any of the three into `artifacts/`, or that widens the upload's `path:` to
+  reach `RUNNER_TEMP`, is a **critical** finding.
+
+- 🔴 **The reviewer can read the runner's credential store, and that is not
+  fixable here — so judge changes by what leaves the machine.** `Read` and
+  `Bash(cat:*)` are allowlisted over any path, and `configure_kitty.py` writes
+  the organisation's provider keys to `~/.config/kitty/credentials.json` and the
+  gateway to `egress.json` on the same machine, as the same user. The prompt
+  embeds untrusted pull request conversation. So assume a determined injection
+  can *read* a secret, and ask instead which channels could *publish* one:
+  - the **uploaded artifact** — closed by the rule above;
+  - the **network** — no `curl`, `WebFetch` or any network tool is allowlisted,
+    and there is no permission bypass to approve one;
+  - the **review body the model writes**, which is posted as a comment. ⚠️ This
+    one is **not closed and cannot be closed from inside this workflow.** The
+    partial mitigations are that an injection attempt must itself be reported at
+    critical severity, and that the reviewer's provider credential should be
+    scoped and rotatable. Treat any change that widens the allowlist, adds a
+    network-capable tool, or reintroduces a permission bypass as critical.
 
 ## Prompt assembly
 

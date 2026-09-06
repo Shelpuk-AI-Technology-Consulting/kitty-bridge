@@ -119,14 +119,29 @@ def wrapper_body(kitty_bin: str) -> str:
     Returns:
         The launcher's full text, including its shebang.
     """
+    # 🔴 **Stderr goes to the log ONLY. Upstream tees it back to the terminal
+    # (`2> >(tee -a "$LOG" >&2)`) and that leg is removed here deliberately.**
+    #
+    # This stream names the egress gateway: kitty's fail-closed guard refuses
+    # with "...cannot route through the egress proxy <masked>", and `masked()`
+    # hides the password while keeping the address and username. Teed to the
+    # process's own stderr, the action can surface it in the job log -- which is
+    # public on a public repository -- by a path `_redact_urls` never sees. It is
+    # the same stream, and the same leak, as the critical finding that redaction
+    # fixed; this was its second door.
+    #
+    # Nothing diagnostic is lost. The log is what `interpret_claude_result` reads
+    # to classify the failure, and the redacted tail it embeds in the diagnostic
+    # is drawn from it -- so the information still reaches a maintainer, in the
+    # one form that has been through the redactor.
     return (
         "#!/usr/bin/env bash\n"
         f'exec "{kitty_bin}" --no-validate --debug-file "${{RUNNER_TEMP:-/tmp}}/'
         + BRIDGE_DEBUG_LOG
         + '" \\\n'
-        '  claude "$@" 2> >(tee -a "${RUNNER_TEMP:-/tmp}/'
+        '  claude "$@" 2>> "${RUNNER_TEMP:-/tmp}/'
         + BRIDGE_STDERR_LOG
-        + '" >&2)\n'
+        + '"\n'
     )
 
 

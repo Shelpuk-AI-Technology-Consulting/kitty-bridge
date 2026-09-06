@@ -76,14 +76,18 @@ target-version = "py310"
 # next carried-across fix would arrive as a conflict. `.github/review/rules/ci.md`
 # records the same rule for anyone reviewing a change there.
 #
-# NOTE: this is not "that code is unchecked". `ci.yml` runs its 588-case suite
+# NOTE: this is not "that code is unchecked". `ci.yml` runs its 595-case suite
 # on every pull request, and that suite carries guards this linter could not
 # express - the private-reference sweep, the runner-ceiling pairing, the
 # aggregate's dependency set.
 #
-# Deliberately ASCII-only, like the rest of this file: `tests/test_pypi_packaging.py`
-# reads it with `Path.read_text()` and no encoding, so a non-ASCII character here
-# fails the release-gating version check on any machine whose locale is not UTF-8.
+# Deliberately ASCII, and NOT because the file is: line 8's description carries
+# an em-dash and always has. The reason is narrower. `tests/test_pypi_packaging.py`
+# reads this file with `Path.read_text()` and no encoding, so on a machine whose
+# locale is not UTF-8 any non-ASCII byte fails the release-gating version check.
+# The em-dash is grandfathered and would fail the same way; adding more is what
+# this note is about. (The claim above used to say "like the rest of this file",
+# which was simply wrong - caught by this repository's own automated review.)
 exclude = [".github"]
 
 [tool.ruff.lint]

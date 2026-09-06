@@ -2482,8 +2482,13 @@ class TestConfigureKitty(unittest.TestCase):
                 f'exec "{self.PYTHON_LOCATION}/bin/kitty" --no-validate '
                 '--debug-file "${RUNNER_TEMP:-/tmp}/'
                 'kitty-bridge-debug.log" \\\n'
-                '  claude "$@" 2> >(tee -a "${RUNNER_TEMP:-/tmp}/'
-                'kitty-bridge-stderr.log" >&2)\n',
+                # ⚠️ Upstream ends `2> >(tee -a "$LOG" >&2)`. The terminal leg is
+                # removed here: that stream names the egress gateway, and teeing
+                # it to the process's own stderr lets the action surface it in a
+                # public job log by a path the redactor never sees. See
+                # `WrapperStderrDoesNotReachTheJobLogTests`.
+                '  claude "$@" 2>> "${RUNNER_TEMP:-/tmp}/'
+                'kitty-bridge-stderr.log"\n',
             )
             self.assertEqual(list(wrapper_dir.iterdir()), [wrapper])
 
@@ -8274,14 +8279,22 @@ class SchemaEvidenceWiringTests(unittest.TestCase):
 
         Overwriting it would leave only the outcome of the attempt that mattered
         least.
+
+        ⚠️ **The two destinations differ on purpose, and upstream's do not.**
+        There both files land in ``artifacts/``. Here the extracted *evidence*
+        does and the raw *record* goes to ``RUNNER_TEMP``: the record is the
+        whole transcript of what the reviewer read, ``artifacts/`` is uploaded on
+        every run, and the runner holds the organisation's provider keys. See
+        :class:`NoSecretBearingStreamIsUploadedTests`. This case still holds what
+        it always held -- that the two attempts do not overwrite each other.
         """
 
         first = _step("Capture schema validation evidence")
         second = _step("Capture schema validation evidence (second attempt)")
         self.assertIn("artifacts/schema_validation_errors.txt", first)
         self.assertIn("artifacts/schema_validation_errors_attempt2.txt", second)
-        self.assertIn("artifacts/claude_execution_record.json", first)
-        self.assertIn("artifacts/claude_execution_record_attempt2.json", second)
+        self.assertIn("claude_execution_record.json", first)
+        self.assertIn("claude_execution_record_attempt2.json", second)
 
     def test_capture_runs_even_when_the_run_failed(self):
         """The runs worth diagnosing are the failed ones.
@@ -9095,12 +9108,22 @@ class BridgeLogEvidenceTests(unittest.TestCase):
         self.assertIn("--debug-file", body)
         self.assertIn(configure_kitty.BRIDGE_DEBUG_LOG, body)
 
-    def test_the_wrapper_also_tees_kitty_stderr(self):
+    def test_the_wrapper_also_captures_kitty_stderr(self):
         """The other window: this catches the failures that stop the bridge ever
-        starting, which the debug log cannot see because it starts with it."""
+        starting, which the debug log cannot see because it starts with it.
+
+        ⚠️ **Upstream this case asserts ``tee -a``, and the change here is
+        deliberate.** The upstream wrapper writes ``2> >(tee -a "$LOG" >&2)`` --
+        the log *and* the process's own stderr. That second leg is the same
+        gateway-naming stream the redaction fix exists for, arriving in the job
+        log by a path the redactor never sees. It is removed;
+        :class:`WrapperStderrDoesNotReachTheJobLogTests` pins the removal. This
+        case keeps the half that must not go with it: the stream is still
+        captured.
+        """
 
         body = configure_kitty.wrapper_body("/opt/py/bin/kitty")
-        self.assertIn("tee -a", body)
+        self.assertIn("2>>", body)
         self.assertIn(configure_kitty.BRIDGE_STDERR_LOG, body)
 
     def test_stale_logs_are_purged_before_the_model_runs(self):
@@ -14425,6 +14448,179 @@ class RepliesGateRunsTheBaseRefsCheckerTests(unittest.TestCase):
         # The fallback that must not exist: running the checker from the
         # checkout after failing to find it on the base.
         self.assertNotIn("|| \"$pythonLocation", block)
+
+
+class NoSecretBearingStreamIsUploadedTests(unittest.TestCase):
+    """🔴 The runner holds provider keys, and an artifact is a public download.
+
+    Raised in round two of this repository's own automated review, which also
+    corrected round one: the round-one reasoning asserted that an injected
+    ``cat ~/.config/kitty/credentials.json | curl …`` was "denied by the
+    allowlist". Only the ``curl`` half is. ``Read`` and ``Bash(cat:*)`` are
+    allowlisted over **any** path, and ``configure_kitty.py`` writes the
+    organisation's provider keys to ``~/.config/kitty/credentials.json`` and the
+    gateway to ``egress.json`` on the same machine.
+
+    So reading a secret is possible. What decides whether it is *published* is
+    the set of channels leaving the runner, and the review has exactly two: the
+    uploaded artifact, and the review body the model writes.
+
+    🔴 **The artifact was the automatic one.** ``extract_schema_errors.py``
+    copies the entire stream-json execution record -- everything the model read,
+    verbatim -- and it was written into ``artifacts/``, which every run uploads
+    on ``always()``. No injection was needed for the *upload*; only for the read.
+    The record now goes to ``RUNNER_TEMP``, exactly as the kitty debug log
+    already does: the machine is destroyed with the job, and only bounded,
+    redacted evidence travels.
+
+    ⚠️ **The second channel is not closed by this and cannot be closed here.** A
+    model that reads a secret can write it into its own review summary, which is
+    posted as a comment. The mitigations are elsewhere and are partial: the
+    prompt instructs that an injection attempt be reported at critical severity,
+    and the reviewer's credential should be short-lived and scoped to what a
+    reviewer needs. That residual is stated in ``rules/ci.md`` rather than left
+    for somebody to discover.
+    """
+
+    def _text(self):
+        """Return the review workflow as text."""
+
+        return WORKFLOW.read_text(encoding="utf-8")
+
+    def _uploaded_paths(self):
+        """Return the `path:` entries of the artifact upload step.
+
+        Returns:
+            The paths, stripped, in declaration order.
+        """
+
+        step = _step("Upload review artifacts")
+        block = re.search(r"^\s*path: \|\n((?:\s{12}\S.*\n)+)", step, re.M)
+        self.assertIsNotNone(block, "the upload step declares no `path:` block")
+        return [line.strip() for line in block.group(1).splitlines() if line.strip()]
+
+    def test_the_execution_record_is_not_written_into_the_uploaded_directory(self):
+        """The finding. Both attempts, because the retry is the unwatched one."""
+
+        offenders = [
+            line.strip()
+            for line in self._text().splitlines()
+            if "--record-out" in line and "artifacts/" in line
+        ]
+
+        self.assertFalse(
+            offenders,
+            "the full stream-json execution record -- everything the reviewer "
+            "read, verbatim -- is written into the uploaded artifact directory, "
+            "so anything it read while reviewing untrusted input is published:\n"
+            "  " + "\n  ".join(offenders),
+        )
+
+    def test_both_attempts_still_capture_the_record_somewhere(self):
+        """🔴 The other half: deleting the capture would also pass the case above.
+
+        The record is what tells a maintainer whether the model returned a
+        wrapped payload, hit a schema error or never answered. Moving it off the
+        uploaded path must not become dropping it.
+        """
+
+        records = [
+            line.strip()
+            for line in self._text().splitlines()
+            if "--record-out" in line
+        ]
+
+        self.assertEqual(
+            len(records),
+            2,
+            f"each attempt must still capture its execution record: {records}",
+        )
+        for line in records:
+            with self.subTest(line=line):
+                self.assertIn("RUNNER_TEMP", line)
+
+    def test_the_upload_declares_no_path_that_could_reach_the_runner_temp(self):
+        """The uploaded set must stay an allowlist of named, bounded files.
+
+        A `path:` widened to `${{ runner.temp }}/**` would re-publish the record
+        and the kitty debug log in one edit, and neither would appear in a diff
+        as anything but a convenience.
+        """
+
+        for path in self._uploaded_paths():
+            with self.subTest(path=path):
+                self.assertNotIn("runner.temp", path.lower())
+                self.assertNotIn("$", path)
+                self.assertFalse(
+                    path.startswith("/") or path.startswith(".."),
+                    f"{path!r} escapes the workspace",
+                )
+
+    def test_the_schema_evidence_still_travels(self):
+        """The bounded, extracted half is the part that is safe to publish.
+
+        It is what a maintainer reads when the model's output failed validation,
+        and it is bounded by construction rather than being a transcript.
+        """
+
+        text = self._text()
+        self.assertIn("artifacts/schema_validation_errors.txt", text)
+        self.assertIn("artifacts/schema_validation_errors_attempt2.txt", text)
+
+
+class WrapperStderrDoesNotReachTheJobLogTests(unittest.TestCase):
+    """🔴 The gateway-naming stream must have exactly one destination.
+
+    The critical finding of round one was that kitty's launch stderr names the
+    egress gateway -- ``masked()`` hides the password and keeps the address and
+    username -- and that the diagnostic published it. That was fixed by
+    redacting the tail where the diagnostic is built.
+
+    Round two found the same stream leaving by a second door: the wrapper wrote
+    ``2> >(tee -a "$LOG" >&2)``, teeing to the log **and** back to the process's
+    own stderr, which the action may surface in the job log. On a public
+    repository the job log is public, and ``_redact_urls`` never sees that copy.
+
+    The terminal leg is now gone -- stderr appends to the log only. Nothing is
+    lost: the log is what ``interpret_claude_result`` reads to classify the
+    failure and what the redacted diagnostic tail is drawn from, so the
+    information still reaches a maintainer, in the one form that has been
+    through the redactor.
+    """
+
+    def test_the_wrapper_sends_stderr_only_to_the_log(self):
+        """No `>&2`, and no `tee`, on the stderr redirection."""
+
+        body = configure_kitty.wrapper_body("/opt/python/bin/kitty")
+
+        self.assertIn("2>>", body)
+        self.assertNotIn(">&2", body)
+        self.assertNotIn("tee", body)
+
+    def test_the_log_is_still_written_so_the_failure_is_still_diagnosable(self):
+        """🔴 The control: dropping the stream entirely would also pass above.
+
+        Kitty prints a launch refusal here and nowhere else. Silencing it would
+        turn every launch failure into `fatal -- no execution record`, a verdict
+        that names the provider and says nothing about the cause.
+        """
+
+        body = configure_kitty.wrapper_body("/opt/python/bin/kitty")
+
+        self.assertIn(configure_kitty.BRIDGE_STDERR_LOG, body)
+        self.assertIn("RUNNER_TEMP", body)
+
+    def test_the_log_stays_on_the_runner(self):
+        """It is the unredacted copy, so it must never be an uploaded path."""
+
+        for path in re.findall(
+            r"^\s*path: \|\n((?:\s{12}\S.*\n)+)",
+            _step("Upload review artifacts"),
+            re.M,
+        )[0].splitlines():
+            with self.subTest(path=path.strip()):
+                self.assertNotIn(configure_kitty.BRIDGE_STDERR_LOG, path)
+                self.assertNotIn(configure_kitty.BRIDGE_DEBUG_LOG, path)
 
 
 if __name__ == "__main__":

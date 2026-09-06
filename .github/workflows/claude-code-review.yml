@@ -1247,9 +1247,20 @@ jobs:
           CLAUDE_EXECUTION_FILE: ${{ steps.claude.outputs.execution_file }}
         run: |
           set -euo pipefail
+          # 🔴 The RECORD goes to RUNNER_TEMP, the extracted EVIDENCE to
+          # `artifacts/`, and that split is a security boundary rather than
+          # tidiness. The record is the whole stream-json transcript --
+          # everything the reviewer read, verbatim -- and `artifacts/` is
+          # uploaded on every run. The runner holds the organisation's provider
+          # keys at `~/.config/kitty/credentials.json`, and `Read` and
+          # `Bash(cat:*)` are allowlisted over any path, so a prompt injection
+          # that got the reviewer to read that file would have been published
+          # with no further step needed. Same treatment the kitty debug log
+          # already gets: the machine is destroyed with the job, and only
+          # bounded evidence travels. See `rules/ci.md`.
           "$pythonLocation/bin/python" .github/review/scripts/extract_schema_errors.py \
             --out artifacts/schema_validation_errors.txt \
-            --record-out artifacts/claude_execution_record.json
+            --record-out "${RUNNER_TEMP}/claude_execution_record.json"
 
       # --- Second attempt ----------------------------------------------------
       #
@@ -1408,7 +1419,7 @@ jobs:
           set -euo pipefail
           "$pythonLocation/bin/python" .github/review/scripts/extract_schema_errors.py \
             --out artifacts/schema_validation_errors_attempt2.txt \
-            --record-out artifacts/claude_execution_record_attempt2.json
+            --record-out "${RUNNER_TEMP}/claude_execution_record_attempt2.json"
 
       # --- Resolve -----------------------------------------------------------
 
