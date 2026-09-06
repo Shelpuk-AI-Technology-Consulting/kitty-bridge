@@ -1010,6 +1010,50 @@ def retry_verdict(
     return elapsed_seconds < budget
 
 
+#: A URL authority: everything between ``scheme://`` and the next delimiter,
+#: including any ``user:pass@`` prefix. The scheme is kept so a reader can still
+#: see that a URL was there and what kind it was.
+_URL_AUTHORITY = re.compile(r"(?<=://)[^\s/\"'>)\]]+")
+
+
+def _redact_urls(text: str) -> str:
+    """Strip every URL authority from text that will be published.
+
+    🔴 **This is a deliberate fork of an otherwise verbatim script, and it fixes
+    a credential leak. It should be carried upstream.**
+
+    Kitty's launch stderr names the egress gateway. The fail-closed guard refuses
+    with *"...cannot route through the egress proxy <masked>"*, where kitty's
+    ``masked()`` hides the **password only** -- the address and username survive.
+    That stream is teed to a log, its tail is embedded in the diagnostic below,
+    and ``build_failure_notice`` posts the diagnostic as a pull request comment,
+    writes it to the run log and uploads it under ``artifacts/``. On a public
+    repository that publishes the organisation's gateway.
+
+    ⚠️ **It is reachable on a correctly configured runner.** ``kitty egress
+    show`` exits 0 because the gateway *does* resolve, so the review is allowed
+    to start; kitty then refuses for a *transport* reason -- README names AWS
+    Bedrock in SSO mode -- and the notice carries the gateway out. The review
+    rules already call echoing this stream a critical finding, which is why
+    ``kitty egress show``'s own streams are discarded; this was the same stream
+    arriving by another door.
+
+    🔴 **Every authority goes, not only gateway-shaped ones.** A rule that
+    matched "things that look like a proxy" would key on the ``user:pass@``
+    prefix and miss an unauthenticated gateway entirely -- and more generally it
+    would only ever catch what somebody remembered. The diagnostic value of this
+    text is the *message*, never the host.
+
+    Args:
+        text: Text about to be embedded in a published diagnostic.
+
+    Returns:
+        The same text with every URL authority replaced by ``<redacted>``.
+    """
+
+    return _URL_AUTHORITY.sub("<redacted>", text)
+
+
 def _write_diagnostic(
     path: str,
     *,
@@ -1082,8 +1126,12 @@ def _write_diagnostic(
     # reach the only text that says what happened will conclude there is nothing
     # to read. Tail-bounded for the same reason the record is: this stream can
     # carry a stack trace per retry.
+    # 🔴 Redacted before embedding, never after. Every consumer -- the pull
+    # request comment, the run log, the uploaded artifact -- reads this one
+    # diagnostic, so a fix applied in a renderer would leave the other two
+    # carrying the gateway. See :func:`_redact_urls`.
     if bridge_text.strip():
-        tail = bridge_text.strip().splitlines()[-40:]
+        tail = _redact_urls(bridge_text).strip().splitlines()[-40:]
         lines += ["--- kitty bridge stderr (tail) ---", *tail, ""]
 
     # 🔴 Scoped exactly as `classify` is, and this is the half that did the damage. The first

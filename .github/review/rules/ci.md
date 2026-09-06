@@ -263,6 +263,27 @@ was dismissed without a word, or a reply was written and never published. The
 gate reads the API live, so a re-run clears it — an **empty commit must not** be
 used to clear it, because that re-triggers the billed review.
 
+🔴 **That job runs the checker from the BASE ref, and the shape is the control.**
+On a `pull_request` event the checkout is the merge commit, so the naive form
+runs the pull request's *own* copy of `check_review_replies.py` — and a commit
+making it `exit 0` disables the gate for the branch that made the change. The
+checker cannot see that it was replaced, so the job reports green while enforcing
+nothing. Flag any change that:
+
+- runs the checker from the checkout path instead of the extracted base copy;
+- drops `fetch-depth: 0`, without which the base commit is unresolvable and the
+  gate cannot run at all;
+- turns the missing-base-copy branch into a **fallback** rather than a skip. That
+  branch exists for exactly two states — the pull request that introduces the
+  system, and a merged deletion of the checker — and a fallback to the checkout
+  restores the whole defect while looking like resilience.
+
+⚠️ **`review-scripts` is deliberately NOT held to this, and that is not an
+oversight.** Its purpose *is* to run the pull request's version of the suite;
+running the base copy would test the wrong code. The integrity question there is
+real and has a different answer: a weakened guard is visible in the diff, and you
+are instructed above to treat weakening one as a critical finding.
+
 ## Actions and pinning
 
 - Third-party actions are referenced at a floating major (`@v1`, `@v6`). The

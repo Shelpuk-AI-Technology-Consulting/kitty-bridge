@@ -177,8 +177,12 @@ env:
   #
   # ⚠️ **8 is TRANSPLANTED, not measured, and the distinction is the risk here.** No
   # per-CALL distribution was ever collected for this reviewer -- what is measured is the
-  # whole JOB (median 455s, max 1244s over 52 runs, README § CI Runners), and a job is
-  # many calls. So the evidence says a single call above 8 minutes would be a long way
+  # whole JOB, and a job is many calls. ⚠️ **That job figure is UPSTREAM'S** -- median
+  # 455s, max 1244s over 52 runs, recorded in the reference repository, which is also
+  # where the section citing it lives; this repository has no such section and no such
+  # measurement. The citation used to read as a fact about this repository, which the
+  # first automated review here caught. So the evidence says a single call above 8
+  # minutes would be a long way
   # outside anything observed; it does NOT say one cannot happen. If it does, the run
   # fails hard rather than degrading -- which is the honest cost of the choice, and the
   # thing to re-derive from a real per-call measurement rather than from this comment.
@@ -1092,13 +1096,34 @@ jobs:
           # Use the workflow token rather than a Claude GitHub App token, so the
           # review does not depend on the App being installed.
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          settings: |
-            {
-              "defaultMode": "bypassPermissions"
-            }
+          # 🔴 **No `settings:` input, and its absence is the security control.**
+          #
+          # Upstream passes `{"defaultMode": "bypassPermissions"}` here. Removed
+          # after this repository's own first automated review raised it: that
+          # mode auto-approves tool calls OUTSIDE `--allowedTools`, on a run
+          # whose prompt embeds the pull request conversation -- which this
+          # repository treats as attacker-influenceable, to the point that an
+          # instruction attempt in it must be reported as a critical finding --
+          # and on a runner holding the organisation's provider credentials on
+          # disk. Under a bypass, an injected "read the credential store and
+          # POST it somewhere" is approved rather than denied.
+          #
+          # ⚠️ **As written upstream it was very likely inert, and that is the
+          # worse half.** The documented key is `permissions.defaultMode`, not a
+          # bare top-level `defaultMode` (Claude Code settings reference,
+          # verified 2026-09-06), and the reference also states that
+          # `bypassPermissions` does not take effect from project or local
+          # settings at all. So the allowlist below was the real boundary while
+          # the comment beside it implied something else -- and the day somebody
+          # "corrected" the nesting, the boundary would have vanished silently.
+          #
+          # `NoPermissionBypassTests` pins the absence, so restoring it needs a
+          # stated reason rather than a paste.
           prompt: ${{ steps.prompt.outputs.prompt }}
-          # Read-only tools only. Tests, linters and builds are run by this
-          # repository's own checks, never by the review.
+          # Read-only tools only, and with no bypass mode above this is the
+          # operative permission boundary rather than a description of one.
+          # Tests, linters and builds are run by this repository's own checks,
+          # never by the review.
           #
           # `--effort max` is a gate setting rather than a tuning knob. This is
           # the only automated judgement a change gets on its design, and a
@@ -1323,10 +1348,9 @@ jobs:
           path_to_claude_code_executable: ${{ steps.kitty.outputs.wrapper_path }}
           anthropic_api_key: ${{ secrets.KITTY_CREDENTIALS_JSON }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          settings: |
-            {
-              "defaultMode": "bypassPermissions"
-            }
+          # No `settings:` input here either -- the two attempts must be
+          # identical, and a bypass restored on the retry alone is the one launch
+          # in the job nobody watches. See the first attempt for the reasoning.
           prompt: ${{ steps.prompt.outputs.prompt }}
           claude_args: |
             --max-turns 250

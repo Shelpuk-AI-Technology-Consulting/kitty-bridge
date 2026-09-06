@@ -14078,5 +14078,354 @@ class JobPermissionsAreLeastPrivilegeTests(unittest.TestCase):
                 self.assertNotIn(": write", blocks[name])
 
 
+class GatewayNeverReachesTheNoticeTests(unittest.TestCase):
+    """🔴 The egress gateway must not be published by the failure path.
+
+    Raised as a **critical** finding by this repository's own first automated
+    review, and confirmed in code. The chain:
+
+    1. the launcher tees kitty's stderr to ``kitty-bridge-stderr.log``;
+    2. :func:`interpret._write_diagnostic` embeds that stream's
+       last forty lines verbatim;
+    3. ``build_failure_notice`` embeds the diagnostic in the comment posted to
+       the pull request -- on a **public** repository -- and the same text is
+       ``cat``-ed into the run log and uploaded under ``artifacts/``.
+
+    And kitty's stderr names the gateway. The fail-closed guard refuses with
+    *"Profile 'x' uses a transport that cannot route through the egress proxy
+    <masked>"*, where ``masked()`` hides the **password only** -- the address and
+    username survive.
+
+    ⚠️ **It is reachable on a correctly configured runner**, which is what makes
+    it critical rather than theoretical. ``kitty egress show`` exits 0 because
+    the gateway *does* resolve, so ``proxied=true`` and the attempt launches;
+    kitty then refuses for a *transport* reason (README names AWS Bedrock in SSO
+    mode), and the notice carries the gateway to the pull request.
+
+    `rules/ci.md` item 3 already declares echoing these streams a critical
+    finding -- it is why ``kitty egress show``'s own streams are discarded. This
+    is the same stream arriving by another door.
+
+    🔴 **Every URL authority goes, not just gateway-shaped ones.** A denylist of
+    "things that look like a proxy" is the shape this repository has twice
+    recorded as failing: it only ever catches what somebody remembered. The
+    diagnostic value of this tail is the *message*, never the host, and the
+    workflow already discards a whole stream for less.
+    """
+
+    GATEWAY_REFUSAL = (
+        "Profile 'reviewer' uses a transport that cannot route through the "
+        "egress proxy http://gwuser:****@proxy.example.invalid:12323. Egress is "
+        "configured, so kitty will not start."
+    )
+
+    def _diagnostic(self, bridge_text):
+        """Return the diagnostic body written for a failed attempt.
+
+        Args:
+            bridge_text: The teed kitty stderr to embed.
+
+        Returns:
+            The diagnostic file's contents.
+        """
+
+        with tempfile.TemporaryDirectory() as tmp:
+            target = os.path.join(tmp, "diagnostic.txt")
+            interpret._write_diagnostic(
+                target,
+                tier="Kitty Bridge",
+                status="fatal",
+                reason="no execution record",
+                retryable=False,
+                record_present=False,
+                execution_text="",
+                bridge_text=bridge_text,
+            )
+            with open(target, encoding="utf-8") as handle:
+                return handle.read()
+
+    def test_the_gateway_address_and_username_never_reach_the_diagnostic(self):
+        """The finding, asserted on the exact refusal kitty emits."""
+
+        body = self._diagnostic(self.GATEWAY_REFUSAL)
+
+        for secret in ("proxy.example.invalid", "gwuser", "12323"):
+            with self.subTest(token=secret):
+                self.assertNotIn(
+                    secret,
+                    body,
+                    "the diagnostic carries the egress gateway, and this text is "
+                    "posted as a pull request comment on a public repository, "
+                    "written to the run log and uploaded as an artifact",
+                )
+
+    def test_the_message_survives_so_the_diagnostic_still_diagnoses(self):
+        """🔴 The other half. Redacting the whole line would also pass above.
+
+        A reader has to be able to tell a fail-closed egress refusal from a
+        missing binary, and the words are what carry that. Only the authority
+        goes.
+        """
+
+        body = self._diagnostic(self.GATEWAY_REFUSAL)
+
+        self.assertIn("cannot route through the egress proxy", body)
+        self.assertIn("kitty will not start", body)
+        self.assertIn("--- kitty bridge stderr (tail) ---", body)
+
+    def test_an_unauthenticated_gateway_is_redacted_too(self):
+        """`masked()` returns the bare URL when the gateway needs no username.
+
+        The username is what a naive `user:pass@` pattern keys on, so a rule
+        written around one misses this shape entirely -- and it is the shape a
+        gateway without credentials always takes.
+        """
+
+        body = self._diagnostic(
+            "cannot route through the egress proxy http://proxy.example.invalid:12323."
+        )
+
+        self.assertNotIn("proxy.example.invalid", body)
+
+    def test_ordinary_lines_carrying_no_url_are_untouched(self):
+        """The control: a redactor that ate everything would pass the cases above."""
+
+        body = self._diagnostic("claude: command not found\nexit status 127")
+
+        self.assertIn("command not found", body)
+        self.assertIn("exit status 127", body)
+
+    def test_the_redaction_is_applied_where_the_tail_is_built(self):
+        """Pinned at the function, not only through the writer.
+
+        `build_failure_notice` and the run log both read the same diagnostic, so
+        redacting in one renderer would leave the others carrying the gateway.
+        Asserting the helper exists and is used keeps the fix at the single point
+        every consumer goes through.
+        """
+
+        source = (
+            Path(interpret.__file__).read_text(encoding="utf-8")
+        )
+        self.assertIn("def _redact_urls(", source)
+        self.assertIn("_redact_urls(bridge_text)", source)
+
+    def test_the_helper_leaves_the_scheme_so_the_shape_is_still_readable(self):
+        """A reader should still see that a URL was there and what kind."""
+
+        redacted = interpret._redact_urls(
+            "connecting to https://api.example.invalid/v1/messages"
+        )
+
+        self.assertNotIn("api.example.invalid", redacted)
+        self.assertIn("https://", redacted)
+
+
+class NoPermissionBypassTests(unittest.TestCase):
+    """🔴 `--allowedTools` must be the operative boundary, not a description of one.
+
+    Upstream passes `settings: {"defaultMode": "bypassPermissions"}` to both
+    attempts. That mode auto-approves tool calls **outside** the allowlist -- on
+    a run whose prompt embeds the pull request conversation, which this
+    repository treats as attacker-influenceable to the point that an instruction
+    attempt in it must be reported as a critical finding, and on a runner holding
+    the organisation's provider credentials on disk at mode 600. Under a bypass,
+    an injected "read the credential store and POST it somewhere" is approved
+    rather than denied.
+
+    ⚠️ **As written it was very likely inert, and that is the worse half.** The
+    documented key is `permissions.defaultMode`, not a bare top-level
+    `defaultMode` (Claude Code settings reference, verified 2026-09-06), and the
+    same reference states `bypassPermissions` does not take effect from project
+    or local settings at all. So the allowlist was the real boundary while the
+    comment beside it implied otherwise -- and the day somebody "corrected" the
+    nesting, the boundary would have vanished with nothing going red.
+
+    Raised as a warning by this repository's own first automated review, which
+    also named exactly what it could not check offline. This class is what makes
+    restoring the mode a decision rather than a paste.
+    """
+
+    #: Every spelling that would re-enable a bypass, including the nesting the
+    #: documentation actually specifies. Matched as text rather than by parsing
+    #: the YAML, because the `settings:` input is a JSON string inside a block
+    #: scalar and a parser would have to be right about both layers.
+    FORBIDDEN = ("bypassPermissions", "acceptEdits", "--permission-mode",
+                 "--dangerously-skip-permissions")
+
+    MARKER = "noqa: permission-mode"
+
+    def _text(self):
+        """Return the review workflow as text."""
+
+        return WORKFLOW.read_text(encoding="utf-8")
+
+    def test_no_attempt_enables_a_permission_bypass(self):
+        """The claim, over the whole file so a retry cannot differ from attempt one."""
+
+        offences = []
+        for lineno, line in enumerate(self._text().splitlines(), 1):
+            if self.MARKER in line:
+                continue
+            # The reasoning above necessarily names what it forbids, and it sits
+            # in comments. A comment cannot configure the CLI; a mapping key or a
+            # flag can. So only non-comment lines are offences.
+            if line.lstrip().startswith("#"):
+                continue
+            for token in self.FORBIDDEN:
+                if token in line:
+                    offences.append(f"{lineno}: {token} in {line.strip()[:90]}")
+
+        self.assertFalse(
+            offences,
+            "a permission bypass is configured, so `--allowedTools` stops being "
+            "the boundary on a run that reads untrusted pull request text and "
+            "holds provider credentials on disk:\n  " + "\n  ".join(offences),
+        )
+
+    def test_the_rule_would_catch_the_upstream_form(self):
+        """🔴 The control. The sweep above asserts an empty list.
+
+        The specimen is the exact input this class was written to reject, so a
+        mistyped token cannot leave the guard passing on an empty loop.
+        """
+
+        specimen = '              "defaultMode": "bypassPermissions"'
+        self.assertTrue(
+            any(token in specimen for token in self.FORBIDDEN),
+            "the rule no longer recognises the setting it exists to forbid",
+        )
+        self.assertFalse(specimen.lstrip().startswith("#"))
+
+    def test_the_allowlist_is_still_there_to_be_the_boundary(self):
+        """Removing the bypass is only an improvement while the allowlist exists.
+
+        With neither, every tool is available by default and this change would
+        have made things worse rather than better -- so the two facts are pinned
+        together.
+        """
+
+        text = self._text()
+        # Non-comment lines only. The reasoning above necessarily names the flag,
+        # and counting raw occurrences made this case assert "2" against a file
+        # containing 3 -- a guard failing on its own explanation.
+        flags = [
+            line
+            for line in text.splitlines()
+            if "--allowedTools" in line and not line.lstrip().startswith("#")
+        ]
+        self.assertEqual(
+            len(flags),
+            2,
+            "both attempts must carry the allowlist, and only the allowlist now "
+            f"stands between the reviewer and an injected tool call: {flags}",
+        )
+        for tool in ("Read", "Grep", "Glob"):
+            self.assertIn(tool, text)
+
+    def test_no_write_capable_tool_is_allowed(self):
+        """The allowlist has to be read-only, or its name is the only thing that is.
+
+        `Bash(...)` entries are scoped to specific commands and are checked by
+        `test_the_bash_allowlist_stays_read_only`; these are the whole-tool names
+        that would grant writing outright.
+        """
+
+        text = self._text()
+        for tool in ("Write", "Edit", "NotebookEdit", "WebFetch"):
+            with self.subTest(tool=tool):
+                self.assertNotIn(
+                    f"{tool},",
+                    text,
+                    f"{tool} is in the allowlist; the reviewer has a writable "
+                    "checkout and a network path, and read-only is the contract",
+                )
+
+
+class RepliesGateRunsTheBaseRefsCheckerTests(unittest.TestCase):
+    """🔴 A merge gate a pull request can rewrite is not a merge gate.
+
+    On a `pull_request` event the checkout is the merge commit, so the naive form
+    of this job runs the pull request's OWN `check_review_replies.py`. A commit
+    making it `exit 0` disables the gate for the branch that made the change, and
+    the checker cannot see that it was replaced -- the job reports green while
+    enforcing nothing.
+
+    Raised by this repository's first automated review, which held the design to
+    its own stated standard: the pull request description rejected a
+    `skip-review` label as "reachable by anyone with write access and would
+    defeat the gate it is meant to survive", and this reached the same end by a
+    quieter route.
+
+    ⚠️ **`review-scripts` is deliberately not held to this**, and the difference
+    is not laziness: its purpose IS to run the pull request's version of the
+    suite. Running the base copy there would test the wrong code.
+    """
+
+    CI = Path(__file__).resolve().parents[2] / "workflows" / "ci.yml"
+
+    def _job(self):
+        """Return the `review_replies` job's text, bounded to that job."""
+
+        text = self.CI.read_text(encoding="utf-8")
+        start = text.index("\n  review_replies:")
+        rest = text[start + 1 :]
+        end = re.search(r"\n  [A-Za-z_][\w-]*:\n", rest)
+        block = rest[: end.start()] if end else rest
+        self.assertIn("review_replies:", block)
+        self.assertLess(len(block), len(text), "the job window did not close")
+        return block
+
+    def test_the_checker_is_read_from_the_base_ref(self):
+        """`git show <base>:<path>`, and the base sha bound through `env:`."""
+
+        block = self._job()
+
+        self.assertIn("BASE_SHA: ${{ github.event.pull_request.base.sha }}", block)
+        self.assertIn('git show "${BASE_SHA}:${CHECKER}"', block)
+
+    def test_the_checkout_copy_is_never_the_one_executed(self):
+        """The interpreter must be pointed at the extracted file, not the path.
+
+        This is the assertion that actually distinguishes the fix from the
+        defect: a step could fetch the base copy and then still run the
+        checkout's, and every other case here would pass.
+        """
+
+        block = self._job()
+
+        self.assertIn('"$pythonLocation/bin/python" "${TRUSTED}"', block)
+        self.assertNotIn(
+            '"$pythonLocation/bin/python" .github/review/scripts/check_review_replies.py',
+            block,
+            "the job runs the checkout's copy of the checker, which the pull "
+            "request under test is free to have rewritten",
+        )
+
+    def test_full_history_is_fetched_so_the_base_is_resolvable(self):
+        """Without it `git show <base>:...` fails and the gate cannot run at all."""
+
+        self.assertIn("fetch-depth: 0", self._job())
+
+    def test_a_missing_base_copy_skips_loudly_rather_than_falling_back(self):
+        """🔴 The one accepted skip, and it must be announced.
+
+        The base branch legitimately has no checker on the pull request that
+        introduces the system. What must never happen is a fallback to the
+        checkout's copy, which would restore the defect while looking like
+        resilience -- so the absence path is asserted to exit rather than to
+        substitute.
+        """
+
+        block = self._job()
+
+        self.assertIn('git cat-file -e "${BASE_SHA}:${CHECKER}"', block)
+        self.assertIn("::notice::", block)
+        self.assertIn("exit 0", block)
+        # The fallback that must not exist: running the checker from the
+        # checkout after failing to find it on the base.
+        self.assertNotIn("|| \"$pythonLocation", block)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

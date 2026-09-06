@@ -40,7 +40,7 @@ jobs:
       contents: read
     uses: ./.github/workflows/tests.yml
 
-  # The review system's own suite: 574 tests over the rule selector, the result
+  # The review system's own suite: 588 tests over the rule selector, the result
   # classifier, the failure and superseded notices, the prompt redactor, the
   # findings schema, and the wiring of `claude-code-review.yml` and this file.
   #
@@ -81,17 +81,46 @@ jobs:
       contents: read
       pull-requests: read
     steps:
+      # Full history, because the step below runs the BASE ref's copy of the
+      # checker rather than this pull request's.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      # 🔴 Runs the checker from the BASE ref, not from the checkout: on a
+      # `pull_request` event the checkout is the merge commit, so the naive form
+      # runs the pull request's own copy and a commit making it `exit 0` disables
+      # the gate for the branch that made the change. `rules/ci.md` § "The merge
+      # gate in `ci.yml`" carries the full reasoning, and why `review-scripts` is
+      # deliberately not treated the same way.
       - name: Check that every resolved thread carries a published answer
         env:
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          CHECKER: .github/review/scripts/check_review_replies.py
         run: |
-          "$pythonLocation/bin/python" .github/review/scripts/check_review_replies.py \
+          set -euo pipefail
+          TRUSTED="${RUNNER_TEMP}/check_review_replies.py"
+
+          # 🔴 A missing base copy is the ONLY accepted reason to skip, and it is
+          # announced rather than swallowed. True on the pull request that
+          # introduces this system, and after a merged deletion -- never a reason
+          # to fall back to the checkout's copy, which is the hole this closes.
+          if ! git cat-file -e "${BASE_SHA}:${CHECKER}" 2>/dev/null; then
+            echo "::notice::The base branch carries no ${CHECKER}, so there is no"\
+                 "trusted copy of this gate to run. Skipping. This is expected only"\
+                 "on the pull request that introduces the review system; on any"\
+                 "other pull request it means the checker was removed from the"\
+                 "base branch and the gate is not being enforced."
+            exit 0
+          fi
+
+          git show "${BASE_SHA}:${CHECKER}" > "${TRUSTED}"
+          "$pythonLocation/bin/python" "${TRUSTED}" \
             --repo "${REPOSITORY}" \
             --pr "${PR_NUMBER}"
 
