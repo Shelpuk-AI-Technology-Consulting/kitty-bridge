@@ -1629,6 +1629,9 @@ class BridgeServer:
             exc.retry_after,
         )
         payload = BridgeServer._all_unhealthy_payload(exc)
+        # The anthropic branch mixes a top-level string key with nested dicts, so the
+        # union has to be declared up front rather than inferred from the first branch.
+        body: dict
         if style == "openai_chat":
             body = {
                 "error": {
