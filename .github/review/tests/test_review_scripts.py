@@ -14849,17 +14849,63 @@ class NoDocumentAttributesTheCatalogueRefreshToTheGateTests(unittest.TestCase):
 
     #: A refresh/schedule word within a short span of `ci.yml`, either order.  # noqa: refresh-claim
     #: Both directions, because the two live spellings put them either way round.
+    #
+    # 🔴 `runs it\b`, not `runs it`. Without the boundary it also matches "runs
+    # **its**" -- and `pyproject.toml` really does say "`ci.yml` runs its
+    # 606-case suite on every pull request", a true sentence about the test job
+    # which the loose form read as a false attribution of the catalogue refresh.
+    # Found by this repository's own review of the commit that added this guard,
+    # while the sweep was still scoped narrowly enough not to reach that file.
     CLAIMS = (
-        re.compile(r"(?:refresh\w*|runs it|weekly|schedul\w*)[^.\n]{0,40}`?ci\.yml`?"),
-        re.compile(r"`?ci\.yml`?[^.\n]{0,40}(?:refresh\w*|runs it|weekly|schedul\w*)"),
+        re.compile(r"(?:refresh\w*|runs it\b|weekly|schedul\w*)[^.\n]{0,40}`?ci\.yml`?"),
+        re.compile(r"`?ci\.yml`?[^.\n]{0,40}(?:refresh\w*|runs it\b|weekly|schedul\w*)"),
     )
 
     MARKER = "noqa: refresh-claim"
 
     def _root(self):
-        """Return the directory the sweep and its control both walk."""
+        """Return the `.github/` directory, for the workflow assertions below."""
 
         return Path(__file__).resolve().parents[2]
+
+    def _swept_files(self):
+        """Yield every TRACKED file, not just those under `.github/`.
+
+        🔴 **Widened after the first version, and the narrowing was load-bearing
+        without saying so.** The sweep began at `.github/` because that is where
+        the four known copies were. But the drift is a sentence about this
+        repository, and a sentence can be written anywhere -- `pyproject.toml`
+        already carries a `ci.yml` reference outside that scope. A guard whose
+        correctness depends on an unstated scope limit is one edit from being
+        wrong.
+
+        Widening was only safe once the `runs it\\b` boundary went in; before
+        that it would have reported `pyproject.toml`'s true sentence about the
+        test job. The two changes belong together and landed together.
+
+        Tracked rather than walked, for the reason the selector's totality guard
+        gives: a walk sees a developer's ignored `.venv` and `.system_design`,
+        neither of which reaches a checkout, and a guard that fails only on
+        somebody's machine gets deleted rather than obeyed.
+
+        Yields:
+            ``(repo_root, path)`` pairs for every tracked file that exists.
+        """
+
+        repo = Path(__file__).resolve().parents[3]
+        proc = subprocess.run(
+            ["git", "ls-files"], cwd=repo, capture_output=True, text=True
+        )
+        if proc.returncode != 0:
+            self.skipTest("not a git checkout, so the tracked set is unknowable")
+
+        tracked = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+        self.assertGreater(len(tracked), 100, "the tracked set looks truncated")
+
+        for name in tracked:
+            path = repo / name
+            if path.is_file():
+                yield repo, path
 
     def test_the_rules_recognise_every_spelling_that_was_actually_written(self):
         """🔴 The control, built from the real sentences rather than invented ones.
@@ -14884,14 +14930,24 @@ class NoDocumentAttributesTheCatalogueRefreshToTheGateTests(unittest.TestCase):
     def test_no_rule_fires_on_the_true_sentences_it_sits_beside(self):
         """The other control: a rule matching everything would also pass.
 
-        Each of these is a real, correct sentence in this tree. The response to a
-        guard that cries wolf is to delete the prose, which is the reasoning this
-        guard exists to preserve.
+        The response to a guard that cries wolf is to delete the prose, which is
+        the reasoning this guard exists to preserve.
+
+        🔴 **The first entry is quoted from `pyproject.toml`, verbatim, and it is
+        the one that matters.** The earlier version of this case said its
+        sentences were "real, correct sentences in this tree" when they were
+        paraphrases -- and the actual sentence, "``ci.yml`` runs its 606-case
+        suite on every pull request", DID fire the rule as first written. The
+        guard passed only because the sweep did not reach that file. Both halves
+        are fixed: the rule requires a word boundary after "runs it", and the
+        sweep now covers every tracked file. A control built from invented text
+        is a control for text nobody writes.
         """
 
         for sentence in (
+            "# on every pull request, and that suite carries guards this linter could not",
+            "`ci.yml` runs its 606-case suite",
             "`ci.yml` is the merge gate, and `ci-required` aggregates it",
-            "the review system's own suite runs in `ci.yml` on every pull request",
             "refreshed weekly by `model-metadata.yml`",
             "a job added to `ci.yml` must also be added to the aggregate",
         ):
@@ -14900,19 +14956,28 @@ class NoDocumentAttributesTheCatalogueRefreshToTheGateTests(unittest.TestCase):
                 self.assertFalse(firing, f"{sentence!r} -> {firing}")
 
     def test_the_sweep_reaches_the_files_it_claims_to(self):
-        """A walk that found nothing satisfies an empty-offences assertion."""
+        """A sweep that found nothing satisfies an empty-offences assertion.
 
-        seen = {p.name for p in self._root().rglob("*") if p.is_file()}
-        for expected in ("providers.md", "REVIEW_GUIDE.md", "select_rules.py"):
+        Includes `pyproject.toml`, which is the file the widened scope was for:
+        it sits outside `.github/` and carries a true `ci.yml` sentence, so its
+        presence is what proves the sweep is no longer relying on a scope limit
+        to pass.
+        """
+
+        seen = {path.name for _, path in self._swept_files()}
+        for expected in (
+            "providers.md",
+            "REVIEW_GUIDE.md",
+            "select_rules.py",
+            "pyproject.toml",
+            "README.md",
+        ):
             with self.subTest(file=expected):
                 self.assertIn(expected, seen)
 
     def test_no_file_attributes_the_refresh_to_the_gate_workflow(self):
-        root = self._root()
         offences = []
-        for path in sorted(root.rglob("*")):
-            if not path.is_file() or "__pycache__" in path.parts:
-                continue
+        for repo, path in self._swept_files():
             try:
                 text = path.read_text(encoding="utf-8")
             except (UnicodeDecodeError, OSError):
@@ -14924,7 +14989,7 @@ class NoDocumentAttributesTheCatalogueRefreshToTheGateTests(unittest.TestCase):
                     continue
                 if any(rule.search(line) for rule in self.CLAIMS):
                     offences.append(
-                        f"{path.relative_to(root.parent).as_posix()}:{lineno}: "
+                        f"{path.relative_to(repo).as_posix()}:{lineno}: "
                         f"{line.strip()[:100]}"
                     )
 
