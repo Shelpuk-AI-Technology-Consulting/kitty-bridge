@@ -105,9 +105,9 @@ RULE_SPECS: tuple[RuleSpec, ...] = (
         patterns=(
             f"{PKG}/providers/**",
             # The catalogue generator. It writes `providers/model_metadata.json`
-            # and `ci.yml` runs it weekly; a change to it is a change to the
-            # provider component from the build side, and no other pattern
-            # reaches `scripts/`.
+            # and `model-metadata.yml` runs it weekly; a change to it is a
+            # change to the provider component from the build side, and no other
+            # pattern reaches `scripts/`.
             "scripts/**",
         ),
     ),

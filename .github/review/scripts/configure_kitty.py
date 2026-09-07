@@ -10,11 +10,12 @@ repository settings and writes the launcher that puts ``kitty`` in front of
 ``claude``".
 
 The launcher also asks kitty for both of its logs: ``--debug-file`` for the
-bridge's own record once it is up, and a ``tee`` on stderr for the launch
-failures kitty prints nowhere else. Neither is decoration -- between them they
-are the only evidence a failed review leaves, and without them a launch refusal
-arrives at the interpreter as an empty execution record. See
-:func:`wrapper_body` for which window each one covers.
+bridge's own record once it is up, and an append redirect on stderr for the
+launch failures kitty prints nowhere else. Neither is decoration -- between them
+they are the only evidence a failed review leaves, and without them a launch
+refusal arrives at the interpreter as an empty execution record. See
+:func:`wrapper_body` for which window each one covers, and for why the stderr
+redirect has exactly one destination rather than the ``tee`` upstream uses.
 
 The three settings reach this script through ``env:`` under neutral names,
 never through ``${{ }}`` interpolation, so their values cannot appear in a
@@ -70,14 +71,18 @@ BRIDGE_STDERR_LOG = "kitty-bridge-stderr.log"
 # Two separate captures, because they cover two disjoint windows and a failure
 # in either one was previously invisible.
 #
-# ``2> >(tee -a ...)`` catches kitty's LAUNCH stderr. Kitty prints its own
+# ``2>> <stderr log>`` catches kitty's LAUNCH stderr. Kitty prints its own
 # failures -- an egress refusal, a profile whose credential will not resolve --
 # to stderr and nowhere else, and `claude-code-action` writes an execution
 # record carrying none of it. That is how a launch failure reached
 # `interpret_claude_result.py` as an empty record and came out as "no execution
 # record; Claude never reached the model" -- true, and useless.
 #
-# ``--debug-file`` covers everything AFTER the bridge is up, which the tee
+# ⚠️ Upstream writes ``2> >(tee -a ... >&2)`` here. The terminal leg is removed;
+# :func:`wrapper_body` says why, and it is a security fix rather than a
+# simplification.
+#
+# ``--debug-file`` covers everything AFTER the bridge is up, which the redirect
 # cannot see: kitty goes quiet on stderr once it is running, so a run that
 # reaches the model and then stalls leaves an empty stderr log and no execution
 # record at all. Verified against kitty's own CLI source

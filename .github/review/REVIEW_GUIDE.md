@@ -205,7 +205,7 @@ Explain the failure mode in one or two sentences and give a concrete fix.
   - `codex` is the implicit default launcher target when none is given. It is
     fixed for backward compatibility and is not user-configurable.
   - `model_metadata.json` is a bundled convenience copy of the OpenRouter
-    catalogue, refreshed weekly by `ci.yml`; the committed copy drifting between
+    catalogue, refreshed weekly by `model-metadata.yml`; the committed copy drifting between
     refreshes is expected and is reported, not enforced.
   - The reviewer in `.github/` installs the **released** `kitty-bridge` from
     PyPI rather than the pull request's own checkout. `rules/ci.md` states the

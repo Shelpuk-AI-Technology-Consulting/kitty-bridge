@@ -1246,9 +1246,17 @@ def _write_diagnostic(
             "",
         ]
 
+    # 🔴 Redacted for the same reason the stderr tail above is, and the omission
+    # here is what made the previous round's closure claim overstate its reach.
+    # This slice is the last sixty lines of the stream-json execution record --
+    # a transcript of what the reviewer read -- and this diagnostic is posted as
+    # a pull request comment, written to the run log and uploaded. Moving the
+    # whole record off the uploaded path did nothing for the copy that travels
+    # inside the diagnostic.
     lines += [
         "--- execution record (tail) ---",
-        "\n".join(execution_text.splitlines()[-60:]) or "(no execution record)",
+        _redact_urls("\n".join(execution_text.splitlines()[-60:]))
+        or "(no execution record)",
     ]
 
     target = Path(path)

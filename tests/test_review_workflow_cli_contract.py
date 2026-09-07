@@ -138,6 +138,26 @@ def _run_kitty(env: dict[str, str], *args: str) -> subprocess.CompletedProcess:
 
 
 @pytest.fixture()
+def tmp_config_dir(tmp_path: Path) -> Path:
+    """Alias of :func:`config_dir` for cases that only need isolation.
+
+    Same directory, different name: a case that never inspects the directory
+    reads better asking for "a temporary config dir" than for "the config dir",
+    and the distinction stops the two uses drifting apart.
+
+    Args:
+        tmp_path: pytest's per-test temporary directory.
+
+    Returns:
+        The directory kitty will resolve to under :func:`_kitty_env`.
+    """
+
+    target = tmp_path / "kittyconfig-alias"
+    target.mkdir()
+    return target
+
+
+@pytest.fixture()
 def config_dir(tmp_path: Path) -> Path:
     """Return an empty, isolated kitty config directory.
 
@@ -225,7 +245,7 @@ class TestTheFlagsTheWrapperPasses:
             "before Claude Code starts"
         )
 
-    def test_the_claude_target_is_still_routable(self):
+    def test_the_claude_target_is_still_routable(self, tmp_config_dir: Path):
         """`claude` must remain a launcher target the router recognises.
 
         The wrapper's whole purpose is `kitty ... claude "$@"`. A rename would
@@ -237,9 +257,28 @@ class TestTheFlagsTheWrapperPasses:
         router actually matches the word `claude` against.
         """
 
-        from kitty.launchers.claude import ClaudeAdapter
-
-        assert ClaudeAdapter().name == "claude"
+        # 🔴 A child process under the pinned environment, NOT an in-process
+        # import. `import kitty...` here resolves through the interpreter's own
+        # `sys.path`, which — run from a git worktree against a shared editable
+        # install — is a *different checkout*. That is precisely the wrong-tree
+        # failure this module's `_kitty_env` exists to prevent, and this one line
+        # escaped it: the module would have gone on claiming to test the working
+        # tree while asking a different one.
+        probe = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "from kitty.launchers.claude import ClaudeAdapter;"
+                "print(ClaudeAdapter().name)",
+            ],
+            cwd=ROOT,
+            env=_kitty_env(tmp_config_dir),
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert probe.returncode == 0, probe.stderr
+        assert probe.stdout.strip() == "claude"
 
         registry = (ROOT / "src" / "kitty" / "cli" / "main.py").read_text(
             encoding="utf-8"
@@ -422,6 +461,22 @@ class TestTheWorkflowStillDrivesThisSurface:
                 f"the review workflow no longer runs {invocation!r}; this module "
                 "is pinning a surface nobody drives"
             )
+
+    def test_the_workflow_still_runs_the_script_that_writes_the_wrapper(self):
+        """🔴 `configure_kitty.py` is the source of every wrapper-flag pin here.
+
+        `TestTheFlagsTheWrapperPasses` reads the launcher out of that script. If
+        the workflow stopped running it — writing the launcher inline, or
+        dropping the step — every one of those cases would keep passing against a
+        file nothing executes. That is the same staleness this class exists to
+        prevent, one level down, and the first version of this class missed it.
+        """
+
+        text = WORKFLOW.read_text(encoding="utf-8")
+        assert "configure_kitty.py" in text, (
+            "the review workflow no longer runs configure_kitty.py, so the "
+            "wrapper this module pins is not the one the reviewer launches"
+        )
 
     def test_the_workflow_still_installs_the_released_bridge(self):
         """The premise of this whole module, asserted rather than assumed.

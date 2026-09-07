@@ -197,11 +197,23 @@ that overrides the child's endpoint and credentials.
   wrong twice upstream: a provider that hangs produces the same empty execution
   record as a misconfiguration, and both observed occurrences cleared on a plain
   re-run.
-- `continue-on-error: true` on the model steps, the notice builders and the
-  evidence captures is deliberate: without it the job dies before anything
-  classifies the failure, comments on the pull request or writes the summary — a
-  red check with no explanation anywhere. Removing one is a finding; adding one
-  to a step whose failure *should* fail the run is also a finding.
+- `continue-on-error: true` on the model steps, the **superseded**-notice steps
+  and the evidence captures is deliberate: without it the job dies before
+  anything classifies the failure, comments on the pull request or writes the
+  summary — a red check with no explanation anywhere. Removing one is a finding;
+  adding one to a step whose failure *should* fail the run is also a finding.
+
+  ⚠️ **`Build failure notice` and `Post failure notice` do NOT carry it, and this
+  bullet used to claim they did.** (Corrected after this repository's automated
+  review checked the claim against the file.) The consequence is a real, known
+  gap rather than a design: those two run only when the outcome is already not
+  `ok`, so the check is red either way — but if either *crashes*, the job stops
+  there and the pull request gets a red check with no comment and no
+  `::error::` annotation, because `Fail when no review was produced` never runs.
+  Do not read the bullet above as covering them. A pull request that adds
+  `continue-on-error` to those two, and moves the failure to
+  `Fail when no review was produced` where it belongs, is closing this rather
+  than weakening it.
 - A step that runs between `Interpret` and `Resolve` and can fail without
   `continue-on-error` will suppress a review that had already succeeded, because
   the later steps carry an implicit `success()`.

@@ -7,9 +7,14 @@ name: Model metadata
 # than tidiness.** `ci.yml` is now the merge gate: its `ci-required` job must
 # depend on every job in that file and compare each against `success`, or a job
 # added later runs, fails, and leaves the gate green. This job cannot live under
-# that rule. It is `if: github.event_name != 'push'`, so on a push to `main` it
-# skips — and a skipped dependency is not `success`, which would paint `main` red
-# on every merge. The alternative, an event-conditional excuse in the aggregate,
+# that rule. It does not run on a push to `main` — the `on:` block below has no
+# `push` trigger — so as a dependency of the aggregate it would be *skipped* on
+# every merge, and a skipped dependency is not `success`, which would paint
+# `main` red. (⚠️ This paragraph used to describe the exclusion as an
+# `if: github.event_name != 'push'` on the job. That was true in `ci.yml` and
+# stopped being true when the job moved here and the trigger was dropped
+# instead; caught by this repository's own automated review.) The alternative, an
+# event-conditional excuse in the aggregate,
 # is the exemption `review_replies` already holds and which must stay at exactly
 # one: a second job carrying it is a second job nobody checks on three of the
 # four events.

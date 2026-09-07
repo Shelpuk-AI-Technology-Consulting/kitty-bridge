@@ -1214,8 +1214,13 @@ jobs:
       #
       # The CLI's rejection already names the field and the constraint, e.g.
       # `/findings/3/title: must NOT have more than 120 characters`. This step
-      # lifts those out and copies the whole record beside them, both into
-      # `artifacts/`, which the upload step at the end publishes.
+      # lifts those out into `artifacts/`, which the upload step publishes, and
+      # copies the whole record to `RUNNER_TEMP`, which it does not. ⚠️ That
+      # split is recent and this comment used to describe the state before it --
+      # "both into artifacts/" -- thirty lines above the line that had already
+      # changed. The record is a transcript of everything the reviewer read, on
+      # a runner holding the organisation's provider keys; see the step's own
+      # comment below and `rules/ci.md`.
       #
       # ⚠️ Its output is for a HUMAN and is deliberately never read back by
       # `interpret_claude_result.py`. Those messages live in tool results, which

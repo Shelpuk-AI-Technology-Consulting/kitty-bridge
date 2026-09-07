@@ -40,7 +40,7 @@ jobs:
       contents: read
     uses: ./.github/workflows/tests.yml
 
-  # The review system's own suite: 595 tests over the rule selector, the result
+  # The review system's own suite: 599 tests over the rule selector, the result
   # classifier, the failure and superseded notices, the prompt redactor, the
   # findings schema, and the wiring of `claude-code-review.yml` and this file.
   #
@@ -101,10 +101,11 @@ jobs:
           REPOSITORY: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          SCRIPTS_DIR: .github/review/scripts
           CHECKER: .github/review/scripts/check_review_replies.py
         run: |
           set -euo pipefail
-          TRUSTED="${RUNNER_TEMP}/check_review_replies.py"
+          TRUSTED_DIR="${RUNNER_TEMP}/base-review-scripts"
 
           # 🔴 A missing base copy is the ONLY accepted reason to skip, and it is
           # announced rather than swallowed. True on the pull request that
@@ -119,8 +120,21 @@ jobs:
             exit 0
           fi
 
-          git show "${BASE_SHA}:${CHECKER}" > "${TRUSTED}"
-          "$pythonLocation/bin/python" "${TRUSTED}" \
+          # 🔴 The WHOLE scripts directory, not just the checker. The checker
+          # puts its own directory on `sys.path` and imports `fetch_conversation`
+          # from it, so a single-file extraction dies with ModuleNotFoundError
+          # before reading a thread -- and because this job runs the BASE copy,
+          # the pull request fixing that would fail the same way. Flat, because
+          # `sys.path` gets the directory the file is in.
+          mkdir -p "${TRUSTED_DIR}"
+          git ls-tree -r --name-only "${BASE_SHA}" -- "${SCRIPTS_DIR}" \
+            > "${RUNNER_TEMP}/base-scripts.txt"
+          while IFS= read -r path; do
+            [ -n "${path}" ] || continue
+            git show "${BASE_SHA}:${path}" > "${TRUSTED_DIR}/$(basename "${path}")"
+          done < "${RUNNER_TEMP}/base-scripts.txt"
+
+          "$pythonLocation/bin/python" "${TRUSTED_DIR}/check_review_replies.py" \
             --repo "${REPOSITORY}" \
             --pr "${PR_NUMBER}"
 

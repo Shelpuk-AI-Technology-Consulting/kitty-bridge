@@ -14276,8 +14276,6 @@ class NoPermissionBypassTests(unittest.TestCase):
     FORBIDDEN = ("bypassPermissions", "acceptEdits", "--permission-mode",
                  "--dangerously-skip-permissions")
 
-    MARKER = "noqa: permission-mode"
-
     def _text(self):
         """Return the review workflow as text."""
 
@@ -14288,8 +14286,11 @@ class NoPermissionBypassTests(unittest.TestCase):
 
         offences = []
         for lineno, line in enumerate(self._text().splitlines(), 1):
-            if self.MARKER in line:
-                continue
+            # 🔴 No `noqa` escape hatch, deliberately. The first version carried
+            # one, exempting any line that named it -- an untested hole in a
+            # guard about a security setting, and nothing in the tree needed it.
+            # Comments are the only exemption, and they cannot configure a CLI.
+            #
             # The reasoning above necessarily names what it forbids, and it sits
             # in comments. A comment cannot configure the CLI; a mapping key or a
             # flag can. So only non-comment lines are offences.
@@ -14354,12 +14355,23 @@ class NoPermissionBypassTests(unittest.TestCase):
         that would grant writing outright.
         """
 
-        text = self._text()
-        for tool in ("Write", "Edit", "NotebookEdit", "WebFetch"):
+        # 🔴 The allowlist VALUES, parsed out, rather than a substring of the
+        # file. The first version searched for `f"{tool},"` -- which misses a
+        # tool appended at the END of the list, where there is no trailing
+        # comma, and that is exactly where a tool gets appended.
+        allowlists = re.findall(r'--allowedTools "([^"]+)"', self._text())
+        self.assertEqual(len(allowlists), 2, "both attempts must declare one")
+
+        granted = {
+            entry.strip()
+            for allowlist in allowlists
+            for entry in allowlist.split(",")
+        }
+        for tool in ("Write", "Edit", "NotebookEdit", "WebFetch", "WebSearch", "Task"):
             with self.subTest(tool=tool):
                 self.assertNotIn(
-                    f"{tool},",
-                    text,
+                    tool,
+                    granted,
                     f"{tool} is in the allowlist; the reviewer has a writable "
                     "checkout and a network path, and read-only is the contract",
                 )
@@ -14400,15 +14412,23 @@ class RepliesGateRunsTheBaseRefsCheckerTests(unittest.TestCase):
         return block
 
     def test_the_checker_is_read_from_the_base_ref(self):
-        """`git show <base>:<path>`, and the base sha bound through `env:`."""
+        """The base sha comes through `env:`, and the extraction reads that ref.
+
+        ⚠️ Asserts `git show "${BASE_SHA}:` rather than the whole single-file
+        command it used to pin. The extraction now walks the base ref's scripts
+        directory -- see :class:`ExtractedCheckerActuallyRunsTests` for why a
+        single file could not work -- so pinning the old command would forbid the
+        fix.
+        """
 
         block = self._job()
 
         self.assertIn("BASE_SHA: ${{ github.event.pull_request.base.sha }}", block)
-        self.assertIn('git show "${BASE_SHA}:${CHECKER}"', block)
+        self.assertIn('git ls-tree -r --name-only "${BASE_SHA}"', block)
+        self.assertIn('git show "${BASE_SHA}:${path}"', block)
 
     def test_the_checkout_copy_is_never_the_one_executed(self):
-        """The interpreter must be pointed at the extracted file, not the path.
+        """The interpreter must be pointed at the extracted copy, not the path.
 
         This is the assertion that actually distinguishes the fix from the
         defect: a step could fetch the base copy and then still run the
@@ -14417,7 +14437,10 @@ class RepliesGateRunsTheBaseRefsCheckerTests(unittest.TestCase):
 
         block = self._job()
 
-        self.assertIn('"$pythonLocation/bin/python" "${TRUSTED}"', block)
+        self.assertIn(
+            '"$pythonLocation/bin/python" "${TRUSTED_DIR}/check_review_replies.py"',
+            block,
+        )
         self.assertNotIn(
             '"$pythonLocation/bin/python" .github/review/scripts/check_review_replies.py',
             block,
@@ -14621,6 +14644,119 @@ class WrapperStderrDoesNotReachTheJobLogTests(unittest.TestCase):
             with self.subTest(path=path.strip()):
                 self.assertNotIn(configure_kitty.BRIDGE_STDERR_LOG, path)
                 self.assertNotIn(configure_kitty.BRIDGE_DEBUG_LOG, path)
+
+
+class ExtractedCheckerActuallyRunsTests(unittest.TestCase):
+    """🔴 The base-ref extraction must produce a checker that can START.
+
+    Round three of this repository's own automated review found the round-one
+    fix broken in the one way its own pull request could not reveal.
+    ``check_review_replies.py`` puts its own directory on ``sys.path`` and then
+    imports ``fetch_conversation`` from it. Extracting that ONE file into
+    ``RUNNER_TEMP`` leaves the sibling behind, so the gate dies with
+    ``ModuleNotFoundError`` before it reads a single thread.
+
+    ⚠️ **And it would have been invisible until after the merge.** The pull
+    request introducing the system takes the skip path -- the base branch has no
+    checker -- so the extraction never ran. Every pull request afterwards would
+    have crashed the gate, turned ``ci-required`` red, and, because the gate runs
+    the BASE ref's copy, the pull request fixing it would have failed the same
+    way. That is the frozen-merge failure this design treats as its worst
+    outcome, self-inflicted.
+
+    🔴 **These cases RUN the extracted script rather than reading the command.**
+    Text assertions are what let the defect through: the previous guard pinned
+    the shape of the extraction and every one of its assertions was true.
+    """
+
+    SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
+    CI = Path(__file__).resolve().parents[2] / "workflows" / "ci.yml"
+    CHECKER = "check_review_replies.py"
+
+    def _run_from(self, directory):
+        """Invoke the checker in ``directory`` and return the finished process.
+
+        ``--help`` because it exercises import and argument parsing without
+        touching the network -- and every failure mode this class is about
+        happens before either.
+
+        Args:
+            directory: Directory holding the extracted copy.
+
+        Returns:
+            The finished process, output captured.
+        """
+
+        return subprocess.run(
+            [sys.executable, str(Path(directory) / self.CHECKER), "--help"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+
+    def test_the_checker_runs_when_its_whole_directory_is_extracted(self):
+        """The claim: extract the directory, and the gate can start."""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            for source in self.SCRIPTS.glob("*.py"):
+                shutil.copy(source, Path(tmp) / source.name)
+
+            proc = self._run_from(tmp)
+
+        self.assertEqual(
+            proc.returncode,
+            0,
+            f"the extracted checker cannot start: {proc.stderr[-400:]}",
+        )
+
+    def test_extracting_the_checker_alone_does_not_run(self):
+        """🔴 The control, and the defect itself.
+
+        Without this the case above passes against a workflow that extracts one
+        file, because the assertion would be about the copy this test made rather
+        than about the copy the workflow makes. This pins that the sibling is a
+        real requirement, so nobody "simplifies" the extraction back.
+        """
+
+        with tempfile.TemporaryDirectory() as tmp:
+            shutil.copy(self.SCRIPTS / self.CHECKER, Path(tmp) / self.CHECKER)
+
+            proc = self._run_from(tmp)
+
+        self.assertNotEqual(
+            proc.returncode,
+            0,
+            "extracting the checker alone now works, so this control no longer "
+            "proves anything -- check whether its sibling import was removed",
+        )
+        self.assertIn("ModuleNotFoundError", proc.stderr)
+
+    def test_the_workflow_extracts_every_sibling_not_one_file(self):
+        """The wiring half: the command must copy the directory, not the file.
+
+        Asserted after the two behavioural cases above, and deliberately not
+        instead of them -- a text pin is what missed this the first time.
+        """
+
+        text = self.CI.read_text(encoding="utf-8")
+        start = text.index("\n  review_replies:")
+        rest = text[start + 1 :]
+        end = re.search(r"\n  [A-Za-z_][\w-]*:\n", rest)
+        block = rest[: end.start()] if end else rest
+
+        self.assertIn("git ls-tree", block)
+        self.assertNotIn(
+            'git show "${BASE_SHA}:${CHECKER}" > "${TRUSTED}"',
+            block,
+            "the job extracts a single file again; its sibling import will "
+            "fail at run time and the gate will never read a thread",
+        )
+
+    def test_the_checker_is_still_the_one_executed(self):
+        """Extracting a directory must not lose track of which file to run."""
+
+        text = self.CI.read_text(encoding="utf-8")
+        self.assertIn(f"/{self.CHECKER}", text)
 
 
 if __name__ == "__main__":

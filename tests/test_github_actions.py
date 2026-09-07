@@ -28,9 +28,13 @@ def _load_workflow(name: str) -> dict:
         pytest.fail(f"Workflow file {name} not found at {path}")
     # Explicitly UTF-8: GitHub reads workflow files as UTF-8, and these carry
     # non-ASCII in their comments. Without this, `open()` uses the platform's
-    # locale encoding and every case in this module fails with a
+    # locale encoding and most cases in this module fail with a
     # UnicodeDecodeError on a Windows developer's machine while passing on the
     # Linux runner -- a suite that disagrees with itself by operating system.
+    #
+    # ⚠️ "most", not "every": this helper is not the module's only reader.
+    # `TestTagVersionCheck` and `test_no_hardcoded_api_token` read files
+    # directly, and the first version of this comment claimed to cover them.
     with open(path, encoding="utf-8") as f:
         data = yaml.safe_load(f)
     # PyYAML parses `on:` as boolean True. Normalize it.
@@ -196,7 +200,10 @@ class TestPublishWorkflow:
     def test_no_hardcoded_api_token(self, workflow: dict):
         """Verify the workflow does not reference any secrets (OIDC only)."""
         path = WORKFLOWS_DIR / "publish.yml"
-        content = path.read_text()
+        # UTF-8 for the reason `_load_workflow` gives. Missed when the other
+        # reads were fixed, which is why that comment no longer claims to cover
+        # "every case in this module" -- it did not.
+        content = path.read_text(encoding="utf-8")
         # OIDC workflows should not reference any secrets at all
         assert re.search(r"\$\{\{\s*secrets\.", content) is None, (
             "OIDC publish workflow must not reference ${{ secrets.* }}"
@@ -423,12 +430,23 @@ class TestMetadataRefreshRespectsBranchProtection:
         # triggers rather than by an `if:` on the job -- same outcome, one fewer
         # queued-and-skipped job per merge. Either spelling satisfies the claim;
         # what must not happen is the refresh running on every push to main.
+        #
+        # 🔴 The `if:` branch checks the CONDITION EXCLUDES push, not that the
+        # word appears in it. The first version asserted `"push" in condition`,
+        # which `if: github.event_name == 'push'` satisfies -- the exact opposite
+        # of the claim. A guard that a negation and its inverse both pass is not
+        # a guard.
         condition = str(workflow["jobs"]["update-metadata"].get("if", ""))
         triggers = _get_trigger(workflow)
 
-        assert "push" not in triggers or "push" in condition, (
-            "update-metadata runs on every push to main, so merging its own "
-            f"pull request re-triggers it; triggers={sorted(triggers)!r} if={condition!r}"
+        if "push" not in triggers:
+            return
+
+        normalised = condition.replace(" ", "")
+        assert "github.event_name!='push'" in normalised, (
+            "update-metadata is reachable on a push to main and its `if:` does "
+            "not exclude that event, so merging its own pull request "
+            f"re-triggers it; triggers={sorted(triggers)!r} if={condition!r}"
         )
 
     def test_gating_the_refresh_does_not_stop_main_being_tested(self):
