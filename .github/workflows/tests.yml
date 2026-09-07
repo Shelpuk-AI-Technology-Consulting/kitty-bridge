@@ -14,6 +14,11 @@ jobs:
   test:
     name: Python ${{ matrix.python-version }}
     runs-on: ubuntu-latest
+    # A backstop, not a budget: the suite runs in a couple of minutes. Sized to
+    # notice a hang. ⚠️ A matrix job is held to the LOWEST platform ceiling among
+    # the labels its matrix can produce, so adding an `ubuntu-slim` entry here
+    # would make this cap a fiction — see `.github/review/rules/ci.md`.
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
