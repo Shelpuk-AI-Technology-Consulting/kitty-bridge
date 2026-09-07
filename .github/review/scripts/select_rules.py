@@ -182,11 +182,13 @@ RULE_SPECS: tuple[RuleSpec, ...] = (
     # or a contract edited here changes what every user's next install resolves,
     # which is why this rule pulls in `cli` -- the entry point is that component's.
     #
-    # 🔴 `.gitignore` is here, and it is not filler. It excludes `.system_design/`,
-    # `.requirements/` and `CLAUDE.md`, so it is what decides which documents
-    # reach a CI checkout -- and therefore what the reviewer in
-    # `claude-code-review.yml` is able to read at all. A line added or removed
-    # there silently widens or narrows every future review. It was also the only
+    # 🔴 `.gitignore` is here, and it is not filler. It excludes `.requirements/`
+    # and `CLAUDE.md` -- and deliberately does NOT exclude `.system_design/` --
+    # so it is what decides which documents reach a CI checkout, and therefore
+    # what the reviewer in `claude-code-review.yml` is able to read at all. A
+    # line added or removed there silently widens or narrows every future
+    # review; re-ignoring `.system_design/` would blind the reviewer to the
+    # internal specification without failing anything. It was also the only
     # tracked file this selector matched with no rule, which is the exact
     # zero-rules-loaded shape the docstring above warns about.
     RuleSpec(
@@ -209,15 +211,20 @@ RULE_SPECS: tuple[RuleSpec, ...] = (
     # troubleshooting that tells a user what a failure means. A change to
     # behaviour that does not move it is drift.
     #
-    # `.system_design/`, `.requirements/` and `CLAUDE.md` are matched even though
-    # `.gitignore` currently excludes all three, so nothing at those paths reaches
-    # a CI checkout. That is deliberate: a test-suite design is being added under
-    # `.system_design/` and is intended to be committed, and a design document
-    # landing with no rule file selected is exactly the silent gap this selector
-    # exists to prevent. The patterns cost nothing while the paths are absent.
+    # `.system_design/` is tracked and reaches a CI checkout, so the reviewer
+    # reads it: it is the internal specification, as README.md is the external
+    # one. These patterns were added before the directory was un-ignored, on the
+    # reasoning that a design document landing with no rule file selected is
+    # exactly the silent gap this selector exists to prevent -- and they were
+    # already correct when it landed.
     #
-    # ⚠️ Do not read their presence here as evidence that the reviewer can read
-    # those documents today -- it cannot, and `REVIEW_GUIDE.md` says so.
+    # `.requirements/` and `CLAUDE.md` are still excluded by `.gitignore`, so
+    # nothing at those paths reaches a checkout. Their patterns stay for the same
+    # reason: they cost nothing while the paths are absent, and they are right
+    # the day either is committed.
+    #
+    # ⚠️ Do not read `.requirements/`'s presence here as evidence the reviewer can
+    # read a per-task REQUIREMENTS.md -- it cannot, and `REVIEW_GUIDE.md` says so.
     RuleSpec(
         name="docs",
         patterns=(

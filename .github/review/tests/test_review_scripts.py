@@ -13673,11 +13673,28 @@ class GitignoredDocumentsAreNotPromisedTests(unittest.TestCase):
 
         The sweep above asserts an EMPTY list, which a mistyped pattern satisfies
         for ever.
+
+        ⚠️ **The specimens are built from what `.gitignore` says today, not from a
+        hard-coded path.** This control used to assert `.system_design` was
+        ignored, and that assertion broke the day the design documents were
+        committed and the directory un-ignored -- the control was correct, its
+        fixture was stale, and it took the whole review job red with it. Deriving
+        the specimen from `ignored` means un-ignoring a directory can no longer
+        do that, while still failing loudly if the parser stops reading
+        `.gitignore` at all.
         """
 
         ignored = self._ignored_prefixes()
-        self.assertIn(".system_design", ignored)
+        # `.requirements/` is per-task working material and stays ignored;
+        # `.system_design/` is tracked, so it is deliberately NOT asserted here.
         self.assertIn(".requirements", ignored)
+        self.assertNotIn(
+            ".system_design",
+            ignored,
+            "`.system_design/` is the committed internal specification and must "
+            "reach a CI checkout; re-ignoring it blinds the automated reviewer "
+            "without failing anything else",
+        )
 
         paths = "|".join(
             re.escape(entry) for entry in sorted(ignored) if entry.endswith(".md") or "/" not in entry
@@ -13688,16 +13705,19 @@ class GitignoredDocumentsAreNotPromisedTests(unittest.TestCase):
         )
 
         for specimen in (
-            "Then read `.system_design/SYSTEM_DESIGN.md` in full before the diff",
             "Also read the task's .requirements/REQUIREMENTS.md for acceptance criteria",
+            "Then open `CLAUDE.md` in full before the diff",
         ):
             with self.subTest(specimen=specimen):
                 self.assertTrue(imperative.search(specimen), specimen)
 
         for allowed in (
-            "`.system_design/` and `.requirements/` are currently in `.gitignore`",
-            "The selector matches `.system_design/**/*.md` so the day one lands",
+            "`.requirements/` is currently in `.gitignore`",
+            "The selector matches `.requirements/**/*.md` so the day one lands",
             "Do not report a missing design document as a finding",
+            # `.system_design/` is no longer ignored, so an imperative aimed at
+            # it is correct guidance and must not be flagged.
+            "Read `.system_design/TEST_SUITE.md` and judge the change against it",
         ):
             with self.subTest(allowed=allowed):
                 self.assertIsNone(imperative.search(allowed), allowed)

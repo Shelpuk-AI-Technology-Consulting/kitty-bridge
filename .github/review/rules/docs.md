@@ -63,14 +63,17 @@ raise it at the same severity as a wrong comment, because a reader trusts it.
 
 ## Design documents
 
-`.system_design/` and `.requirements/` are currently in `.gitignore`, so **no
-design document reaches a CI checkout today**. Do not report a missing design
-document as a finding, and do not claim to have read one.
+`.system_design/` **is tracked and reaches a CI checkout.** `.requirements/` is
+still in `.gitignore`, so per-task requirement documents do not: never report a
+missing `REQUIREMENTS.md` as a finding, and never claim to have read one.
 
-If a pull request commits such a document — a test-suite design is expected under
-`.system_design/` — then read it, judge the change against it, and check that
-`select_rules.py` matches its path. The selector already carries the patterns; it
-costs nothing while the directories are absent.
+Read the design document covering the area the change touches and judge the
+change against it. Two failures are findings, and the second is the one that gets
+missed: code that contradicts a stable design, **and** a design left stale by a
+change that invalidates it. A design document that still describes behaviour the
+diff just replaced is a defect with the same shape as a wrong docstring, and it
+is worse in one respect — the next author reads it as the specification. These
+files are large; read the relevant section, not the whole thing.
 
 ## Assets
 

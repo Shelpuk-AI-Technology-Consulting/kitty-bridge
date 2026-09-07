@@ -19,13 +19,17 @@ Do not review the diff in isolation.
   privacy claims, and the troubleshooting that tells a user what a failure means.
   It is ~33 KB; read it whole.
 
-⚠️ **`README.md` is the only specification you can read, and that is a property
-of the checkout rather than a preference.** `.gitignore` excludes
-`/.system_design/`, `/.requirements/`, `/CLAUDE.md` and `/.references/`, so none
-of them exists in a CI checkout. Do **not** report a missing design document or a
-missing `REQUIREMENTS.md` as a finding, and do not claim to have read one. Where
-a pull request commits such a document — one is expected under `.system_design/`
-— read it and judge the change against it.
+⚠️ **What you can and cannot read, as a property of the checkout rather than a
+preference.** `.gitignore` excludes `/.requirements/`, `/CLAUDE.md` and
+`/.references/`, so none of them exists in a CI checkout. Do **not** report a
+missing `REQUIREMENTS.md` as a finding, and do not claim to have read one.
+
+`/.system_design/` **is tracked** and is present. Together with `README.md` it is
+the specification: the README is the user-facing interface contract, the design
+documents are the internal one. Read the design document covering the area the
+change touches, and judge the change against it — code that contradicts a stable
+design is a finding, and so is a design left stale by a change that invalidates
+it. Read the relevant section, not the whole file; these are large.
 
 **Additionally, based on what the pull request touches:**
 
