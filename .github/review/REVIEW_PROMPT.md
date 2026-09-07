@@ -14,16 +14,12 @@ diff alone.
 
 `README.md` is ~33 KB and is read whole, deliberately.
 
-⚠️ **What is and is not in the checkout, as a fact rather than a preference.**
-`.gitignore` excludes `/.requirements/`, `/CLAUDE.md` and `/.references/`, so
-none of them is present: do not look for a per-task `REQUIREMENTS.md`, do not
-report a missing one as a finding, and do not claim to have read one.
-
-`/.system_design/` **is tracked** and is in the checkout. When the change touches
-an area a design document covers, read that document and judge the change against
-it — a contradiction between a stable design and the code is a finding. Read the
-relevant part rather than the whole file; these run to six figures of bytes and
-the budget below is real.
+⚠️ **`README.md` is the only specification in the checkout, and that is a fact
+about the checkout rather than a preference.** `.gitignore` excludes
+`/.system_design/`, `/.requirements/`, `/CLAUDE.md` and `/.references/`, so none
+of them is present. Do not look for a design document, do not report a missing
+one as a finding, and do not claim to have read one. Where a pull request commits
+such a document, read it — it will be in the diff.
 
 Then read the review contract and the rule files included below, examine the
 changed files, and return your findings as structured output matching the
