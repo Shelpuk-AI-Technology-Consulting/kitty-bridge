@@ -19,20 +19,25 @@ Covers ``.requirements/20260907T142619Z_wire_shape_honesty`` R4a, R4b and R5.
 
 from __future__ import annotations
 
+import copy
 import json
 
+import aiohttp
 import pytest
 from aioresponses import CallbackResult, aioresponses
 
 from kitty.bridge.server import BridgeServer
+from kitty.launchers.base import LauncherAdapter, SpawnConfig
 from kitty.providers.opencode import OpenCodeGoAdapter
-from tests.bridge.test_thinking_roundtrip_failover import (
-    _anthropic_sse,
-    _post,
-    _rejection,
-    _ScriptedUpstream,
-    _StubLauncher,
-)
+from kitty.types import BridgeProtocol
+
+# The stubs below duplicate `test_thinking_roundtrip_failover.py`'s rather than
+# importing them.  Every bridge test module defines its own — `_StubLauncher`
+# already appears independently in that module and in
+# `test_client_disconnect_health.py` — and `tests/` is not a package, so a
+# cross-module import resolves only when the repository root happens to be on
+# `sys.path` (as `python -m pytest` puts it there, but the bare `pytest` CI runs
+# does not).
 
 # The adapter ignores ``provider_config`` for its base URL, so these are the
 # real routed endpoints.  ``aioresponses`` intercepts both; nothing leaves the
@@ -44,6 +49,87 @@ MESSAGES_URL = "https://opencode.ai/zen/go/v1/messages"
 # (https://opencode.ai/docs/go/, verified 2026-09-07).
 CC_MODEL = "glm-5.2"
 MESSAGES_MODEL = "minimax-m2.5"
+
+THINKING_ROUNDTRIP_400 = (
+    '{"error":{"message":"The `content[].thinking` in the thinking mode must be '
+    'passed back to the API.","type":"invalid_request_error","param":null,'
+    '"code":"invalid_request_error"}}'
+)
+
+
+class _StubLauncher(LauncherAdapter):
+    """Minimal launcher that selects the Messages API bridge protocol."""
+
+    @property
+    def name(self) -> str:
+        return "stub"
+
+    @property
+    def binary_name(self) -> str:
+        return "stub"
+
+    @property
+    def bridge_protocol(self) -> BridgeProtocol:
+        return BridgeProtocol.MESSAGES_API
+
+    def build_spawn_config(self, profile, bridge_port: int, resolved_key: str) -> SpawnConfig:
+        return SpawnConfig(env_overrides={}, env_clear=[], cli_args=[])
+
+
+class _ScriptedUpstream:
+    """Records every request body and replies from a scripted sequence.
+
+    The body is deep-copied on arrival: the repair rewrites the outgoing body in
+    place after it has been sent, so recording the reference would let the retry
+    retroactively rewrite what the first attempt is recorded as having sent.
+    """
+
+    def __init__(self, *responses: CallbackResult) -> None:
+        self._responses = list(responses)
+        self.bodies: list[dict] = []
+
+    def __call__(self, url, **kwargs) -> CallbackResult:
+        self.bodies.append(copy.deepcopy(kwargs.get("json", {})))
+        if len(self._responses) > 1:
+            return self._responses.pop(0)
+        return self._responses[0]
+
+
+def _rejection() -> CallbackResult:
+    """The upstream's thinking-round-trip 400."""
+    return CallbackResult(status=400, content_type="application/json", body=THINKING_ROUNDTRIP_400)
+
+
+def _anthropic_sse() -> bytes:
+    """A minimal, well-formed Anthropic Messages SSE stream."""
+    events = [
+        {
+            "type": "message_start",
+            "message": {
+                "id": "msg_ok",
+                "type": "message",
+                "role": "assistant",
+                "content": [],
+                "model": MESSAGES_MODEL,
+                "usage": {"input_tokens": 10, "output_tokens": 0},
+            },
+        },
+        {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}},
+        {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "Recovered"}},
+        {"type": "content_block_stop", "index": 0},
+        {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 3}},
+        {"type": "message_stop"},
+    ]
+    return b"".join(f"event: {e['type']}\ndata: {json.dumps(e)}\n\n".encode() for e in events)
+
+
+async def _post(server: BridgeServer, request: dict) -> tuple[int, str]:
+    """POST a Messages-API request at the running bridge over loopback."""
+    async with (
+        aiohttp.ClientSession() as session,
+        session.post(f"http://127.0.0.1:{server.port}/v1/messages", json=request) as resp,
+    ):
+        return resp.status, (await resp.read()).decode("utf-8")
 
 
 def _chat_completions_sse() -> bytes:
