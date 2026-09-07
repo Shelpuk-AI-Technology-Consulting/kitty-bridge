@@ -878,7 +878,8 @@ class TestSelectRules(unittest.TestCase):
         """`scripts/` is the provider component from the build side.
 
         Its one script writes `providers/model_metadata.json`, which the package
-        ships and every profile resolves against, and `ci.yml` runs it weekly. It
+        ships and every profile resolves against, and `model-metadata.yml` runs it
+        weekly. It
         is deliberately NOT `python-tests` -- it carries no assertions and no test
         runner collects it -- and deliberately not `packaging`, which would put a
         catalogue change behind dependency-bound rules.
@@ -14816,6 +14817,142 @@ class ExtractedCheckerActuallyRunsTests(unittest.TestCase):
 
         text = self.CI.read_text(encoding="utf-8")
         self.assertIn(f"/{self.CHECKER}", text)
+
+
+class NoDocumentAttributesTheCatalogueRefreshToTheGateTests(unittest.TestCase):
+    """🔴 The catalogue refresh moved out of `ci.yml`. Four documents said so.  # noqa: refresh-claim
+
+    They were not clustered: `REVIEW_GUIDE.md`, `select_rules.py`,
+    `rules/providers.md` and a docstring in this file. Two were found in one
+    round, the other two in the next — by a review sweeping the tree by hand,
+    which is an act rather than an invariant. This is the third time this exact
+    drift has been reported, and a fourth copy landing is only a matter of
+    somebody writing the sentence again.
+
+    ⚠️ **The claim matters, it is not bookkeeping.** `rules/providers.md` is a
+    file the automated reviewer is handed, so a reviewer told the refresh lives
+    in `ci.yml` will look for it there, not find it, and judge a change against a
+    workflow that does not run it. The guard exists because prose the reviewer
+    reads has the same standing as code.
+
+    Matched as "the refresh attributed to the gate workflow" rather than as a
+    phrasing. `REVIEW_GUIDE.md` said "refreshed weekly by `ci.yml`" and  # noqa: refresh-claim
+    `providers.md` said the same with a clause after it, while  # noqa: refresh-claim
+    `select_rules.py` said "`ci.yml` runs it weekly" -- three spellings of one  # noqa: refresh-claim
+    belief, which is exactly the shape the leak guard's docstring warns a
+    phrasing list cannot cover.
+    """
+
+    #: The refresh's own workflow, named once so a rename fails here rather than
+    #: silently widening what the rule accepts.
+    REFRESH_WORKFLOW = "model-metadata.yml"
+
+    #: A refresh/schedule word within a short span of `ci.yml`, either order.  # noqa: refresh-claim
+    #: Both directions, because the two live spellings put them either way round.
+    CLAIMS = (
+        re.compile(r"(?:refresh\w*|runs it|weekly|schedul\w*)[^.\n]{0,40}`?ci\.yml`?"),
+        re.compile(r"`?ci\.yml`?[^.\n]{0,40}(?:refresh\w*|runs it|weekly|schedul\w*)"),
+    )
+
+    MARKER = "noqa: refresh-claim"
+
+    def _root(self):
+        """Return the directory the sweep and its control both walk."""
+
+        return Path(__file__).resolve().parents[2]
+
+    def test_the_rules_recognise_every_spelling_that_was_actually_written(self):
+        """🔴 The control, built from the real sentences rather than invented ones.
+
+        Each of these stood in the tree and each was reported separately. A rule
+        that recognises only the one somebody remembered is the failure this
+        class exists to end.
+        """
+
+        for specimen in (
+            "refreshed weekly by `ci.yml`. Two things follow:",  # noqa: refresh-claim
+            "convenience copy, refreshed weekly by `ci.yml`",  # noqa: refresh-claim
+            "and `ci.yml` runs it weekly; a change to it",  # noqa: refresh-claim
+            "the catalogue is on a weekly schedule in ci.yml",  # noqa: refresh-claim
+        ):
+            with self.subTest(specimen=specimen):
+                self.assertTrue(
+                    any(rule.search(specimen) for rule in self.CLAIMS),
+                    "no rule recognises a sentence this guard exists to forbid",
+                )
+
+    def test_no_rule_fires_on_the_true_sentences_it_sits_beside(self):
+        """The other control: a rule matching everything would also pass.
+
+        Each of these is a real, correct sentence in this tree. The response to a
+        guard that cries wolf is to delete the prose, which is the reasoning this
+        guard exists to preserve.
+        """
+
+        for sentence in (
+            "`ci.yml` is the merge gate, and `ci-required` aggregates it",
+            "the review system's own suite runs in `ci.yml` on every pull request",
+            "refreshed weekly by `model-metadata.yml`",
+            "a job added to `ci.yml` must also be added to the aggregate",
+        ):
+            with self.subTest(sentence=sentence):
+                firing = [r.pattern for r in self.CLAIMS if r.search(sentence)]
+                self.assertFalse(firing, f"{sentence!r} -> {firing}")
+
+    def test_the_sweep_reaches_the_files_it_claims_to(self):
+        """A walk that found nothing satisfies an empty-offences assertion."""
+
+        seen = {p.name for p in self._root().rglob("*") if p.is_file()}
+        for expected in ("providers.md", "REVIEW_GUIDE.md", "select_rules.py"):
+            with self.subTest(file=expected):
+                self.assertIn(expected, seen)
+
+    def test_no_file_attributes_the_refresh_to_the_gate_workflow(self):
+        root = self._root()
+        offences = []
+        for path in sorted(root.rglob("*")):
+            if not path.is_file() or "__pycache__" in path.parts:
+                continue
+            try:
+                text = path.read_text(encoding="utf-8")
+            except (UnicodeDecodeError, OSError):
+                # A binary file cannot carry a reviewable claim, and failing on
+                # one would make this guard about file types.
+                continue
+            for lineno, line in enumerate(text.splitlines(), 1):
+                if self.MARKER in line:
+                    continue
+                if any(rule.search(line) for rule in self.CLAIMS):
+                    offences.append(
+                        f"{path.relative_to(root.parent).as_posix()}:{lineno}: "
+                        f"{line.strip()[:100]}"
+                    )
+
+        self.assertFalse(
+            offences,
+            f"the catalogue refresh runs in `{self.REFRESH_WORKFLOW}`, not in "
+            "`ci.yml`. Rewrite each of these rather than deleting the sentence "
+            "-- `rules/providers.md` is handed to the reviewer, so a wrong "
+            "attribution sends it to the wrong workflow:\n  "
+            + "\n  ".join(offences),
+        )
+
+    def test_the_refresh_really_lives_where_this_guard_says(self):
+        """🔴 The claim this guard enforces must itself be true.
+
+        If the job moved again, every case above would go on forbidding a
+        sentence that had become correct -- a guard enforcing yesterday's fact,
+        which is the exact failure it was written to stop.
+        """
+
+        workflows = self._root() / "workflows"
+        refresh = (workflows / self.REFRESH_WORKFLOW).read_text(encoding="utf-8")
+        self.assertIn("update-metadata:", refresh)
+        self.assertIn("cron:", refresh)
+
+        gate = (workflows / "ci.yml").read_text(encoding="utf-8")
+        self.assertNotIn("update-metadata:", gate)
+        self.assertNotIn("cron:", gate)
 
 
 if __name__ == "__main__":

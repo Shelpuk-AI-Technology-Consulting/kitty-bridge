@@ -50,7 +50,7 @@ headers are the deliberate exception; a new one, or a widened one, is not.
 ## The catalogue
 
 `model_metadata.json` is a convenience copy of the OpenRouter catalogue,
-refreshed weekly by `ci.yml`. Two things follow:
+refreshed weekly by `model-metadata.yml`. Two things follow:
 
 - **A hand-edit to that file is a finding**, because the next scheduled refresh
   overwrites it. The fix belongs in the generator.
