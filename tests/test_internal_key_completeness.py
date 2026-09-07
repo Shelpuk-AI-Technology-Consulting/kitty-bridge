@@ -1,0 +1,248 @@
+"""Structural guard: every internal metadata key kitty writes is registered.
+
+Kitty's translators and adapters hand each other metadata on underscore-prefixed
+keys of the Chat Completions request dict.  ``ProviderAdapter._INTERNAL_KEYS``
+is the frozenset ``translate_to_upstream`` strips, and it is the only thing
+keeping those keys off the provider's wire.
+
+KBR-6 is what happens when the set falls behind the code: ``_effort`` and
+``_thinking_adaptive`` were added to ``MessagesTranslator.translate_request``
+and never added to the set, so sixteen providers received them on every
+request — an intermediary signature in a field no vendor API defines.
+
+The complementary check — that each ``translate_to_upstream`` override strips
+the set — is necessary but **not** sufficient, and is exactly the test that
+existed and passed while the defect was live: every override strips the set
+correctly.  The set itself was wrong.  This file checks the set.
+
+See ``.system_design/TEST_SUITE.md`` §6.2.3, gap G15.
+"""
+
+from __future__ import annotations
+
+import ast
+import collections
+
+import pytest
+from internal_key_scan import KeyWrite, scan_source, scan_tree
+
+from kitty.providers.base import ProviderAdapter
+
+#: Which file is expected to mint which internal keys.
+#:
+#: A *key set* per file, not a per-file count.  ``server.py`` holds roughly
+#: twenty near-identical ``cc_request["_resolved_key"]`` writes across the retry
+#: and failover branches; an exact-count registry would fire on any refactor
+#: that adds or merges a branch, get bumped reflexively, and die.  A key set is
+#: stable under that duplication and still fails when a file starts minting a
+#: new key or when the visitor goes blind on a file.
+_EXPECTED_KEYS: dict[str, set[str]] = {
+    "bridge/messages/translator.py": {
+        "_effort",
+        "_reasoning_effort",
+        "_thinking_adaptive",
+        "_thinking_enabled",
+    },
+    "bridge/responses/translator.py": {"_reasoning_effort", "_thinking_enabled"},
+    "bridge/server.py": {
+        "_native_messages_request",
+        "_original_body",
+        "_provider_config",
+        "_resolved_key",
+    },
+    "providers/kimi.py": {"_thinking_enabled"},
+}
+
+
+def _keys_by_file(writes: list[KeyWrite]) -> dict[str, set[str]]:
+    """Group scan results into the key set minted by each file.
+
+    Args:
+        writes: Scan results.
+
+    Returns:
+        Mapping of relative path to the set of keys written in that file.
+    """
+    grouped: dict[str, set[str]] = collections.defaultdict(set)
+    for write in writes:
+        grouped[write.path].add(write.key)
+    return dict(grouped)
+
+
+class TestEveryInternalKeyIsRegistered:
+    """R1: no internal key may be written without joining ``_INTERNAL_KEYS``."""
+
+    def test_every_internal_key_written_is_registered(self):
+        writes, _excluded = scan_tree()
+        known = set(ProviderAdapter._INTERNAL_KEYS)
+
+        offenders = [str(write) for write in writes if write.key not in known]
+
+        assert not offenders, (
+            "Internal metadata key(s) written into a request dict but missing from "
+            "ProviderAdapter._INTERNAL_KEYS, so they are forwarded to the provider:\n  "
+            + "\n  ".join(offenders)
+            + "\n\nAdd them to _INTERNAL_KEYS in src/kitty/providers/base.py. If the key is "
+            "not part of a request body, do NOT add it to the set — add a justified "
+            "exclusion to tests/internal_key_scan.py instead, per TEST_SUITE.md §6.2.3."
+        )
+
+
+class TestTheScanCannotRotIntoANoOp:
+    """R3: a guard that stops seeing anything must fail, not pass."""
+
+    def test_the_scan_actually_finds_something(self):
+        """A broken visitor returning nothing would pass every other check here."""
+        writes, _excluded = scan_tree()
+
+        assert len(writes) >= 30, f"the scan found only {len(writes)} write(s); it has gone blind"
+
+    def test_key_set_per_file_is_unchanged(self):
+        """A file that starts or stops minting a key must be reviewed."""
+        writes, _excluded = scan_tree()
+        actual = _keys_by_file(writes)
+
+        changed = {path: keys for path, keys in actual.items() if keys != _EXPECTED_KEYS.get(path)}
+        detail = [
+            f"{path}: expected {sorted(_EXPECTED_KEYS.get(path, set()))}, found {sorted(keys)}"
+            for path, keys in sorted(changed.items())
+        ]
+
+        assert not detail, (
+            "The set of internal keys minted per file changed — review each for upstream "
+            "exposure, then update _EXPECTED_KEYS in this file: " + "; ".join(detail)
+        )
+
+    def test_registry_has_no_stale_entries(self):
+        """A stale entry would excuse a file that no longer mints anything."""
+        writes, _excluded = scan_tree()
+        stale = sorted(set(_EXPECTED_KEYS) - set(_keys_by_file(writes)))
+
+        assert not stale, f"_EXPECTED_KEYS names files that mint no internal key any more: {stale}"
+
+
+#: One synthetic module per AST form the scan claims to cover.  A visitor that
+#: silently stopped handling a form would pass every check above.
+_SYNTHETIC_FORMS = {
+    "subscript-assign": 'def f(cc):\n    cc["_leaked"] = 1\n',
+    "dict-literal": 'def f():\n    return {"_leaked": 1}\n',
+    "dict-literal-via-update": 'def f(cc):\n    cc.update({"_leaked": 1})\n',
+    "dict-literal-via-unpack": 'def f(cc):\n    return {**cc, "_leaked": 1}\n',
+    "setdefault": 'def f(cc):\n    cc.setdefault("_leaked", 1)\n',
+    "dict-kwarg": "def f(cc):\n    return dict(cc, _leaked=1)\n",
+}
+
+
+class TestTheScanIsFalsifiable:
+    """R3d: each covered form is proven to be detected, not assumed."""
+
+    @pytest.mark.parametrize("form", sorted(_SYNTHETIC_FORMS))
+    def test_scan_flags_a_synthetic_key(self, form: str):
+        writes, _excluded = scan_source(_SYNTHETIC_FORMS[form])
+
+        assert [w.key for w in writes] == ["_leaked"], f"the scan missed a {form} write"
+
+    def test_scan_flags_a_write_to_an_unusual_target_name(self):
+        """The scan must not filter by target name.
+
+        Restricting it to targets called ``cc_request`` or ``body`` would pass
+        every other test in this file while missing a real leak.
+        """
+        writes, _excluded = scan_source('def f(payload):\n    payload["_leaked"] = 1\n')
+
+        assert [w.key for w in writes] == ["_leaked"]
+
+    def test_scan_flags_a_write_inside_a_nested_function(self):
+        """Scope tracking must not create a blind spot."""
+        source = 'def outer(cc):\n    def inner():\n        cc["_leaked"] = 1\n    return inner\n'
+        writes, _excluded = scan_source(source)
+
+        assert [w.key for w in writes] == ["_leaked"]
+
+    def test_registered_keys_are_still_reported_by_the_scan(self):
+        """The scan reports every internal key, not only unregistered ones.
+
+        Filtering inside the visitor would make ``_EXPECTED_KEYS`` unusable and
+        would hide a key that later left ``_INTERNAL_KEYS``.
+        """
+        writes, _excluded = scan_source('def f(cc):\n    cc["_resolved_key"] = 1\n')
+
+        assert [w.key for w in writes] == ["_resolved_key"]
+
+
+class TestTheRequestObjectExclusion:
+    """R4: an aiohttp request object is not a request body — nor a free pass."""
+
+    def test_web_request_exclusion_still_matches(self):
+        """An exclusion that matches nothing is a guard that has gone blind."""
+        _writes, excluded = scan_tree()
+
+        assert excluded, (
+            "The web.Request exclusion no longer matches anything. Either the "
+            "request-scoped writes in BridgeServer._auth_middleware moved, or the "
+            "annotation changed — confirm the exclusion is still needed before removing it."
+        )
+
+    def test_the_excluded_keys_are_the_known_request_scoped_ones(self):
+        """Pin what is excluded, so the hatch cannot quietly widen."""
+        _writes, excluded = scan_tree()
+
+        assert {write.key for write in excluded} == {"_key_id", "_profile_name", "_mapped_profile"}
+
+    def test_excluded_keys_are_not_in_internal_keys(self):
+        """They are request-scoped storage, not body keys.
+
+        Adding them to ``_INTERNAL_KEYS`` is the tempting way to silence the
+        scan without the exclusion.  It would make the set describe something
+        it does not govern, and would then excuse a genuine leak if one of
+        those names were ever written into a real request body.
+        """
+        _writes, excluded = scan_tree()
+        known = set(ProviderAdapter._INTERNAL_KEYS)
+
+        assert not {write.key for write in excluded} & known
+
+    def test_annotation_excludes_but_a_bare_local_does_not(self):
+        """The exclusion is keyed on the annotation, never on the name.
+
+        Both functions below write to a variable called ``request``. Only the
+        annotated one is request-scoped storage; a name-based rule would wave
+        the other one through.
+        """
+        annotated = 'def f(request: web.Request):\n    request["_leaked"] = 1\n'
+        bare = 'def f(request):\n    request["_leaked"] = 1\n'
+
+        annotated_writes, annotated_excluded = scan_source(annotated)
+        bare_writes, bare_excluded = scan_source(bare)
+
+        assert annotated_writes == [] and [w.key for w in annotated_excluded] == ["_leaked"]
+        assert [w.key for w in bare_writes] == ["_leaked"] and bare_excluded == []
+
+    def test_the_exclusion_does_not_leak_out_of_its_scope(self):
+        """A later function reusing the name must not inherit the exclusion."""
+        source = (
+            'def handler(request: web.Request):\n    request["_ok"] = 1\n\n'
+            'def helper(request):\n    request["_leaked"] = 1\n'
+        )
+        writes, excluded = scan_source(source)
+
+        assert [w.key for w in writes] == ["_leaked"]
+        assert [w.key for w in excluded] == ["_ok"]
+
+
+class TestTheScanParsesRatherThanGreps:
+    """R3: the check is structural, so prose cannot trip it or hide from it."""
+
+    def test_a_key_named_only_in_a_docstring_is_not_reported(self):
+        """A grep-based guard would fire on the design document's own examples."""
+        writes, _excluded = scan_source('def f():\n    """Mentions cc["_leaked"] in prose."""\n')
+
+        assert writes == []
+
+    def test_every_scanned_file_parses(self):
+        """A file that fails to parse must not be skipped in silence."""
+        from internal_key_scan import SCANNED_PACKAGES, SRC
+
+        for package in SCANNED_PACKAGES:
+            for file in sorted((SRC / package).rglob("*.py")):
+                ast.parse(file.read_text(encoding="utf-8"), filename=str(file))

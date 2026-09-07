@@ -580,8 +580,16 @@ its own ticket. F3, F4 and F5 are live breaches of invariants defined above.
   `MessagesTranslator.translate_request` writes `_effort` and `_thinking_adaptive` into the CC
   request, but neither is a member of `ProviderAdapter._INTERNAL_KEYS`, so the default
   `translate_to_upstream` — which strips only that frozenset — forwards both. Confirmed
-  empirically across `openai`, `openrouter`, `zai_regular`, `fireworks`, `minimax` and `novita`:
-  each emits `['_effort', '_thinking_adaptive']` upstream. **A breach of both I1 and I2**, and
+  empirically by sweeping **all 23 registry entries** (KBR-6) on the translated Messages path, for
+  an input carrying `effort` and `thinking: {"type": "adaptive"}`, each adapter constructed from an
+  empty `provider_config`: 17 emit `['_effort', '_thinking_adaptive']` from
+  `translate_to_upstream`, and 16 of those put that body on the wire. That is a sweep over
+  adapters and still a sample over models and configs — `opencode_go` routes by model and
+  `minimax_token` by config, so the regression test parametrises over adapter × route.
+  The seventeenth, `openai_subscription`, is saved by a later stage —
+  `_cc_to_responses` and `_prepare_responses_body` rebuild from an allowlist — which is §6.2.3's
+  "the hook is not the wire" running in the opposite direction. An earlier draft of this finding
+  named six providers; that was a sample, not a sweep. **A breach of both I1 and I2**, and
   the exact thing P1 exists to prevent. Underscore-prefixed keys no public API defines are an
   unmistakable proxy signature. Note that `_reasoning_effort` and `_thinking_enabled`, written by
   the same function, *are* in the set — so this is an omission, not a design choice. Tracked as
@@ -989,7 +997,7 @@ reported the adapter clean.
 | Guard | Asserts |
 |---|---|
 | **Register completeness — shape diff at the wire** | For every adapter × representative model × transport, capture the body at the §3.2.3 boundary and assert the projected delta from the input is exactly the union of that adapter's register rows whose triggers the input met. **One fixed request is not sufficient** — each conditional row needs a trigger case and a complement case (§3.3.4), and adapters that route by model need one input per route. |
-| **Internal-key completeness** | AST-scan `bridge/**` for every `_`-prefixed key written into a request dict, and assert each is a member of `_INTERNAL_KEYS`. **This is the guard that catches F4 (KBR-6).** The complementary check — that each `translate_to_upstream` override delegates or excludes the set — is necessary but not sufficient: every override strips it correctly today; the set itself is what is wrong. |
+| **Internal-key completeness** | AST-scan `bridge/**` **and `providers/**`** for every `_`-prefixed key written into a Chat-Completions request dict, and assert each is a member of `_INTERNAL_KEYS`. **This is the guard that catches F4 (KBR-6).** The complementary check — that each `translate_to_upstream` override delegates or excludes the set — is necessary but not sufficient: every override strips it correctly today; the set itself is what is wrong. Two scoping rules make the scan sound; both are stated below. |
 | **Wire-shape honesty** | For every adapter × representative model, assert `upstream_wire_is_messages_api` agrees with the shape observed at the serialization boundary. Catches F5 (KBR-7). |
 | **Bridge-introduced vendor token** | No content the bridge *introduces* into a request body or header contains `kitty` in any casing. Scoped by the projection diff (§3.3.3), never a flat scan of the serialized body — a flat scan would fail on a user legitimately writing the word, and "fixing" that would breach I1. Catches F3 (KBR-5). |
 | **Start-path domination** | Every `BridgeServer(` construction is dominated by an `egress_block_reason(` call **at AST level**, not merely co-located in the same file. `cli/main.py` already holds two of the five start paths (§5.1 gap 3). **Necessary but not sufficient — see below.** |
@@ -998,6 +1006,64 @@ reported the adapter clean.
 | **Attribution-header table** | The README's `X-Kitty-*` table matches `_attribution_headers()`, and none of those names can reach any `build_upstream_headers()`. |
 | **Flag table** | The README logging-flag table matches the CLI parser. |
 
+
+**Scoping the internal-key scan (1): `providers/**` is in scope, not only `bridge/**`.** An earlier
+draft scanned `bridge/**` alone, on the reasoning that the translators are where internal keys are
+minted. They are not the only place. `ProviderAdapter.normalize_request` **mutates `cc_request` in
+place** and is called on the live serving path — 34 call sites in `server.py`, six adapters
+overriding it — so `providers/**` owns a live minting hook of its own. `providers/kimi.py:57`
+writes `_thinking_enabled` from `build_request`, a second such hook on the public adapter
+interface, dormant today in that `build_request` has no call site under `src/`. The invariant is
+about what reaches the wire, not about which directory performed the write, so a `bridge/**`-only
+scan leaves the `normalize_request` path unguarded. `providers/**` is green today, which is the
+cheapest moment to adopt it — adding scope to a guard that is already red is a migration, adding
+it now is a line.
+
+**The scan is deliberately over-approximate.** No AST scan can tell a Chat-Completions body from
+any other dict, so the scan's real population is *every* `_`-prefixed key written into *any* dict
+in the scanned files. It must not filter by the target variable's name: name-based **inclusion**
+(considering only targets called `cc_request` / `body` / `result`) is the same defect as the
+name-based **exclusion** rejected below, with the sign flipped, and it would miss a leak written
+into `payload["_x"] = 1`. When the next non-body underscore write appears — a cache key, a stats
+dict — the escape hatch is a named exclusion with a stated reason, **never** an `_INTERNAL_KEYS`
+entry. `server.py:1187` (`self.__dict__["_provider_config"] = value`) is already such a write, and
+passes only because `_provider_config` happens to be a set member for unrelated reasons; it is a
+warning of the pressure, not a precedent.
+
+**Scoping the internal-key scan (2): an aiohttp `web.Request` is not a request body.** The naive
+form of this scan — every subscript assignment whose key is a `_`-prefixed string constant —
+reports three false positives, all in `BridgeServer._auth_middleware`: `_key_id`, `_profile_name`
+and `_mapped_profile`. Those are written onto the **inbound** `aiohttp.web.Request` object, which
+aiohttp supports as a request-scoped mapping, and are read back by the access logger. They are
+never serialized to any provider.
+
+The scan must therefore exclude subscript targets that resolve to a parameter annotated
+`web.Request`, and must key that exclusion on the **annotation**, not on the variable being named
+`request` — the codebase uses `request` for both kinds of object, and a name-based rule would
+excuse a genuine leak written into a variable that happened to be called `request`.
+
+The tempting alternative — adding those three names to `_INTERNAL_KEYS` to make the scan pass —
+is wrong and must not be taken. `_INTERNAL_KEYS` is applied to a Chat-Completions body and is
+documented as "keys that must never be sent upstream"; these three never enter such a body at all.
+Adding them would make the set describe something it does not govern, and would then silently
+excuse a real leak if one of those names were ever written into an actual request body.
+
+Because an exclusion that stops matching is indistinguishable from a guard that has quietly gone
+blind, the exclusion carries its own assertion: **the scan must fail if the `web.Request`
+exclusion matches nothing.**
+
+The premise — that an aiohttp `web.Request` is a `MutableMapping` supporting `__setitem__` — was
+verified against **aiohttp 3.13.5**, the version in this project's environment. (The
+`AppKey`/`NotAppKeyWarning` deprecation applies to `Application`, not `Request`.) The version is
+named so that an aiohttp bump that changes this is a visible decision rather than a silent one.
+
+**The complementary delegation check, and why it is not implemented structurally.** The row above
+calls the "each `translate_to_upstream` override delegates or excludes the set" check *necessary*.
+It is discharged behaviourally instead, by the registry-parametrised regression test (KBR-6): that
+test is parametrised over `providers.registry._registry` × wire route, so a newly added adapter is
+covered the day it is registered, whereas a structural delegation check must be taught about each
+new override. The behavioural form is the stronger of the two. This is recorded rather than left
+implicit because the structural check would otherwise be silently orphaned.
 
 **Calling the guard is not enforcing it.** `egress_block_reason()` *returns a reason*; it stops
 nothing. Enforcement is the branch that follows — `if egress_error: print(...); return 1`. Delete
@@ -1547,7 +1613,7 @@ Four Python versions in CI, with `mypy` and `import-linter` as gates rather than
 | ID | Gap | Today | Target | Priority |
 |---|---|---|---|---|
 | **G14** | **F3 — the vendor name goes upstream in the body (M13)** — KBR-5 | Live I2 breach | Fix the message; forbidden-token guard (§6.2.3) + TR-4 | **0** |
-| **G15** | **F4 — `_effort` / `_thinking_adaptive` reach the wire** — KBR-6 | Live I1+I2 breach on every CC-wire provider | Add both to `_INTERNAL_KEYS`; internal-key completeness guard (§6.2.3) | **0** |
+| **G15** | **F4 — `_effort` / `_thinking_adaptive` reach the wire** — KBR-6 | Live I1+I2 breach on every CC-wire provider | Add both to `_INTERNAL_KEYS`; internal-key completeness guard (§6.2.3); regression test at `BridgeServer._upstream_body_for`. **Closes on the bridge-side boundary only** — P1 completeness inside the three custom transports (`bedrock`, `ollama_cloud`, `openai_subscription`) is carried by T-G2 over T-D4–T-D9's captures | **0** |
 | **G16** | **F5 — `OpenCodeGoAdapter` misdeclares its wire shape** — KBR-7 | Latent defect in the M8 path; trap for the oracle | Make the property per-model; wire-shape honesty guard | **1** |
 | **G19** | Routing was outside the register and outside the oracle | The destination is built from the profile (M14, P20, P21); a body-only check cannot see a misrouted Azure deployment | §3.3.5 — whole-request oracle with an independently derived route | **1** |
 | **G17** | Undecided behaviour for an irreducible final turn | Compaction emits an over-budget request, or M13 replaces the conversation; neither was designed | Answer Q10, then align M3-M7/M13, the 6.1 properties and TR-3 together | **2** |

@@ -18,6 +18,12 @@ class ProviderAdapter(ABC):
         {
             "_reasoning_effort",
             "_thinking_enabled",
+            # KBR-6: written by MessagesTranslator.translate_request alongside
+            # the two above, and missed when they were added.  AnthropicAdapter
+            # reads both from cc_request before rebuilding its own body, so
+            # stripping them here does not disturb adaptive thinking or effort.
+            "_effort",
+            "_thinking_adaptive",
             "_resolved_key",
             "_provider_config",
             "_original_body",
