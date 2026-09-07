@@ -392,8 +392,11 @@ def _repair_thinking_roundtrip(body: dict, *, native: bool) -> bool:
     The dialect is passed in rather than inferred, because
     ``{"role": "assistant", "content": "..."}`` is valid in both and guessing
     would silently write the wrong carrier for one of them.  It must come from
-    the adapter's :attr:`ProviderAdapter.upstream_wire_is_messages_api`, not
-    from ``_native_messages_request`` — see :meth:`BridgeServer._upstream_body_for`.
+    :meth:`ProviderAdapter.upstream_wire_is_messages_api_for_model`, asked with
+    the model the body was serialized for — not from the bare property, which
+    on a model-routing adapter answers only for the default route (KBR-7), and
+    not from ``_native_messages_request`` — see
+    :meth:`BridgeServer._upstream_body_for`.
 
     Changed messages are **copied**, not edited in place, and ``messages`` is
     replaced with a new list.  ``translate_to_upstream`` returns a shallow copy
@@ -3555,7 +3558,9 @@ class BridgeServer:
                                 and _is_thinking_roundtrip_error(upstream.status, error_body)
                                 and _repair_thinking_roundtrip(
                                     upstream_body,
-                                    native=self._active_provider.upstream_wire_is_messages_api,
+                                    native=self._active_provider.upstream_wire_is_messages_api_for_model(
+                                        cc_request.get("model", "")
+                                    ),
                                 )
                             ):
                                 self._thinking_repair_backends.add(self._current_backend_idx)
@@ -6493,6 +6498,14 @@ class BridgeServer:
         re-serializes with ``translate_to_upstream`` directly would carry the
         previous backend's carrier to a sibling that never asked for it.
 
+        The carrier's dialect is read per model, from ``cc_request`` itself
+        rather than from ``_active_model`` — the adapter routes on that same
+        key, and only that key is normalized (KBR-7; the URL and header helpers
+        still read ``_active_model``, which is KBR-127).  This depends on every
+        failover site rebuilding the body from the ``cc_request`` it has just
+        re-normalized; a site that reused a stale body would pair it with a
+        fresh model.
+
         Args:
             cc_request: The normalized request. Never modified — the carrier is
                 written to the returned body only.
@@ -6502,7 +6515,10 @@ class BridgeServer:
         """
         upstream_body = self._active_provider.translate_to_upstream(cc_request)
         if self._current_backend_idx in self._thinking_repair_backends:
-            _repair_thinking_roundtrip(upstream_body, native=self._active_provider.upstream_wire_is_messages_api)
+            _repair_thinking_roundtrip(
+                upstream_body,
+                native=self._active_provider.upstream_wire_is_messages_api_for_model(cc_request.get("model", "")),
+            )
         return upstream_body
 
     def _build_upstream_headers(self) -> dict[str, str]:
