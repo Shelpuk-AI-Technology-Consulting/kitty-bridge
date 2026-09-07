@@ -213,9 +213,10 @@ site without adding a row fails the L2 register guards (§6.2.3).
 
 The register is only enforceable at the point where bytes are handed to a transport. That point
 is **not** `translate_to_upstream` for any of the three custom-transport providers, and assuming
-it is hid seven rows in the first draft: on `openai_subscription` the hook returns a Chat
-Completions shape and the real body is built afterwards (P13–P17), while on `bedrock` and
-`ollama_cloud` the hook builds the body and the transport then **mutates it** (P18, P19).
+it is hid seven rows in the first draft: on `openai_subscription` the hook is **never invoked on
+the request path at all** — `_cc_to_responses` builds the Responses body inside the transport
+(P13–P17) — while on `bedrock` and `ollama_cloud` the hook builds the body and the transport then
+**mutates it** (P18, P19).
 
 | Path | Adapters | Where the final bytes are decided |
 |---|---|---|
@@ -375,12 +376,15 @@ not solved the problem.
 
 #### 3.3.4 Scoping, triggers and transports
 
-**Scoped by observed wire shape, per request.** `upstream_wire_is_messages_api` is the natural
-selector but cannot be trusted as an adapter-level constant: `OpenCodeGoAdapter` inherits `True`
+**Scoped by observed wire shape, per request.** The declared wire shape is the natural selector
+but must not be trusted as an adapter-level constant. `OpenCodeGoAdapter` used to inherit `True`
 from `AnthropicAdapter` while emitting Chat Completions for every model outside
-`_MESSAGES_MODELS` (F5, KBR-7). The oracle selects the projection by the shape actually observed
-on the wire, and an L2 guard asserts the property agrees with that shape for every adapter ×
-representative model.
+`_MESSAGES_MODELS` (F5, KBR-7); that is fixed, and the declaration is now per-model. **The
+decision here stands regardless**, for the reason given in §7.4 rather than because of that one
+bug: an oracle must not ask the code under test what shape it emitted, and a declaration is a
+claim, not an observation. So the oracle selects the projection by the shape actually observed on
+the wire, and the L2 guard (§6.2.3) separately asserts that the declaration agrees with that
+shape for every adapter × representative model.
 
 **Triggers and their complements, across representative models.** A single fixed request cannot
 establish register completeness. For every conditional row the corpus must contain a case that
@@ -546,8 +550,10 @@ the test pins it as a *declared* exception and asserts `kitty --no-validate` rem
 
 ### 4.4 Findings
 
-Five defects surfaced while writing this document. **None is fixed by this change**; each needs
-its own ticket. F3, F4 and F5 are live breaches of invariants defined above.
+Five defects surfaced while writing this document. **None was fixed by this change** — it added
+documentation only; each needed its own ticket. F3, F4 and F5 were live breaches of invariants
+defined above. **F5 has since been fixed under KBR-7**, together with the hook-level half of its
+guard; see its entry below and §6.2.3. The rest remain open.
 
 - **F1 — Agent identity is handled per-provider, not by policy.** *(KBR-8.)* Upstream headers are built from
   scratch, so Claude Code's `user-agent`, `x-app`, `anthropic-beta` and `x-stainless-*` never
@@ -586,14 +592,20 @@ its own ticket. F3, F4 and F5 are live breaches of invariants defined above.
   unmistakable proxy signature. Note that `_reasoning_effort` and `_thinking_enabled`, written by
   the same function, *are* in the set — so this is an omission, not a design choice. Tracked as
   G15 and KBR-6.
-- **F5 — `OpenCodeGoAdapter.upstream_wire_is_messages_api` is wrong for most of its models.**
-  *(KBR-7.)* It
-  inherits `True` from `AnthropicAdapter`, but its `translate_to_upstream` returns a Chat
+- **F5 — `OpenCodeGoAdapter.upstream_wire_is_messages_api` was wrong for most of its models.**
+  *(KBR-7 — **fixed**.)* It
+  inherited `True` from `AnthropicAdapter`, while its `translate_to_upstream` returned a Chat
   Completions body for every model outside `_MESSAGES_MODELS`. `ProviderAdapter`'s own docstring
   says the property "describes the shape that actually goes on the wire" and that anything
-  shaping the serialized body must branch on it — so a `True` that is false for most models is a
+  shaping the serialized body must branch on it — so a `True` that was false for most models was a
   latent defect in the thinking-repair path (M8) as well as a trap for the oracle's scoping
-  (§3.3.4). Tracked as G16 and KBR-7.
+  (§3.3.4). Tracked as G16 and KBR-7. The declaration is now per-model —
+  `upstream_wire_is_messages_api_for_model(model)` mirrors `translate_to_upstream`'s own routing,
+  and the bare property reports the adapter's default (Chat Completions) route — and both bridge
+  repair sites read it from the `cc_request` the adapter routes on. The hook-level honesty guard
+  landed with the fix; §6.2.3 records what it does and does not prove. §3.3.4's decision stands
+  regardless: the oracle still selects on the observed shape, because an oracle must not ask the
+  code under test what shape it emitted.
 
 ### 4.5 Accepted residual risk
 
@@ -982,15 +994,16 @@ Structural guards in the style of `tests/test_egress_coverage.py`.
 **The register guard runs at the serialization boundary (§3.2.3), not at `translate_to_upstream`.**
 An earlier draft specified feeding a request through `normalize_request` + `translate_to_upstream`
 and diffing the result. That misses every transformation inside a custom transport — and P13 is
-exactly that case: on `openai_subscription` those two hooks return a Chat Completions shape, and
-`_cc_to_responses` drops fourteen parameters afterwards. A guard checking the hook would have
-reported the adapter clean.
+exactly that case: on `openai_subscription` `translate_to_upstream` is never called on the request
+path, and `_cc_to_responses` builds the Responses body from `cc_request` directly, dropping
+fourteen parameters. A guard checking the hook would have reported the adapter clean while
+inspecting a body it never sends.
 
 | Guard | Asserts |
 |---|---|
 | **Register completeness — shape diff at the wire** | For every adapter × representative model × transport, capture the body at the §3.2.3 boundary and assert the projected delta from the input is exactly the union of that adapter's register rows whose triggers the input met. **One fixed request is not sufficient** — each conditional row needs a trigger case and a complement case (§3.3.4), and adapters that route by model need one input per route. |
 | **Internal-key completeness** | AST-scan `bridge/**` for every `_`-prefixed key written into a request dict, and assert each is a member of `_INTERNAL_KEYS`. **This is the guard that catches F4 (KBR-6).** The complementary check — that each `translate_to_upstream` override delegates or excludes the set — is necessary but not sufficient: every override strips it correctly today; the set itself is what is wrong. |
-| **Wire-shape honesty** | For every adapter × representative model, assert `upstream_wire_is_messages_api` agrees with the shape observed at the serialization boundary. Catches F5 (KBR-7). |
+| **Wire-shape honesty** | For every adapter × representative model, assert the adapter's declared wire shape agrees with the shape the body is actually written in. Catches F5 (KBR-7). **Two boundaries, two owners.** The *hook* form — observing `translate_to_upstream`'s return value — landed with **KBR-7** as `tests/test_wire_shape_honesty.py`, together with the fix: it asserts the per-model declaration `upstream_wire_is_messages_api_for_model(model)` against the emitted body, and the bare property against an explicitly declared default-route model. It guards itself so it cannot rot — the classifier is pinned against known Messages, Chat Completions and Converse bodies (including a Converse body with no tools, since the tools axis is what separates Converse from Messages); every registry key must be represented; every route of a model-routing adapter must be represented; and the custom-transport set is asserted rather than narrated. The *wire* form — observing the body at the §3.2.3 boundary — is **T-G4 / KBR-80** and is **not** delivered: for the three `use_custom_transport` adapters nothing in the hook-level guard observes the bytes that ship. On `openai_subscription` `translate_to_upstream` is never invoked on the request path at all — `_cc_to_responses` builds the Responses body inside the transport (P13–P17) — so there the exemption is load-bearing. On `bedrock` and `ollama_cloud` the transport mutates the hook's body afterwards (P18, P19); neither mutation changes the body's *shape family*, so for those two the exemption is precautionary — a guard must observe the shipped bytes, not infer them. The hook form also does not cover adapters constructed with `provider_config`, native-passthrough requests, whether a non-Messages body is *well-formed* (the declaration is a boolean, so Chat Completions and "neither" are collapsed) — **T-G4 inherits that one**, because it is a property of the declaration and not of the boundary — or whether the routing table matches the provider's published endpoint table (**KBR-126**). The declaration stays boolean deliberately: its consumer is binary (`_repair_thinking_roundtrip` picks between exactly two carriers), so widening it to an enum would change the repair's contract rather than this declaration's. If a routing adapter ever gains a third wire, the boolean must be **replaced**, not extended — a `False` meaning "Responses" would be F5 again in a new costume. |
 | **Bridge-introduced vendor token** | No content the bridge *introduces* into a request body or header contains `kitty` in any casing. Scoped by the projection diff (§3.3.3), never a flat scan of the serialized body — a flat scan would fail on a user legitimately writing the word, and "fixing" that would breach I1. Catches F3 (KBR-5). |
 | **Start-path domination** | Every `BridgeServer(` construction is dominated by an `egress_block_reason(` call **at AST level**, not merely co-located in the same file. `cli/main.py` already holds two of the five start paths (§5.1 gap 3). **Necessary but not sufficient — see below.** |
 | **Env-var register** | `_SETTINGS_ENV_OVERRIDE_KEYS` and `_CONFLICTING_ENV_VARS` (`launchers/claude.py`) match what `build_spawn_config` emits and what the README documents. |
@@ -1448,10 +1461,11 @@ assert_no_unclaimed_mutation(inbound:  CapturedRequest, inbound_format,
 ```
 
 **Bodies alone cannot prove correct routing** (§3.3.5). Both formats are supplied by the harness
-from the observed wire shape (§3.3.4), never read from the adapter's own property — that property
-is unreliable (F5, KBR-7) and, more fundamentally, an oracle must not ask the code under test what
-it did. A new corpus entry, adapter, model route or transport costs one parametrisation, not a new
-test.
+from the observed wire shape (§3.3.4), never read from the adapter's own declaration. That
+declaration was unreliable (F5, KBR-7, since fixed) — but the decision does not rest on that: an
+oracle must not ask the code under test what it did, and a **boolean** declaration cannot
+select among the six projections listed above in any case. A new corpus entry, adapter, model
+route or transport costs one parametrisation, not a new test.
 
 ---
 
@@ -1544,11 +1558,16 @@ Four Python versions in CI, with `mypy` and `import-linter` as gates rather than
 
 ### 9.2 What is missing
 
+**Status convention.** A closed gap keeps its row — the reasoning is still worth reading — with
+**CLOSED** in the *Gap* column, *Today* in the past tense, and Priority `—`, so a scan by priority
+does not surface work that is done. `TEST_SUITE_IMPLEMENTATION_PLAN.md` §16 mirrors it.
+
 | ID | Gap | Today | Target | Priority |
 |---|---|---|---|---|
 | **G14** | **F3 — the vendor name goes upstream in the body (M13)** — KBR-5 | Live I2 breach | Fix the message; forbidden-token guard (§6.2.3) + TR-4 | **0** |
 | **G15** | **F4 — `_effort` / `_thinking_adaptive` reach the wire** — KBR-6 | Live I1+I2 breach on every CC-wire provider | Add both to `_INTERNAL_KEYS`; internal-key completeness guard (§6.2.3) | **0** |
-| **G16** | **F5 — `OpenCodeGoAdapter` misdeclares its wire shape** — KBR-7 | Latent defect in the M8 path; trap for the oracle | Make the property per-model; wire-shape honesty guard | **1** |
+| **G16** | **F5 — `OpenCodeGoAdapter` misdeclared its wire shape** — KBR-7 · **CLOSED** | Was a latent defect in the M8 path and a trap for the oracle | Done: the declaration is per-model, both repair sites branch on it, and the **hook-level** honesty guard landed with the fix. The **wire-level** guard remains T-G4 / KBR-80 | — |
+| **G20** | **OpenCode Go's routing table does not match the provider** — KBR-126 | Found while fixing G16. As of 2026-09-07 (<https://opencode.ai/docs/go/>, "Endpoints") the provider serves eight models on `/v1/messages`; `_MESSAGES_MODELS` holds two, and a `/v1/responses` endpoint (four models) has no route at all. The wire-shape guard correctly reports the adapter *honest* — declaration and emitted body agree — because this is routing, not shape | Refresh the table against the provider's endpoint list; decide the Responses route; replace the stale `validation_model`. Consider a checked-in snapshot of the endpoint table, so the routing question gets an in-repo oracle | **1** |
 | **G19** | Routing was outside the register and outside the oracle | The destination is built from the profile (M14, P20, P21); a body-only check cannot see a misrouted Azure deployment | §3.3.5 — whole-request oracle with an independently derived route | **1** |
 | **G17** | Undecided behaviour for an irreducible final turn | Compaction emits an over-budget request, or M13 replaces the conversation; neither was designed | Answer Q10, then align M3-M7/M13, the 6.1 properties and TR-3 together | **2** |
 | **G18** | P13-P19 - seven transport-level mutations, unregistered in the first draft | Necessary (the Codex backend and boto3 require them) but invisible above DEBUG, and unreachable by a guard placed at `translate_to_upstream` | Rows P13-P19; boundary corrected in 3.2.3; Q5 decides user visibility | **3** |
@@ -1569,7 +1588,8 @@ Four Python versions in CI, with `mypy` and `import-linter` as gates rather than
 **Order of work.** G14 and G15 are priority 0: they are live breaches of the product's stated
 promise, both are small code fixes, and each has a cheap guard that stops it recurring. Then G1
 and G2 — the two invariants with the least coverage, sharing §7.2's recording upstream as their
-foundation — with G16 alongside because the oracle's scoping depends on it. G8 unblocks G1's
+foundation. (G16 was originally scheduled alongside them; it is closed, and per §3.3.4 the
+oracle's scoping never depended on it.) G8 unblocks G1's
 corpus; G10 rides along with G2 once the harness is parametrised. G3's measurement lands with G1;
 G3's *fix* is its own ticket. G4 and G7 reinforce an existing layer and can run in parallel. G5,
 G6, G9, G11 are cheap and independent. G12 and G13 are last: most expensive to run, least caught
@@ -1600,9 +1620,11 @@ missed F4.
 
 **The oracle is scoped by observed wire shape, not by the adapter's own property (§3.3.4).** On a
 CC-wire provider every field differs and every delta is claimed by the translation row, so a
-direct diff passes without proving anything. And the natural selector cannot be trusted:
-`OpenCodeGoAdapter` declares a Messages wire while emitting Chat Completions for most models
-(F5). Selecting on the observed shape keeps assertion 1 falsifiable regardless.
+direct diff passes without proving anything. And the natural selector must not be trusted: it is a
+claim by the code under test, and it is a boolean where §7.4 needs six projections. It was also in
+fact wrong (`OpenCodeGoAdapter` declared a Messages wire while emitting Chat Completions for most
+models — F5, since fixed), but the first two reasons stand without it. Selecting on the observed
+shape keeps assertion 1 falsifiable regardless.
 
 **Structural diff, except key order on the passthrough path (§3.3, §4.3 C2).** Byte-comparing
 JSON fails on serialisation noise and trains people to ignore red. But key *order* is exactly what

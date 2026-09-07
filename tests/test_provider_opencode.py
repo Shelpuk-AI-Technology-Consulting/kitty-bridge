@@ -2,7 +2,9 @@
 
 import json
 
-from kitty.providers.opencode import OpenCodeGoAdapter
+import pytest
+
+from kitty.providers.opencode import _MESSAGES_MODELS, OpenCodeGoAdapter
 
 # ── CC format samples ──────────────────────────────────────────────────────
 
@@ -238,6 +240,89 @@ class TestOpenCodeGoHeadersRouting:
 # ═══════════════════════════════════════════════════════════════════════════
 # Chat Completions passthrough
 # ═══════════════════════════════════════════════════════════════════════════
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Auto-routing: upstream_wire_is_messages_api (KBR-7)
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# The model names here are the ones OpenCode Go serves today.  The older
+# classes above still name `glm-5`, `kimi-k2.5` and `mimo-v2-*`, which the
+# provider has since retired; refreshing them is the deferred catalogue ticket
+# recorded in this task's REQUIREMENTS.md §3.1(b), not this change.
+
+
+# Models the adapter routes to Chat Completions, plus the two inputs that have
+# no model at all.  `glm-5` is kept deliberately: a retired name is now exactly
+# the "unknown model" case, and the default must stay Chat Completions.
+_CHAT_COMPLETIONS_MODELS = ["glm-5.2", "glm-5.1", "kimi-k2.7-code", "mimo-v2.5-pro", "glm-5", "", "some-future-model"]
+
+
+class TestOpenCodeGoWireShapeDeclaration:
+    """The declared wire shape must agree with what ``translate_to_upstream`` emits.
+
+    KBR-7: the adapter inherited ``upstream_wire_is_messages_api == True`` from
+    :class:`AnthropicAdapter` while emitting Chat Completions for every model
+    outside ``_MESSAGES_MODELS``.  The bridge's thinking round-trip repair
+    branches on that declaration, so a wrong answer writes an Anthropic
+    ``thinking`` block into a Chat Completions body.
+    """
+
+    def setup_method(self):
+        self.adapter = OpenCodeGoAdapter()
+
+    @pytest.mark.parametrize("model", sorted(_MESSAGES_MODELS))
+    def test_declares_messages_for_each_messages_model(self, model):
+        assert self.adapter.upstream_wire_is_messages_api_for_model(model) is True
+
+    @pytest.mark.parametrize("model", _CHAT_COMPLETIONS_MODELS)
+    def test_declares_chat_completions_for_non_messages_models(self, model):
+        assert self.adapter.upstream_wire_is_messages_api_for_model(model) is False
+
+    def test_bare_property_reports_the_default_chat_completions_route(self):
+        """The bare property answers for the default route, like its neighbours.
+
+        ``upstream_path`` and ``build_upstream_headers`` both report the Chat
+        Completions default with a per-model form alongside; this declaration
+        now does the same instead of inheriting Anthropic's ``True``.
+        """
+        assert self.adapter.upstream_wire_is_messages_api is False
+
+    def test_declaration_does_not_call_translate_to_upstream(self):
+        """The declaration is a predicate, not an observation.
+
+        Implementing it by classifying ``translate_to_upstream``'s output would
+        make the registry-wide guard a tautology: the declaration would carry no
+        information, and an oracle must not ask the code under test what shape
+        it emitted.
+        """
+
+        def _explode(cc_request):
+            raise AssertionError("the declaration must not serialize a request")
+
+        self.adapter.translate_to_upstream = _explode  # type: ignore[method-assign]  # deliberate tripwire
+        assert self.adapter.upstream_wire_is_messages_api_for_model("minimax-m2.5") is True
+        assert self.adapter.upstream_wire_is_messages_api_for_model("glm-5.2") is False
+
+    @pytest.mark.parametrize("model", ["minimax-m2.5", "glm-5.2"])
+    def test_declaration_matches_the_body_translate_to_upstream_returns(self, model):
+        """Assert against the emitted body, not against a restated constant.
+
+        A test that repeated the routing predicate would keep passing through
+        the very drift KBR-7 is about.
+        """
+        body = self.adapter.translate_to_upstream(
+            {
+                "model": model,
+                "max_tokens": 100,
+                "messages": [{"role": "system", "content": "sys"}, {"role": "user", "content": "hi"}],
+                "tools": [{"type": "function", "function": {"name": "t", "parameters": {}}}],
+            }
+        )
+        # An Anthropic Messages body hoists the system prompt out of `messages`
+        # and carries `input_schema` tools; a Chat Completions body does neither.
+        emitted_messages_api = "system" in body and "input_schema" in body["tools"][0]
+        assert self.adapter.upstream_wire_is_messages_api_for_model(model) is emitted_messages_api
 
 
 class TestOpenCodeGoChatCompletionsPassthrough:

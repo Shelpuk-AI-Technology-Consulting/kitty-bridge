@@ -82,6 +82,36 @@ class OpenCodeGoAdapter(AnthropicAdapter):
     def get_upstream_path(self, model: str) -> str:
         return "/v1/messages" if _is_messages_model(model) else "/v1/chat/completions"
 
+    @property
+    def upstream_wire_is_messages_api(self) -> bool:
+        """Default wire shape (Chat Completions).  Routed per model below.
+
+        Overrides ``AnthropicAdapter``'s unconditional ``True``, which was
+        false for every model outside ``_MESSAGES_MODELS`` (KBR-7).  Like
+        ``upstream_path`` and ``build_upstream_headers`` above, this reports the
+        adapter's default route; callers holding a model must ask
+        :meth:`upstream_wire_is_messages_api_for_model`.
+        """
+        return False
+
+    def upstream_wire_is_messages_api_for_model(self, model: str) -> bool:
+        """Report the wire shape ``translate_to_upstream`` emits for *model*.
+
+        Uses ``_is_messages_model`` on the raw name, which is exactly what
+        ``translate_to_upstream`` routes on — deliberately without
+        ``normalize_model_name``, so the two agree by construction rather than
+        by a second copy of the rule.  Normalizing here would be more correct in
+        isolation and less correct against the contract, which is agreement with
+        the router.
+
+        Args:
+            model: The model name, exactly as ``translate_to_upstream`` reads it.
+
+        Returns:
+            True for the models served on ``/v1/messages``.
+        """
+        return _is_messages_model(model)
+
     def build_upstream_headers(self, api_key: str) -> dict[str, str]:
         """Default headers (Chat Completions — Bearer auth)."""
         return {

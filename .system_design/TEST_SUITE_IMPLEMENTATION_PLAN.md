@@ -295,7 +295,7 @@ one case it existed for. T-E1 now ships the report; T-E9 only checks it is compl
 | **T-G1** | README ⇄ code table guards | defect | T-W7 | Endpoint, attribution-header, env-var, logging-flag tables (KBR-9) | §6.2.3 | M |
 | **T-G2** | Register coverage meta-assertion | | T-W3, T-D9, T-D5, T-D6, T-D7 | Over T-D4–T-D9's captures — **it does not re-drive the wire**, and is marked `l3` so it cannot put sockets in the fast gate | §6.2.3 | M |
 | **T-G3** | Internal-key completeness AST guard | defect | T-W7 | Every `_`-prefixed key written into a request dict is in `_INTERNAL_KEYS` (KBR-6) | §6.2.3 | M |
-| **T-G4** | Wire-shape honesty guard | defect | T-W7, T-B1, T-B2, T-B3 | `upstream_wire_is_messages_api` agrees with the observed output shape per adapter × model (KBR-7) | §6.2.3 | M |
+| **T-G4** | Wire-shape honesty guard **at the wire** | defect | T-W7, T-B1, T-B2, T-B3 | The declaration agrees with the shape observed at the §3.2.3 boundary, per adapter × model × transport. **The hook-level form already landed with KBR-7** (`tests/test_wire_shape_honesty.py`) and is not this row. What remains is the three `use_custom_transport` adapters, for which nothing at the hook observes the bytes that ship: `openai_subscription` never invokes `translate_to_upstream` on the request path (P13–P17), and `bedrock` and `ollama_cloud` mutate the hook's body in the transport (P18, P19) — those two mutations do not change the shape family, so there the wire check is precautionary. Plus `provider_config`-constructed adapters and native-passthrough requests | §6.2.3 | M |
 | **T-G5** | Bridge-introduced vendor token guard | defect | T-D1, T-W7, T-C5 | No bridge-introduced content names kitty — **and in the same run** an inbound turn containing `kitty-bridge` survives byte-identically (KBR-5) | §3.3.3 | M |
 | **T-G6** | OpenAPI 3.1 + schemathesis | | T-W8 | Five POST routes plus `/healthz`, `/stats`, `/v1/models`, **targeting bridge mode**; plus a per-protocol registration-matrix guard | §6.2.1 | L |
 | **T-G7** | SSE grammar state machine | | T-B4, T-W8 | Every stream, including error streams and mid-stream failover, is a sentence in the grammar | §6.2.2 | M |
@@ -482,7 +482,7 @@ merge.** So:
 |---|---|---|---|
 | KBR-5 | G14 | T-G5, TR-4 | Atomic fix + test now |
 | KBR-6 | G15 | T-G3 | Atomic fix + test now |
-| KBR-7 | G16 | T-G4 | Atomic fix + test now |
+| KBR-7 · **CLOSED** | G16 | T-G4 | Route taken: atomic fix + hook-level guard landed together, red evidence in the PR. T-G4 still owns the wire boundary. (Status convention: `TEST_SUITE.md` §9.2.) |
 | KBR-8 | G3 | T-G9, TR-1c | Atomic fix + test now |
 | KBR-9 | G6 | T-G1 | Atomic fix + test now |
 
@@ -516,7 +516,7 @@ Every design requirement has an owner. "Existing" means the current suite alread
 | §6.1 | Properties · mutation validation | T-F1–T-F6 · T-H1–T-H5 |
 | §6.2.1 | OpenAPI, schemathesis, registration matrix | T-G6 |
 | §6.2.2 | SSE grammar | T-G7 |
-| §6.2.3 | Register, internal-key, wire-shape, vendor-token, docs guards | T-G1–T-G5 |
+| §6.2.3 | Register, internal-key, wire-shape, vendor-token, docs guards | T-G1–T-G5 — except the **hook-level** half of wire-shape honesty, delivered by KBR-7 |
 | §6.2.4 | Four dependency contracts | T-G8, T-G10, T-G11, T-G12 |
 | §6.3.1 | Bridge-with-sockets scenarios | T-I7–T-I11 |
 | §6.3.2 | CLI lifecycle | T-I1–T-I4 |

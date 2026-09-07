@@ -266,9 +266,39 @@ class ProviderAdapter(ABC):
         Anthropic body, built from the Chat Completions request.
 
         Anything shaping the serialized body — notably the bridge's thinking
-        round-trip repair — must branch on this, never on the request flag.
+        round-trip repair — must branch on the declared wire shape, never on
+        the request flag.
+
+        On an adapter that routes by model this answers only for the **default**
+        route.  A caller holding a model must ask
+        :meth:`upstream_wire_is_messages_api_for_model` instead: branching on
+        this property with a routed adapter in hand is what KBR-7 was.
         """
         return False
+
+    def upstream_wire_is_messages_api_for_model(self, model: str) -> bool:
+        """Whether ``translate_to_upstream`` emits a Messages body for *model*.
+
+        The per-model form of :attr:`upstream_wire_is_messages_api`, for
+        adapters that route to different endpoints depending on the model —
+        the same pairing as :attr:`upstream_path` / :meth:`get_upstream_path`
+        and ``build_upstream_headers`` / ``build_upstream_headers_for_model``.
+
+        Callers that have a model in hand must use this rather than the bare
+        property, and must read the model from the request being serialized so
+        the two agree by construction (KBR-7).
+
+        An adapter that routes by model overrides **both**: this, mirroring its
+        own routing predicate, and the property, reporting its default route.
+
+        Args:
+            model: The model name the request will be sent with, exactly as
+                ``translate_to_upstream`` will read it — unnormalized.
+
+        Returns:
+            True when the body for *model* is an Anthropic Messages body.
+        """
+        return self.upstream_wire_is_messages_api
 
     @property
     def use_custom_transport(self) -> bool:

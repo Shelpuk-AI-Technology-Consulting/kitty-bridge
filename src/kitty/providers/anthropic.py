@@ -72,11 +72,19 @@ class AnthropicAdapter(ProviderAdapter):
 
     @property
     def upstream_wire_is_messages_api(self) -> bool:
-        """Always True — every path through ``translate_to_upstream`` emits Messages API.
+        """True — this class's ``translate_to_upstream`` emits Messages API.
 
-        Subclasses either forward a native Messages body unchanged or fall back
-        to this class's Chat Completions → Messages translation, so the wire
-        shape does not depend on ``_native_messages_request``.
+        Holds for subclasses that do **not** route by model: they either
+        forward a native Messages body unchanged or fall back to this class's
+        Chat Completions → Messages translation, so the wire shape does not
+        depend on ``_native_messages_request``.
+
+        It does **not** hold for a subclass that routes by model.
+        :class:`~kitty.providers.opencode.OpenCodeGoAdapter` emits Chat
+        Completions for every model outside its ``_MESSAGES_MODELS``, and
+        inheriting this ``True`` was KBR-7.  Such a subclass must override
+        **both** this property, reporting its default route, and
+        ``upstream_wire_is_messages_api_for_model``, mirroring its own routing.
         """
         return True
 
