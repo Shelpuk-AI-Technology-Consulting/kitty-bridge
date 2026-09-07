@@ -160,6 +160,7 @@ Eleven request-path rows (M1–M11) plus one response-path row (M12) and one sub
 | M11 | Force `stream: False` | `_handle_gemini` | Gemini protocol, non-streaming `:generateContent` | The Gemini translator defaults `stream=True`; the non-streaming endpoint must not open an SSE stream. |
 | M12 | Substitute fallback assistant text | `_EMPTY_ASSISTANT_FALLBACK_TEXT` in `bridge/messages/translator.py` **and** `bridge/responses/translator.py` | Upstream returned an empty response | **Response-side**, not part of the eleven request-path rows. |
 | M13 | **Discard the conversation and substitute a `[Kitty Bridge: …]` user message** | `_compact_messages` post-condition | No non-system message survives compaction (F25/F26 path — the system prompt alone exceeds the window) | Produces a legible error instead of a confusing upstream 400. **Qualitatively unlike M5**: M5 shrinks history, M13 replaces it — and it writes the product's name into the upstream body. See finding F3. |
+| M14 | **Replace the destination entirely** — scheme, host and path are built from the profile by `build_base_url()` + `get_upstream_path()` | `BridgeServer._build_upstream_url` | Always | The agent addressed a loopback bridge; the request has to reach the real provider. Listed because **the destination is a mutation surface the body cannot show**: on Azure an identical body sent to the wrong deployment path is a different request entirely (§3.3.5). |
 
 #### 3.2.2 Provider-level
 
@@ -181,6 +182,8 @@ trigger no test can fail — so each material mutation gets its own row.
 | P5d | Map `_thinking_adaptive` → `thinking: {"type":"adaptive"}` and `_effort` → top-level `effort` | same | Those keys present | Passthrough of an agent signal. |
 | P5e | Inject an empty `{"type":"thinking","thinking":""}` block into assistant messages | `AnthropicAdapter._translate_assistant_msg` | Assistant message lacks one while thinking is active | The Anthropic-path analogue of P8. **A message-content change**, not a parameter change. |
 | P6 | Remove `model` from the body | `AzureOpenAIAdapter` | Always | Azure selects the model by deployment id in the URL; the body field is rejected. |
+| P20 | **Encode the profile's model as the deployment id in the URL path** | `AzureOpenAIAdapter.get_upstream_path` | Always | The counterpart of P6: what P6 removes from the body reappears in the path. A register that records only P6 makes the model look *dropped* when it was *moved*, and leaves the move unchecked. |
+| P21 | Encode `project_id` and `location` in the base URL | `VertexAIAdapter.build_base_url` | Always | Vertex addresses a project-scoped endpoint. Same class as P20: routing carried outside the body. |
 | P7 | **Cap the agent's `max_tokens` at 4096** | `FireworksAdapter.normalize_request` | Non-streaming request with `max_tokens > 4096` | Fireworks rejects non-streaming requests above 4096. **User-visible** as shortened output. |
 | P8 | Inject empty `reasoning_content` into assistant messages | `ProviderAdapter._inject_empty_reasoning_content`, called from `KimiCodeAdapter`, `_ZaiBase`, `CustomOpenAIAdapter` | Thinking signalled **or** inferred from prior `reasoning_content` via `_detect_thinking_from_messages` | Those providers reject the request without it. The *inferred* trigger matters: it fires with no signal from the agent at all. |
 | P9a | Set `User-Agent` to `claude-code/1.0` | `KimiCodeAdapter`, `BytePlusAdapter`, `MimoAdapter` `.build_upstream_headers` | Always, on those three | Those providers 403 without a recognised coding-agent user-agent. Central to I2 — F1. |
@@ -401,6 +404,34 @@ path, which §4.3 C2 asserts for I2 reasons.
 `tool_use` block became the right `tool_calls` entry is an L1 translator claim. The oracle
 answers a narrower question: was anything changed that nobody declared.
 
+
+#### 3.3.5 Routing is part of the request, and the body cannot show it
+
+The envelope fixed the missing-body-fields problem, but a body-only oracle still cannot see where
+the request went. Three providers carry routing outside the body:
+
+| Provider | What lives in the URL | Consequence |
+|---|---|---|
+| Azure | The deployment id, which **is** the profile's model (P20) — and P6 deliberately removes `model` from the body | Two requests to two different deployments have **byte-identical bodies**. A body-only oracle cannot tell them apart, so a misrouted request is invisible. |
+| Vertex | `project_id` and `location` (P21) | The account being billed is a URL component |
+| Gemini | Model and operation (`:generateContent` vs `:streamGenerateContent`) in the inbound path | M10 lifts the model into the body precisely because it is not there to begin with |
+
+So the oracle takes the **whole captured request** — method, scheme, host, path, query, headers,
+body — and asserts routing separately from content.
+
+**The routing expectation is derived independently.** It is computed in the test from the
+configured profile — provider, model, `provider_config` — using the provider's *published* URL
+shape, not by calling `build_base_url()` / `get_upstream_path()`. Asking the code under test where
+it meant to go and then checking it went there proves nothing; this is the same independent-oracle
+rule §3.3.1 applies to bodies.
+
+**Falsification control.** Alongside the five body cases in §3.3.1, a sixth: change the Azure
+deployment segment in the captured path while leaving the body byte-identical. The oracle must
+fail. Without this case there is no evidence the routing assertion is wired to anything.
+
+The recorders already capture method, path and query (§7.2). The gap was that the assertion did
+not consume them.
+
 ### 3.4 Where I1 is proven
 
 | Claim | Layer | Test |
@@ -413,6 +444,8 @@ answers a narrower question: was anything changed that nobody declared.
 | Each wire projection reads its format correctly | L1 | The projections are test code and get their own tests — against published format examples, not against kitty's output |
 | A **below-threshold** corpus entry on a native-wire provider shows only M1 and P1 | L2 | Scoped to below-threshold deliberately: above it, M3/M5/M7 and any triggered provider row apply to the native path too |
 | No unclaimed delta, over the whole corpus, on every adapter × representative model × transport | **L3** | Transparency oracle (§3.3) |
+| The request reaches the destination the profile implies — host, path and query | **L3** | §3.3.5. Independently derived from the profile, never from `build_base_url()` |
+| A changed deployment path with an unchanged body is caught | **L3** | §3.3.5 falsification control — the case a body-only oracle cannot see |
 | An inbound `kitty` string survives while an injected vendor message is caught | **L3** | §3.3.3 regression case |
 | A real Claude Code session's tool calls execute correctly through kitty | L4 | Real-agent E2E (§6.4.2) |
 | Compaction has not degraded answer quality | L4 eval | §6.4.3 |
@@ -753,6 +786,7 @@ whether to change it is Q3.
 | No `EgressConfig` representation leaks the password | L1 property | Structural: the password component of `masked()` is exactly the mask. **Not** a substring test — see §6.1 |
 | Every outbound HTTP client is egress-aware; no source assigns `HTTP_PROXY`; no session trusts the environment | L2 structural | **Exists:** `tests/test_egress_coverage.py` |
 | **Every** `BridgeServer` construction is dominated by an `egress_block_reason` call | L2 structural | **Must be strengthened** — the existing guard is file-granular (§5.1 gap 3) |
+| The guard's rejection is **enforced** — no server starts on a rejecting configuration | **L3** | §6.2.3. Structural domination proves the call, not the branch that acts on it |
 | An `https://` proxy carries real traffic on all three transport stacks | L2/L3 | **Exists:** `tests/test_egress_https_proxy.py` |
 | Proxy semantics under each dependency's version range | L2 | §6.2.4 |
 | The destination is reachable directly with egress **disabled**, on every transport | **L3** | §5.2.2 phase 1 — the positive control. Without it the row below proves nothing (§5.3) |
@@ -958,11 +992,32 @@ reported the adapter clean.
 | **Internal-key completeness** | AST-scan `bridge/**` for every `_`-prefixed key written into a request dict, and assert each is a member of `_INTERNAL_KEYS`. **This is the guard that catches F4 (KBR-6).** The complementary check — that each `translate_to_upstream` override delegates or excludes the set — is necessary but not sufficient: every override strips it correctly today; the set itself is what is wrong. |
 | **Wire-shape honesty** | For every adapter × representative model, assert `upstream_wire_is_messages_api` agrees with the shape observed at the serialization boundary. Catches F5 (KBR-7). |
 | **Bridge-introduced vendor token** | No content the bridge *introduces* into a request body or header contains `kitty` in any casing. Scoped by the projection diff (§3.3.3), never a flat scan of the serialized body — a flat scan would fail on a user legitimately writing the word, and "fixing" that would breach I1. Catches F3 (KBR-5). |
-| **Start-path domination** | Every `BridgeServer(` construction is dominated by an `egress_block_reason(` call **at AST level**, not merely co-located in the same file. `cli/main.py` already holds two of the five start paths (§5.1 gap 3). |
+| **Start-path domination** | Every `BridgeServer(` construction is dominated by an `egress_block_reason(` call **at AST level**, not merely co-located in the same file. `cli/main.py` already holds two of the five start paths (§5.1 gap 3). **Necessary but not sufficient — see below.** |
 | **Env-var register** | `_SETTINGS_ENV_OVERRIDE_KEYS` and `_CONFLICTING_ENV_VARS` (`launchers/claude.py`) match what `build_spawn_config` emits and what the README documents. |
 | **Endpoint table** | The README endpoint table matches `_register_routes`. Catches F2 (KBR-9). |
 | **Attribution-header table** | The README's `X-Kitty-*` table matches `_attribution_headers()`, and none of those names can reach any `build_upstream_headers()`. |
 | **Flag table** | The README logging-flag table matches the CLI parser. |
+
+
+**Calling the guard is not enforcing it.** `egress_block_reason()` *returns a reason*; it stops
+nothing. Enforcement is the branch that follows — `if egress_error: print(...); return 1`. Delete
+that branch and every structural check above still passes while an unproxyable profile starts
+normally and leaks the machine's own address, which is the entire failure mode I3 exists to
+prevent.
+
+The structural guard is therefore paired with a behavioural one at L3:
+
+- **Per entry point.** Each of the five start paths (`bridge_runner.py` ×2, `cli/launcher.py`,
+  `cli/main.py` ×2) is driven with a configuration the guard rejects, and the assertion is that
+  **no server starts** — no listening socket, non-zero exit — not merely that a message was
+  printed.
+- **Falsification control.** A variant that keeps the `egress_block_reason()` call and discards
+  its return value must make these tests **fail**. Without it, the suite cannot distinguish
+  enforcement from decoration.
+
+This complements the guard's own unit test (which checks the returned reason) and acceptance
+scenario EG-3 (which checks the user-facing behaviour). The unit test proves the guard decides
+correctly; this proves the decision is obeyed.
 
 Every guard asserts its own scan finds known positives, so none can rot into a no-op —
 `tests/test_egress_coverage.py` already does this and is the pattern to copy.
@@ -1089,7 +1144,7 @@ Feature: The upstream provider cannot tell Kitty Bridge is there
     When Claude Code sends a turn through kitty
     Then no content the bridge added to the request names kitty
 
-  @ratchet  # not gating until G3 (KBR-8) closes — see the note below
+  # One exempt assertion: header-subset, pending KBR-8. See the exemption registry in 8.
   Scenario: TR-1c  Kitty's headers are a subset of the agent's own
     Given a profile using the Z.AI coding plan
     When Claude Code sends a turn through kitty
@@ -1120,7 +1175,7 @@ Feature: The upstream provider cannot tell Kitty Bridge is there
          the 50,000-char truncation limit, or it is dropped because its
          tool_result lost the tool_use that produced it
 
-  @ratchet  # currently fails by design — this is F3/G14 (KBR-5)
+  # One exempt assertion: no-vendor-content, pending KBR-5. Setup and all else gate.
   Scenario: TR-4  An unrecoverable conversation fails without naming kitty upstream
     Given a system prompt larger than the model's context window
     When Claude Code sends a turn through kitty
@@ -1153,15 +1208,16 @@ Feature: Configured egress cannot be bypassed
     Then kitty refuses to start and names the profile
 ```
 
-**Two scenarios are `@ratchet`, and the distinction matters.** The Acceptance job gates every PR
-(§8), so a scenario asserting behaviour the product does not yet have would make `main` red on
-day one — and a permanently red gate gets disabled, taking the working scenarios with it. TR-1c
-(header parity) and TR-4 (the vendor string) both assert the *target* state of open defects: G3
-(KBR-8) and G14 (KBR-5) respectively. They run on every PR and are reported, but they do not
-gate until their defect closes, at which point the marker is removed and they become ordinary
-gating scenarios. This is the same ratchet §4.3 C1b describes for the header baseline; the
-marker exists so the promotion is a deliberate one-line change, not something anyone has to
-remember.
+**Two scenarios carry an assertion-level exemption.** The Acceptance job gates every PR (§8), so
+an assertion about behaviour the product does not yet have would make `main` red on day one — and
+a permanently red gate gets disabled, taking the working scenarios with it.
+
+The exemption covers **one assertion**, never the scenario. In TR-1c it is the header-subset
+assertion (KBR-8); in TR-4 it is the no-vendor-content assertion (KBR-5). Every other step in
+those scenarios — setup, the `Given` clauses, and any other `Then` — gates normally, so a broken
+fixture or an unrelated regression still fails the build. An unexpected pass also fails, forcing
+the exemption off when the defect closes. The full policy and the exemption registry are in §8;
+this section does not restate it, so the two cannot drift apart.
 
 **Three scenarios were corrected against the implementation, not the other way round.**
 
@@ -1209,9 +1265,19 @@ Assert on all three: the request arrives at the recorder **and** both sentinels 
 test that checks only the recorder cannot tell "precedence is correct" from "the request went
 everywhere."
 
-*The control.* Sentinels that are never hit prove nothing unless they can be hit. A second case
-removes kitty's settings file and asserts B wins over A — demonstrating both sentinels are live
-and the harness can distinguish them. Without it, a typo in a sentinel URL reads as a pass.
+*The controls.* A sentinel that is never hit proves nothing unless it can be hit — and one
+control exercises only one sentinel. Two more runs are needed, so that **each destination wins
+under its own configuration**:
+
+| Run | Session settings | `~/.claude/settings.json` | Environment | Expected winner |
+|---|---|---|---|---|
+| Main | present | present (B) | present (A) | the recorder |
+| Control 1 | absent | present (B) | present (A) | **B** |
+| Control 2 | absent | absent | present (A) | **A** |
+
+Control 1 alone leaves A unexercised, so a typo in A's URL would read as a pass in the main run —
+A is *supposed* to be silent there, and a broken A is silent too. Three runs, three winners, and
+every sentinel demonstrated live.
 
 Pinning it in CI has real questions attached — which distribution, how tightly version-pinned, licensing for
 redistribution in a CI image — recorded as Q12 rather than assumed away.
@@ -1334,9 +1400,11 @@ same interface to the tests:
 | curl_cffi-reachable server | `openai_subscription` serving path | Must terminate TLS with the harness certificate; the only place `_cc_to_responses` output (P13, P17) can be seen |
 | botocore endpoint override | `bedrock` | Points the client at the local recorder rather than AWS; observes the Converse payload **after** the transport's `modelId`/`stream` pops (P18) |
 
-Each records every request in full: method, path, **headers with original casing and order**,
-raw body bytes, arrival timestamp, and — for containment — **the peer port of the accepted
-connection**, which is the join key against the proxy's tunnel log (§5.2.1). Each replays
+Each records every request in full: method, scheme, host, path, **query**, **headers with
+original casing and order**, raw body bytes, arrival timestamp, and — for containment — **the
+peer port of the accepted connection**, which is the join key against the proxy's tunnel log
+(§5.2.1). The routing fields are not decoration: §3.3.5 asserts on them, and on Azure they carry
+the only difference between two otherwise identical requests. Each replays
 scripted responses: SSE streams, error statuses, Cloudflare blocks, empty responses,
 context-too-large rejections, and disconnects at each of §6.3.1's four injection points.
 
@@ -1367,18 +1435,23 @@ nothing from `src/kitty/bridge`**. They are test code that the whole of I1 rests
 their own L1 tests, written against each format's published examples rather than against kitty's
 output.
 
-**The oracle** is a pytest fixture wrapping the recorders, exposing one assertion:
+**The oracle** is a pytest fixture wrapping the recorders, exposing one assertion over **complete
+requests**, not bodies:
 
 ```
-assert_no_unclaimed_mutation(inbound_body, inbound_format,
-                             captured_body, captured_format,
-                             register, triggers_met)
+CapturedRequest(method, scheme, host, path, query, headers, body)
+
+assert_no_unclaimed_mutation(inbound:  CapturedRequest, inbound_format,
+                             captured: CapturedRequest, captured_format,
+                             register, triggers_met,
+                             expected_route)   # derived from the profile, independently
 ```
 
-Both formats are supplied by the harness from the observed wire shape (§3.3.4), never read from
-the adapter's own property — that property is unreliable (F5, KBR-7) and, more fundamentally, an
-oracle must not ask the code under test what it did. A new corpus entry, adapter, model route or
-transport costs one parametrisation, not a new test.
+**Bodies alone cannot prove correct routing** (§3.3.5). Both formats are supplied by the harness
+from the observed wire shape (§3.3.4), never read from the adapter's own property — that property
+is unreliable (F5, KBR-7) and, more fundamentally, an oracle must not ask the code under test what
+it did. A new corpus entry, adapter, model route or transport costs one parametrisation, not a new
+test.
 
 ---
 
@@ -1476,6 +1549,7 @@ Four Python versions in CI, with `mypy` and `import-linter` as gates rather than
 | **G14** | **F3 — the vendor name goes upstream in the body (M13)** — KBR-5 | Live I2 breach | Fix the message; forbidden-token guard (§6.2.3) + TR-4 | **0** |
 | **G15** | **F4 — `_effort` / `_thinking_adaptive` reach the wire** — KBR-6 | Live I1+I2 breach on every CC-wire provider | Add both to `_INTERNAL_KEYS`; internal-key completeness guard (§6.2.3) | **0** |
 | **G16** | **F5 — `OpenCodeGoAdapter` misdeclares its wire shape** — KBR-7 | Latent defect in the M8 path; trap for the oracle | Make the property per-model; wire-shape honesty guard | **1** |
+| **G19** | Routing was outside the register and outside the oracle | The destination is built from the profile (M14, P20, P21); a body-only check cannot see a misrouted Azure deployment | §3.3.5 — whole-request oracle with an independently derived route | **1** |
 | **G17** | Undecided behaviour for an irreducible final turn | Compaction emits an over-budget request, or M13 replaces the conversation; neither was designed | Answer Q10, then align M3-M7/M13, the 6.1 properties and TR-3 together | **2** |
 | **G18** | P13-P19 - seven transport-level mutations, unregistered in the first draft | Necessary (the Codex backend and boto3 require them) but invisible above DEBUG, and unreachable by a guard placed at `translate_to_upstream` | Rows P13-P19; boundary corrected in 3.2.3; Q5 decides user visibility | **3** |
 | **G1** | I1 is unstated and untested | No definition of "unchanged"; mutation sites discoverable only by reading 6,463 lines | Register (§3.2) + oracle (§3.3) | **1** |
