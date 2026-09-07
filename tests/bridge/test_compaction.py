@@ -6,10 +6,13 @@ histories to prevent 400 "context too large" errors from upstream providers.
 
 import json
 
+import pytest
+
 from kitty.bridge.server import (
     _COMPACTION_GUARANTEED_MESSAGES_MAX,
     _MAX_REQUEST_CHARS,
     BridgeServer,
+    CompactionFailedError,
 )
 from kitty.launchers.base import LauncherAdapter, SpawnConfig
 from kitty.profiles.schema import Profile
@@ -1626,64 +1629,190 @@ class TestNativePassthroughCompactionWarning:
 
 
 class TestCompactionPostCondition:
-    """F25 + F26: After compaction, at least one non-system message must remain.
+    """KBR-5: a conversation with no surviving non-system message must raise.
 
-    The guaranteed-fit fallback can drop everything except the system message
-    and one tail block.  If the tail block is a ``tool`` result whose
-    ``tool_use`` was dropped, ``_validate_tool_call_pairing`` removes it,
-    leaving only the system message.  A request with only a system message
-    is invalid for any upstream provider.
+    A request carrying only a system message is invalid for any upstream
+    provider.  Compaction used to substitute a synthetic user turn naming the
+    product, which then travelled upstream and let a provider fingerprint the
+    bridge.  It now raises :class:`CompactionFailedError` and the handler
+    renders a 400 downstream instead.
 
-    F26 (oversized system message silently exceeding budget) is caught by
-    the same post-condition: if the system message is so large that no
-    user/assistant message can fit, the post-condition fails and the
-    bridge returns a clear error instead of sending a guaranteed-to-fail
-    request.
+    **The trigger is not an oversized system prompt.**  The guaranteed-fit
+    fallback always keeps at least one non-system block, so a surviving user
+    turn always prevents this; only ``_validate_tool_call_pairing`` removing
+    an unpaired tool result can empty the set.  The two tests this class
+    replaced asserted the old behaviour with fixtures that never reached the
+    path at all.
     """
 
-    def test_only_system_message_left_raises_error(self):
-        """F25: compaction that leaves only a system message returns an error
-        indicator instead of the bare system message list."""
-        server = _make_server()
-        # Construct a scenario: huge system message + one tool result
-        # whose tool_use gets dropped by guaranteed-fit, then pairing
-        # validation drops the orphan tool result.
-        huge_system = "S" * 2_000_000
-        messages = [
-            {"role": "system", "content": huge_system},
-            {
-                "role": "assistant",
-                "content": None,
-                "tool_calls": [
-                    {
-                        "id": "call_1",
-                        "type": "function",
-                        "function": {"name": "test", "arguments": "{}"},
-                    }
-                ],
-            },
-            {"role": "tool", "content": "result", "tool_call_id": "call_1"},
-            {"role": "user", "content": "x" * 2_000_000},
-        ]
-        result = server._compact_messages(messages)
-        # Either: (a) it returns messages with >0 non-system messages,
-        # or (b) it returns an error dict.
-        if isinstance(result, list):
-            non_system = [m for m in result if m.get("role") != "system"]
-            assert len(non_system) > 0, "F25: compaction left only system message — post-condition should prevent this"
+    def test_a_conversation_that_arrived_unsendable_is_not_refused_here(self):
+        """A request with no non-system message to begin with passes through.
 
-    def test_oversized_system_returns_error_not_bare_messages(self):
-        """F26: an oversized system message that exceeds budget returns error."""
+        The bridge refuses only what its own compaction emptied. A conversation
+        the agent sent with nothing but a system message was never sendable, and
+        the provider's own rejection is the honest answer — refusing it here
+        would blame the bridge for the agent's malformed request.
+
+        It must still not leak: the old code substituted the vendor message on
+        exactly this input, which is why it is asserted rather than skipped.
+        """
         server = _make_server()
-        huge_system = "X" * (_COMPACTION_GUARANTEED_MESSAGES_MAX + 100)
+        result = server._compact_messages([{"role": "system", "content": "S" * 3_000_000}])
+        assert "kitty" not in json.dumps(result).lower()
+
+    def test_empty_message_list_is_not_refused(self):
+        """``messages: []`` is a caller's business, not a compaction failure.
+
+        Guards a real over-reach: an earlier version of this fix raised on any
+        conversation with no non-system message, which rejected every
+        ``messages: []`` request with a 400 that blamed compaction.
+        """
+        server = _make_server()
+        cc_request: dict = {"model": "m", "messages": []}
+        server._apply_compaction(cc_request)
+        assert cc_request["messages"] == []
+
+    def test_orphan_tool_result_as_only_turn_raises_cc_shape(self):
+        """Chat-Completions shape: an unpaired ``tool`` result is the last turn.
+
+        Pairing validation drops the orphan, emptying the surviving set.  This
+        is the real-world trigger — an empty upstream SSE response recorded as
+        a complete tool message.
+        """
+        server = _make_server()
         messages = [
-            {"role": "system", "content": huge_system},
+            {"role": "system", "content": "S" * 3_000_000},
+            {"role": "tool", "content": "result", "tool_call_id": "call_missing"},
+        ]
+        with pytest.raises(CompactionFailedError):
+            server._compact_messages(messages)
+
+    def test_orphan_tool_result_as_only_turn_raises_native_shape(self):
+        """Anthropic-native shape: a user message of only orphan tool_result blocks."""
+        server = _make_server()
+        messages = [
+            {"role": "system", "content": "S" * 3_000_000},
+            {
+                "role": "user",
+                "content": [{"type": "tool_result", "tool_use_id": "toolu_missing", "content": "r"}],
+            },
+        ]
+        with pytest.raises(CompactionFailedError):
+            server._compact_messages(messages)
+
+    def test_orphan_tool_result_raises_at_a_tight_model_budget(self):
+        """The same trigger fires on the model-derived budget, not just the static one."""
+        server = _make_server()
+        messages = [
+            {"role": "system", "content": "S" * 50_000},
+            {"role": "tool", "content": "result", "tool_call_id": "call_missing"},
+        ]
+        with pytest.raises(CompactionFailedError):
+            server._compact_messages(messages, max_messages_chars=1000)
+
+    def test_surviving_user_turn_does_not_raise(self):
+        """A huge system prompt plus an ordinary user turn compacts normally.
+
+        This is the shape the ticket and the design documents wrongly named as
+        the trigger.  It pins that the raise is conditional: were it to become
+        unconditional, every oversized conversation would fail instead of
+        compacting.
+        """
+        server = _make_server()
+        messages = [
+            {"role": "system", "content": "S" * (_COMPACTION_GUARANTEED_MESSAGES_MAX + 100)},
             {"role": "user", "content": "hello"},
         ]
         result = server._compact_messages(messages)
-        if isinstance(result, list):
-            non_system = [m for m in result if m.get("role") != "system"]
-            assert len(non_system) > 0, "F26: oversized system message should not produce only-system result"
+        assert [m for m in result if m.get("role") != "system"], "a surviving user turn must not raise"
+
+    def test_below_threshold_orphan_result_raises_in_apply_compaction(self):
+        """The below-threshold path is guarded too.
+
+        ``_compact_messages`` short-circuits below the compaction threshold, so
+        its own post-condition never runs.  ``_apply_compaction`` then runs
+        pairing validation a second time, which can empty the conversation with
+        no check in between — a system-only body would go upstream.
+        """
+        server = _make_server()
+        cc_request = {
+            "model": "m",
+            "messages": [
+                {"role": "system", "content": "you are helpful"},
+                {"role": "tool", "content": "r", "tool_call_id": "call_missing"},
+            ],
+        }
+        with pytest.raises(CompactionFailedError):
+            server._apply_compaction(cc_request)
+
+
+class TestCompactionIntroducesNoVendorToken:
+    """KBR-5 regression guard: the bridge must not write its own name upstream.
+
+    A flat case-insensitive scan for ``kitty`` is only sound because this
+    module's corpus is curated to contain the token in exactly one place — the
+    agent-supplied turn in
+    :meth:`test_agent_supplied_vendor_token_survives_byte_identically`.
+
+    **Do not add a corpus entry whose agent-supplied text contains "kitty", and
+    never "fix" a failure here by stripping or rewriting user text.**  Agent
+    content must reach the provider unchanged even when it names the product;
+    suppressing it would breach message fidelity in the act of defending
+    indistinguishability.  ``TEST_SUITE.md`` §6.2.3 requires the general guard
+    to be scoped by a projection diff for exactly this reason; that guard is
+    T-G5 (KBR-81) and needs the oracle, so this defect-scoped scan stands in
+    until then.
+    """
+
+    #: Inputs that must all leave the compactor free of a bridge-introduced token.
+    _CORPUS: list[tuple[str, list[dict]]] = [
+        ("below threshold", [{"role": "user", "content": "hello"}]),
+        (
+            "compaction engaged",
+            [{"role": "system", "content": "S" * 100}, *_make_messages(400)],
+        ),
+        ("system only, over threshold", [{"role": "system", "content": "S" * 3_000_000}]),
+        (
+            "orphan tool result (cc)",
+            [
+                {"role": "system", "content": "S" * 3_000_000},
+                {"role": "tool", "content": "r", "tool_call_id": "call_missing"},
+            ],
+        ),
+        (
+            "orphan tool result (native)",
+            [
+                {"role": "system", "content": "S" * 3_000_000},
+                {
+                    "role": "user",
+                    "content": [{"type": "tool_result", "tool_use_id": "toolu_missing", "content": "r"}],
+                },
+            ],
+        ),
+    ]
+
+    @pytest.mark.parametrize("label,messages", _CORPUS, ids=[c[0] for c in _CORPUS])
+    def test_no_bridge_introduced_vendor_token_in_compacted_output(self, label, messages):
+        """No compactor output may contain ``kitty`` in any casing."""
+        server = _make_server()
+        try:
+            result = server._compact_messages(messages)
+        except CompactionFailedError:
+            return  # Nothing was produced, so nothing can leak.
+        assert "kitty" not in json.dumps(result, ensure_ascii=False).lower(), (
+            f"{label}: the bridge introduced its own name into the upstream messages"
+        )
+
+    def test_agent_supplied_vendor_token_survives_byte_identically(self):
+        """The complement: the agent may talk about the product freely.
+
+        Runs in the same module as the scan above, so a change that satisfied
+        one by breaking the other cannot pass.
+        """
+        server = _make_server()
+        turn = {"role": "user", "content": "Please explain how kitty-bridge works"}
+        result = server._compact_messages([{"role": "system", "content": "s"}, dict(turn)])
+        assert turn in result, "agent-supplied text naming the product must reach the provider unchanged"
 
 
 # ── F33: json.dumps error handling in compaction ──────────────────────────

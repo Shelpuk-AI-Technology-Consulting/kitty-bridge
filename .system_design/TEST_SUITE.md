@@ -143,7 +143,8 @@ body. Established by reading `src/kitty/bridge/server.py` and all 23 adapters in
 
 #### 3.2.1 Bridge-level
 
-Eleven request-path rows (M1–M11) plus one response-path row (M12) and one substitution (M13).
+Eleven request-path rows (M1–M11) plus one response-path row (M12). The former substitution row
+M13 is **withdrawn** — KBR-5 replaced it with a downstream error, so it mutates nothing.
 
 | # | Mutation | Site | Trigger | Why it is necessary |
 |---|---|---|---|---|
@@ -159,7 +160,7 @@ Eleven request-path rows (M1–M11) plus one response-path row (M12) and one sub
 | M10 | Inject the model from the URL path into the body | `_handle_gemini` | Gemini protocol only | Gemini carries the model in the path, not the body; `_normalize_model` needs it in the body to override it. |
 | M11 | Force `stream: False` | `_handle_gemini` | Gemini protocol, non-streaming `:generateContent` | The Gemini translator defaults `stream=True`; the non-streaming endpoint must not open an SSE stream. |
 | M12 | Substitute fallback assistant text | `_EMPTY_ASSISTANT_FALLBACK_TEXT` in `bridge/messages/translator.py` **and** `bridge/responses/translator.py` | Upstream returned an empty response | **Response-side**, not part of the eleven request-path rows. |
-| M13 | **Discard the conversation and substitute a `[Kitty Bridge: …]` user message** | `_compact_messages` post-condition | No non-system message survives compaction (F25/F26 path — the system prompt alone exceeds the window) | Produces a legible error instead of a confusing upstream 400. **Qualitatively unlike M5**: M5 shrinks history, M13 replaces it — and it writes the product's name into the upstream body. See finding F3. |
+| ~~M13~~ | **Withdrawn — no longer a mutation.** Was: discard the conversation and substitute a `[Kitty Bridge: …]` user message. | `_compact_messages` / `_apply_compaction` post-condition | No non-system message survives | **Closed by KBR-5.** The post-condition now raises `CompactionFailedError` and the handler returns a protocol-native 400 downstream; nothing is substituted, so there is no mutation left to register. The row is kept struck through rather than deleted so a reader of finding F3 can still find it. **The trigger recorded here was wrong** — see F3. |
 | M14 | **Replace the destination entirely** — scheme, host and path are built from the profile by `build_base_url()` + `get_upstream_path()` | `BridgeServer._build_upstream_url` | Always | The agent addressed a loopback bridge; the request has to reach the real provider. Listed because **the destination is a mutation surface the body cannot show**: on Azure an identical body sent to the wrong deployment path is a different request entirely (§3.3.5). |
 
 #### 3.2.2 Provider-level
@@ -370,8 +371,13 @@ Diffing projections separates the two cases cleanly:
 
 The regression case is explicit, and belongs in the corpus (§7.1): an inbound turn whose text is
 `Please explain how kitty-bridge works` must survive byte-identically, **and** an injected vendor
-message (M13) must still be caught in the same run. A harness that cannot do both at once has
+message must still be caught in the same run. A harness that cannot do both at once has
 not solved the problem.
+
+Since KBR-5 there is no *live* injected vendor message to use as the positive half — M13 was the
+only one. The fixture is therefore the synthetic historical M13 string held in
+`tests/bridge/test_vendor_token_guard.py`, which T-G5 inherits. A guard whose positive control
+disappeared with the defect it caught is a guard that has quietly stopped working.
 
 #### 3.3.4 Scoping, triggers and transports
 
@@ -438,7 +444,8 @@ not consume them.
 |---|---|---|
 | Compaction preserves `tool_use`/`tool_result` atomicity, in both CC and native shapes | L1 property | `compact(m)` contains no orphan |
 | Compaction output fits the budget **unless the surviving set is irreducible** | L1 property | See §6.1 — the honest exception is wider than an oversized system block |
-| The last turn survives **unless it is itself truncated (M3/M4) or dropped by pairing validation (M7), in which case M13 fires** | L1 property | Stated with all three exceptions, or it fails on day one |
+| The last turn survives **unless it is itself truncated (M3/M4) or dropped by pairing validation (M7), in which case the request is refused downstream** | L1 property | Stated with all three exceptions, or it fails on day one. Since KBR-5 the third case raises `CompactionFailedError` rather than substituting a turn |
+| **No upstream request is ever made after a `CompactionFailedError`** | L1 + L3 | The load-bearing invariant behind KBR-5. Note it is *not* "the request is left untouched": `_apply_compaction` raises after it has already replaced `cc_request["messages"]`, so the guarantee is about the absence of an upstream call, not about the request dict |
 | Compaction is identity below the budget | L1 property | Short-circuit at the `original_size <= compaction_threshold` guard — M5's trigger, tested directly |
 | Truncation is identity below `_TOOL_RESULT_TRUNCATION_LIMIT` | L1 property | Same shape, for M3 and M4 |
 | Each wire projection reads its format correctly | L1 | The projections are test code and get their own tests — against published format examples, not against kitty's output |
@@ -468,7 +475,7 @@ list of headers we happened to think of. That posture is what surfaced F3 and F4
 | Channel | What it exposes today | Verdict |
 |---|---|---|
 | **C1 — Request headers** | `build_upstream_headers()` constructs the set from scratch; no inbound agent header is forwarded. Four adapters supply a coding-agent `User-Agent` (P9a, P9c); every other provider — including `zai_coding`, whose set is exactly `Authorization`, `anthropic-version`, `content-type` — sends aiohttp's default. | **Gap, and inconsistent.** F1. |
-| **C2 — Request body** | The register's mutations (§3.2), JSON key ordering produced by kitty's serialisation, **the literal string `[Kitty Bridge: …]` (M13)**, and **`_effort` / `_thinking_adaptive`, which are kitty-internal and reach the wire**. | **Breached.** F3 and F4. |
+| **C2 — Request body** | The register's mutations (§3.2), JSON key ordering produced by kitty's serialisation, ~~the literal string `[Kitty Bridge: …]` (M13)~~ **— fixed, KBR-5** — and **`_effort` / `_thinking_adaptive`, which are kitty-internal and reach the wire**. With M13 gone the only bridge-introduced literal left in the body is `[Tool output truncated — original size: N chars]` (M3/M4): still a viable fingerprint, it simply does not name the product. | **Still breached by F4.** F3 closed. |
 | **C3 — Cross-attempt content and cadence** | Retries (`_MAX_RETRIES = 3`), failover, transport-blip re-connects, the empty-response ladder — and **four** paths that send a *different body* on a later attempt (M6, M8, M9, and failover re-normalisation). | §4.3 C3. Four declared exceptions. |
 | **C4 — Transport fingerprint** | TLS/ALPN/HTTP-2 signature of aiohttp, unlike the agent's own client. `curl_cffi` is already used for the OpenAI subscription provider precisely because that provider fingerprints TLS. | **Accepted residual risk.** §4.5. |
 | **C5 — Connection lifecycle** | `_build_client_session` uses `TCPConnector(limit=…, force_close=True)` — a fresh TCP and TLS connection for **every** upstream request, no keep-alive reuse. The agent's client does not behave that way. | **Gap.** A cheap, non-TLS fingerprint — arguably more detectable than C4. §4.3 C5. |
@@ -509,8 +516,9 @@ oracle's projection makes possible and a flat scan cannot:
   a path may contain the word; a tool result may quote this document. All of that must reach the
   provider unchanged — stripping it to satisfy I2 would breach I1, and the two invariants would
   be in direct conflict. The oracle's projection diff already separates agent-supplied parts
-  from bridge-introduced ones (§3.3.3); only the latter are scanned. M13 is caught because it
-  has no inbound counterpart, while the user's sentence is not, because it does.
+  from bridge-introduced ones (§3.3.3); only the latter are scanned. M13 was caught because it
+  had no inbound counterpart, while the user's sentence is not, because it does. M13 is fixed;
+  the worked example stands because the *next* bridge-introduced string will be caught the same way.
 - **Key order preservation on the native path.** A provider can fingerprint the JSON serialiser
   from key ordering alone. This is the one place the comparison is byte-level rather than
   projected, and it applies only where kitty claims to be forwarding rather than translating.
@@ -566,15 +574,36 @@ its own ticket. F3, F4 and F5 are live breaches of invariants defined above.
   `/v1beta/models/{model}:generateContent` and `:streamGenerateContent`, and the README omits
   `GET /v1/models`. Exactly the drift the L2 docs⇄code layer exists to catch. Tracked as G6
   and KBR-9.
-- **F3 — The product's own name is written into the upstream request body.** *(KBR-5.)* When compaction
-  cannot preserve any non-system message, `_compact_messages` discards the conversation and
-  substitutes a user message reading
+- **F3 — FIXED (KBR-5, 2026-09-07).** The product's own name was written into the upstream request
+  body. **Two corrections were made to this finding while fixing it, both measured against the
+  running code:**
+  1. **The trigger stated below is wrong.** The guaranteed-fit fallback always keeps at least one
+     non-system block, so a surviving user turn always defeats the post-condition — a large system
+     prompt *cannot* cause this. The set is emptied only by `_validate_tool_call_pairing` removing
+     an unpaired tool result: a corrupt conversation, typically one where an empty upstream SSE
+     response was recorded as a complete tool message. The same wrong trigger appeared in register
+     row M13 and in the §7.1 corpus row, and both are corrected. The two existing tests for this
+     path (`TestCompactionPostCondition`) never reached it and passed vacuously.
+  2. **There was a second, unguarded site.** `_apply_compaction` re-runs pairing validation *after*
+     `_compact_messages` returns, and `_compact_messages` short-circuits below the compaction
+     threshold — so a below-threshold conversation could be emptied with no post-condition
+     anywhere, and a system-only body went upstream. Closed in the same change.
+
+  The fix: `_compact_messages` and `_apply_compaction` raise `CompactionFailedError`; the four
+  handlers render a protocol-native HTTP 400 carrying `error.reason == "compaction_failed"`. The
+  recovery path (`_compact_with_tighter_budget`) fails over to the next backend **without** marking
+  it unhealthy, since no second upstream request was made and cooling the pool down for one corrupt
+  conversation would 503 every concurrent session. Original finding, for the record:
+
+  When compaction
+  cannot preserve any non-system message, `_compact_messages` discarded the conversation and
+  substituted a user message reading
   `[Kitty Bridge: Unable to compact conversation — the system prompt is too large relative to the
   model's context window. Use /clear to reset the conversation.]`. That message goes upstream via
-  `_apply_compaction`. **A direct breach of I2** — the provider sees the vendor name in the
-  request — and a fidelity mutation qualitatively unlike M5, since it replaces the conversation
-  rather than shrinking it. The intent (a legible error rather than an opaque 400) is sound; the
-  delivery is not. Register row M13; tracked as G14, KBR-5 and Q9.
+  `_apply_compaction`. **A direct breach of I2** — the provider saw the vendor name in the
+  request — and a fidelity mutation qualitatively unlike M5, since it replaced the conversation
+  rather than shrinking it. The intent (a legible error rather than an opaque 400) was sound; the
+  delivery was not. Register row M13 (withdrawn); tracked as G14, KBR-5 and Q9 (answered).
 - **F4 — Kitty-internal keys reach the upstream body on every Chat-Completions-wire provider.**
   *(KBR-6.)*
   `MessagesTranslator.translate_request` writes `_effort` and `_thinking_adaptive` into the CC
@@ -869,7 +898,8 @@ run and gets weakened by whoever is on the rota.
 
 **This is a product question, not just a test-wording question.** What *should* happen when the
 final turn alone will not fit? Today the request goes upstream over budget and is rejected there,
-or M13 replaces it. Neither is obviously right, and neither has been decided. The register,
+or — when nothing sendable survives — KBR-5's downstream 400 refuses it. Neither is obviously
+right, and neither has been decided. The register,
 the properties and the Gherkin must agree on one answer — see Q10. Until it is decided, the
 document records current behaviour as *observed*, explicitly not as *approved*.
 
@@ -991,7 +1021,7 @@ reported the adapter clean.
 | **Register completeness — shape diff at the wire** | For every adapter × representative model × transport, capture the body at the §3.2.3 boundary and assert the projected delta from the input is exactly the union of that adapter's register rows whose triggers the input met. **One fixed request is not sufficient** — each conditional row needs a trigger case and a complement case (§3.3.4), and adapters that route by model need one input per route. |
 | **Internal-key completeness** | AST-scan `bridge/**` for every `_`-prefixed key written into a request dict, and assert each is a member of `_INTERNAL_KEYS`. **This is the guard that catches F4 (KBR-6).** The complementary check — that each `translate_to_upstream` override delegates or excludes the set — is necessary but not sufficient: every override strips it correctly today; the set itself is what is wrong. |
 | **Wire-shape honesty** | For every adapter × representative model, assert `upstream_wire_is_messages_api` agrees with the shape observed at the serialization boundary. Catches F5 (KBR-7). |
-| **Bridge-introduced vendor token** | No content the bridge *introduces* into a request body or header contains `kitty` in any casing. Scoped by the projection diff (§3.3.3), never a flat scan of the serialized body — a flat scan would fail on a user legitimately writing the word, and "fixing" that would breach I1. Catches F3 (KBR-5). |
+| **Bridge-introduced vendor token** | No content the bridge *introduces* into a request body or header contains `kitty` in any casing. Scoped by the projection diff (§3.3.3), never a flat scan of the serialized body — a flat scan would fail on a user legitimately writing the word, and "fixing" that would breach I1. Caught F3 (KBR-5). **F3 is now fixed, so this guard has no live positive fixture left**: its positive control is the synthetic historical M13 string held in `tests/bridge/test_vendor_token_guard.py`, which T-G5 inherits. That file is also the defect-scoped stand-in until T-G5 lands — it scans **source literals** against an allowlist, never traffic, so it does not fall into the flat-scan trap this row warns about. |
 | **Start-path domination** | Every `BridgeServer(` construction is dominated by an `egress_block_reason(` call **at AST level**, not merely co-located in the same file. `cli/main.py` already holds two of the five start paths (§5.1 gap 3). **Necessary but not sufficient — see below.** |
 | **Env-var register** | `_SETTINGS_ENV_OVERRIDE_KEYS` and `_CONFLICTING_ENV_VARS` (`launchers/claude.py`) match what `build_spawn_config` emits and what the README documents. |
 | **Endpoint table** | The README endpoint table matches `_register_routes`. Catches F2 (KBR-9). |
@@ -1175,12 +1205,15 @@ Feature: The upstream provider cannot tell Kitty Bridge is there
          the 50,000-char truncation limit, or it is dropped because its
          tool_result lost the tool_use that produced it
 
-  # One exempt assertion: no-vendor-content, pending KBR-5. Setup and all else gate.
+  # No exemption. KBR-5 is fixed, so every assertion gates normally.
   Scenario: TR-4  An unrecoverable conversation fails without naming kitty upstream
-    Given a system prompt larger than the model's context window
-    When Claude Code sends a turn through kitty
+    Given a conversation whose only remaining turn is a tool result with no matching tool call
+    When Claude Code sends that turn through kitty
     Then the user is told the conversation cannot be compacted
-    And the provider receives no content naming kitty
+    And the provider receives nothing at all
+    # The Given was "a system prompt larger than the model's context window" until
+    # KBR-5 measured it: that shape does not empty the conversation, so the
+    # scenario could never have reached the behaviour it names. See F3.
 
 Feature: Configured egress cannot be bypassed
 
@@ -1208,12 +1241,15 @@ Feature: Configured egress cannot be bypassed
     Then kitty refuses to start and names the profile
 ```
 
-**Two scenarios carry an assertion-level exemption.** The Acceptance job gates every PR (§8), so
+**One scenario carries an assertion-level exemption.** The Acceptance job gates every PR (§8), so
 an assertion about behaviour the product does not yet have would make `main` red on day one — and
 a permanently red gate gets disabled, taking the working scenarios with it.
 
+**TR-4's exemption is withdrawn (2026-09-07):** KBR-5 is fixed, so its no-vendor-content assertion
+gates normally. TR-1c's remains, pending KBR-8.
+
 The exemption covers **one assertion**, never the scenario. In TR-1c it is the header-subset
-assertion (KBR-8); in TR-4 it is the no-vendor-content assertion (KBR-5). Every other step in
+assertion (KBR-8). Every other step in
 those scenarios — setup, the `Given` clauses, and any other `Then` — gates normally, so a broken
 fixture or an unrelated regression still fails the build. An unexpected pass also fails, forcing
 the exemption off when the defect closes. The full policy and the exemption registry are in §8;
@@ -1233,7 +1269,7 @@ this section does not restate it, so the two cannot drift apart.
 
 **TR-3 and the compaction properties still depend on an undecided product question** (Q10): what
 *should* happen when the final turn alone exceeds the budget. This Gherkin records current
-behaviour; it does not ratify it. When Q10 is answered, TR-3, register rows M3–M7/M13 and the
+behaviour; it does not ratify it. When Q10 is answered, TR-3 and register rows M3–M7 and the
 §6.1 properties change together or not at all.
 
 #### 6.4.2 Agent-boundary tests
@@ -1294,7 +1330,7 @@ not pass-by-skipping. A green tick that means "we did not test this" is worse th
 
 #### 6.4.3 Answer-quality evals
 
-Compaction (M5, M6, M13) and truncation (M3, M4, P7, P13) can degrade an answer without breaking
+Compaction (M5, M6) and truncation (M3, M4, P7, P13) can degrade an answer without breaking
 any structural assertion. Nothing below L4 can detect that. But the method has to be honest about
 what it can establish.
 
@@ -1375,9 +1411,10 @@ contains trigger cases cannot support assertion 2. At minimum:
 | Tool result just under and just over 50,000 chars | M3/M4 trigger **and** complement |
 | Transcript just under and just over the compaction budget | M5 trigger and complement |
 | Transcript provoking the upstream 400/413 recovery | M6 — **must run against a balancing profile**; `_request_with_retry` has no compaction recovery |
-| System prompt alone larger than the window | M13, and the Q10 behaviour |
+| System prompt alone larger than the window | The Q10 behaviour. **Not** the compaction-failure path: KBR-5 measured this shape and it leaves the user turn intact |
+| Only remaining turn is a tool result with no matching tool call | The compaction-failure path — the real trigger for what M13 used to do (F3) |
 | A single final turn larger than the budget | The irreducible-set case (§6.1) |
-| **A turn whose text is `Please explain how kitty-bridge works`** | The §3.3.3 regression case — must survive byte-identically while M13 is still caught |
+| **A turn whose text is `Please explain how kitty-bridge works`** | The §3.3.3 regression case — must survive byte-identically while a bridge-introduced vendor string is still caught in the same run |
 | `max_tokens` above and below 4096, streaming and non-streaming | P7 trigger and complement; P13 |
 | Malformed body | The L2 fuzz path |
 
@@ -1485,7 +1522,9 @@ outcome than the red gate it was meant to avoid.
 The exemption is therefore narrow and accountable:
 
 - It attaches to **one assertion**, named, with its expected failure condition and its issue key
-  (TR-1c's header-subset assertion → KBR-8; TR-4's no-vendor-content assertion → KBR-5).
+  (TR-1c's header-subset assertion → KBR-8. TR-4's no-vendor-content assertion → KBR-5 was the
+  only other entry and was **withdrawn on 2026-09-07** when KBR-5 shipped; the registry is now one
+  row long, which is the length it is supposed to trend towards).
 - **Setup and every other assertion in the scenario gate normally.** If TR-4 cannot reach the
   bridge, the job fails — that is not the known defect.
 - **An unexpected pass fails the job.** When the assertion starts passing, the defect is fixed
@@ -1546,11 +1585,11 @@ Four Python versions in CI, with `mypy` and `import-linter` as gates rather than
 
 | ID | Gap | Today | Target | Priority |
 |---|---|---|---|---|
-| **G14** | **F3 — the vendor name goes upstream in the body (M13)** — KBR-5 | Live I2 breach | Fix the message; forbidden-token guard (§6.2.3) + TR-4 | **0** |
+| ~~**G14**~~ | ~~**F3 — the vendor name goes upstream in the body (M13)** — KBR-5~~ | **CLOSED 2026-09-07** | Post-condition raises; handlers render a downstream 400; defect-scoped source-literal guard (`tests/bridge/test_vendor_token_guard.py`) stands in until T-G5 | — |
 | **G15** | **F4 — `_effort` / `_thinking_adaptive` reach the wire** — KBR-6 | Live I1+I2 breach on every CC-wire provider | Add both to `_INTERNAL_KEYS`; internal-key completeness guard (§6.2.3) | **0** |
 | **G16** | **F5 — `OpenCodeGoAdapter` misdeclares its wire shape** — KBR-7 | Latent defect in the M8 path; trap for the oracle | Make the property per-model; wire-shape honesty guard | **1** |
 | **G19** | Routing was outside the register and outside the oracle | The destination is built from the profile (M14, P20, P21); a body-only check cannot see a misrouted Azure deployment | §3.3.5 — whole-request oracle with an independently derived route | **1** |
-| **G17** | Undecided behaviour for an irreducible final turn | Compaction emits an over-budget request, or M13 replaces the conversation; neither was designed | Answer Q10, then align M3-M7/M13, the 6.1 properties and TR-3 together | **2** |
+| **G17** | Undecided behaviour for an irreducible final turn | Compaction emits an over-budget request, or (since KBR-5) the bridge refuses it downstream; neither was designed | Answer Q10, then align M3-M7, the 6.1 properties and TR-3 together | **2** |
 | **G18** | P13-P19 - seven transport-level mutations, unregistered in the first draft | Necessary (the Codex backend and boto3 require them) but invisible above DEBUG, and unreachable by a guard placed at `translate_to_upstream` | Rows P13-P19; boundary corrected in 3.2.3; Q5 decides user visibility | **3** |
 | **G1** | I1 is unstated and untested | No definition of "unchanged"; mutation sites discoverable only by reading 6,463 lines | Register (§3.2) + oracle (§3.3) | **1** |
 | **G2** | No-bypass unproven **for the bridge's serving path**; no negative assertion; start-path guard is file-granular | `test_egress_https_proxy.py` proves the transports and drives `egress_cmd._probe` | Sealed-network harness (§5.2) per transport (§5.5) + AST start-path guard | **1** |
@@ -1564,7 +1603,7 @@ Four Python versions in CI, with `mypy` and `import-linter` as gates rather than
 | **G9** | C5 unmeasured | `force_close=True` gives a per-request connection pattern unlike the agent's | Connection-count baseline | **3** |
 | **G11** | Dependency behaviour unpinned; `curl_cffi` unbounded and **botocore undeclared** | Containment rests on an undeclared transitive dependency | Dependency contract tests (§6.2.4) + declare botocore | **3** |
 | **G12** | Product layer effectively absent | 2 E2E tests, never run in CI | Nightly job, extended to 5 Claude Code cases | **4** |
-| **G13** | No answer-quality signal | Compaction, M13 and the Fireworks cap can degrade output invisibly | Paired delta eval | **4** |
+| **G13** | No answer-quality signal | Compaction and the Fireworks cap can degrade output invisibly | Paired delta eval | **4** |
 
 **Order of work.** G14 and G15 are priority 0: they are live breaches of the product's stated
 promise, both are small code fixes, and each has a cheap guard that stops it recurring. Then G1
@@ -1622,7 +1661,8 @@ hard part and risk the two drifting on exactly the behaviour they both exist to 
 
 **Two L1 properties are stated with their exceptions (§6.1).** "Output ≤ budget" and "the last
 turn survives" are both false as absolutes — the compactor breaks out while still over budget
-when it cannot shrink further, and M13 replaces the last turn. Stating the honest version keeps
+when it cannot shrink further, and the last turn can be dropped outright (after which KBR-5
+refuses the request downstream). Stating the honest version keeps
 the properties enforceable; stating the clean version guarantees they get weakened by whoever is
 on the rota.
 
@@ -1660,7 +1700,12 @@ are the only form of this check that can fail for the right reason.
 of the serialized body for `kitty` puts I1 and I2 in direct conflict: a user asking Claude Code
 to explain kitty-bridge would fail the I2 check, and satisfying it by stripping their words would
 breach I1. Scoping by the projection diff dissolves the conflict — the user's sentence has an
-inbound counterpart, M13's message does not.
+inbound counterpart, M13's message did not.
+
+KBR-5's own guard could not wait for the oracle, so it takes the other way out of the same
+conflict: it scans **source literals** against an allowlist rather than serialized traffic. Agent
+content is never inspected, so the conflict cannot arise — at the cost of catching only strings
+that are literals in the bridge's own source, which is why it is a stand-in and not the answer.
 
 **The register is enforced at the serialization boundary, not at `translate_to_upstream`
 (§3.2.3).** On the subscription provider those hooks return a Chat Completions shape and
@@ -1756,18 +1801,26 @@ a PR, which cannot both hold while the directory is ignored; this change therefo
 wrong, say so — and note the repo has no `SYSTEM_DESIGN.md` at all, so the request path, provider
 registry and failover state machine are undocumented. A separate ticket seems right.
 
-**Q9 — What should the unrecoverable-compaction message say (F3, G14, KBR-5)?** It must stay
+**Q9 — ANSWERED by the product owner, 2026-09-07.** Return the error **downstream only**, never as
+a synthetic upstream turn — the third option below — and the downstream message **names the
+product**, since it never leaves the user's machine and naming the component tells them which part
+of their stack is speaking. Implemented in KBR-5: the post-condition raises `CompactionFailedError`
+and each handler renders a protocol-native 400. The message text was also rewritten, because the
+original blamed the system prompt and prescribed `/clear`, and F3 establishes that neither is
+right. *Original question:* what should the unrecoverable-compaction message say (F3, G14,
+KBR-5)? It must stay
 legible to the user and stop naming the product upstream. Options: a vendor-neutral string;
 routing the error to the agent as an HTTP error instead of a synthetic assistant turn; or keeping
 the text but returning it downstream only. The third is probably right — the message is for the
 user, and it currently reaches the one audience it was never meant for.
 
 **Q10 — What should happen when the final turn alone exceeds the budget (§6.1, TR-3)?** Today
-compaction gives up and emits an over-budget request, which the provider rejects, or M13 replaces
-the conversation entirely. Neither was designed; both are what the loop happens to do when it can
+compaction gives up and emits an over-budget request, which the provider rejects, or — since
+KBR-5 — the bridge refuses it downstream with a 400. Neither was designed; both are what the loop happens to do when it can
 shrink no further. Options: truncate the final turn's content, fail fast with a clear local
 error, or keep current behaviour and document it deliberately. **Whatever is chosen, register
-rows M3–M7 and M13, the §6.1 compaction properties and TR-3 move together.** The design records
+rows M3–M7, the §6.1 compaction properties and TR-3 move together — M13 has since been
+withdrawn by KBR-5, which narrows this question rather than answering it.** The design records
 current behaviour as observed, explicitly not as approved, until this is answered.
 
 **Q11 — Does changed-code mutation testing fit the per-PR gate (§6.1)?** Answerable by

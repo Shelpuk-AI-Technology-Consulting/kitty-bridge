@@ -941,6 +941,25 @@ def _append_sse_chunk(
     return lines  # unreachable, kept for type-checkers
 
 
+class CompactionFailedError(Exception):
+    """Raised when compaction leaves a conversation with no non-system message.
+
+    The request cannot be sent: an upstream provider rejects a conversation
+    that carries only a system message. Handlers translate this into a 400 in
+    their own protocol dialect (:meth:`BridgeServer._compaction_failed_response`)
+    rather than substituting a message, so that nothing the bridge writes ever
+    reaches the provider — see KBR-5.
+
+    The trigger is **not** an oversized system prompt, despite what the message
+    this exception replaced used to claim. The guaranteed-fit fallback always
+    keeps at least one non-system block, so a surviving user turn always
+    prevents this. The set is emptied only by
+    :meth:`BridgeServer._validate_tool_call_pairing` removing an unpaired tool
+    result — a corrupt conversation, typically one where an empty upstream SSE
+    response was recorded as a complete tool message.
+    """
+
+
 class UpstreamError(Exception):
     """Raised when the upstream provider returns a non-retryable error or retries are exhausted."""
 
@@ -1825,6 +1844,67 @@ class BridgeServer:
             headers["X-Kitty-Model"] = _header_value(model)
         return headers
 
+    #: User-facing text for an irreducible conversation (KBR-5).
+    #:
+    #: Downstream only — it must never be written into an upstream request.
+    #: It names the product deliberately: the user needs to know which part of
+    #: their stack is speaking, and this string never leaves the machine.
+    #: It does **not** blame the system prompt, which the old message did
+    #: wrongly; the guaranteed-fit fallback always keeps a non-system block, so
+    #: a large system prompt alone cannot cause this.
+    _COMPACTION_FAILED_MESSAGE = (
+        "Kitty Bridge could not reduce this conversation to something the model can accept: "
+        "after compaction no messages were left to send. This usually means the conversation "
+        "contains a tool result whose matching tool call was lost. Start a new conversation "
+        "(/clear), or switch to a model with a larger context window."
+    )
+
+    @staticmethod
+    def _compaction_failed_response(*, style: str = "anthropic") -> web.Response:
+        """Build the 400 returned when no non-system message survives compaction.
+
+        The envelope is protocol-native, matching :meth:`_all_unhealthy_response`
+        rather than :meth:`_check_request_size` (which renders one Anthropic
+        shape on every protocol): a Gemini CLI cannot parse an Anthropic error.
+
+        Every body carries ``error.reason == "compaction_failed"``.
+        ``_check_request_size`` returns a byte-identical 400 envelope from the
+        very next line of each handler, so without this marker a test could not
+        tell the two rejections apart — and neither can an operator reading a
+        log.
+
+        Args:
+            style: Error dialect of the calling endpoint — ``"anthropic"``
+                (``/v1/messages``), ``"openai_chat"`` (``/v1/chat/completions``),
+                ``"openai_responses"`` (``/v1/responses``), or ``"google"``
+                (Gemini ``generateContent``).
+
+        Returns:
+            The 400 JSON response in the requested dialect.
+        """
+        logger.warning("Compaction left no sendable message; returning 400 (%s dialect)", style)
+        message = BridgeServer._COMPACTION_FAILED_MESSAGE
+        body: dict
+        if style == "openai_chat":
+            body = {"error": {"message": message, "type": "invalid_request_error", "reason": "compaction_failed"}}
+        elif style == "openai_responses":
+            body = {"error": {"code": "invalid_request", "message": message, "reason": "compaction_failed"}}
+        elif style == "google":
+            body = {
+                "error": {
+                    "code": 400,
+                    "message": message,
+                    "status": "INVALID_ARGUMENT",
+                    "reason": "compaction_failed",
+                }
+            }
+        else:
+            body = {
+                "type": "error",
+                "error": {"type": "invalid_request_error", "message": message, "reason": "compaction_failed"},
+            }
+        return BridgeServer._error_response(body)
+
     def _model_stats(self, model: str | None) -> dict[str, int]:
         """Return the mutable attribution record for a real model name.
 
@@ -2471,7 +2551,10 @@ class BridgeServer:
             self._truncate_oversized_tool_results(cc_request)
 
             # Compact messages before size check
-            self._apply_compaction(cc_request)
+            try:
+                self._apply_compaction(cc_request)
+            except CompactionFailedError:
+                return self._compaction_failed_response(style="openai_responses")
 
             # P4: Context size guardrail
             size_error = self._check_request_size(cc_request)
@@ -2489,6 +2572,9 @@ class BridgeServer:
 
             try:
                 cc_response = await self._request_with_retry(cc_request)
+            except CompactionFailedError:
+                # Must precede `except Exception`, which would render a 500.
+                return self._compaction_failed_response(style="openai_responses")
             except UpstreamError as exc:
                 error_msg = self._translate_upstream_error(exc.status, exc.body)
                 return web.json_response(
@@ -3034,7 +3120,10 @@ class BridgeServer:
             self._truncate_oversized_tool_results(cc_request)
 
             # Compact messages before size check
-            self._apply_compaction(cc_request)
+            try:
+                self._apply_compaction(cc_request)
+            except CompactionFailedError:
+                return self._compaction_failed_response(style="anthropic")
 
             # P4: Context size guardrail
             size_error = self._check_request_size(cc_request)
@@ -3046,6 +3135,9 @@ class BridgeServer:
 
             try:
                 cc_response = await self._request_with_retry(cc_request)
+            except CompactionFailedError:
+                # Must precede `except Exception`, which would render a 500.
+                return self._compaction_failed_response(style="anthropic")
             except UpstreamError as exc:
                 error_msg = self._translate_upstream_error(exc.status, exc.body)
                 return web.json_response(
@@ -4012,7 +4104,10 @@ class BridgeServer:
         self._truncate_oversized_tool_results(cc_request)
 
         # Compact messages before size check
-        self._apply_compaction(cc_request)
+        try:
+            self._apply_compaction(cc_request)
+        except CompactionFailedError:
+            return self._compaction_failed_response(style="google")
 
         # P4: Context size guardrail
         size_error = self._check_request_size(cc_request)
@@ -4032,6 +4127,11 @@ class BridgeServer:
 
         try:
             cc_response = await self._request_with_retry(cc_request)
+        except CompactionFailedError:
+            # Must precede `except Exception`. This handler has no outer try, so
+            # an uncaught exception would reach _access_log_middleware and become
+            # a dialect-less 500 the Gemini CLI cannot parse.
+            return self._compaction_failed_response(style="google")
         except UpstreamError as exc:
             error_msg = self._translate_upstream_error(exc.status, exc.body)
             return web.json_response(
@@ -4535,11 +4635,21 @@ class BridgeServer:
 
         body_hash = hashlib.sha256(_json.dumps(cc_request, sort_keys=True).encode()).hexdigest()[:12]
         consecutive_400_count = 0
+        # KBR-5: True when the most recent attempt ended because re-compaction
+        # found nothing left to send. Re-initialised per attempt below; bound here
+        # only so the post-loop check is safe when the loop body never runs.
+        compaction_exhausted = False
 
         # FI-8.4: warn once if the request is oversized before the first attempt.
         self._maybe_warn_oversized(cc_request)
 
         for attempt in range(n_backends):
+            # Reset per attempt: the flag must mean "the MOST RECENT attempt
+            # ended in compaction exhaustion", never "one ever did". Left
+            # sticky, an irreducible conversation on backend A would report as
+            # the final verdict for backend B's unrelated 429 — telling the user
+            # not to retry a transient failure that retrying would fix.
+            compaction_exhausted = False
             if attempt > 0:
                 try:
                     self._select_backend()
@@ -4584,7 +4694,30 @@ class BridgeServer:
                         attempt + 1,
                         n_backends,
                     )
-                    self._compact_with_tighter_budget(cc_request, factor=0.5)
+                    try:
+                        self._compact_with_tighter_budget(cc_request, factor=0.5)
+                    except CompactionFailedError:
+                        # KBR-5: cannot shrink further for THIS backend's budget.
+                        # Fail over instead of giving up: the budget is the
+                        # pool's *minimum* context, so a larger-context sibling
+                        # may still accept this body unchanged.
+                        #
+                        # Deliberately no _mark_backend_unhealthy and no
+                        # consecutive_400 increment — no second upstream request
+                        # was made, so there is no evidence against this backend,
+                        # and cooling it down would take the pool offline for
+                        # `backend_cooldown` because one conversation was
+                        # corrupt. Same policy as the comment above and as
+                        # _failure_kind's "oversized is a recovery trigger, not
+                        # a cooldown tier".
+                        logger.info(
+                            "Backend attempt %d/%d: conversation cannot be compacted further; "
+                            "failing over without marking the backend unhealthy",
+                            attempt + 1,
+                            n_backends,
+                        )
+                        compaction_exhausted = True
+                        continue
                     try:
                         cc_response = await self._make_upstream_request(cc_request, retry_rate_limit=False, grace=grace)
                         if not self._is_empty_cc_response(cc_response):
@@ -4639,6 +4772,15 @@ class BridgeServer:
                     n_backends,
                     exc,
                 )
+
+        # KBR-5: every backend has been tried and at least one found nothing
+        # left to send. Raised here, above the final empty-response retries,
+        # because those sleep 20s and then re-send the identical oversized body
+        # — pure latency for a failure that is already deterministic.
+        if compaction_exhausted:
+            # Chained so the upstream rejection that started recovery stays in
+            # the traceback for operators; the client still sees only the 400.
+            raise CompactionFailedError("no backend could take the compacted conversation") from last_exc
 
         # Final empty-response retries before fallback
         for final_idx, delay in enumerate(_EMPTY_FINAL_DELAYS, start=1):
@@ -4736,7 +4878,10 @@ class BridgeServer:
         self._truncate_oversized_tool_results(cc_request)
 
         # Compact messages before size check
-        self._apply_compaction(cc_request)
+        try:
+            self._apply_compaction(cc_request)
+        except CompactionFailedError:
+            return self._compaction_failed_response(style="openai_chat")
 
         # P4: Context size guardrail
         size_error = self._check_request_size(cc_request)
@@ -4748,6 +4893,11 @@ class BridgeServer:
 
         try:
             cc_response = await self._request_with_retry(cc_request)
+        except CompactionFailedError:
+            # Must precede `except Exception`. This handler has no outer try, so
+            # an uncaught exception would reach _access_log_middleware and become
+            # a dialect-less 500.
+            return self._compaction_failed_response(style="openai_chat")
         except UpstreamError as exc:
             error_msg = self._translate_upstream_error(exc.status, exc.body)
             return web.json_response(
@@ -5423,7 +5573,19 @@ class BridgeServer:
            iteratively drop oldest blocks (head first, then tail front) until
            it fits. System message and at least one tail block are always preserved.
 
-        Returns the (possibly compacted) messages list.
+        Args:
+            messages: The conversation to compact.
+            max_messages_chars: Model-derived budget for the messages list, or
+                ``None`` to use the static thresholds.
+
+        Returns:
+            The (possibly compacted) messages list.
+
+        Raises:
+            CompactionFailedError: When no non-system message survives. Because
+                step 3 always keeps a tail block, this happens only when pairing
+                validation removes an unpaired tool result — never merely
+                because the system prompt is large.
         """
         if not messages:
             return messages
@@ -5628,27 +5790,22 @@ class BridgeServer:
         # message if all other blocks were dropped and the last remaining
         # tail block (a tool result) was removed by pairing validation.
         # An oversized system message (F26) also triggers this check.
+        # Only refuse a conversation THIS METHOD emptied. A request that arrived
+        # with nothing but a system message (or nothing at all) was never
+        # sendable, and the provider's own rejection is the honest answer —
+        # refusing it here would blame the bridge for the agent's malformed
+        # request, and would reject `messages: []`, which callers do send.
         non_system = [m for m in result if m.get("role") != "system"]
-        if not non_system:
+        if not non_system and any(m.get("role") != "system" for m in messages):
             logger.error(
-                "Context compaction: post-condition failed — only system message remains "
-                "after compaction (%d chars). System prompt may be too large for the "
-                "model context window.",
+                "Context compaction: post-condition failed — no non-system message survives "
+                "(%d chars). Usually an unpaired tool result was the last surviving turn.",
                 result_size,
             )
-            # Return a single user message with a clear error so the upstream
-            # produces a visible error instead of a confusing 400.
-            return [
-                system_messages[0] if system_messages else {"role": "system", "content": ""},
-                {
-                    "role": "user",
-                    "content": (
-                        "[Kitty Bridge: Unable to compact conversation — the system prompt "
-                        "is too large relative to the model's context window. "
-                        "Use /clear to reset the conversation.]"
-                    ),
-                },
-            ]
+            # KBR-5: raise rather than substituting a message. Substituting sent
+            # the product's name to the provider, which is the one thing the
+            # bridge exists not to do. The handler renders a 400 downstream.
+            raise CompactionFailedError("compaction left no non-system message")
 
         return result
 
@@ -5740,9 +5897,11 @@ class BridgeServer:
 
         A soft heuristic (~180K tokens): above this, a high-reasoning /
         long-context request is likely to be truncated or rejected by
-        upstreams. Used to emit a preemptive WARNING; it does NOT gate the
-        on-failure auto-compaction retry (a context-too-large error triggers
-        recovery regardless of this size estimate).
+        upstreams. Used to emit a preemptive WARNING **and** as the third gate
+        on the on-failure auto-compaction retry, alongside the status check and
+        ``_is_context_too_large_error`` — see ``_request_with_retry_balancing``.
+        Compaction only helps when there is content to shrink, so a
+        context-too-large error on a small request fails over instead.
         """
         messages = cc_request.get("messages")
         if not messages:
@@ -5763,6 +5922,13 @@ class BridgeServer:
         Args:
             cc_request: The Chat-Completions request to compact in place.
             factor: Fraction of the model-aware budget to target (0 < f < 1).
+
+        Raises:
+            CompactionFailedError: When the tighter budget leaves no non-system
+                message. The caller fails over to the next backend rather than
+                retrying this one — see :meth:`_request_with_retry_balancing`.
+                Note this method does **not** re-run pairing validation, so it
+                relies on ``_compact_messages`` raising for itself.
         """
         if "messages" not in cc_request or factor <= 0:
             return
@@ -5860,7 +6026,22 @@ class BridgeServer:
         # keeps well-formed pairs together, but a corrupt input can still slip
         # through. Without this pass the next request would trigger upstream
         # code 2013 ("tool result's tool id ... not found").
+        # KBR-5: enforce the post-condition here too. Below the compaction
+        # threshold `_compact_messages` short-circuits, so its own check never
+        # runs — and the pairing pass below can still empty the conversation.
+        # Without this a system-only body would reach the provider.
+        had_non_system = any(m.get("role") != "system" for m in cc_request["messages"])
         cc_request["messages"] = self._validate_tool_call_pairing(cc_request["messages"])
+
+        # Scoped to what pairing validation REMOVED, for the same reason as the
+        # check in `_compact_messages`: a request that arrived unsendable is the
+        # provider's to reject, not the bridge's.
+        if had_non_system and not any(m.get("role") != "system" for m in cc_request["messages"]):
+            logger.error(
+                "Context compaction: pairing validation left no non-system message; "
+                "the conversation cannot be sent."
+            )
+            raise CompactionFailedError("pairing validation left no non-system message")
 
     def _check_request_size(self, cc_request: dict) -> web.Response | None:
         """Return a 400 error if the translated request exceeds the safe size limit.
