@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from pathlib import Path
 
 import aiohttp
 import pytest
@@ -690,6 +691,22 @@ class TestErrorMessageIsActionable:
     def test_message_does_not_blame_the_system_prompt(self):
         """The old, falsified explanation must not come back."""
         assert "system prompt" not in BridgeServer._COMPACTION_FAILED_MESSAGE.lower()
+
+    def test_the_readme_documents_this_error(self):
+        """A user who hits this will search the README for the words they saw.
+
+        README is this product's specification, so a user-visible error that is
+        not in Troubleshooting is drift — the repo's own documentation rule says
+        as much. Anchored on the message's first clause rather than the whole
+        string, so rewording the tail does not force a README edit while
+        changing what the user actually searches for does.
+        """
+        readme = (Path(__file__).resolve().parent.parent.parent / "README.md").read_text(encoding="utf-8")
+        opening = BridgeServer._COMPACTION_FAILED_MESSAGE.split(":")[0]
+        assert opening in readme, (
+            f"README has no Troubleshooting entry for {opening!r}. A user who sees this error "
+            "will search for it; add the entry rather than deleting this test."
+        )
 
     @pytest.mark.parametrize(
         "style", ["anthropic", "openai_chat", "openai_responses", "google"]
