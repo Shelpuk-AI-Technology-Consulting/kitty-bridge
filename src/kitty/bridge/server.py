@@ -5983,6 +5983,17 @@ class BridgeServer:
         ``_COMPACTION_CHAR_THRESHOLD`` is intentionally NOT used as the
         trigger here — real compaction fires on the model-derived
         ``messages_budget`` (often ~600K), well below that 2.8M cap.
+
+        Args:
+            cc_request: The Chat-Completions request, compacted in place.
+
+        Raises:
+            CompactionFailedError: When compaction, or the final pairing pass,
+                removes the last non-system message. Note this is raised *after*
+                ``cc_request["messages"]`` has already been replaced, so the
+                guarantee it carries is "no upstream request is made", not "the
+                request is left untouched". Every caller returns an error
+                response immediately.
         """
         if "messages" not in cc_request:
             return
