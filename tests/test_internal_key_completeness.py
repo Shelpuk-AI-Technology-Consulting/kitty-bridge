@@ -29,6 +29,13 @@ from internal_key_scan import SRC, KeyWrite, scan_source, scan_tree
 
 from kitty.providers.base import ProviderAdapter
 
+# L2: the subject of this file is an artifact outside `src/kitty` Python code,
+# or a structural scan of source text -- two things edited separately that must
+# agree. It gates pull requests exactly as before, in the `l1 or l2` job; the
+# marker records which half of that expression it answers to, and keeps a
+# source-text scan out of the L1 set that mutation testing will judge.
+pytestmark = pytest.mark.l2
+
 #: Which file is expected to mint which internal keys.
 #:
 #: A *key set* per file, not a per-file count.  ``server.py`` holds roughly

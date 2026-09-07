@@ -93,7 +93,7 @@ After Milestone 0, seven streams advance independently, each owning its own modu
 
 | ID | Task | Depends on | Design | Size |
 |---|---|---|---|---|
-| **T-W1** | Layer markers, CI selection rules, per-category collection checks | — | §8 | M |
+| **T-W1** | Layer markers, CI selection rules, per-category collection checks | — | §8, §8.1, §8.2 | M |
 | **T-W2** | **The input contract** — request/capture types and the projection protocol | — | §3.3.1 | S |
 | **T-W3** | Register schema and data | T-W2 | §3.2 | M |
 | **T-W4** | Recorder implementation — primary aiohttp recorder | T-W2 | §7.2 | M |
@@ -357,7 +357,7 @@ that makes *its* bytes observable. Bundled, the Ollama half would have had no ev
 | **T-K5** | `load.yml` reusable + publish gate | ci | T-K4 | `publish.yml` `needs:`-gates on a load run **for the tag commit** | §8 | M |
 | **T-K6** | Activate the Subsystem job | ci | T-W1, T-E2, T-D3, T-D4 | `l3` gates PRs and releases. **T-D3 is required, not just T-D4**: activating the job promotes the oracle into gating infrastructure, and §1.4 forbids that before its falsification suite exists. Fixing only T-J2's dependency left this hole open | §8 | S |
 | **T-K7** | Deep nightly — mutation and schema fuzzing | ci | T-H3, T-G6 | Both exist before the job claims to run them | §8 | S |
-| **T-K8** | Per-category collection enforcement | ci | T-W1, T-K6 | Each required category has its own non-empty check. A category present but empty **fails** | §8 | S |
+| **T-K8** | Attach the per-category checks to each job | ci | T-W1, T-K6 | **The mechanism is T-W1's** — `--require-category`, and the test pairing it to every job's marker expression, landed there. What is left here is attaching a flag per category as each job activates, and removing that layer from `PENDING_ACTIVATION_LAYERS`. Narrowed after T-W1 delivered the enforcement rather than only the vocabulary | §8.1 | S |
 | **T-K9** | Activate the Acceptance job | ci | T-J2, T-J3, T-K6 | `acceptance` gates PRs and releases | §8 | S |
 | **T-K10** | Activate the `agent_smoke` category | ci, blocked Q12 | T-W1, T-I5, T-I6 | Its own required category — **it does not block Subsystem or Acceptance**, and it does not wait for them either: the T-K9 dependency was delay with no shared prerequisite behind it. It requires **T-I6 as well as T-I5**, because startup connectivity alone would let the category go green without proving the settings precedence that is the whole reason it exists | §8 | S |
 | **T-K11** | Agent-live nightly | ci | T-I14 | Runs the **expanded** five-scenario coverage, not the two existing cases | §8 | S |

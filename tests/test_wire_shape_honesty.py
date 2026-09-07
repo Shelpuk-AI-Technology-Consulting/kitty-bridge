@@ -64,6 +64,12 @@ from kitty.providers.base import ProviderAdapter
 from kitty.providers.opencode import _MESSAGES_MODELS
 from kitty.providers.registry import _registry, get_provider
 
+# L2: a contract guard, per the §6.2.3 citation in this module's docstring. It
+# gates pull requests exactly as before, in the `l1 or l2` job; the marker keeps
+# it out of the L1 set that mutation testing will judge, where a contract guard
+# would have its kills attributed to the wrong layer.
+pytestmark = pytest.mark.l2
+
 
 class WireShape(Enum):
     """The request dialects a provider adapter can put on the wire."""
