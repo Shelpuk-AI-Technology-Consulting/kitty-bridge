@@ -3,540 +3,528 @@
 **Implements:** [`TEST_SUITE.md`](TEST_SUITE.md). That document says what the suite must prove and
 why; this one says who can build what, in what order, without waiting on each other.
 **Traces to:** [KBR-2](https://shelpuk.atlassian.net/browse/KBR-2).
-**Status:** Plan. No Jira issues created yet — the `T-` ids here are plan-local and become ticket
-summaries when the plan is accepted.
+**Status:** Plan. No Jira issues created — the `T-` ids are plan-local and become ticket summaries
+when the plan is accepted.
 
-> **On identifiers.** Every task id is prefixed `T-`. `TEST_SUITE.md` already uses bare `C1–C6`
-> for observable channels, `F1–F5` for findings, `G1–G19` for gaps, `I1–I3` for the invariants,
-> and `M`/`P` for register rows. Unprefixed task ids collided with all of them — the first draft
-> of this plan said "KBR-6 → G3" where the design says "KBR-6 → G15". The prefix is the fix, and
-> the **Design** column carries the reverse link.
+> **Identifiers.** Every task id is prefixed `T-`. `TEST_SUITE.md` already uses bare `C1–C6` for
+> observable channels, `F1–F5` for findings, `G1–G19` for gaps and `I1–I3` for the invariants. An
+> earlier draft collided with all of them. The **Design** column carries the reverse link.
 
----
-
-## 0. How this plan is organised
-
-The design has one shape problem for delivery: almost every interesting test depends on shared
-infrastructure that does not exist. Build it in the wrong order and one person writes harnesses
-for three weeks while everyone else waits.
-
-So the plan is arranged by **what unblocks the most people soonest**, not by importance:
-
-- **§2 Wave 0** is the enablement set — eight small artifacts, plus the handful of tasks that
-  genuinely need nothing. Until it lands, parallelism is capped around ten. After it, around
-  fifteen.
-- **§3–§13** are epics. Each task is atomic, independently landable, and carries its dependencies,
-  acceptance criteria and design reference.
-- **§14** is the wave plan and the two long chains. **§15** lists tasks blocked on decisions
-  rather than on code. **§16** covers the open defects. **§17** covers sequencing risk.
-
-**Read §1 before picking up any task.** The definition of done is unusual and it is the thing most
-likely to be got wrong.
+> **The epic tables in §4–§13 are the single source of truth for dependencies.** §14's tiers and
+> chains are *derived* from them — an earlier draft had a graph, a wave table and a duration
+> estimate that were three different schedules.
 
 ---
 
-## 1. Rules every task obeys
+## 1. How to use this plan
 
-### 1.1 Definition of done
+### 1.1 Schedule by readiness, not by wave
 
-1. The deliverable exists and satisfies the acceptance criteria in its row.
+§14 groups tasks into tiers, but **a tier is a derived view, not a gate**. A task is available the
+moment its own dependencies are done. Nobody waits for a tier to finish.
+
+### 1.2 Milestone 0 is contracts plus one proven slice
+
+Almost every interesting test needs shared infrastructure that does not exist. Milestone 0 (§3)
+delivers the **shared contracts** — types, schemas, protocols, extension interfaces — plus **one
+working vertical slice with a falsification case**, so later streams integrate against an
+interface proven once rather than against a promise.
+
+Give each shared file a named integration owner. Give each stream its own modules.
+
+### 1.3 Definition of done
+
+1. The deliverable satisfies the acceptance criteria in its row.
 2. `ruff`, `lint-imports`, `mypy src/kitty` and the full suite pass on Python 3.10–3.13.
-3. Every new test carries exactly one layer marker (**T-W1**) so it lands in exactly one CI job.
-4. Google-style docstrings on every class, method and function; module docstrings; block comments
-   explaining *why*. Test code is code.
-5. **It can land on `main` alone.** No task may leave the suite red waiting for a sibling. A check
-   that fails because of a known product defect lands with an entry in the exemption registry
-   (**T-W7**) — not disabled, not omitted.
+3. Every new test carries exactly one layer marker (**T-W1**).
+4. Google-style docstrings throughout; block comments explaining *why*. Test code is code.
+5. **It lands on `main` alone**, without leaving the suite red waiting for a sibling.
 
-### 1.2 The harness rule — a harness is not done until it has been seen to fail
+### 1.4 The harness rule
 
-This is the throughline of the design and the reason it took four review rounds. Repeatedly,
-proposed tests would have passed without proving anything: an oracle composed of two functions
-that were not inverses; a containment test asserting nothing arrived at a destination nothing
-could reach; a guard proving a function was *called* when the enforcement was the branch after it;
-a projection that could not see the model name, in a product whose purpose is changing the model
-name.
+Four review rounds on the design produced four harnesses that would have passed while proving
+nothing: an oracle composed of two functions that were not inverses; a containment test asserting
+nothing arrived at a destination nothing could reach; a guard proving a function was *called* when
+the enforcement was the branch after it; a projection that could not see the model name, in a
+product whose purpose is changing the model name.
 
-So for every task that builds a harness, assertion or guard:
+So:
 
-> **Acceptance requires a committed falsification case: a deliberate defect the harness must
-> detect, running in the suite, not demonstrated once by hand.**
+> **The first working version of every harness ships with at least one falsification case — a
+> deliberate defect it must detect, running in the suite.** The dedicated falsification task adds
+> the rest, and **is a hard prerequisite for that harness gating anything downstream.**
 
-Rows below name the specific case where the design specifies one; otherwise the author picks one
-and records it in the PR.
+An earlier draft made falsification mandatory in the definition of done and optional in the
+dependency graph, so both major harnesses could have become gating infrastructure before their
+falsification suites landed. The dependency rows below close that.
 
-### 1.3 Flags
+### 1.5 Flags and sizing
 
 | Flag | Meaning |
 |---|---|
-| **src** | Touches `src/kitty/`. Higher risk; needs a `code-reviewer` pass and a note in the PR |
-| **ci** | Touches `.github/workflows/`. Verify on a branch first — a broken gate is worse than a missing one |
-| **blocked** | Cannot start until an open question (`TEST_SUITE.md` §11) is answered. See §15 |
-| **partial** | Can start and land, but a stated part of its acceptance waits on a decision |
-| **defect** | Designed to land red, with an exemption removed by the defect's own ticket. See §16 |
+| **src** | Touches `src/kitty/`; needs a `code-reviewer` pass |
+| **ci** | Touches `.github/workflows/`; verify on a branch first |
+| **blocked** | Cannot start until an open question is answered (§15) |
+| **partial** | Lands, but a stated part of its acceptance waits on a decision |
+| **defect** | Relates to an open defect (§16) |
 | **resolves** | Its output answers an open question |
 
-### 1.4 Sizing
-
-**S** ≈ half a day · **M** ≈ 1–2 days · **L** ≈ 3–5 days. Nothing is larger than L; anything that
-looks larger is split. Sizes assume the author has read the referenced design section.
+**S** ≈ 0.5 day · **M** ≈ 1.5 days · **L** ≈ 4 days.
 
 ---
 
-## 2. Wave 0 — the enablement set
+## 2. Streams
 
-**Everything here is small, and nearly everything else waits on some of it.** Treat Wave 0 as one
-push with several people on it, not a queue.
+After Milestone 0, seven streams advance independently, each owning its own modules.
 
-| ID | Task | Depends on | Unblocks | Design | Size |
-|---|---|---|---|---|---|
-| **T-W1** | Layer markers and pytest config | — | Everything | §8 | M |
-| **T-W2** | Request types and the projection protocol | — | Epic A, then the oracle | §3.3.1 | S |
-| **T-W3** | The Permitted-Mutation Register as data | T-W2 | Oracle, register guard, corpus loader | §3.2 | M |
-| **T-W4** | Recorder protocol + primary aiohttp recorder | — | Epic B, T-W8, all of L3 | §7.2 | M |
-| **T-W5** | Shared CONNECT proxy fixture | — | All of Epic E | §7.3 | M |
-| **T-W6** | Corpus capture procedure, scrubber, loader | T-W3 | All of Epic C | §7.1 | M |
-| **T-W7** | The exemption registry | T-W1 | Every guard that lands red | §8 | M |
-| **T-W8** | Bridge-under-test fixture | T-W4 | ~15 tasks across D, E, G, I, J, K | §6.3.1 | M |
-
-**Genuinely needs nothing, start day one:** T-W1, T-W2, T-W4, T-W5, T-E6, T-E7, T-F1, T-I1, T-I3,
-T-I4, T-K1. Everything else in Wave 0 is one hop behind.
-
-### T-W1 — Layer markers and pytest config
-
-Register `l1`, `l2`, `l3`, `acceptance`, `agent_smoke`, `agent_live`, `eval`, `load`. A meta-test
-asserts **every collected test carries exactly one** — zero or two both fail.
-
-**Do not hand-edit 2,880 test functions across 139 files.** That is the worst possible first
-commit when a dozen people are about to branch, and it conflicts with every one of them. Assign
-the default in `pytest_collection_modifyitems` by path, and require an explicit marker only where
-the default is wrong. The meta-test is what stops the defaulting rotting.
-
-Also reconcile the existing `--runslow` skip-by-default mechanism with **T-K8** ("a gating job
-whose prerequisite is missing fails") — today `slow` tests silently skip, which is the pattern
-T-K8 forbids.
-
-*Done when:* removing a needed marker fails the meta-test; `pytest -m l1` collects a strict subset
-of `pytest`. *Size:* M — larger than it looks, because of the defaulting rules and the `--runslow`
-reconciliation.
-
-### T-W2 — Request types and the projection protocol
-
-`Request(envelope, conversation, residual)`, `Envelope`, `Conversation`, `Turn`, `Part` variants,
-and the `Projection` protocol. No readers — this is the shared vocabulary.
-
-Includes the **totality rule** as a reusable assertion: every key classifies into envelope,
-conversation or residual, and a non-empty residual raises. Shipping it here means all six readers
-inherit one semantics rather than six interpretations.
-
-*Done when:* a stub reader that silently drops an unknown key fails the totality assertion — the
-falsification case. *Size:* S.
-
-### T-W3 — The register as data
-
-Design §3.2 is a markdown table; the oracle takes `register` and `triggers_met` as arguments and
-the L2 completeness guard diffs against the same rows. **It has to become data, or both consume a
-prose table by hand.**
-
-One entry per row M1–M14 and P1–P21: id, site symbol, trigger predicate, the projection field it
-touches (`envelope.model`, `conversation.tools[].strict`, …), conditional or unconditional, design
-anchor. Also defines the **trigger vocabulary** T-W6's loader indexes by.
-
-*Done when:* a test asserts the markdown table and the data agree in both directions.
-Falsification: delete a row from either side. *Size:* M.
-
-### T-W4 — Recorder protocol and the primary aiohttp recorder
-
-`CapturedRequest(method, scheme, host, path, query, headers, body)` with original header casing and
-order, arrival timestamp, and **the peer port of the accepted connection** — the join key for
-containment (§5.2.1). Plus the aiohttp implementation serving Anthropic Messages and Chat
-Completions.
-
-**Ships one minimal valid success response per protocol.** Without it, any request driven through a
-real `BridgeServer` falls into the retry and failover paths — which are themselves body-mutating
-(M6, M8, M9) — and no consumer could obtain a clean baseline. The *failure* library is **T-B4**.
-
-Peer-port and casing capture are part of the **protocol**, enforced by a conformance test every
-Epic B recorder must pass — not restated per recorder and forgotten.
-
-*Done when:* casing and order survive capture; peer port is recorded; the conformance test exists
-and a recorder that lowercases headers fails it. *Size:* M.
-
-### T-W5 — Shared CONNECT proxy fixture
-
-Extract `_ConnectProxy` and `_TlsTarget` from `tests/test_egress_https_proxy.py` into a shared
-fixture. Extend it to record **the outbound source port of each tunnel** and to be stoppable
-mid-test.
-
-An extraction, not a rewrite: `test_egress_https_proxy.py` is the strongest existing asset in the
-suite and must pass unchanged against the extracted fixture.
-
-*Done when:* the existing module still passes; tunnel source port is recorded; stopping the proxy
-produces a connection failure, not a hang. *Size:* M.
-
-### T-W6 — Corpus capture procedure, scrubber and loader
-
-The capture procedure, a **credential scrubber**, and a loader exposing entries **by the register
-triggers they meet** (hence T-W3).
-
-The scrubber is load-bearing: a fixture file is as public as the repository, and captured
-transcripts carry prompts, file contents and API keys.
-
-Also **names an owner and a cadence for corpus refresh**, tied to Claude Code releases. Design
-§7.1 warns an un-refreshable corpus becomes a museum of a protocol nobody speaks; nothing else in
-this plan schedules that.
-
-*Done when:* the scrubber removes an API key, a bearer token and an absolute home path from a
-synthetic transcript; a CI lint fails on an unscrubbed fixture. *Size:* M.
-
-### T-W7 — The exemption registry
-
-Four guards and two acceptance scenarios are *designed* to land red (§16). They need the exemption
-mechanism before any of them can land, which makes this **enablement, not acceptance plumbing** —
-it sat in Epic J in the first draft, which stranded three Wave-0 tasks.
-
-Plain pytest, not BDD-specific: the Epic G guards are ordinary `l2` tests. An entry names **one
-assertion**, its expected failure condition and its ticket. Setup and every other assertion in the
-same test gate normally. **An unexpected pass fails the job** (`xfail(strict=True)` semantics). One
-registry file.
-
-*Done when:* a test with an exempt assertion **and** a second failing non-exempt assertion fails;
-an exempt assertion that starts passing fails. Those two are the falsification cases — without
-them this is the blanket amnesty the design rejects. *Size:* M.
-
-### T-W8 — Bridge-under-test fixture
-
-A profile/backend factory plus a real `BridgeServer` started against a named recorder, torn down
-cleanly. Around fifteen tasks across Epics D, E, G, I, J and K need exactly this; `conftest.py`
-offers only `sample_profile_dict` and `unused_tcp_port` today, and each of the ~40 files under
-`tests/bridge/` builds its own. Without this task, whoever picks up T-D1 builds it, and T-E3,
-T-G2 and T-I8 each build another.
-
-Constructs a profile for any adapter × model × transport, points its backend at a recorder host,
-starts the server in bridge mode, exposes both.
-
-*Done when:* one fixture call yields a running bridge for any registered adapter, and a test
-asserts teardown releases the port. *Size:* M.
+| Stream | Epics | Needs from Milestone 0 |
+|---|---|---|
+| **Fidelity** | A, D | Types, register, recorder, bridge fixture |
+| **Containment** | E | CONNECT proxy, bridge fixture |
+| **Corpus** | C | Corpus format and scrubber |
+| **Properties** | F | Nothing beyond `hypothesis` |
+| **Contracts** | G | Exemption registry, proxy fixture |
+| **Lifecycle** | I | Bridge fixture — several tasks need nothing |
+| **Evaluation** | H, K | Markers |
 
 ---
 
-## 3. Epic A — Wire projections
-
-Six independent readers, parallel after **T-W2**. Each imports **nothing from `src/kitty/bridge`**
-— that independence is the point (§3.3.1).
-
-| ID | Reader | Depends on | Design | Size |
-|---|---|---|---|---|
-| **T-A1** | Anthropic Messages | T-W2 | §3.3.1 | M |
-| **T-A2** | Chat Completions | T-W2 | §3.3.1 | M |
-| **T-A3** | OpenAI Responses | T-W2 | §3.3.1 | M |
-| **T-A4** | Gemini — **consumes the URL as well as the body**; model and operation live in the path | T-W2 | §3.3.5 | M |
-| **T-A5** | Bedrock Converse | T-W2 | §3.3.1 | M |
-| **T-A6** | Ollama `/api/chat` | T-W2 | §3.3.1 | S |
-
-**Acceptance, all six:** round-trips that format's **published examples** into `Request` with an
-empty residual — validated against the published schema, never against kitty's output. A reader
-validated against kitty's output inherits kitty's bugs and the oracle becomes circular.
-
-**Falsification, all six:** a body with one unrecognised key produces a non-empty residual and
-fails the totality assertion.
-
-**Deliberately *not* in scope here:** "residual empty across the whole corpus." That needs the
-corpus and belongs to **T-D8**, which owns coverage. Putting it in T-A1's acceptance made the
-projections silently depend on Epic C and dragged the corpus onto the critical path.
-
----
-
-## 4. Epic B — Recorders and scripted responses
-
-All depend on **T-W4** and must pass its recorder conformance test — including peer-port capture,
-which T-E4's tunnel join needs from every recorder, not only the primary.
+## 3. Milestone 0 — shared contracts and one proven slice
 
 | ID | Task | Depends on | Design | Size |
 |---|---|---|---|---|
-| **T-B1** | Provider-aiohttp recorder — `ollama_cloud` and the `openai_subscription` **OAuth legs**, which run at startup before anything else is proven | T-W4 | §5.5, §7.2 | M |
-| **T-B2** | curl_cffi-reachable recorder with harness TLS — the only place `_cc_to_responses` output (P13, P17) is observable | T-W4 | §7.2 | M |
-| **T-B3** | botocore endpoint-override recorder — captures the Converse payload **after** the transport's `modelId`/`stream` pops (P18) | T-W4 | §3.2.3, §7.2 | M |
-| **T-B4** | Scripted failure library — SSE variants, error statuses, Cloudflare blocks, empty responses, context-too-large rejections, mid-stream disconnect at each of the four §6.3.1 injection points | T-W4 | §6.3.1, §7.2 | M |
+| **T-W1** | Layer markers, CI selection rules, per-category collection checks | — | §8 | M |
+| **T-W2** | Request/capture types and the projection protocol | — | §3.3.1 | S |
+| **T-W3** | Register schema and data | T-W2 | §3.2 | M |
+| **T-W4** | Recorder protocol + primary aiohttp recorder | — | §7.2 | M |
+| **T-W5** | Shared CONNECT proxy fixture | — | §7.3 | M |
+| **T-W6** | Corpus format, capture procedure, scrubber, loader | T-W3 | §7.1 | M |
+| **T-W7** | Assertion exemption registry | T-W1 | §8 | M |
+| **T-W8** | Bridge fixture **core + transport extension interface** | T-W4 | §6.3.1 | M |
+| **T-W9** | **The proven vertical slice** | T-W1, T-W4, T-W8 | §6.3.1 | S |
+
+**T-W1 — markers and CI selection.** Register `l1`, `l2`, `l3`, `acceptance`, `agent_smoke`,
+`agent_live`, `eval`, `load`; a meta-test asserts every collected test carries exactly one. **Do
+not hand-edit 2,880 test functions** — default by path in `pytest_collection_modifyitems`, and
+require an explicit marker only where the default is wrong.
+
+This also establishes the **CI selection mechanism and per-category collection checks up front**,
+not in Epic K: parallel authors need the divided test command from day one. And a category that
+must be non-empty needs its own check — an earlier draft claimed `pytest -m "acceptance or
+agent_smoke"` would exit 5 when agent-smoke tests were missing. **That is wrong.** Once acceptance
+tests exist the expression collects them and passes happily with zero agent-smoke coverage. Also
+reconcile the existing `--runslow` silent skip with the same rule.
+
+**T-W2 — types.** `Request(envelope, conversation, residual)`, `Envelope`, `Conversation`, `Turn`,
+`Part` variants, `Reply` for the response direction, and the `Projection` protocol. Includes the
+**totality rule**: every key classifies into envelope, conversation or residual, and a non-empty
+residual raises. *Falsification:* a stub reader that drops an unknown key fails it.
+
+**T-W3 — register.** One entry per row M1–M14 and P1–P21: id, site symbol, trigger predicate, the
+projection field it touches, conditional or not, design anchor. Defines the trigger vocabulary
+T-W6 indexes by. *Falsification:* delete a row from the markdown or the data; the agreement test
+fails.
+
+**T-W4 — recorder protocol.** `CapturedRequest(method, scheme, host, path, query, headers, body)`
+with original casing and order, arrival timestamp, and **the peer port of the accepted
+connection**. Ships **one minimal valid success response per protocol** — without it any request
+driven through a real bridge falls into the retry paths, which are themselves body-mutating. The
+failure library is T-B4. Peer-port and casing capture are enforced by a **conformance test every
+Epic B recorder must pass**.
+
+**T-W5 — CONNECT proxy.** Extract `_ConnectProxy`/`_TlsTarget` from
+`tests/test_egress_https_proxy.py`; add tunnel source-port recording and mid-test stoppability. An
+extraction, not a rewrite: that module must pass unchanged.
+
+**T-W6 — corpus.** Format, capture procedure, credential scrubber, and a loader indexing entries
+by register trigger. Names an **owner and cadence for refresh**. *Falsification:* an unscrubbed
+fixture fails a CI lint.
+
+**T-W7 — exemption registry.** Plain pytest, not BDD-specific. An entry names **one assertion**,
+its expected failure condition and its ticket; everything else in the test gates normally; an
+unexpected pass fails (`xfail(strict=True)`). *Falsification:* a second, non-exempt failing
+assertion in the same test must still fail the job.
+
+**T-W8 — bridge fixture core and extension interface.** A profile/backend factory and a real
+`BridgeServer` started against a recorder, for the **default aiohttp transport only**, plus the
+**extension interface** custom transports plug into. An earlier draft promised "any registered
+adapter" while depending only on T-W4 — which would have meant implementing T-B1–T-B3 inside the
+shared fixture. Defining the interface here lets recorder authors integrate without editing the
+core.
+
+**T-W9 — the proven vertical slice.** Drive one request from the bridge fixture into the recorder
+and assert the capture is complete and correct. Small, but it is the first moment the contracts
+are known to compose. *Falsification:* a recorder that drops the query string fails it.
 
 ---
 
-## 5. Epic C — Golden corpus
+## 4. Epic A — Projections
 
-Parallel after **T-W6**. Coverage is driven by the register: every conditional row needs a trigger
-case **and** a complement.
+| ID | Task | Depends on | Design | Size |
+|---|---|---|---|---|
+| **T-A1** | Anthropic Messages reader | T-W2 | §3.3.1 | M |
+| **T-A2** | Chat Completions reader | T-W2 | §3.3.1 | M |
+| **T-A3** | OpenAI Responses reader | T-W2 | §3.3.1 | M |
+| **T-A4** | Gemini reader — **consumes the URL as well as the body** | T-W2 | §3.3.5 | M |
+| **T-A5** | Bedrock Converse reader | T-W2 | §3.3.1 | M |
+| **T-A6** | Ollama `/api/chat` reader | T-W2 | §3.3.1 | S |
+| **T-A7** | **Response-direction `Reply` projection** — parts, stop reason, usage | T-W2 | §3.3.1 | M |
+
+**All readers:** validated against that format's **published examples**, never against kitty's
+output — a reader validated against kitty's output inherits kitty's bugs and the oracle becomes
+circular. *Falsification:* one unrecognised key produces a non-empty residual.
+
+"Residual empty across the whole corpus" belongs to **T-D8**, not here; putting it in T-A1's
+acceptance made the projections silently depend on Epic C.
+
+---
+
+## 5. Epic B — Recorders
+
+Each task delivers a recorder **and its bridge-fixture integration** through T-W8's extension
+interface, and must pass T-W4's conformance test — including peer-port capture, which T-E2's
+tunnel join needs from every recorder.
+
+| ID | Task | Depends on | Design | Size |
+|---|---|---|---|---|
+| **T-B1** | Provider-aiohttp recorder + integration — `ollama_cloud`, and the `openai_subscription` **OAuth legs** that run at startup | T-W4, T-W8 | §5.5, §7.2 | M |
+| **T-B2** | curl_cffi recorder + integration, harness TLS — the only place `_cc_to_responses` output is observable | T-W4, T-W8 | §7.2 | M |
+| **T-B3** | botocore recorder + integration — captures the Converse payload **after** the transport's `modelId`/`stream` pops | T-W4, T-W8 | §3.2.3, §7.2 | M |
+| **T-B4** | Scripted failure library — SSE variants, errors, Cloudflare, empty responses, context-too-large, mid-stream disconnect at each of the four injection points | T-W4 | §6.3.1 | M |
+
+---
+
+## 6. Epic C — Corpus
 
 | ID | Entries | Depends on | Covers | Size |
 |---|---|---|---|---|
 | **T-C1** | Plain turn, tools declared, `tool_use`, `tool_result` | T-W6 | Complement for most conditional rows; M7 | S |
 | **T-C2** | Thinking, image, `system` with `cache_control` | T-W6 | P2a/b, P5c–e, P8, M8 | S |
-| **T-C3** | Tool result under/over 50,000 chars; transcript under/over the compaction budget | T-W6 | M3, M4, M5 — triggers and complements | M |
-| **T-C4** | 400/413 recovery against a **balancing** profile; system prompt alone over the window; a single final turn over the budget | T-W6 | M6, M13, the irreducible-set case | M |
-| **T-C5** | The vendor-string regression entry — a turn reading `Please explain how kitty-bridge works` | T-W6 | §3.3.3 | S |
-| **T-C6** | `max_tokens` above/below 4096 × streaming/non-streaming; a malformed body | T-W6 | P7, P13, the L2 fuzz path | S |
-| **T-C7** | Native Claude Code baseline — headers **and** connection pattern | T-W6 | Baselines for design channels C1b (header parity) and C5 (connection lifecycle) — consumed by T-I12 and T-I9 | M |
+| **T-C3** | Tool result under/over 50,000 chars; transcript under/over the compaction budget | T-W6 | M3, M4, M5 | M |
+| **T-C4** | 400/413 recovery on a **balancing** profile; system prompt alone over the window; a single final turn over budget | T-W6 | M6, M13, irreducible set | M |
+| **T-C5** | The vendor-string entry — `Please explain how kitty-bridge works` | T-W6 | §3.3.3 | S |
+| **T-C6** | `max_tokens` above/below 4096 × streaming/non-streaming; a malformed body | T-W6 | P7, P13, fuzz path | S |
+| **T-C7** | Native Claude Code baseline — headers and connection pattern | T-W6 | Baselines for design channels C1b and C5 | M |
 
-**T-C4's M6 entry must be authored against a balancing profile.** `_compact_with_tighter_budget`
-is called only from `_request_with_retry_balancing`; a single-backend profile never reaches it and
-the entry would silently never fire.
+**T-C4's recovery entry must use a balancing profile** — `_compact_with_tighter_budget` is reached
+only from `_request_with_retry_balancing`. **T-C4 and T-C6 are deliberately synthesised**: a
+system prompt over the window and a malformed body do not occur in a real session on demand, so
+design §7.1's "real, not synthetic" rationale does not apply; record that beside the fixtures.
 
-**T-C4 and T-C6 are deliberately synthesised, not captured.** A system prompt larger than the
-window, and a malformed body, do not occur in a real session on demand — so design §7.1's
-"real, not synthetic" rationale does not apply to them. Record that reasoning beside the fixtures;
-the scrubber and lint rules still apply.
-
-**Scheduling note:** T-C1–T-C7 share one capture-and-secret-review pass. Seven tasks, not seven
-independent parallel slots.
+**T-C1–T-C7 share one capture-and-secret-review pass** — seven tasks, not seven parallel slots.
 
 ---
 
-## 6. Epic D — The fidelity oracle (I1)
+## 7. Epic D — Fidelity oracle
+
+**T-D4–T-D7 are siblings, not a chain.** Each consumes the oracle interface plus its own
+transport's prerequisites. An earlier draft made T-D5–T-D7 wait for the full 20-adapter default
+matrix, serialising unrelated provider coverage.
 
 | ID | Task | Depends on | Done when | Design | Size |
 |---|---|---|---|---|---|
-| **T-D1** | Oracle core | T-W2, T-W3, T-W4, T-W8, T-A1, T-A2, T-C1 | `assert_no_unclaimed_mutation` runs end to end on one default-transport adapter with both §3.3.2 assertions. **Accepts `expected_route`** so T-D2 is a filling-in, not a signature change. **Includes the byte-level key-order assertion on the native passthrough path** — the one place the comparison is not projected | §3.3, §4.3 C2 | L |
-| **T-D2** | Independent routing expectation | T-D1, T-A4 | Expected host/path/query computed from the profile using the provider's *published* URL shape — **never** by calling `build_base_url()` / `get_upstream_path()` | §3.3.5 | M |
-| **T-D3** | Falsification suite | T-D1, T-D2 | Six cases, all failing the oracle, in the suite: changed model · flipped `stream` · deleted tool description · stripped `strict` · injected metadata field (non-empty residual) · **changed Azure deployment segment with a byte-identical body** | §3.3.1, §3.3.5 | M |
-| **T-D4** | Parametrise — default aiohttp transport | T-D1, T-D2, T-A1–T-A4, T-B4, T-C1–T-C6, T-W8 | The 20 default-transport adapters at their representative models; `opencode_go` per route | §3.3.4 | L |
-| **T-D5** | Parametrise — curl_cffi | T-D4, T-B2, T-A3 | `openai_subscription` serving path, observing P13–P17 | §3.3.2 | M |
-| **T-D6** | Parametrise — botocore | T-D4, T-B3, T-A5 | `bedrock`, observing the Converse payload after P18 | §3.3.2 | M |
-| **T-D7** | Parametrise — provider aiohttp | T-D4, T-B1, T-A6 | `ollama_cloud` after P19; the subscription OAuth leg | §3.3.2 | M |
-| **T-D8** | Coverage checker | T-D4, T-W3, T-C1–T-C6 | A meta-test failing when any conditional register row lacks a trigger case or a complement. **Also owns "residual empty across the whole corpus"** for all six readers | §3.3.4 | M |
-
-**T-D3 lands immediately after T-D1/T-D2, not at the end.** It is what distinguishes an oracle from
-a decoration.
-
-**T-D4 was one L covering four transports.** Split per transport so each is landable and each
-extends the parametrisation, rather than one task with thirteen predecessors on the critical path.
+| **T-D1** | Oracle core **+ first falsification case** | T-W2, T-W3, T-W8, T-W9, T-A1, T-A2, T-C1 | Both §3.3.2 assertions on one adapter; accepts `expected_route` so T-D2 is a filling-in; includes the byte-level key-order assertion on the native passthrough path; **a changed model must fail the oracle** | §3.3, §4.3 C2 | L |
+| **T-D2** | Routing expectation **+ its falsification** | T-D1, T-A4 | Route derived from the profile using the provider's *published* URL shape, never `build_base_url()`; a changed Azure deployment segment with a byte-identical body must fail | §3.3.5 | M |
+| **T-D3** | Remaining falsification cases | T-D1, T-D2 | Flipped `stream`, deleted tool description, stripped `strict`, injected metadata field. **Hard prerequisite for T-J2** — the oracle does not gate acceptance until its falsification suite is complete | §3.3.1 | M |
+| **T-D4** | Default-transport slice | T-D1, T-D2, T-B4 | One representative default adapter, end to end | §3.3.4 | M |
+| **T-D5** | curl_cffi slice | T-D1, T-D2, T-B2, T-A3 | `openai_subscription`, observing P13–P17 | §3.3.2 | M |
+| **T-D6** | botocore slice | T-D1, T-D2, T-B3, T-A5 | `bedrock`, observing the Converse payload after P18 | §3.3.2 | M |
+| **T-D7** | Provider-aiohttp slice | T-D1, T-D2, T-B1, T-A6 | `ollama_cloud` after P19; the subscription OAuth leg | §3.3.2 | M |
+| **T-D9** | Full default-transport matrix | T-D4, T-A3, T-A4, T-C2, T-C3, T-C4, T-C6 | All 20 default adapters at representative models; `opencode_go` per route | §3.3.4 | L |
+| **T-D10** | Response-direction comparison | T-D1, T-A7 | `Reply` projections compared on the response path — a separate claim from request fidelity, tested separately | §3.3.1 | M |
+| **T-D8** | Coverage checker | T-D9, T-D5, T-D6, T-D7, T-W3, T-A5, T-A6, T-A7, T-C5 | Fails when any conditional register row lacks a trigger case or a complement. **Owns "residual empty across the whole corpus" for all seven readers** | §3.3.4 | M |
 
 ---
 
-## 7. Epic E — Containment (I3)
+## 8. Epic E — Containment
+
+**T-E2 is one complete, falsified aiohttp slice.** T-E3–T-E5 extend it per transport as siblings.
+An earlier draft made a single positive-control task wait on every transport's direct route, so a
+difficult botocore route delayed even aiohttp containment — contradicting this plan's own claim
+that a stuck transport blocks only its own task.
 
 | ID | Task | Flags | Depends on | Done when | Design | Size |
 |---|---|---|---|---|---|---|
-| **T-E1** | Hostname harness + aiohttp direct route | | T-W5, T-W4, T-W8 | Upstream addressed as `upstream.kitty-test.invalid`; direct leg resolves via a monkeypatched aiohttp resolver — **not** `/etc/hosts`, which needs admin rights and is unavailable on most CI runners | §5.3 | L |
-| **T-E2** | curl_cffi and botocore direct routes | | T-E1, T-B2, T-B3 | curl's `resolve` mapping and a botocore `endpoint_url` override. **A transport that cannot be given a working direct route is reported `unproven`, not passed** | §5.3, §5.5 | M |
-| **T-E3** | Phase 1 — positive controls | | T-E1, T-E2 | With egress **disabled**, each transport reaches the upstream directly and the connection is recorded | §5.2.2 | M |
-| **T-E4** | Phase 2/2b — containment and tunnel correlation | | T-E3, T-W5 | Proxy down ⇒ **zero** upstream connections and the request fails. Proxy up ⇒ every accepted connection joins a tunnel on the recorded source port, N requests per tunnel allowed, failed tunnels contributing none | §5.2.1, §5.2.2 | L |
-| **T-E5** | Phase 3 — falsification | | T-E4 | A deliberately injected bypass — patched `should_bypass`, or a session built without the proxy — makes the harness fail | §5.2.2 | M |
-| **T-E6** | Guard **enforcement** | | — | Each of the five start paths driven with a rejecting configuration asserts **no server starts**: no listening socket, non-zero exit. Falsification: a variant keeping the `egress_block_reason()` call and discarding its return value must make these fail. **No recorder needed — nothing reaches upstream by construction** | §6.2.3 | M |
-| **T-E7** | AST start-path domination guard | | — | Every `BridgeServer(` construction is dominated by an `egress_block_reason(` call at AST level, not file level. Falsification: move a construction above its guard call in the same file | §5.1, §6.2.3 | M |
-| **T-E8** | Local bypass, fail-closed, and the transport asymmetry | | T-E1 | Loopback/`localhost` provider connects directly **on bridge sessions**; a `supports_egress() == False` profile blocks startup **and the message names the profile** (EG-3's assertion); and the complement — those destinations **are** tunnelled on curl_cffi, botocore and provider-aiohttp, which have no bypass. Pinning the asymmetry stops a future "fix" quietly adding one | §5.5, §5.2.2 | M |
-
-**T-E6 and T-E7 are complements and both are needed.** T-E7 proves the guard is *called*; T-E6
-proves its answer is *obeyed*. Deleting `if egress_error: return 1` passes T-E7 and fails T-E6.
-Both need nothing and belong in Wave 0.
+| **T-E1** | Harness core, aiohttp direct route, **transport extension interface** | | T-W5, T-W8, T-W9 | Upstream addressed as `upstream.kitty-test.invalid`; aiohttp direct leg via a monkeypatched resolver — **not** `/etc/hosts`, unavailable on CI runners | §5.3 | L |
+| **T-E2** | **aiohttp containment slice, complete and falsified** | | T-E1 | Phase 1 positive control; proxy down ⇒ zero connections; proxy up ⇒ every connection joins a tunnel on the recorded source port; **and an injected bypass makes the harness fail** | §5.2.1, §5.2.2 | L |
+| **T-E3** | curl_cffi route and slice | | T-E1, T-E2, T-B2 | All four phases for curl_cffi | §5.3, §5.5 | M |
+| **T-E4** | botocore route and slice | | T-E1, T-E2, T-B3 | All four phases for botocore | §5.3, §5.5 | M |
+| **T-E5** | Provider-aiohttp route and slice | | T-E1, T-E2, T-B1 | All four phases for the provider sessions and the OAuth leg | §5.5 | M |
+| **T-E6** | Guard **enforcement** | | — | Five start paths with a rejecting configuration assert **no server starts**. Falsification: a variant keeping the call and discarding its return value must fail these. **No recorder needed** | §6.2.3 | M |
+| **T-E7** | AST start-path domination | | — | Every `BridgeServer(` construction dominated by an `egress_block_reason(` call at AST level | §5.1 | M |
+| **T-E8** | Local bypass, fail-closed, transport asymmetry | | T-E2, T-E3, T-E4, T-E5 | Loopback bypass on bridge sessions; a `supports_egress() == False` profile blocks startup **and names the profile**; and the complement — those destinations **are** tunnelled on the three custom transports, which have no bypass | §5.5 | M |
+| **T-E9** | Proven / unproven report | | T-E3, T-E4, T-E5 | Each transport is either proven or **explicitly reported unproven**. A transport that cannot be given a working direct route is never silently counted as passing | §5.3 | S |
 
 ---
 
-## 8. Epic F — L1 component and property
+## 9. Epic F — Properties
 
-| ID | Task | Depends on | Done when | Design | Size |
-|---|---|---|---|---|---|
-| **T-F1** | `hypothesis` in the dev extra + a shared strategy library for Messages/CC transcripts | — | Strategies reusable by T-F2–T-F5 | §6.1 | M |
-| **T-F2** | Compaction properties | T-F1 | Identity below budget · no orphaned pair · idempotent · **output ≤ budget unless the surviving set is irreducible**, stated with the exception | §6.1 | M |
-| **T-F3** | Pairing and truncation properties | T-F1 | No orphan in either shape; truncation identity below the limit, bounded above it | §6.1 | M |
-| **T-F4** | Egress properties | T-F1 | Private ranges bypassed; **no hostname outside the `localhost` family bypassed**; `parse_proxy_url` round-trip; **structural** redaction — the password component of `masked()` is exactly the mask, never a substring test | §5.3, §6.1 | M |
-| **T-F5** | `describe_tool_input_anomaly` property | T-F1 | Never reports an anomaly for input valid against the declared schema | §6.1 | S |
-| **T-F6** | Translator semantic property via the projections | T-F1, T-A1, T-A2 | `project_messages(inbound)` equals `project_cc(translate_request(inbound))` — the projections, never a translator round-trip | §3.3.1, §6.1 | M |
+| ID | Task | Depends on | Design | Size |
+|---|---|---|---|---|
+| **T-F1** | `hypothesis` + shared transcript strategies | — | §6.1 | M |
+| **T-F2** | Compaction properties — including **output ≤ budget unless the surviving set is irreducible** | T-F1 | §6.1 | M |
+| **T-F3** | Pairing and truncation properties | T-F1 | §6.1 | M |
+| **T-F4** | Egress properties — private ranges; **no hostname outside the `localhost` family bypassed**; **structural** password redaction, never a substring test | T-F1 | §5.3, §6.1 | M |
+| **T-F5** | `describe_tool_input_anomaly` property | T-F1 | §6.1 | S |
+| **T-F6** | Translator semantic property **via the projections** | T-F1, T-A1, T-A2 | §3.3.1 | M |
 
-**T-F4's `should_bypass` property is load-bearing beyond L1**: it is the premise T-E1's harness
-rests on. If someone adds name resolution to `should_bypass`, T-F4 fails and T-E1's design is
-re-examined — rather than T-E1 quietly going vacuous.
+**T-F4 is load-bearing beyond L1**: it pins the premise T-E1's harness rests on.
 
 ---
 
-## 9. Epic G — L2 contract
+## 10. Epic G — Contracts
 
 | ID | Task | Flags | Depends on | Done when | Design | Size |
 |---|---|---|---|---|---|---|
-| **T-G1** | README ⇄ code table guards | defect | T-W7 | Endpoint, attribution-header, env-var and logging-flag tables. Lands red against the endpoint table → exemption (KBR-9 / gap G6) | §6.2.3 | M |
-| **T-G2** | Register completeness — coverage over the captures | | T-W3, T-D4 | Per adapter × model × transport, the captured delta equals the union of that adapter's rows whose triggers the input met. **A meta-assertion over T-D4–T-D7's captures, marked `l3`** — it does not re-drive the wire, and it must not put real sockets in the fast gate | §6.2.3 | M |
-| **T-G3** | Internal-key completeness AST guard | defect | T-W7 | Every `_`-prefixed key written into a request dict in `bridge/**` is in `_INTERNAL_KEYS`. Lands red → exemption (KBR-6 / gap G15) | §6.2.3 | M |
-| **T-G4** | Wire-shape honesty guard | defect | T-W7, T-W8, T-B1–T-B3 | `upstream_wire_is_messages_api` agrees with the observed output shape per adapter × representative model. Lands red → exemption (KBR-7 / gap G16) | §6.2.3 | M |
-| **T-G5** | Bridge-introduced vendor token guard | defect | T-D1, T-W7, T-C5 | No **bridge-introduced** content contains `kitty` in any casing, scoped by the projection diff — **and, in the same run**, an inbound turn containing `kitty-bridge` survives byte-identically. A harness that cannot do both at once has not solved the problem. Lands red → exemption (KBR-5 / gap G14) | §3.3.3, §6.2.3 | M |
-| **T-G6** | OpenAPI 3.1 document + schemathesis | | T-W8 | Five POST routes plus `/healthz`, `/stats`, `/v1/models`, **targeting a bridge started in bridge mode**; a separate guard asserts the per-protocol registration matrix | §6.2.1 | L |
-| **T-G7** | SSE grammar state machine | | T-B4, T-W8 | Every stream — including error streams, mid-stream failover and the empty-response fallback — is a sentence in the Anthropic event grammar, across all three streaming protocols | §6.2.2 | M |
-| **T-G8** | Dependency behaviour contracts | | T-W5 | aiohttp session proxy across `>=3.11,<3.14`; `curl_cffi` `proxies=` precedence over ambient `HTTP_PROXY`/`NO_PROXY`; `botocore Config(proxies=)` precedence; `keyring` backends. **Also declares `botocore` explicitly** — a containment guarantee currently rests on an undeclared transitive dependency | §6.2.4 | M |
-| **T-G9** | **Header contract** | defect | T-W7 | Per adapter, an **exact** header set — names present, names absent, casing, value shape. Plus: no adapter derives a `User-Agent` or version header from `kitty.__version__`, and where both a UA version and a `version` header are sent they agree. **This is the test that catches KBR-8.** Lands red → exemption (gap G3) | §4.3 C1 | M |
+| **T-G1** | README ⇄ code table guards | defect | T-W7 | Endpoint, attribution-header, env-var, logging-flag tables (KBR-9) | §6.2.3 | M |
+| **T-G2** | Register coverage meta-assertion | | T-W3, T-D9, T-D5, T-D6, T-D7 | Over T-D4–T-D9's captures — **it does not re-drive the wire**, and is marked `l3` so it cannot put sockets in the fast gate | §6.2.3 | M |
+| **T-G3** | Internal-key completeness AST guard | defect | T-W7 | Every `_`-prefixed key written into a request dict is in `_INTERNAL_KEYS` (KBR-6) | §6.2.3 | M |
+| **T-G4** | Wire-shape honesty guard | defect | T-W7, T-B1, T-B2, T-B3 | `upstream_wire_is_messages_api` agrees with the observed output shape per adapter × model (KBR-7) | §6.2.3 | M |
+| **T-G5** | Bridge-introduced vendor token guard | defect | T-D1, T-W7, T-C5 | No bridge-introduced content names kitty — **and in the same run** an inbound turn containing `kitty-bridge` survives byte-identically (KBR-5) | §3.3.3 | M |
+| **T-G6** | OpenAPI 3.1 + schemathesis | | T-W8 | Five POST routes plus `/healthz`, `/stats`, `/v1/models`, **targeting bridge mode**; plus a per-protocol registration-matrix guard | §6.2.1 | L |
+| **T-G7** | SSE grammar state machine | | T-B4, T-W8 | Every stream, including error streams and mid-stream failover, is a sentence in the grammar | §6.2.2 | M |
+| **T-G8** | aiohttp proxy contract | | T-W5 | Session-level proxy across `>=3.11,<3.14`; a per-request `proxy=None` cannot escape it | §6.2.4 | S |
+| **T-G9** | **Header contract** | defect | T-W7 | Exact header set per adapter — names, absences, casing, value shape. No `User-Agent` or version header derived from `kitty.__version__`; where both are sent they agree. **This catches KBR-8** | §4.3 C1 | M |
+| **T-G10** | curl_cffi proxy contract | | T-W5 | `proxies=` honoured; precedence over ambient `HTTP_PROXY`/`NO_PROXY` | §6.2.4 | S |
+| **T-G11** | botocore proxy contract + **declare `botocore`** | | T-W5 | `Config(proxies=)` precedence over the environment; and the dependency is declared, since a containment guarantee currently rests on an undeclared transitive | §6.2.4 | S |
+| **T-G12** | `keyring` backend contract | | — | Backend resolution on each supported platform | §6.2.4 | S |
 
 ---
 
-## 10. Epic H — Mutation validation
+## 11. Epic H — Mutation validation
 
 | ID | Task | Flags | Depends on | Done when | Design | Size |
 |---|---|---|---|---|---|---|
-| **T-H1** | `mutmut` config, L1 selection, baseline | | T-W1 | `[tool.mutmut]` with array `source_paths` and `pytest_add_cli_args_test_selection = ["-m", "l1"]`; a recorded baseline per target group | §6.1 | M |
-| **T-H2** | Extract pure payload builders | **src** | T-B3 | `_bedrock_body(...)` and `_ollama_body(...)` extracted from `make_request`/`stream_request`. **Depends on T-B3 because "behaviour unchanged" needs a characterisation test** — T-B3 is what makes the post-mutation Converse payload observable | §6.1 | M |
-| **T-H3** | Per-component thresholds + CI reporting | ci | T-H1, T-H2, T-F2–T-F6 | ≥ 85% killed **per target group**, not one aggregate; survivor triage documented; `mutmut export-cicd-stats` in the nightly job | §6.1 | M |
-| **T-H4** | Measure changed-code mutation runtime | resolves Q11 | T-H1 | Timed `mutmut run` restricted to a representative PR's functions, against the fast gate's budget | §6.1 | S |
+| **T-H1** | `mutmut` config, L1 selection, baseline | | T-W1 | Array `source_paths`, `pytest_add_cli_args_test_selection = ["-m", "l1"]`, baseline per target group | §6.1 | M |
+| **T-H2** | Extract `_bedrock_body` | **src** | T-B3 | Payload shaping out of `make_request`/`stream_request`, behind T-B3's characterisation capture | §6.1 | M |
+| **T-H5** | Extract `_ollama_body` | **src** | T-B1 | Same for `ollama_cloud`, behind **its own** characterisation capture | §6.1 | M |
+| **T-H3** | Per-component thresholds + nightly reporting | ci | T-H1, T-H2, T-H5, T-F2, T-F3, T-F4, T-F5, T-F6 | ≥ 85% killed **per target group**, not one aggregate | §6.1 | M |
+| **T-H4** | Measure changed-code mutation runtime | resolves Q11 | T-H1 | Timed against the fast gate's budget | §6.1 | S |
+
+**T-H2 and T-H5 are separate** — one refactor per module, each behind the characterisation test
+that makes *its* bytes observable. Bundled, the Ollama half would have had no evidence.
 
 ---
 
-## 11. Epic I — L3 subsystem
+## 12. Epic I — Lifecycle and subsystem
 
 | ID | Task | Flags | Depends on | Done when | Design | Size |
 |---|---|---|---|---|---|---|
-| **T-I1** | Settings lifecycle | | — | Normal exit, `SIGTERM`, `SIGKILL` + `kitty cleanup`; global settings byte-identical before and after; `_kitty_values_present` fires only on kitty-written state | §6.3.2 | M |
-| **T-I2** | Concurrent sessions | | T-I1 | Two sessions, separate `--settings` files, neither touches `~/.claude/settings.json`, the second does not disturb the first (issue #22) | §6.3.2 | M |
-| **T-I3** | `prepare_launch` failure fails the launch | | — | When the session file cannot be written, launch **fails** rather than running on the user's own Anthropic credentials | §6.3.2 | S |
-| **T-I4** | Background bridge ownership | | — | A bridge owned by another user is not stopped, not restarted, no second bridge starts beside it | §6.3.2 | S |
-| **T-I5** | Agent startup smoke | blocked Q12 | T-W4, T-W8, T-B4 | Pinned real Claude Code binary, one non-interactive turn against the recorder, clean exit | §6.4.2 | M |
-| **T-I6** | Agent settings precedence | blocked Q12 | T-I5 | Three runs, three winners: session file beats both; without it the global file beats the environment; without either the environment wins. Every sentinel demonstrated live | §6.4.2 | M |
-| **T-I7** | Streaming recovery — content | partial Q14 | T-B4, T-G7, T-W8 | Four injection points; no duplicated text, no tool-call id reused across attempts, no spliced arguments, exactly one terminal outcome. **Positive post-emission oracle waits on Q14**; until then the negatives only | §6.3.1 | L |
-| **T-I8** | Cross-attempt content and cadence | | T-D1, T-W8, T-B4 | Transport-blip and empty-response retries byte-identical; M6, M8, M9 and failover re-normalisation each fire only under their own trigger | §4.3 C3 | M |
-| **T-I9** | Connection lifecycle baseline | | T-W4, T-W8, T-C7 | Distinct TCP connections per N-turn session against the native capture; reported baseline, ratcheted | §4.3 C5 | M |
-| **T-I10** | `_backend_context` isolation | | T-W8 | Concurrent requests never observe each other's backend selection. Deterministic — belongs here, not in the load profile | §6.3.1 | S |
-| **T-I11** | Failover, disconnect, error envelopes | | T-B4, T-W8 | Streaming failover mid-response; client disconnect releases the upstream connection without marking the backend unhealthy; all-backends-unhealthy 503 in each protocol's native envelope; oversized request in the protocol's own error shape | §6.3.1 | M |
-| **T-I12** | Fingerprint parity report | | T-C7, T-W8, T-G9 | kitty's header set compared against the native baseline; **reported with a ratchet, not gating**, until gap G3 closes | §4.3 C1b | M |
-| **T-I13** | Side traffic | | T-W4, T-W8 | `GET /healthz` and `GET /stats` never cause an upstream request; a launch contacts the provider only for the agent's turns plus pre-flight validation, pinned as a declared exception; `kitty --no-validate` removes it | §4.3 C6 | M |
+| **T-I1** | Settings lifecycle | | — | Normal exit, `SIGTERM`, `SIGKILL` + `kitty cleanup`; global settings byte-identical | §6.3.2 | M |
+| **T-I2** | Concurrent sessions | | T-I1 | Separate `--settings` files; neither touches the global file (issue #22) | §6.3.2 | M |
+| **T-I3** | `prepare_launch` failure fails the launch | | — | Never proceeds on the user's own credentials | §6.3.2 | S |
+| **T-I4** | Background bridge ownership | | — | Not stopped, not restarted, no second bridge | §6.3.2 | S |
+| **T-I5** | Agent startup smoke | blocked Q12 | T-W8, T-W9, T-B4 | Pinned Claude Code binary, one turn, clean exit | §6.4.2 | M |
+| **T-I6** | Agent settings precedence | blocked Q12 | T-I5 | Three runs, three winners; every sentinel demonstrated live | §6.4.2 | M |
+| **T-I7** | Streaming recovery — content | partial Q14 | T-B4, T-G7, T-W8 | Four injection points; no duplicated text, no reused tool-call id, no spliced arguments. Positive oracle waits on Q14 | §6.3.1 | L |
+| **T-I8** | Cross-attempt content and cadence | | T-D1, T-W8, T-B4 | Blip and empty-response retries byte-identical; M6, M8, M9 and failover re-normalisation each fire only on trigger | §4.3 C3 | M |
+| **T-I9** | Connection lifecycle baseline | | T-W8, T-C7 | Distinct connections per session vs the native capture; ratcheted | §4.3 C5 | M |
+| **T-I10** | `_backend_context` isolation | | T-W8 | Deterministic; belongs here, not in load | §6.3.1 | S |
+| **T-I11** | Failover, disconnect, error envelopes | | T-B4, T-W8 | Mid-stream failover; disconnect releases upstream without marking unhealthy; 503 in each native envelope; oversized in the protocol's error shape | §6.3.1 | M |
+| **T-I12** | Fingerprint parity report | | T-C7, T-W8, T-G9 | Header set vs the native baseline; **reported with a ratchet, not gating**, until gap G3 closes | §4.3 C1b | M |
+| **T-I13** | Side traffic | | T-W8 | `/healthz` and `/stats` cause no upstream request; pre-flight pinned as a declared exception; `--no-validate` removes it | §4.3 C6 | M |
+| **T-I14** | **Expand live-agent coverage to five Claude Code scenarios** | | — | Plain turn, tool-using turn, multi-turn with tool results, extended thinking, and a session crossing the compaction threshold. The existing file has two cases; scheduling it nightly does not expand it | §6.4.2 | M |
 
 ---
 
-## 12. Epic J — L4 acceptance
+## 13. Epic J — Acceptance · Epic K — Evaluation, load, CI
 
 | ID | Task | Flags | Depends on | Done when | Design | Size |
 |---|---|---|---|---|---|---|
-| **T-J1** | `pytest-bdd` wiring and step definitions | | T-W1, T-W7 | Gherkin runs under pytest; steps bind to the L3 harnesses rather than re-implementing them. The exemption mechanism itself is T-W7 | §6.4.1 | M |
-| **T-J2** | TR scenarios — fidelity and indistinguishability | defect | T-J1, T-D4, T-C7, T-G9 | TR-1, TR-1c, TR-2, TR-3, TR-4. TR-1c and TR-4 land with exemptions (KBR-8, KBR-5). **No egress dependency — none of the TR scenarios involves containment** | §6.4.1 | M |
-| **T-J3** | EG scenarios — containment | | T-J1, T-E3, T-E4, T-E6, T-E8 | EG-0 (the reachability control), EG-1, EG-2, EG-3. T-E8 supplies EG-3's "names the profile" assertion | §6.4.1 | M |
+| **T-J1** | `pytest-bdd` wiring and step definitions | | T-W1, T-W7 | Steps bind to the L3 harnesses rather than re-implementing them | §6.4.1 | M |
+| **T-J2** | TR scenarios | defect | T-J1, T-D3, T-D9, T-C7, T-G9 | TR-1, **TR-1b**, TR-1c, TR-2, TR-3, TR-4. Depends on T-D3 because the oracle may not gate acceptance before its falsification suite is complete. No egress dependency — no TR scenario involves containment | §6.4.1 | M |
+| **T-J3** | EG scenarios | | T-J1, T-E2, T-E6, T-E8 | EG-0 (the reachability control), EG-1, EG-2, EG-3. T-E2 already carries its falsification | §6.4.1 | M |
+| **T-K1** | Eval harness skeleton | | — | Two arms; model, provider, dataset, sampling pinned per run; failure taxonomy per arm | §6.4.3 | M |
+| **T-K2** | Independently authored task set | | T-K1 | Acceptance tests **written by a person** | §6.4.3 | L |
+| **T-K3** | Statistics and decision rule | blocked Q4, Q13 | T-K1, T-K2 | Successes ÷ **scheduled** trials; interval; pre-registered margin; symmetric exclusions; a missing-data ceiling that **voids** the run | §6.4.3 | M |
+| **T-K4** | Load rig and baseline | | T-W8, T-B4 | Fixed workload, named runner class; latency, TTFB, completion and error rates, bounded RSS, socket recovery; streaming and buffered measured separately | §6.4.4 | L |
+| **T-K5** | `load.yml` reusable + publish gate | ci | T-K4 | `publish.yml` `needs:`-gates on a load run **for the tag commit** | §8 | M |
+| **T-K6** | Activate the Subsystem job | ci | T-W1, T-E2, T-D4 | `l3` gates PRs and releases, from the first proven slices onward | §8 | S |
+| **T-K7** | Deep nightly — mutation and schema fuzzing | ci | T-H3, T-G6 | Both exist before the job claims to run them | §8 | S |
+| **T-K8** | Per-category collection enforcement | ci | T-W1, T-K6 | Each required category has its own non-empty check. A category present but empty **fails** | §8 | S |
+| **T-K9** | Activate the Acceptance job | ci | T-J2, T-J3, T-K6 | `acceptance` gates PRs and releases | §8 | S |
+| **T-K10** | Activate the `agent_smoke` category | ci, blocked Q12 | T-I5, T-K9 | Its own required category — **it does not block Subsystem or Acceptance** | §8 | S |
+| **T-K11** | Agent-live nightly | ci | T-I14 | Runs the **expanded** five-scenario coverage, not the two existing cases | §8 | S |
+| **T-K12** | Eval nightly | ci | T-K3 | Runs once the decision rule exists; alerts, never gates | §8 | S |
+
+**CI activation is incremental.** Each job turns on when its first independently runnable slice
+lands, and each required category carries its own collection check. `agent_smoke` stays pending
+Q12 as a separate category so it cannot hold up Subsystem or Acceptance.
 
 ---
 
-## 13. Epic K — Evals, load and CI wiring
+## 14. Derived schedule
 
-| ID | Task | Flags | Depends on | Done when | Design | Size |
-|---|---|---|---|---|---|---|
-| **T-K1** | Eval harness skeleton | | — | Two arms; model, provider, dataset and sampling pinned and recorded per run; failure taxonomy captured per arm | §6.4.3 | M |
-| **T-K2** | Independently authored task set | | T-K1 | Coding tasks whose acceptance tests are **written by a person**. A model-generated test passing the model's own code shares its misunderstandings | §6.4.3 | L |
-| **T-K3** | Statistics and decision rule | blocked Q4, Q13 | T-K1, T-K2 | Successes ÷ **scheduled** trials; repetition; confidence interval; pre-registered margin; symmetric exclusion rule; missing-data ceiling that **voids** the run | §6.4.3 | M |
-| **T-K4** | Load rig and baseline | | T-W4, T-W8, T-B4 | Fixed workload and named runner class; bridge-added latency p50/p95, TTFB, completion and error rates, bounded RSS, socket/fd recovery; streaming and buffered paths measured separately | §6.4.4 | L |
-| **T-K5** | `load.yml` reusable + publish dependency | ci | T-K4 | `publish.yml` `needs:`-gates on a successful load run **for the tag commit**; a nightly caller warns but does not substitute | §8 | M |
-| **T-K6** | `tests.yml` gains Subsystem and Acceptance | ci | T-W1, T-E4, T-J3, T-I5 | Both gate PRs and releases through the one reusable workflow. **T-I5 is a dependency because `agent_smoke` is in the Acceptance selection**: if it never lands the selection collects nothing, pytest exits 5, and T-K8 turns that into a hard failure. Either T-I5 lands first, or T-K6 ships with `acceptance` only and T-I5 adds `agent_smoke` | §8 | M |
-| **T-K7** | Nightly workflows | ci | T-H3, T-K1 | Deep (mutation, schemathesis at high `--max-examples`), Agent-live, Eval. **Agent-live runs the existing `tests/integration/test_agent_e2e.py`, which needs no pinned binary** — so this does not wait on Q12. None of these gate | §8 | M |
-| **T-K8** | Skip-is-failure enforcement | ci | T-K6 | A gating job whose prerequisite is missing **fails**. A green tick meaning "we did not test this" is worse than a red one | §8 | S |
+Computed from the dependency columns above, not written by hand. **Recompute after any dependency
+change** — these numbers go stale the moment the tables move. 98 tasks; the graph is acyclic and
+every dependency resolves.
 
----
+### 14.1 Readiness tiers
 
-## 14. Sequencing
+A tier is the earliest point a task *could* start, not a batch to wait for. **53 of 98 tasks are
+available in tiers 0–2**, which is what Milestone 0 buys.
 
-### 14.1 Dependency graph, condensed
-
-```
-T-W1 ──────────────────────────────────────► everything (markers)
-T-W1 ──► T-W7 ──► T-G1, T-G3, T-G4, T-G5, T-G9, T-J1
-T-W2 ──► T-A1..T-A6 ──┐
-T-W3 ─────────────────┼──► T-D1 ──► T-D2 ──► T-D3
-T-W4 ──► T-B1..T-B4 ──┤          └─► T-D4 ──► T-D5/6/7, T-D8, T-G2 ──┐
-T-W4 ──► T-W8 ────────┤                                              ├──► T-J2 ──┐
-T-W6 ──► T-C1..T-C7 ──┘                                 T-C7, T-G9 ──┘           │
-                                                                                 │
-T-W5 ──► T-E1 ──► T-E2 ──► T-E3 ──► T-E4 ──► T-E5                                │
-                    └────► T-E8 ──┐                                              │
-              T-E6, T-E7 ─────────┴──► T-J3 ──► T-K6 ──► T-K8 ◄──────────────────┘
-
-independent from day one:  T-F1 ──► T-F2..T-F5      T-I1 ──► T-I2
-                           T-I3, T-I4, T-K1, T-E6, T-E7
-```
-
-### 14.2 Waves
-
-| Wave | Content | Parallel capacity |
+| Tier | Count | Tasks |
 |---|---|---|
-| **0** | T-W1–T-W8, T-E6, T-E7, T-F1, T-I1, T-I3, T-I4, T-K1 | ~10 — T-W* is the constraint, staff it first |
-| **1** | T-A1–T-A6, T-B1–T-B4, T-C1–T-C7, T-E1, T-F2–T-F5, T-G1, T-G3, T-G8, T-G9, T-H1, T-H2, T-I2, T-K2 | **~15**, the widest point — though T-C1–T-C7 share one capture pass and are not seven independent slots |
-| **2** | T-D1, T-E2, T-E3, T-F6, T-G4, T-G6, T-I10, T-I13, T-J1 | ~9 |
-| **3** | T-D2, T-D3, T-D4, T-E4, T-E8, T-G5, T-G7, T-H3, T-I8, T-I9, T-I11, T-I12, T-K4 | ~12 |
-| **4** | T-D5, T-D6, T-D7, T-D8, T-E5, T-G2, T-I5, T-I6, T-I7, T-J2, T-J3, T-K5 | ~11 |
-| **5** | T-K6, T-K7, T-K8, T-K3, T-H4 | ~5 — CI wiring plus the decision-blocked tail |
+| **0** | 13 | T-E6 T-E7 T-F1 T-G12 T-I1 T-I3 T-I4 T-I14 T-K1 T-W1 T-W2 T-W4 T-W5 |
+| **1** | 22 | T-A1–T-A7 T-B4 T-F2–T-F5 T-G8 T-G10 T-G11 T-H1 T-I2 T-K2 T-K11 T-W3 T-W7 T-W8 |
+| **2** | 18 | T-B1 T-B2 T-B3 T-F6 T-G1 T-G3 T-G6 T-G7 T-G9 T-H4 T-I10 T-I11 T-I13 T-J1 T-K3 T-K4 T-W6 T-W9 |
+| **3** | 15 | T-C1–T-C7 T-E1 T-G4 T-H2 T-H5 T-I5 T-I7 T-K5 T-K12 |
+| **4** | 6 | T-D1 T-E2 T-H3 T-I6 T-I9 T-I12 |
+| **5** | 8 | T-D2 T-D10 T-E3 T-E4 T-E5 T-G5 T-I8 T-K7 |
+| **6** | 7 | T-D3 T-D4 T-D5 T-D6 T-D7 T-E8 T-E9 |
+| **7** | 3 | T-D9 T-J3 T-K6 |
+| **8** | 4 | T-D8 T-G2 T-J2 T-K8 |
+| **9** | 1 | T-K9 |
+| **10** | 1 | T-K10 |
 
-### 14.3 The two long chains
+### 14.2 The chains, as computed
 
-Two chains of comparable length; the containment one is longer. Both end at CI wiring, not at the
-acceptance scenario — a scenario that gates nothing is not delivered.
+| Milestone | Longest chain to it | Days |
+|---|---|---|
+| Containment slice proven (**T-E2**) | T-W4 → T-W8 → T-W9 → T-E1 → T-E2 | 11.5 |
+| Containment complete (**T-E9**) | … → T-E2 → T-E3 → T-E9 | 13.5 |
+| Fidelity matrix complete (**T-D9**) | T-W2 → T-W3 → T-W6 → T-C1 → T-D1 → T-D2 → T-D4 → T-D9 | 15.0 |
+| Containment acceptance (**T-J3**) | T-W4 → T-W8 → T-W9 → T-E1 → T-E2 → T-E3 → T-E8 → T-J3 | 16.0 |
+| Fidelity acceptance (**T-J2**) | … → T-D9 → T-J2 | 16.5 |
+| **Everything gating (T-K9)** | … → T-J2 → T-K9 | **17.0** |
 
-```
-Containment  T-W4(M) → T-W8(M) → T-E1(L) → T-E2(M) → T-E3(M) → T-E4(L) → T-J3(M) → T-K6(M) → T-K8(S)
-             ≈ 17–18 days
+**The critical path runs through the corpus, not through containment.** That is not what the
+previous draft assumed, and it changes the advice: `T-W2 → T-W3 → T-W6 → T-C1` is four sequential
+tasks before the oracle can even start, because T-D1 needs one corpus entry to run against. The
+corpus was listed as a background risk; it is in fact the front of the longest chain.
 
-Fidelity     T-W2(S) → T-A1(M) → T-D1(L) → T-D2(M) → T-D4(L) → T-J2(M) → T-K6(M) → T-K8(S)
-             ≈ 15 days
-```
+Two consequences:
 
-They converge only at **T-K6**. Nothing in one waits on anything in the other before that, so
-**running them as two streams with different owners roughly halves elapsed time on the two hardest
-parts of the suite** — the single biggest scheduling lever in this plan.
+1. **T-W2, T-W3 and T-W6 are the first three things to staff**, in that order, and T-C1 should be
+   the first corpus entry captured — not whichever is most interesting.
+2. **Containment is no longer the long pole** but finishes only half a day earlier, and it is
+   fully independent until T-K9. Two owners still halve elapsed time; the fidelity owner is simply
+   the one on the critical path.
 
-Four consequences worth acting on:
+If the corpus dependency is judged too expensive, the lever is T-D1: let it run against a
+synthetic minimal transcript rather than T-C1, which removes three tasks from the front of the
+chain. That trades a little early realism for roughly two days — a decision worth taking
+deliberately rather than by default.
 
-1. **T-W2, T-W4, T-W5 and T-W8 head the chains and are all small.** They go first, and no two of
-   them to the same person.
-2. **T-A1 and T-A2 gate T-D1**, so those two projections go before the other four, which can be
-   built during T-D1's construction.
-3. **T-E1 is the riskiest task in the plan** and sits second in the longer chain. If it slips,
-   containment slips one-for-one. Start it earliest, review it hardest.
-4. **T-K6 is a convergence point and a single point of failure.** Both chains stop there; it
-   should not be scheduled as an afterthought.
+### 14.3 Consequences worth acting on
+
+1. **T-W2, T-W4, T-W5 and T-W8 head the chains and are all S/M.** They go first, and no two to the
+   same person.
+2. **T-E1 is the riskiest single task**; it sits early in the containment chain, which has ~1 day
+   of slack against the critical path. Slip it and containment becomes the critical path.
+3. **T-K9 is the convergence point.** Both chains stop there; it is not an afterthought.
+4. **T-K10 is the only tier-10 task** and it is blocked on Q12. It gates nothing else.
 
 ---
 
-## 15. Blocked on decisions, not on code
+## 15. Blocked on decisions
 
 | Question | Blocks | Cost of leaving it open |
 |---|---|---|
-| **Q4** + **Q13** — eval margin, compaction baseline | T-K3 | The eval runs and cannot conclude. T-K1/T-K2 proceed |
-| **Q10** — irreducible final turn | T-F2's exact bound, TR-3's wording, register rows M3–M7/M13 | T-F2 lands with the observed-behaviour property and is revised once — but it must be revised **together with** TR-3 and the register |
-| **Q11** — per-PR mutation cadence | Nothing. **T-H4 answers it** | T-H3 lands nightly-only; a later change moves it |
-| **Q12** — pinned Claude Code binary | T-I5, T-I6 — and therefore T-K6's `agent_smoke` selection | **The most expensive open question.** It blocks the only test of a third-party behaviour the product depends on, and it reaches into CI wiring |
-| **Q14** — post-emission stream recovery | T-I7's positive assertions | T-I7 lands asserting only the negatives: catches corruption, cannot confirm correctness |
+| **Q4** + **Q13** | T-K3, and therefore T-K12 | The eval runs and cannot conclude; T-K1/T-K2 proceed |
+| **Q10** | T-F2's exact bound, TR-3's wording, register rows M3–M7/M13 | T-F2 lands with the observed-behaviour property and is revised **together with** TR-3 and the register |
+| **Q11** | Nothing — **T-H4 answers it** | T-H3 lands nightly-only |
+| **Q12** | T-I5, T-I6, T-K10 | The settings-precedence claim has no per-PR proof. **It no longer blocks Subsystem or Acceptance** — T-K10 is a separate category |
+| **Q14** | T-I7's positive assertions | T-I7 lands asserting only the negatives |
 
-**Q1** (agent identity) blocks no task but decides whether T-I12 and T-J2's TR-1c exemption ever
-become gating. **Q5, Q6, Q7** affect register rows and residual-risk wording, not delivery.
+**Q1** blocks no task but decides whether T-I12 and TR-1c ever gate. **Q5–Q7** affect register
+rows and wording, not delivery.
 
 ---
 
-## 16. Relationship to the open defects
+## 16. Defects and regression evidence
 
-Five defects are filed. The dependency runs one way only:
+An earlier draft required every guard to **merge red** before its fix. That is stronger than the
+goal requires and it delays production fixes — KBR-5's acceptance scenario sits in tier 9 while
+the design ranks the defect priority 0.
 
-- **The guard lands first, red, with an exemption.** Writing it *after* the fix proves nothing
-  about whether it would have caught the defect — and the fix then has no regression test that
-  ever failed.
-- **The defect's ticket removes the exemption**, as its acceptance criterion. T-W7's
-  unexpected-pass rule makes forgetting impossible.
+**The goal is evidence that the regression test fails on the unfixed revision — not a separate red
+merge.** So:
 
-| Defect | Design gap | Guard that lands red | Exemption removed by |
+- **Default: one atomic PR** containing the regression test **and** the fix, with evidence in the
+  PR that the test fails at the base revision and passes with the fix. A guard written after the
+  fix with no such evidence is still not acceptable — that is what the rule exists to prevent.
+- **Exemption path** only where the fix must genuinely follow later, or where the guard's scope is
+  broader than one defect. T-G1, T-G3, T-G4, T-G5 and T-G9 each cover a class of check beyond a
+  single defect, so they may land first with a single-assertion exemption.
+- **Later acceptance scenarios pass normally** if the defect is already fixed. T-J2 does not need
+  TR-1c and TR-4 to be red; it needs them to be correct.
+
+| Defect | Design gap | Broader guard | Fastest route |
 |---|---|---|---|
-| KBR-5 — vendor string upstream | G14 | T-G5, T-J2 (TR-4) | KBR-5's fix |
-| KBR-6 — internal keys on the wire | G15 | T-G3 | KBR-6's fix |
-| KBR-7 — wire-shape mismatch | G16 | T-G4 | KBR-7's fix |
-| KBR-8 — contradictory client versions | G3 | T-G9, T-J2 (TR-1c) | KBR-8's fix |
-| KBR-9 — README endpoint table | G6 | T-G1 | KBR-9's fix |
+| KBR-5 | G14 | T-G5, TR-4 | Atomic fix + test now |
+| KBR-6 | G15 | T-G3 | Atomic fix + test now |
+| KBR-7 | G16 | T-G4 | Atomic fix + test now |
+| KBR-8 | G3 | T-G9, TR-1c | Atomic fix + test now |
+| KBR-9 | G6 | T-G1 | Atomic fix + test now |
 
 ---
 
-## 17. Risks in the sequencing
+## 17. Design-to-deliverable coverage
 
-**T-E1 is the hardest single task and the easiest to underestimate.** Direct-route resolution needs
-a different mechanism per transport, and T-E2 is explicit that a transport which cannot be given
-one is reported **unproven** rather than passed. Splitting T-E1/T-E2 means a stuck transport is one
-blocked M, not a blocked L.
+Every design requirement has an owner. "Existing" means the current suite already covers it.
 
-**The corpus is the quiet long pole.** T-C1–T-C7 are individually small but need real captured
-sessions, a secret review, and an owner for refresh. Start T-W6 on day one even though nothing
-visibly depends on it yet.
+| Design | Requirement | Owner |
+|---|---|---|
+| §3.2 | The register, machine-readable | T-W3 |
+| §3.3.1 | Six request projections | T-A1–T-A6 |
+| §3.3.1 | Response-direction `Reply` projection and comparison | T-A7, T-D10 |
+| §3.3.1 | Oracle falsification suite | T-D1, T-D3 |
+| §3.3.2 | Both oracle assertions | T-D1 |
+| §3.3.3 | Bridge-introduced scoping + the survival complement | T-G5 |
+| §3.3.4 | Trigger complements across models | T-D8, T-C1–T-C6 |
+| §3.3.5 | Routing in the oracle + deployment falsification | T-D2 |
+| §4.3 C1 | Header contract | T-G9 |
+| §4.3 C1b | Fingerprint parity baseline and report | T-C7, T-I12 |
+| §4.3 C2 | Key-order on the native path | T-D1 |
+| §4.3 C3 | Cross-attempt content | T-I8 |
+| §4.3 C5 | Connection lifecycle | T-C7, T-I9 |
+| §4.3 C6 | Side traffic | T-I13 |
+| §5.2.1 | Tunnel correlation | T-E2 |
+| §5.2.2 | Three phases + falsification, per transport | T-E2–T-E5, T-E9 |
+| §5.3 | Hostname harness, per-transport resolution | T-E1–T-E5 |
+| §5.4 | Guard enforcement and domination | T-E6, T-E7 |
+| §5.5 | Per-transport containment and the bypass asymmetry | T-E3–T-E5, T-E8 |
+| §6.1 | Properties · mutation validation | T-F1–T-F6 · T-H1–T-H5 |
+| §6.2.1 | OpenAPI, schemathesis, registration matrix | T-G6 |
+| §6.2.2 | SSE grammar | T-G7 |
+| §6.2.3 | Register, internal-key, wire-shape, vendor-token, docs guards | T-G1–T-G5 |
+| §6.2.4 | Four dependency contracts | T-G8, T-G10, T-G11, T-G12 |
+| §6.3.1 | Bridge-with-sockets scenarios | T-I7–T-I11 |
+| §6.3.2 | CLI lifecycle | T-I1–T-I4 |
+| §6.4.1 | Gherkin scenarios | T-J1–T-J3 |
+| §6.4.2 | Agent smoke · precedence · **five live scenarios** | T-I5 · T-I6 · T-I14 |
+| §6.4.3 | Eval harness, task set, statistics | T-K1–T-K3 |
+| §6.4.4 | Load rig and gate | T-K4, T-K5 |
+| §7.1–§7.4 | Corpus, recorders, proxy, oracle | T-W6/Epic C, T-W4/Epic B, T-W5, T-W2/T-D1 |
+| §8 | Markers, selection, job activation | T-W1, T-K6–T-K12 |
+| §5.1 | Real-socket transport proof across three stacks | **Existing** — `tests/test_egress_https_proxy.py`, extended by T-W5 |
+| §6.2.3 | A structural scan that asserts its own positives | **Existing** — `tests/test_egress_coverage.py`, the pattern T-E7 copies |
 
-**T-D4–T-D7 and T-G2 are adjacent and easy to duplicate.** T-D4–T-D7 own driving the wire and
-capturing; T-G2 owns asserting register-row coverage over those captures, as a meta-assertion. Two
-teams implementing "per adapter × model × transport" independently is the most likely wasted work
-in this plan — and if T-G2 re-drives the wire under an `l2` marker it puts real sockets in the
-fast gate.
+---
 
-**T-H2 is the only source change.** Keep it out of every test PR so a revert is cheap. It now
-depends on T-B3 so "behaviour unchanged" has evidence behind it rather than assertion.
+## 18. Risks
 
-**The existing suite already runs ~18.5 minutes per Python version.** Wave 3 onward adds real
-sockets to the PR gate. T-K6 should land with a measured runtime; if the gate crosses the point
-where people route around it, the marker split is the mechanism for pulling work back to nightly —
-that is what T-W1 buys beyond tidiness.
+**T-E1 is the hardest single task**, and T-E2's slice depends on it entirely. Splitting the
+per-transport routes into T-E3–T-E5 means a stuck transport is one blocked M and an entry in
+T-E9's unproven report, not a blocked chain.
+
+**The corpus is on the critical path**, not merely a background risk (§14.2). T-C1–T-C7 need real
+sessions, a secret review and a named refresh owner, and share one capture pass — while
+`T-W2 → T-W3 → T-W6 → T-C1` is the front of the longest chain. Staff it first, capture T-C1 first,
+and consider the synthetic-transcript lever in §14.2 if it slips.
+
+**T-D9 and T-G2 are adjacent.** T-D4–T-D9 own driving the wire and capturing; T-G2 asserts
+register coverage over those captures as a meta-assertion. Implementing "per adapter × model ×
+transport" twice is the most likely wasted work here — and if T-G2 re-drives the wire under an
+`l2` marker it puts real sockets in the fast gate.
+
+**T-H2 and T-H5 are the only source changes.** Keep them out of test PRs so a revert is cheap.
+
+**The suite already runs ~18.5 minutes per Python version.** Real sockets reach the PR gate at
+T-K6. It should land with a measured runtime; the marker split is the mechanism for pulling work
+back to nightly if the gate stops being fast.
+
+**Shared files need a named integration owner** — T-W2, T-W3, T-W4, T-W8 and T-W9 are touched by
+several streams. Everything else lives in stream-owned modules.
