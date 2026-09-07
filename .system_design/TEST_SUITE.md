@@ -1079,13 +1079,6 @@ a special case. Had it counted, the exclusion would retire on the very statement
 suppress and the middleware's three request-scoped writes would invert into reported leaks. Widening
 the rebinding rule is safe; widening it carelessly is not, so both cases carry their own tests.
 
-**The counterweight matters more than the rule.** That walk must **not** treat a `Subscript` or
-`Attribute` target as a rebinding. `request["_key_id"] = ...` writes *through* the name without
-rebinding it, so a walk that recursed into subscripts would retire the exclusion on the very
-statement it exists to suppress — and the middleware's three request-scoped writes would be
-reported as leaks, inverting the guard. Widening the rebinding rule is safe; widening it carelessly
-is not, so the subscript and attribute cases carry their own tests.
-
 Because an exclusion that stops matching is indistinguishable from a guard that has quietly gone
 blind, the exclusion carries its own assertion: **the scan must fail if the `web.Request`
 exclusion matches nothing.**

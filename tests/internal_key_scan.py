@@ -309,7 +309,7 @@ class _InternalKeyVisitor(ast.NodeVisitor):
         self.generic_visit(node)
 
     def visit_AugAssign(self, node: ast.AugAssign) -> None:
-        """Record ``obj["_key"] += value``, and retire a rebound name.
+        """Record ``obj["_key"] += value``.
 
         Args:
             node: The augmented assignment statement.
@@ -318,7 +318,7 @@ class _InternalKeyVisitor(ast.NodeVisitor):
         self.generic_visit(node)
 
     def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
-        """Record ``obj["_key"]: T = value``, and retire a rebound name.
+        """Record ``obj["_key"]: T = value``.
 
         Args:
             node: The annotated assignment statement.
