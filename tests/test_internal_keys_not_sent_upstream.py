@@ -14,12 +14,17 @@ body *after* the internal-key strip, so a test at the adapter hook would be
 blind to anything that repair introduces.  See ``TEST_SUITE.md`` §6.2.3, which
 requires the serialization boundary.
 
-**What this does not cover.** Three adapters override ``use_custom_transport``
-and build their real wire body inside their own transport, downstream of this
-boundary: ``bedrock``, ``ollama_cloud`` and ``openai_subscription``.  For those,
-this file proves the bridge-side body is clean, not the bytes on the socket.
-Their coverage is carried by T-G2 over T-D4–T-D9's captures; recorded as the
-residual on gap G15 in ``TEST_SUITE.md`` §9.
+**What this does not cover.** Of the three adapters overriding
+``use_custom_transport``, only ``openai_subscription`` builds its wire body
+independently of this boundary — ``_cc_to_responses`` and
+``_prepare_responses_body`` construct it from a fixed allowlist, which is why
+that adapter never leaked in the first place.  ``bedrock`` and ``ollama_cloud``
+both call ``self.translate_to_upstream(cc_request)`` inside their transports and
+send that body, so this file's assertion does reach their wire.
+
+The residual is therefore one adapter, and a structurally safe one. It is
+recorded against gap G15 in ``TEST_SUITE.md`` §9 and carried by T-G2 over
+T-D4–T-D9's captures.
 
 **Why the input is derived, not hand-written.** The key set comes from the AST
 scan in ``tests/internal_key_scan.py`` — the same scan the completeness guard
@@ -43,6 +48,11 @@ _CC_MODEL = "claude-sonnet-4-5"
 #: ``OpenCodeGoAdapter`` picks its wire shape from the model name, so one model
 #: exercises one route.  See ``opencode._MESSAGES_MODELS``.
 _EXTRA_MODELS: dict[str, tuple[str, ...]] = {"opencode_go": ("minimax-m2.5",)}
+
+#: Adapters whose upstream body comes from ``AnthropicAdapter``'s rebuild, which
+#: is what restores ``thinking`` and ``effort`` from the internal keys.  The
+#: three subclasses reach it whenever ``_native_messages_request`` is unset.
+_ANTHROPIC_REBUILD_ADAPTERS = ("anthropic", "custom_anthropic", "minimax_token", "zai_coding")
 
 #: Placeholder values by key, so an adapter that reads a key finds the shape it
 #: expects rather than raising on a string where it wanted a dict.
@@ -250,15 +260,23 @@ class TestTheStripPreservesWhatTheKeysCarry:
 
     They take :func:`_translator_only_cc`, never the topped-up input — see that
     function for why the distinction is the whole point of this class.
+
+    Parametrised over every adapter that reaches ``AnthropicAdapter``'s rebuild,
+    not just ``anthropic`` itself: the three subclasses take that path whenever
+    ``_native_messages_request`` is unset, which is what the translated Messages
+    path produces, so a rebuild that stopped restoring the feature would go
+    unnoticed on three of the four providers that offer it.
     """
 
-    def test_adaptive_thinking_survives_the_strip(self):
-        body = _upstream_body("anthropic", _translator_only_cc(_CC_MODEL))
+    @pytest.mark.parametrize("provider_type", _ANTHROPIC_REBUILD_ADAPTERS)
+    def test_adaptive_thinking_survives_the_strip(self, provider_type: str):
+        body = _upstream_body(provider_type, _translator_only_cc(_CC_MODEL))
 
         assert body["thinking"] == {"type": "adaptive"}
 
-    def test_effort_survives_the_strip(self):
-        body = _upstream_body("anthropic", _translator_only_cc(_CC_MODEL))
+    @pytest.mark.parametrize("provider_type", _ANTHROPIC_REBUILD_ADAPTERS)
+    def test_effort_survives_the_strip(self, provider_type: str):
+        body = _upstream_body(provider_type, _translator_only_cc(_CC_MODEL))
 
         assert body["effort"] == "high"
 
