@@ -19,6 +19,21 @@ variable's name — restricting it to targets called ``cc_request`` or ``body``
 would miss a leak written into ``payload["_x"] = 1``.  The single escape hatch
 is :data:`_REQUEST_ANNOTATIONS`; adding a non-body key to ``_INTERNAL_KEYS``
 to silence the scan is forbidden and is explained in the design document.
+
+**What it does not see.**  A key whose name is not a literal at the write site:
+``cc[prefix + name] = v``, ``cc[_SOME_CONSTANT] = v`` where the constant is
+defined elsewhere, ``cc.update(other)`` and ``{**computed}`` for a mapping built
+at run time, and ``cc.__setitem__("_x", v)``.  The middle one is the realistic
+gap — a module-level ``_RESOLVED_KEY = "_resolved_key"`` would go unseen — and it
+is left unresolved rather than half-solved, because a scan that follows some
+constants and not others invites more confidence than it earns.  Every form the
+scan *does* claim has a falsification case in
+``tests/test_internal_key_completeness.py``.
+
+**Import note.**  Both test modules import this one as ``internal_key_scan``,
+which works because pytest puts each test file's own directory on ``sys.path``.
+Adding a ``tests/__init__.py`` would turn ``tests`` into a package and break
+that; the import would then need to be ``tests.internal_key_scan``.
 """
 
 from __future__ import annotations
@@ -54,7 +69,8 @@ class KeyWrite:
         lineno: 1-based line number of the writing statement.
         key: The key written, including its leading underscore.
         form: Which AST form produced it — one of ``"subscript-assign"``,
-            ``"dict-literal"``, ``"setdefault"`` or ``"dict-kwarg"``.
+            ``"dict-literal"``, ``"setdefault"``, ``"update-kwarg"`` or
+            ``"dict-kwarg"``.
     """
 
     path: str
@@ -112,19 +128,55 @@ class _InternalKeyVisitor(ast.NodeVisitor):
 
     # ── scope tracking ──────────────────────────────────────────────────
 
-    def _enter_scope(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+    def _enter_scope(self, node: ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda) -> None:
         """Push a scope carrying the request-annotated parameters of *node*.
 
+        A parameter the inner function declares itself is **subtracted** from
+        what it inherits, even when an enclosing scope annotated the same name.
+        Without that, an inner ``def inner(request)`` taking an ordinary dict
+        would inherit the outer handler's exclusion and hide a real leak — which
+        is the name-keyed behaviour this exclusion exists to avoid.
+
         Args:
-            node: The function whose signature is being entered.
+            node: The function or lambda whose signature is being entered.
         """
         args = node.args
-        names = {
+        declared = {arg.arg for arg in (*args.posonlyargs, *args.args, *args.kwonlyargs)}
+        if args.vararg:
+            declared.add(args.vararg.arg)
+        if args.kwarg:
+            declared.add(args.kwarg.arg)
+        annotated = {
             arg.arg
             for arg in (*args.posonlyargs, *args.args, *args.kwonlyargs)
             if _annotation_name(arg.annotation) in _REQUEST_ANNOTATIONS
         }
-        self._request_names.append(self._request_names[-1] | names)
+        self._request_names.append((self._request_names[-1] - declared) | annotated)
+
+    def visit_Lambda(self, node: ast.Lambda) -> None:
+        """Stop a lambda parameter from inheriting an enclosing exclusion.
+
+        Args:
+            node: The lambda being visited.
+        """
+        self._enter_scope(node)
+        self.generic_visit(node)
+        self._request_names.pop()
+
+    def _drop_if_rebound(self, target: ast.expr) -> None:
+        """Retire the exclusion for a name that has been rebound.
+
+        ``request = await request.json()`` leaves ``request`` holding a request
+        *body*.  The exclusion is seeded from an annotation but applied to a
+        name, so it must stop at the point the name stops meaning what the
+        annotation said — otherwise it decays into exactly the name-based rule
+        the design forbids.
+
+        Args:
+            target: An assignment target.
+        """
+        if isinstance(target, ast.Name) and target.id in self._request_names[-1]:
+            self._request_names[-1] = self._request_names[-1] - {target.id}
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
         """Track request-annotated parameters across a function body.
@@ -198,7 +250,32 @@ class _InternalKeyVisitor(ast.NodeVisitor):
             node: The assignment statement.
         """
         for target in node.targets:
+            self._drop_if_rebound(target)
             self._visit_subscript_target(target, node.lineno)
+            # ``cc["_x"], other = 1, 2`` — a subscript can hide inside a tuple.
+            if isinstance(target, ast.Tuple | ast.List):
+                for element in target.elts:
+                    self._visit_subscript_target(element, node.lineno)
+        self.generic_visit(node)
+
+    def visit_For(self, node: ast.For) -> None:
+        """Retire the exclusion for a loop variable that reuses the name.
+
+        Args:
+            node: The ``for`` statement being visited.
+        """
+        self._drop_if_rebound(node.target)
+        self.generic_visit(node)
+
+    def visit_With(self, node: ast.With) -> None:
+        """Retire the exclusion for a ``with ... as request`` binding.
+
+        Args:
+            node: The ``with`` statement being visited.
+        """
+        for item in node.items:
+            if item.optional_vars is not None:
+                self._drop_if_rebound(item.optional_vars)
         self.generic_visit(node)
 
     def visit_AugAssign(self, node: ast.AugAssign) -> None:
@@ -235,16 +312,24 @@ class _InternalKeyVisitor(ast.NodeVisitor):
         self.generic_visit(node)
 
     def visit_Call(self, node: ast.Call) -> None:
-        """Record ``obj.setdefault("_key", v)`` and ``dict(obj, _key=v)``.
+        """Record ``setdefault``, ``update(**kwargs)`` and ``dict(_key=v)`` writes.
+
+        ``obj.update(_effort=x)`` is idiomatic — arguably more so than several
+        separate subscript assignments — and carries no dict literal for
+        :meth:`visit_Dict` to catch, so it needs a rule of its own.
 
         Args:
             node: The call expression.
         """
         func = node.func
-        if isinstance(func, ast.Attribute) and func.attr == "setdefault" and node.args:
+        if isinstance(func, ast.Attribute) and node.args and func.attr == "setdefault":
             first = node.args[0]
             if isinstance(first, ast.Constant):
                 self._record(first.value, node.lineno, "setdefault", target=func.value)
+        if isinstance(func, ast.Attribute) and func.attr == "update":
+            for keyword in node.keywords:
+                if keyword.arg is not None:
+                    self._record(keyword.arg, node.lineno, "update-kwarg", target=func.value)
         if isinstance(func, ast.Name) and func.id == "dict":
             for keyword in node.keywords:
                 if keyword.arg is not None:

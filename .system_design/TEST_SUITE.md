@@ -997,7 +997,7 @@ reported the adapter clean.
 | Guard | Asserts |
 |---|---|
 | **Register completeness — shape diff at the wire** | For every adapter × representative model × transport, capture the body at the §3.2.3 boundary and assert the projected delta from the input is exactly the union of that adapter's register rows whose triggers the input met. **One fixed request is not sufficient** — each conditional row needs a trigger case and a complement case (§3.3.4), and adapters that route by model need one input per route. |
-| **Internal-key completeness** | AST-scan `bridge/**` **and `providers/**`** for every `_`-prefixed key written into a Chat-Completions request dict, and assert each is a member of `_INTERNAL_KEYS`. **This is the guard that catches F4 (KBR-6).** The complementary check — that each `translate_to_upstream` override delegates or excludes the set — is necessary but not sufficient: every override strips it correctly today; the set itself is what is wrong. Two scoping rules make the scan sound; both are stated below. |
+| **Internal-key completeness** | AST-scan `bridge/**` **and `providers/**`** for every `_`-prefixed key written into **any** dict — the scan cannot narrow to request bodies, and must not try; see below — and assert each is a member of `_INTERNAL_KEYS`. **This is the guard that catches F4 (KBR-6).** The complementary check — that each `translate_to_upstream` override delegates or excludes the set — is necessary but not sufficient: every override strips it correctly today; the set itself is what is wrong. Two scoping rules make the scan sound; both are stated below. |
 | **Wire-shape honesty** | For every adapter × representative model, assert `upstream_wire_is_messages_api` agrees with the shape observed at the serialization boundary. Catches F5 (KBR-7). |
 | **Bridge-introduced vendor token** | No content the bridge *introduces* into a request body or header contains `kitty` in any casing. Scoped by the projection diff (§3.3.3), never a flat scan of the serialized body — a flat scan would fail on a user legitimately writing the word, and "fixing" that would breach I1. Catches F3 (KBR-5). |
 | **Start-path domination** | Every `BridgeServer(` construction is dominated by an `egress_block_reason(` call **at AST level**, not merely co-located in the same file. `cli/main.py` already holds two of the five start paths (§5.1 gap 3). **Necessary but not sufficient — see below.** |
@@ -1047,6 +1047,17 @@ is wrong and must not be taken. `_INTERNAL_KEYS` is applied to a Chat-Completion
 documented as "keys that must never be sent upstream"; these three never enter such a body at all.
 Adding them would make the set describe something it does not govern, and would then silently
 excuse a real leak if one of those names were ever written into an actual request body.
+
+**The exclusion is annotation-*seeded* but name-*applied*, so it must retire when the name is
+rebound.** An annotation binds a name once; every later use of that name is matched textually.
+`request = await request.json()` leaves `request` holding a parsed request *body*, and a naive
+implementation goes on excluding writes to it — at which point the rule has silently become the
+name-based one this section forbids, reachable in four moves (annotate, reassign, write, ship).
+The same applies to a nested `def inner(request)` that re-declares the name unannotated: it must
+*not* inherit the enclosing scope's exclusion, even though closures otherwise should. The scan
+therefore drops a name on assignment, `for`, `with` and re-declaration as a parameter. None of
+those shadowing forms occurs in `server.py` today; the rule exists so that the day one does, the
+guard does not quietly stop guarding.
 
 Because an exclusion that stops matching is indistinguishable from a guard that has quietly gone
 blind, the exclusion carries its own assertion: **the scan must fail if the `web.Request`

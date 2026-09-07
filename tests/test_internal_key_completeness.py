@@ -22,9 +22,10 @@ from __future__ import annotations
 
 import ast
 import collections
+from pathlib import Path
 
 import pytest
-from internal_key_scan import KeyWrite, scan_source, scan_tree
+from internal_key_scan import SRC, KeyWrite, scan_source, scan_tree
 
 from kitty.providers.base import ProviderAdapter
 
@@ -71,6 +72,22 @@ def _keys_by_file(writes: list[KeyWrite]) -> dict[str, set[str]]:
 
 class TestEveryInternalKeyIsRegistered:
     """R1: no internal key may be written without joining ``_INTERNAL_KEYS``."""
+
+    def test_the_scanned_tree_is_the_imported_package(self):
+        """The scan reads files; the expectation is imported. They must agree.
+
+        ``SRC`` is derived from this file's location, but ``_INTERNAL_KEYS``
+        comes from whatever ``kitty`` is importable. In a git worktree sharing
+        the main checkout's editable install those are two different trees, and
+        the guard then compares one tree's writes against the other tree's set —
+        which can produce a false pass as easily as a false failure.
+        """
+        import kitty
+
+        assert Path(kitty.__file__).resolve().parent == SRC, (
+            f"scanning {SRC} but importing {Path(kitty.__file__).resolve().parent}. "
+            "Run pytest with PYTHONPATH=src from this worktree."
+        )
 
     def test_every_internal_key_written_is_registered(self):
         writes, _excluded = scan_tree()
@@ -121,26 +138,38 @@ class TestTheScanCannotRotIntoANoOp:
         assert not stale, f"_EXPECTED_KEYS names files that mint no internal key any more: {stale}"
 
 
-#: One synthetic module per AST form the scan claims to cover.  A visitor that
-#: silently stopped handling a form would pass every check above.
-_SYNTHETIC_FORMS = {
-    "subscript-assign": 'def f(cc):\n    cc["_leaked"] = 1\n',
-    "dict-literal": 'def f():\n    return {"_leaked": 1}\n',
-    "dict-literal-via-update": 'def f(cc):\n    cc.update({"_leaked": 1})\n',
-    "dict-literal-via-unpack": 'def f(cc):\n    return {**cc, "_leaked": 1}\n',
-    "setdefault": 'def f(cc):\n    cc.setdefault("_leaked", 1)\n',
-    "dict-kwarg": "def f(cc):\n    return dict(cc, _leaked=1)\n",
+#: One synthetic module per way of writing a key, with the ``KeyWrite.form``
+#: each must report.  A visitor method that silently stopped working — or that
+#: started mislabelling what it found — would pass every check above.
+#:
+#: Keyed by case name, valued ``(source, expected_form)``.
+_SYNTHETIC_WRITES: dict[str, tuple[str, str]] = {
+    "subscript-assign": ('def f(cc):\n    cc["_leaked"] = 1\n', "subscript-assign"),
+    "subscript-augassign": ('def f(cc):\n    cc["_leaked"] += 1\n', "subscript-assign"),
+    "subscript-annassign": ('def f(cc):\n    cc["_leaked"]: int = 1\n', "subscript-assign"),
+    "subscript-in-tuple": ('def f(cc):\n    cc["_leaked"], x = 1, 2\n', "subscript-assign"),
+    "dict-literal": ('def f():\n    return {"_leaked": 1}\n', "dict-literal"),
+    "dict-literal-via-update": ('def f(cc):\n    cc.update({"_leaked": 1})\n', "dict-literal"),
+    "dict-literal-via-unpack": ('def f(cc):\n    return {**cc, "_leaked": 1}\n', "dict-literal"),
+    "setdefault": ('def f(cc):\n    cc.setdefault("_leaked", 1)\n', "setdefault"),
+    "update-kwarg": ("def f(cc):\n    cc.update(_leaked=1)\n", "update-kwarg"),
+    "dict-kwarg": ("def f(cc):\n    return dict(cc, _leaked=1)\n", "dict-kwarg"),
 }
 
 
 class TestTheScanIsFalsifiable:
     """R3d: each covered form is proven to be detected, not assumed."""
 
-    @pytest.mark.parametrize("form", sorted(_SYNTHETIC_FORMS))
-    def test_scan_flags_a_synthetic_key(self, form: str):
-        writes, _excluded = scan_source(_SYNTHETIC_FORMS[form])
+    @pytest.mark.parametrize("case", sorted(_SYNTHETIC_WRITES))
+    def test_scan_flags_a_synthetic_key(self, case: str):
+        source, expected_form = _SYNTHETIC_WRITES[case]
+        writes, _excluded = scan_source(source)
 
-        assert [w.key for w in writes] == ["_leaked"], f"the scan missed a {form} write"
+        assert [w.key for w in writes] == ["_leaked"], f"the scan missed a {case} write"
+        assert writes[0].form == expected_form, (
+            f"{case} was reported as {writes[0].form!r}, not {expected_form!r}; "
+            "the assertion message names the form, so a mislabel misdirects the reader"
+        )
 
     def test_scan_flags_a_write_to_an_unusual_target_name(self):
         """The scan must not filter by target name.
@@ -228,6 +257,56 @@ class TestTheRequestObjectExclusion:
 
         assert [w.key for w in writes] == ["_leaked"]
         assert [w.key for w in excluded] == ["_ok"]
+
+    #: Ways to make the excluded name stop meaning "the aiohttp request object".
+    #:
+    #: The exclusion is seeded from an annotation but applied to a *name*, so it
+    #: has to retire the moment the name is rebound. Without these, the rule
+    #: decays into the name-based one R4 forbids: annotate a parameter
+    #: ``web.Request``, reassign it to a body dict, and every write to it is
+    #: waved through.
+    _SHADOWING = {
+        "reassigned-to-a-dict": (
+            "def f(request: web.Request):\n    request = {}\n    request[\"_leaked\"] = 1\n"
+        ),
+        "reassigned-to-the-parsed-body": (
+            "async def f(request: web.Request):\n"
+            "    request = await request.json()\n"
+            '    request["_leaked"] = 1\n'
+        ),
+        "redeclared-as-a-nested-parameter": (
+            "def outer(request: web.Request):\n"
+            "    def inner(request):\n"
+            '        request["_leaked"] = 1\n'
+            "    return inner\n"
+        ),
+        "rebound-by-a-for-target": (
+            "def f(request: web.Request, items):\n"
+            "    for request in items:\n"
+            '        request["_leaked"] = 1\n'
+        ),
+        "rebound-by-a-with-target": (
+            "def f(request: web.Request, ctx):\n"
+            "    with ctx as request:\n"
+            '        request["_leaked"] = 1\n'
+        ),
+    }
+
+    @pytest.mark.parametrize("case", sorted(_SHADOWING))
+    def test_a_rebound_name_loses_the_exclusion(self, case: str):
+        writes, excluded = scan_source(self._SHADOWING[case])
+
+        assert [w.key for w in writes] == ["_leaked"], (
+            f"{case}: the name no longer holds the aiohttp request object, so the "
+            "exclusion must not still apply to it"
+        )
+        assert excluded == []
+
+    def test_a_lambda_parameter_does_not_inherit_the_exclusion(self):
+        source = 'def f(request: web.Request):\n    return lambda request: request.setdefault("_leaked", 1)\n'
+        writes, _excluded = scan_source(source)
+
+        assert [w.key for w in writes] == ["_leaked"]
 
 
 class TestTheScanParsesRatherThanGreps:

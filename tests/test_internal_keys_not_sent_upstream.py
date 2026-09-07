@@ -76,6 +76,29 @@ def _messages_body(model: str) -> dict:
     }
 
 
+def _translator_only_cc(model: str) -> dict:
+    """Build a CC request from the real translator, with nothing added.
+
+    R5 exists to reject a "fix" that makes every other test pass by deleting the
+    keys from the translator. It can only do that if its input is the
+    translator's own output: the topped-up dict from :func:`_cc_request`
+    re-supplies ``_effort`` and ``_thinking_adaptive`` from ``_INTERNAL_KEYS``,
+    so an adapter reads them and emits the feature whether the translator still
+    mints them or not.
+
+    That is not hypothetical. The first version of this file used the topped-up
+    input for R5, and ``test_adaptive_thinking_survives_the_strip`` passed
+    against the deletion it was written to catch.
+
+    Args:
+        model: Model name to translate for.
+
+    Returns:
+        The translator's output, unmodified.
+    """
+    return MessagesTranslator().translate_request(_messages_body(model))
+
+
 def _cc_request(model: str, *, native: bool) -> dict:
     """Build a CC request carrying every internal key the source can write.
 
@@ -117,12 +140,16 @@ def _routes() -> list[tuple[str, str, bool]]:
     ]
 
 
-def _upstream_body(provider_type: str, cc: dict) -> dict:
+def _upstream_body(provider_type: str, cc: dict, *, thinking_repair: bool = False) -> dict:
     """Serialize *cc* through the bridge's own serialization boundary.
 
     Args:
         provider_type: Registry key of the adapter under test.
         cc: The normalized CC request.
+        thinking_repair: Arm ``_thinking_repair_backends`` for the selected
+            backend, so ``_repair_thinking_roundtrip`` runs on the body after
+            the internal-key strip. Off by default because it is a per-backend
+            recovery state, not the ordinary path.
 
     Returns:
         The body the bridge would send as JSON.
@@ -133,6 +160,8 @@ def _upstream_body(provider_type: str, cc: dict) -> dict:
         resolved_key="test-key",
         model=cc["model"],
     )
+    if thinking_repair:
+        server._thinking_repair_backends = {server._current_backend_idx}
     return server._upstream_body_for(cc)
 
 
@@ -169,6 +198,25 @@ class TestNoInternalKeyReachesUpstream:
             "ProviderAdapter._INTERNAL_KEYS (src/kitty/providers/base.py)."
         )
 
+    @pytest.mark.parametrize("provider_type", ["anthropic", "openai", "zai_regular"])
+    def test_no_internal_key_reaches_upstream_under_thinking_repair(self, provider_type: str):
+        """The post-strip stage this boundary was chosen for must also be clean.
+
+        `_upstream_body_for` was picked over `translate_to_upstream` precisely
+        because `_repair_thinking_roundtrip` runs after the strip. That branch
+        is dormant unless the backend is in `_thinking_repair_backends`, so
+        without this case the choice of boundary is asserted but never
+        exercised — and a repair that started minting a key would slip past the
+        test placed there to catch it.
+
+        One native-wire adapter and two CC-wire ones, since the repair writes a
+        different carrier for each dialect.
+        """
+        cc = _cc_request(_CC_MODEL, native=False)
+        body = _upstream_body(provider_type, cc, thinking_repair=True)
+
+        assert not _leaked(body)
+
     def test_the_input_carries_every_discovered_key(self):
         """R6: the two guards share one key list, so neither can drift.
 
@@ -180,9 +228,14 @@ class TestNoInternalKeyReachesUpstream:
 
         assert expected <= set(cc), f"input is missing {sorted(expected - set(cc))}"
 
-    def test_the_input_actually_carries_the_defect_keys(self):
-        """A translator that stopped minting them would make R2 vacuous."""
-        cc = _cc_request(_CC_MODEL, native=False)
+    def test_the_translator_still_mints_the_defect_keys(self):
+        """A translator that stopped minting them would make R2 vacuous.
+
+        Asserted against the translator's own output. Against the topped-up
+        input this could only fail if the keys left ``_INTERNAL_KEYS``, which is
+        not what it claims to guard.
+        """
+        cc = _translator_only_cc(_CC_MODEL)
 
         assert {"_effort", "_thinking_adaptive"} <= set(cc)
 
@@ -194,15 +247,18 @@ class TestTheStripPreservesWhatTheKeysCarry:
     in the translator. That would silently remove adaptive thinking and effort
     control from every Anthropic-compatible provider. These two tests reject
     that fix.
+
+    They take :func:`_translator_only_cc`, never the topped-up input — see that
+    function for why the distinction is the whole point of this class.
     """
 
     def test_adaptive_thinking_survives_the_strip(self):
-        body = _upstream_body("anthropic", _cc_request(_CC_MODEL, native=False))
+        body = _upstream_body("anthropic", _translator_only_cc(_CC_MODEL))
 
         assert body["thinking"] == {"type": "adaptive"}
 
     def test_effort_survives_the_strip(self):
-        body = _upstream_body("anthropic", _cc_request(_CC_MODEL, native=False))
+        body = _upstream_body("anthropic", _translator_only_cc(_CC_MODEL))
 
         assert body["effort"] == "high"
 
