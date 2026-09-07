@@ -103,11 +103,28 @@ class TestCIWorkflow:
         branches = trigger.get("pull_request", {}).get("branches", [])
         assert "main" in branches, "CI must trigger on PRs targeting main"
 
-    def test_runs_on_ubuntu(self, workflow: dict):
+    def test_runs_on_the_self_hosted_linux_fleet(self, workflow: dict):
+        """Every job runs on the organisation's self-hosted Linux runners.
+
+        Replaces an assertion that every job names an ``ubuntu`` label. That
+        was true while the tree ran on GitHub-hosted runners and is now false
+        by design, so it is retargeted rather than deleted — dropping it would
+        leave nothing asserting where these jobs run.
+
+        Checks the tier too: a job that keeps ``self-hosted`` but names no
+        ``cap-`` tier matches every runner in the fleet, which is the shape
+        that queues behind scarce machines for no reason.
+        """
         jobs = _resolve_jobs(workflow)
         for job_name, job in jobs.items():
-            runs_on = job.get("runs-on", "")
-            assert "ubuntu" in str(runs_on), f"Job '{job_name}' must run on ubuntu"
+            runs_on = job.get("runs-on")
+            if runs_on is None:
+                continue  # a caller job delegates to the reusable workflow's own runner
+            labels = runs_on if isinstance(runs_on, list) else [runs_on]
+            assert "self-hosted" in labels, f"Job '{job_name}' must run on the self-hosted fleet, got {runs_on!r}"
+            assert any(label.startswith("cap-") for label in labels), (
+                f"Job '{job_name}' names no cap-* tier, so it matches every runner in the fleet: {runs_on!r}"
+            )
 
     def test_checks_out_code(self, workflow: dict):
         steps = _get_all_steps(workflow)

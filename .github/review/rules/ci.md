@@ -230,14 +230,30 @@ that overrides the child's endpoint and credentials.
 
 ## Runner and caps
 
-- `runs-on: ubuntu-latest` for the review job, for `ci-required` and for the
-  `update-metadata` and test jobs; `ubuntu-slim` for the two review-system jobs in
-  `ci.yml`. All GitHub-hosted. This repository is public, and a runner group's
-  *"Allow public repositories"* setting is off by default, so a `[self-hosted,
-  …]` label reaches no group at all. A change that moves to one needs to say what
-  changed about that grant, or it will silently never run.
+- **Every job runs on the organisation's self-hosted Linux fleet**, spelled
+  `[self-hosted, cap-<tier>, noble]`: `cap-main` for the test matrix, `cap-light`
+  for the review job, `cap-nano` for `update-metadata` and `publish`, `cap-pico`
+  for `review-scripts`, `review_replies` and `ci-required`. The `cap-*` labels are
+  cumulative tiers, so **ask for the smallest tier the job needs** — a larger one
+  narrows the pool and queues the job behind scarcer machines for nothing. Flag a
+  job that names `self-hosted` with no tier: it matches the whole fleet.
+- 🔴 **The grant is the prerequisite, and it is not visible from inside this
+  repository.** A runner group's *"Allow public repositories"* setting is off by
+  default and this repository is public, so a `[self-hosted, …]` label reaches no
+  group until an owner opens one. This tree ran on GitHub-hosted runners for
+  exactly that reason before the fleet was opened to it, and the revert is
+  recorded in `claude-code-review.yml` — three jobs sat `queued` for over fifteen
+  minutes with no error, no annotation and no timeout. **If checks are missing
+  rather than red, verify the grant before reading anything else:**
+
+      gh api orgs/<org>/actions/runner-groups/<id> --jq '.allows_public_repositories'
+
+  A change that moves a job back to a GitHub-hosted label needs to say why, and a
+  change that adds a job must put it on the fleet like its siblings.
 - 🔴 **A `timeout-minutes:` above the runner's platform ceiling is a fiction, and
-  nothing warns.** `ubuntu-slim` is a single-CPU runner with a **15-minute job
+  nothing warns.** The self-hosted ceiling is 5 days, so every cap in the tree is
+  enforceable today — but the trap is one label change away, and the tree carries
+  the scar. `ubuntu-slim` is a single-CPU runner with a **15-minute job
   ceiling that cannot be raised from configuration** (GitHub's runner reference:
   *"The job timeout for single-CPU runners is 15 minutes. If a job reaches this
   limit, the job is terminated and fails."*). Upstream, the review job declared 60
@@ -255,8 +271,9 @@ that overrides the child's endpoint and credentials.
   label nothing offers queues **for ever** — no error, no annotation, no timeout.
   A typo and an ungranted runner are indistinguishable. So flag any change to a
   `runs-on:` label the pull request does not explain, and treat "the check never
-  appeared" as a label question first. `ubuntu-latest` is the always-available
-  fallback.
+  appeared" as a label question first — then as a grant question. `ubuntu-latest`
+  remains the always-available label, and is the fallback if the fleet is ever
+  withdrawn from this repository.
 - **A runner image may be missing a tool the action shells out to.** `unzip` is
   the known case and the preflight step covers it. A change that adds a step
   invoking a new tool should add it to that preflight call — nothing else will

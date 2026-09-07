@@ -248,23 +248,30 @@ jobs:
     # assignment nothing can ever police, and this file is the only record of where the
     # job runs. Change the literal, in a pull request, where it is reviewed.
     #
-    # 🔴 **GITHUB-HOSTED, BECAUSE THIS REPOSITORY IS PUBLIC AND THE SELF-HOSTED FLEET
-    # CANNOT SERVE IT.** The reference repository runs this job on its own
-    # `[self-hosted, cap-light, noble]` machines. That is unavailable here, and not for
-    # a reason a label change could fix: a runner group carries an **"Allow public
-    # repositories"** setting that is OFF by default, so a public repository reaches no
-    # group until somebody deliberately opens one to it. Opening a shared fleet to a
-    # public repository is a decision with a real blast radius -- anyone who can open a
-    # pull request gets closer to those machines -- so this takes the hosted runner
-    # instead of asking for that.
+    # 🔴 **SELF-HOSTED, AND THE GRANT IS THE PREREQUISITE -- NOT THE LABEL.** The whole
+    # tree moved to the fleet deliberately; `rules/ci.md` and the project `CLAUDE.md`
+    # carry the standing rule. `cap-light` matches what the reference repository runs
+    # this same job on.
     #
-    # 🔴 **WHAT THAT FAILURE LOOKED LIKE, because it is the reason this comment is
-    # long.** Three jobs sat `queued` for over fifteen minutes with **no error, no
-    # annotation and no timeout**, while a GitHub-hosted job on the same pull request
-    # finished in 55 seconds. Proved rather than inferred: a throwaway workflow asking
-    # for the bare `self-hosted` label -- no capability, no OS pin, which matches every
-    # runner in every group a repository can see -- was never claimed either. Nothing
-    # claimed it, so that set was empty.
+    # 🔴 **THIS EXACT MOVE WAS TRIED BEFORE AND FAILED, and the record stays because
+    # the failure is silent and repeats on its own.** A runner group carries an
+    # **"Allow public repositories"** setting that is OFF by default, and this
+    # repository is public, so a `[self-hosted, ...]` label reaches no group until
+    # somebody deliberately opens one to it. What that looked like: three jobs sat
+    # `queued` for over fifteen minutes with **no error, no annotation and no
+    # timeout**, while a GitHub-hosted job on the same pull request finished in 55
+    # seconds. Proved rather than inferred -- a throwaway workflow asking for the bare
+    # `self-hosted` label, which matches every runner in every group a repository can
+    # see, was never claimed either. Nothing claimed it, so that set was empty.
+    #
+    # ⚠️ **So this label is correct only while the grant is on.** Opening a shared
+    # fleet to a public repository has a real blast radius -- anyone who can open a
+    # pull request gets closer to those machines -- so it is an owner's decision, made
+    # once, outside this file. Verify it rather than assume it:
+    #
+    #     gh api orgs/<org>/actions/runner-groups/<id> --jq '.allows_public_repositories'
+    #
+    # If every check on a pull request is missing rather than red, check that first.
     #
     # ⚠️ **AN UNREACHABLE LABEL IS SILENT, AND THAT IS STILL THE THING TO REMEMBER
     # HERE.** A job asking for a label nothing offers queues for ever exactly as the
@@ -305,12 +312,14 @@ jobs:
     # two-attempt retry this job is built around cannot fit under a 15-minute ceiling at
     # ANY cap when one median attempt alone is nine minutes.
     #
-    # `ubuntu-latest` carries 4 CPUs against slim's 1 and the ordinary 6-hour ceiling, so
-    # the cap below becomes enforceable for the first time and the distribution should
-    # shorten as well. `ci.yml` deliberately KEEPS `ubuntu-slim`: two jobs whose slowest
-    # observed run is 207s are exactly the lightweight workload that label is for. The
-    # review workflow and the two `ci.yml` review jobs therefore no longer share one
-    # label, which is a real cost -- see `ci.yml`, where it is recorded on both jobs.
+    # The cap below is enforceable on this label: the self-hosted job ceiling is 5 days
+    # against slim's 15 minutes, so the measured 14m28s maximum above has room it never
+    # had. ⚠️ **The measurements above were taken on `ubuntu-slim` and then on
+    # `ubuntu-latest`; neither predicts this fleet.** They are kept because a recorded
+    # measurement is not edited to match a new configuration -- but the distribution on
+    # `cap-light` is UNMEASURED, and the first thing to re-read here is whether the cap
+    # still clears it. `ci.yml`'s two review jobs are on `cap-pico`, the tier sized for
+    # their 207s, so the tree no longer splits across a hosted/self-hosted boundary.
     # ⚠️ This used to count the workflows in the tree rather than name the jobs it
     # is about, and went wrong the moment the test jobs landed. The cost it records
     # is unchanged -- it was always about these two jobs and this one -- so it now
@@ -322,7 +331,7 @@ jobs:
     #
     # ⚠️ The pairing of this label with the cap below is now checked by
     # `DeclaredJobCapIsEnforceableTests`, so neither line can move without the other.
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, cap-light, noble]
     # 🔴 **22 -> 25, and the STEP cap below is deleted (upstream).** This review died at
     # exactly 20m12s against a 20-minute step cap. a sibling repository runs the same
     # model at the same `--effort max` and, at the time, the same turn budget -- 150,

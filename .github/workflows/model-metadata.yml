@@ -48,7 +48,7 @@ jobs:
     # The `push` trigger is gone from `on:` above rather than being filtered by
     # an `if:`, which is what that condition used to do. Same outcome, one fewer
     # queued-and-skipped job per merge.
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, cap-nano, noble]
     # A backstop, not a budget: this installs the package and makes one API
     # call. Sized to notice a hang rather than to accommodate one. Six hours is
     # the platform ceiling on this label and would be a fiction as a cap.

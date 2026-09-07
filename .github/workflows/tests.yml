@@ -13,11 +13,16 @@ permissions:
 jobs:
   test:
     name: Python ${{ matrix.python-version }}
-    runs-on: ubuntu-latest
+    # `cap-main` because this is the heaviest job in the tree: four Python
+    # versions, each running the full ~3100-test suite. The smaller tiers are
+    # sized for short single-CPU work and would stretch a job that already runs
+    # for minutes. See `rules/ci.md` for why the whole tree is on the fleet.
+    runs-on: [self-hosted, cap-main, noble]
     # A backstop, not a budget: the suite runs in a couple of minutes. Sized to
     # notice a hang. ⚠️ A matrix job is held to the LOWEST platform ceiling among
-    # the labels its matrix can produce, so adding an `ubuntu-slim` entry here
-    # would make this cap a fiction — see `.github/review/rules/ci.md`.
+    # the labels its matrix can produce, so adding a lower-ceiling entry here
+    # would make this cap a fiction — see `.github/review/rules/ci.md`. On the
+    # self-hosted fleet the ceiling is 5 days, so 30 is enforceable with room.
     timeout-minutes: 30
     strategy:
       fail-fast: false

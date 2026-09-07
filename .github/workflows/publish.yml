@@ -18,7 +18,7 @@ jobs:
 
   publish:
     needs: test
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, cap-nano, noble]
     timeout-minutes: 20
     environment:
       name: pypi
