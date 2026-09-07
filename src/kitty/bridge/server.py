@@ -4644,12 +4644,6 @@ class BridgeServer:
         self._maybe_warn_oversized(cc_request)
 
         for attempt in range(n_backends):
-            # Reset per attempt: the flag must mean "the MOST RECENT attempt
-            # ended in compaction exhaustion", never "one ever did". Left
-            # sticky, an irreducible conversation on backend A would report as
-            # the final verdict for backend B's unrelated 429 — telling the user
-            # not to retry a transient failure that retrying would fix.
-            compaction_exhausted = False
             if attempt > 0:
                 try:
                     self._select_backend()
@@ -4658,6 +4652,18 @@ class BridgeServer:
                     break
                 self._normalize_model(cc_request)
                 self._active_provider.normalize_request(cc_request)
+
+            # Reset per attempt: the flag must mean "the MOST RECENT attempt
+            # ended in compaction exhaustion", never "one ever did". Left
+            # sticky, an irreducible conversation on backend A would report as
+            # the final verdict for backend B's unrelated 429 — telling the user
+            # not to retry a transient failure that retrying would fix.
+            #
+            # Reset AFTER the `break` above, not before it: an attempt that never
+            # started must not clear what the previous one established, or a
+            # backend going unhealthy underneath us (from another request) would
+            # turn a compaction failure back into the raw upstream error.
+            compaction_exhausted = False
 
             try:
                 cc_response = await self._make_upstream_request(cc_request, retry_rate_limit=False, grace=grace)
@@ -5902,6 +5908,16 @@ class BridgeServer:
         ``_is_context_too_large_error`` — see ``_request_with_retry_balancing``.
         Compaction only helps when there is content to shrink, so a
         context-too-large error on a small request fails over instead.
+
+        Args:
+            cc_request: The Chat-Completions request to measure. Only its
+                ``messages`` are counted; a request without them is never
+                oversized.
+
+        Returns:
+            ``True`` when the serialized messages exceed
+            ``_OVERSIZED_INPUT_THRESHOLD``, ``False`` otherwise — including when
+            they cannot be serialized at all.
         """
         messages = cc_request.get("messages")
         if not messages:

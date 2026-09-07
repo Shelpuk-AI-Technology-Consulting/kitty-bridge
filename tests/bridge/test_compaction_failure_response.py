@@ -25,6 +25,7 @@ import uuid
 import aiohttp
 import pytest
 
+from kitty.bridge import server as server_module
 from kitty.bridge.server import BridgeServer, UpstreamError
 from kitty.launchers.base import LauncherAdapter, SpawnConfig
 from kitty.profiles.schema import Profile
@@ -484,6 +485,179 @@ class TestRecoveryPathCompactionFailure:
 
         assert status == 429, "an unrelated later failure must surface as itself"
         assert body["error"].get("reason") != "compaction_failed"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "path,payload,read_reason",
+        [
+            pytest.param(
+                "/v1/messages",
+                {"model": "m", "messages": [{"role": "user", "content": "hi"}], "stream": False},
+                lambda b: b["error"]["reason"],
+                id="messages",
+            ),
+            pytest.param(
+                "/v1/responses",
+                {"model": "m", "input": [{"role": "user", "content": "hi"}], "stream": False},
+                lambda b: b["error"]["reason"],
+                id="responses",
+            ),
+            pytest.param(
+                "/v1beta/models/gemini-pro:generateContent",
+                {"contents": [{"role": "user", "parts": [{"text": "hi"}]}]},
+                lambda b: b["error"]["reason"],
+                id="gemini",
+            ),
+        ],
+    )
+    async def test_every_handler_renders_its_dialect_on_the_recovery_path(
+        self, monkeypatch, path, payload, read_reason
+    ):
+        """The recovery raise must not degrade to a 500 in any handler.
+
+        Each handler catches this at a *different* site from the pre-flight one,
+        and all four currently degrade differently without it: Messages and
+        Responses through their inner ``except Exception`` around
+        ``_request_with_retry``, Gemini and Chat Completions through theirs, and
+        the two without an outer ``try`` through the access-log middleware. The
+        clause is per handler, so the test has to be too.
+        """
+        server = _balancing_server(n_backends=2)
+
+        async def _always_too_large(cc_request, *args, **kwargs):
+            raise UpstreamError(400, "context length exceeded: too many tokens in the request")
+
+        monkeypatch.setattr(server, "_make_upstream_request", _always_too_large)
+        monkeypatch.setattr(server, "_is_oversized_request", lambda _req: True)
+        monkeypatch.setattr(
+            server,
+            "_compact_with_tighter_budget",
+            # Substitutes the real method deliberately: this test is about the
+            # handler's exception rendering, not about budget arithmetic. The
+            # real method is covered by the oversized-payload test below.
+            lambda cc_request, factor=0.5: server._compact_messages(list(_ORPHAN_CC_MESSAGES), 10),
+        )
+        port = await server.start_async()
+        try:
+            status, body = await _post(port, path, payload)
+        finally:
+            await server.stop_async()
+
+        assert status == 400, f"{path} degraded instead of rendering its dialect"
+        assert read_reason(body) == "compaction_failed"
+
+    @pytest.mark.asyncio
+    async def test_a_genuinely_oversized_payload_reaches_the_tighter_recompaction(self, monkeypatch):
+        """Drive the real 600 KB gate instead of mocking it open.
+
+        The recovery path has three conditions, and the third —
+        ``_is_oversized_request``, i.e. serialized messages over
+        ``_OVERSIZED_INPUT_THRESHOLD`` — is the one a small fixture silently
+        fails, leaving a test that proves nothing. The sibling tests above mock
+        it to stay fast; this one sends a real 700 KB history and asserts the
+        real ``_compact_with_tighter_budget`` runs.
+
+        **It deliberately does not assert a 400.** Measured against the code,
+        the recovery re-compaction cannot reach the post-condition with
+        realistic input: pre-flight ``_apply_compaction`` strips every orphan
+        tool result (raising if that empties the conversation), so anything
+        arriving here is already well-paired, and ``_compact_messages`` groups
+        pairs atomically and always keeps one non-system block. The guard at
+        that site is therefore defence in depth — kept because
+        ``_compact_with_tighter_budget`` does **not** re-run pairing validation,
+        so a future change could make it reachable, and because the invariant
+        should hold wherever compaction runs. The sibling tests inject the
+        exception precisely because no fixture can provoke it here.
+        """
+        server = _balancing_server(n_backends=1)
+        reached: list[float] = []
+        real_tighter = server._compact_with_tighter_budget
+
+        def _spy_tighter(cc_request, factor=0.5):
+            reached.append(factor)
+            return real_tighter(cc_request, factor=factor)
+
+        async def _always_too_large(cc_request, *args, **kwargs):
+            raise UpstreamError(400, "context length exceeded: too many tokens in the request")
+
+        monkeypatch.setattr(server, "_make_upstream_request", _always_too_large)
+        monkeypatch.setattr(server, "_compact_with_tighter_budget", _spy_tighter)
+        # The empty-response fallback sleeps 20s then 40s; nothing here depends
+        # on it and the test should not either.
+        monkeypatch.setattr(server_module, "_EMPTY_FINAL_DELAYS", [])
+
+        # Over _OVERSIZED_INPUT_THRESHOLD (600_000 serialized chars) so the real
+        # gate opens. Split across turns to stay a plausible history.
+        big_turns = [{"role": "user", "content": "x" * 70_000} for _ in range(10)]
+        port = await server.start_async()
+        try:
+            status, _ = await _post(
+                port,
+                "/v1/chat/completions",
+                {"model": "m", "messages": big_turns, "stream": False},
+            )
+        finally:
+            await server.stop_async()
+
+        assert reached == [0.5], "a real 700KB payload must reach the tighter re-compaction"
+        assert status == 400, "the upstream's own context-too-large error still surfaces"
+
+
+# ── The wire itself ────────────────────────────────────────────────────────
+
+
+class TestNothingOnTheWireNamesTheProduct:
+    """The end-to-end half of the guard: what actually leaves the process.
+
+    Every other test here asserts that *nothing* is sent. This one lets a normal
+    request through and inspects the bytes and headers the provider would see —
+    the only assertion in the suite that covers the header channel at all.
+    """
+
+    @pytest.mark.asyncio
+    async def test_body_and_headers_carry_no_vendor_token(self, monkeypatch):
+        """A below-threshold request reaches upstream naming nothing.
+
+        The inbound turn deliberately contains ``kitty-bridge``: it must arrive
+        **unchanged**, proving the guard is not satisfied by stripping the
+        user's words. Satisfying indistinguishability that way would breach
+        message fidelity, which is the trap ``TEST_SUITE.md`` §6.2.3 warns about.
+        """
+        server = _bridge_mode_server()
+        spy = _UpstreamSpy()
+        captured_headers: dict[str, str] = {}
+        monkeypatch.setattr(server, "_make_upstream_request", spy)
+
+        real_headers = server._build_upstream_headers
+
+        def _capture_headers():
+            captured_headers.update(real_headers())
+            return dict(captured_headers)
+
+        monkeypatch.setattr(server, "_build_upstream_headers", _capture_headers)
+
+        turn = {"role": "user", "content": "Please explain how kitty-bridge works"}
+        port = await server.start_async()
+        try:
+            status, _ = await _post(
+                port,
+                "/v1/chat/completions",
+                {"model": "m", "messages": [dict(turn)], "stream": False},
+            )
+        finally:
+            await server.stop_async()
+
+        assert status == 200
+        assert spy.bodies, "the request never reached upstream, so this proves nothing"
+        sent = spy.bodies[0]
+        assert turn in sent["messages"], "the agent's own text must reach the provider unchanged"
+
+        # Everything the bridge added, with the agent's own turn removed.
+        introduced = {k: v for k, v in sent.items() if k != "messages"}
+        assert "kitty" not in json.dumps(introduced, ensure_ascii=False).lower()
+        assert "kitty" not in json.dumps(captured_headers, ensure_ascii=False).lower(), (
+            f"a header names the product: {captured_headers}"
+        )
 
 
 # ── The message the user actually reads ────────────────────────────────────

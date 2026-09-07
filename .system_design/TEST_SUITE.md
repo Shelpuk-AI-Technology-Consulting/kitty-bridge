@@ -593,7 +593,18 @@ its own ticket. F3, F4 and F5 are live breaches of invariants defined above.
   handlers render a protocol-native HTTP 400 carrying `error.reason == "compaction_failed"`. The
   recovery path (`_compact_with_tighter_budget`) fails over to the next backend **without** marking
   it unhealthy, since no second upstream request was made and cooling the pool down for one corrupt
-  conversation would 503 every concurrent session. Original finding, for the record:
+  conversation would 503 every concurrent session.
+
+  **The recovery-path guard is defence in depth, not a reachable path — measured.** Pre-flight
+  `_apply_compaction` strips every orphan tool result and raises if that empties the conversation,
+  so anything arriving at the recovery re-compaction is already well-paired; `_compact_messages`
+  groups `tool_use`/`tool_result` atomically and its guaranteed-fit fallback always keeps one
+  non-system block. Four oversized shapes were driven through both stages and none reached the
+  post-condition from recovery. The guard stays because `_compact_with_tighter_budget` does **not**
+  re-run pairing validation, so a future change could make it reachable, and because the invariant
+  should hold wherever compaction runs — but the handler tests for that site inject the exception
+  deliberately, and say so, rather than pretending a fixture provokes it. Original finding, for the
+  record:
 
   When compaction
   cannot preserve any non-system message, `_compact_messages` discarded the conversation and
