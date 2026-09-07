@@ -13556,8 +13556,8 @@ class OutcomeChainCancellationWiringTests(unittest.TestCase):
 class GitignoredDocumentsAreNotPromisedTests(unittest.TestCase):
     """🔴 The reviewer must not be sent to a document that is not in the checkout.
 
-    `.gitignore` excludes `/.system_design/`, `/.requirements/`, `/.references/`
-    and `/CLAUDE.md`, so none of them reaches CI. The prompt and the guide are
+    `.gitignore` excludes `/.requirements/`, `/.references/` and `/CLAUDE.md`, so
+    none of them reaches CI. The prompt and the guide are
     written on a developer's machine, where every one of those directories DOES
     exist -- which is exactly how a sentence telling the reviewer to read one
     gets written and never noticed. On the runner the model then spends turns
@@ -13572,10 +13572,26 @@ class GitignoredDocumentsAreNotPromisedTests(unittest.TestCase):
     tree and against `.gitignore`, so a new always-read document is checked the
     moment it is named.
 
-    ⚠️ **This is the class that changes the day `/.system_design/` stops being
-    ignored** -- and at that point the two design-document rules omitted from
-    :data:`NoDocumentClaimsTheRepositoryHasNoTestGateTests.CLAIMS` become worth
-    importing. The note there points here.
+    ⚠️ **That day came: the test-suite design landed in
+    `.system_design/TEST_SUITE.md` and `/.system_design/` left `.gitignore`.**
+    This class changed accordingly --
+    `.system_design` is no longer one of the excluded prefixes, so the pattern no
+    longer forbids sending the reviewer there, and a sentence doing so is now a
+    specimen in the ALLOWED list rather than the FORBIDDEN one. The control keeps
+    `.requirements`, which is still excluded; it was not given a replacement
+    second path, because a control built on a path that is not excluded asserts
+    nothing while still looking like a control.
+
+    The class also now asserts `.system_design` is **absent** from the excluded
+    set, so the day it is re-excluded this fails and says to restore it, rather
+    than silently permitting a promise the checkout cannot keep.
+
+    ⚠️ **Still open, deliberately:** the two design-document rules omitted from
+    :data:`NoDocumentClaimsTheRepositoryHasNoTestGateTests.CLAIMS` are now worth
+    importing, and the prompt and guide may now legitimately direct the reviewer
+    at `.system_design/`. Both are content decisions about what the reviewer is
+    told, not test-premise repairs, and are tracked in the internal issue tracker
+    rather than made here as a side effect of unblocking CI.
     """
 
     ROOT = Path(__file__).resolve().parents[3]
@@ -13676,8 +13692,17 @@ class GitignoredDocumentsAreNotPromisedTests(unittest.TestCase):
         """
 
         ignored = self._ignored_prefixes()
-        self.assertIn(".system_design", ignored)
+        # `.system_design` was the second specimen until the design documents
+        # were committed and it left `.gitignore`. It is not replaced: the
+        # control needs a path that IS still excluded, and substituting one that
+        # is not would make it assert nothing while still looking like a control.
         self.assertIn(".requirements", ignored)
+        self.assertNotIn(
+            ".system_design",
+            ignored,
+            "`.system_design/` is tracked again — if it has been re-excluded, "
+            "restore it to this control and to the specimens below",
+        )
 
         paths = "|".join(
             re.escape(entry) for entry in sorted(ignored) if entry.endswith(".md") or "/" not in entry
@@ -13688,15 +13713,21 @@ class GitignoredDocumentsAreNotPromisedTests(unittest.TestCase):
         )
 
         for specimen in (
-            "Then read `.system_design/SYSTEM_DESIGN.md` in full before the diff",
             "Also read the task's .requirements/REQUIREMENTS.md for acceptance criteria",
+            "Then open `.requirements/REQUIREMENTS.md` in full before the diff",
         ):
             with self.subTest(specimen=specimen):
                 self.assertTrue(imperative.search(specimen), specimen)
 
+        # 🔴 The other half of the control, and the one that changed. A sentence
+        # sending the reviewer to `.system_design/` must now be ALLOWED: those
+        # documents are tracked, so the checkout has them and the rule this class
+        # enforces does not apply to them any more. Were the pattern still built
+        # from a stale list, this case would fail and say so.
         for allowed in (
-            "`.system_design/` and `.requirements/` are currently in `.gitignore`",
-            "The selector matches `.system_design/**/*.md` so the day one lands",
+            "Then read `.system_design/TEST_SUITE.md` in full before the diff",
+            "`.requirements/` is currently in `.gitignore`",
+            "The selector matches `.system_design/**/*.md`",
             "Do not report a missing design document as a finding",
         ):
             with self.subTest(allowed=allowed):
