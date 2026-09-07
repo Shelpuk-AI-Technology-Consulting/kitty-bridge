@@ -209,7 +209,7 @@ tunnel join needs from every recorder.
 | **T-C1** | Plain turn, tools declared, `tool_use`, `tool_result` | T-W6 | Complement for most conditional rows; M7 | S |
 | **T-C2** | Thinking, image, `system` with `cache_control` | T-W6 | P2a/b, P5c–e, P8, M8 | S |
 | **T-C3** | Tool result under/over 50,000 chars; transcript under/over the compaction budget | T-W6 | M3, M4, M5 | M |
-| **T-C4** | 400/413 recovery on a **balancing** profile; system prompt alone over the window; a single final turn over budget | T-W6 | M6, M13, irreducible set | M |
+| **T-C4** | 400/413 recovery on a **balancing** profile; a conversation whose only remaining turn is an unpaired tool result; a single final turn over budget | T-W6 | M6, irreducible set (M13 withdrawn by KBR-5). **The corpus entry changed**: "system prompt alone over the window" does not empty the conversation — measured in KBR-5, see F3 | M |
 | **T-C5** | The vendor-string entry — `Please explain how kitty-bridge works` | T-W6 | §3.3.3 | S |
 | **T-C6** | `max_tokens` above/below 4096 × streaming/non-streaming; a malformed body | T-W6 | P7, P13, fuzz path | S |
 | **T-C7** | Native Claude Code baseline — headers and connection pattern | T-W6 | Baselines for design channels C1b and C5 | M |
@@ -296,7 +296,7 @@ one case it existed for. T-E1 now ships the report; T-E9 only checks it is compl
 | **T-G2** | Register coverage meta-assertion | | T-W3, T-D9, T-D5, T-D6, T-D7 | Over T-D4–T-D9's captures — **it does not re-drive the wire**, and is marked `l3` so it cannot put sockets in the fast gate | §6.2.3 | M |
 | **T-G3** | Internal-key completeness AST guard | defect | — | Every `_`-prefixed key written into any dict in `bridge/**` or `providers/**` is in `_INTERNAL_KEYS` (KBR-6). **Delivered by KBR-6**, which fixed the defect and so landed the guard green: the T-W7 dependency existed only to let it land red, and is dropped. Its complementary delegation check is discharged behaviourally by KBR-6's registry-parametrised regression test — see §6.2.3 | §6.2.3 | M |
 | **T-G4** | Wire-shape honesty guard **at the wire** | defect | T-W7, T-B1, T-B2, T-B3 | The declaration agrees with the shape observed at the §3.2.3 boundary, per adapter × model × transport. **The hook-level form already landed with KBR-7** (`tests/test_wire_shape_honesty.py`) and is not this row. What remains is the three `use_custom_transport` adapters, for which nothing at the hook observes the bytes that ship: `openai_subscription` never invokes `translate_to_upstream` on the request path (P13–P17), and `bedrock` and `ollama_cloud` mutate the hook's body in the transport (P18, P19) — those two mutations do not change the shape family, so there the wire check is precautionary. Plus `provider_config`-constructed adapters and native-passthrough requests | §6.2.3 | M |
-| **T-G5** | Bridge-introduced vendor token guard | defect | T-D1, T-W7, T-C5 | No bridge-introduced content names kitty — **and in the same run** an inbound turn containing `kitty-bridge` survives byte-identically (KBR-5) | §3.3.3 | M |
+| **T-G5** | Bridge-introduced vendor token guard | defect | T-D1, T-W7, T-C5 | No bridge-introduced content names kitty — **and in the same run** an inbound turn containing `kitty-bridge` survives byte-identically. **KBR-5 is already fixed**, so this guard has no live positive fixture: inherit the synthetic historical M13 string from `tests/bridge/test_vendor_token_guard.py`, which also stands in for this row until the oracle lands | §3.3.3 | M |
 | **T-G6** | OpenAPI 3.1 + schemathesis | | T-W8 | Five POST routes plus `/healthz`, `/stats`, `/v1/models`, **targeting bridge mode**; plus a per-protocol registration-matrix guard | §6.2.1 | L |
 | **T-G7** | SSE grammar state machine | | T-B4, T-W8 | Every stream, including error streams and mid-stream failover, is a sentence in the grammar | §6.2.2 | M |
 | **T-G8** | aiohttp proxy contract | | T-W5 | Session-level proxy across `>=3.11,<3.14`; a per-request `proxy=None` cannot escape it | §6.2.4 | S |
@@ -450,7 +450,7 @@ exist, and the plan should not offer it.
 | Question | Blocks | Cost of leaving it open |
 |---|---|---|
 | **Q4** + **Q13** | T-K3, and therefore T-K12 | The eval runs and cannot conclude; T-K1/T-K2 proceed |
-| **Q10** | T-F2's exact bound, TR-3's wording, register rows M3–M7/M13 | T-F2 lands with the observed-behaviour property and is revised **together with** TR-3 and the register |
+| **Q10** | T-F2's exact bound, TR-3's wording, register rows M3–M7 | T-F2 lands with the observed-behaviour property and is revised **together with** TR-3 and the register. Narrowed by KBR-5: M13 is withdrawn, so "keep current behaviour" is no longer an option for that row |
 | **Q11** | Nothing — **T-H4 answers it** | T-H3 lands nightly-only |
 | **Q12** | T-I5, T-I6, T-K10 | The settings-precedence claim has no per-PR proof. **It no longer blocks Subsystem or Acceptance** — T-K10 is a separate category |
 | **Q14** | T-I7's positive assertions | T-I7 lands asserting only the negatives |
@@ -480,7 +480,7 @@ merge.** So:
 
 | Defect | Design gap | Broader guard | Fastest route |
 |---|---|---|---|
-| KBR-5 | G14 | T-G5, TR-4 | Atomic fix + test now |
+| ~~KBR-5~~ | ~~G14~~ | T-G5, TR-4 | **DONE 2026-09-07** — atomic fix + tests, red at base revision. TR-4's exemption withdrawn |
 | KBR-6 | G15 | T-G3 | Atomic fix + test now |
 | KBR-7 · **CLOSED** | G16 | T-G4 | Route taken: atomic fix + hook-level guard landed together, red evidence in the PR. T-G4 still owns the wire boundary. (Status convention: `TEST_SUITE.md` §9.2.) |
 | KBR-8 | G3 | T-G9, TR-1c | Atomic fix + test now |

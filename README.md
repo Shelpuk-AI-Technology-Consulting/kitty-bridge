@@ -642,6 +642,26 @@ kitty setup
 
 The conversation has grown beyond the model's context window. Use `/clear` in the agent to reset.
 
+### "Kitty Bridge could not reduce this conversation to something the model can accept"
+
+Compaction ran and found nothing left to send, so the bridge refused the request instead of forwarding it. Nothing was
+sent to the provider.
+
+Almost always this means the conversation contains a tool result whose matching tool call was lost — usually after an
+empty or truncated response from the provider left a half-recorded turn behind. The conversation cannot be repaired, so
+a larger context window does not help:
+
+```
+/clear
+```
+
+If it recurs immediately on a fresh conversation, the system prompt and tool definitions are likely too large for the
+model you have configured — trim `CLAUDE.md` or the number of MCP servers, or switch to a model with a larger context
+window.
+
+The response is a normal `400` in your agent's own error format, carrying `"reason": "compaction_failed"` so it is
+distinguishable in logs from the ordinary "request too large" rejection.
+
 ### Mouse wheel scrolls through previous prompts instead of the conversation (Claude Code)
 
 The wheel steps backwards through your prompt history while the transcript stays put. This is Claude Code's renderer
