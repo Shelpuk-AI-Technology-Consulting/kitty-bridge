@@ -313,6 +313,47 @@ class TestTheRequestObjectExclusion:
             "    if (request := await request.json()):\n"
             '        request["_leaked"] = 1\n'
         ),
+        # Tuple and starred targets bind every name inside them. The recursion
+        # must stop at Subscript, though — see `test_a_subscript_target_is_not_
+        # treated_as_a_rebind`, which is the case that would break the guard
+        # rather than merely widen it.
+        "rebound-by-a-tuple-for-target": (
+            "def f(request: web.Request, pairs):\n"
+            "    for request, item in pairs:\n"
+            '        request["_leaked"] = 1\n'
+        ),
+        "rebound-by-a-tuple-with-target": (
+            "def f(request: web.Request, ctx):\n"
+            "    with ctx as (request, other):\n"
+            '        request["_leaked"] = 1\n'
+        ),
+        "rebound-by-a-starred-target": (
+            "def f(request: web.Request, items):\n"
+            "    first, *request = items\n"
+            '    request["_leaked"] = 1\n'
+        ),
+        "rebound-by-an-augmented-assignment": (
+            "def f(request: web.Request, extra):\n"
+            "    request += extra\n"
+            '    request["_leaked"] = 1\n'
+        ),
+        "rebound-by-an-except-clause": (
+            "def f(request: web.Request):\n"
+            "    try:\n"
+            "        pass\n"
+            "    except ValueError as request:\n"
+            '        request["_leaked"] = 1\n'
+        ),
+        "rebound-by-an-import-alias": (
+            "def f(request: web.Request):\n"
+            "    import json as request\n"
+            '    request["_leaked"] = 1\n'
+        ),
+        "rebound-by-a-from-import-alias": (
+            "def f(request: web.Request):\n"
+            "    from json import loads as request\n"
+            '    request["_leaked"] = 1\n'
+        ),
     }
 
     @pytest.mark.parametrize("case", sorted(_SHADOWING))
@@ -324,6 +365,40 @@ class TestTheRequestObjectExclusion:
             "exclusion must not still apply to it"
         )
         assert excluded == []
+
+    def test_a_subscript_target_is_not_treated_as_a_rebind(self):
+        """The counterweight to the rebinding rule, and the sharper risk.
+
+        `cc["_x"] = 1` writes *through* `cc`; it does not rebind it. If the
+        walk that retires a rebound name recursed into `Subscript` targets it
+        would retire the exclusion on the very statement the exclusion exists
+        to suppress — and the three request-scoped writes in `_auth_middleware`
+        would start being reported as leaks.
+
+        Two consecutive writes, because the first would disarm the exclusion
+        for the second if the recursion were wrong.
+        """
+        source = (
+            "def f(request: web.Request):\n"
+            '    request["_first"] = 1\n'
+            '    request["_second"] = 2\n'
+        )
+        writes, excluded = scan_source(source)
+
+        assert writes == []
+        assert [w.key for w in excluded] == ["_first", "_second"]
+
+    def test_an_attribute_target_is_not_treated_as_a_rebind(self):
+        """`request.state = x` rebinds an attribute, not the name."""
+        source = (
+            "def f(request: web.Request):\n"
+            "    request.state = {}\n"
+            '    request["_leaked"] = 1\n'
+        )
+        writes, excluded = scan_source(source)
+
+        assert writes == []
+        assert [w.key for w in excluded] == ["_leaked"]
 
     def test_a_lambda_parameter_does_not_inherit_the_exclusion(self):
         source = 'def f(request: web.Request):\n    return lambda request: request.setdefault("_leaked", 1)\n'

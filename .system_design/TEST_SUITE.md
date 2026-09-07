@@ -1055,12 +1055,21 @@ implementation goes on excluding writes to it — at which point the rule has si
 name-based one this section forbids, reachable in four moves (annotate, reassign, write, ship).
 The same applies to a nested `def inner(request)` that re-declares the name unannotated: it must
 *not* inherit the enclosing scope's exclusion, even though closures otherwise should. The scan
-therefore drops a name on **every** binding form it can see: plain and annotated assignment, the
-walrus, `for` / `async for`, `with` / `async with`, and re-declaration as a function or lambda
-parameter. The async forms are listed first among equals deliberately — every handler this
-exclusion protects is a coroutine, so `async with` and an annotated `request: dict = await
-request.json()` are the *likely* shapes here, not the exotic ones. None occurs in `server.py`
-today; the rule exists so that the day one does, the guard does not quietly stop guarding.
+therefore drops a name on **every** binding form it can see: plain, annotated and augmented
+assignment, the walrus, `for` / `async for`, `with` / `async with`, `except ... as`, `import ... as`,
+and re-declaration as a function or lambda parameter — recursing through tuple, list and starred
+targets, so `for request, item in pairs:` counts. The async forms are listed first among equals
+deliberately: every handler this exclusion protects is a coroutine, so `async with` and an annotated
+`request: dict = await request.json()` are the *likely* shapes here, not the exotic ones. None
+occurs in `server.py` today; the rule exists so that the day one does, the guard does not quietly
+stop guarding.
+
+**The counterweight matters more than the rule.** That walk must **not** treat a `Subscript` or
+`Attribute` target as a rebinding. `request["_key_id"] = ...` writes *through* the name without
+rebinding it, so a walk that recursed into subscripts would retire the exclusion on the very
+statement it exists to suppress — and the middleware's three request-scoped writes would be
+reported as leaks, inverting the guard. Widening the rebinding rule is safe; widening it carelessly
+is not, so the subscript and attribute cases carry their own tests.
 
 Because an exclusion that stops matching is indistinguishable from a guard that has quietly gone
 blind, the exclusion carries its own assertion: **the scan must fail if the `web.Request`

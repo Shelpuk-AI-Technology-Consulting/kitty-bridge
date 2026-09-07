@@ -163,8 +163,18 @@ class _InternalKeyVisitor(ast.NodeVisitor):
         self.generic_visit(node)
         self._request_names.pop()
 
-    def _drop_if_rebound(self, target: ast.expr) -> None:
-        """Retire the exclusion for a name that has been rebound.
+    def _drop_name(self, name: str | None) -> None:
+        """Retire the exclusion for one bound name.
+
+        Args:
+            name: The name being bound, or ``None`` for a binding form that
+                binds nothing (a bare ``except:``).
+        """
+        if name is not None and name in self._request_names[-1]:
+            self._request_names[-1] = self._request_names[-1] - {name}
+
+    def _drop_if_rebound(self, target: ast.expr | None) -> None:
+        """Retire the exclusion for every name a binding target rebinds.
 
         ``request = await request.json()`` leaves ``request`` holding a request
         *body*.  The exclusion is seeded from an annotation but applied to a
@@ -172,11 +182,23 @@ class _InternalKeyVisitor(ast.NodeVisitor):
         annotation said — otherwise it decays into exactly the name-based rule
         the design forbids.
 
+        Recurses through tuple, list and starred targets, because
+        ``for request, item in pairs:`` rebinds ``request`` just as plainly as
+        ``request = ...`` does.  It deliberately does **not** recurse into
+        ``Subscript`` or ``Attribute`` targets: ``cc["_x"] = 1`` writes *through*
+        ``cc`` without rebinding it, and treating that as a rebind would retire
+        the exclusion on the very statement it exists to suppress.
+
         Args:
-            target: An assignment target.
+            target: A binding target, or ``None``.
         """
-        if isinstance(target, ast.Name) and target.id in self._request_names[-1]:
-            self._request_names[-1] = self._request_names[-1] - {target.id}
+        if isinstance(target, ast.Name):
+            self._drop_name(target.id)
+        elif isinstance(target, ast.Starred):
+            self._drop_if_rebound(target.value)
+        elif isinstance(target, ast.Tuple | ast.List):
+            for element in target.elts:
+                self._drop_if_rebound(element)
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
         """Track request-annotated parameters across a function body.
@@ -287,12 +309,42 @@ class _InternalKeyVisitor(ast.NodeVisitor):
     visit_AsyncWith = visit_With
 
     def visit_AugAssign(self, node: ast.AugAssign) -> None:
-        """Record ``obj["_key"] += value``.
+        """Record ``obj["_key"] += value``, and retire a rebound name.
 
         Args:
             node: The augmented assignment statement.
         """
+        self._drop_if_rebound(node.target)
         self._visit_subscript_target(node.target, node.lineno)
+        self.generic_visit(node)
+
+    def visit_ExceptHandler(self, node: ast.ExceptHandler) -> None:
+        """Retire the exclusion for ``except ... as request``.
+
+        Args:
+            node: The exception handler being visited.
+        """
+        self._drop_name(node.name)
+        self.generic_visit(node)
+
+    def visit_Import(self, node: ast.Import) -> None:
+        """Retire the exclusion for ``import x as request``.
+
+        Args:
+            node: The import statement being visited.
+        """
+        for alias in node.names:
+            self._drop_name(alias.asname or alias.name.split(".")[0])
+        self.generic_visit(node)
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+        """Retire the exclusion for ``from x import y as request``.
+
+        Args:
+            node: The import statement being visited.
+        """
+        for alias in node.names:
+            self._drop_name(alias.asname or alias.name)
         self.generic_visit(node)
 
     def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
