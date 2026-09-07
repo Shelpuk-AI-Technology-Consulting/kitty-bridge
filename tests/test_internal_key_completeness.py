@@ -290,6 +290,29 @@ class TestTheRequestObjectExclusion:
             "    with ctx as request:\n"
             '        request["_leaked"] = 1\n'
         ),
+        # The four below are the async and walrus forms. The handlers this
+        # exclusion protects are all coroutines, so these are the likely
+        # shapes here, not the exotic ones.
+        "rebound-by-an-annotated-target": (
+            "async def f(request: web.Request):\n"
+            "    request: dict = await request.json()\n"
+            '    request["_leaked"] = 1\n'
+        ),
+        "rebound-by-an-async-for-target": (
+            "async def f(request: web.Request, items):\n"
+            "    async for request in items:\n"
+            '        request["_leaked"] = 1\n'
+        ),
+        "rebound-by-an-async-with-target": (
+            "async def f(request: web.Request, ctx):\n"
+            "    async with ctx as request:\n"
+            '        request["_leaked"] = 1\n'
+        ),
+        "rebound-by-a-walrus": (
+            "async def f(request: web.Request):\n"
+            "    if (request := await request.json()):\n"
+            '        request["_leaked"] = 1\n'
+        ),
     }
 
     @pytest.mark.parametrize("case", sorted(_SHADOWING))

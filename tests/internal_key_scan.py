@@ -267,6 +267,10 @@ class _InternalKeyVisitor(ast.NodeVisitor):
         self._drop_if_rebound(node.target)
         self.generic_visit(node)
 
+    #: ``async for`` binds exactly as ``for`` does.  The handlers this exclusion
+    #: protects are all coroutines, so the async forms are the likely ones here.
+    visit_AsyncFor = visit_For
+
     def visit_With(self, node: ast.With) -> None:
         """Retire the exclusion for a ``with ... as request`` binding.
 
@@ -278,6 +282,10 @@ class _InternalKeyVisitor(ast.NodeVisitor):
                 self._drop_if_rebound(item.optional_vars)
         self.generic_visit(node)
 
+    #: ``async with`` binds exactly as ``with`` does, and is the common form in
+    #: this codebase — every outbound call sits inside one.
+    visit_AsyncWith = visit_With
+
     def visit_AugAssign(self, node: ast.AugAssign) -> None:
         """Record ``obj["_key"] += value``.
 
@@ -288,12 +296,22 @@ class _InternalKeyVisitor(ast.NodeVisitor):
         self.generic_visit(node)
 
     def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
-        """Record ``obj["_key"]: T = value``.
+        """Record ``obj["_key"]: T = value``, and retire a rebound name.
 
         Args:
             node: The annotated assignment statement.
         """
+        self._drop_if_rebound(node.target)
         self._visit_subscript_target(node.target, node.lineno)
+        self.generic_visit(node)
+
+    def visit_NamedExpr(self, node: ast.NamedExpr) -> None:
+        """Retire the exclusion for a walrus rebinding.
+
+        Args:
+            node: The named expression being visited.
+        """
+        self._drop_if_rebound(node.target)
         self.generic_visit(node)
 
     def visit_Dict(self, node: ast.Dict) -> None:

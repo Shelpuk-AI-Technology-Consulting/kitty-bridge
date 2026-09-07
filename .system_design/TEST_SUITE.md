@@ -1055,9 +1055,12 @@ implementation goes on excluding writes to it — at which point the rule has si
 name-based one this section forbids, reachable in four moves (annotate, reassign, write, ship).
 The same applies to a nested `def inner(request)` that re-declares the name unannotated: it must
 *not* inherit the enclosing scope's exclusion, even though closures otherwise should. The scan
-therefore drops a name on assignment, `for`, `with` and re-declaration as a parameter. None of
-those shadowing forms occurs in `server.py` today; the rule exists so that the day one does, the
-guard does not quietly stop guarding.
+therefore drops a name on **every** binding form it can see: plain and annotated assignment, the
+walrus, `for` / `async for`, `with` / `async with`, and re-declaration as a function or lambda
+parameter. The async forms are listed first among equals deliberately — every handler this
+exclusion protects is a coroutine, so `async with` and an annotated `request: dict = await
+request.json()` are the *likely* shapes here, not the exotic ones. None occurs in `server.py`
+today; the rule exists so that the day one does, the guard does not quietly stop guarding.
 
 Because an exclusion that stops matching is indistinguishable from a guard that has quietly gone
 blind, the exclusion carries its own assertion: **the scan must fail if the `web.Request`
