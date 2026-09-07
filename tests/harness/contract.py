@@ -505,8 +505,15 @@ SAMPLING_KEYS = frozenset(
 #: Gemini adds ``SAFETY`` and ``RECITATION``, Anthropic has added values over
 #: time, and Ollama reports ``done_reason: load``.  Without it a legitimate
 #: safety-blocked reply would fail the run instead of projecting — the mistake
-#: R9.3 avoids on the request side.  An unmapped value projects as ``other``
-#: with the original string in ``Reply.residual["stop_reason"]``.
+#: R9.3 avoids on the request side.  An unmapped value projects as ``other``,
+#: with the wire's own string kept in :attr:`Reply.stop_reason_raw`.
+#:
+#: **Not in the residual.**  An earlier draft put it there, which defeated the
+#: escape it was meant to be: :func:`verify_total` fails the run on *any*
+#: non-empty residual, so a reader following that rule literally would have
+#: failed every safety-blocked Gemini reply.  A value mapped to ``other`` has
+#: been seen and classified — it is accounted for, not unaccounted — so the
+#: residual was the wrong home for it on the contract's own terms.
 STOP_REASONS = frozenset({"end_turn", "max_tokens", "stop_sequence", "tool_use", "error", "other"})
 
 
@@ -684,6 +691,10 @@ class Reply:
     Attributes:
         parts: Ordered content of the assistant's reply.
         stop_reason: One of :data:`STOP_REASONS`.
+        stop_reason_raw: The wire's own value when ``stop_reason`` is ``other``,
+            and ``None`` otherwise. Keeps a Gemini ``SAFETY`` distinguishable
+            from a ``RECITATION`` without failing the run, which putting it in
+            the residual would have done.
         usage: Token counts. **Carried but excluded from the fidelity diff** —
             usage is provider-reported and never agent-supplied, so a difference
             carries no I1 information.
@@ -694,6 +705,7 @@ class Reply:
 
     parts: Sequence[Part] = ()
     stop_reason: str | None = None
+    stop_reason_raw: str | None = None
     usage: Mapping[str, Any] = _frozen_field()
     residual: Mapping[str, Any] = _frozen_field()
     consumed: frozenset[str] = frozenset()

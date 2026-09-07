@@ -384,6 +384,20 @@ class TestEnvelopeAndConversation:
         """
         assert set(c.STOP_REASONS) == {"end_turn", "max_tokens", "stop_sequence", "tool_use", "error", "other"}
 
+    def test_the_stop_reason_escape_does_not_itself_fail_the_run(self) -> None:
+        """The escape must not be built out of the thing that fails the run.
+
+        Keeping the wire's value in the residual would have made every
+        safety-blocked Gemini reply fail `verify_total`, defeating the escape
+        entirely. A value mapped to `other` has been seen and classified, so it
+        is accounted for — `stop_reason_raw` is its home.
+        """
+        blocked = c.Reply(stop_reason="other", stop_reason_raw="SAFETY", consumed=frozenset({"finishReason"}),
+                          source={"finishReason": "SAFETY"})
+
+        c.verify_total(blocked)
+        assert blocked.stop_reason_raw == "SAFETY"
+
     def test_the_tool_choice_vocabulary_is_a_constant_not_prose(self) -> None:
         """Four formats spell one concept four ways; six readers must not each guess (R8.6)."""
         assert set(c.TOOL_CHOICE_VALUES) == {"auto", "any", "none"}
@@ -648,12 +662,16 @@ class TestTotalityFalsification:
         with pytest.raises(c.ResidualFieldsError, match="mystery"):
             c.verify_total(residualised)
 
-    def test_a_reader_that_drops_a_key_nested_under_one_it_consumed_is_caught(self) -> None:
-        """Top-level accounting alone would pass this.
+    def test_a_nested_key_the_reader_could_not_classify_fails_closed(self) -> None:
+        """A residual keyed by a *path* fails the run, not just a top-level one.
 
         Gemini puts every sampling parameter under ``generationConfig``, so a
-        reader that consumes the outer key and quietly ignores ``topK`` inside
-        it satisfies a top-level check.  Path-keyed residuals are what close it.
+        reader must be able to say "I could not classify ``topK`` inside a key
+        I did handle" and have that fail. Path-keyed residuals are what allow
+        it.
+
+        Note what this does **not** prove — see
+        :meth:`test_a_nested_key_the_reader_silently_drops_is_a_known_limit`.
         """
         nested = _project(
             consumed={"model", "mystery", "generationConfig"},
@@ -662,6 +680,26 @@ class TestTotalityFalsification:
 
         with pytest.raises(c.ResidualFieldsError, match="generationConfig.topK"):
             c.verify_total(nested)
+
+    def test_a_nested_key_the_reader_silently_drops_is_a_known_limit(self) -> None:
+        """The boundary of the totality rule, pinned so it is deliberate.
+
+        ``consumed`` holds **top-level** keys, so a reader that claims
+        ``generationConfig`` and silently ignores ``topK`` inside it passes.
+        Catching that would need the contract to walk the body itself, which
+        would make it a second reader — and the oracle must not be written in
+        terms of anything that reads bodies (§3.3.1).
+
+        What closes it instead: each reader's own L1 tests against its format's
+        published examples (§7.4), and T-D8's "residual empty across the whole
+        corpus" over all seven readers.
+
+        This test fails the day someone extends totality to nested keys — which
+        is the point. It is not an endorsement, it is a boundary marker.
+        """
+        nested_drop = _project(consumed={"model", "mystery", "generationConfig"}, residual={})
+
+        c.verify_total(nested_drop)
 
     def test_a_reader_that_accounts_for_every_key_passes(self) -> None:
         """**The control.**

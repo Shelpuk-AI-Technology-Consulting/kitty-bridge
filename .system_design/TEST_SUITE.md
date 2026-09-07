@@ -319,6 +319,14 @@ and catches drops; the **path-keyed** residual covers nesting and fails closed, 
 because Gemini puts every sampling parameter under `generationConfig` and Converse nests
 `inferenceConfig` and `toolConfig`.
 
+> **The boundary, stated so nobody over-reads a green run.** `consumed` holds *top-level* keys, so
+> a reader that claims `generationConfig` and **silently drops** `topK` inside it **passes**
+> `verify_total`. Catching that would require the contract to walk the body itself — making it a
+> second reader, which the independent-oracle rule forbids. What closes it instead: each reader's
+> own L1 tests against its format's published examples (§7.4), and **T-D8**, which owns "residual
+> empty across the whole corpus" for all seven readers. T-W2 pins this boundary with its own test,
+> so it stays a decision rather than an assumption.
+
 **Optional ids, because two formats have none.** Gemini's `functionCall`/`functionResponse` carry
 no id; pairing there is by tool name and the k-th unanswered call of that name in the most recent
 assistant turn. A required id would force those readers to synthesise one and show a delta on every
@@ -462,11 +470,16 @@ agree on a canonical form. They are six separate tasks, so the agreement is part
   `tool:<name>`. This is the one deliberate exception to keying `extra` by the wire key, because
   four spellings name one concept.
 - **On the response direction**, `stop_reason` is `end_turn` · `max_tokens` · `stop_sequence` ·
-  `tool_use` · `error` · `other`, where `other` carries the original string in
-  `residual["stop_reason"]` — Gemini adds `SAFETY` and `RECITATION`, and a closed set with no escape
-  would fail the run on a legitimate safety-blocked reply. **`usage` is carried but excluded from
-  the diff**: it is provider-reported, never agent-supplied, so a difference carries no I1
-  information.
+  `tool_use` · `error` · `other`, where `other` keeps the wire's own string in
+  **`Reply.stop_reason_raw`** — Gemini adds `SAFETY` and `RECITATION`, and a closed set with no
+  escape would fail the run on a legitimate safety-blocked reply.
+
+  **Not in the residual**, and the reason generalises: a non-empty residual *fails the run*, so
+  building an escape out of the residual defeats the escape. A value mapped to `other` has been
+  seen and classified — it is accounted for. The residual means only *nobody has looked at this*.
+
+  **`usage` is carried but excluded from the diff**: it is provider-reported, never agent-supplied,
+  so a difference carries no I1 information.
 
 Then write one **hand-written reader per wire format** — Anthropic Messages, Chat Completions,
 OpenAI Responses, Gemini, Bedrock Converse, Ollama `/api/chat` — each written directly against
