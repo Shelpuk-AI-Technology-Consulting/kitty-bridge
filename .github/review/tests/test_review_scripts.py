@@ -2963,6 +2963,65 @@ class TestConfigureKitty(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertIn("available=true", out)
 
+    def test_an_empty_profile_auth_ref_is_reported_by_naming_it(self):
+        """🔴 The profiles branch, which the egress case above does NOT cover.
+
+        The two branches mean opposite things and must behave differently. For an
+        egress record ``""`` means "unauthenticated proxy" and kitty resolves it,
+        which is why the case above asserts ``available=true``. For a **profile**
+        it means no key resolves at all, so it must still be reported -- but named
+        rather than interpolated into ``needs credential , which credentials.json
+        does not contain``, which reads as a rendering bug rather than a bad
+        profile and leaves an operator with nothing to act on.
+
+        ⚠️ **Added a round later than the fix, and that is the point of writing it
+        down.** The rendering change shipped with the egress-path test still
+        being the only coverage, so a reintroduction of the asymmetry -- the
+        profiles branch testing ``isinstance(..., str)`` again -- would have gone
+        unnoticed. Raised by this repository's own review of the commit that
+        made the change.
+        """
+
+        with tempfile.TemporaryDirectory() as tmp:
+            code, _, out, _, _ = self._run(
+                Path(tmp),
+                values={
+                    "KITTY_PROFILES_JSON": '{"profiles": {"prod": '
+                    '{"provider": "openrouter", "model": "m", "auth_ref": ""}}}'
+                },
+            )
+
+        self.assertEqual(code, 0)
+        self.assertIn("available=false", out)
+        # The claim: the message names the emptiness. Asserted as the absence of
+        # the dangling-reference wording as well, because a renderer that emitted
+        # both would satisfy a presence check alone.
+        self.assertIn("EMPTY credential reference", out)
+        self.assertNotIn("needs credential ,", out)
+
+    def test_a_dangling_profile_auth_ref_still_names_the_reference(self):
+        """The control: the new branch must not swallow the ordinary case.
+
+        A non-empty reference that `credentials.json` does not contain is the
+        failure this report was written for, and a conditional added for the
+        empty case is exactly the shape that breaks it.
+        """
+
+        with tempfile.TemporaryDirectory() as tmp:
+            code, _, out, _, _ = self._run(
+                Path(tmp),
+                values={
+                    "KITTY_PROFILES_JSON": '{"profiles": {"prod": '
+                    '{"provider": "openrouter", "model": "m", '
+                    '"auth_ref": "no-such-ref"}}}'
+                },
+            )
+
+        self.assertEqual(code, 0)
+        self.assertIn("available=false", out)
+        self.assertIn("no-such-ref", out)
+        self.assertNotIn("EMPTY credential reference", out)
+
     def test_an_unknown_store_version_is_accepted_here(self):
         """A future ``STORE_VERSION`` must NOT fail the build from this script.
 
