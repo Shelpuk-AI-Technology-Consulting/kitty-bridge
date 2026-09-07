@@ -294,7 +294,7 @@ one case it existed for. T-E1 now ships the report; T-E9 only checks it is compl
 |---|---|---|---|---|---|---|
 | **T-G1** | README ⇄ code table guards | defect | T-W7 | Endpoint, attribution-header, env-var, logging-flag tables (KBR-9) | §6.2.3 | M |
 | **T-G2** | Register coverage meta-assertion | | T-W3, T-D9, T-D5, T-D6, T-D7 | Over T-D4–T-D9's captures — **it does not re-drive the wire**, and is marked `l3` so it cannot put sockets in the fast gate | §6.2.3 | M |
-| **T-G3** | Internal-key completeness AST guard | defect | T-W7 | Every `_`-prefixed key written into a request dict is in `_INTERNAL_KEYS` (KBR-6) | §6.2.3 | M |
+| **T-G3** | Internal-key completeness AST guard | defect | — | Every `_`-prefixed key written into any dict in `bridge/**` or `providers/**` is in `_INTERNAL_KEYS` (KBR-6). **Delivered by KBR-6**, which fixed the defect and so landed the guard green: the T-W7 dependency existed only to let it land red, and is dropped. Its complementary delegation check is discharged behaviourally by KBR-6's registry-parametrised regression test — see §6.2.3 | §6.2.3 | M |
 | **T-G4** | Wire-shape honesty guard **at the wire** | defect | T-W7, T-B1, T-B2, T-B3 | The declaration agrees with the shape observed at the §3.2.3 boundary, per adapter × model × transport. **The hook-level form already landed with KBR-7** (`tests/test_wire_shape_honesty.py`) and is not this row. What remains is the three `use_custom_transport` adapters, for which nothing at the hook observes the bytes that ship: `openai_subscription` never invokes `translate_to_upstream` on the request path (P13–P17), and `bedrock` and `ollama_cloud` mutate the hook's body in the transport (P18, P19) — those two mutations do not change the shape family, so there the wire check is precautionary. Plus `provider_config`-constructed adapters and native-passthrough requests | §6.2.3 | M |
 | **T-G5** | Bridge-introduced vendor token guard | defect | T-D1, T-W7, T-C5 | No bridge-introduced content names kitty — **and in the same run** an inbound turn containing `kitty-bridge` survives byte-identically (KBR-5) | §3.3.3 | M |
 | **T-G6** | OpenAPI 3.1 + schemathesis | | T-W8 | Five POST routes plus `/healthz`, `/stats`, `/v1/models`, **targeting bridge mode**; plus a per-protocol registration-matrix guard | §6.2.1 | L |
@@ -400,7 +400,7 @@ available in tiers 0–2.**
 |---|---|---|
 | **0** | 12 | T-E6 T-E7 T-F1 T-G12 T-I1 T-I3 T-I4 T-I14 T-K1 T-W1 T-W2 T-W5 |
 | **1** | 21 | T-A1–T-A7 T-F2–T-F5 T-G8 T-G10 T-G11 T-H1 T-I2 T-K2 T-K11 T-W3 T-W4 T-W7 |
-| **2** | 10 | T-B4 T-F6 T-G1 T-G3 T-G9 T-H4 T-J1 T-K3 T-W6 T-W8 |
+| **2** | 9 | T-B4 T-F6 T-G1 T-G9 T-H4 T-J1 T-K3 T-W6 T-W8 (T-G3 delivered by KBR-6) |
 | **3** | 18 | T-B1 T-B2 T-B3 T-C1–T-C7 T-G6 T-G7 T-I10 T-I11 T-I13 T-K4 T-K12 T-W9 |
 | **4** | 10 | T-D1 T-E1 T-G4 T-H2 T-H5 T-I5 T-I7 T-I9 T-I12 T-K5 |
 | **5** | 8 | T-D2 T-D10 T-E2 T-E9 T-G5 T-H3 T-I6 T-I8 |
@@ -516,7 +516,7 @@ Every design requirement has an owner. "Existing" means the current suite alread
 | §6.1 | Properties · mutation validation | T-F1–T-F6 · T-H1–T-H5 |
 | §6.2.1 | OpenAPI, schemathesis, registration matrix | T-G6 |
 | §6.2.2 | SSE grammar | T-G7 |
-| §6.2.3 | Register, internal-key, wire-shape, vendor-token, docs guards | T-G1–T-G5 — except the **hook-level** half of wire-shape honesty, delivered by KBR-7 |
+| §6.2.3 | Register, internal-key, wire-shape, vendor-token, docs guards | T-G1–T-G5 — T-G3 delivered by KBR-6, and the **hook-level** half of wire-shape honesty by KBR-7; T-G4 still owns the wire boundary |
 | §6.2.4 | Four dependency contracts | T-G8, T-G10, T-G11, T-G12 |
 | §6.3.1 | Bridge-with-sockets scenarios | T-I7–T-I11 |
 | §6.3.2 | CLI lifecycle | T-I1–T-I4 |
