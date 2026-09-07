@@ -265,6 +265,12 @@ class TestTheRequestObjectExclusion:
     #: decays into the name-based one R4 forbids: annotate a parameter
     #: ``web.Request``, reassign it to a body dict, and every write to it is
     #: waved through.
+    #:
+    #: These are cases, not a specification. The scan does not enumerate binding
+    #: statements — four review rounds showed that list cannot be completed —
+    #: it asks whether the scope rebinds the name at all. So this dict is
+    #: evidence the rule holds across the shapes Python offers, and a new form
+    #: appearing in some future Python needs a case here but not a code change.
     _SHADOWING = {
         "reassigned-to-a-dict": (
             "def f(request: web.Request):\n    request = {}\n    request[\"_leaked\"] = 1\n"
@@ -352,6 +358,39 @@ class TestTheRequestObjectExclusion:
         "rebound-by-a-from-import-alias": (
             "def f(request: web.Request):\n"
             "    from json import loads as request\n"
+            '    request["_leaked"] = 1\n'
+        ),
+        # The forms below are the reason the rule is decided per scope rather
+        # than per statement. Each is a binding form Python has that the earlier
+        # statement-by-statement version did not enumerate; under the scope rule
+        # none of them needed its own handler.
+        "rebound-by-a-match-capture": (
+            "def f(request: web.Request, data):\n"
+            "    match data:\n"
+            "        case request:\n"
+            '            request["_leaked"] = 1\n'
+        ),
+        "rebound-by-a-match-mapping-rest": (
+            "def f(request: web.Request, data):\n"
+            "    match data:\n"
+            '        case {"a": 1, **request}:\n'
+            '            request["_leaked"] = 1\n'
+        ),
+        "rebound-by-a-class-statement": (
+            "def f(request: web.Request):\n"
+            "    class request:\n"
+            "        pass\n"
+            '    request["_leaked"] = 1\n'
+        ),
+        "rebound-by-a-comprehension-target": (
+            "def f(request: web.Request, xs):\n"
+            "    ys = [request for request in xs]\n"
+            '    request["_leaked"] = 1\n'
+        ),
+        "rebound-by-a-nested-def": (
+            "def f(request: web.Request):\n"
+            "    def request():\n"
+            "        pass\n"
             '    request["_leaked"] = 1\n'
         ),
     }

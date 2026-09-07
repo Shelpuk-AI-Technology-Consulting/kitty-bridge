@@ -107,6 +107,68 @@ def _annotation_name(node: ast.expr | None) -> str | None:
     return None
 
 
+def _rebound_names(scope: ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda) -> set[str]:
+    """Return every name *scope* binds anywhere in its body.
+
+    The request-object exclusion is seeded from a parameter annotation but
+    applied to a name, so it must not survive the name being rebound:
+    ``request = await request.json()`` leaves ``request`` holding a request
+    *body*, and going on excluding writes to it is precisely the name-keyed
+    rule the design forbids.
+
+    **Decided per scope, not per statement.** Four review rounds chased this
+    one statement form at a time — annotated assignment, then ``async for`` and
+    ``async with``, then augmented assignment and ``except``/``import`` aliases
+    and tuple targets, then ``match`` captures and ``class``. Enumerating
+    binding *statements* cannot terminate, because Python keeps having more of
+    them. Enumerating binding *node kinds* does terminate: a plain name is bound
+    by a ``Name`` in a ``Store``/``Del`` context, and everything else that binds
+    carries the name as a bare string on a handful of node types.
+
+    So the rule is now coarse and total: **if a scope rebinds the name at all,
+    the annotation is not trusted for that scope.** A write before the rebinding
+    is reported too. That is the safe direction — over-reporting costs a review
+    comment, under-reporting hides a leak — and it is why this is not
+    flow-sensitive.
+
+    ``Subscript`` and ``Attribute`` targets are not bindings: in
+    ``request["_key_id"] = ...`` the ``Name`` node carries a ``Load`` context, so
+    it is excluded here automatically rather than by a special case. That is the
+    behaviour the whole exclusion rests on.
+
+    Args:
+        scope: The function or lambda whose body is inspected. Nested scopes are
+            included, which is deliberate: a closure rebinding the enclosing
+            name makes it untrustworthy in both.
+
+    Returns:
+        Every name bound somewhere inside *scope*.
+    """
+    bound: set[str] = set()
+    for node in ast.walk(scope):
+        # Assignment, for, with-as, walrus, tuple/starred targets, comprehensions
+        # and match captures that bind a plain name all land here.
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store | ast.Del):
+            bound.add(node.id)
+        # The rest carry their bound name as a string rather than a Name node.
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            bound.add(node.name)
+        elif isinstance(node, ast.alias):
+            bound.add(node.asname or node.name.split(".")[0])
+        elif isinstance(node, ast.MatchAs | ast.MatchStar) and node.name:
+            bound.add(node.name)
+        elif isinstance(node, ast.MatchMapping) and node.rest:
+            bound.add(node.rest)
+        elif isinstance(node, ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef):
+            bound.add(node.name)
+    # Parameter declarations are deliberately absent: an ``ast.arg`` is not a
+    # ``Name``, so a parameter reaches this set only by being *reassigned* in the
+    # body — which is exactly the condition that should disqualify it. A nested
+    # function re-declaring the name is handled by the caller's scope
+    # subtraction instead, because that shadows rather than rebinds.
+    return bound
+
+
 class _InternalKeyVisitor(ast.NodeVisitor):
     """Collect underscore-prefixed dict-key writes from one module."""
 
@@ -151,7 +213,11 @@ class _InternalKeyVisitor(ast.NodeVisitor):
             for arg in (*args.posonlyargs, *args.args, *args.kwonlyargs)
             if _annotation_name(arg.annotation) in _REQUEST_ANNOTATIONS
         }
-        self._request_names.append((self._request_names[-1] - declared) | annotated)
+        # A parameter rebound anywhere in this scope is not trusted at all — see
+        # _rebound_names for why this is decided per scope rather than per
+        # statement.
+        trusted = annotated - _rebound_names(node)
+        self._request_names.append((self._request_names[-1] - declared) | trusted)
 
     def visit_Lambda(self, node: ast.Lambda) -> None:
         """Stop a lambda parameter from inheriting an enclosing exclusion.
@@ -162,43 +228,6 @@ class _InternalKeyVisitor(ast.NodeVisitor):
         self._enter_scope(node)
         self.generic_visit(node)
         self._request_names.pop()
-
-    def _drop_name(self, name: str | None) -> None:
-        """Retire the exclusion for one bound name.
-
-        Args:
-            name: The name being bound, or ``None`` for a binding form that
-                binds nothing (a bare ``except:``).
-        """
-        if name is not None and name in self._request_names[-1]:
-            self._request_names[-1] = self._request_names[-1] - {name}
-
-    def _drop_if_rebound(self, target: ast.expr | None) -> None:
-        """Retire the exclusion for every name a binding target rebinds.
-
-        ``request = await request.json()`` leaves ``request`` holding a request
-        *body*.  The exclusion is seeded from an annotation but applied to a
-        name, so it must stop at the point the name stops meaning what the
-        annotation said — otherwise it decays into exactly the name-based rule
-        the design forbids.
-
-        Recurses through tuple, list and starred targets, because
-        ``for request, item in pairs:`` rebinds ``request`` just as plainly as
-        ``request = ...`` does.  It deliberately does **not** recurse into
-        ``Subscript`` or ``Attribute`` targets: ``cc["_x"] = 1`` writes *through*
-        ``cc`` without rebinding it, and treating that as a rebind would retire
-        the exclusion on the very statement it exists to suppress.
-
-        Args:
-            target: A binding target, or ``None``.
-        """
-        if isinstance(target, ast.Name):
-            self._drop_name(target.id)
-        elif isinstance(target, ast.Starred):
-            self._drop_if_rebound(target.value)
-        elif isinstance(target, ast.Tuple | ast.List):
-            for element in target.elts:
-                self._drop_if_rebound(element)
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
         """Track request-annotated parameters across a function body.
@@ -272,7 +301,6 @@ class _InternalKeyVisitor(ast.NodeVisitor):
             node: The assignment statement.
         """
         for target in node.targets:
-            self._drop_if_rebound(target)
             self._visit_subscript_target(target, node.lineno)
             # ``cc["_x"], other = 1, 2`` — a subscript can hide inside a tuple.
             if isinstance(target, ast.Tuple | ast.List):
@@ -280,71 +308,13 @@ class _InternalKeyVisitor(ast.NodeVisitor):
                     self._visit_subscript_target(element, node.lineno)
         self.generic_visit(node)
 
-    def visit_For(self, node: ast.For) -> None:
-        """Retire the exclusion for a loop variable that reuses the name.
-
-        Args:
-            node: The ``for`` statement being visited.
-        """
-        self._drop_if_rebound(node.target)
-        self.generic_visit(node)
-
-    #: ``async for`` binds exactly as ``for`` does.  The handlers this exclusion
-    #: protects are all coroutines, so the async forms are the likely ones here.
-    visit_AsyncFor = visit_For
-
-    def visit_With(self, node: ast.With) -> None:
-        """Retire the exclusion for a ``with ... as request`` binding.
-
-        Args:
-            node: The ``with`` statement being visited.
-        """
-        for item in node.items:
-            if item.optional_vars is not None:
-                self._drop_if_rebound(item.optional_vars)
-        self.generic_visit(node)
-
-    #: ``async with`` binds exactly as ``with`` does, and is the common form in
-    #: this codebase — every outbound call sits inside one.
-    visit_AsyncWith = visit_With
-
     def visit_AugAssign(self, node: ast.AugAssign) -> None:
         """Record ``obj["_key"] += value``, and retire a rebound name.
 
         Args:
             node: The augmented assignment statement.
         """
-        self._drop_if_rebound(node.target)
         self._visit_subscript_target(node.target, node.lineno)
-        self.generic_visit(node)
-
-    def visit_ExceptHandler(self, node: ast.ExceptHandler) -> None:
-        """Retire the exclusion for ``except ... as request``.
-
-        Args:
-            node: The exception handler being visited.
-        """
-        self._drop_name(node.name)
-        self.generic_visit(node)
-
-    def visit_Import(self, node: ast.Import) -> None:
-        """Retire the exclusion for ``import x as request``.
-
-        Args:
-            node: The import statement being visited.
-        """
-        for alias in node.names:
-            self._drop_name(alias.asname or alias.name.split(".")[0])
-        self.generic_visit(node)
-
-    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
-        """Retire the exclusion for ``from x import y as request``.
-
-        Args:
-            node: The import statement being visited.
-        """
-        for alias in node.names:
-            self._drop_name(alias.asname or alias.name)
         self.generic_visit(node)
 
     def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
@@ -353,17 +323,7 @@ class _InternalKeyVisitor(ast.NodeVisitor):
         Args:
             node: The annotated assignment statement.
         """
-        self._drop_if_rebound(node.target)
         self._visit_subscript_target(node.target, node.lineno)
-        self.generic_visit(node)
-
-    def visit_NamedExpr(self, node: ast.NamedExpr) -> None:
-        """Retire the exclusion for a walrus rebinding.
-
-        Args:
-            node: The named expression being visited.
-        """
-        self._drop_if_rebound(node.target)
         self.generic_visit(node)
 
     def visit_Dict(self, node: ast.Dict) -> None:

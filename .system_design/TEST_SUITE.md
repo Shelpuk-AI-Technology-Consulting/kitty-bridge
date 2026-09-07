@@ -1055,14 +1055,29 @@ implementation goes on excluding writes to it — at which point the rule has si
 name-based one this section forbids, reachable in four moves (annotate, reassign, write, ship).
 The same applies to a nested `def inner(request)` that re-declares the name unannotated: it must
 *not* inherit the enclosing scope's exclusion, even though closures otherwise should. The scan
-therefore drops a name on **every** binding form it can see: plain, annotated and augmented
-assignment, the walrus, `for` / `async for`, `with` / `async with`, `except ... as`, `import ... as`,
-and re-declaration as a function or lambda parameter — recursing through tuple, list and starred
-targets, so `for request, item in pairs:` counts. The async forms are listed first among equals
-deliberately: every handler this exclusion protects is a coroutine, so `async with` and an annotated
-`request: dict = await request.json()` are the *likely* shapes here, not the exotic ones. None
-occurs in `server.py` today; the rule exists so that the day one does, the guard does not quietly
-stop guarding.
+therefore refuses to trust an annotation for any name the scope **rebinds anywhere in its body**.
+
+**Decided per scope, not per statement — and that is the design decision, not an implementation
+detail.** The first version enumerated binding *statements* and was corrected four times in review:
+annotated assignment, then `async for` and `async with`, then augmented assignment,
+`except`/`import` aliases and tuple targets, then `match` captures and `class`. That list cannot be
+completed, because Python keeps adding to it and each addition silently re-opens the hole. Asking
+instead "does this scope rebind the name at all" terminates: a plain name is bound by a `Name` in a
+`Store`/`Del` context, and the handful of forms that carry the name as a bare string —
+`except`, `import`, `match`, `def`, `class` — is closed and short. Comprehension targets, which the
+statement-by-statement version had explicitly given up on, fall out for free.
+
+The rule is deliberately coarse and not flow-sensitive: a write *before* the rebinding is reported
+too. Over-reporting costs a review comment; under-reporting hides a leak. No handler in `server.py`
+rebinds `request` today, so the coarseness costs nothing now, and the guard's real job is to hold
+the day one does.
+
+**The counterweight matters more than the rule.** A `Subscript` or `Attribute` target is **not** a
+rebinding. `request["_key_id"] = ...` writes *through* the name, and the `Name` node inside it
+carries a `Load` context — so it is excluded from the bound set by the same mechanism rather than by
+a special case. Had it counted, the exclusion would retire on the very statement it exists to
+suppress and the middleware's three request-scoped writes would invert into reported leaks. Widening
+the rebinding rule is safe; widening it carelessly is not, so both cases carry their own tests.
 
 **The counterweight matters more than the rule.** That walk must **not** treat a `Subscript` or
 `Attribute` target as a rebinding. `request["_key_id"] = ...` writes *through* the name without
