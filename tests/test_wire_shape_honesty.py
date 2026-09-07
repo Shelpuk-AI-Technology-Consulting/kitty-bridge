@@ -361,6 +361,21 @@ def test_classifier_reports_other_for_a_converse_body_without_tools():
     assert classify_wire_shape(body) is WireShape.OTHER
 
 
+def test_the_converse_fixture_matches_what_bedrock_actually_emits():
+    """Pin the hand-written Converse fixture against the real adapter.
+
+    ``OTHER`` is the classifier's fallback, so a typo in ``_CONVERSE_BODY``
+    would leave the two tests above green while proving nothing about a real
+    Converse body.  This asserts the fixture carries the same markers on the
+    two axes the classifier reads as the body ``BedrockAdapter`` emits.
+    """
+    emitted = get_provider("bedrock").translate_to_upstream(copy.deepcopy(_probe_request("kitty-test-model")))
+
+    assert ("tools" in emitted) == ("tools" in _CONVERSE_BODY)
+    assert ("system" in emitted) == ("system" in _CONVERSE_BODY)
+    assert classify_wire_shape(emitted) is classify_wire_shape(_CONVERSE_BODY)
+
+
 def test_classifier_needs_the_tools_axis():
     """A probe without tools cannot be classified — hence R6's pinned shape.
 
