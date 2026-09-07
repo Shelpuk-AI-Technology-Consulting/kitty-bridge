@@ -473,6 +473,14 @@ class TestRecoveryPathCompactionFailure:
                 server._compact_messages(list(_ORPHAN_CC_MESSAGES), 10)
 
         monkeypatch.setattr(server, "_compact_with_tighter_budget", _tighter)
+        # The assertion below does not depend on the empty-response ladder, and
+        # this test falls into it: backend 0 stays healthy (recovery deliberately
+        # does not cool it down), the flag resets on attempt 2, so the loop ends
+        # with nothing to raise and drops through to `_EMPTY_FINAL_DELAYS` —
+        # 20s + 40s of real sleep before the 429 surfaces, on every Python
+        # version in CI. Stubbed for the same reason as in
+        # `test_a_genuinely_oversized_payload_reaches_the_tighter_recompaction`.
+        monkeypatch.setattr(server_module, "_EMPTY_FINAL_DELAYS", [])
         port = await server.start_async()
         try:
             status, body = await _post(
