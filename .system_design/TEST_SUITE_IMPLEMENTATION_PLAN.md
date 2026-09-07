@@ -94,14 +94,14 @@ After Milestone 0, seven streams advance independently, each owning its own modu
 | ID | Task | Depends on | Design | Size |
 |---|---|---|---|---|
 | **T-W1** | Layer markers, CI selection rules, per-category collection checks | — | §8 | M |
-| **T-W2** | Request/capture types and the projection protocol | — | §3.3.1 | S |
+| **T-W2** | **The input contract** — request/capture types and the projection protocol | — | §3.3.1 | S |
 | **T-W3** | Register schema and data | T-W2 | §3.2 | M |
-| **T-W4** | Recorder protocol + primary aiohttp recorder | — | §7.2 | M |
+| **T-W4** | Recorder implementation — primary aiohttp recorder | T-W2 | §7.2 | M |
 | **T-W5** | Shared CONNECT proxy fixture | — | §7.3 | M |
 | **T-W6** | Corpus format, capture procedure, scrubber, loader | T-W3 | §7.1 | M |
 | **T-W7** | Assertion exemption registry | T-W1 | §8 | M |
 | **T-W8** | Bridge fixture **core + transport extension interface** | T-W4 | §6.3.1 | M |
-| **T-W9** | **The proven vertical slice** | T-W1, T-W4, T-W8 | §6.3.1 | S |
+| **T-W9** | **The proven vertical slice** | T-W1, T-W2, T-W4, T-W8 | §6.3.1 | S |
 
 **T-W1 — markers and CI selection.** Register `l1`, `l2`, `l3`, `acceptance`, `agent_smoke`,
 `agent_live`, `eval`, `load`; a meta-test asserts every collected test carries exactly one. **Do
@@ -115,19 +115,25 @@ agent_smoke"` would exit 5 when agent-smoke tests were missing. **That is wrong.
 tests exist the expression collects them and passes happily with zero agent-smoke coverage. Also
 reconcile the existing `--runslow` silent skip with the same rule.
 
-**T-W2 — types.** `Request(envelope, conversation, residual)`, `Envelope`, `Conversation`, `Turn`,
-`Part` variants, `Reply` for the response direction, and the `Projection` protocol. Includes the
-**totality rule**: every key classifies into envelope, conversation or residual, and a non-empty
-residual raises. *Falsification:* a stub reader that drops an unknown key fails it.
+**T-W2 — the input contract.** One owner for everything a projection reads and a recorder produces:
+`Request(envelope, conversation, residual)`, `Envelope`, `Conversation`, `Turn`, `Part` variants,
+`Reply` for the response direction, **`CapturedRequest(method, scheme, host, path, query, headers,
+body)`**, and the `Projection` protocol.
+
+**`CapturedRequest` lives here, not in T-W4.** An earlier draft titled this task "request/capture types" while T-W4 defined `CapturedRequest` with no dependency between them — so the recorder author and the Gemini reader author (who needs the URL, §3.3.5) could have started against two different readings of the same contract. That is precisely the coordination problem Milestone 0 exists to remove.
+
+Includes the **totality rule**: every key classifies into envelope, conversation or residual, and a
+non-empty residual raises. *Falsification:* a stub reader that drops an unknown key fails it.
 
 **T-W3 — register.** One entry per row M1–M14 and P1–P21: id, site symbol, trigger predicate, the
 projection field it touches, conditional or not, design anchor. Defines the trigger vocabulary
 T-W6 indexes by. *Falsification:* delete a row from the markdown or the data; the agreement test
 fails.
 
-**T-W4 — recorder protocol.** `CapturedRequest(method, scheme, host, path, query, headers, body)`
-with original casing and order, arrival timestamp, and **the peer port of the accepted
-connection**. Ships **one minimal valid success response per protocol** — without it any request
+**T-W4 — recorder implementation.** Implements T-W2's `CapturedRequest` — original casing and order,
+arrival timestamp, and **the peer port of the accepted connection** — for the primary aiohttp
+recorder. It consumes the contract rather than defining it. Ships **one minimal valid success
+response per protocol** — without it any request
 driven through a real bridge falls into the retry paths, which are themselves body-mutating. The
 failure library is T-B4. Peer-port and casing capture are enforced by a **conformance test every
 Epic B recorder must pass**.
@@ -153,8 +159,10 @@ shared fixture. Defining the interface here lets recorder authors integrate with
 core.
 
 **T-W9 — the proven vertical slice.** Drive one request from the bridge fixture into the recorder
-and assert the capture is complete and correct. Small, but it is the first moment the contracts
-are known to compose. *Falsification:* a recorder that drops the query string fails it.
+and assert the capture is complete and **type-compatible with T-W2's declared contract** — the
+recorder's output must satisfy what a projection expects to read. Small, but it is the first
+moment the contracts are known to compose rather than merely to exist.
+*Falsification:* a recorder that drops the query string fails it.
 
 ---
 
@@ -243,17 +251,25 @@ An earlier draft made a single positive-control task wait on every transport's d
 difficult botocore route delayed even aiohttp containment — contradicting this plan's own claim
 that a stuck transport blocks only its own task.
 
+**A transport task is done when it records an outcome, not when it succeeds.** `proven`, `unsupported`
+(the harness cannot give that transport a direct route — design §5.3 requires this be reported,
+not hidden) or `failed` (a route exists and containment does not hold, which is a product defect
+and gets its own ticket). An earlier draft defined these tasks as complete only when all four
+phases passed, and then had T-E9 — the report whose entire purpose is recording that a transport
+could **not** be proven — depend on all three succeeding. The failure report could not run in the
+one case it existed for. T-E1 now ships the report; T-E9 only checks it is complete.
+
 | ID | Task | Flags | Depends on | Done when | Design | Size |
 |---|---|---|---|---|---|---|
-| **T-E1** | Harness core, aiohttp direct route, **transport extension interface** | | T-W5, T-W8, T-W9 | Upstream addressed as `upstream.kitty-test.invalid`; aiohttp direct leg via a monkeypatched resolver — **not** `/etc/hosts`, unavailable on CI runners | §5.3 | L |
+| **T-E1** | Harness core, aiohttp direct route, extension interface, **capability report** | | T-W5, T-W8, T-W9 | Upstream addressed as `upstream.kitty-test.invalid`; aiohttp direct leg via a monkeypatched resolver — **not** `/etc/hosts`, unavailable on CI runners. **Ships the per-transport capability report**, which starts with every transport `not-attempted` | §5.3 | L |
 | **T-E2** | **aiohttp containment slice, complete and falsified** | | T-E1 | Phase 1 positive control; proxy down ⇒ zero connections; proxy up ⇒ every connection joins a tunnel on the recorded source port; **and an injected bypass makes the harness fail** | §5.2.1, §5.2.2 | L |
-| **T-E3** | curl_cffi route and slice | | T-E1, T-E2, T-B2 | All four phases for curl_cffi | §5.3, §5.5 | M |
-| **T-E4** | botocore route and slice | | T-E1, T-E2, T-B3 | All four phases for botocore | §5.3, §5.5 | M |
-| **T-E5** | Provider-aiohttp route and slice | | T-E1, T-E2, T-B1 | All four phases for the provider sessions and the OAuth leg | §5.5 | M |
+| **T-E3** | curl_cffi route and slice | | T-E1, T-E2, T-B2 | **An outcome is recorded**: `proven` (all four phases pass), `unsupported` (the harness cannot give this transport a direct route — with the reason), or `failed` (a route exists and containment does not hold — a product defect, filed) | §5.3, §5.5 | M |
+| **T-E4** | botocore route and slice | | T-E1, T-E2, T-B3 | Same three outcomes as T-E3, for botocore | §5.3, §5.5 | M |
+| **T-E5** | Provider-aiohttp route and slice | | T-E1, T-E2, T-B1 | Same three outcomes, for the provider sessions and the OAuth leg | §5.5 | M |
 | **T-E6** | Guard **enforcement** | | — | Five start paths with a rejecting configuration assert **no server starts**. Falsification: a variant keeping the call and discarding its return value must fail these. **No recorder needed** | §6.2.3 | M |
 | **T-E7** | AST start-path domination | | — | Every `BridgeServer(` construction dominated by an `egress_block_reason(` call at AST level | §5.1 | M |
-| **T-E8** | Local bypass, fail-closed, transport asymmetry | | T-E2, T-E3, T-E4, T-E5 | Loopback bypass on bridge sessions; a `supports_egress() == False` profile blocks startup **and names the profile**; and the complement — those destinations **are** tunnelled on the three custom transports, which have no bypass | §5.5 | M |
-| **T-E9** | Proven / unproven report | | T-E3, T-E4, T-E5 | Each transport is either proven or **explicitly reported unproven**. A transport that cannot be given a working direct route is never silently counted as passing | §5.3 | S |
+| **T-E8** | Local bypass, fail-closed, transport asymmetry | | T-E2, T-B1, T-B2, T-B3 | Loopback bypass on bridge sessions; a `supports_egress() == False` profile blocks startup **and names the profile**; and the complement — those destinations **are** tunnelled on the three custom transports, which have no bypass. Needs the **recorders** to observe tunnelling, not the containment slices, so a stuck transport does not block it | §5.5 | M |
+| **T-E9** | Containment completeness gate | | T-E1 | Asserts **every transport has a recorded outcome and none is `not-attempted`**. `unsupported` is a permitted outcome for partial delivery; `failed` is not. It reads the report T-E1 ships — **it does not depend on any transport succeeding** | §5.3 | S |
 
 ---
 
@@ -339,11 +355,11 @@ that makes *its* bytes observable. Bundled, the Ollama half would have had no ev
 | **T-K3** | Statistics and decision rule | blocked Q4, Q13 | T-K1, T-K2 | Successes ÷ **scheduled** trials; interval; pre-registered margin; symmetric exclusions; a missing-data ceiling that **voids** the run | §6.4.3 | M |
 | **T-K4** | Load rig and baseline | | T-W8, T-B4 | Fixed workload, named runner class; latency, TTFB, completion and error rates, bounded RSS, socket recovery; streaming and buffered measured separately | §6.4.4 | L |
 | **T-K5** | `load.yml` reusable + publish gate | ci | T-K4 | `publish.yml` `needs:`-gates on a load run **for the tag commit** | §8 | M |
-| **T-K6** | Activate the Subsystem job | ci | T-W1, T-E2, T-D4 | `l3` gates PRs and releases, from the first proven slices onward | §8 | S |
+| **T-K6** | Activate the Subsystem job | ci | T-W1, T-E2, T-D3, T-D4 | `l3` gates PRs and releases. **T-D3 is required, not just T-D4**: activating the job promotes the oracle into gating infrastructure, and §1.4 forbids that before its falsification suite exists. Fixing only T-J2's dependency left this hole open | §8 | S |
 | **T-K7** | Deep nightly — mutation and schema fuzzing | ci | T-H3, T-G6 | Both exist before the job claims to run them | §8 | S |
 | **T-K8** | Per-category collection enforcement | ci | T-W1, T-K6 | Each required category has its own non-empty check. A category present but empty **fails** | §8 | S |
 | **T-K9** | Activate the Acceptance job | ci | T-J2, T-J3, T-K6 | `acceptance` gates PRs and releases | §8 | S |
-| **T-K10** | Activate the `agent_smoke` category | ci, blocked Q12 | T-I5, T-K9 | Its own required category — **it does not block Subsystem or Acceptance** | §8 | S |
+| **T-K10** | Activate the `agent_smoke` category | ci, blocked Q12 | T-W1, T-I5, T-I6 | Its own required category — **it does not block Subsystem or Acceptance**, and it does not wait for them either: the T-K9 dependency was delay with no shared prerequisite behind it. It requires **T-I6 as well as T-I5**, because startup connectivity alone would let the category go green without proving the settings precedence that is the whole reason it exists | §8 | S |
 | **T-K11** | Agent-live nightly | ci | T-I14 | Runs the **expanded** five-scenario coverage, not the two existing cases | §8 | S |
 | **T-K12** | Eval nightly | ci | T-K3 | Runs once the decision rule exists; alerts, never gates | §8 | S |
 
@@ -355,66 +371,77 @@ Q12 as a separate category so it cannot hold up Subsystem or Acceptance.
 
 ## 14. Derived schedule
 
-Computed from the dependency columns above, not written by hand. **Recompute after any dependency
-change** — these numbers go stale the moment the tables move. 98 tasks; the graph is acyclic and
-every dependency resolves.
+Computed from the dependency columns above, not written by hand. 98 tasks; the graph is acyclic
+and every dependency resolves. **Recompute after any dependency change.**
 
-### 14.1 Readiness tiers
+### 14.1 What these numbers are, and are not
 
-A tier is the earliest point a task *could* start, not a batch to wait for. **53 of 98 tasks are
-available in tiers 0–2**, which is what Milestone 0 buys.
+The durations below are **dependency-only lower bounds**. They assume every task starts the moment
+its predecessors finish, which in turn assumes enough people to run every ready task in parallel.
+They are not a delivery forecast, and two facts in this plan actively break that assumption:
+
+- **T-C1–T-C7 share one capture-and-secret-review pass** (§6) — they are seven tasks but not seven
+  parallel slots.
+- **Five shared files need a single integration owner** (§18), which serialises work that the
+  graph shows as parallel.
+
+An earlier draft said "two owners halve elapsed time." **That does not follow from this
+calculation** — the chain lengths are lower bounds under unlimited staffing, and halving is a
+statement about resourcing that this graph cannot support. What the graph *does* support is
+narrower and still useful: the fidelity and containment chains share no task until T-K9, so they
+never block each other.
+
+### 14.2 Readiness tiers
+
+A tier is the earliest point a task *could* start, not a batch to wait for. **43 of 98 tasks are
+available in tiers 0–2.**
 
 | Tier | Count | Tasks |
 |---|---|---|
-| **0** | 13 | T-E6 T-E7 T-F1 T-G12 T-I1 T-I3 T-I4 T-I14 T-K1 T-W1 T-W2 T-W4 T-W5 |
-| **1** | 22 | T-A1–T-A7 T-B4 T-F2–T-F5 T-G8 T-G10 T-G11 T-H1 T-I2 T-K2 T-K11 T-W3 T-W7 T-W8 |
-| **2** | 18 | T-B1 T-B2 T-B3 T-F6 T-G1 T-G3 T-G6 T-G7 T-G9 T-H4 T-I10 T-I11 T-I13 T-J1 T-K3 T-K4 T-W6 T-W9 |
-| **3** | 15 | T-C1–T-C7 T-E1 T-G4 T-H2 T-H5 T-I5 T-I7 T-K5 T-K12 |
-| **4** | 6 | T-D1 T-E2 T-H3 T-I6 T-I9 T-I12 |
-| **5** | 8 | T-D2 T-D10 T-E3 T-E4 T-E5 T-G5 T-I8 T-K7 |
-| **6** | 7 | T-D3 T-D4 T-D5 T-D6 T-D7 T-E8 T-E9 |
+| **0** | 12 | T-E6 T-E7 T-F1 T-G12 T-I1 T-I3 T-I4 T-I14 T-K1 T-W1 T-W2 T-W5 |
+| **1** | 21 | T-A1–T-A7 T-F2–T-F5 T-G8 T-G10 T-G11 T-H1 T-I2 T-K2 T-K11 T-W3 T-W4 T-W7 |
+| **2** | 10 | T-B4 T-F6 T-G1 T-G3 T-G9 T-H4 T-J1 T-K3 T-W6 T-W8 |
+| **3** | 18 | T-B1 T-B2 T-B3 T-C1–T-C7 T-G6 T-G7 T-I10 T-I11 T-I13 T-K4 T-K12 T-W9 |
+| **4** | 10 | T-D1 T-E1 T-G4 T-H2 T-H5 T-I5 T-I7 T-I9 T-I12 T-K5 |
+| **5** | 8 | T-D2 T-D10 T-E2 T-E9 T-G5 T-H3 T-I6 T-I8 |
+| **6** | 11 | T-D3 T-D4 T-D5 T-D6 T-D7 T-E3 T-E4 T-E5 T-E8 T-K7 T-K10 |
 | **7** | 3 | T-D9 T-J3 T-K6 |
 | **8** | 4 | T-D8 T-G2 T-J2 T-K8 |
 | **9** | 1 | T-K9 |
-| **10** | 1 | T-K10 |
 
-### 14.2 The chains, as computed
+### 14.3 The chains
 
 | Milestone | Longest chain to it | Days |
 |---|---|---|
-| Containment slice proven (**T-E2**) | T-W4 → T-W8 → T-W9 → T-E1 → T-E2 | 11.5 |
-| Containment complete (**T-E9**) | … → T-E2 → T-E3 → T-E9 | 13.5 |
-| Fidelity matrix complete (**T-D9**) | T-W2 → T-W3 → T-W6 → T-C1 → T-D1 → T-D2 → T-D4 → T-D9 | 15.0 |
-| Containment acceptance (**T-J3**) | T-W4 → T-W8 → T-W9 → T-E1 → T-E2 → T-E3 → T-E8 → T-J3 | 16.0 |
+| Oracle core proven (**T-D1**) | T-W2 → T-W3 → T-W6 → T-C1 → T-D1 | 8.0 |
+| Containment slice proven (**T-E2**) | T-W2 → T-W4 → T-W8 → T-W9 → T-E1 → T-E2 | 12.0 |
+| Fidelity matrix complete (**T-D9**) | … → T-D1 → T-D2 → T-D4 → T-D9 | 15.0 |
 | Fidelity acceptance (**T-J2**) | … → T-D9 → T-J2 | 16.5 |
 | **Everything gating (T-K9)** | … → T-J2 → T-K9 | **17.0** |
 
-**The critical path runs through the corpus, not through containment.** That is not what the
-previous draft assumed, and it changes the advice: `T-W2 → T-W3 → T-W6 → T-C1` is four sequential
-tasks before the oracle can even start, because T-D1 needs one corpus entry to run against. The
-corpus was listed as a background risk; it is in fact the front of the longest chain.
+**The critical path runs through the corpus**, not through containment:
+`T-W2 → T-W3 → T-W6 → T-C1 → T-D1 → T-D2 → T-D4 → T-D9 → T-J2 → T-K9`. Four sequential tasks
+precede the oracle, because T-D1 needs one corpus entry to run against. The corpus is not a
+background risk; it is the front of the longest chain.
 
-Two consequences:
+**A previously claimed optimisation has been withdrawn.** An earlier draft suggested letting T-D1
+run against a synthetic transcript instead of T-C1, "taking about two days off the front." That
+number was asserted, not computed. Recomputing it against the current graph gives **zero days
+saved**: dropping the T-D1 → T-C1 edge makes T-W9 the limiting predecessor at exactly the same
+length, so the chain merely moves from `T-W3 → T-W6 → T-C1` to `T-W4 → T-W8 → T-W9`. The corpus
+dependency is not what makes this path long — the path is long either way. The lever does not
+exist, and the plan should not offer it.
 
-1. **T-W2, T-W3 and T-W6 are the first three things to staff**, in that order, and T-C1 should be
-   the first corpus entry captured — not whichever is most interesting.
-2. **Containment is no longer the long pole** but finishes only half a day earlier, and it is
-   fully independent until T-K9. Two owners still halve elapsed time; the fidelity owner is simply
-   the one on the critical path.
+### 14.4 Consequences worth acting on
 
-If the corpus dependency is judged too expensive, the lever is T-D1: let it run against a
-synthetic minimal transcript rather than T-C1, which removes three tasks from the front of the
-chain. That trades a little early realism for roughly two days — a decision worth taking
-deliberately rather than by default.
-
-### 14.3 Consequences worth acting on
-
-1. **T-W2, T-W4, T-W5 and T-W8 head the chains and are all S/M.** They go first, and no two to the
-   same person.
-2. **T-E1 is the riskiest single task**; it sits early in the containment chain, which has ~1 day
-   of slack against the critical path. Slip it and containment becomes the critical path.
-3. **T-K9 is the convergence point.** Both chains stop there; it is not an afterthought.
-4. **T-K10 is the only tier-10 task** and it is blocked on Q12. It gates nothing else.
+1. **T-W2 is the single most blocking task.** It heads both chains, it is sized S, and it now owns
+   the whole input contract (§3). It goes first, alone, and lands before the streams branch.
+2. **T-W3 and T-W6 follow immediately** — they sit second and third on the critical path, ahead of
+   any test.
+3. **T-E1 is the riskiest single task**; containment carries ~5 days of slack against the critical
+   path, so a slip there is absorbed rather than fatal. That is a change from the previous draft,
+   where the two chains were nearly equal.
+4. **T-K9 is the convergence point.** Both chains stop there; it is not an afterthought.
 
 ---
 
@@ -510,10 +537,11 @@ Every design requirement has an owner. "Existing" means the current suite alread
 per-transport routes into T-E3–T-E5 means a stuck transport is one blocked M and an entry in
 T-E9's unproven report, not a blocked chain.
 
-**The corpus is on the critical path**, not merely a background risk (§14.2). T-C1–T-C7 need real
+**The corpus is on the critical path**, not merely a background risk (§14.3). T-C1–T-C7 need real
 sessions, a secret review and a named refresh owner, and share one capture pass — while
-`T-W2 → T-W3 → T-W6 → T-C1` is the front of the longest chain. Staff it first, capture T-C1 first,
-and consider the synthetic-transcript lever in §14.2 if it slips.
+`T-W2 → T-W3 → T-W6 → T-C1` is the front of the longest chain. Staff it first and capture T-C1
+first. There is **no shortcut**: §14.3 shows that dropping the corpus dependency saves nothing,
+because the alternative predecessor chain is exactly as long.
 
 **T-D9 and T-G2 are adjacent.** T-D4–T-D9 own driving the wire and capturing; T-G2 asserts
 register coverage over those captures as a meta-assertion. Implementing "per adapter × model ×
