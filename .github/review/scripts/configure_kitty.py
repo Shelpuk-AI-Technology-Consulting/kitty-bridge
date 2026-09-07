@@ -376,8 +376,23 @@ def _unresolved_references(values: dict[str, str]) -> list[str]:
     except json.JSONDecodeError:  # pragma: no cover - validated before this runs
         pass
 
+    # 🔴 An EMPTY reference is reported as empty rather than interpolated into a
+    # sentence that then names nothing. The `egress.json` branch above already
+    # avoids this by matching kitty's own truthiness guard; the `profiles.json`
+    # branch tests `isinstance(..., str)`, which accepts `""` -- so the fix was
+    # applied on one side and not the other, and the message read "needs
+    # credential , which credentials.json does not contain". An operator cannot
+    # act on that: it looks like a rendering bug rather than a bad profile.
+    #
+    # Reported, not skipped: unlike an egress record, a profile with an empty
+    # `auth_ref` resolves no key at all, so silence here would move the failure
+    # into the run as an unexplained auth error.
     return [
-        f"{where} needs credential {ref}, which credentials.json does not contain"
+        (
+            f"{where} names an EMPTY credential reference, so no key resolves"
+            if not ref
+            else f"{where} needs credential {ref}, which credentials.json does not contain"
+        )
         for where, ref in required
         if not credentials.get(ref)
     ]
