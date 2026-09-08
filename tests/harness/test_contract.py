@@ -141,13 +141,22 @@ class TestCapturedRequestRedaction:
         for name in c.REDACTED_HEADERS:
             assert name == name.lower()
 
-    def test_the_mask_set_names_every_credential_header_the_five_recorders_will_see(self) -> None:
-        """Asserts its own subject set, so the set cannot quietly shrink (house rule).
+    def test_the_mask_set_is_exactly_five_carriers_plus_two_precautionary(self) -> None:
+        """Asserts its own subject set exactly, so it cannot shrink *or* grow unexplained.
 
-        One entry per carrier named in the constant's own docstring:
-        `x-api-key` (Anthropic), `api-key` (Azure and P9b's MiMo),
-        `x-goog-api-key` (Gemini), `authorization` (Vertex's OAuth leg) and
+        **Five with a carrier** the recorders will meet (§7.2): `x-api-key`
+        (Anthropic), `api-key` (Azure and P9b's MiMo), `x-goog-api-key`
+        (Gemini), `authorization` (Vertex's OAuth leg) and
         `proxy-authorization` (the CONNECT legs, §5.2.1).
+
+        **Two precautionary**: `cookie` and `set-cookie`. Nothing authenticates
+        by cookie today, so nothing exercises them — kept because listing a
+        credential nobody sends costs nothing, while omitting one somebody
+        later starts sending leaks it into every CI log.
+
+        Exact, not a subset: the subset form could not notice an entry nobody
+        had explained, which is how the constant and its prose drifted apart
+        in the first place.
         """
         assert set(c.REDACTED_HEADERS) == {
             "authorization",
