@@ -278,10 +278,18 @@ Part = Text | ToolUse | ToolResult | Thinking | Image | Json | Opaque
 REDACTION_MASK = "<redacted>"
 
 #: Header names whose values never appear in a ``repr``, lowercased for
-#: case-insensitive matching. The five recorders (§7.2) will see every one of
-#: these: ``x-api-key`` from Anthropic, ``api-key`` from Azure and P9b's MiMo,
-#: ``x-goog-api-key`` from Gemini, ``authorization`` from Vertex's OAuth leg and
-#: ``proxy-authorization`` from the CONNECT legs (§5.2.1).
+#: case-insensitive matching. Seven entries, in two groups.
+#:
+#: **Five the recorders (§7.2) will actually see**, one per carrier:
+#: ``x-api-key`` from Anthropic, ``api-key`` from Azure and P9b's MiMo,
+#: ``x-goog-api-key`` from Gemini, ``authorization`` from Vertex's OAuth leg,
+#: and ``proxy-authorization`` from the CONNECT legs (§5.2.1).
+#:
+#: **Two precautionary**: ``cookie`` and ``set-cookie``. No adapter authenticates
+#: by cookie today, so nothing exercises them — they are here because a session
+#: cookie is a credential and the cost of listing one nobody sends is nil, while
+#: the cost of omitting one somebody starts sending is a leak into every CI log.
+#: :attr:`CapturedReply` is the likelier carrier of the two.
 REDACTED_HEADERS = frozenset(
     {"authorization", "proxy-authorization", "x-api-key", "api-key", "x-goog-api-key", "cookie", "set-cookie"}
 )

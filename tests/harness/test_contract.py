@@ -149,13 +149,15 @@ class TestCapturedRequestRedaction:
         `x-goog-api-key` (Gemini), `authorization` (Vertex's OAuth leg) and
         `proxy-authorization` (the CONNECT legs, §5.2.1).
         """
-        assert {
+        assert set(c.REDACTED_HEADERS) == {
             "authorization",
             "proxy-authorization",
             "x-api-key",
             "api-key",
             "x-goog-api-key",
-        } <= c.REDACTED_HEADERS
+            "cookie",
+            "set-cookie",
+        }
 
     def test_the_proxy_authorization_header_is_actually_masked(self) -> None:
         """Membership in the set is not proof the mask reaches it."""
