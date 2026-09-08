@@ -101,6 +101,23 @@ class TestCapturedRequestShape:
         with pytest.raises(TypeError, match="not a string"):
             _capture(headers=("Authorization",))  # type: ignore[arg-type]
 
+    def test_a_bytes_header_name_is_rejected_because_it_would_bypass_the_mask(self) -> None:
+        """The pair-length check let a credential through the redaction entirely.
+
+        `b"authorization".lower()` is `b"authorization"`, which is not in a set
+        of `str` — so a bytes-named `Authorization` header missed the mask and
+        its value was rendered in full into every log and assertion diff. A
+        length check that ignores element types is how a leak walks through a
+        guard that looks like it covers this.
+        """
+        with pytest.raises(TypeError, match="both be str"):
+            _capture(headers=((b"Authorization", "Bearer sk-LEAKED"),))  # type: ignore[arg-type]
+
+    def test_a_bytes_header_value_is_rejected_too(self) -> None:
+        """The other element, so the check cannot be half-applied."""
+        with pytest.raises(TypeError, match="both be str"):
+            _capture(headers=(("Authorization", b"Bearer sk-LEAKED"),))  # type: ignore[arg-type]
+
     def test_headers_given_as_a_generator_are_not_consumed_by_the_guard(self) -> None:
         """A one-shot iterable must survive validation.
 
@@ -427,6 +444,30 @@ class TestEnvelopeAndConversation:
         assert [t.text for t in conversation.system] == ["a", "b"]
         assert [t.role for t in conversation.turns] == ["user", "assistant"]
         assert [t.name for t in conversation.tools] == ["x", "y"]
+
+    @pytest.mark.parametrize(
+        ("build", "expected"),
+        [
+            (lambda: c.Turn(role="user", parts=("not a part",)), "Turn.parts"),
+            (lambda: c.Reply(parts=(42,)), "Reply.parts"),
+            (lambda: c.ToolResult(content=(c.ToolUse(name="f"),)), "ToolResult.content"),
+            (lambda: c.Conversation(system=("plain string",)), "Conversation.system"),
+            (lambda: c.Conversation(turns=("not a turn",)), "Conversation.turns"),
+            (lambda: c.Conversation(tools=("not a tool",)), "Conversation.tools"),
+        ],
+        ids=["turn-parts", "reply-parts", "tool-result-content", "system", "turns", "tools"],
+    )
+    def test_a_closed_union_rejects_a_member_outside_it(self, build: object, expected: str) -> None:
+        """Closed means enforced — the posture the vocabularies already take.
+
+        Swept across **every** field that declares a closed set rather than the
+        one that was reported, because fixing these one at a time is what
+        produced four separate rounds of the same finding. `ToolResult.content`
+        is deliberately narrower than `Part`: a tool call cannot nest inside a
+        tool result, and that claim is now checked rather than merely written.
+        """
+        with pytest.raises(TypeError, match=expected):
+            build()  # type: ignore[operator]
 
     def test_a_role_outside_the_closed_vocabulary_is_rejected_at_construction(self) -> None:
         """Construction is not parsing, so this is a ValueError, not UnreadableBodyError (R8.1)."""

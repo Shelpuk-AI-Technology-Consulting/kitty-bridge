@@ -258,12 +258,19 @@ class ToolResult:
 
     def __post_init__(self) -> None:
         """Freeze the content sequence in place."""
-        object.__setattr__(self, "content", tuple(self.content))
+        object.__setattr__(
+            self, "content", _checked_members(self.content, RESULT_PART_TYPES, "ToolResult.content")
+        )
 
 
 #: Every :data:`Part` variant, as a tuple for ``isinstance`` and for the guard
 #: that asserts the union has not silently grown.
 PART_TYPES = (Text, ToolUse, ToolResult, Thinking, Image, Json, Opaque)
+
+#: What a :class:`ToolResult` may carry.  Deliberately narrower than
+#: :data:`PART_TYPES` and deliberately not recursive: no wire format nests a
+#: tool call inside a tool result.
+RESULT_PART_TYPES = (Text, Image, Json, Opaque)
 
 Part = Text | ToolUse | ToolResult | Thinking | Image | Json | Opaque
 
@@ -297,6 +304,39 @@ REDACTED_HEADERS = frozenset(
 #: Query-string keys whose values never appear in a ``repr``. Gemini carries its
 #: credential in the URL, which :attr:`CapturedRequest.query` preserves verbatim.
 REDACTED_QUERY_KEYS = frozenset({"key", "api_key", "access_token"})
+
+
+def _checked_members(values: Any, allowed: tuple[type, ...], field_name: str) -> tuple[Any, ...]:
+    """Return ``values`` as a tuple, rejecting anything outside ``allowed``.
+
+    The contract declares several closed sets — the :data:`Part` union, the
+    parts a :class:`ToolResult` may carry, the types a :class:`Conversation`
+    holds. *Closed* has meant *enforced* everywhere else in this module
+    (:data:`ROLES`, :data:`SAMPLING_KEYS`, :data:`STOP_REASONS`,
+    :data:`TOOL_CHOICE_VALUES`), and a declared-but-unchecked union is the same
+    defect: a rule that reads like a guarantee and guarantees nothing.
+
+    Args:
+        values: The sequence given for the field.
+        allowed: The types a member may be.
+        field_name: The field's name, for the error message.
+
+    Returns:
+        The members, order untouched.
+
+    Raises:
+        TypeError: When a member is outside ``allowed``.
+    """
+    # Materialise once: reading a one-shot iterable twice would leave the store
+    # empty and silent, which is the defect round 9 closed on headers.
+    members = tuple(values)
+
+    offenders = sorted({type(m).__name__ for m in members if not isinstance(m, allowed)})
+    if offenders:
+        names = ", ".join(t.__name__ for t in allowed)
+        raise TypeError(f"{field_name} accepts only {names}; got {', '.join(offenders)}")
+
+    return members
 
 
 def _normalised_headers(headers: Any) -> tuple[tuple[str, str], ...]:
@@ -334,6 +374,13 @@ def _normalised_headers(headers: Any) -> tuple[tuple[str, str], ...]:
     pairs = tuple(tuple(entry) for entry in entries)
     if any(len(pair) != 2 for pair in pairs):
         raise TypeError("each header must be a (name, value) pair")
+
+    # A `bytes` name survives a length check and then misses the credential
+    # mask outright: `b"authorization"` is not in a set of `str`, so the value
+    # is rendered in full. Checking the length without the element types is how
+    # a leak walks through a guard that looks like it covers this.
+    if any(not isinstance(part, str) for pair in pairs for part in pair):
+        raise TypeError("header names and values must both be str")
 
     return pairs
 
@@ -575,10 +622,11 @@ class Turn:
             ValueError: When ``role`` is outside :data:`ROLES`. Construction is
                 not parsing — T-D1 builds expected conversations by hand — so
                 this is a ``ValueError`` and not :class:`UnreadableBodyError`.
+            TypeError: When a member of ``parts`` is outside :data:`PART_TYPES`.
         """
         if self.role not in ROLES:
             raise ValueError(f"role must be one of {sorted(ROLES)}, got {self.role!r}")
-        object.__setattr__(self, "parts", tuple(self.parts))
+        object.__setattr__(self, "parts", _checked_members(self.parts, PART_TYPES, "Turn.parts"))
 
 
 @dataclass(frozen=True)
@@ -639,9 +687,9 @@ class Conversation:
                 likely accident. Validated the way :class:`Turn` validates its
                 role, rather than left as an unenforced reader obligation.
         """
-        object.__setattr__(self, "system", tuple(self.system))
-        object.__setattr__(self, "turns", tuple(self.turns))
-        object.__setattr__(self, "tools", tuple(self.tools))
+        object.__setattr__(self, "system", _checked_members(self.system, (Text,), "Conversation.system"))
+        object.__setattr__(self, "turns", _checked_members(self.turns, (Turn,), "Conversation.turns"))
+        object.__setattr__(self, "tools", _checked_members(self.tools, (ToolDecl,), "Conversation.tools"))
 
         if not isinstance(self.sampling, Mapping):
             raise TypeError("sampling must be a mapping of canonical key to value")
@@ -796,7 +844,7 @@ class Reply:
                 f"stop_reason_raw is only for 'other', but stop_reason is {self.stop_reason!r}"
             )
 
-        object.__setattr__(self, "parts", tuple(self.parts))
+        object.__setattr__(self, "parts", _checked_members(self.parts, PART_TYPES, "Reply.parts"))
         object.__setattr__(self, "usage", _freeze_mapping(self.usage))
         object.__setattr__(self, "residual", _freeze_mapping(self.residual))
         object.__setattr__(self, "source", _freeze_mapping(self.source))
