@@ -12147,7 +12147,14 @@ class ReusableTestJobWiringTests(unittest.TestCase):
             "ruff check .",
             "lint-imports",
             "mypy src/kitty",
-            "pytest -q",
+            # Not a bare `pytest -q` any more. The suite is divided by layer
+            # marker, and the SELECTION is part of what the gate enforces: a
+            # `pytest` naming no layers would silently inherit the local
+            # convenience default from `addopts` and gate a different set than
+            # anyone declared. The `--require-category` flags pairing with this
+            # expression are checked in `tests/test_github_actions.py`, which
+            # can parse the YAML; this file runs on a bare interpreter.
+            'pytest -m "l1 or l2"',
         ):
             with self.subTest(command=command):
                 self.assertIn(

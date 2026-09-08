@@ -47,6 +47,20 @@ jobs:
       - name: Type check
         run: mypy src/kitty
 
+      # The Fast gate: the L1 and L2 layers, named explicitly.
+      #
+      # 🔴 `--require-category` for EVERY layer the expression selects, and the
+      # pairing is enforced by a test. `-m "l1 or l2"` is satisfied by `l1`
+      # alone, so without these flags the job reports success for a layer it
+      # never ran -- the same mistake an earlier draft of the design made when
+      # it claimed an `or` expression would fail on an empty side. It will not.
+      #
+      # `--strict-markers` is on the command line, NOT in `addopts`: pytest 9.0
+      # silently ignores it there and 9.1 does not, so a config-file placement
+      # would mean the gate behaves differently on two contributors' machines.
+      # `pyproject.toml` carries the reasoning in full.
       - name: Test
-        run: pytest -q
+        run: >-
+          pytest -m "l1 or l2" -q --strict-markers
+          --require-category=l1 --require-category=l2
 

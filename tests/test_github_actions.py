@@ -11,6 +11,19 @@ from pathlib import Path
 
 import pytest
 import yaml
+from layers import (
+    marker_expression_of,
+    positively_selected_layers,
+    required_categories_of,
+    workflow_pytest_invocations,
+)
+
+# L2: the subject of this file is an artifact outside `src/kitty` Python code,
+# or a structural scan of source text -- two things edited separately that must
+# agree. It gates pull requests exactly as before, in the `l1 or l2` job; the
+# marker records which half of that expression it answers to, and keeps a
+# source-text scan out of the L1 set that mutation testing will judge.
+pytestmark = pytest.mark.l2
 
 ROOT = Path(__file__).resolve().parent.parent
 GITHUB_DIR = ROOT / ".github"
@@ -516,3 +529,103 @@ class TestTypeCheckIsEnforced:
         pytest_at = next(i for i, c in enumerate(commands) if "pytest" in c)
 
         assert mypy_at < pytest_at, "mypy runs after the suite, so type errors are reported last"
+
+
+def _pytest_invocations() -> list[str]:
+    """Return every ``pytest`` command line across all workflows.
+
+    Returns:
+        One string per ``run:`` step that invokes pytest, whitespace collapsed
+        so a folded YAML scalar reads the same as a single line.
+
+    Delegates to :func:`layers.workflow_pytest_invocations` so that this module
+    and ``tests/test_layer_selection.py`` cannot disagree about which jobs
+    exist.  They check opposite directions, and a sweep that misses a workflow
+    fails **open** in one of them.
+    """
+    return workflow_pytest_invocations(WORKFLOWS_DIR)
+
+
+class TestEveryJobVerifiesTheCategoriesItClaims:
+    """A job must require every layer its own marker expression selects.
+
+    ``-m "acceptance or agent_smoke"`` is satisfied by ``acceptance`` alone: the
+    job collects, passes, and reports a category it never ran. ``TEST_SUITE.md``
+    §8 records that an earlier draft of the design believed pytest would exit 5
+    in that case and says plainly: "That is wrong."
+
+    ``--require-category`` is the fix, and this is what stops a *future* job
+    from being added without it -- which is why the sweep covers every workflow
+    rather than naming the one job that exists today.
+    """
+
+    def test_the_sweep_actually_found_the_pytest_invocations(self):
+        """The self-check: prove the scan still matches something.
+
+        A structural guard that has rotted into matching nothing passes forever
+        and silently. This is the pattern ``tests/test_egress_coverage.py``
+        established and §6.2 requires of every guard here.
+        """
+        assert _pytest_invocations(), "no pytest invocation found in any workflow"
+
+    def test_the_fast_job_selects_the_two_gating_layers(self):
+        """Pin the divided command the whole plan schedules against.
+
+        Parallel authors need the selection expression from day one; this is the
+        artifact they read, so a change to it should be deliberate enough to
+        update a test.
+        """
+        commands = " || ".join(_pytest_invocations())
+
+        assert 'pytest -m "l1 or l2"' in commands
+
+    def test_no_job_runs_pytest_without_naming_a_marker_expression(self):
+        """Every job says which layers it runs.
+
+        A bare ``pytest`` in a workflow inherits the default exclusion from
+        ``addopts``, which is a developer-convenience setting. A CI job that
+        depends on it is a job whose coverage can be changed by editing a
+        comment about local runs.
+        """
+        undeclared = [
+            cmd for cmd in _pytest_invocations() if marker_expression_of(cmd) is None
+        ]
+
+        assert undeclared == [], f"these CI pytest runs name no layers: {undeclared}"
+
+    def test_the_gate_passes_strict_markers_on_the_command_line(self):
+        """``--strict-markers`` belongs here, not in ``addopts``.
+
+        pytest 9.0.x silently ignores it in ``addopts``; 9.1.0 honours it
+        (upstream issue 14442). With ``pytest>=8.0`` and no upper bound, a
+        config-file placement would make the gate strict for one contributor and
+        not another. Asserted here, and asserted *absent* from ``addopts`` in
+        ``tests/test_layer_markers.py`` -- the natural tidy-up is to move it
+        there, and one assertion alone would not notice.
+        """
+        commands = " || ".join(_pytest_invocations())
+
+        assert "--strict-markers" in commands
+
+    def test_each_job_requires_every_layer_its_expression_selects(self):
+        """The pairing that makes a job's claim about itself checkable.
+
+        "Selects" is computed by evaluating the expression, never by looking for
+        layer names in the string. The two differ on every expression containing
+        ``not``: a string scan reads ``-m "not agent_live"`` as a job that runs
+        the live-agent tests and would demand it guarantee them.
+        """
+        gaps: list[str] = []
+
+        for command in _pytest_invocations():
+            expression = marker_expression_of(command)
+            if expression is None:
+                continue
+
+            unverified = set(positively_selected_layers(expression)) - required_categories_of(
+                command
+            )
+            if unverified:
+                gaps.append(f"{command!r} selects {sorted(unverified)} without requiring it")
+
+        assert gaps == []
