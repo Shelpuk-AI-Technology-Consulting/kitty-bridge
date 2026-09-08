@@ -185,11 +185,20 @@ class TestCapturedRequestRedaction:
             assert c.REDACTION_MASK in rendered, f"{name} masked to nothing rather than to the mask"
 
     def test_every_masked_query_key_is_actually_redacted(self) -> None:
-        """The query-side counterpart, swept the same way and for the same reason."""
+        """The query-side counterpart, swept the same way and for the same reason.
+
+        Asserts the **pair survives with the mask as its value**, not merely
+        that the secret is gone. A `repr` that dropped the pair outright, or
+        emptied it to `key=`, would satisfy an absence check while hiding a
+        missing-credential bug exactly as effectively as a leak hides a present
+        one. The header sweep already pins this; the two must not disagree.
+        """
         for key in sorted(c.REDACTED_QUERY_KEYS):
-            rendered = repr(_capture(query=f"{key.upper()}=SECRET-VALUE&alt=sse"))
+            sent = key.upper()
+            rendered = repr(_capture(query=f"{sent}=SECRET-VALUE&alt=sse"))
 
             assert "SECRET-VALUE" not in rendered, f"{key} is in the set but not masked"
+            assert f"{sent}={c.REDACTION_MASK}" in rendered, f"{key} was dropped or emptied, not masked"
             assert "alt=sse" in rendered, f"masking {key} destroyed an innocent parameter"
 
 
