@@ -168,11 +168,29 @@ class TestCapturedRequestRedaction:
             "set-cookie",
         }
 
-    def test_the_proxy_authorization_header_is_actually_masked(self) -> None:
-        """Membership in the set is not proof the mask reaches it."""
-        captured = _capture(headers=(("Proxy-Authorization", "Basic c2VjcmV0OnBhc3M="),))
+    def test_every_masked_header_is_actually_redacted(self) -> None:
+        """Membership in the set is not proof the mask reaches the entry.
 
-        assert "c2VjcmV0OnBhc3M=" not in repr(captured)
+        Swept over the constant itself rather than a hand-picked few, so an
+        eighth entry cannot ship asserted-but-unexercised — which is how four
+        of the seven sat untested through four review rounds.
+
+        Each is sent in **upper case** to prove the match is case-insensitive
+        per entry, not merely that the constant happens to be lowercase.
+        """
+        for name in sorted(c.REDACTED_HEADERS):
+            rendered = repr(_capture(headers=((name.upper(), "SECRET-VALUE"),)))
+
+            assert "SECRET-VALUE" not in rendered, f"{name} is in the set but not masked"
+            assert c.REDACTION_MASK in rendered, f"{name} masked to nothing rather than to the mask"
+
+    def test_every_masked_query_key_is_actually_redacted(self) -> None:
+        """The query-side counterpart, swept the same way and for the same reason."""
+        for key in sorted(c.REDACTED_QUERY_KEYS):
+            rendered = repr(_capture(query=f"{key.upper()}=SECRET-VALUE&alt=sse"))
+
+            assert "SECRET-VALUE" not in rendered, f"{key} is in the set but not masked"
+            assert "alt=sse" in rendered, f"masking {key} destroyed an innocent parameter"
 
 
 class TestCapturedReply:
@@ -462,9 +480,28 @@ class TestEnvelopeAndConversation:
             c.Reply(stop_reason="MAX_TOKENS")
 
     def test_every_canonical_stop_reason_is_accepted(self) -> None:
-        """The control: the guard above would pass if construction rejected everything."""
+        """The control: the guard above would pass if construction rejected everything.
+
+        `other` is passed with its paired raw value, because the two are only
+        meaningful together — see the pairing tests below.
+        """
         for reason in c.STOP_REASONS:
-            assert c.Reply(stop_reason=reason).stop_reason == reason
+            raw = "SAFETY" if reason == "other" else None
+            assert c.Reply(stop_reason=reason, stop_reason_raw=raw).stop_reason == reason
+
+    def test_other_without_the_wire_value_is_rejected(self) -> None:
+        """`other` alone discards the very thing the escape exists to keep.
+
+        T-D10 must be able to tell a Gemini `SAFETY` block from a `RECITATION`;
+        a reader that maps both to bare `other` has thrown that away.
+        """
+        with pytest.raises(ValueError, match="stop_reason_raw"):
+            c.Reply(stop_reason="other")
+
+    def test_a_raw_value_beside_a_canonical_reason_is_rejected(self) -> None:
+        """The other direction: a stale original left over from a mapped value."""
+        with pytest.raises(ValueError, match="only for 'other'"):
+            c.Reply(stop_reason="end_turn", stop_reason_raw="STOP")
 
 
 class TestPathVocabulary:

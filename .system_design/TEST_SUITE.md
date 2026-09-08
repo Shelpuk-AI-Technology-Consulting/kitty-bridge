@@ -478,6 +478,12 @@ agree on a canonical form. They are six separate tasks, so the agreement is part
   building an escape out of the residual defeats the escape. A value mapped to `other` has been
   seen and classified — it is accounted for. The residual means only *nobody has looked at this*.
 
+  **The pairing is enforced, both ways.** `other` without `stop_reason_raw` is rejected, because a
+  reader that maps both `SAFETY` and `RECITATION` to a bare `other` has discarded exactly what
+  T-D10 needs; and a `stop_reason_raw` beside a canonical reason is rejected as a stale leftover.
+  An invariant stated only in a docstring is a comment, not a rule — the same posture the closed
+  vocabularies take.
+
   **`usage` is carried but excluded from the diff**: it is provider-reported, never agent-supplied,
   so a difference carries no I1 information.
 

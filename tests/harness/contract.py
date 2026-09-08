@@ -745,15 +745,28 @@ class Reply:
         """Validate the stop reason and freeze every sequence and mapping.
 
         Raises:
-            ValueError: When ``stop_reason`` is outside :data:`STOP_REASONS`.
-                Closed means enforced, the same posture :class:`Turn` takes on
-                roles and :class:`Conversation` on sampling keys — a vocabulary
-                declared closed but checked nowhere is a comment, not a rule.
+            ValueError: When ``stop_reason`` is outside :data:`STOP_REASONS`, or
+                when it does not pair correctly with ``stop_reason_raw``. Closed
+                means enforced, the same posture :class:`Turn` takes on roles and
+                :class:`Conversation` on sampling keys — a vocabulary declared
+                closed but checked nowhere is a comment, not a rule, and the same
+                applies to an invariant written only in a docstring.
         """
         if self.stop_reason is not None and self.stop_reason not in STOP_REASONS:
             raise ValueError(
                 f"stop_reason must be one of {sorted(STOP_REASONS)}, got {self.stop_reason!r}; "
                 "an unmapped wire value projects as 'other' with the original in stop_reason_raw"
+            )
+
+        # The pairing is the escape's whole value. `other` without the wire's
+        # string discards what T-D10 needs to tell a SAFETY block from a
+        # RECITATION; a raw value beside a canonical reason means the reader
+        # mapped it and kept a stale original.
+        if self.stop_reason == "other" and self.stop_reason_raw is None:
+            raise ValueError("stop_reason 'other' must carry the wire's own value in stop_reason_raw")
+        if self.stop_reason != "other" and self.stop_reason_raw is not None:
+            raise ValueError(
+                f"stop_reason_raw is only for 'other', but stop_reason is {self.stop_reason!r}"
             )
 
         object.__setattr__(self, "parts", tuple(self.parts))
