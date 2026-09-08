@@ -299,6 +299,45 @@ REDACTED_HEADERS = frozenset(
 REDACTED_QUERY_KEYS = frozenset({"key", "api_key", "access_token"})
 
 
+def _normalised_headers(headers: Any) -> tuple[tuple[str, str], ...]:
+    """Return ``headers`` as validated name/value pairs.
+
+    Shared by :class:`CapturedRequest` and :class:`CapturedReply`. It is a
+    function rather than a copy in each ``__post_init__`` because the two copies
+    it replaces both carried the same defect: a bug found in one was, silently,
+    a bug in the other.
+
+    Args:
+        headers: The value given for a capture's ``headers`` field.
+
+    Returns:
+        The header pairs, order and casing untouched.
+
+    Raises:
+        TypeError: When ``headers`` is a mapping, when any entry is a string or
+            bytes, or when any entry is not a name/value pair.
+    """
+    if isinstance(headers, Mapping):
+        raise TypeError("headers must be a sequence of (name, value) pairs, not a mapping")
+
+    # Materialise once. Iterating twice would consume a generator on the first
+    # pass and leave the second seeing nothing -- storing no headers at all,
+    # silently, from a guard whose whole purpose is to fail loudly.
+    entries = tuple(headers)
+
+    # A string is a sequence too, so `tuple("ab")` is a *valid-looking* 2-tuple
+    # of characters. Rejecting the type is the only check that catches it; a
+    # length check cannot.
+    if any(isinstance(entry, str | bytes) for entry in entries):
+        raise TypeError("each header must be a (name, value) pair, not a string")
+
+    pairs = tuple(tuple(entry) for entry in entries)
+    if any(len(pair) != 2 for pair in pairs):
+        raise TypeError("each header must be a (name, value) pair")
+
+    return pairs
+
+
 def _redact_headers(headers: Sequence[tuple[str, str]]) -> str:
     """Render header pairs with credential values masked.
 
@@ -383,19 +422,7 @@ class CapturedRequest:
                 shredded into character tuples and the header evidence §4.3 C1
                 asserts on would be gone. Failing loudly is the point.
         """
-        if isinstance(self.headers, Mapping):
-            raise TypeError("headers must be a sequence of (name, value) pairs, not a mapping")
-
-        # A string is a sequence too, so `tuple("ab")` is a *valid-looking*
-        # 2-tuple of characters. Rejecting the type is the only check that
-        # catches it; a length check cannot.
-        if any(isinstance(entry, str | bytes) for entry in self.headers):
-            raise TypeError("each header must be a (name, value) pair, not a string")
-
-        pairs = tuple(tuple(h) for h in self.headers)
-        if any(len(pair) != 2 for pair in pairs):
-            raise TypeError("each header must be a (name, value) pair")
-        object.__setattr__(self, "headers", pairs)
+        object.__setattr__(self, "headers", _normalised_headers(self.headers))
 
     def __repr__(self) -> str:
         """Render the capture with credentials masked.
@@ -441,19 +468,7 @@ class CapturedReply:
                 shredded into character tuples and the header evidence §4.3 C1
                 asserts on would be gone. Failing loudly is the point.
         """
-        if isinstance(self.headers, Mapping):
-            raise TypeError("headers must be a sequence of (name, value) pairs, not a mapping")
-
-        # A string is a sequence too, so `tuple("ab")` is a *valid-looking*
-        # 2-tuple of characters. Rejecting the type is the only check that
-        # catches it; a length check cannot.
-        if any(isinstance(entry, str | bytes) for entry in self.headers):
-            raise TypeError("each header must be a (name, value) pair, not a string")
-
-        pairs = tuple(tuple(h) for h in self.headers)
-        if any(len(pair) != 2 for pair in pairs):
-            raise TypeError("each header must be a (name, value) pair")
-        object.__setattr__(self, "headers", pairs)
+        object.__setattr__(self, "headers", _normalised_headers(self.headers))
 
     def __repr__(self) -> str:
         """Render the reply with credentials masked.

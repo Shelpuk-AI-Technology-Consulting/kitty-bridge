@@ -101,6 +101,19 @@ class TestCapturedRequestShape:
         with pytest.raises(TypeError, match="not a string"):
             _capture(headers=("Authorization",))  # type: ignore[arg-type]
 
+    def test_headers_given_as_a_generator_are_not_consumed_by_the_guard(self) -> None:
+        """A one-shot iterable must survive validation.
+
+        The guard has to look at the entries *and* store them. Reading the
+        input twice consumes a generator on the first pass, so the second sees
+        nothing and the capture is stored with **no headers at all** — no
+        error, from a guard whose whole purpose is to fail loudly. A recorder
+        streaming its headers is the realistic source.
+        """
+        captured = _capture(headers=(pair for pair in (("A", "1"), ("B", "2"))))  # type: ignore[arg-type]
+
+        assert captured.headers == (("A", "1"), ("B", "2"))
+
 
 class TestCapturedRequestRedaction:
     """Credentials must not reach a pytest diff or a CI log (R1.7)."""
@@ -232,6 +245,33 @@ class TestCapturedReply:
         reply = c.CapturedReply(status=200, headers=(("Set-Cookie", "session=secret-token"),), body=b"{}")
 
         assert "secret-token" not in repr(reply)
+
+    @pytest.mark.parametrize(
+        ("headers", "expected"),
+        [
+            ({"Set-Cookie": "session=secret"}, "mapping"),
+            ("ab", "not a string"),
+            ((("Set-Cookie",),), "pair"),
+        ],
+        ids=["mapping", "two-character-string", "wrong-length-pair"],
+    )
+    def test_it_rejects_the_same_malformed_headers_a_request_does(self, headers: object, expected: str) -> None:
+        """The reply's guard must not drift from the request's.
+
+        Both types validate headers identically, and both were previously
+        hand-copied — so a defect found in one was silently a defect in the
+        other. They now share one helper, and this exercises the reply side of
+        all three rejection paths so the shared behaviour is pinned from both
+        ends rather than assumed from one.
+        """
+        with pytest.raises(TypeError, match=expected):
+            c.CapturedReply(status=200, headers=headers)  # type: ignore[arg-type]
+
+    def test_its_headers_survive_a_generator_too(self) -> None:
+        """The one-shot case, on the second type that shares the helper."""
+        reply = c.CapturedReply(status=200, headers=(p for p in (("A", "1"),)))  # type: ignore[arg-type]
+
+        assert reply.headers == (("A", "1"),)
 
 
 class TestImmutability:
