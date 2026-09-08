@@ -185,7 +185,6 @@ async def _run_agent_through_bridge(
 # ── Tests ──────────────────────────────────────────────────────────────────
 
 
-@pytest.mark.slow
 class TestAgentMathE2E:
     """Test that each agent returns 4 when asked 2+2."""
 
@@ -203,7 +202,6 @@ class TestAgentMathE2E:
         assert MATH_EXPECTED in output, f"Expected '4' in output, got: {output[:500]}"
 
 
-@pytest.mark.slow
 class TestAgentWebSearchE2E:
     """Test that each agent can use Kindly MCP to search the web."""
 

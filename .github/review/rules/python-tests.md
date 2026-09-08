@@ -1,10 +1,11 @@
 # Rule: tests (`tests/**`, `.github/review/tests/**`)
 
 Two suites live under this rule. `tests/` is the repository's own suite, run by
-`tests.yml` on Python 3.10–3.13 with `pytest -q`. `.github/review/tests/` is the
-review system's suite, run by `ci.yml` on a **bare interpreter with no installed
-dependencies** — see `rules/ci.md` for why, and never add a third-party import
-there.
+`tests.yml` on Python 3.10–3.13 with
+`pytest -m "l1 or l2" --require-category=l1 --require-category=l2`.
+`.github/review/tests/` is the review system's suite, run by `ci.yml` on a
+**bare interpreter with no installed dependencies** — see `rules/ci.md` for why,
+and never add a third-party import there.
 
 ## The one question worth asking about every test
 
@@ -46,14 +47,32 @@ filesystem, the network, the environment, and the user's real config directory.
 
 Prove each behaviour at the lowest layer that can prove it.
 
-| The claim | Where it belongs |
-|---|---|
-| A translator maps this field to that one | unit, in `tests/bridge/` |
-| A launcher builds this exact env map | unit, in `tests/` |
-| A profile written by an old version still loads | unit, over a committed fixture |
-| Agent and bridge agree on the wire shape | protocol/contract test |
-| The bridge survives an upstream disconnect mid-stream | subsystem, against a real local server |
-| `kitty claude` end to end | `tests/integration/` |
+| The claim | Where it belongs | Marker |
+|---|---|---|
+| A translator maps this field to that one | unit, in `tests/bridge/` | `l1` |
+| A launcher builds this exact env map | unit, in `tests/` | `l1` |
+| A profile written by an old version still loads | unit, over a committed fixture | `l1` |
+| Agent and bridge agree on the wire shape | protocol/contract test | `l2` |
+| The bridge survives an upstream disconnect mid-stream | subsystem, against a real local server | `l3` |
+| `kitty claude` end to end | `tests/integration/` | `agent_live` |
+
+**Every test carries exactly one layer marker, and a CI job is a marker
+expression over them.** The marker is assigned from the file's path by
+`tests/conftest.py`, so a new test in an existing directory needs nothing; a
+file declares its own layer only where that default is wrong, and
+`tests/test_layer_markers.py` fails the suite if any test carries none or two.
+
+Two things to raise when reviewing a change here:
+
+- **A marker added by hand needs a reason in the diff.** The default is right
+  for almost everything; an explicit one says "this file is not what its
+  directory suggests", which is a claim worth reading.
+- 🔴 **Moving a test to a layer no job runs removes it from CI, silently.**
+  Only `l1` and `l2` are gated today. `PENDING_ACTIVATION_LAYERS` in
+  `tests/layers.py` lists the rest with the task that activates each, and a
+  test fails if a populated layer is neither run nor listed — but a *file*
+  moved into a listed layer is not caught by that. Treat such a move as a
+  coverage deletion unless the job that runs it lands in the same change.
 
 Two findings follow from this table:
 

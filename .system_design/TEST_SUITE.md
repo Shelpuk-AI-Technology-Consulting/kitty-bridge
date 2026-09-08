@@ -1852,6 +1852,81 @@ release. A gate that is green because it stopped looking is worse.
 cannot start its proxy, the job fails. A gating job that goes green because it ran nothing is the
 most expensive kind of false confidence.
 
+**One exception, stated so the rule is honest.** A **platform or interpreter** skip is permitted:
+`tests/test_launcher_discovery.py` skips POSIX cases on Windows, and the matrix is what covers
+them. A **resource-availability** skip is not, and the suite has one today —
+`tests/bridge/test_bridge_state.py` calls `pytest.skip("openssl not available")` inside a gating
+job, which is the exact shape this rule forbids. Filed as KBR-132 rather than quietly
+grandfathered — the rule is only worth stating if its one known breach has an owner.
+
+### 8.1 The selection mechanism
+
+Delivered by T-W1, ahead of the jobs that use it, because parallel authors need the divided test
+command from day one.
+
+- **`tests/layers.py`** owns the vocabulary and every decision over it as a **pure function**:
+  the path default, the exactly-one predicate, the required-category predicate, and which layers
+  a marker expression positively selects. Pure so that each can be handed a deliberate defect —
+  plan §1.4 makes that mandatory, and a decision entangled with a pytest hook cannot be given one.
+- **`tests/conftest.py`** wires them with a single `wrapper=True`
+  `pytest_collection_modifyitems`. Defaults are applied **before** pytest's `-m` deselection —
+  otherwise `-m l1` deselects a suite whose files carry no markers — and the category check runs
+  **after** it, or it counts tests the job will not run. A wrapper gets that ordering from the
+  hook protocol rather than from plugin registration order.
+- **`--require-category=NAME`**, repeatable, fails the run when a named layer collected nothing.
+  This is the fix for the `or` problem above, and every job must pass one per layer its
+  expression selects. A test enforces that pairing across every workflow.
+- **`--layer-report=PATH`** dumps the collected items and their layers as JSON, which is how the
+  whole-suite checks reason about labelling without re-deriving it.
+
+**The default is by path, and the vocabulary is by marker.** Thousands of tests predate the scheme
+and are not edited one at a time: `tests/integration/**` defaults to `agent_live`, everything else
+to `l1`, and a file names its own layer only where that is wrong. An unrecognised path falls back
+to `l1` — a new corner of the tree joining the fast gate uninvited is visible and cheap, whereas
+one joining a nightly job is invisible until something ships broken.
+
+**`--runslow` is gone.** It attached `pytest.mark.skip` to the 32 live-agent tests, so the gating
+job collected them, skipped them, and reported green — the failure this section names, running in
+production. They are `agent_live` now, and a bare `pytest` excludes them through an `addopts`
+marker expression instead. The difference is not cosmetic: the run now reports *32 deselected*, a
+statement about what was **selected**, where it used to report *32 skipped*, a statement about
+tests that were supposed to run and did not.
+
+**Two hand-maintained copies of one list is a defect in waiting**, so the `addopts` expression is
+asserted equal to one derived from `RESOURCE_DEPENDENT_LAYERS` — the layers needing a resource CI
+has and a developer's machine may not. `agent_smoke` is on that list before it has a single test,
+because §6.4.2 launches a real pinned binary and the task that makes the category live should not
+have to rediscover the rule.
+
+**`--strict-markers` is passed on the command line, never through `addopts`.** pytest 9.0 silently
+ignores it there; 9.1 honours it (upstream issue 14442). With `pytest>=8.0` and no upper bound, a
+config-file placement would mean the gate behaves differently for two contributors looking at the
+same tree, which is worse than not having it.
+
+### 8.2 Activation is incremental, and the gap is on the record
+
+The matrix above describes the finished state. Today only the Fast job exists, so `l3`,
+`acceptance`, `agent_smoke`, `agent_live`, `eval` and `load` are selected by **no job at all**.
+
+That is a real hole and it is the one this mechanism could most easily hide: before the split,
+`pytest -q` ran everything, so a subsystem test written tomorrow ran in CI. After it, that test
+runs nowhere — silently, because a job nobody has written cannot go red.
+
+`PENDING_ACTIVATION_LAYERS` is the answer: a registry mapping each not-yet-run layer to the plan
+task that activates it. It is checked in **both** directions, which is what stops it becoming a
+standing amnesty:
+
+- a layer holding tests that no job selects and that is **not** in the registry fails the suite;
+- a layer in the registry that a job **does** now select also fails, so an entry cannot outlive
+  its reason.
+
+A consequence worth stating: **a test may not be moved to `l3` before the Subsystem job exists.**
+Roughly six modules under `tests/` bind real sockets or spawn processes and are `l1` by default
+today — `test_egress_https_proxy.py` foremost among them. Reclassifying them is correct and is
+T-K6's business, together with the job that runs them; doing it earlier would remove them from
+every gate. T-H1 must take that reclassification into account before it measures a mutation
+baseline, because it selects on `l1`.
+
 **The load gate has to be wired, not merely declared.** The table above marks Load as gating a
 release, but `publish.yml` currently depends only on the reusable `tests.yml`. Putting the load
 run in "its own workflow" would leave publication free to proceed while load fails — or while it

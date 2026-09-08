@@ -755,6 +755,29 @@ ruff check .
 mypy src/kitty
 ```
 
+### Running a subset of the tests
+
+Every test carries exactly one layer marker, so you can ask for the part you need:
+
+```bash
+pytest -m l1          # component and property tests -- the fast majority
+pytest -m l2          # contract tests: two artifacts that must agree
+pytest -m "l1 or l2"  # what CI gates every pull request on
+pytest -m ""          # everything, including the categories excluded below
+```
+
+A bare `pytest` runs everything except the categories that need a resource your machine may not
+have -- a pinned agent binary, live provider credentials, a load rig. Those are excluded by
+selection, not skipped, so the run tells you they were deselected rather than pretending to have
+considered them. To run them, name them:
+
+```bash
+pytest -m agent_live  # launches real agent CLIs against live credentials
+```
+
+The marker is assigned automatically from the file's path; a test only declares its own layer
+where that default is wrong. `.system_design/TEST_SUITE.md` §8 has the full matrix.
+
 ## License
 
 MIT

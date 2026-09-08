@@ -66,6 +66,55 @@ packages = ["src/kitty"]
 asyncio_mode = "auto"
 testpaths = ["tests"]
 
+# Every test carries exactly one of these, and a CI job is a marker expression
+# over them and nothing else -- so no test can fall between two jobs or land in
+# both. See `.system_design/TEST_SUITE.md` section 8 for the job/marker matrix.
+#
+# The marker is assigned by PATH DEFAULT in `tests/conftest.py`, not by hand;
+# a file only names its own layer where the default is wrong. `tests/layers.py`
+# owns both the vocabulary and the default map, and this list is checked against
+# it by `tests/test_layer_markers.py`.
+markers = [
+    "l1: component and property tests -- a unit's logic, in milliseconds",
+    "l2: contract tests -- two artifacts that must agree, checked statically",
+    "l3: subsystem tests -- one service against real sockets, files and processes",
+    "acceptance: Gherkin scenarios over the product's stated promises",
+    "agent_smoke: a real agent binary starts and reaches the bridge",
+    "agent_live: a real agent binary against live provider credentials",
+    "eval: answer-quality evaluation -- nondeterministic, alerts and never gates",
+    "load: load and endurance runs",
+]
+
+# IMPORTANT: `-m` here is a DEFAULT, not a policy: a command-line `-m` replaces it
+# outright (verified against pytest 9.0.3, and the reason `tests.yml` can name
+# its own expression). It exists so a bare `pytest` -- a developer's local run,
+# or a future caller that forgets an expression -- does not try to launch four
+# real agent CLIs against live credentials.
+#
+# The string is asserted equal to `layers.default_marker_expression()`, derived
+# from `RESOURCE_DEPENDENT_LAYERS`. Do not edit one without the other; two
+# hand-maintained copies of one list is how a layer gets excluded in the module
+# and keeps running locally anyway.
+#
+# It replaces a `--runslow` flag that attached `pytest.mark.skip` to those tests
+# instead. The difference is the whole point: this run reports "32 deselected",
+# a statement about what was SELECTED, where the old one reported "32 skipped",
+# a statement about tests that were supposed to run and did not. section 8: "Skips are
+# failures in a gating job."
+#
+# IMPORTANT: `--strict-markers` is deliberately NOT here, and must not be added.
+# pytest 9.0 regressed so that `--strict-markers` given through `addopts` is
+# silently ignored; the fix landed in 9.1.0 (upstream issue 14442). Verified
+# against 9.0.3: from `addopts` a bogus marker is a warning and the run exits 0,
+# from the command line it is a collection error and the run exits 2.
+#
+# A strictness setting that depends on the patch version of pytest a contributor
+# happens to have is worse than no setting: it is a gate that reports differently
+# to two people looking at the same tree. So `tests.yml` passes the flag on the
+# command line, where every supported version honours it, and
+# `tests/test_layer_selection.py` proves the flag works rather than assuming it.
+addopts = ["-m", "not agent_smoke and not agent_live and not eval and not load"]
+
 [tool.ruff]
 line-length = 120
 target-version = "py310"

@@ -35,6 +35,13 @@ from pathlib import Path
 
 import pytest
 
+# L2: the subject of this file is an artifact outside `src/kitty` Python code,
+# or a structural scan of source text -- two things edited separately that must
+# agree. It gates pull requests exactly as before, in the `l1 or l2` job; the
+# marker records which half of that expression it answers to, and keeps a
+# source-text scan out of the L1 set that mutation testing will judge.
+pytestmark = pytest.mark.l2
+
 ROOT = Path(__file__).resolve().parent.parent
 REVIEW_SCRIPTS = ROOT / ".github" / "review" / "scripts"
 CONFIGURE_KITTY = REVIEW_SCRIPTS / "configure_kitty.py"
