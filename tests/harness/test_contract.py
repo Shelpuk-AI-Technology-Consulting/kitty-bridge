@@ -142,8 +142,26 @@ class TestCapturedRequestRedaction:
             assert name == name.lower()
 
     def test_the_mask_set_names_every_credential_header_the_five_recorders_will_see(self) -> None:
-        """Asserts its own subject set, so the set cannot quietly shrink (house rule)."""
-        assert {"authorization", "x-api-key", "api-key", "x-goog-api-key"} <= c.REDACTED_HEADERS
+        """Asserts its own subject set, so the set cannot quietly shrink (house rule).
+
+        One entry per carrier named in the constant's own docstring:
+        `x-api-key` (Anthropic), `api-key` (Azure and P9b's MiMo),
+        `x-goog-api-key` (Gemini), `authorization` (Vertex's OAuth leg) and
+        `proxy-authorization` (the CONNECT legs, §5.2.1).
+        """
+        assert {
+            "authorization",
+            "proxy-authorization",
+            "x-api-key",
+            "api-key",
+            "x-goog-api-key",
+        } <= c.REDACTED_HEADERS
+
+    def test_the_proxy_authorization_header_is_actually_masked(self) -> None:
+        """Membership in the set is not proof the mask reaches it."""
+        captured = _capture(headers=(("Proxy-Authorization", "Basic c2VjcmV0OnBhc3M="),))
+
+        assert "c2VjcmV0OnBhc3M=" not in repr(captured)
 
 
 class TestCapturedReply:
@@ -409,6 +427,33 @@ class TestEnvelopeAndConversation:
 
         assert c.extra_path(c.TOOL_CHOICE_KEY) == "envelope.extra[tool_choice]"
         assert envelope.extra["tool_choice"] == "auto"
+
+    def test_a_wire_spelling_of_tool_choice_is_rejected(self) -> None:
+        """Closed means enforced. Gemini's `AUTO` must be normalised, not passed through."""
+        with pytest.raises(ValueError, match="tool_choice"):
+            c.Envelope(extra={c.TOOL_CHOICE_KEY: "AUTO"})
+
+    def test_a_named_tool_selection_is_accepted(self) -> None:
+        """The control: `tool:<name>` is the fourth legal form (R8.6)."""
+        envelope = c.Envelope(extra={c.TOOL_CHOICE_KEY: "tool:get_weather"})
+
+        assert envelope.extra[c.TOOL_CHOICE_KEY] == "tool:get_weather"
+
+    def test_other_entries_in_extra_are_not_validated(self) -> None:
+        """`extra` is open by design; `tool_choice` is the one entry with a canonical value."""
+        envelope = c.Envelope(extra={"thinking": {"type": "enabled"}, "reasoning_effort": "high"})
+
+        assert envelope.extra["reasoning_effort"] == "high"
+
+    def test_a_wire_stop_reason_is_rejected_rather_than_carried_through(self) -> None:
+        """Gemini's `MAX_TOKENS` must map onto the canonical set, or the diff sees two spellings."""
+        with pytest.raises(ValueError, match="stop_reason"):
+            c.Reply(stop_reason="MAX_TOKENS")
+
+    def test_every_canonical_stop_reason_is_accepted(self) -> None:
+        """The control: the guard above would pass if construction rejected everything."""
+        for reason in c.STOP_REASONS:
+            assert c.Reply(stop_reason=reason).stop_reason == reason
 
 
 class TestPathVocabulary:
@@ -888,8 +933,8 @@ def test_unreadable_body_error_is_named_by_the_contract() -> None:
 #: dynamic forms stay unanchored, because they appear mid-expression.
 _KITTY_IMPORT = re.compile(
     r"^\s*(?:from|import)\s+(?:src\.)?kitty\b"
-    r"|import_module\(\s*[\"']kitty"
-    r"|__import__\(\s*[\"']kitty"
+    r"|import_module\(\s*[\"'](?:src\.)?kitty"
+    r"|__import__\(\s*[\"'](?:src\.)?kitty"
 )
 
 
@@ -929,6 +974,8 @@ def test_the_import_guard_actually_fires_on_every_form_it_claims_to_catch() -> N
         "from src.kitty import server",
         'mod = importlib.import_module("kitty.bridge.server")',
         '__import__("kitty")',
+        'mod = importlib.import_module("src.kitty.bridge.server")',
+        '__import__("src.kitty")',
     ]
 
     undetected = [form for form in forms if not _KITTY_IMPORT.search(form)]

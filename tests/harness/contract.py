@@ -3,7 +3,7 @@
 `.system_design/TEST_SUITE.md` §3.3.1 · plan task **T-W2** (KBR-25).
 
 This module is the single owner of the vocabulary the fidelity oracle is
-written in.  Ten tasks depend on it: the register (T-W3), the recorder (T-W4),
+written in.  Eleven tasks depend on it: the register (T-W3), the recorder (T-W4),
 the vertical slice (T-W9), the six wire readers (T-A1–T-A6), the reply
 projection (T-A7) and the oracle core (T-D1).
 
@@ -644,7 +644,27 @@ class Envelope:
     __hash__ = None  # type: ignore[assignment]
 
     def __post_init__(self) -> None:
-        """Freeze the extra mapping in place."""
+        """Validate any tool choice and freeze the extra mapping.
+
+        ``extra`` is otherwise open by design — it holds whatever control
+        fields a format defines, keyed by the wire key. ``tool_choice`` is the
+        one entry with a *canonical* value (R8.6), so it is the one entry worth
+        checking; leaving it unchecked would make :data:`TOOL_CHOICE_VALUES` a
+        comment rather than a rule.
+
+        Raises:
+            ValueError: When ``extra["tool_choice"]`` is outside
+                :data:`TOOL_CHOICE_VALUES` and is not a ``tool:<name>``
+                selection.
+        """
+        choice = (self.extra or {}).get(TOOL_CHOICE_KEY)
+        if choice is not None and not (
+            choice in TOOL_CHOICE_VALUES or (isinstance(choice, str) and choice.startswith("tool:"))
+        ):
+            raise ValueError(
+                f"tool_choice must be one of {sorted(TOOL_CHOICE_VALUES)} or 'tool:<name>', got {choice!r}"
+            )
+
         object.__setattr__(self, "extra", _freeze_mapping(self.extra))
 
 
@@ -714,7 +734,20 @@ class Reply:
     __hash__ = None  # type: ignore[assignment]
 
     def __post_init__(self) -> None:
-        """Freeze every sequence and mapping."""
+        """Validate the stop reason and freeze every sequence and mapping.
+
+        Raises:
+            ValueError: When ``stop_reason`` is outside :data:`STOP_REASONS`.
+                Closed means enforced, the same posture :class:`Turn` takes on
+                roles and :class:`Conversation` on sampling keys — a vocabulary
+                declared closed but checked nowhere is a comment, not a rule.
+        """
+        if self.stop_reason is not None and self.stop_reason not in STOP_REASONS:
+            raise ValueError(
+                f"stop_reason must be one of {sorted(STOP_REASONS)}, got {self.stop_reason!r}; "
+                "an unmapped wire value projects as 'other' with the original in stop_reason_raw"
+            )
+
         object.__setattr__(self, "parts", tuple(self.parts))
         object.__setattr__(self, "usage", _freeze_mapping(self.usage))
         object.__setattr__(self, "residual", _freeze_mapping(self.residual))

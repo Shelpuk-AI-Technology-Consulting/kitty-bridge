@@ -470,7 +470,7 @@ exist, and the plan should not offer it.
    a design review established that without the path vocabulary T-W3 cannot be written and without
    the normalisation rules the six readers produce incomparable output, so both moved into it. The
    day that added is on every chain (§14.3), and it is the cheapest place in the plan to spend it:
-   the alternative is ten tasks each solving the same problem differently.
+   the alternative is eleven tasks each solving the same problem differently.
 2. **T-W3 and T-W6 follow immediately** — they sit second and third on the critical path, ahead of
    any test.
 3. **T-E1 is the riskiest single task**; containment carries ~5 days of slack against the critical
