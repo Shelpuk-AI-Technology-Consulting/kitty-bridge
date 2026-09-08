@@ -348,8 +348,9 @@ from it and carried separately, so a changed media type is its own delta. Gemini
 `fileData.fileUri` has no bytes: `digest` is then absent and `ref` holds the URI. Unpinned, the
 Messages reader and the Chat Completions reader would produce different digests for one image.
 
-The contract lives in `tests/harness/contract.py` (T-W2), which is also the home of T-W4's
-recorder, T-W5's proxy fixture, T-W6's corpus loader and T-W8's bridge fixture.
+The contract lives in `tests/harness/contract.py` (T-W2). The **package** `tests/harness/` is the
+home of T-W4's recorder, T-W5's proxy fixture, T-W6's corpus loader and T-W8's bridge fixture, each
+in its own module beside it — `contract.py` itself captures nothing and reads nothing.
 
 **Unknown fields fail closed.** Each reader must classify **every** key in the body into exactly
 one of: mapped to the envelope, mapped to the conversation, or residual. A non-empty `residual`

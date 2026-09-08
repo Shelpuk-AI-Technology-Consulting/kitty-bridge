@@ -386,6 +386,12 @@ class CapturedRequest:
         if isinstance(self.headers, Mapping):
             raise TypeError("headers must be a sequence of (name, value) pairs, not a mapping")
 
+        # A string is a sequence too, so `tuple("ab")` is a *valid-looking*
+        # 2-tuple of characters. Rejecting the type is the only check that
+        # catches it; a length check cannot.
+        if any(isinstance(entry, str | bytes) for entry in self.headers):
+            raise TypeError("each header must be a (name, value) pair, not a string")
+
         pairs = tuple(tuple(h) for h in self.headers)
         if any(len(pair) != 2 for pair in pairs):
             raise TypeError("each header must be a (name, value) pair")
@@ -437,6 +443,12 @@ class CapturedReply:
         """
         if isinstance(self.headers, Mapping):
             raise TypeError("headers must be a sequence of (name, value) pairs, not a mapping")
+
+        # A string is a sequence too, so `tuple("ab")` is a *valid-looking*
+        # 2-tuple of characters. Rejecting the type is the only check that
+        # catches it; a length check cannot.
+        if any(isinstance(entry, str | bytes) for entry in self.headers):
+            raise TypeError("each header must be a (name, value) pair, not a string")
 
         pairs = tuple(tuple(h) for h in self.headers)
         if any(len(pair) != 2 for pair in pairs):

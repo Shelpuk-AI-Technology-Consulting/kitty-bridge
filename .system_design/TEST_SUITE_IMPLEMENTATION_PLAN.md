@@ -122,8 +122,10 @@ query, headers, body)`**, `CapturedReply`, the closed `WireFormat` enum, the `Pr
 `ReplyProjection` protocols, **the path vocabulary and its pattern matcher (§3.3.1a)**, and **the
 cross-format normalisation rules (§3.3.1b)**.
 
-**Delivered in `tests/harness/contract.py`**, which is also the home for T-W4's recorder, T-W5's
-proxy fixture, T-W6's corpus loader and T-W8's bridge fixture.
+**Delivered in `tests/harness/contract.py`.** The **package** `tests/harness/` is the home for
+T-W4's recorder, T-W5's proxy fixture, T-W6's corpus loader and T-W8's bridge fixture — each in its
+own module beside the contract, not inside it. `contract.py` defines shapes and rules; it captures
+nothing and reads no bodies.
 
 **The path vocabulary and the normalisation rules were added after a design review**, and both are
 here for the reason `CapturedRequest` is: T-W3 cannot fill its "projection field it touches" column

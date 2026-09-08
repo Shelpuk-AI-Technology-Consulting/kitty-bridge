@@ -85,6 +85,22 @@ class TestCapturedRequestShape:
         with pytest.raises(TypeError, match="pair"):
             _capture(headers=(("Authorization",),))  # type: ignore[arg-type]
 
+    def test_a_two_character_string_does_not_slip_through_as_a_pair(self) -> None:
+        """A string is a sequence, so `tuple("ab")` is a valid-looking 2-tuple.
+
+        A length check cannot catch this — `("a", "b")` has length 2 and would
+        be stored as a header named `a` with the value `b`. Only rejecting the
+        type does, and this is the one shape that walked through a guard whose
+        own docstring says failing loudly is the point.
+        """
+        with pytest.raises(TypeError, match="not a string"):
+            _capture(headers=("ab",))  # type: ignore[arg-type]
+
+    def test_a_longer_string_is_rejected_for_the_same_reason(self) -> None:
+        """The control: a length check alone would reject this one and miss the pair above."""
+        with pytest.raises(TypeError, match="not a string"):
+            _capture(headers=("Authorization",))  # type: ignore[arg-type]
+
 
 class TestCapturedRequestRedaction:
     """Credentials must not reach a pytest diff or a CI log (R1.7)."""
