@@ -48,25 +48,28 @@ def server():
 
 class TestBridgeAnthropicURL:
     def test_upstream_url_uses_messages_path(self, server):
-        url = server._build_upstream_url()
+        # An empty request, deliberately: this server carries no profile model and
+        # this adapter's route does not depend on the model, so the empty case is
+        # the strongest form of the claim (KBR-127).
+        url = server._build_upstream_url({})
         assert url == "https://api.anthropic.com/v1/messages"
 
     def test_upstream_url_not_chat_completions(self, server):
-        url = server._build_upstream_url()
+        url = server._build_upstream_url({})
         assert "/chat/completions" not in url
 
 
 class TestBridgeAnthropicHeaders:
     def test_uses_x_api_key(self, server):
-        headers = server._build_upstream_headers()
+        headers = server._build_upstream_headers({})
         assert headers["x-api-key"] == "sk-ant-test123"
 
     def test_no_bearer_auth(self, server):
-        headers = server._build_upstream_headers()
+        headers = server._build_upstream_headers({})
         assert "Authorization" not in headers
 
     def test_has_anthropic_version(self, server):
-        headers = server._build_upstream_headers()
+        headers = server._build_upstream_headers({})
         assert "anthropic-version" in headers
 
 

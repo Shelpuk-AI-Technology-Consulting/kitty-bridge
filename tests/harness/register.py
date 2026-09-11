@@ -435,8 +435,12 @@ _BRIDGE_ROWS: tuple[MutationRow, ...] = (
             "wire-independent form. That is P16's reasoning. The rewrite is nonetheless real bytes at "
             "the curl_cffi boundary of section 3.2.3, where `_original_body` is this body, which is why "
             "it is a row and not an omission. **This binds the OpenAI-Responses reader, T-A3:** it must "
-            "read a string `input` and the single-item array form into the identical `Request`. If it "
-            "ever does not, this escape is void and M15 needs a projectable anchor."
+            "read a string `input` and every spelling of the equivalent single user message into the "
+            "identical `Request`: the explicit `type: message` form this row mints, and both "
+            "`EasyInputMessage` spellings (`content` as a plain string, and as an array of parts). "
+            "Naming only one of the three would let a reader satisfy this literally and still "
+            "project two equivalent bodies apart, which is the failure the escape is void on. If it "
+            "ever does, M15 needs a projectable anchor."
         ),
     ),
 )

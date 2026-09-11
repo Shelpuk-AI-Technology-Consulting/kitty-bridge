@@ -275,7 +275,7 @@ class TestTheDataAndTheDesignNameTheSameRows:
         cell reads ``Always``. §3.3.2 assertion 2 would then demand a complement
         case for a mutation that always fires.
         """
-        defective = markdown.replace("M1, M2, M10, M14, P1,", "M1, M2, M10, P1,", 1)
+        defective = markdown.replace("M1, M2, M10, M14, M15, P1,", "M1, M2, M10, M15, P1,", 1)
 
         problems = r.register_disagreements(r.REGISTER, defective)
 
@@ -283,7 +283,7 @@ class TestTheDataAndTheDesignNameTheSameRows:
 
     def test_an_unconditional_list_naming_a_row_that_does_not_exist_is_caught(self, markdown: str) -> None:
         """A stale entry left behind when a row is renamed or withdrawn."""
-        defective = markdown.replace("M1, M2, M10, M14, P1,", "M1, M2, M10, M14, M99, P1,", 1)
+        defective = markdown.replace("M1, M2, M10, M14, M15, P1,", "M1, M2, M10, M14, M15, M99, P1,", 1)
 
         problems = r.register_disagreements(r.REGISTER, defective)
 

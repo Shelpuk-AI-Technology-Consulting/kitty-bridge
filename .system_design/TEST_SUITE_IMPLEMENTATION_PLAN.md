@@ -136,7 +136,7 @@ once. Both are exactly the coordination problem Milestone 0 exists to remove.
 
 **T-W3 inherits two acceptance criteria from this work.**
 
-1. Every one of the 41 live rows carries either a path in T-W2's vocabulary or `not projectable`
+1. Every one of the 42 live rows carries either a path in T-W2's vocabulary or `not projectable`
    **with a reason**, asserted against the register data so a new row cannot escape it. T-W2 proves
    the vocabulary is *expressive*; the row-by-row assignment is T-W3's, because a copy of that
    table inside T-W2 would be a second source of truth that stays green while the register moves.
@@ -239,7 +239,7 @@ must not be collapsed.
 |---|---|---|---|---|
 | **T-A1** | Anthropic Messages reader | T-W2 | §3.3.1 | M |
 | **T-A2** | Chat Completions reader | T-W2 | §3.3.1 | M |
-| **T-A3** | OpenAI Responses reader — **must read a string `input` and the single-item array form into the identical `Request`** (register row M15 takes §3.3.1a's escape on exactly that equivalence; if the reader ever tells them apart, M15 needs a projectable anchor) | T-W2 | §3.3.1 · §3.3.1a | M |
+| **T-A3** | OpenAI Responses reader — **must read a string `input` and every spelling of the equivalent single user message into the identical `Request`** — the explicit `{"type": "message", …, "content": [{"type": "input_text", …}]}` form the normaliser emits, and the two `EasyInputMessage` spellings (`content` as a plain string, and as an array of parts), which `translate_request` already collapses alike (register row M15 takes §3.3.1a's escape on exactly that equivalence; if the reader ever tells them apart, M15 needs a projectable anchor) | T-W2 | §3.3.1 · §3.3.1a | M |
 | **T-A4** | Gemini reader — **consumes the URL as well as the body** | T-W2 | §3.3.5 | M |
 | **T-A5** | Bedrock Converse reader | T-W2 | §3.3.1 | M |
 | **T-A6** | Ollama `/api/chat` reader | T-W2 | §3.3.1 | S |

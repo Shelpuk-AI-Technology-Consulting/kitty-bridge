@@ -81,7 +81,7 @@ class InvalidResponsesRequest(ValueError):
     """
 
 
-def normalize_responses_request(body: dict) -> dict:
+def normalize_responses_request(body: object) -> dict:
     """Return a Responses request with ``input`` in its array form
 
     OpenAI's ``CreateResponse`` schema defines ``input`` as ``oneOf`` a string
@@ -106,7 +106,10 @@ def normalize_responses_request(body: dict) -> dict:
     it binds the future OpenAI-Responses reader to read the two forms alike.
 
     Args:
-        body: The decoded inbound request body.
+        body: The decoded inbound request body.  Typed ``object`` rather than
+            ``dict`` because this is a trust boundary: the caller has decoded
+            arbitrary JSON, and annotating ``dict`` would make the guard below
+            look unreachable to a type checker.
 
     Returns:
         A body whose ``input``, if present, is a list of input-item objects.

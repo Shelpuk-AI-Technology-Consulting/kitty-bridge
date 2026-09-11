@@ -296,7 +296,7 @@ class TestTheNormaliser:
     def test_a_body_that_is_not_a_json_object_is_refused(self, bad: object) -> None:
         """Valid JSON is not the same claim as a valid request."""
         with pytest.raises(InvalidResponsesRequest, match="object"):
-            normalize_responses_request(bad)  # type: ignore[arg-type]
+            normalize_responses_request(bad)
 
     def test_the_message_names_the_field_and_carries_no_exception_text(self) -> None:
         """A 400 exists to tell the client what to change."""

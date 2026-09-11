@@ -143,10 +143,10 @@ body. Established by reading `src/kitty/bridge/server.py` and all 23 adapters in
 
 #### 3.2.1 Bridge-level
 
-Eleven request-path rows (M1–M11), one response-path row (M12), and the routing row **M14**
+Twelve request-path rows (M1–M11 and M15), one response-path row (M12), and the routing row **M14**
 (§3.3.5), which is listed here because the destination is a mutation surface the body cannot show.
-Fourteen rows in all. The former substitution row M13 is **withdrawn** — KBR-5 replaced it with a
-downstream error, so it mutates nothing — leaving **thirteen live** bridge-level rows.
+Fifteen rows in all. The former substitution row M13 is **withdrawn** — KBR-5 replaced it with a
+downstream error, so it mutates nothing — leaving **fourteen live** bridge-level rows.
 
 | # | Mutation | Site | Trigger | Why it is necessary |
 |---|---|---|---|---|
@@ -161,10 +161,10 @@ downstream error, so it mutates nothing — leaving **thirteen live** bridge-lev
 | M9 | Convert a native Messages body to CC format and re-send the same backend | `_convert_native_to_cc_format`, then a re-run of `_normalize_model` and `normalize_request` | Upstream returned a `tool_use` format error on the native path | Fallback that keeps the session alive rather than failing the turn. Also an I2 exception. |
 | M10 | Inject the model from the URL path into the body | `_handle_gemini` | Gemini protocol only | Gemini carries the model in the path, not the body; `_normalize_model` needs it in the body to override it. |
 | M11 | Force `stream: False` | `_handle_gemini` | Gemini protocol, non-streaming `:generateContent` | The Gemini translator defaults `stream=True`; the non-streaming endpoint must not open an SSE stream. |
-| M12 | Substitute fallback assistant text | `_EMPTY_ASSISTANT_FALLBACK_TEXT` in `bridge/messages/translator.py` **and** `bridge/responses/translator.py` | Upstream returned an empty response | **Response-side**, not part of the eleven request-path rows. |
+| M12 | Substitute fallback assistant text | `_EMPTY_ASSISTANT_FALLBACK_TEXT` in `bridge/messages/translator.py` **and** `bridge/responses/translator.py` | Upstream returned an empty response | **Response-side**, not part of the twelve request-path rows. |
 | ~~M13~~ | **Withdrawn — no longer a mutation.** Was: discard the conversation and substitute a `[Kitty Bridge: …]` user message. | `_compact_messages` / `_apply_compaction` post-condition | No non-system message survives | **Closed by KBR-5.** The post-condition now raises `CompactionFailedError` and the handler returns a protocol-native 400 downstream; nothing is substituted, so there is no mutation left to register. The row is kept struck through rather than deleted so a reader of finding F3 can still find it. **The trigger recorded here was wrong** — see F3. |
-| M14 | **Replace the destination entirely** — scheme, host and path are built from the profile by `build_base_url()` + `get_upstream_path()` | `BridgeServer._build_upstream_url` | Always | The agent addressed a loopback bridge; the request has to reach the real provider. Listed because **the destination is a mutation surface the body cannot show**: on Azure an identical body sent to the wrong deployment path is a different request entirely (§3.3.5). |
-| M15 | Rewrite a string `input` into the single-item list form | `normalize_responses_request` (`bridge/responses/translator.py`), called from `_handle_responses` before the body forks | Always, on the Responses protocol — a body already in the array form meets this row with a no-op rather than avoiding it, which is why it is unconditional | OpenAI's `CreateResponse` defines the two forms as the **same request**: `input` is `oneOf` a string (*"a text input to the model, equivalent to a text input with the `user` role"*) or an array, and everything downstream reads the array. Listed rather than omitted because the rewrite is real bytes at the `curl_cffi` boundary of §3.2.3, where `_original_body` **is** this body; the projection cannot express the difference, so the row takes §3.3.1a's escape for P16's reason. **KBR-144.** |
+| M14 | **Replace the destination entirely** — scheme and host are built from the profile by `build_base_url()`; the path by `get_upstream_path(_route_model(cc_request))` — the **request's normalized model**, which is the normalized profile model when there is one and the agent's model when there is not. `_route_model` is the single place that answers this; the auth scheme (P9/P20) and the thinking carrier read it too, and the adapter reads the same key for the body (KBR-127 — it was the raw profile model, so path and body could route differently) | `BridgeServer._build_upstream_url` | Always | The agent addressed a loopback bridge; the request has to reach the real provider. Listed because **the destination is a mutation surface the body cannot show**: on Azure an identical body sent to the wrong deployment path is a different request entirely (§3.3.5). |
+| M15 | Rewrite a string `input` into the single-item list form `[{"type": "message", "role": "user", "content": [{"type": "input_text", "text": <s>}]}]` | `normalize_responses_request` (`bridge/responses/translator.py`), called from `_handle_responses` before the body forks | Always | OpenAI's `CreateResponse` defines the two forms as the **same request**: `input` is `oneOf` a string (*"a text input to the model, equivalent to a text input with the `user` role"*) or an array, and everything downstream reads the array. Fires on every request reaching the handler; a body already in the array form meets the row with a **no-op** rather than avoiding it, so there is no complement state for §3.3.2 assertion 2 to arrange, which is why it is unconditional. Listed rather than omitted because the rewrite is real bytes at the `curl_cffi` boundary of §3.2.3, where `_original_body` **is** this body; the projection cannot express the difference, so the row takes §3.3.1a's escape for P16's reason. **KBR-144.** |
 
 #### 3.2.2 Provider-level
 
@@ -205,7 +205,7 @@ partial today — see gap G22.
 | P5d | Map `_thinking_adaptive` → `thinking: {"type":"adaptive"}` and `_effort` → top-level `effort` | same | Those keys present | Passthrough of an agent signal. |
 | P5e | Inject an empty `{"type":"thinking","thinking":""}` block into assistant messages | `AnthropicAdapter._translate_assistant_msg` | Assistant message lacks one while thinking is active | The Anthropic-path analogue of P8. **A message-content change**, not a parameter change. |
 | P6 | Remove `model` from the body | `AzureOpenAIAdapter` | Always | Azure selects the model by deployment id in the URL; the body field is rejected. |
-| P20 | **Encode the profile's model as the deployment id in the URL path** | `AzureOpenAIAdapter.get_upstream_path` | Always | The counterpart of P6: what P6 removes from the body reappears in the path. A register that records only P6 makes the model look *dropped* when it was *moved*, and leaves the move unchecked. |
+| P20 | **Encode the request's normalized model as the deployment id in the URL path** | `AzureOpenAIAdapter.get_upstream_path` | Always | The counterpart of P6: what P6 removes from the body reappears in the path. A register that records only P6 makes the model look *dropped* when it was *moved*, and leaves the move unchecked. Before KBR-127 this read *the profile's* model, so a profile written `azure/my-deploy` addressed a `/deployments/azure/my-deploy/` segment that cannot exist. |
 | P21 | Encode `project_id` and `location` in the base URL | `VertexAIAdapter.build_base_url` | Always | Vertex addresses a project-scoped endpoint. Same class as P20: routing carried outside the body. |
 | P7 | **Cap the agent's `max_tokens` at 4096** | `FireworksAdapter.normalize_request` | Non-streaming request with `max_tokens > 4096` | Fireworks rejects non-streaming requests above 4096. **User-visible** as shortened output. |
 | P8 | Inject empty `reasoning_content` into assistant messages | `ProviderAdapter._inject_empty_reasoning_content`, called from `KimiCodeAdapter`, `_ZaiBase`, `CustomOpenAIAdapter` | Thinking signalled **or** inferred from prior `reasoning_content` via `_detect_thinking_from_messages` | Those providers reject the request without it. The *inferred* trigger matters: it fires with no signal from the agent at all. |
@@ -225,8 +225,8 @@ partial today — see gap G22.
 
 **Conditional rows are the point.** Every row whose trigger is a condition must be provably
 *inert* when that condition is absent — the sharpest form of "unless absolutely necessary", and
-what §3.3.2 assertion 2 tests, with the trigger complements §3.3.4 requires. M1, M2, M10, M14, P1,
-P6, P9a, P9b, P9c, P10, P11, P12, P13, P14, P15, P16, P17, P18, P19, P20, P21 and M15 are unconditional
+what §3.3.2 assertion 2 tests, with the trigger complements §3.3.4 requires. M1, M2, M10, M14, M15, P1,
+P6, P9a, P9b, P9c, P10, P11, P12, P13, P14, P15, P16, P17, P18, P19, P20 and P21 are unconditional
 by design and are exempt from that assertion.
 
 **M14, P20 and P21 were missing from that list until KBR-26**, while their own trigger cells read
@@ -752,7 +752,7 @@ the request went. Three providers carry routing outside the body:
 
 | Provider | What lives in the URL | Consequence |
 |---|---|---|
-| Azure | The deployment id, which **is** the profile's model (P20) — and P6 deliberately removes `model` from the body | Two requests to two different deployments have **byte-identical bodies**. A body-only oracle cannot tell them apart, so a misrouted request is invisible. |
+| Azure | The deployment id, which **is** the request's normalized model (P20) — and P6 deliberately removes `model` from the body | Two requests to two different deployments have **byte-identical bodies**. A body-only oracle cannot tell them apart, so a misrouted request is invisible. |
 | Vertex | `project_id` and `location` (P21) | The account being billed is a URL component |
 | Gemini | Model and operation (`:generateContent` vs `:streamGenerateContent`) in the inbound path | M10 lifts the model into the body precisely because it is not there to begin with |
 
@@ -761,9 +761,12 @@ body — and asserts routing separately from content.
 
 **The routing expectation is derived independently.** It is computed in the test from the
 configured profile — provider, model, `provider_config` — using the provider's *published* URL
-shape, not by calling `build_base_url()` / `get_upstream_path()`. Asking the code under test where
-it meant to go and then checking it went there proves nothing; this is the same independent-oracle
-rule §3.3.1 applies to bodies.
+shape, not by calling `build_base_url()` / `get_upstream_path()`. The model half of that
+derivation is `normalize_model_name(profile.model)` when the profile names a model, and the
+model the agent asked for when it does not: since KBR-127 the path resolves from
+`cc_request["model"]`, so deriving it from the profile's raw string would encode the very defect
+KBR-127 removed. Asking the code under test where it meant to go and then checking it went there
+proves nothing; this is the same independent-oracle rule §3.3.1 applies to bodies.
 
 **One normalisation the independent derivation has to reproduce (KBR-134).** `build_base_url()`
 strips a trailing endpoint suffix from a user-configured base URL, because users routinely paste
@@ -777,7 +780,10 @@ T-D2 discovering it as a failing test with no obvious cause.
 
 **Falsification control.** Alongside the five body cases in §3.3.1, a sixth: change the Azure
 deployment segment in the captured path while leaving the body byte-identical. The oracle must
-fail. Without this case there is no evidence the routing assertion is wired to anything.
+fail. A seventh, from KBR-127: give the profile a prefixed model (`opencode/minimax-m2.5`) and
+assert path, auth scheme and body shape agree — the defect showed a correct body reaching a
+correct-looking host at the wrong path under the wrong auth, which each of the three checked alone
+would pass. Without these cases there is no evidence the routing assertion is wired to anything.
 
 **T-D2 must normalise the authority and scheme before comparing, and this is not optional.**
 A published URL shape is `https://…` on the provider's own hostname; the harness serves
@@ -2227,7 +2233,7 @@ list rather than a search** — the count is what T-K6 and T-H1 plan against.
   over data and it opens nothing. The two socket-binding modules together run in **~1 second**,
   measured, which is the number the fast-gate budget should carry until T-K6 moves them.
 - **KBR-144:** `tests/bridge/test_responses_string_input.py` starts a real `BridgeServer` on an
-  ephemeral port in three of its classes, following the existing convention of
+  ephemeral port in four of its classes, following the existing convention of
   `tests/bridge/test_crash_resilience.py` rather than inventing a second one. The whole module
   runs in **~0.6 seconds**, measured, of which the socket-binding cases are ~0.1.
 

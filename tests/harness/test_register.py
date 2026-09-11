@@ -330,6 +330,17 @@ class TestThePathsEachRowTouches:
 
         assert escaped == {"M2", "M9", "M15", "P1", "P11", "P12", "P16"}
 
+    def test_m15_still_binds_the_reader_its_escape_depends_on(self) -> None:
+        """M15's escape is only sound while T-A3 reads both spellings alike.
+
+        The binding lives in prose — this reason and the plan's T-A3 row — and
+        nothing else reads either. A reword would delete it in silence, so the
+        one word that makes it findable is pinned.
+        """
+        m15 = next(row for row in r.REGISTER if row.id == "M15")
+
+        assert "T-A3" in (m15.not_projectable_reason or "")
+
 
 class TestTheModuleStandsAlone:
     """§3.3.1's independent-oracle rule, applied to the specification itself.
