@@ -417,6 +417,28 @@ _BRIDGE_ROWS: tuple[MutationRow, ...] = (
         conditional=False,
         design_ref="§3.2.1 · §3.3.5",
     ),
+    MutationRow(
+        id="M15",
+        site=("kitty/bridge/responses/translator.py:normalize_responses_request",),
+        # Unconditional for M1's reason, not M2's. The trigger reads like a
+        # condition on the request, but a body already in the array form meets this
+        # row with a no-op rather than avoiding it, so there is no complement state
+        # for §3.3.2 assertion 2 to arrange.
+        trigger=_ALWAYS,
+        paths=(c.NOT_PROJECTABLE,),
+        conditional=False,
+        design_ref="§3.2.1 · §3.3.1a",
+        not_projectable_reason=(
+            "OpenAI's `CreateResponse` declares a string `input` and the single-item array form to be "
+            "one request, so the two project to one `Conversation` -- a single user turn carrying the "
+            "text -- and a projection that told them apart would be reading a vendor's spelling into a "
+            "wire-independent form. That is P16's reasoning. The rewrite is nonetheless real bytes at "
+            "the curl_cffi boundary of section 3.2.3, where `_original_body` is this body, which is why "
+            "it is a row and not an omission. **This binds the OpenAI-Responses reader, T-A3:** it must "
+            "read a string `input` and the single-item array form into the identical `Request`. If it "
+            "ever does not, this escape is void and M15 needs a projectable anchor."
+        ),
+    ),
 )
 
 # --------------------------------------------------------------------------

@@ -239,7 +239,7 @@ must not be collapsed.
 |---|---|---|---|---|
 | **T-A1** | Anthropic Messages reader | T-W2 | §3.3.1 | M |
 | **T-A2** | Chat Completions reader | T-W2 | §3.3.1 | M |
-| **T-A3** | OpenAI Responses reader | T-W2 | §3.3.1 | M |
+| **T-A3** | OpenAI Responses reader — **must read a string `input` and the single-item array form into the identical `Request`** (register row M15 takes §3.3.1a's escape on exactly that equivalence; if the reader ever tells them apart, M15 needs a projectable anchor) | T-W2 | §3.3.1 · §3.3.1a | M |
 | **T-A4** | Gemini reader — **consumes the URL as well as the body** | T-W2 | §3.3.5 | M |
 | **T-A5** | Bedrock Converse reader | T-W2 | §3.3.1 | M |
 | **T-A6** | Ollama `/api/chat` reader | T-W2 | §3.3.1 | S |

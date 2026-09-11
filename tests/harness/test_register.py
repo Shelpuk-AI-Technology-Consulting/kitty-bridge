@@ -65,11 +65,11 @@ _SHAPES: tuple[tuple[str, str], ...] = (
 
 
 class TestTheRowsThemselves:
-    """§3.2 publishes 41 live rows; the data must be those rows and no others."""
+    """§3.2 publishes 42 live rows; the data must be those rows and no others."""
 
     def test_the_register_holds_every_live_row(self) -> None:
-        """14 bridge-level rows less the withdrawn M13, plus 28 provider-level."""
-        assert len(r.REGISTER) == 41
+        """15 bridge-level rows less the withdrawn M13, plus 28 provider-level."""
+        assert len(r.REGISTER) == 42
 
     def test_the_register_is_a_tuple_and_not_a_list(self) -> None:
         """`mypy` does not run over `tests/`, so the annotation is not enforcement.
@@ -319,14 +319,16 @@ class TestThePathsEachRowTouches:
         assert not c.path_matches(p15.paths[0], "conversation.tools[get_weather].description")
 
     def test_the_escape_is_used_only_where_the_design_expects_it(self) -> None:
-        """§3.3.1a names the whole-body translations and P16; P1 was added with a reason.
+        """§3.3.1a names the whole-body translations and P16; P1 and M15 were added with a reason.
 
         Pinned so that widening the escape is a deliberate edit here, not a
-        quiet way to make a hard row go away.
+        quiet way to make a hard row go away.  M15 (KBR-144) is the seventh: the
+        two spellings of a Responses ``input`` are one request, so the rewrite is
+        invisible to a wire-independent projection for P16's reason.
         """
         escaped = {row.id for row in r.REGISTER if not row.is_projectable}
 
-        assert escaped == {"M2", "M9", "P1", "P11", "P12", "P16"}
+        assert escaped == {"M2", "M9", "M15", "P1", "P11", "P12", "P16"}
 
 
 class TestTheModuleStandsAlone:

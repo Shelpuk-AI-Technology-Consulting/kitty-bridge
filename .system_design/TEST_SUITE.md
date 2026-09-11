@@ -164,6 +164,7 @@ downstream error, so it mutates nothing — leaving **thirteen live** bridge-lev
 | M12 | Substitute fallback assistant text | `_EMPTY_ASSISTANT_FALLBACK_TEXT` in `bridge/messages/translator.py` **and** `bridge/responses/translator.py` | Upstream returned an empty response | **Response-side**, not part of the eleven request-path rows. |
 | ~~M13~~ | **Withdrawn — no longer a mutation.** Was: discard the conversation and substitute a `[Kitty Bridge: …]` user message. | `_compact_messages` / `_apply_compaction` post-condition | No non-system message survives | **Closed by KBR-5.** The post-condition now raises `CompactionFailedError` and the handler returns a protocol-native 400 downstream; nothing is substituted, so there is no mutation left to register. The row is kept struck through rather than deleted so a reader of finding F3 can still find it. **The trigger recorded here was wrong** — see F3. |
 | M14 | **Replace the destination entirely** — scheme, host and path are built from the profile by `build_base_url()` + `get_upstream_path()` | `BridgeServer._build_upstream_url` | Always | The agent addressed a loopback bridge; the request has to reach the real provider. Listed because **the destination is a mutation surface the body cannot show**: on Azure an identical body sent to the wrong deployment path is a different request entirely (§3.3.5). |
+| M15 | Rewrite a string `input` into the single-item list form | `normalize_responses_request` (`bridge/responses/translator.py`), called from `_handle_responses` before the body forks | Always, on the Responses protocol — a body already in the array form meets this row with a no-op rather than avoiding it, which is why it is unconditional | OpenAI's `CreateResponse` defines the two forms as the **same request**: `input` is `oneOf` a string (*"a text input to the model, equivalent to a text input with the `user` role"*) or an array, and everything downstream reads the array. Listed rather than omitted because the rewrite is real bytes at the `curl_cffi` boundary of §3.2.3, where `_original_body` **is** this body; the projection cannot express the difference, so the row takes §3.3.1a's escape for P16's reason. **KBR-144.** |
 
 #### 3.2.2 Provider-level
 
@@ -225,7 +226,7 @@ partial today — see gap G22.
 **Conditional rows are the point.** Every row whose trigger is a condition must be provably
 *inert* when that condition is absent — the sharpest form of "unless absolutely necessary", and
 what §3.3.2 assertion 2 tests, with the trigger complements §3.3.4 requires. M1, M2, M10, M14, P1,
-P6, P9a, P9b, P9c, P10, P11, P12, P13, P14, P15, P16, P17, P18, P19, P20 and P21 are unconditional
+P6, P9a, P9b, P9c, P10, P11, P12, P13, P14, P15, P16, P17, P18, P19, P20, P21 and M15 are unconditional
 by design and are exempt from that assertion.
 
 **M14, P20 and P21 were missing from that list until KBR-26**, while their own trigger cells read
@@ -2214,7 +2215,7 @@ T-K6's business, together with the job that runs them; doing it earlier would re
 every gate. T-H1 must take that reclassification into account before it measures a mutation
 baseline, because it selects on `l1`.
 
-**Three modules have been added to that set since, and they are named here so T-K6 inherits a
+**Four modules have been added to that set since, and they are named here so T-K6 inherits a
 list rather than a search** — the count is what T-K6 and T-H1 plan against.
 
 - **KBR-132:** `tests/bridge/test_tls_certs.py` spawns a real `openssl` in one of its five cases.
@@ -2225,6 +2226,10 @@ list rather than a search** — the count is what T-K6 and T-H1 plan against.
   `tests/harness/test_recorder_conformance.py` is genuinely `l1` — its checks are pure functions
   over data and it opens nothing. The two socket-binding modules together run in **~1 second**,
   measured, which is the number the fast-gate budget should carry until T-K6 moves them.
+- **KBR-144:** `tests/bridge/test_responses_string_input.py` starts a real `BridgeServer` on an
+  ephemeral port in three of its classes, following the existing convention of
+  `tests/bridge/test_crash_resilience.py` rather than inventing a second one. The whole module
+  runs in **~0.6 seconds**, measured, of which the socket-binding cases are ~0.1.
 
 **The load gate has to be wired, not merely declared.** The table above marks Load as gating a
 release, but `publish.yml` currently depends only on the reusable `tests.yml`. Putting the load
