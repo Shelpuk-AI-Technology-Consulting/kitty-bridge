@@ -691,7 +691,8 @@ Two further C1 assertions arising from F1:
 **C1b — Fingerprint parity (L3).** Compare kitty's header set against a captured Claude Code
 native set (§7.1 captures both). Assert kitty's is a *subset*, and report the difference. Today
 the difference is large; the test's job is to make it visible and stop it growing, not to fail
-the build on day one — a reported baseline with a ratchet, becoming a gate once G3 closes.
+the build on day one — a reported baseline with a ratchet (the monotonic kind, not the §8.3
+exemption), becoming a gate once G3 closes.
 
 **C2 — Body shape (L3).** Covered by the transparency oracle (§3.3), plus two assertions the
 oracle's projection makes possible and a flat scan cannot:
@@ -1554,7 +1555,7 @@ The exemption covers **one assertion**, never the scenario. In TR-1c it is the h
 assertion (KBR-8). Every other step in
 those scenarios — setup, the `Given` clauses, and any other `Then` — gates normally, so a broken
 fixture or an unrelated regression still fails the build. An unexpected pass also fails, forcing
-the exemption off when the defect closes. The full policy and the exemption registry are in §8;
+the exemption off when the defect closes. The full policy is in §8 and the registry in §8.3;
 this section does not restate it, so the two cannot drift apart.
 
 **Three scenarios were corrected against the implementation, not the other way round.**
@@ -1684,7 +1685,8 @@ that is a gate — it is the "as appropriate" this document forbids elsewhere. S
   window after the run, proving `force_close` and the connection-limit behave under saturation.
 
 The ceilings and floors are numbers this document does not invent: they come from a first
-baseline run, recorded and then ratcheted. **`_backend_context` isolation moved to L3** (§6.3.1)
+baseline run, recorded and then ratcheted — again the monotonic kind, not the §8.3 exemption.
+**`_backend_context` isolation moved to L3** (§6.3.1)
 — it is deterministic and does not need a load rig to prove.
 
 ## 7. Shared test infrastructure
@@ -1908,7 +1910,7 @@ release must not wait on an LLM eval. Both cannot hold. Evals and the live-agent
 **alerting**, not gating: they are nondeterministic and depend on a third party's availability,
 and a release that can be blocked by someone else's rate limiter is not a release process.
 
-**`@ratchet` exempts one named assertion, not a scenario.** A scenario-wide exemption is a
+**`ratchet` exempts one named assertion, not a scenario.** A scenario-wide exemption is a
 blanket amnesty: a broken fixture, a failure in a `Given` step, or an unrelated regression inside
 that scenario all become invisible, indistinguishable from the known defect. That is a worse
 outcome than the red gate it was meant to avoid.
@@ -1917,8 +1919,9 @@ The exemption is therefore narrow and accountable:
 
 - It attaches to **one assertion**, named, with its expected failure condition and its issue key
   (TR-1c's header-subset assertion → KBR-8. TR-4's no-vendor-content assertion → KBR-5 was the
-  only other entry and was **withdrawn on 2026-09-07** when KBR-5 shipped; the registry is now one
-  row long, which is the length it is supposed to trend towards).
+  only other entry and was **withdrawn on 2026-09-07** when KBR-5 shipped, which leaves the
+  registry one row long **in the state this document describes** — the length it is supposed to
+  trend towards, and not a count of what is in the file today; see §8.3).
 - **Setup and every other assertion in the scenario gate normally.** If TR-4 cannot reach the
   bridge, the job fails — that is not the known defect.
 - **An unexpected pass fails the job.** When the assertion starts passing, the defect is fixed
@@ -2078,6 +2081,140 @@ versions. The new L3 work adds real sockets to that gate. If the fast gate stops
 people route around it, so the marker split above is also the mechanism for keeping the per-PR
 path bounded — and the mutation-cadence measurement (Q11) has to be taken against that budget,
 not against an empty one.
+
+### 8.3 The exemption mechanism
+
+Delivered by T-W7 (KBR-30), ahead of the guards that need it: T-G1, T-G4, T-G5, T-G9 and T-J2
+each cover a class of check broader than the one defect they happen to expose, so each is
+expected to land red on one assertion (plan §16). T-J1 is the blocked *dependency* rather than a
+guard — it is the pytest-bdd wiring T-J2's scenarios are written against.
+
+**`tests/exemptions.py`** holds the registry and the decisions over it, in the shape §8.1 uses
+for the selection rules: every decision is a **pure function** — `outcome_for`,
+`lookup_exemption`, `registry_violations`, `unexpected_pass_message` — so each can be handed a
+deliberate defect, per plan §1.4. There is no pytest hook, no plugin and no new CI flag; a test
+that uses an exemption is an ordinary test carrying its ordinary layer marker.
+
+```python
+# tests/exemptions.py — the one registry
+EXEMPTIONS: Mapping[str, Exemption] = {
+    "tr-1c-header-subset": Exemption(
+        assertion="the header set is a subset of what Claude Code sends natively",
+        condition="the bridge sends a User-Agent the agent does not",
+        issue="KBR-8",
+    ),
+}
+```
+
+```python
+# the guard. Imported as `exemptions`, not `tests.exemptions`: `tests/` has no
+# `__init__.py`, so pytest's `prepend` import mode puts it on `sys.path` —
+# `tests/layers.py` carries the same caveat in its module docstring.
+from exemptions import ratchet
+
+with ratchet("tr-1c-header-subset"):
+    assert bridge_headers <= native_headers
+```
+
+**Two words spelled the same.** `ratchet(...)` here is the **exemption**: binary, gating, and it
+fails when its assertion starts passing. A *"ratcheted baseline"* in §4.3 C1b, §6.3.1 and §6.4.4,
+and in plan tasks T-I9 and T-I12, is a **different and non-gating** mechanism: record a number,
+report it, tighten it monotonically. The collision predates this section — §8 above already calls
+the exemption `@ratchet` — and the name is kept because §8 is the section the guards are written
+against. T-I9 and T-I12 must not import this symbol; their plan rows say so.
+
+**Ids are lowercase kebab-case**, and that much is checked, because five tasks add rows
+independently. Prefixing an id with the guard or scenario it belongs to is a convention, not a
+check — see the stated limits below. **One row per assertion, not per defect:** two guards over
+KBR-8 take two rows, since each must be withdrawn on the day its own cell starts passing.
+
+**Parametrised guards.** The blocked consumers are per-adapter (T-G9) and per adapter × model ×
+transport (T-G4), and the defect is usually one cell of that matrix. Exempt the cell, not the
+parametrisation:
+
+```python
+exemption = (
+    ratchet("t-g9-openai-subscription-user-agent")
+    if adapter == "openai_subscription"
+    else nullcontext()
+)
+with exemption:
+    assert headers(adapter) <= native_headers(adapter)
+```
+
+The other adapters gate normally; the exempt one still fails the job the day it starts passing.
+The row's `condition` column names the cell in prose, because nothing else does. **In a
+parametrised guard a cell is an assertion:** three exempt cells take three rows, so each can be
+withdrawn on the day its own cell starts passing, and the count in the registry stays a count of
+outstanding defects.
+
+Six decisions in that mechanism depart from the obvious option, and are recorded because the
+obvious option is what a future reader will otherwise assume was intended:
+
+- **A context manager, not a decorator.** The paragraph above writes `@ratchet`, and a decorator
+  is what pytest's own `xfail` would give. But a decorator can only wrap a **whole test**, which
+  is exactly the scenario-wide amnesty this section rejects: it would hide a broken fixture and
+  every healthy assertion beside the exempt one. Assertion scope needs a block. The name is kept.
+- **Only `AssertionError` is amnestied; every other exception propagates.** An exemption says
+  "this claim is known to be false", not "this region of the test may do anything". A `KeyError`
+  inside the block is a broken fixture and fails the job. `pytest.fail()`, `pytest.xfail()`,
+  `pytest.skip()` and **a missed `pytest.raises()`** are not `AssertionError`s and are therefore
+  **not** amnestied — the safe direction, since an exemption that could turn a test into a skip is
+  the failure §8 names two paragraphs above, but a surprise for the author of an L2 guard that
+  reports its verdict with `pytest.fail` and a diff, which is the shape
+  `tests/test_github_actions.py` uses today. **A guard that needs an exemption states its verdict
+  as an `assert`**: catch with `try`/`except` and assert on what you caught, rather than leaning on
+  `pytest.raises` or `pytest.fail`.
+- **An unexpected pass raises a non-`AssertionError` exception.** `UnexpectedExemptionPass`
+  descends from `Exception`, deliberately not from `AssertionError`, so that a nested or adjacent
+  `ratchet` block can never swallow it. A strictness signal that another exemption can amnesty is
+  not strictness.
+- **The registry seam is private.** `ratchet` takes an underscored `_registry` keyword so that
+  this mechanism's own tests can have rows while the production registry is empty. **A guard must
+  never pass it.** A public `registry=` would be a documented back door into the one-registry
+  invariant: a local amnesty nobody can count by reading one file.
+- **No orphan-row scan.** A row whose assertion has since been deleted is stale documentation,
+  but it grants amnesty to nothing and so cannot hide a failure; the mechanism against an
+  exemption outliving its defect is the unexpected-pass rule. A text scan of `tests/**` for unused
+  ids would buy tidiness at the price of a false positive on any id named in a comment.
+  Considered and declined, not overlooked.
+- **No terminal reporting of fired exemptions.** Visibility is the registry file, which is what
+  §8 asks for — "one registry … short, visible". A per-run summary would be a `conftest.py` hook,
+  and the value of this mechanism is precisely that it changes no job's collection or selection.
+  The residual risk is real and accepted: a CI log gives no sign that an exemption fired.
+
+**Two limits the mechanism cannot enforce, stated so they are not mistaken for guarantees.**
+
+- **The block must hold exactly one assertion** and the statements that build its subject.
+  Nothing detects a second: once the first assertion fails, the second is never evaluated, and a
+  failure it would have reported is invisible — a miniature of the blanket amnesty §8 rejects.
+  The enforcement is review, and the rule is in `.github/review/rules/python-tests.md`.
+- **The `condition` column is documentation, not an assertion.** Any `AssertionError` from the
+  block is amnestied, including one raised by an unrelated regression that happens to break the
+  same assertion. The mitigation is the single-statement scope above, not the column.
+- **The id prefix is a convention.** `registry_violations` checks the casing, not that an id
+  names its guard or scenario, and it cannot check that a parametrised guard took one row per
+  exempt cell. An allow-list of permitted prefixes would need editing for every new guard, which
+  buys tidiness at the price of friction on the path this mechanism exists to keep open.
+
+**The unexpected-pass rule only fires in a job that runs the test.** A row attached to a test on
+a layer in `PENDING_ACTIVATION_LAYERS` (§8.2) — `l3` and `acceptance` today, which is where T-G4,
+T-G5 and T-J2 land — is unchecked until that job is activated, so there the exemption *can*
+outlive its defect. The task that activates the job owns re-checking the rows on its layer, in
+the same way §8.2 makes each pending layer someone's named handoff.
+
+**The registry ships empty, today.** The row this section names — TR-1c's header-subset
+assertion, KBR-8 — belongs to an acceptance scenario that does not exist yet (§6.4.1, delivered
+by T-J2 downstream of T-J1). A registry row for an assertion no test contains documents a
+fiction, and the guard against a fiction cannot be the unexpected-pass rule, because nothing ever
+runs it. Whichever of T-G1, T-G4, T-G5, T-G9 or T-J2 lands first adds the first row. §6.4.1 and
+§6.2.3 are not amended to say so: this document states the To-Be state, in which those rows
+exist, and §8's row-count parenthetical now says which state it is counting.
+
+That makes the registry-shape check itself vulnerable to §8's own "green because it stopped
+looking": a validator run over zero rows passes perfectly. So `registry_violations` is proved
+against a **fabricated malformed registry** rather than against the production one, and the
+production registry is asserted clean as a separate, weaker claim.
 
 ## 9. Gap register
 

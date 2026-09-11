@@ -94,8 +94,24 @@ Several tests exist specifically to hold something nothing else enforces:
 **A change that weakens one of these to make a diff pass is a critical finding**,
 and it is worth stating explicitly in the finding what invariant was being held.
 Deleting such a test, loosening its assertion, or adding a skip to it all count.
-An `xfail` or `skip` added anywhere without a stated reason and a linked issue is
-a warning at minimum.
+An `xfail` or `skip` added anywhere without a stated reason and a linked issue
+is a warning at minimum. A `ratchet` carries both by construction, so its
+trigger is different: a `ratchet` added to one of the invariant guards named
+above, or one whose registry row does not land in the same diff.
+
+**`ratchet` is the third amnesty form and has its own rule.** It exempts one
+named assertion, from a row in `tests/exemptions.py` carrying that assertion,
+its expected failure condition and its Jira key
+(`.system_design/TEST_SUITE.md` §8.3). Two things to raise:
+
+- 🔴 **More than one assertion inside a `ratchet` block.** The block must hold
+  one assertion and the statements that build its subject. A second assertion is
+  never evaluated once the first fails, so a failure it would have reported is
+  invisible — the blanket amnesty §8 rejects, in miniature. Nothing detects
+  this; review is the enforcement.
+- **A `ratchet` call passing `_registry=`.** That is the mechanism's private
+  test seam. From a guard it is a local amnesty that no one can count by reading
+  the registry, which defeats the point of having one.
 
 ## Coverage of the change itself
 
