@@ -96,7 +96,7 @@ After Milestone 0, seven streams advance independently, each owning its own modu
 | **T-W1** | Layer markers, CI selection rules, per-category collection checks | — | §8, §8.1, §8.2 | M |
 | **T-W2** | **The input contract** — request/capture types, the projection protocol, the path vocabulary and the normalisation rules | — | §3.3.1, §3.3.1a, §3.3.1b | ~~S~~ **M** |
 | **T-W3** | Register schema and data | T-W2 | §3.2 | M |
-| **T-W4** | Recorder implementation — primary aiohttp recorder | T-W2 | §7.2 | M |
+| **T-W4** | Recorder implementation — primary aiohttp recorder | T-W2 | §7.2, §7.2.1 | ~~M~~ **L** |
 | **T-W5** | Shared CONNECT proxy fixture | — | §7.3 | M |
 | **T-W6** | Corpus format, capture procedure, scrubber, loader | T-W3 | §7.1 | M |
 | **T-W7** | Assertion exemption registry | T-W1 | §8 | M |
@@ -160,10 +160,21 @@ fails.
 **T-W4 — recorder implementation.** Implements T-W2's `CapturedRequest` — original casing and order,
 arrival timestamp, and **the peer port of the accepted connection** — for the primary aiohttp
 recorder. It consumes the contract rather than defining it. Ships **one minimal valid success
-response per protocol** — without it any request
-driven through a real bridge falls into the retry paths, which are themselves body-mutating. The
-failure library is T-B4. Peer-port and casing capture are enforced by a **conformance test every
-Epic B recorder must pass**.
+response per protocol, per stream mode** — Claude Code sends `"stream": true`, and a streaming
+request answered with a JSON body is not a success. The failure library is T-B4. Peer-port and
+casing capture are enforced by a **conformance test every Epic B recorder must pass**, and it
+also records every **accepted connection**, including one that carries no request — §5.2.1's
+bypass shape, which no request list can express.
+
+~~without it any request driven through a real bridge falls into the retry paths, which are
+themselves body-mutating~~ — **this was wrong, and §4.3 C3 says the opposite**: transport-blip
+and empty-response retries are "the two that repeat a request unchanged" and must be
+byte-identical; the four mutating paths are M6, M8, M9 and failover. The two real reasons an
+empty or mis-shaped reply is unacceptable are sharper: it costs **80 seconds** of real
+`asyncio.sleep` per affected test (`_EMPTY_RETRY_DELAYS` + `_EMPTY_FINAL_DELAYS`) in a gating
+job, and on a **balancing** profile it fails over — and failover *is* body-mutating, so the
+harness would manufacture a delta no product code caused. A harness **413** is the same family:
+it is M6's own trigger. See §7.2.1.
 
 **T-W5 — CONNECT proxy.** Extract `_ConnectProxy`/`_TlsTarget` from
 `tests/test_egress_https_proxy.py`; add tunnel source-port recording and mid-test stoppability. An
@@ -189,7 +200,23 @@ core.
 and assert the capture is complete and **type-compatible with T-W2's declared contract** — the
 recorder's output must satisfy what a projection expects to read. Small, but it is the first
 moment the contracts are known to compose rather than merely to exist.
-*Falsification:* a recorder that drops the query string fails it.
+*Falsification:* a recorder that drops the query string fails it. T-W4 ships its **own**
+query-drop case against the recorder in isolation; this one is the end-to-end claim, and the two
+must not be collapsed.
+
+**T-W9 inherits three obligations T-W4 could not discharge**, because T-W4 starts no
+`BridgeServer` and they are only observable with one running:
+
+1. **Exactly one upstream request per inbound request.** T-W4 proves its replies are non-empty by
+   the judgements it can call directly; that is necessary and not sufficient. A second capture in
+   the recording is the only real evidence the retry ladder never fired.
+2. **The `has_content` cell of §7.2.1's table.** It is a local flag in the pass-through streaming
+   loop (`server.py:5145`), not a function — unreachable except by driving a bridge. T-W4's
+   streams satisfy its precondition by construction; nothing has confirmed it.
+3. **The empty-ladder timing.** `_EMPTY_RETRY_DELAYS` + `_EMPTY_FINAL_DELAYS` is 80 seconds of
+   real sleep. The slice should assert its own wall-clock bound, so a regression that
+   reintroduces the ladder fails rather than merely slowing the gate — the defect commit
+   `691e974` fixed once already.
 
 ---
 
