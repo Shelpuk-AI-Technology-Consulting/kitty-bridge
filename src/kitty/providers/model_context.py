@@ -80,13 +80,7 @@ def _coerce_context_tokens(value: object) -> int | None:
         return None
 
 
-# Sentinel distinguishing "more than one key matched" from "no key matched".
-# The two must not collapse: a miss falls through to the tail retry, an
-# ambiguous match stops the lookup for that catalog (see _resolve_catalog).
-_AMBIGUOUS = object()
-
-
-def _match_catalog(query: str, keys: Collection[str]) -> str | object | None:
+def _match_catalog(query: str, keys: Collection[str]) -> tuple[str | None, bool]:
     """Match a model name against a set of catalog keys.
 
     Tries, in order: an exact match; the query as a ``"/"``-delimited suffix of
@@ -101,11 +95,14 @@ def _match_catalog(query: str, keys: Collection[str]) -> str | object | None:
             cached catalog mapping itself, so no copy is built per request.
 
     Returns:
-        The matching key, :data:`_AMBIGUOUS` when a step matched more than one
-        key, or ``None`` when nothing matched.
+        A ``(key, ambiguous)`` pair. ``key`` is the match, or ``None`` when
+        nothing matched. ``ambiguous`` reports that a step matched more than
+        one key — which must not collapse into "no match", because a miss
+        falls through to the tail retry while an ambiguous match stops the
+        lookup for this catalog entirely (see :func:`_resolve_catalog`).
     """
     if query in keys:
-        return query
+        return query, False
 
     # Each step is decisive: a step that matches several keys cannot be
     # narrowed by trying the next one, it can only be reported.
@@ -114,7 +111,7 @@ def _match_catalog(query: str, keys: Collection[str]) -> str | object | None:
         [k for k in keys if query.endswith("/" + k)],
     ):
         if len(candidates) == 1:
-            return candidates[0]
+            return candidates[0], False
         if len(candidates) > 1:
             logger.warning(
                 "Ambiguous context entry for %s: %d matches (%s)",
@@ -122,8 +119,8 @@ def _match_catalog(query: str, keys: Collection[str]) -> str | object | None:
                 len(candidates),
                 sorted(candidates),
             )
-            return _AMBIGUOUS
-    return None
+            return None, True
+    return None, False
 
 
 def _resolve_catalog(model: str, keys: Collection[str]) -> str | None:
@@ -147,16 +144,16 @@ def _resolve_catalog(model: str, keys: Collection[str]) -> str | None:
         The matching key, or ``None`` when the catalog cannot resolve the name.
     """
     query = model.lower()
-    hit = _match_catalog(query, keys)
-    if hit is _AMBIGUOUS:
+    hit, ambiguous = _match_catalog(query, keys)
+    if ambiguous:
         return None
     if hit is None:
         _, sep, tail = query.partition("/")
         if sep and tail:
-            hit = _match_catalog(tail, keys)
-            if hit is _AMBIGUOUS:
+            hit, ambiguous = _match_catalog(tail, keys)
+            if ambiguous:
                 return None
-    return hit  # type: ignore[return-value]  # _AMBIGUOUS is handled above
+    return hit
 
 
 def _parse_overrides(raw: str, source: str) -> dict[str, int] | None:
@@ -253,12 +250,13 @@ def _load_overrides() -> dict[str, int]:
         # an ambiguous overrides catalog hands the decision to the metadata
         # table it exists to overrule. Reject such a revision wholesale rather
         # than load it, as with a body that is not a JSON object.
-        if parsed is not None and _colliding_keys(parsed):
+        collisions = _colliding_keys(parsed) if parsed is not None else []
+        if collisions:
             logger.warning(
                 "Model context overrides from %s hold keys that differ only by prefix (%s); "
                 "keeping the packaged catalog",
                 REMOTE_OVERRIDES_CACHE_PATH,
-                _colliding_keys(parsed),
+                collisions,
             )
             parsed = None
         if parsed is not None:

@@ -740,12 +740,13 @@ class TestPrefixedQueryTailRetry:
         assert result == mc.DEFAULT_CONTEXT_TOKENS
         assert any("shared-model" in r.getMessage() for r in caplog.records if r.levelname == "WARNING")
 
-    def test_only_the_first_segment_is_stripped(self, tmp_path: Path, monkeypatch):
+    def test_only_the_first_segment_is_stripped(self):
         """R4: a multi-segment path does not collapse to its last segment.
 
         Fireworks passes full paths through unchanged, so the lookup must not
         reduce ``accounts/fireworks/routers/gpt-4o`` to ``gpt-4o`` and claim a
-        window for an unrelated model.
+        window for an unrelated model. The module's autouse fixture supplies
+        the synthetic catalog, so this takes no fixture parameters of its own.
         """
         import kitty.providers.model_context as mc
 
