@@ -20,11 +20,20 @@ is not over-read:
    profile model through some path none of the forbidden names covers would pass.
    The three shapes on the list — the property, its backing field, and the
    backends table — are the ones reachable from ``BridgeServer`` today.
-2. **Runtime replacement.**  ``tests/bridge/test_compaction_failure_response.py``
-   binds the real method to a local name and monkeypatches a stand-in over it.
-   Neither is a call this sweep can see; a stand-in with the wrong signature is
-   caught by that test raising ``TypeError``, not by this file.
-3. **That the route is right.**  Only that it is resolved from the request.  The
+2. **A wrong argument.**  The sweep proves a call *names* a request, never that
+   it names the *right* one.  ``self._build_upstream_url(body)`` or a stale dict
+   passes this guard and passes ``mypy`` too — both are ``dict``.  That is the
+   residual risk of a mechanical edit across 46 sites, and it is carried by
+   reading the call sites, not by this file.
+3. **Runtime replacement.**  ``tests/bridge/test_compaction_failure_response.py``
+   monkeypatches a stand-in over ``_build_upstream_headers``.  The *alias* it
+   binds first is covered — :func:`_helper_aliases` exists for that site — but a
+   ``monkeypatch.setattr`` whose replacement takes no argument is not, because
+   the helper's name reaches it only as a string literal.  Worse, that stand-in
+   is never invoked at all: the same test replaces ``_make_upstream_request``,
+   so nothing downstream of it runs.  So no test in the tree exercises that
+   stand-in, and it is not this guard's job to pretend otherwise.
+4. **That the route is right.**  Only that it is resolved from the request.  The
    behavioural half of that claim lives in the sibling file named above.
 
 L2 rather than L1: ``tests/test_egress_coverage.py`` — the file
@@ -113,8 +122,38 @@ def _reads_name(function: ast.FunctionDef, name: str) -> bool:
     return any(isinstance(node, ast.Name) and node.id == name for node in ast.walk(function))
 
 
+def _helper_aliases(tree: ast.AST) -> set[str]:
+    """Return local names bound to either helper without calling it.
+
+    ``real_headers = server._build_upstream_headers`` is how
+    ``tests/bridge/test_compaction_failure_response.py`` reaches the real method
+    before monkeypatching a stand-in over it.  A call through that name is a
+    call to the helper, and a sweep that only matched attribute calls would step
+    straight past the one site in the tree that takes this shape.
+
+    Args:
+        tree: A parsed module.
+
+    Returns:
+        Every name bound to an un-called helper attribute.
+    """
+    aliases: set[str] = set()
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign) or not isinstance(node.value, ast.Attribute):
+            continue
+        if node.value.attr not in _HELPERS:
+            continue
+        aliases.update(t.id for t in node.targets if isinstance(t, ast.Name))
+
+    return aliases
+
+
 def _zero_argument_calls(tree: ast.AST) -> list[int]:
     """Return the line numbers of no-argument calls to either helper.
+
+    Matches both shapes a call can take: directly on an object, and through a
+    local name bound to the method (:func:`_helper_aliases`).
 
     Args:
         tree: A parsed module.
@@ -122,14 +161,18 @@ def _zero_argument_calls(tree: ast.AST) -> list[int]:
     Returns:
         One line number per offending call, in source order.
     """
+    aliases = _helper_aliases(tree)
+
+    def _is_helper(call: ast.Call) -> bool:
+        """Return whether a call reaches either helper, by either shape."""
+        if isinstance(call.func, ast.Attribute):
+            return call.func.attr in _HELPERS
+        return isinstance(call.func, ast.Name) and call.func.id in aliases
+
     return sorted(
         node.lineno
         for node in ast.walk(tree)
-        if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Attribute)
-        and node.func.attr in _HELPERS
-        and not node.args
-        and not node.keywords
+        if isinstance(node, ast.Call) and _is_helper(node) and not node.args and not node.keywords
     )
 
 
@@ -203,15 +246,19 @@ class TestRouteResolutionHasOneSourceOfTruth:
         where "whenever that branch happens to run" means "in production".
         """
         offending: list[str] = []
-        scanned = 0
+        scanned: dict[str, int] = {}
 
         for tree_root in _SCANNED_TREES:
-            for path in sorted(tree_root.rglob("*.py")):
-                scanned += 1
+            paths = sorted(tree_root.rglob("*.py"))
+            scanned[tree_root.name] = len(paths)
+            for path in paths:
                 for lineno in _zero_argument_calls(ast.parse(path.read_text(encoding="utf-8"))):
                     offending.append(f"{path.relative_to(tree_root.parent)}:{lineno}")
 
-        assert scanned > 100, f"the sweep found only {scanned} Python files; it is not reading the tree"
+        # Per tree, not a total: an aggregate threshold stays satisfied by one
+        # tree alone, so dropping the other from _SCANNED_TREES would go unseen.
+        empty = sorted(name for name, count in scanned.items() if not count)
+        assert not empty, f"the sweep read no Python files under {empty}; it is not reading the tree"
         assert not offending, "these call sites resolve a route without naming a request:\n  " + "\n  ".join(offending)
 
     @pytest.mark.parametrize(
@@ -260,3 +307,14 @@ class TestRouteResolutionHasOneSourceOfTruth:
         source = "url = self._build_upstream_url()\nheaders = self._build_upstream_headers(cc_request)\n"
 
         assert _zero_argument_calls(ast.parse(source)) == [1]
+
+    def test_the_call_site_sweep_detects_a_zero_argument_call_through_an_alias(self) -> None:
+        """The aliased shape must be reported too, or the one site that uses it is invisible."""
+        source = (
+            "real_headers = server._build_upstream_headers\n"
+            "captured.update(real_headers())\n"
+            "kept = server._build_upstream_url\n"
+            "url = kept(cc_request)\n"
+        )
+
+        assert _zero_argument_calls(ast.parse(source)) == [2]

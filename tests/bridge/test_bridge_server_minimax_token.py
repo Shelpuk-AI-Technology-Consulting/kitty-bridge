@@ -351,6 +351,9 @@ class TestMiniMaxTokenTranslatedPath:
 
     def test_global_default(self):
         server = _make_server()
+        # An empty request, deliberately: this server carries no profile model and
+        # this adapter's route does not depend on the model, so the empty case is
+        # the strongest form of the claim (KBR-127).
         assert server._build_upstream_url({}) == f"{_GLOBAL_URL}{_MESSAGES_PATH}"
 
     def test_cn_region_routes_to_cn_host(self):

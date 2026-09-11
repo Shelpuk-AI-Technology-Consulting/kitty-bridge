@@ -106,15 +106,17 @@ class OpenCodeGoAdapter(AnthropicAdapter):
     def upstream_wire_is_messages_api_for_model(self, model: str) -> bool:
         """Report the wire shape ``translate_to_upstream`` emits for *model*.
 
-        Uses ``_is_messages_model`` on the raw name, which is exactly what
-        ``translate_to_upstream`` routes on — deliberately without
-        ``normalize_model_name``, so the two agree by construction rather than
-        by a second copy of the rule.  Normalizing here would be more correct in
-        isolation and less correct against the contract, which is agreement with
-        the router.
+        Uses ``_is_messages_model`` on the string it is given, which is exactly
+        what ``translate_to_upstream`` routes on — deliberately without calling
+        ``normalize_model_name`` again, so the two agree by construction rather
+        than by a second copy of the rule.  Normalizing here would be more
+        correct in isolation and less correct against the contract, which is
+        agreement with the router.
 
         Args:
-            model: The model name, exactly as ``translate_to_upstream`` reads it.
+            model: The model name, exactly as ``translate_to_upstream`` reads it:
+                the normalized model in ``cc_request``, since KBR-7 for the body
+                and since KBR-127 for the path and auth headers too.
 
         Returns:
             True for the models served on ``/v1/messages``.

@@ -48,6 +48,9 @@ def server():
 
 class TestBridgeZaiAnthropicURL:
     def test_upstream_url_uses_messages_path(self, server):
+        # An empty request, deliberately: this server carries no profile model and
+        # this adapter's route does not depend on the model, so the empty case is
+        # the strongest form of the claim (KBR-127).
         url = server._build_upstream_url({})
         assert url == "https://api.z.ai/api/anthropic/v1/messages"
 
