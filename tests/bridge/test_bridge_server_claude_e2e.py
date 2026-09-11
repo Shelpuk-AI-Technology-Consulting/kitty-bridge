@@ -1059,7 +1059,7 @@ class TestClaudeCodeUpstreamRequestFormat:
                     assert resp.status == 200
 
                     # Verify the server builds the correct upstream headers
-                    headers = server._build_upstream_headers()
+                    headers = server._build_upstream_headers({})
                     assert headers["Authorization"] == "Bearer sk-resolved-key-12345"
                     assert headers["Content-Type"] == "application/json"
         finally:

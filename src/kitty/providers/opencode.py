@@ -25,6 +25,15 @@ __all__ = ["OpenCodeGoAdapter"]
 logger = logging.getLogger(__name__)
 
 # Models served via the Anthropic Messages API endpoint.
+#
+# These keys are matched against the NORMALIZED model name: since KBR-127 the
+# URL path, the auth headers and the body all route on ``cc_request["model"]``,
+# which has been through ``normalize_model_name``.  So ``normalize_model_name``
+# below must preserve the dots — the base class's version replaces them with
+# hyphens, and delegating to it would send every model here to
+# ``/v1/chat/completions`` under Bearer auth, silently.  The two tests in
+# ``tests/bridge/test_upstream_route_resolution.py`` that name a Messages model
+# are what would go red.
 _MESSAGES_MODELS: frozenset[str] = frozenset(
     {
         "minimax-m2.5",

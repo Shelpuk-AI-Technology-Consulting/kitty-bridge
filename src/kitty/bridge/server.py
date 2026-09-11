@@ -2747,8 +2747,8 @@ class BridgeServer:
         terminal_status = "completed"
         last_usage: dict | None = None
         try:
-            url = self._build_upstream_url()
-            headers = self._build_upstream_headers()
+            url = self._build_upstream_url(cc_request)
+            headers = self._build_upstream_headers(cc_request)
             logger.debug("Upstream POST → %s", url)
 
             upstream_body = self._active_provider.translate_to_upstream(cc_request)
@@ -2826,8 +2826,8 @@ class BridgeServer:
                                 self._select_backend()
                                 self._normalize_model(cc_request)
                                 self._active_provider.normalize_request(cc_request)
-                                url = self._build_upstream_url()
-                                headers = self._build_upstream_headers()
+                                url = self._build_upstream_url(cc_request)
+                                headers = self._build_upstream_headers(cc_request)
                                 upstream_body = self._active_provider.translate_to_upstream(cc_request)
                                 logger.info(
                                     "Responses stream failover: backend attempt %d/%d (status %d), switching backend",
@@ -2955,8 +2955,8 @@ class BridgeServer:
                             self._select_backend()
                             self._normalize_model(cc_request)
                             self._active_provider.normalize_request(cc_request)
-                            url = self._build_upstream_url()
-                            headers = self._build_upstream_headers()
+                            url = self._build_upstream_url(cc_request)
+                            headers = self._build_upstream_headers(cc_request)
                             upstream_body = self._active_provider.translate_to_upstream(cc_request)
                             logger.info(
                                 "Responses stream failover: in-stream error (no output yet), "
@@ -2988,8 +2988,8 @@ class BridgeServer:
                                 self._select_backend()
                                 self._normalize_model(cc_request)
                                 self._active_provider.normalize_request(cc_request)
-                                url = self._build_upstream_url()
-                                headers = self._build_upstream_headers()
+                                url = self._build_upstream_url(cc_request)
+                                headers = self._build_upstream_headers(cc_request)
                                 upstream_body = self._active_provider.translate_to_upstream(cc_request)
                                 logger.info(
                                     "Responses stream empty response: attempt %d/%d, switching backend",
@@ -3455,8 +3455,8 @@ class BridgeServer:
                 return sr
 
         try:
-            url = self._build_upstream_url()
-            headers = self._build_upstream_headers()
+            url = self._build_upstream_url(cc_request)
+            headers = self._build_upstream_headers(cc_request)
             upstream_body = self._upstream_body_for(cc_request)
             logger.debug("Upstream POST → %s", url)
 
@@ -3512,8 +3512,8 @@ class BridgeServer:
                                         self._select_backend()
                                         self._normalize_model(cc_request)
                                         self._active_provider.normalize_request(cc_request)
-                                        url = self._build_upstream_url()
-                                        headers = self._build_upstream_headers()
+                                        url = self._build_upstream_url(cc_request)
+                                        headers = self._build_upstream_headers(cc_request)
                                         upstream_body = self._upstream_body_for(cc_request)
                                         logger.info(
                                             "Messages stream Cloudflare failover: attempt %d/%d, switching backend",
@@ -3544,8 +3544,8 @@ class BridgeServer:
                                 cc_request["_native_messages_request"] = False
                                 self._normalize_model(cc_request)
                                 self._active_provider.normalize_request(cc_request)
-                                url = self._build_upstream_url()
-                                headers = self._build_upstream_headers()
+                                url = self._build_upstream_url(cc_request)
+                                headers = self._build_upstream_headers(cc_request)
                                 upstream_body = self._upstream_body_for(cc_request)
                                 continue
 
@@ -3586,8 +3586,8 @@ class BridgeServer:
                                     self._select_backend()
                                     self._normalize_model(cc_request)
                                     self._active_provider.normalize_request(cc_request)
-                                    url = self._build_upstream_url()
-                                    headers = self._build_upstream_headers()
+                                    url = self._build_upstream_url(cc_request)
+                                    headers = self._build_upstream_headers(cc_request)
                                     upstream_body = self._upstream_body_for(cc_request)
                                     logger.info(
                                         "Messages stream failover: attempt %d/%d (status %d), switching backend",
@@ -3793,8 +3793,8 @@ class BridgeServer:
                                 self._select_backend()
                                 self._normalize_model(cc_request)
                                 self._active_provider.normalize_request(cc_request)
-                                url = self._build_upstream_url()
-                                headers = self._build_upstream_headers()
+                                url = self._build_upstream_url(cc_request)
+                                headers = self._build_upstream_headers(cc_request)
                                 upstream_body = self._upstream_body_for(cc_request)
                                 logger.info(
                                     "Messages stream in-stream error (no output yet): attempt %d/%d, switching backend",
@@ -3837,8 +3837,8 @@ class BridgeServer:
                                     self._select_backend()
                                     self._normalize_model(cc_request)
                                     self._active_provider.normalize_request(cc_request)
-                                    url = self._build_upstream_url()
-                                    headers = self._build_upstream_headers()
+                                    url = self._build_upstream_url(cc_request)
+                                    headers = self._build_upstream_headers(cc_request)
                                     upstream_body = self._upstream_body_for(cc_request)
                                     logger.info(
                                         "Messages stream empty response: attempt %d/%d, switching backend",
@@ -3862,8 +3862,8 @@ class BridgeServer:
                                         self._select_backend()
                                         self._normalize_model(cc_request)
                                         self._active_provider.normalize_request(cc_request)
-                                        url = self._build_upstream_url()
-                                        headers = self._build_upstream_headers()
+                                        url = self._build_upstream_url(cc_request)
+                                        headers = self._build_upstream_headers(cc_request)
                                         upstream_body = self._upstream_body_for(cc_request)
                                         retried = True
                                 else:
@@ -3977,8 +3977,8 @@ class BridgeServer:
                                     self._select_backend()
                                     self._normalize_model(cc_request)
                                     self._active_provider.normalize_request(cc_request)
-                                    url = self._build_upstream_url()
-                                    headers = self._build_upstream_headers()
+                                    url = self._build_upstream_url(cc_request)
+                                    headers = self._build_upstream_headers(cc_request)
                                     upstream_body = self._upstream_body_for(cc_request)
                                     logger.info(
                                         "Streaming failover: backend attempt %d/%d failed (%s), switching backend",
@@ -4275,8 +4275,8 @@ class BridgeServer:
                 return sr
 
         try:
-            url = self._build_upstream_url()
-            headers = self._build_upstream_headers()
+            url = self._build_upstream_url(cc_request)
+            headers = self._build_upstream_headers(cc_request)
             upstream_body = self._active_provider.translate_to_upstream(cc_request)
             logger.debug("Upstream POST → %s", url)
 
@@ -4338,8 +4338,8 @@ class BridgeServer:
                             cc_request["_native_messages_request"] = False
                             self._normalize_model(cc_request)
                             self._active_provider.normalize_request(cc_request)
-                            url = self._build_upstream_url()
-                            headers = self._build_upstream_headers()
+                            url = self._build_upstream_url(cc_request)
+                            headers = self._build_upstream_headers(cc_request)
                             upstream_body = self._active_provider.translate_to_upstream(cc_request)
                             continue
 
@@ -4356,8 +4356,8 @@ class BridgeServer:
                                 self._select_backend()
                                 self._normalize_model(cc_request)
                                 self._active_provider.normalize_request(cc_request)
-                                url = self._build_upstream_url()
-                                headers = self._build_upstream_headers()
+                                url = self._build_upstream_url(cc_request)
+                                headers = self._build_upstream_headers(cc_request)
                                 upstream_body = self._active_provider.translate_to_upstream(cc_request)
                                 logger.info(
                                     "Gemini stream failover: backend attempt %d/%d (status %d), switching backend",
@@ -4471,8 +4471,8 @@ class BridgeServer:
                             self._select_backend()
                             self._normalize_model(cc_request)
                             self._active_provider.normalize_request(cc_request)
-                            url = self._build_upstream_url()
-                            headers = self._build_upstream_headers()
+                            url = self._build_upstream_url(cc_request)
+                            headers = self._build_upstream_headers(cc_request)
                             upstream_body = self._active_provider.translate_to_upstream(cc_request)
                             logger.info(
                                 "Gemini stream failover: in-stream error, backend attempt %d/%d, switching backend",
@@ -4492,8 +4492,8 @@ class BridgeServer:
                                 self._select_backend()
                                 self._normalize_model(cc_request)
                                 self._active_provider.normalize_request(cc_request)
-                                url = self._build_upstream_url()
-                                headers = self._build_upstream_headers()
+                                url = self._build_upstream_url(cc_request)
+                                headers = self._build_upstream_headers(cc_request)
                                 upstream_body = self._active_provider.translate_to_upstream(cc_request)
                                 logger.info(
                                     "Gemini stream empty response: attempt %d/%d, switching backend",
@@ -5116,8 +5116,8 @@ class BridgeServer:
                 return sr
 
         try:
-            url = self._build_upstream_url()
-            headers = self._build_upstream_headers()
+            url = self._build_upstream_url(cc_request)
+            headers = self._build_upstream_headers(cc_request)
             upstream_body = self._active_provider.translate_to_upstream(cc_request)
             logger.debug("Upstream POST → %s", url)
 
@@ -5186,8 +5186,8 @@ class BridgeServer:
                             cc_request["_native_messages_request"] = False
                             self._normalize_model(cc_request)
                             self._active_provider.normalize_request(cc_request)
-                            url = self._build_upstream_url()
-                            headers = self._build_upstream_headers()
+                            url = self._build_upstream_url(cc_request)
+                            headers = self._build_upstream_headers(cc_request)
                             upstream_body = self._active_provider.translate_to_upstream(cc_request)
                             continue
 
@@ -5203,8 +5203,8 @@ class BridgeServer:
                                 self._select_backend()
                                 self._normalize_model(cc_request)
                                 self._active_provider.normalize_request(cc_request)
-                                url = self._build_upstream_url()
-                                headers = self._build_upstream_headers()
+                                url = self._build_upstream_url(cc_request)
+                                headers = self._build_upstream_headers(cc_request)
                                 upstream_body = self._active_provider.translate_to_upstream(cc_request)
                                 logger.info(
                                     "CC stream failover: attempt %d/%d (status %d), switching backend",
@@ -5374,8 +5374,8 @@ class BridgeServer:
                             self._select_backend()
                             self._normalize_model(cc_request)
                             self._active_provider.normalize_request(cc_request)
-                            url = self._build_upstream_url()
-                            headers = self._build_upstream_headers()
+                            url = self._build_upstream_url(cc_request)
+                            headers = self._build_upstream_headers(cc_request)
                             upstream_body = self._active_provider.translate_to_upstream(cc_request)
                             logger.info(
                                 "CC stream in-stream error: attempt %d/%d, switching backend",
@@ -5404,8 +5404,8 @@ class BridgeServer:
                                 self._select_backend()
                                 self._normalize_model(cc_request)
                                 self._active_provider.normalize_request(cc_request)
-                                url = self._build_upstream_url()
-                                headers = self._build_upstream_headers()
+                                url = self._build_upstream_url(cc_request)
+                                headers = self._build_upstream_headers(cc_request)
                                 upstream_body = self._active_provider.translate_to_upstream(cc_request)
                                 logger.info(
                                     "CC stream empty response: attempt %d/%d, switching backend",
@@ -6477,9 +6477,26 @@ class BridgeServer:
             f"Authentication failed for profile '{profile_name}'. Please re-login with: {auth_command}. Details: {msg}"
         )
 
-    def _build_upstream_url(self) -> str:
+    def _build_upstream_url(self, cc_request: dict) -> str:
+        """Build the upstream endpoint URL for the request about to be sent.
+
+        The model comes from ``cc_request`` and not from ``_active_model``,
+        because the adapter routes the **body** on that same key and only
+        ``cc_request["model"]`` has been through :meth:`_normalize_model`.  A
+        profile written ``model: opencode/minimax-m2.5`` otherwise produced a
+        Messages body addressed to the Chat Completions path, and a backend
+        with no profile model at all resolved the adapter's default route for
+        every model the agent asked for (KBR-127).
+
+        Args:
+            cc_request: The request, already normalized by
+                :meth:`_normalize_model` for the currently selected backend.
+
+        Returns:
+            The absolute upstream URL.
+        """
         base = self._active_provider.build_base_url(self._active_provider_config).rstrip("/")
-        model = self._active_model or ""
+        model = cc_request.get("model", "")
         path = self._active_provider.get_upstream_path(model)
         return f"{base}{path}"
 
@@ -6500,11 +6517,12 @@ class BridgeServer:
 
         The carrier's dialect is read per model, from ``cc_request`` itself
         rather than from ``_active_model`` — the adapter routes on that same
-        key, and only that key is normalized (KBR-7; the URL and header helpers
-        still read ``_active_model``, which is KBR-127).  This depends on every
-        failover site rebuilding the body from the ``cc_request`` it has just
-        re-normalized; a site that reused a stale body would pair it with a
-        fresh model.
+        key, and only that key is normalized (KBR-7).  KBR-127 moved
+        :meth:`_build_upstream_url` and :meth:`_build_upstream_headers` onto the
+        same key, so the body, the path and the auth scheme now all resolve from
+        one string.  This depends on every failover site rebuilding the body from
+        the ``cc_request`` it has just re-normalized; a site that reused a stale
+        body would pair it with a fresh model.
 
         Args:
             cc_request: The normalized request. Never modified — the carrier is
@@ -6521,12 +6539,28 @@ class BridgeServer:
             )
         return upstream_body
 
-    def _build_upstream_headers(self) -> dict[str, str]:
+    def _build_upstream_headers(self, cc_request: dict) -> dict[str, str]:
+        """Build the upstream auth headers for the request about to be sent.
+
+        Reads the model from ``cc_request`` for the same reason
+        :meth:`_build_upstream_url` does, and it is the same defect: an
+        OpenCode Go profile carrying a provider prefix sent a Messages body
+        under ``Authorization: Bearer`` instead of ``x-api-key`` (KBR-127).
+        Path and auth must resolve from one string, or a request can be
+        correctly shaped, correctly addressed, and still rejected.
+
+        Args:
+            cc_request: The request, already normalized by
+                :meth:`_normalize_model` for the currently selected backend.
+
+        Returns:
+            The headers to send upstream.
+        """
         provider = self._active_provider
         # Providers that route to different endpoints per model may need
         # model-aware header construction (e.g. OpenCode Go).
         if hasattr(provider, "build_upstream_headers_for_model"):
-            model = self._active_model or ""
+            model = cc_request.get("model", "")
             return cast("dict[str, str]", provider.build_upstream_headers_for_model(self._active_key, model))  # type: ignore[attr-defined]  # optional provider hook
         return provider.build_upstream_headers(self._active_key)
 
@@ -6624,8 +6658,8 @@ class BridgeServer:
             self._log_backend_selection()
             return await self._active_provider.make_request(cc_request)
 
-        url = self._build_upstream_url()
-        headers = self._build_upstream_headers()
+        url = self._build_upstream_url(cc_request)
+        headers = self._build_upstream_headers(cc_request)
         upstream_body = self._upstream_body_for(cc_request)
 
         request_timeout = aiohttp.ClientTimeout(total=None, sock_connect=30, sock_read=_STREAM_READ_TIMEOUT)

@@ -299,7 +299,10 @@ class ProviderAdapter(ABC):
 
         Args:
             model: The model name the request will be sent with, exactly as
-                ``translate_to_upstream`` will read it — unnormalized.
+                ``translate_to_upstream`` reads it: the normalized model in
+                ``cc_request``.  Since KBR-127 the URL and header helpers
+                resolve from that same key, so an implementation must not
+                normalize again — it would disagree with its own router.
 
         Returns:
             True when the body for *model* is an Anthropic Messages body.

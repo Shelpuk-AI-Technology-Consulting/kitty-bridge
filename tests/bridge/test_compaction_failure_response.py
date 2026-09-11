@@ -639,8 +639,8 @@ class TestNothingOnTheWireNamesTheProduct:
 
         real_headers = server._build_upstream_headers
 
-        def _capture_headers():
-            captured_headers.update(real_headers())
+        def _capture_headers(cc_request):
+            captured_headers.update(real_headers(cc_request))
             return dict(captured_headers)
 
         monkeypatch.setattr(server, "_build_upstream_headers", _capture_headers)
