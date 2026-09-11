@@ -629,11 +629,96 @@ class TestPathVocabulary:
         """§3.3.4: a failure must name the exact turn and part."""
         assert c.part_path(2, 1) == "conversation.turns[2].parts[1]"
 
+    def test_an_index_helper_also_builds_the_wildcard_a_register_row_writes(self) -> None:
+        """T-W3 writes patterns with the same helpers T-D1 writes concrete paths with.
+
+        Leaving the register to hand-assemble ``"conversation.turns[*].parts[*]"``
+        would put the spelling in two places — the drift §3.3.1a says the shared
+        vocabulary exists to prevent.
+        """
+        assert c.part_path(c.WILDCARD, c.WILDCARD) == "conversation.turns[*].parts[*]"
+        assert c.turn_path(c.WILDCARD, "role") == "conversation.turns[*].role"
+        assert c.system_path(c.WILDCARD) == "conversation.system[*]"
+        assert c.reply_part_path(c.WILDCARD) == "reply.parts[*]"
+
+    def test_the_wildcard_a_helper_builds_matches_the_concrete_path_it_stands_for(self) -> None:
+        """The control: a pattern nothing matches would be a row that claims nothing."""
+        assert c.path_matches(c.part_path(c.WILDCARD, c.WILDCARD), c.part_path(2, 0))
+        assert c.path_matches(c.reply_part_path(c.WILDCARD), c.reply_part_path(3))
+        assert not c.path_matches(c.part_path(c.WILDCARD, c.WILDCARD), c.turn_path(2, "role"))
+
+    def test_an_index_that_is_neither_a_position_nor_the_wildcard_is_rejected(self) -> None:
+        """`mypy` runs on `src/kitty` only, so the annotation cannot catch this.
+
+        A silently accepted typo builds a path that looks concrete and matches
+        nothing — a register row that claims nothing while appearing to.
+        """
+        for build in (c.system_path, c.reply_part_path):
+            with pytest.raises(ValueError):
+                build("oops")
+
+        with pytest.raises(ValueError):
+            c.part_path(0, "oops")
+
+        with pytest.raises(ValueError):
+            c.turn_path("**", "role")
+
+    def test_an_index_that_is_not_a_string_at_all_is_rejected(self) -> None:
+        """The other half of the same hole.
+
+        Guarding only the string branch would still admit ``part_path(None, 0)``
+        and ``system_path(1.5)``, which build exactly the unmatched path the
+        string guard exists to prevent.
+        """
+        with pytest.raises(ValueError):
+            c.part_path(None, 0)  # type: ignore[arg-type]
+
+        with pytest.raises(ValueError):
+            c.system_path(1.5)  # type: ignore[arg-type]
+
+    def test_a_boolean_index_is_rejected_even_though_bool_is_an_int(self) -> None:
+        """The case an ``isinstance(value, int)`` check waves through.
+
+        ``bool`` subclasses ``int``, so ``part_path(True, 0)`` would build
+        ``conversation.turns[True].parts[0]`` — a path that reads as concrete and
+        matches nothing, which is precisely what this validator exists to stop.
+        """
+        for bad in (True, False):
+            with pytest.raises(ValueError):
+                c.part_path(bad, 0)  # type: ignore[arg-type]
+
+            with pytest.raises(ValueError):
+                c.reply_part_path(bad)  # type: ignore[arg-type]
+
     def test_the_remaining_forms_build(self) -> None:
         """Each form exists because a register row or a design section needs it."""
         assert c.extra_path("thinking") == "envelope.extra[thinking]"
         assert c.sampling_path("temperature") == "conversation.sampling[temperature]"
         assert c.system_path(0) == "conversation.system[0]"
+        assert c.residual_path("generationConfig.topK") == "residual[generationConfig.topK]"
+
+    def test_extra_is_keyed_by_wire_key_and_rejects_a_nested_one(self) -> None:
+        """§3.3.1a: the value under a key is compared whole.
+
+        Enforced rather than stated, the way the closed sampling set is. Six rows
+        — P2a, P2b, P3, P4, P5d and P10 — plus P5c are anchored at
+        ``envelope.extra[<key>]``; if a reader emitted
+        ``envelope.extra[thinking.budget_tokens]`` instead, the prefix stops at a
+        bracket, every one of those anchors would match nothing, and §3.3.2
+        assertion 1 would report a false I1 breach on seven *registered*
+        mutations.
+        """
+        assert c.extra_path("thinking") == "envelope.extra[thinking]"
+
+        with pytest.raises(ValueError, match="nested"):
+            c.extra_path("thinking.budget_tokens")
+
+    def test_the_residual_still_accepts_a_nested_key(self) -> None:
+        """The complement: nesting belongs to the residual, and only there.
+
+        A guard that rejected dots everywhere would break
+        ``residual[generationConfig.topK]``, which §3.3.1a names as legal.
+        """
         assert c.residual_path("generationConfig.topK") == "residual[generationConfig.topK]"
 
     def test_header_rows_have_a_form_because_three_register_rows_change_headers(self) -> None:

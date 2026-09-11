@@ -1059,7 +1059,10 @@ class TestClaudeCodeUpstreamRequestFormat:
                     assert resp.status == 200
 
                     # Verify the server builds the correct upstream headers
-                    headers = server._build_upstream_headers()
+                    # An empty request, deliberately: this server carries no profile model and
+                    # this adapter's route does not depend on the model, so the empty case is
+                    # the strongest form of the claim (KBR-127).
+                    headers = server._build_upstream_headers({})
                     assert headers["Authorization"] == "Bearer sk-resolved-key-12345"
                     assert headers["Content-Type"] == "application/json"
         finally:

@@ -401,10 +401,18 @@ class TestTheWholeSuiteIsCoherent:
             "tests/test_egress_coverage.py",
             "tests/test_wire_shape_honesty.py",
             "tests/test_upstream_identity_consistency.py",
+            "tests/test_upstream_route_source_of_truth.py",
             "tests/test_github_actions.py",
             "tests/test_layer_markers.py",
             "tests/test_layer_selection.py",
             "tests/test_custom_url_docs.py",
+            # T-W3 (KBR-26). The register's *agreement* guards read two real
+            # artifacts -- TEST_SUITE.md §3.2 and the AST of `src/kitty` -- so
+            # they are contract tests. Its *schema* tests read neither and stay
+            # at the l1 default in `tests/harness/test_register.py`; splitting
+            # the file is what let each carry the marker it earns, since a
+            # module-level `pytestmark` cannot be overridden per test.
+            "tests/harness/test_register_agreement.py",
         }
 
         actual = {
