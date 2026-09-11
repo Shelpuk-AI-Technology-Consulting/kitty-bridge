@@ -312,7 +312,10 @@ class TestEverySiteAgreesWithTheHelper:
             provider_config={"base_url": self._AZURE},
         )
 
-        assert server._build_upstream_url() == self._AZURE
+        # The request carries the model, because KBR-127 made the route read it from
+        # there rather than from the server's attribute. `custom_openai` ignores the
+        # model in its path, so this case turns entirely on composition.
+        assert server._build_upstream_url({"model": "some-model"}) == self._AZURE
 
     @pytest.mark.asyncio
     @patch("kitty.validation.aiohttp.ClientSession")
@@ -352,7 +355,7 @@ class TestEverySiteAgreesWithTheHelper:
         )
 
         expected = ProviderAdapter.compose_upstream_url(self._BASE, provider.get_upstream_path("some-model"))
-        assert server._build_upstream_url() == expected
+        assert server._build_upstream_url({"model": "some-model"}) == expected
 
     @pytest.mark.asyncio
     @patch("kitty.validation.aiohttp.ClientSession")

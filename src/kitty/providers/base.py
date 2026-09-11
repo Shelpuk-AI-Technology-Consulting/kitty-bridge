@@ -362,6 +362,35 @@ class ProviderAdapter(ABC):
             "Content-Type": "application/json",
         }
 
+    def build_upstream_headers_for_model(self, api_key: str, model: str) -> dict[str, str]:
+        """Build HTTP headers for the upstream request carrying *model*.
+
+        The per-model form of :meth:`build_upstream_headers`, for adapters
+        that authenticate differently depending on which endpoint the model
+        routes to — the same pairing as :attr:`upstream_path` /
+        :meth:`get_upstream_path` and :attr:`upstream_wire_is_messages_api` /
+        :meth:`upstream_wire_is_messages_api_for_model`.
+
+        Concrete here, and deliberately not an optional hook the bridge
+        reaches for with ``hasattr``: an adapter that routes auth per model
+        and forgets to define it would then silently receive the default
+        scheme, which is the shape of the defect KBR-127 fixed on the model
+        itself.  KBR-7 made the wire-shape sibling concrete for the same
+        reason.  The default ignores *model* and answers as
+        :meth:`build_upstream_headers` does, so an adapter with one auth
+        scheme overrides nothing.
+
+        Args:
+            api_key: Resolved API key for the upstream provider.
+            model: The model the request will be sent with, exactly as
+                ``translate_to_upstream`` reads it: the normalized model in
+                ``cc_request``.
+
+        Returns:
+            The headers to send upstream.
+        """
+        return self.build_upstream_headers(api_key)
+
     def translate_to_upstream(self, cc_request: dict) -> dict:
         """Translate a normalized CC request into the upstream wire format.
 
@@ -538,7 +567,10 @@ class ProviderAdapter(ABC):
 
         Args:
             model: The model name the request will be sent with, exactly as
-                ``translate_to_upstream`` will read it — unnormalized.
+                ``translate_to_upstream`` reads it: the normalized model in
+                ``cc_request``.  Since KBR-127 the URL and header helpers
+                resolve from that same key, so an implementation must not
+                normalize again — it would disagree with its own router.
 
         Returns:
             True when the body for *model* is an Anthropic Messages body.
