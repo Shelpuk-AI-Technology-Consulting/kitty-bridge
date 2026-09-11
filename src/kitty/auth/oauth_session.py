@@ -44,8 +44,12 @@ _REFRESH_MARGIN_SECONDS = 60
 _OAUTH_TIMEOUT_SECONDS = 30.0
 
 
-def _token_request_headers() -> dict[str, str]:
+def token_request_headers() -> dict[str, str]:
     """Build the headers every OAuth token POST carries.
+
+    Shared by both legs -- the recurring refresh in this module and the
+    interactive login in :mod:`kitty.auth.openai_oauth` -- so that the identity
+    the token endpoint sees is decided in exactly one place.
 
     The impersonated Codex CLI ``User-Agent`` comes from
     :mod:`kitty.codex_identity`, the same source the API leg's ``User-Agent``
@@ -252,7 +256,7 @@ class OAuthSession:
         status, body_text = await http.post_form(
             OAUTH_TOKEN_URL,
             refresh_payload,
-            headers=_token_request_headers(),
+            headers=token_request_headers(),
             timeout=_OAUTH_TIMEOUT_SECONDS,
         )
         if status >= 400:
@@ -313,7 +317,7 @@ class OAuthSession:
         status, body_text = await http.post_form(
             OAUTH_TOKEN_URL,
             payload,
-            headers=_token_request_headers(),
+            headers=token_request_headers(),
             timeout=_OAUTH_TIMEOUT_SECONDS,
         )
         if status >= 400:

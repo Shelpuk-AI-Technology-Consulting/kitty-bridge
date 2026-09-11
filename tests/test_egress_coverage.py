@@ -58,7 +58,7 @@ _ALLOWLIST: dict[str, str] = {
     "bridge/server.py": "two sessions; _session_for() picks proxied vs direct by destination",
     "providers/model_context_sync.py": "catalog-refresh session built with aiohttp_session_kwargs()",
     "providers/ollama_cloud.py": "session built with aiohttp_session_kwargs()",
-    "providers/openai_subscription.py": "one builder, two sessions (API + OAuth); proxies= and NOPROXY set there (KBR-161)",
+    "providers/openai_subscription.py": "one builder, two sessions: proxies= and NOPROXY (KBR-161)",
     "providers/bedrock.py": "botocore Config(proxies=...); SSO mode reports supports_egress()=False",
     "validation.py": "session built with aiohttp_session_kwargs(egress); fails closed under egress",
     "auth/openai_oauth.py": "session built with aiohttp_session_kwargs()",

@@ -420,6 +420,11 @@ class TestTheWholeSuiteIsCoherent:
             # module-level `pytestmark` cannot be overridden per test.
             "tests/harness/test_register_agreement.py",
             "tests/test_upstream_url_single_rule.py",
+            # KBR-161. Two dependency-and-agreement guards: what curl_cffi
+            # promises the OpenAI subscription legs (§6.2.4, an unbounded
+            # pin), and that both legs present one identity from one source.
+            "tests/test_curl_cffi_transport_contract.py",
+            "tests/test_oauth_leg_identity.py",
         }
 
         actual = {

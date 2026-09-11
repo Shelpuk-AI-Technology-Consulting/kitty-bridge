@@ -10,7 +10,6 @@ from pathlib import Path
 import pytest
 
 from kitty.auth.oauth_session import (
-    OAUTH_TOKEN_URL,
     OAuthRefreshFailed,
     OAuthSession,
 )
