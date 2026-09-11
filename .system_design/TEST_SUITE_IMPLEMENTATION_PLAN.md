@@ -166,8 +166,19 @@ failure library is T-B4. Peer-port and casing capture are enforced by a **confor
 Epic B recorder must pass**.
 
 **T-W5 — CONNECT proxy.** Extract `_ConnectProxy`/`_TlsTarget` from
-`tests/test_egress_https_proxy.py`; add tunnel source-port recording and mid-test stoppability. An
-extraction, not a rewrite: that module must pass unchanged.
+`tests/test_egress_https_proxy.py` into `tests/harness/connect_proxy.py`; add tunnel source-port
+recording and mid-test stoppability. An extraction, not a rewrite: that module must pass unchanged,
+and "unchanged" is checked mechanically — its five collected node ids are byte-identical.
+
+It also ships **`unattributable_peer_ports()`**, §5.2.1's join stated once, and the **proxied-leg
+resolver seam** (`HARNESS_UPSTREAM_HOST` in the target SAN plus an empty-by-default `resolve` map).
+Neither was in the original row. The join is here because §1.4 requires this delivery to carry a
+falsification case and a falsification case needs a checkable assertion; two implementations of one
+join is the failure the extraction exists to prevent. The resolver seam is here because T-E1 would
+otherwise have to edit a module five tickets consume, which is the coordination problem this
+milestone exists to remove — T-E1 still owns the **direct**-route override and the per-transport
+policy. **T-E2's row is untouched: it still owns its own phase-3 falsification**, which injects a
+bypass into the product rather than into the test.
 
 **T-W6 — corpus.** Format, capture procedure, credential scrubber, and a loader indexing entries
 by register trigger. Names an **owner and cadence for refresh**. *Falsification:* an unscrubbed
@@ -382,7 +393,7 @@ that makes *its* bytes observable. Bundled, the Ollama half would have had no ev
 | **T-K3** | Statistics and decision rule | blocked Q4, Q13 | T-K1, T-K2 | Successes ÷ **scheduled** trials; interval; pre-registered margin; symmetric exclusions; a missing-data ceiling that **voids** the run | §6.4.3 | M |
 | **T-K4** | Load rig and baseline | | T-W8, T-B4 | Fixed workload, named runner class; latency, TTFB, completion and error rates, bounded RSS, socket recovery; streaming and buffered measured separately | §6.4.4 | L |
 | **T-K5** | `load.yml` reusable + publish gate | ci | T-K4 | `publish.yml` `needs:`-gates on a load run **for the tag commit** | §8 | M |
-| **T-K6** | Activate the Subsystem job | ci | T-W1, T-E2, T-D3, T-D4 | `l3` gates PRs and releases. **T-D3 is required, not just T-D4**: activating the job promotes the oracle into gating infrastructure, and §1.4 forbids that before its falsification suite exists. Fixing only T-J2's dependency left this hole open | §8 | S |
+| **T-K6** | Activate the Subsystem job | ci | T-W1, T-E2, T-D3, T-D4 | `l3` gates PRs and releases. **T-D3 is required, not just T-D4**: activating the job promotes the oracle into gating infrastructure, and §1.4 forbids that before its falsification suite exists. Fixing only T-J2's dependency left this hole open. **Re-layer `tests/harness/test_connect_proxy.py` together with `tests/test_egress_https_proxy.py`** — T-W5 left both at `l1` because §8.2 forbids moving a test to a layer no job selects, and they are the extraction and its own regression evidence: landing them in different jobs would leave one proving the other in a run that no longer includes it | §8 | S |
 | **T-K7** | Deep nightly — mutation and schema fuzzing | ci | T-H3, T-G6 | Both exist before the job claims to run them | §8 | S |
 | **T-K8** | Attach the per-category checks to each job | ci | T-W1, T-K6 | **The mechanism is T-W1's** — `--require-category`, and the test pairing it to every job's marker expression, landed there. What is left here is attaching a flag per category as each job activates, and removing that layer from `PENDING_ACTIVATION_LAYERS`. Narrowed after T-W1 delivered the enforcement rather than only the vocabulary | §8.1 | S |
 | **T-K9** | Activate the Acceptance job | ci | T-J2, T-J3, T-K6 | `acceptance` gates PRs and releases | §8 | S |

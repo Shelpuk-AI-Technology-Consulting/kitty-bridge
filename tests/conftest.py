@@ -17,6 +17,14 @@ from layers import (
     unknown_categories,
 )
 
+# Shared fixture modules. `pytest_plugins` is honoured in an *initial*
+# conftest -- one on the path from rootdir to a collection argument, which
+# this file is for every invocation the suite uses -- and is an error in any
+# other conftest, so a deeper `tests/<dir>/conftest.py` could not hold it.
+# A test asks for `connect_proxy` or `tls_target` by name; nothing imports
+# `harness.connect_proxy` to get them.
+pytest_plugins = ("harness.connect_proxy",)
+
 # The collected items and their layers, as `(node id, [layer names])`, published
 # for `tests/test_layer_markers.py`. A stash key rather than a module global so
 # it is scoped to the session and typed.
