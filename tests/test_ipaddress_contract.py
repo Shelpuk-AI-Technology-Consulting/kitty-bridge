@@ -143,6 +143,11 @@ def test_unspecified_is_stable_for_addresses_that_are_not_ipv4_mapped(host: str,
         host: An address literal that is not the IPv4-mapped form.
         expected: What ``is_unspecified`` must report for it.
 
+    The list is bounded to the inputs the consumer actually reaches this
+    property with, which is the rule the module docstring states: an address
+    outside it (``255.255.255.255``, say) is not a coverage gap, because no
+    consumer asks about it.
+
     gh-122792 moved this property only for IPv4-mapped addresses.  For
     everything else it has answered the same since 3.3, and ``_connect_target``
     reads it for exactly these inputs — so here it is safe to pin, and pinning
