@@ -410,10 +410,19 @@ _BRIDGE_ROWS: tuple[MutationRow, ...] = (
         site=(f"{_SERVER}:BridgeServer._build_upstream_url",),
         trigger=_ALWAYS,
         # §3.3.5: the destination is a mutation surface the body cannot show.
-        # This site composes `build_base_url()` with `get_upstream_path()` and
-        # adds no query of its own — where a provider's path helper carries one,
-        # that provider's row claims it. P20 is the case that does.
-        paths=(c.ROUTE_SCHEME, c.ROUTE_HOST, c.ROUTE_PATH),
+        # This site composes `build_base_url()` with `get_upstream_path()` through
+        # `ProviderAdapter.compose_upstream_url`, which joins the endpoint to the
+        # PATH and merges the two queries (KBR-143).
+        #
+        # `ROUTE_QUERY` is claimed here, which it was not before that change. The
+        # earlier reasoning — "this site adds no query of its own, so where a
+        # provider's path helper carries one, that provider's row claims it; P20 is
+        # the case that does" — described concatenation, under which a query could
+        # only ever arrive from the path helper. Now a query on the configured base
+        # URL reaches `route.query` too, and P20 no longer accounts for every way a
+        # parameter gets there. P20 keeps its own claim: both rows can contribute,
+        # which is what the merge is.
+        paths=(c.ROUTE_SCHEME, c.ROUTE_HOST, c.ROUTE_PATH, c.ROUTE_QUERY),
         conditional=False,
         design_ref="§3.2.1 · §3.3.5",
     ),

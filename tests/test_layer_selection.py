@@ -413,6 +413,7 @@ class TestTheWholeSuiteIsCoherent:
             # the file is what let each carry the marker it earns, since a
             # module-level `pytestmark` cannot be overridden per test.
             "tests/harness/test_register_agreement.py",
+            "tests/test_upstream_url_single_rule.py",
         }
 
         actual = {

@@ -58,8 +58,15 @@ class TestCustomUrl404Wiring:
         assert "must end at the API root" in message
         assert '"/chat/completions"' in message
 
-    def test_message_names_the_doubled_path_when_one_survives(self):
-        """A base URL normalisation cannot repair still shows the address in full."""
+    def test_message_names_the_query_bearing_address_it_actually_requested(self):
+        """KBR-143 — there is no doubled path left to report on this shape.
+
+        KBR-134 asserted the *malformed* composition here, because a query-bearing
+        base URL was left alone (its decision D10) and the broken address was the
+        honest thing to show.  Normalisation handles the shape now, so the message
+        names the address the bridge really requested — and the query value is masked,
+        since this text reaches the agent transcript and the access log.
+        """
         server = _server(
             CustomOpenAIAdapter(),
             {"base_url": "https://gw.example/v1/chat/completions?tenant=x"},
@@ -67,9 +74,8 @@ class TestCustomUrl404Wiring:
 
         message = server._translate_upstream_error(404, {"detail": "Not Found"})
 
-        # The query-bearing URL is left alone by normalisation (D10), so the
-        # malformed composition is what the user sees -- which is the point.
-        assert "https://gw.example/v1/chat/completions?tenant=x/chat/completions" in message
+        assert "https://gw.example/v1/chat/completions?tenant=****" in message
+        assert "tenant=x/chat/completions" not in message
 
     def test_userinfo_never_reaches_the_message(self):
         """Credentials in the configured URL are stripped before it is echoed."""
