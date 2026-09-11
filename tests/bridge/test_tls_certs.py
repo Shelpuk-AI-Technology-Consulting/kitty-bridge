@@ -59,7 +59,7 @@ def _failure_message_from(tmp_path: Path) -> str:
         raise AssertionError(
             f"The helper skipped instead of failing ({skipped}). A skip inside a "
             "gating job is what KBR-132 fixed; TEST_SUITE.md section 8 forbids it."
-        ) from None
+        ) from skipped
     except pytest.fail.Exception as failed:
         return str(failed)
 
@@ -91,21 +91,24 @@ def no_openssl_on_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 class TestMissingOpensslFailsTheRun:
     """The resource is absent: the run goes red, never green-by-omission."""
 
-    def test_missing_openssl_fails_it_does_not_skip(
-        self, tmp_path: Path, no_openssl_on_path: None
-    ) -> None:
+    @pytest.mark.usefixtures("no_openssl_on_path")
+    def test_missing_openssl_fails_it_does_not_skip(self, tmp_path: Path) -> None:
         """PATH carrying no openssl produces a failure, not a skip (AC1).
 
         This is the falsification case for the whole change: restoring the
         ``pytest.skip`` in the helper turns this test red.
+
+        The assertion names the *missing-binary* branch rather than just
+        ``"openssl"``: all three of the helper's failure messages contain that
+        word, so the looser assertion would pass on any failure at all and prove
+        only that something went wrong somewhere.
         """
         message = _failure_message_from(tmp_path)
 
-        assert "openssl" in message
+        assert "not found on PATH" in message
 
-    def test_the_failure_message_says_why_it_did_not_skip(
-        self, tmp_path: Path, no_openssl_on_path: None
-    ) -> None:
+    @pytest.mark.usefixtures("no_openssl_on_path")
+    def test_the_failure_message_says_why_it_did_not_skip(self, tmp_path: Path) -> None:
         """The message names the rule, so a CI log is self-explanatory (AC1b).
 
         Asserted rather than left to prose: a reader of a red CI job needs to
