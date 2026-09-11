@@ -21,10 +21,14 @@ from __future__ import annotations
 
 import json
 import uuid
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import aiohttp
 import pytest
+from harness.contract import WireFormat
+from harness.recorder import RecordingUpstream
 
 from kitty.bridge import server as server_module
 from kitty.bridge.server import BridgeServer, UpstreamError
@@ -111,6 +115,80 @@ class _UpstreamSpy:
     async def __call__(self, cc_request: dict, *args, **kwargs) -> dict:
         self.bodies.append(json.loads(json.dumps(cc_request)))
         return {"choices": [{"message": {"role": "assistant", "content": "ok"}}]}
+
+
+#: The header the falsification control injects, and the reason that control is
+#: a defect at all. Named here so the control can check its own premise: if this
+#: pair ever stopped naming the product, the control would go red saying the
+#: guard is broken when what actually changed is the bait (KBR-147).
+_BAIT_HEADER = ("X-Kitty-Bridge", "1.9.2")
+
+
+class _ProductNamedHeaderProvider(_StubProvider):
+    """Provider that leaks the product's name into an upstream header.
+
+    The bait for the falsification control below.
+
+    Overriding :meth:`~kitty.providers.base.ProviderAdapter.build_upstream_headers`
+    is enough because the base
+    :meth:`~kitty.providers.base.ProviderAdapter.build_upstream_headers_for_model`
+    — which is what :meth:`~kitty.bridge.server.BridgeServer._build_upstream_headers`
+    actually calls — delegates to it.
+    """
+
+    def build_upstream_headers(self, api_key: str) -> dict[str, str]:
+        """Return the base header set with a product-named header added.
+
+        Args:
+            api_key: Resolved API key for the upstream provider.
+
+        Returns:
+            The base headers plus :data:`_BAIT_HEADER`.
+        """
+        return {**super().build_upstream_headers(api_key), _BAIT_HEADER[0]: _BAIT_HEADER[1]}
+
+
+def _names_the_product(observed: object) -> bool:
+    """Return whether a captured header set or request body names the product.
+
+    One scan, called by both the guard and its falsification control. A control
+    that reimplemented the scan would prove the copy works, not the guard.
+
+    Args:
+        observed: Anything JSON-serializable — a header pair sequence as
+            :class:`~harness.contract.CapturedRequest` carries it, or a decoded
+            request body.
+
+    Returns:
+        True when the product's name appears anywhere in ``observed``.
+    """
+    return "kitty" in json.dumps(observed, ensure_ascii=False).lower()
+
+
+@asynccontextmanager
+async def _recording_upstream() -> AsyncIterator[RecordingUpstream]:
+    """Yield a running recording upstream, checking for fallback replies on exit.
+
+    The §7.2 primary recorder (``tests/harness/recorder.py``, KBR-27) rather than
+    a stand-in: it observes what aiohttp actually sent, with original casing and
+    duplicates preserved, which is what §4.3 C1 asserts on. A stand-in patched
+    over a bridge method observes only what the bridge passed it — the defect
+    KBR-147 records.
+
+    Yields:
+        The running :class:`~harness.recorder.RecordingUpstream`.
+    """
+    upstream = RecordingUpstream(default_format=WireFormat.CHAT_COMPLETIONS)
+    await upstream.start()
+    try:
+        yield upstream
+    finally:
+        await upstream.stop()
+        # Checked in `finally`, as the reference fixture does: a fallback-format
+        # reply is not loud on its own -- the adapter parses nothing, the bridge
+        # reads the reply as empty, and the test pays the 80-second retry ladder
+        # *inside* this block, which is when it most needs to say why.
+        upstream.assert_all_paths_matched()
 
 
 #: A conversation whose only non-system turn is an unpaired tool result.
@@ -618,13 +696,21 @@ class TestRecoveryPathCompactionFailure:
 class TestNothingOnTheWireNamesTheProduct:
     """The end-to-end half of the guard: what actually leaves the process.
 
-    Every other test here asserts that *nothing* is sent. This one lets a normal
-    request through and inspects the bytes and headers the provider would see —
-    the only assertion in the suite that covers the header channel at all.
+    Every other test here asserts that *nothing* is sent. These two let a normal
+    request through into the §7.2 recording upstream and inspect the bytes and
+    headers the provider really received.
+
+    **The header channel used to prove nothing (KBR-147).** The capture was a
+    stand-in monkeypatched over ``_build_upstream_headers``, which is called
+    *inside* the ``_make_upstream_request`` the same test replaced — so it never
+    ran, and the assertion scanned an empty dict. Both tests below therefore
+    assert their capture is non-empty before scanning it, and
+    ``test_the_guard_detects_a_product_named_header`` is the falsification
+    control that shows the scan is wired to something.
     """
 
     @pytest.mark.asyncio
-    async def test_body_and_headers_carry_no_vendor_token(self, monkeypatch):
+    async def test_body_and_headers_carry_no_vendor_token(self):
         """A below-threshold request reaches upstream naming nothing.
 
         The inbound turn deliberately contains ``kitty-bridge``: it must arrive
@@ -632,40 +718,74 @@ class TestNothingOnTheWireNamesTheProduct:
         user's words. Satisfying indistinguishability that way would breach
         message fidelity, which is the trap ``TEST_SUITE.md`` §6.2.3 warns about.
         """
-        server = _bridge_mode_server()
-        spy = _UpstreamSpy()
-        captured_headers: dict[str, str] = {}
-        monkeypatch.setattr(server, "_make_upstream_request", spy)
-
-        real_headers = server._build_upstream_headers
-
-        def _capture_headers(cc_request):
-            captured_headers.update(real_headers(cc_request))
-            return dict(captured_headers)
-
-        monkeypatch.setattr(server, "_build_upstream_headers", _capture_headers)
-
         turn = {"role": "user", "content": "Please explain how kitty-bridge works"}
-        port = await server.start_async()
-        try:
-            status, _ = await _post(
-                port,
-                "/v1/chat/completions",
-                {"model": "m", "messages": [dict(turn)], "stream": False},
-            )
-        finally:
-            await server.stop_async()
+        async with _recording_upstream() as upstream:
+            server = BridgeServer(None, _StubProvider(base_url=upstream.base_url), "test-key")  # type: ignore[arg-type]
+            port = await server.start_async()
+            try:
+                status, _ = await _post(
+                    port,
+                    "/v1/chat/completions",
+                    {"model": "m", "messages": [dict(turn)], "stream": False},
+                )
+            finally:
+                await server.stop_async()
 
         assert status == 200
-        assert spy.bodies, "the request never reached upstream, so this proves nothing"
-        sent = spy.bodies[0]
+        # One attempt, so a silent retry ladder is red rather than slow-green.
+        assert len(upstream.requests) == 1, f"expected one upstream request, recorded {len(upstream.requests)}"
+        captured = upstream.requests[0]
+
+        # The non-vacuity guard KBR-147 was missing. Without it the scan below
+        # passes over an empty capture and can never fail.
+        assert captured.headers, "the headers were never captured, so this proves nothing"
+        assert ("authorization", "Bearer test-key") in [(name.lower(), value) for name, value in captured.headers], (
+            f"the real header builder never reached the wire: {captured.headers}"
+        )
+        assert not _names_the_product(captured.headers), f"a header names the product: {captured.headers}"
+
+        sent = json.loads(captured.body)
         assert turn in sent["messages"], "the agent's own text must reach the provider unchanged"
 
-        # Everything the bridge added, with the agent's own turn removed.
+        # Everything the bridge added, with the agent's own turn removed. The
+        # exclusion is `messages` because _StubProvider emits a Chat Completions
+        # body; an adapter on another wire shape carries agent text in `system`
+        # or `input` too, and the general answer there is the oracle's
+        # projection diff (TEST_SUITE.md §3.3.3, KBR-81).
         introduced = {k: v for k, v in sent.items() if k != "messages"}
-        assert "kitty" not in json.dumps(introduced, ensure_ascii=False).lower()
-        assert "kitty" not in json.dumps(captured_headers, ensure_ascii=False).lower(), (
-            f"a header names the product: {captured_headers}"
+        assert not _names_the_product(introduced), f"the bridge introduced a vendor token: {introduced}"
+
+    @pytest.mark.asyncio
+    async def test_the_guard_detects_a_product_named_header(self):
+        """The falsification control: an injected product-named header is caught.
+
+        The guard above passes today, so on its own it cannot distinguish "no
+        header names the product" from "the capture is broken again". This drives
+        the same path with an adapter that leaks, through the same capture and
+        the same scan, and requires the leak to be seen.
+        """
+        # Check the bait before trusting the conclusion, so a bait that stopped
+        # naming the product fails here rather than as "the guard is broken".
+        assert "kitty" in "".join(_BAIT_HEADER).lower(), f"the bait no longer names the product: {_BAIT_HEADER}"
+
+        async with _recording_upstream() as upstream:
+            provider = _ProductNamedHeaderProvider(base_url=upstream.base_url)
+            server = BridgeServer(None, provider, "test-key")  # type: ignore[arg-type]
+            port = await server.start_async()
+            try:
+                await _post(
+                    port,
+                    "/v1/chat/completions",
+                    {"model": "m", "messages": [{"role": "user", "content": "hello"}], "stream": False},
+                )
+            finally:
+                await server.stop_async()
+
+        assert upstream.requests, "the request never reached upstream, so this proves nothing"
+        captured = upstream.requests[0]
+        assert captured.headers, "the headers were never captured, so this proves nothing"
+        assert _names_the_product(captured.headers), (
+            f"the guard cannot see an injected product-named header: {captured.headers}"
         )
 
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
 import signal
@@ -682,8 +683,15 @@ class TestBridgeReachable:
             ("::", "::1"),
             ("::0", "::1"),
             ("0:0:0:0:0:0:0:0", "::1"),
-            # IPv4-mapped: unspecified, but wants an IPv4 loopback.
+            # The IPv4-mapped wildcard names an IPv4 bind, so it wants an IPv4
+            # loopback -- decided from ``ipv4_mapped``, never from the
+            # patch-dependent ``is_unspecified``. See KBR-146.
             ("::ffff:0.0.0.0", "127.0.0.1"),
+            ("::ffff:0:0", "127.0.0.1"),
+            # A mapped address that is not a wildcard is a real bind target and
+            # is probed exactly as recorded, like any other real address.
+            ("::ffff:127.0.0.1", "::ffff:127.0.0.1"),
+            ("::ffff:192.0.2.1", "::ffff:192.0.2.1"),
             ("127.0.0.1", "127.0.0.1"),
             ("192.0.2.1", "192.0.2.1"),
             ("::1", "::1"),
@@ -696,6 +704,49 @@ class TestBridgeReachable:
         from kitty.bridge.manage import _connect_target
 
         assert _connect_target(host) == expected
+
+    @pytest.mark.parametrize("property_reports", [False, True])
+    def test_ipv4_mapped_wildcard_resolves_alike_whatever_is_unspecified_reports(
+        self, monkeypatch: pytest.MonkeyPatch, property_reports: bool
+    ):
+        """The mapped wildcard resolves alike on both sides of CPython gh-122792.
+
+        Args:
+            monkeypatch: pytest's patching fixture, which reverts the stdlib
+                property at teardown.
+            property_reports: What ``IPv6Address.is_unspecified`` is forced to
+                report -- ``False`` reproduces a pre-backport interpreter,
+                ``True`` a patched one.
+
+        ``IPv6Address.is_unspecified`` delegates to the mapped IPv4 address from
+        3.10.16, 3.11.11, 3.12.7 and 3.13.1 onwards, and does not below them.
+        ``requires-python = ">=3.10"`` admits every one of those releases, so a
+        single interpreter can only ever demonstrate its own side of the change.
+        Forcing the property is the only way to hold both sides inside one run,
+        and it is the exact seam the defect came through: the pre-fix function
+        short-circuited on this property and handed back the wildcard unchanged.
+
+        The claim is output invariance, not non-consultation -- an
+        implementation that reads the property and discards its answer is legal
+        and passes.
+        """
+        from kitty.bridge.manage import _connect_target
+
+        # Patched on IPv6Address, which owns the property outright on every
+        # supported branch -- so this shadows nothing and leaves no residue.
+        monkeypatch.setattr(
+            ipaddress.IPv6Address,
+            "is_unspecified",
+            property(lambda self: property_reports),
+        )
+
+        # Without this the test has a silent no-op mode: an implementation that
+        # stopped routing through ``ipaddress`` would make the patch inert and
+        # leave this a duplicate of the table row, still claiming to prove
+        # version-independence.
+        assert ipaddress.ip_address("::ffff:0.0.0.0").is_unspecified is property_reports
+
+        assert _connect_target("::ffff:0.0.0.0") == "127.0.0.1"
 
     def test_unresolvable_hostname_returns_false(self):
         """DNS failure is an OSError subclass and must not escape either."""
