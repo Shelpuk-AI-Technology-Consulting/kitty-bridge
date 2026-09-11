@@ -40,7 +40,11 @@ from kitty.bridge.messages.translator import MessagesTranslator
 from kitty.bridge.responses.events import (
     format_error_event as responses_format_error,
 )
-from kitty.bridge.responses.translator import ResponsesTranslator
+from kitty.bridge.responses.translator import (
+    InvalidResponsesRequest,
+    ResponsesTranslator,
+    normalize_responses_request,
+)
 from kitty.bridge.tool_audit import AUDIT_MARKER, ToolUseAuditor, collect_tool_schemas, report_tool_use
 from kitty.cloudflare import is_cloudflare_block
 from kitty.egress import EgressConfig, should_bypass
@@ -2576,6 +2580,17 @@ class BridgeServer:
         logger.debug("═══ RESPONSES API REQUEST ═══")
         logger.debug("Request headers: %s", dict(request.headers))
         logger.debug("Request body: %s", json.dumps(body, indent=2, ensure_ascii=False))
+
+        # Before the body forks: `_original_body` below hands this dict to a custom transport (KBR-144).
+        # Sited between the two `try`s on purpose -- above, it reads as bad JSON; below, as a 500.
+        try:
+            body = normalize_responses_request(body)
+        except InvalidResponsesRequest as exc:
+            logger.warning("Malformed Responses API request body: %s", exc)
+            # `reason` marks which of this endpoint's four same-shaped 400s fired.
+            return self._error_response(
+                {"error": {"code": "invalid_request", "message": str(exc), "reason": "invalid_input"}}
+            )
 
         try:
             translator = ResponsesTranslator()
