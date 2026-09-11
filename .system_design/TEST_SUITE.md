@@ -609,6 +609,17 @@ rule §3.3.1 applies to bodies.
 deployment segment in the captured path while leaving the body byte-identical. The oracle must
 fail. Without this case there is no evidence the routing assertion is wired to anything.
 
+**T-D2 must normalise the authority and scheme before comparing, and this is not optional.**
+A published URL shape is `https://…` on the provider's own hostname; the harness serves
+`http://127.0.0.1:<ephemeral>`. T-W4's recorder captures the `Host` header **verbatim,
+port included** — correct, because that is what the client sent, and because the ephemeral
+port is the only thing distinguishing one recorder from another. The consequence is that
+`route.host` and `route.scheme` mismatch **by construction** on every comparison unless the
+expectation is rewritten with the harness's own authority and scheme. Path and query need no
+such treatment, and they are where the Azure case lives. Stated here because nothing else
+assigns this, and a reader discovering it at T-D2 time would reasonably conclude the recorder
+was wrong.
+
 The recorders already capture method, path and query (§7.2). The gap was that the assertion did
 not consume them.
 
@@ -1740,6 +1751,69 @@ context-too-large rejections, and disconnects at each of §6.3.1's four injectio
 asserted — what reaches the wire is the client library's ordering, not the agent's. Peer
 *address* is deliberately not used for containment (§5.2.1).
 
+#### 7.2.1 What T-W4 settled — read this before writing another recorder
+
+The primary recorder is `tests/harness/recorder.py`; the contract every recorder is
+judged against is `tests/harness/recorder_conformance.py`, and plan §5 requires T-B1–T-B3 to
+pass it. The following were established by probe on the pinned stack (aiohttp 3.13.5) and are
+not matters of taste — each is a way a recorder can look correct and lie.
+
+| Field | Read it from | Never from |
+|---|---|---|
+| Headers | `raw_headers`, decoded **latin-1** | `request.headers`; and never `utf-8`, which refuses obs-text |
+| Path | `rel_url.raw_path` | `request.path` — percent-**decoded** |
+| Query | `rel_url.raw_query_string` | `request.query_string` — percent-**decoded** |
+| Authority | the `Host` header itself; `""` when absent | `request.host` — falls back to `socket.getfqdn()`, **inventing the build machine's name**, and that fallback differs across the `>=3.11,<3.14` pin range. `request.url` lower-cases the host |
+| Peer port | `transport.get_extra_info("peername")[1]` | `request.remote` — address only |
+
+Three server-construction facts, each of which fails as a bare client-side
+`ConnectionResetError` with no traceback if got wrong:
+
+- **`client_max_size=0`**, supplied through a `request_factory` — it is a `BaseRequest`
+  argument, *not* a `Server`/`RequestHandler` one. The 1 MiB default turns §7.1's
+  over-budget corpus entries into a harness **413**, which is M6's own trigger, so the
+  harness would manufacture the compaction the oracle exists to detect. Zero disables the
+  check outright; a fixed ceiling is something a later corpus entry outgrows, and the
+  comparison is `>=`. The recorder then buffers bodies unbounded, which is acceptable only
+  because it is a loopback double whose clients are the harness's own.
+- **`auto_decompress=False`**. Left on, a `Content-Encoding: gzip` body is captured
+  decompressed *beside a header saying it is compressed* — an internally inconsistent
+  capture, and C1 asserts on that header.
+- **Connection logging via `web.Server.connection_made(handler, transport)`**, which is the
+  only public seam that sees a connection carrying **no** request — §5.2.1's bypass shape,
+  and structurally invisible in any request list. Wrapping the protocol object is
+  impossible: `RequestHandler` defines `__slots__`. Key the log on the **handler object**;
+  never on `id(handler)`, whose addresses CPython reuses, which would reintroduce the
+  port-reuse aliasing one level down, and never on a `WeakKeyDictionary`, because
+  `RequestHandler` is not weak-referenceable.
+
+**Limitation.** With a TLS-terminating site, `connection_made` fires *after* the handshake,
+so a connection that fails negotiation is not logged — and §5.2.1 names a failed TLS
+negotiation as a real bypass. **T-B2 and T-E2 must observe at socket level or accept this
+explicitly.**
+
+**A recorder produces no `CapturedReply`.** The reply is the script; the test already knows
+it. T-A7 and T-D10 need not reopen this contract to ask for one.
+
+**The reply's format is chosen by a path *suffix*** — `/v1/messages` or `/messages` for
+Anthropic Messages, `/chat/completions` for Chat Completions — because a recorder is
+impersonating a provider and providers dispatch on the URL. An exact match would serve
+`anthropic` and `custom_anthropic` and get Azure, vertex, ollama, opencode and
+zai_anthropic wrong. §3.3.4's "select by the shape observed on the wire" governs the
+**oracle's** choice of projection and must not be wired to this decision. An unmatched path
+falls back to a declared default and is **recorded**, failing the fixture at teardown: a
+wrong-format reply is not a loud failure but an apparently empty response, and that costs
+the 80-second retry ladder.
+
+**One thing no bridge-side judgement checks.** §4.3 C3's emptiness oracles are keyed on the
+**upstream** format: `_is_empty_cc_response` for non-streaming, `translator.response_was_empty`
+plus the `has_content` byte flag for Chat Completions streams — and **nothing at all** for a
+native Anthropic Messages stream, which `server.py:3616` forwards to the client byte-for-byte.
+A recorder's Anthropic SSE success is therefore guarded only by §6.2.2's grammar. That is a
+property of the product, not of the harness: an upstream returning a well-formed but
+contentless Anthropic stream reaches Claude Code with none of the retry the Chat Completions
+path has.
+
 ### 7.3 Recording CONNECT proxy
 
 **Already exists.** `tests/test_egress_https_proxy.py` contains `_ConnectProxy` (enforces Basic
@@ -1933,6 +2007,13 @@ today — `test_egress_https_proxy.py` foremost among them. Reclassifying them i
 T-K6's business, together with the job that runs them; doing it earlier would remove them from
 every gate. T-H1 must take that reclassification into account before it measures a mutation
 baseline, because it selects on `l1`.
+
+**T-W4 added two more, and they are named here so T-K6 inherits a list rather than a search:**
+`tests/harness/test_recorder.py` and `tests/harness/test_recorder_falsification.py` both bind
+real sockets and are `l1` by default for exactly the reason above.
+`tests/harness/test_recorder_conformance.py` is genuinely `l1` — its checks are pure functions
+over data and it opens nothing. The two socket-binding modules together run in **~1 second**,
+measured, which is the number the fast-gate budget should carry until T-K6 moves them.
 
 **The load gate has to be wired, not merely declared.** The table above marks Load as gating a
 release, but `publish.yml` currently depends only on the reusable `tests.yml`. Putting the load
