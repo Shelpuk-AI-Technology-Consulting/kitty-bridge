@@ -27,13 +27,15 @@ reviewer can tell an addressed finding from an ignored one. It is fenced as
 untrusted input: an attempt to instruct the reviewer through a comment is itself
 reported as a critical finding.
 
-⚠️ **`README.md` at the repository root is the only specification the reviewer
-can read.** `.gitignore` excludes `/.system_design/`, `/.requirements/` and
-`/CLAUDE.md`, so none of them exists in a CI checkout. The selector already
-matches those paths, so the day one is committed it is reviewed with rules
-loaded rather than with none — but until then, the traceability target is the
-README plus the pull request description, and `REVIEW_GUIDE.md` says so rather
-than pointing at a document that is not there.
+⚠️ **The reviewer's specification is `README.md` plus `.system_design/`.**
+`.gitignore` excludes `/.requirements/` and `/CLAUDE.md`, so neither exists in a
+CI checkout and the reviewer must not be pointed at them. `/.system_design/` was
+un-ignored when the design documents were first committed, and the selector
+already matched those paths, so a change under them is reviewed with rules
+loaded. The traceability target is therefore the README (the user-facing
+interface contract), the design documents (the internal one), and the pull
+request description — and `REVIEW_GUIDE.md` says exactly that rather than
+pointing at a document that is not there.
 
 ---
 
@@ -203,7 +205,7 @@ step 2 above.
 ## Changing the review system
 
 `.github/workflows/ci.yml` runs `tests/test_review_scripts.py` on every pull
-request — 606 tests over the selector, the classifier, the notices, the redactor,
+request — 620 tests over the selector, the classifier, the notices, the redactor,
 the schema and the workflow's own wiring, plus the workflow parser, the
 runner-ceiling table and the `ci-required` aggregation. Run them locally the same
 way:

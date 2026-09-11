@@ -60,6 +60,12 @@ _AIOHTTP_SKIP_REASON = "aiohttp requires Python 3.11 for TLS-in-TLS over stdlib 
 # ── Certificates (session-scoped, files only) ────────────────────────────
 
 
+# Matches the bound in `tests/bridge/tls_certs.py`, for the same reason: long
+# enough that a loaded runner never trips it, short enough that a stuck openssl
+# is reported rather than left to consume the job's ceiling.
+_OPENSSL_TIMEOUT_SECONDS = 60
+
+
 @dataclasses.dataclass(frozen=True)
 class _CertFiles:
     """Paths of the throwaway certificate set used by the local servers.
@@ -88,8 +94,23 @@ def _run_openssl(*args: str) -> None:
     Raises:
         pytest.fail: When openssl exits non-zero; the captured stderr is
             included so certificate-generation mistakes are readable (AC1).
+        subprocess.TimeoutExpired: When openssl does not finish within
+            ``_OPENSSL_TIMEOUT_SECONDS``. Left to propagate rather than
+            converted: it already names the command and the bound, and an
+            unhandled error is as loud as a failure.
     """
-    completed = subprocess.run(["openssl", *args], capture_output=True, text=True)
+    # Bounded, and stdin closed, for the reason `tests/bridge/tls_certs.py`
+    # gives (KBR-132): this is the single entry point for every openssl process
+    # this module spawns inside the gate, and nothing else would stop a wedged
+    # one hanging it. Deliberately no count -- "call sites" and "processes
+    # spawned" differ here, because `_generate_leaf` runs twice.
+    completed = subprocess.run(
+        ["openssl", *args],
+        capture_output=True,
+        text=True,
+        stdin=subprocess.DEVNULL,
+        timeout=_OPENSSL_TIMEOUT_SECONDS,
+    )
     if completed.returncode != 0:
         pytest.fail(f"openssl {args[0]} failed (exit {completed.returncode}):\n{completed.stderr}")
 

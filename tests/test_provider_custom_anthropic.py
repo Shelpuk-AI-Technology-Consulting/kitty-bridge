@@ -392,3 +392,91 @@ class TestCustomAnthropicBuildRequest:
         req = adapter.build_request("claude-sonnet-4-6", [], temperature=None, max_tokens=None)
         assert "temperature" not in req
         assert "max_tokens" not in req
+
+
+class TestCustomAnthropicBaseUrlEndpointSuffix:
+    """KBR-134 — the same trap, with ``/v1/messages`` as the endpoint path.
+
+    Not reported by a customer; found by reading the code while fixing the
+    OpenAI-compatible case.  A user pasting ``https://api.anthropic.com/v1/messages``
+    would otherwise reach ``.../v1/messages/v1/messages``.
+    """
+
+    @staticmethod
+    def _build(url: str) -> str:
+        """Return the base URL the adapter derives from ``url``.
+
+        Args:
+            url: The value stored in ``provider_config["base_url"]``.
+
+        Returns:
+            The normalised base URL.
+        """
+        return CustomAnthropicAdapter().build_base_url({"base_url": url})
+
+    def test_strips_messages_endpoint(self):
+        """A pasted Messages endpoint resolves to the API root."""
+        assert self._build("https://api.anthropic.com/v1/messages") == "https://api.anthropic.com"
+
+    def test_strips_messages_endpoint_with_trailing_slash(self):
+        """A trailing slash belongs to the match, not to the returned value."""
+        assert self._build("https://api.anthropic.com/v1/messages/") == "https://api.anthropic.com"
+
+    def test_leaves_api_root_untouched(self):
+        """The documented form is returned byte-identical."""
+        assert self._build("https://api.anthropic.com") == "https://api.anthropic.com"
+
+    def test_leaves_other_providers_endpoint_untouched(self):
+        """A Chat Completions path is not this adapter's endpoint and is left alone."""
+        url = "https://api.anthropic.com/v1/chat/completions"
+        assert self._build(url) == url
+
+    def test_does_not_consume_the_host(self):
+        """``https://v1/messages`` ends with the suffix as a *string* only."""
+        assert self._build("https://v1/messages") == "https://v1/messages"
+
+    def test_leaves_query_bearing_url_untouched(self):
+        """Stripping would move the query ahead of the appended path (D10)."""
+        url = "https://gw.example/v1/messages?tenant=x"
+        assert self._build(url) == url
+
+    def test_composition_is_never_changed(self):
+        """Normalisation never alters the URL the bridge ends up requesting."""
+        suffix = CustomAnthropicAdapter().upstream_path
+        for path in (
+            "",
+            "/",
+            "/v1/messages",
+            "/v1/messages/",
+            "/v1/messages/v1/messages",
+            "//v1/messages",
+            "/v1/messages?q=1",
+            "/v1/messages#f",
+            "/proxy/v1/messages",
+        ):
+            url = f"https://gw.example{path}"
+            result = self._build(url)
+            if result == url:
+                continue
+            assert result.rstrip("/") + suffix == url.rstrip("/"), url
+
+    def test_rejects_empty_url(self):
+        """An empty base URL still raises, with the existing message."""
+        import pytest
+
+        with pytest.raises(ValueError, match="Invalid base_url"):
+            self._build("")
+
+    def test_rejects_non_http_scheme(self):
+        """A non-HTTP scheme still raises before normalisation is reached."""
+        import pytest
+
+        with pytest.raises(ValueError, match="Invalid base_url"):
+            self._build("ftp://x")
+
+    def test_rejects_schemeless_url(self):
+        """A bare host still raises before normalisation is reached."""
+        import pytest
+
+        with pytest.raises(ValueError, match="Invalid base_url"):
+            self._build("api.anthropic.com")

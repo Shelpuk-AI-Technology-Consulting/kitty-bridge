@@ -310,3 +310,174 @@ class TestCustomOpenAINormalizeModel:
         req = {"model": "deepseek-chat", "messages": []}
         adapter.normalize_request(req)
         assert req == {"model": "deepseek-chat", "messages": []}
+
+
+class TestCustomOpenAIBaseUrlEndpointSuffix:
+    """KBR-134 — a base URL that already carries ``/chat/completions``.
+
+    The bridge composes ``base_url + upstream_path``, so a user who pastes the
+    full endpoint (which is what every provider's documentation shows) gets a
+    doubled path and a 404.  ``build_base_url`` strips the redundant suffix.
+    """
+
+    @staticmethod
+    def _build(url: str) -> str:
+        """Return the base URL the adapter derives from ``url``.
+
+        Args:
+            url: The value stored in ``provider_config["base_url"]``.
+
+        Returns:
+            The normalised base URL.
+        """
+        return CustomOpenAIAdapter().build_base_url({"base_url": url})
+
+    # ── The reported defect ────────────────────────────────────────────────
+
+    def test_strips_endpoint_suffix(self):
+        """The reporter's exact input resolves to Mistral's API root."""
+        assert self._build("https://api.mistral.ai/v1/chat/completions") == "https://api.mistral.ai/v1"
+
+    def test_strips_endpoint_suffix_with_trailing_slash(self):
+        """A trailing slash belongs to the match, not to the returned value."""
+        assert self._build("https://api.mistral.ai/v1/chat/completions/") == "https://api.mistral.ai/v1"
+
+    def test_strips_when_suffix_is_the_whole_path(self):
+        """A base URL that is nothing but the endpoint leaves a bare origin."""
+        assert self._build("https://api.example.com/chat/completions") == "https://api.example.com"
+
+    def test_strips_exactly_one_occurrence(self):
+        """Stripping once keeps the composed URL identical to the input (D4)."""
+        assert self._build("https://gw/chat/completions/chat/completions") == "https://gw/chat/completions"
+
+    # ── Correctly configured URLs are untouched ────────────────────────────
+
+    def test_leaves_api_root_untouched(self):
+        """The documented form is returned byte-identical."""
+        assert self._build("https://api.deepseek.com/v1") == "https://api.deepseek.com/v1"
+
+    def test_leaves_local_http_url_untouched(self):
+        """A loopback vLLM or LM Studio endpoint is unaffected."""
+        assert self._build("http://localhost:8000/v1") == "http://localhost:8000/v1"
+
+    def test_leaves_trailing_slash_untouched(self):
+        """A non-matching URL keeps its trailing slash (R5)."""
+        assert self._build("https://gw.example:8443/api/v1/") == "https://gw.example:8443/api/v1/"
+
+    # ── Shapes where a naive strip would corrupt the address ───────────────
+
+    def test_does_not_consume_the_host(self):
+        """``https://chat/completions`` ends with the suffix as a *string* only."""
+        assert self._build("https://chat/completions") == "https://chat/completions"
+
+    def test_leaves_path_parameters_untouched(self):
+        """``urlsplit`` keeps ``;x=1`` in the path, so the match correctly fails."""
+        assert self._build("https://host/v1/chat/completions;x=1") == "https://host/v1/chat/completions;x=1"
+
+    def test_leaves_query_bearing_url_untouched(self):
+        """Stripping would move the query ahead of the appended path (D10)."""
+        assert self._build("https://gw/v1/chat/completions?tenant=x") == "https://gw/v1/chat/completions?tenant=x"
+
+    def test_leaves_fragment_bearing_url_untouched(self):
+        """Same defect as the query case, via the fragment (D10)."""
+        assert self._build("https://gw/v1/chat/completions#frag") == "https://gw/v1/chat/completions#frag"
+
+    def test_leaves_doubled_slash_untouched(self):
+        """Stripping would yield a different address, not a shorter one (D10)."""
+        assert self._build("https://gw//chat/completions") == "https://gw//chat/completions"
+
+    def test_leaves_azure_style_endpoint_untouched(self):
+        """Azure's documented endpoint carries a query and cannot be composed at all."""
+        azure = "https://res.openai.azure.com/openai/deployments/d/chat/completions?api-version=2024-02-01"
+        assert self._build(azure) == azure
+
+    def test_match_is_case_sensitive(self):
+        """URL paths are case-sensitive by specification, so an upper-case path is left alone."""
+        assert self._build("https://gw/V1/CHAT/COMPLETIONS") == "https://gw/V1/CHAT/COMPLETIONS"
+
+    # ── The property the strip must never violate ──────────────────────────
+
+    def test_composition_is_never_changed(self):
+        """Normalisation never alters the URL the bridge ends up requesting.
+
+        For every input, either the value is returned unchanged — in which case
+        the composed URL is what it always was — or composing the endpoint back
+        onto the result reproduces the caller's own URL exactly.  This is the
+        invariant the self-check in ``_strip_endpoint_suffix`` enforces, and it
+        is what makes "strip the suffix" safe without a list of special cases.
+        """
+        suffix = CustomOpenAIAdapter().upstream_path
+        urls = [
+            f"{scheme}://{host}{path}"
+            for scheme in ("http", "https")
+            for host in ("gw", "gw.example", "gw.example:8443", "u:p@gw.example")
+            for path in (
+                "",
+                "/",
+                "/v1",
+                "/v1/",
+                "/chat/completions",
+                "/chat/completions/",
+                "/v1/chat/completions",
+                "/v1/chat/completions/",
+                "/v1/chat/completions/chat/completions",
+                "//chat/completions",
+                "/v1/chat/completions;x=1",
+                "/v1/chat/completions?q=1",
+                "/v1/chat/completions#f",
+                "/openai/deployments/d/chat/completions?api-version=2024-02-01",
+            )
+        ]
+        for url in urls:
+            result = self._build(url)
+            if result == url:
+                continue
+            assert result.rstrip("/") + suffix == url.rstrip("/"), url
+
+    def test_scheme_and_host_are_preserved(self):
+        """Normalisation touches the path and nothing else."""
+        from urllib.parse import urlsplit
+
+        for url in (
+            "https://api.mistral.ai/v1/chat/completions",
+            "http://localhost:8000/v1",
+            "https://chat/completions",
+            "https://gw.example:8443/api/v1/",
+        ):
+            before, after = urlsplit(url), urlsplit(self._build(url))
+            assert (after.scheme, after.netloc) == (before.scheme, before.netloc), url
+
+    def test_unparseable_url_is_returned_untouched(self):
+        """A URL ``urlsplit`` cannot read must not become an exception.
+
+        ``urlsplit`` raises on a malformed IPv6 literal, and this helper runs
+        inside ``build_base_url`` — which ``kitty.validation.validate_api_key``
+        calls *outside* its own ``try``.  Raising here would turn a bad stored
+        profile into a traceback at launch instead of an error message, which is
+        a regression this normalisation introduced and must not reintroduce.
+        """
+        assert self._build("https://[::1/v1") == "https://[::1/v1"
+        assert self._build("https://[::1/v1/chat/completions") == "https://[::1/v1/chat/completions"
+
+    # ── Existing validation is unchanged ───────────────────────────────────
+
+    def test_rejects_empty_url(self):
+        """An empty base URL still raises, with the existing message."""
+        import pytest
+
+        with pytest.raises(ValueError, match="Invalid base_url"):
+            self._build("")
+
+    def test_rejects_non_http_scheme(self):
+        """A non-HTTP scheme still raises before normalisation is reached."""
+        import pytest
+
+        with pytest.raises(ValueError, match="Invalid base_url"):
+            self._build("ftp://x")
+
+    def test_rejects_schemeless_url(self):
+        """A bare host still raises before normalisation is reached."""
+        import pytest
+
+        with pytest.raises(ValueError, match="Invalid base_url"):
+            self._build("api.mistral.ai/v1")

@@ -764,6 +764,16 @@ shape, not by calling `build_base_url()` / `get_upstream_path()`. Asking the cod
 it meant to go and then checking it went there proves nothing; this is the same independent-oracle
 rule §3.3.1 applies to bodies.
 
+**One normalisation the independent derivation has to reproduce (KBR-134).** `build_base_url()`
+strips a trailing endpoint suffix from a user-configured base URL, because users routinely paste
+the full endpoint their provider's documentation shows and the bridge would otherwise compose a
+doubled path. A profile whose `base_url` already ends in `/chat/completions` therefore reaches the
+same destination as one that does not. T-D2 must apply the same rule when it computes the expected
+route, or that profile reports a routing mismatch against a request that went exactly where it
+should. This is the awkward edge of the independent-derivation rule — the expectation has to
+reimplement a behaviour rather than observe it — and it is recorded here because the alternative is
+T-D2 discovering it as a failing test with no obvious cause.
+
 **Falsification control.** Alongside the five body cases in §3.3.1, a sixth: change the Azure
 deployment segment in the captured path while leaving the body byte-identical. The oracle must
 fail. Without this case there is no evidence the routing assertion is wired to anything.
@@ -2020,10 +2030,44 @@ most expensive kind of false confidence.
 
 **One exception, stated so the rule is honest.** A **platform or interpreter** skip is permitted:
 `tests/test_launcher_discovery.py` skips POSIX cases on Windows, and the matrix is what covers
-them. A **resource-availability** skip is not, and the suite has one today —
-`tests/bridge/test_bridge_state.py` calls `pytest.skip("openssl not available")` inside a gating
-job, which is the exact shape this rule forbids. Filed as KBR-132 rather than quietly
-grandfathered — the rule is only worth stating if its one known breach has an owner.
+them. A **resource-availability** skip is not. The suite had one — `tests/bridge/test_bridge_state.py`
+called `pytest.skip("openssl not available")` inside a gating job, the exact shape this rule
+forbids — filed as KBR-132 rather than quietly grandfathered, and **closed on 2026-09-11**.
+
+**How it is upheld there now.** `tests/bridge/tls_certs.py` owns the certificate generation the
+bridge TLS tests need, and every non-success exit from it goes through `pytest.fail`: a missing
+binary, a non-zero exit, a timeout. `tests/bridge/test_tls_certs.py` is the check on that, and its
+falsification case — restore the skip, the test must go **red** — is what makes it a detector
+rather than a decoration. That case is written out in the module rather than left to a
+`pytest.raises`, because `Failed` and `Skipped` are *sibling* classes: `pytest.raises(Failed)` does
+not catch a `Skipped`, so the obvious spelling would have reported the reintroduced defect as a
+*skipped* test, passing the gate. A detector that fails by skipping is the defect wearing the
+uniform of its own guard.
+
+**A consequence, stated because it is now load-bearing:** `openssl` is an **environment
+prerequisite of the Fast job**, not something a test may probe for. Forbidding the
+resource-availability skip and requiring the runner to provide the resource are the same statement.
+`ubuntu-latest` ships it; a change of runner image, a container job, or a non-Ubuntu matrix entry
+has to keep it, and the fix for a red gate is to install `openssl`, never to reinstate the skip.
+
+**Why that is not handled by deselection, which is this document's other answer for a missing
+resource.** §8.1's `RESOURCE_DEPENDENT_LAYERS` excludes a whole **layer** whose resource a
+developer's machine may not have — a pinned agent binary, live credentials, a load rig — so a bare
+`pytest` reports those as *deselected*, not skipped. That mechanism is layer-granular by
+construction, and `openssl` is needed by *some tests inside* `l1` rather than by a layer — stated
+as that property rather than as a count of modules, which is the kind of number that goes stale
+silently. A resource used by part of a gating layer has only two possible treatments: skip it,
+which §8 forbids, or require it.
+The two rules are consistent, and the seam between them is worth naming because the obvious
+reading of §8.1 suggests a third option that does not exist.
+
+**The rule itself is still only prose.** Nothing checks that a *future* test does not do what
+`test_bridge_state.py` did. The property holds today — no test in a gating layer calls
+`pytest.skip`, and every `skipif` left there tests `sys.platform`, `os.name`, `sys.version_info` or
+`hasattr(signal, ...)` — but that is an observation about the present, not a mechanism, and it is
+the kind of observation that stops being true without anyone noticing. Filed as
+[KBR-138](https://shelpuk.atlassian.net/browse/KBR-138), by the same reasoning that filed KBR-132:
+the rule is only worth stating if the gap between it and its enforcement has an owner.
 
 ### 8.1 The selection mechanism
 
@@ -2093,6 +2137,11 @@ T-K6's business, together with the job that runs them; doing it earlier would re
 every gate. T-H1 must take that reclassification into account before it measures a mutation
 baseline, because it selects on `l1`.
 
+KBR-132 added one to that set: `tests/bridge/test_tls_certs.py` spawns a real `openssl` in one of
+its five cases. Named here rather than left for T-K6 to rediscover, since the count is what T-K6
+and T-H1 plan against. KBR-132 deliberately did **not** move it — the rule above applies to a test
+fixing a skip defect exactly as it applies to any other.
+
 **The load gate has to be wired, not merely declared.** The table above marks Load as gating a
 release, but `publish.yml` currently depends only on the reusable `tests.yml`. Putting the load
 run in "its own workflow" would leave publication free to proceed while load fails — or while it
@@ -2153,6 +2202,7 @@ does not surface work that is done. `TEST_SUITE_IMPLEMENTATION_PLAN.md` §16 mir
 | **G19** | Routing was outside the register and outside the oracle | The destination is built from the profile (M14, P20, P21); a body-only check cannot see a misrouted Azure deployment | §3.3.5 — whole-request oracle with an independently derived route | **1** |
 | **G17** | Undecided behaviour for an irreducible final turn | Compaction emits an over-budget request, or (since KBR-5) the bridge refuses it downstream; neither was designed | Answer Q10, then align M3-M7, the 6.1 properties and TR-3 together | **2** |
 | **G18** | P13-P19 - seven transport-level mutations, unregistered in the first draft | Necessary (the Codex backend and boto3 require them) but invisible above DEBUG, and unreachable by a guard placed at `translate_to_upstream` | Rows P13-P19; boundary corrected in 3.2.3; Q5 decides user visibility | **3** |
+| **G21** | §8's skip rule is stated in prose and nothing checks it — KBR-138 | Found while closing KBR-132. The known breach is fixed, and every skip left in a *gating* layer is a platform or interpreter one — but that is an observation, not a mechanism, and the next resource-availability skip written into `l1`, `l2`, `l3` or `acceptance` re-creates the same silent-green defect | A check over the collected suite that fails on a resource-availability skip in a gating layer, with a planted skip as its falsification case (§1.4). It must be **layer-aware**: `tests/integration/test_agent_e2e.py` holds three legitimate resource skips (missing credentials, profile, agent binary) that are legal only because they sit in `agent_live`, so a flat grep would report them and be turned off. Two further questions: static sweep or runtime hook, and whether a permitted skip is recognised by condition shape or declared by marker | **3** |
 | **G1** | I1 is unstated and untested | No definition of "unchanged"; mutation sites discoverable only by reading 6,463 lines | Register (§3.2) + oracle (§3.3) | **1** |
 | **G2** | No-bypass unproven **for the bridge's serving path**; no negative assertion; start-path guard is file-granular | `test_egress_https_proxy.py` proves the transports and drives `egress_cmd._probe` | Sealed-network harness (§5.2) per transport (§5.5) + AST start-path guard | **1** |
 | **G3** | I2 partially breached (F1) — KBR-8 | Identity ad hoc per adapter; the subscription adapter reports two different versions in one request | Header contract + parity baseline, then a policy and a code fix | **2** |

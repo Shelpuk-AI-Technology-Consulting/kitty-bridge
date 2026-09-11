@@ -532,6 +532,7 @@ merge.** So:
 | KBR-7 · **CLOSED** | G16 | T-G4 | Route taken: atomic fix + hook-level guard landed together, red evidence in the PR. T-G4 still owns the wire boundary. (Status convention: `TEST_SUITE.md` §9.2.) |
 | KBR-8 | G3 | T-G9, TR-1c | Atomic fix + test now |
 | KBR-9 | G6 | T-G1 | Atomic fix + test now |
+| KBR-132 · **CLOSED** | G21 | — | Route taken: atomic fix + regression test, red at base, evidence in the PR. The broader guard is **KBR-138**, which has no plan-task ID because it was filed after this plan was written; G21 is its design gap. (Status convention: `TEST_SUITE.md` §9.2.) |
 
 ---
 
