@@ -327,14 +327,22 @@ class TestTheRoutingKeySurvivesSerialization:
     def test_no_adapter_strips_the_model_from_the_request_in_place(self, provider_type: str) -> None:
         """A failover re-reads the route from a request already serialized once.
 
-        Fourteen of the twenty-three ``_build_upstream_url`` call sites run after
-        ``translate_to_upstream`` has been called on the same dict, so KBR-127
-        turned "the request keeps its ``model`` key" from an implementation
-        detail into an invariant.  ``AzureOpenAIAdapter`` is the one adapter
-        that removes ``model`` (register entry P6) and it is safe only because
-        it builds a copy; an adapter that popped the key in place would send the
-        failover attempt to the default route with an empty model — KBR-127(b),
-        reappearing on the one path hardest to reproduce.
+        Within a single attempt the URL is built *before* the body, so the
+        ordering looks safe site by site.  It is not safe across attempts: when
+        an attempt fails, a later branch rebuilds the URL from the **same**
+        ``cc_request`` object, which ``translate_to_upstream`` has already been
+        handed.  Fifteen of the twenty-three ``_build_upstream_url`` sites sit
+        after such a call with no intervening rebuild of the dict, and the path
+        is thoroughly live rather than theoretical — instrumenting the helper
+        by dict identity across ``tests/bridge`` recorded **57 of 303** URL
+        builds landing on an already-translated request.
+
+        So KBR-127 turned "the request keeps its ``model`` key" from an
+        implementation detail into an invariant.  ``AzureOpenAIAdapter`` is the
+        one adapter that removes ``model`` (register entry P6) and is safe only
+        because it builds a copy; one that popped the key in place would send
+        the failover attempt to the default route with an empty model —
+        KBR-127(b), reappearing on the path hardest to reproduce.
 
         Args:
             provider_type: A key of the provider registry.
