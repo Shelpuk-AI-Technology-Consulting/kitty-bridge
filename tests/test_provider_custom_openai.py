@@ -470,17 +470,24 @@ class TestCustomOpenAIBaseUrlEndpointSuffix:
 
         suffix = CustomOpenAIAdapter().upstream_path
         for url in self._CORPUS:
-            try:
-                before, after = urlsplit(url), urlsplit(self._build(url))
-            except ValueError:
-                continue
+            # No `try` around `urlsplit`: every corpus entry is parseable, and an
+            # unparseable one added later should raise loudly rather than be skipped.
+            before, after = urlsplit(url), urlsplit(self._build(url))
+
             assert (before.scheme, before.netloc, before.query, before.fragment) == (
                 after.scheme,
                 after.netloc,
                 after.query,
                 after.fragment,
             ), url
-            assert after.path in (before.path, before.path.rstrip("/")[: -len(suffix)]), url
+            trimmed = before.path.rstrip("/")
+            allowed = {before.path}
+            # Offer the stripped form only where the suffix is actually there. Computing
+            # it unconditionally would let a mutant that blindly truncated the last 17
+            # characters satisfy this assertion on a path that never matched.
+            if trimmed.endswith(suffix):
+                allowed.add(trimmed[: -len(suffix)])
+            assert after.path in allowed, url
 
     def test_composing_the_endpoint_back_reproduces_the_pasted_address(self):
         """The claim a user would make: what they pasted is what Kitty requests.

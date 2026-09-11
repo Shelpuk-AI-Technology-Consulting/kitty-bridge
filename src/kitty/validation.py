@@ -32,11 +32,16 @@ def _unusable_url_result(
     provider_config: dict,
     exc: Exception,
 ) -> ValidationResult:
-    """Build the failure for a profile whose base URL cannot produce a request.
+    """Build the failure for a profile that cannot produce a request URL.
 
     Before KBR-143 this condition was reported as ``API key for <provider> contains
     invalid characters``, which sent the user to replace a credential that was never
-    the problem — the same misdirection KBR-134 was filed about, one layer in.
+    the problem — the same misdirection KBR-134 was filed about, one layer in. So the
+    message has to name the *real* fault, which means two cases rather than one: a
+    profile that configured a ``base_url`` is told about its base URL, while one that
+    did not — Vertex missing its ``project_id``, say — is told about its configuration,
+    because naming a URL the user never set would be a new misdirection in place of the
+    old one.
 
     Args:
         provider: The adapter whose profile is being validated.
@@ -45,19 +50,32 @@ def _unusable_url_result(
         exc: What resolving the URL raised.
 
     Returns:
-        An invalid result naming the provider and the configured base URL.  The URL is
-        redacted, because this reason is printed at launch and a query is where a
-        gateway keeps its credentials.
+        An invalid result naming the provider and, when one was configured, the base
+        URL. Both the URL and the exception's own text are redacted: this reason is
+        printed at launch, a query is where a gateway keeps its credentials, and
+        ``build_base_url`` raises with the raw URL inside its message.
     """
-    # Quote the configured value rather than the composed one: it is what the user
-    # would edit, and when `build_base_url` raised there is no composed URL to show.
-    configured = provider_config.get("base_url") or provider.default_base_url
+    # `in`, not `or`: an empty configured value must be quoted as empty rather than
+    # replaced by the provider's default, which the user never typed.
+    configured = str(provider_config["base_url"]) if "base_url" in provider_config else None
+    detail = str(exc).rstrip(".")
+
+    # The adapter's own error embeds the unredacted URL, so redact the same value
+    # wherever it appears in the text rather than only where this function quotes it.
+    if configured:
+        redacted = provider.redact_url_for_display(configured)
+        detail = detail.replace(configured, redacted)
+        source = f"base URL ({redacted})"
+    elif configured == "":
+        source = "base URL ('')"
+    else:
+        source = "configuration"
+
     return ValidationResult(
         valid=False,
         reason=(
-            f"Cannot build a request URL for {provider.provider_type} from this profile's base URL "
-            f"({provider.redact_url_for_display(str(configured))}): {exc}. "
-            f"Run `kitty profile` to correct it."
+            f"Cannot build a request URL for {provider.provider_type} from this profile's "
+            f"{source}: {detail}. Run `kitty profile` to correct it."
         ),
     )
 
@@ -107,8 +125,13 @@ async def validate_api_key(
         model = provider.normalize_model_name(provider.validation_model)
         path = provider.get_upstream_path(model)
         url = provider.compose_upstream_url(base_url, path)
-        if not urlsplit(url).netloc:
+        # `hostname`, not `netloc`: "https://:8080/v1" has a truthy netloc and no host.
+        parsed = urlsplit(url)
+        if not parsed.hostname:
             raise ValueError("the composed URL has no host")
+        # Reading `.port` IS the check, not a value: `urlsplit` accepts a port outside
+        # 0-65535 and raises only when the value is read.
+        _ = parsed.port
     except (ValueError, ProviderError) as exc:
         return _unusable_url_result(provider, provider_config, exc)
 

@@ -480,7 +480,13 @@ class TestCustomAnthropicBaseUrlEndpointSuffix:
                 after.query,
                 after.fragment,
             ), url
-            assert after.path in (before.path, before.path.rstrip("/")[: -len(suffix)]), url
+            trimmed = before.path.rstrip("/")
+            allowed = {before.path}
+            # Only where the suffix is present, so the assertion cannot be satisfied by
+            # a blind truncation of the last len(suffix) characters.
+            if trimmed.endswith(suffix):
+                allowed.add(trimmed[: -len(suffix)])
+            assert after.path in allowed, url
 
     def test_rejects_empty_url(self):
         """An empty base URL still raises, with the existing message."""

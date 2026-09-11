@@ -286,17 +286,101 @@ class TestPreflightBlamesTheUrlNotTheKey:
         assert "custom_openai" in result.reason
         assert "key" not in result.reason.lower()
 
+    @pytest.mark.parametrize(
+        "base_url",
+        [
+            "https:///v1?subscription-key=s3cret",
+            "ftp://gw/v1?subscription-key=s3cret",
+            "https://u:s3cret@[::1/v1",
+            "//u:s3cret@[::1/v1",
+        ],
+        ids=["no-host", "rejected-scheme", "unparseable-userinfo", "schemeless-userinfo"],
+    )
     @pytest.mark.asyncio
-    async def test_the_reported_url_carries_no_query_credential(self):
-        """The reason is printed at launch, so it is redacted like the 404 message."""
+    async def test_the_reported_url_carries_no_credential(self, base_url: str):
+        """The reason is printed at launch, so it is redacted like the 404 message.
+
+        Parametrised across the branches that build it, because they do not all reach
+        the URL the same way.  The ``ftp://`` case is the one that caught a real leak:
+        ``build_base_url`` raises with the **raw** URL in its own message, and the
+        reason quoted that exception verbatim — so redacting the URL alongside it was
+        not enough.
+
+        Args:
+            base_url: A base URL that cannot produce a request, carrying a secret.
+        """
         from kitty.providers.custom_openai import CustomOpenAIAdapter
 
-        result = await validate_api_key(
-            CustomOpenAIAdapter(), "any-key", {"base_url": "https:///v1?subscription-key=s3cret"}
-        )
+        result = await validate_api_key(CustomOpenAIAdapter(), "any-key", {"base_url": base_url})
 
         assert result.valid is False
-        assert "s3cret" not in result.reason
+        assert "s3cret" not in result.reason, result.reason
+
+    @pytest.mark.parametrize(
+        "base_url",
+        ["https://:8080/v1", "https://gw.example:99999/v1"],
+        ids=["port-without-host", "port-out-of-range"],
+    )
+    @pytest.mark.asyncio
+    async def test_a_url_with_an_unusable_authority_is_reported_as_a_url(self, base_url: str):
+        """An empty host and an impossible port are URL faults, not key faults.
+
+        ``urlsplit("https://:8080/v1").netloc`` is the truthy ``":8080"`` while its
+        ``hostname`` is ``None``, so a check on ``netloc`` passed this through to
+        ``aiohttp``, which raised ``InvalidURL`` — a ``ValueError``, and therefore the
+        key message again.  An out-of-range port is the same class: ``urlsplit``
+        accepts it and only ``.port`` objects.
+
+        Args:
+            base_url: A base URL whose authority no HTTP client can use.
+        """
+        from kitty.providers.custom_openai import CustomOpenAIAdapter
+
+        result = await validate_api_key(CustomOpenAIAdapter(), "any-key", {"base_url": base_url})
+
+        assert result.valid is False
+        assert "base URL" in result.reason
+        assert "key" not in result.reason.lower(), result.reason
+
+    @pytest.mark.asyncio
+    async def test_a_missing_provider_config_key_is_not_blamed_on_the_base_url(self):
+        """Vertex's missing ``project_id`` is a configuration fault, not a URL one.
+
+        Naming the base URL here would send the user to edit a value they never set,
+        which is the class of misdirection this ticket exists to end.  No ``base_url``
+        is configured for Vertex, so the message speaks of the configuration instead.
+        """
+        from kitty.providers.vertex import VertexAIAdapter
+
+        result = await validate_api_key(VertexAIAdapter(), "any-key", {})
+
+        assert result.valid is False
+        assert "project_id" in result.reason
+        assert "base URL" not in result.reason, result.reason
+
+    @pytest.mark.asyncio
+    async def test_an_empty_base_url_is_quoted_as_empty(self):
+        """An empty configured value must not be reported as the provider's default.
+
+        ``provider_config.get("base_url") or default`` swallowed it, so the message
+        quoted ``https://api.openai.com/v1`` — a URL the user never typed and which
+        would have worked.
+        """
+        from kitty.providers.custom_openai import CustomOpenAIAdapter
+
+        result = await validate_api_key(CustomOpenAIAdapter(), "any-key", {"base_url": ""})
+
+        assert result.valid is False
+        assert "api.openai.com" not in result.reason, result.reason
+
+    @pytest.mark.asyncio
+    async def test_the_reason_has_no_doubled_period(self):
+        """The reason is read by a human, so it is punctuated like a sentence."""
+        from kitty.providers.custom_openai import CustomOpenAIAdapter
+
+        result = await validate_api_key(CustomOpenAIAdapter(), "any-key", {"base_url": "ftp://x"})
+
+        assert ".." not in result.reason, result.reason
 
     @pytest.mark.asyncio
     async def test_a_raising_build_base_url_becomes_a_result(self):

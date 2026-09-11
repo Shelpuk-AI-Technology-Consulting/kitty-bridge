@@ -173,6 +173,15 @@ class ProviderAdapter(ABC):
         Args:
             url: The URL about to be shown to a human.
 
+        A **valueless** parameter is left as written: ``?debug`` has no value to mask,
+        and its text is a name by this rule.  A bare token used as a parameter name
+        would therefore survive, which is accepted — masking names as well would cost
+        every parameter name in the diagnostic to protect a shape no API uses.
+
+        The fragment is masked whole rather than per-parameter, because an HTTP client
+        never sends one: there is nothing to diagnose in a component the provider does
+        not see, so none of it is worth keeping.
+
         Returns:
             The redacted URL.  An unparseable one — the very case a malformed-profile
             message has to report — is redacted textually instead of being withheld
@@ -181,29 +190,62 @@ class ProviderAdapter(ABC):
         try:
             parts = urlsplit(url)
         except ValueError:
-            # No structure to work with, so fall back to text and over-redact: every
-            # character from the first "?" is query and goes, and anything before an
-            # "@" may be userinfo and goes too. What survives is scheme, host and
-            # path, which is what names the address.
-            head, separator, _ = url.partition("?")
-            scheme, _, rest = head.partition("://")
-            if "@" in rest:
-                rest = rest.rsplit("@", 1)[1]
-            shown = f"{scheme}://{rest}" if scheme else rest
-            return f"{shown}?{_MASK}" if separator else shown
+            return ProviderAdapter._redact_unparseable_url(url)
 
-        # Split on "&" rather than parsing: `parse_qsl` would decode the names and
+        # A URL with no authority cannot be redacted structurally: "u:p@host/v1" parses
+        # as scheme "u" with the credentials in the PATH, where no netloc rule reaches
+        # them. Such a URL can never name a host, so it is only ever shown as an error.
+        if not parts.netloc:
+            return ProviderAdapter._redact_unparseable_url(url)
+
+        # Split on "&" rather than parsing: `parse_qsl` would decode the names, and
         # re-encoding them could alter a name the reader needs to recognise.
         if parts.query:
             masked = [p if "=" not in p else f"{p.split('=', 1)[0]}={_MASK}" for p in parts.query.split("&")]
             parts = parts._replace(query="&".join(masked))
 
-        # Userinfo sits before an "@" in the netloc. The common case has none, which
-        # keeps an ordinary URL byte-identical in the message.
+        if parts.fragment:
+            parts = parts._replace(fragment=_MASK)
+
+        # The common case has no userinfo, which keeps an ordinary URL byte-identical.
         if "@" in parts.netloc:
             parts = parts._replace(netloc=parts.netloc.rsplit("@", 1)[1])
 
         return urlunsplit(parts)
+
+    @staticmethod
+    def _redact_unparseable_url(url: str) -> str:
+        """Redact a URL :func:`~urllib.parse.urlsplit` cannot read, by text alone.
+
+        There is no structure to edit, so this over-redacts deliberately: everything
+        from the first ``"?"`` is treated as query and dropped, and anything before an
+        ``"@"`` is treated as userinfo and dropped.  What survives is the scheme, host
+        and path — the part that names the address, which is what the message needs.
+
+        A path legitimately containing ``"@"`` loses its head under this rule. That is
+        an acceptable price on a URL that is already malformed, and the alternative —
+        showing the value whole — is how a credential reaches a log.
+
+        Args:
+            url: The unparseable URL.
+
+        Returns:
+            The textually redacted form.
+        """
+        head, query_separator, _ = url.partition("?")
+
+        # `partition` returns the whole string as its FIRST element when the separator
+        # is absent, so a URL with no "://" would otherwise be read as all scheme and
+        # no host -- leaving the userinfo strip below nothing to work on.
+        scheme, scheme_separator, rest = head.partition("://")
+        if not scheme_separator:
+            scheme, rest = "", head
+
+        if "@" in rest:
+            rest = rest.rsplit("@", 1)[1]
+
+        shown = f"{scheme}://{rest}" if scheme else rest
+        return f"{shown}?{_MASK}" if query_separator else shown
 
     @staticmethod
     def _merge_query(base_query: str, endpoint_query: str) -> str:

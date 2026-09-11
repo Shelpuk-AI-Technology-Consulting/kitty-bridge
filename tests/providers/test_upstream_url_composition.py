@@ -243,6 +243,39 @@ class TestRedactUrlForDisplay:
         """Over-redacting an unparseable URL covers userinfo as well as the query."""
         assert ProviderAdapter.redact_url_for_display("https://u:p@[::1/v1") == "https://[::1/v1"
 
+    @pytest.mark.parametrize(
+        ("url", "expected"),
+        [
+            ("//u:p@[::1/v1", "[::1/v1"),
+            ("//u:p@[::1/v1?key=s3cret", "[::1/v1?****"),
+            ("u:p@[::1/v1", "[::1/v1"),
+        ],
+        ids=["schemeless", "schemeless-with-query", "bare"],
+    )
+    def test_an_unparseable_url_with_no_scheme_still_loses_its_userinfo(self, url: str, expected: str):
+        """A URL with no ``://`` must not keep its password, or gain a bogus ``://``.
+
+        ``str.partition`` returns the whole string as its *first* element when the
+        separator is absent, so reading the scheme from it left the host part empty
+        and the userinfo strip ran on nothing.  A profile can hold such a value, and
+        this function renders whatever the profile holds.
+
+        Args:
+            url: An unparseable base URL carrying userinfo and no scheme.
+            expected: The display form, with the userinfo and any query gone.
+        """
+        assert ProviderAdapter.redact_url_for_display(url) == expected
+
+    def test_a_fragment_is_masked_whole(self):
+        """A fragment never reaches the wire, so it has no diagnostic value to keep.
+
+        ``compose_upstream_url`` carries the base URL's fragment through, so one
+        holding a token would reach the 404 message.  Masked whole rather than
+        per-parameter: there is nothing to diagnose in a component the provider
+        never sees.
+        """
+        assert ProviderAdapter.redact_url_for_display("https://gw/v1#token=s3cret") == "https://gw/v1#****"
+
 
 class TestEverySiteAgreesWithTheHelper:
     """Each of the three composition sites produces what the helper produces (R1).
@@ -259,6 +292,53 @@ class TestEverySiteAgreesWithTheHelper:
 
     # A base URL carrying a query: the shape all three used to break on.
     _BASE = "https://gw.example/v1?tenant=x"
+
+    # The endpoint Microsoft's documentation shows, which is the ticket's whole point.
+    _AZURE = "https://res.openai.azure.com/openai/deployments/d/chat/completions?api-version=2024-02-01"
+
+    def test_the_bridge_requests_a_pasted_azure_endpoint_verbatim(self):
+        """KBR-143's headline claim, asserted against the literal URL.
+
+        The cases below compare each site to ``compose_upstream_url``, which proves
+        they agree but would hold just as well if the helper itself were wrong. This
+        one names the address a customer pastes and the address the bridge requests,
+        with no helper in the oracle.
+        """
+        server = BridgeServer(
+            None,  # type: ignore[arg-type]
+            CustomOpenAIAdapter(),
+            "test-key",
+            model="some-model",
+            provider_config={"base_url": self._AZURE},
+        )
+
+        assert server._build_upstream_url() == self._AZURE
+
+    @pytest.mark.asyncio
+    @patch("kitty.validation.aiohttp.ClientSession")
+    async def test_preflight_probes_a_pasted_azure_endpoint_verbatim(self, mock_session_cls):
+        """The same literal claim for the pre-flight probe.
+
+        Pre-flight composes independently of the bridge, so a customer could be
+        refused at launch by a URL the bridge would have got right.
+
+        Args:
+            mock_session_cls: The patched ``ClientSession``, so no socket opens.
+        """
+        response = AsyncMock()
+        response.status = 200
+        response.__aenter__ = AsyncMock(return_value=response)
+        response.__aexit__ = AsyncMock(return_value=False)
+        session = AsyncMock()
+        session.post = MagicMock(return_value=response)
+        session.__aenter__ = AsyncMock(return_value=session)
+        session.__aexit__ = AsyncMock(return_value=False)
+        mock_session_cls.return_value = session
+
+        result = await validate_api_key(CustomOpenAIAdapter(), "any-key", {"base_url": self._AZURE})
+
+        assert result.valid is True
+        assert session.post.call_args.args[0] == self._AZURE
 
     def test_bridge_server(self):
         """``BridgeServer._build_upstream_url`` composes through the helper."""
