@@ -1053,8 +1053,9 @@ not just the first, and is called from **five** sites in three files — `bridge
 logic.
 
 **Real-socket transport proof already exists, and is strong.** `tests/test_egress_https_proxy.py`
-(601 lines) stands up a local TLS CONNECT proxy that enforces Basic auth and **records every
-`CONNECT` it sees**, plus a local TLS target, and performs real TLS handshakes across all three
+stands up a local TLS CONNECT proxy that enforces Basic auth and **records every `CONNECT` it
+sees**, plus a local TLS target — both since T-W5 shared from
+`tests/harness/connect_proxy.py` (§7.3) — and performs real TLS handshakes across all three
 transport stacks kitty uses: aiohttp (driving the real `egress_cmd._probe`), `curl_cffi` with the
 exact `proxies=` mapping `openai_subscription` passes, and urllib3 shaped as
 `botocore.httpsession._get_proxy_manager` builds it. This is the strongest asset in the area and
@@ -1076,9 +1077,14 @@ the foundation the rest of §5 builds on rather than replaces.
 
 ### 5.2 The sealed-network harness
 
-An L3 harness that closes gaps 1 and 2, built by extending `tests/test_egress_https_proxy.py`'s
-`_ConnectProxy` and `_TlsTarget` rather than writing new infrastructure — that proxy already
+An L3 harness that closes gaps 1 and 2, built on `tests/harness/connect_proxy.py`'s
+`ConnectProxy` and `TlsTarget` rather than writing new infrastructure — that proxy already
 records CONNECT attempts, which is the observation the harness needs.
+
+Those two classes were `_ConnectProxy` and `_TlsTarget`, private to
+`tests/test_egress_https_proxy.py`, until **T-W5 ([KBR-28])** extracted them and registered their
+fixtures as a pytest plugin; §7.3 records what that delivered. `tests/test_egress_https_proxy.py`
+now imports them and keeps only `target_url`, the one seam specific to `kitty egress test`.
 
 ```
        ┌──────────── kitty BridgeServer ────────────┐
@@ -1109,15 +1115,27 @@ The correct assertion is at the **connection** level: every TCP connection the u
 must be attributable to a successful tunnel through the proxy, with any number of requests
 riding on it, and failed tunnels contributing no upstream connections.
 
-**The join.** `ConnectAttempt` records target and authentication status only, which is not enough
-to identify a connection at both ends. Extend it to record the **proxy's outbound source port**
-for each tunnel it opens; the recording upstream already records the peer port of each accepted
-connection. Joining on that port identifies each upstream connection with the tunnel that
-created it. An upstream connection with no matching tunnel port is a bypass, and it is the only
-thing this assertion needs to catch.
+**The join.** `ConnectAttempt` recorded target and authentication status only, which is not enough
+to identify a connection at both ends. **T-W5 added `source_port`** — the proxy's outbound source
+port for each tunnel it opens, and `None` where no tunnel was opened; the recording upstream
+records the peer port of each accepted connection. Joining on that port identifies each upstream
+connection with the tunnel that created it. An upstream connection with no matching tunnel port is
+a bypass, and it is the only thing this assertion needs to catch.
+`unattributable_peer_ports()` in the same module states the assertion once, so each transport
+slice inherits it rather than re-deriving it.
 
 (Peer *address* cannot do this job: with bridge, proxy and upstream on loopback in one process,
 proxied and direct connections both present `127.0.0.1`.)
+
+**The premise, which is a property of the wiring and not a law.** A source port identifies a
+connection only because every leg terminates on the same destination `ip:port`, so the kernel will
+not hand the same port to a second connection while the first is in `TIME_WAIT`. Point a future
+leg at a *different* destination and a direct connection may legitimately draw a live tunnel's
+source port and be attributed to it. The resulting error is a false negative — a breach
+unreported — never a false positive, so it degrades safety rather than stability. Re-derive this
+before adding a second upstream port. The join is also over **connections**, never requests: a
+request-level log must be reduced to its distinct connections first, since one tunnel may carry
+many requests.
 
 #### 5.2.2 The three phases, per transport
 
@@ -1247,7 +1265,7 @@ Three consequences the rest of §5 must not paper over:
 2. **The sealed-network harness proves nothing about them** unless parametrised over the
    transport. It must run over `{bridge aiohttp session, provider aiohttp session, curl_cffi
    session, botocore client}` — the shape `tests/test_egress_https_proxy.py` already uses, which
-   is a further reason to extend that module rather than start fresh.
+   is a further reason it was that module's proxy T-W5 extracted rather than a fresh one.
 3. **The OAuth leg runs at startup**, before anything else has been proven, and is the one most
    likely to fire on a fresh machine. It must not be left out.
 
@@ -2011,17 +2029,48 @@ path has.
 
 ### 7.3 Recording CONNECT proxy
 
-**Already exists.** `tests/test_egress_https_proxy.py` contains `_ConnectProxy` (enforces Basic
-auth, records every `CONNECT` as a `ConnectAttempt`) and `_TlsTarget`, with throwaway
-certificates on ephemeral ports. Extend it rather than build a second:
+**Delivered by T-W5 ([KBR-28]) in `tests/harness/connect_proxy.py`**, extracted from
+`tests/test_egress_https_proxy.py` rather than written a second time — two proxy implementations
+is how two harnesses come to disagree about what "tunnelled" means. That module keeps its five
+tests, unchanged down to the collected node ids, and drives all three transport stacks through the
+extracted fixture; it is the regression evidence for the extraction.
 
-- expose it as a shared fixture;
-- add the ability to stop it mid-test, for §5.2.2 phase 2;
-- **record the outbound source port** of each tunnel it opens, so §5.2.1 can join tunnels to the
-  connections the recorders accept — `ConnectAttempt` carries target and auth status only today,
-  which is not enough to identify a connection at both ends;
-- resolve the harness hostname itself on the proxied leg, and expose a per-transport direct-route
-  override for §5.2.2 phase 1.
+What it provides:
+
+- **The fixtures**, registered as a pytest plugin from `tests/conftest.py`, so a test asks for
+  `connect_proxy` or `tls_target` by name and imports nothing.
+- **`ConnectAttempt.source_port`** — the local port of the proxy's outbound socket for each tunnel
+  it opens, and `None` where no tunnel was opened (rejected auth, or an unreachable upstream).
+  This is §5.2.1's join key; target and auth status alone cannot identify a connection at both
+  ends.
+- **`unattributable_peer_ports(peer_ports, attempts)`** — §5.2.1's assertion, stated once so each
+  transport slice inherits it rather than re-deriving it. It refuses an unset peer port rather
+  than guessing: a recorder that never populated `CapturedRequest.peer_port` would otherwise make
+  containment unfalsifiable in whichever direction the default happened to fall. *This is an
+  addition to T-W5's two named deliverables, made because §1.4 requires this delivery to ship a
+  falsification case and a falsification case needs a checkable assertion.* It does not discharge
+  **T-E2's** phase-3 obligation, which injects a bypass into the product rather than into the test.
+- **`ConnectProxy.stop()` and `TlsTarget.stop()`** — mid-test stoppability for §5.2.2 phase 2.
+  Both abort live connections rather than closing them (a TLS `close()` waits out
+  `ssl_shutdown_timeout`, 30s by default) and both retry until the listener has actually finished
+  closing. Python 3.12.1 changed `asyncio.Server.wait_closed()` to block until every connection is
+  dropped while 3.10 and 3.11 return immediately, so a teardown that merely closes the listener
+  hangs on half the support matrix and passes on the other half.
+- **The proxied-leg resolver** — `HARNESS_UPSTREAM_HOST` (`upstream.kitty-test.invalid`, §5.3) in
+  the target certificate's SAN, and an empty-by-default `ConnectProxy.resolve` map consulted
+  before the outbound connection. The harness owns the resolver because the harness is the proxy;
+  a client tunnelling to a `.invalid` name never resolves it itself, so this is the only place the
+  name can be mapped. **Shipped here, not in T-E1**, because T-E1 would otherwise have to edit a
+  module five tickets consume — the coordination problem Milestone 0 exists to remove.
+
+Still **T-E1's** (KBR-61): the per-transport **direct**-route override §5.2.2 phase 1 needs, and
+which transport gets which route. T-W5 ships the seam, not the policy.
+
+**A missing `openssl` fails, it does not skip.** `certs` is shared infrastructure, and §8's rule
+is that a skip in a gating job is a failure: a suite that quietly stops proving containment
+because a tool is absent is indistinguishable from one that proves it.
+
+[KBR-28]: https://shelpuk.atlassian.net/browse/KBR-28
 
 ### 7.4 Wire projections and the transparency oracle
 
@@ -2234,9 +2283,12 @@ standing amnesty:
 
 A consequence worth stating: **a test may not be moved to `l3` before the Subsystem job exists.**
 Roughly six modules under `tests/` bind real sockets or spawn processes and are `l1` by default
-today — `test_egress_https_proxy.py` foremost among them. Reclassifying them is correct and is
-T-K6's business, together with the job that runs them; doing it earlier would remove them from
-every gate. T-H1 must take that reclassification into account before it measures a mutation
+today — `test_egress_https_proxy.py` foremost among them, and since T-W5 the shared fixture it was
+extracted into plus `tests/harness/test_connect_proxy.py`, which must move **with** it: an
+extraction and its own regression evidence landing in two different jobs would leave one proving
+the other in a run that no longer includes it. Reclassifying them is correct and is T-K6's
+business, together with the job that runs them; doing it earlier would remove them from every
+gate. T-H1 must take that reclassification into account before it measures a mutation
 baseline, because it selects on `l1`.
 
 **Three modules have been added to that set since, and they are named here so T-K6 inherits a
@@ -2420,7 +2472,8 @@ Three assets stand out and are built on rather than replaced:
 
 - `tests/test_egress_https_proxy.py` — real TLS handshakes through a local recording CONNECT
   proxy, across all three transport stacks. The strongest existing proof of anything in this
-  document.
+  document. Since T-W5 the proxy, the target and the certificates are shared from
+  `tests/harness/connect_proxy.py`; the tests stayed here.
 - `tests/test_egress_coverage.py` — AST/regex structural guard over `src/` that also asserts its
   own scan finds known positives, so it cannot rot into a no-op.
 - `tests/test_github_actions.py` — treats the workflow definitions as testable artifacts.
@@ -2514,8 +2567,10 @@ L1 property test, stated *with* the `localhost` exclusions so it does not fail o
 weakened.
 
 **Extend the existing CONNECT proxy rather than build one (§7.3).** `test_egress_https_proxy.py`
-already owns a recording proxy across all three transport stacks. A second would duplicate the
-hard part and risk the two drifting on exactly the behaviour they both exist to pin.
+already had a recording proxy exercised across all three transport stacks. A second would
+duplicate the hard part and risk the two drifting on exactly the behaviour they both exist to pin.
+T-W5 carried this out: the proxy moved to `tests/harness/connect_proxy.py` and that module's five
+tests kept passing against it, unchanged down to their collected node ids.
 
 **Two L1 properties are stated with their exceptions (§6.1).** "Output ≤ budget" and "the last
 turn survives" are both false as absolutes — the compactor breaks out while still over budget
