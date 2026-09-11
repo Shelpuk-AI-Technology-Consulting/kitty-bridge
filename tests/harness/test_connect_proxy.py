@@ -197,6 +197,7 @@ class TestTunnelSourcePortRecording:
         try:
             assert "407" in status
 
+            assert len(connect_proxy.attempts) == 1
             assert connect_proxy.attempts[0].authenticated is False
             # The load-bearing assertion. A companion `peer_ports == []` would
             # be decorative: read with no settling wait, it would also pass
@@ -488,6 +489,16 @@ class TestUnattributableConnections:
 
             unattributable = unattributable_peer_ports(tcp_sink.peer_ports, connect_proxy.attempts)
 
+            # Both directions, stated rather than inferred. The equality below
+            # already excludes "both were rejected" -- that would return two
+            # ports, not one -- but a join is a claim about each connection,
+            # and reading only the negative half invites the next author to
+            # weaken the positive one without noticing.
+            #
+            # The join key is the proxy's OUTBOUND port, not the client's:
+            # `tunnelled`'s own sockname belongs to the client-to-proxy leg and
+            # never reaches the far end.
+            assert connect_proxy.attempts[0].source_port in tcp_sink.peer_ports
             assert unattributable == [direct_port]
         finally:
             direct.close()

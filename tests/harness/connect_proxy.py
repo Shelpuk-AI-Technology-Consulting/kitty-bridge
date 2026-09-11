@@ -117,8 +117,13 @@ def _run_openssl(*args: str) -> None:
         *args: Arguments following the ``openssl`` executable name.
 
     Raises:
-        pytest.fail: When openssl exits non-zero; the captured stderr is
+        pytest.Failed: When openssl exits non-zero; the captured stderr is
             included so certificate-generation mistakes are readable (AC1).
+        OSError: ``FileNotFoundError`` when the ``openssl`` binary is not on
+            PATH. The ``returncode`` check never sees that case, and it is
+            deliberately left to propagate: §8's rule is that a skip in a
+            gating job is a failure, so a missing tool must stop the suite
+            rather than quietly excuse it.
     """
     completed = subprocess.run(["openssl", *args], capture_output=True, text=True)
     if completed.returncode != 0:
