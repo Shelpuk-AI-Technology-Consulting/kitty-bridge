@@ -2582,19 +2582,13 @@ class BridgeServer:
         logger.debug("Request headers: %s", dict(request.headers))
         logger.debug("Request body: %s", json.dumps(body, indent=2, ensure_ascii=False))
 
-        # Before the body forks: `_original_body` below hands this same dict to a
-        # custom transport, which builds its own upstream body from it (KBR-144).
-        # In its own `try`, ahead of the catch-all below, which would render a
-        # malformed body as a 500 -- and below the JSON-parse block, whose
-        # `except Exception` would relabel it "Invalid JSON body".
+        # Before the body forks: `_original_body` below hands this dict to a custom transport (KBR-144).
+        # Sited between the two `try`s on purpose -- above, it reads as bad JSON; below, as a 500.
         try:
             body = normalize_responses_request(body)
         except InvalidResponsesRequest as exc:
             logger.warning("Malformed Responses API request body: %s", exc)
-            # `reason` for the same purpose `_compaction_failed_response` gives it:
-            # three other rejections on this endpoint answer in this same envelope,
-            # and without a marker neither a test nor an operator reading a log can
-            # say which one fired.
+            # `reason` marks which of this endpoint's four same-shaped 400s fired.
             return self._error_response(
                 {"error": {"code": "invalid_request", "message": str(exc), "reason": "invalid_input"}}
             )

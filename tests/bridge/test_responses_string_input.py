@@ -24,6 +24,7 @@ list" passes on the defect.
 
 from __future__ import annotations
 
+import copy
 import json
 
 import aiohttp
@@ -250,11 +251,16 @@ class TestTheNormaliser:
         """``input`` is optional; its absence is not a shape error."""
         assert normalize_responses_request({"model": _MODEL}) == {"model": _MODEL}
 
-    def test_the_caller_s_body_is_not_mutated(self) -> None:
-        """The handler logs the body it received; normalising in place would relabel that log."""
-        original = _string_body()
-        normalize_responses_request(original)
-        assert original["input"] == _TEXT
+    @pytest.mark.parametrize("body", [_string_body(), _array_body()], ids=["string", "array"])
+    def test_the_caller_s_body_is_not_mutated(self, body: dict) -> None:
+        """The handler logs the body it received; normalising in place would relabel that log.
+
+        Both branches, so the claim stays true of the normaliser rather than of
+        the one branch that rewrites anything today.
+        """
+        before = copy.deepcopy(body)
+        normalize_responses_request(body)
+        assert body == before
 
     def test_an_empty_string_is_a_string_like_any_other(self) -> None:
         """``""`` is in the ``oneOf`` string branch, so it gets no special case.
@@ -374,8 +380,12 @@ class TestTheUpstreamBodyOnTheDefaultTransport:
                         payload=_CC_REPLY,
                         callback=_record,
                     )
-                status, _ = await _post(port, body)
+                status, payload = await _post(port, body)
             assert status == 200, f"expected the request to be served, got {status}"
+            # R1 claims a *stream*, not merely a 200: `_post` hands back raw text
+            # when the reply is not JSON, which is what an SSE reply looks like.
+            if stream:
+                assert "data:" in payload, f"expected an SSE reply, got {payload!r}"
             assert len(captured) == 1, f"expected exactly one upstream attempt, got {len(captured)}"
             return captured[0]
         finally:
@@ -517,6 +527,7 @@ class TestTheInputFamilyNeverReturnsAServerError:
         finally:
             await server.stop_async()
         assert status == 200
+        assert len(captured) == 1, f"expected exactly one upstream attempt, got {len(captured)}"
         assert captured[0]["model"] == (profile_model or "")
 
 

@@ -563,7 +563,8 @@ the path.
 **`not projectable` is a legal value for the register's field column, and it requires a reason.**
 P16 uses it — the `input_text`/`output_text` tag is redundant with the turn's role, so carrying it
 would put one vendor's spelling into a wire-independent form — as do the whole-body protocol
-translations M2, M9, P11 and P12, and **P1** for the reason below. An empty cell would leave those
+translations M2, M9, P11 and P12, **P1** for the reason below, and **M15**, whose two spellings of
+a Responses `input` are one request (KBR-144). An empty cell would leave those
 rows silently unfalsifiable; an explicit value with a reason does not.
 
 ⚠️ **`residual` is never a legal register anchor.** P1 strips kitty's internal keys, which no
