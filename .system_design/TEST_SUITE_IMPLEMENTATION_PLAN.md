@@ -136,7 +136,7 @@ once. Both are exactly the coordination problem Milestone 0 exists to remove.
 
 **T-W3 inherits two acceptance criteria from this work.**
 
-1. Every row M1–M14 and P1–P21 carries either a path in T-W2's vocabulary or `not projectable`
+1. Every one of the 41 live rows carries either a path in T-W2's vocabulary or `not projectable`
    **with a reason**, asserted against the register data so a new row cannot escape it. T-W2 proves
    the vocabulary is *expressive*; the row-by-row assignment is T-W3's, because a copy of that
    table inside T-W2 would be a second source of truth that stays green while the register moves.
@@ -152,10 +152,20 @@ once. Both are exactly the coordination problem Milestone 0 exists to remove.
 Includes the **totality rule**: every key classifies into envelope, conversation or residual, and a
 non-empty residual raises. *Falsification:* a stub reader that drops an unknown key fails it.
 
-**T-W3 — register.** One entry per row M1–M14 and P1–P21: id, site symbol, trigger predicate, the
-projection field it touches, conditional or not, design anchor. Defines the trigger vocabulary
-T-W6 indexes by. *Falsification:* delete a row from the markdown or the data; the agreement test
-fails.
+**T-W3 — register.** One entry per live row of §3.2.1 and §3.2.2. The families are M1–M14 and
+P1–P21, but the **sub-lettered rows are separate rows with separate triggers**, so the count is
+**42 published, 41 live** — M13 is withdrawn (KBR-5) and excluded from the data, with the parser
+asserting the struck set is exactly `{M13}` so a new strike-through is a deliberate decision.
+
+Per row: id, site symbols, trigger, the projection paths it touches, conditional or not, design
+reference — plus `not_projectable_reason`, required exactly when the row takes §3.3.1a's escape.
+Defines the trigger vocabulary T-W6 indexes by. *Falsification:* delete a row from the markdown or
+the data; the agreement test fails.
+
+**A trigger is a name, not a callable**, and **scope is deliberately absent** — both decisions,
+with their evidence, are recorded in design §3.2.4. Scope is **KBR-139**; verifying a declared
+trigger is gap **G21 / KBR-140**. Delivered in `tests/harness/register.py` beside the contract,
+with the schema tests at `l1` and the two agreement guards at `l2`.
 
 **T-W4 — recorder implementation.** Implements T-W2's `CapturedRequest` — original casing and order,
 arrival timestamp, and **the peer port of the accepted connection** — for the primary aiohttp
