@@ -185,13 +185,47 @@ CREDENTIAL_PATTERNS = (
 # same way, so re-running is pure waste. Both failures seen on the first live
 # run land here -- the apostrophes that truncated --json-schema, and the
 # unresolvable $schema reference.
+#
+# ⚠️ **This set is checked BEFORE `QUOTA_PATTERNS`, and that is still deliberate:
+# a rejected schema can coexist with other noise in the record.** `\b400\b` stays
+# here for a measured reason rather than a tidy one -- the context-management
+# refusal is a 400 whose body says "No quota was consumed for this request", so
+# demoting it below quota reports a genuine workflow fault as a spent balance.
+# `_write_diagnostic` already encodes that precedence, with its
+# CONTEXT_MANAGEMENT_REFUSAL branch above its quota branch.
+#
+# 🔴 **KBR-145 moved `invalid[_ ]request` OUT of this set**, to
+# `FATAL_UNLESS_PROVIDER_NAMED_PATTERNS` below. DeepSeek reports a spent balance
+# as a 402 carrying OpenAI's generic `"code":"invalid_request_error"`, so this
+# entry matched first and an operator was sent to debug a correct workflow --
+# observed live on PR #54, run 34622141943. It is the only entry that named a
+# generic error CODE rather than a specific failure, which is why it is the only
+# one that moved.
 FATAL_PATTERNS = (
     r"is not valid json",
     r"is not a valid json schema",
-    r"invalid[_ ]request",
     r"\b400\b",
     r"unterminated string",
 )
+
+# Fatal ONLY when no provider-named cause was found first. Consulted after
+# `QUOTA_PATTERNS` and `CREDENTIAL_PATTERNS`, and before `EXHAUSTED_PATTERNS`.
+#
+# ⚠️ **Named for the fact, not for a principle, because no clean principle
+# survives measurement.** "Generic loses to everything more specific" reads well
+# and is wrong: `EXHAUSTED_PATTERNS` contains the bare words `\btimeout\b` and
+# `\bcapacity\b`, which a model can write in its own prose, and `_outcome_text`
+# includes `result`. Yielding to those would let a $1.79 billed rejection be
+# called `exhausted` -- and `retry_verdict` then spends the $1.79 again.
+#
+# ⚠️ **The accepted exposure, stated so it cannot read as an oversight.** This
+# tier DOES yield to `quota`, `\bbilling\b`, `\b401\b` and `\b403\b`, all of
+# which are unanchored and can appear in prose. KBR-145 took that trade
+# knowingly: it fixes the two misclassifications anyone has observed -- the live
+# 402 and a 401 reported with this same generic code, which `map_error` fixtures
+# show OpenAI and Fireworks both do -- at the cost of four prose shapes nobody
+# has observed. Anchoring those four patterns is KBR-166.
+FATAL_UNLESS_PROVIDER_NAMED_PATTERNS = (r"invalid[_ ]request",)
 
 # upstream. Anchored on the beta's own dated slug, or on the refusal's distinctive
 # phrasing, and NOT on the bare words "context management".
@@ -476,7 +510,15 @@ def _extract_structured_output(raw_output: str, execution_text: str) -> dict | N
 #: patterns are searched. Reviewing a change under `.github/review/scripts/` therefore fed this
 #: module's own source into its own matcher: `interpret_claude_result.py` contains the literals
 #: ``\b400\b``, ``quota``, ``insufficient balance`` and ``billing``, and one read of it matches
-#: **nine** of :data:`QUOTA_PATTERNS` and three of :data:`FATAL_PATTERNS`.
+#: **most of** :data:`QUOTA_PATTERNS` and **every** fatal pattern in the file.
+#:
+#: ⚠️ **Stated as a shape rather than as figures, because the figures rotted.** This line
+#: quoted "nine of QUOTA_PATTERNS and three of FATAL_PATTERNS"; re-derived by running the
+#: match, the first was already wrong (ten of eleven) and the second was broken by KBR-145
+#: itself — splitting the fatal set and documenting the split introduced the literal
+#: ``invalid_request_error`` into this file, so that pattern began self-matching where its
+#: own bare regex text never had. The argument never rested on the counts, only on this
+#: module matching a great many of its own patterns, and nothing checked the numbers.
 #:
 #: Measured on PR #237: a genuine transient ``server_error`` — whose correct verdict is
 #: ``exhausted`` and whose correct advice is "re-run" — was reported as ``fatal``, *"re-running
@@ -665,7 +707,14 @@ def classify(
     haystack = (execution_text if scoped is None else scoped).lower()
 
     # Fatal first: a rejected schema can coexist with other noise in the record,
-    # and spending the remaining providers on it is pure waste.
+    # and spending the remaining providers on it is pure waste. That reasoning is
+    # unchanged for everything still in this set.
+    #
+    # 🔴 KBR-145 removed ONE entry from it. `invalid[_ ]request` named a generic
+    # error code rather than a specific failure, and DeepSeek uses that code for a
+    # spent balance, so "fatal first" reported a billing state as a broken
+    # workflow. It now lives in `FATAL_UNLESS_PROVIDER_NAMED_PATTERNS`, consulted
+    # below once quota and credentials have had their turn.
     hit = _first_match(FATAL_PATTERNS, haystack)
     if hit:
         return "fatal", f"workflow-level failure: {hit!r}"
@@ -677,6 +726,21 @@ def classify(
     hit = _first_match(CREDENTIAL_PATTERNS, haystack)
     if hit:
         return "exhausted", f"provider rejected the credentials or model: {hit!r}"
+
+    # 🔴 KBR-145. A generic error CODE is fatal only once the two sets that name a
+    # provider-side cause have had their turn: DeepSeek reports a spent balance with
+    # OpenAI's generic code, so checking it first called a billing state a broken
+    # workflow. Reaching this branch returns `fatal`, which retries NOTHING -- the
+    # retry is what the two sets above unlock by matching instead.
+    #
+    # The tier stops HERE and does not also yield to the transient set below, whose
+    # weakest members (`\btimeout\b`, `\bcapacity\b`) a model can write in its own
+    # prose: that would call a $1.79 billed rejection `exhausted` and spend it again.
+    # The symmetric exposure from quota's own weak members is real and is stated
+    # beside the tuple rather than denied here.
+    hit = _first_match(FATAL_UNLESS_PROVIDER_NAMED_PATTERNS, haystack)
+    if hit:
+        return "fatal", f"workflow-level failure: {hit!r}"
 
     hit = _first_match(EXHAUSTED_PATTERNS, haystack)
     if hit:
@@ -1235,11 +1299,18 @@ def _write_diagnostic(
         # the failure an operator hits most often printed no guidance at all.
         reset = re.search(r"limit will reset at ([^\]\"]+)", evidence, re.I)
         lines += [
+            # 🔴 KBR-145: named OpenRouter until this ticket, and by then the
+            # profile had pointed at DeepSeek since 2026-07-28. The sentence was
+            # tolerable while this branch was reached rarely; fixing the
+            # classifier makes it the text an operator reads on the MOST common
+            # failure, so a wrong provider name here is a wrong instruction at
+            # the worst moment. Neutral wording cannot rot the same way: the
+            # profile is what selects a provider, and this module cannot see it.
             "The provider could not serve the request because its quota or "
-            "balance is spent. OpenRouter, the gateway the current kitty "
-            "profile points at, bills from a prepaid credit "
-            "balance and has no overage billing, so calls fail until it is "
-            "topped up." + (f" Resets at {reset.group(1).strip()}." if reset else ""),
+            "balance is spent. The gateway the active kitty profile points at "
+            "bills from a prepaid balance with no overage, so calls fail until "
+            "it is topped up."
+            + (f" Resets at {reset.group(1).strip()}." if reset else ""),
             "",
             "Nothing is wrong with this pull request, but the review did not "
             "run, so this check fails. Top up the balance and re-run.",
