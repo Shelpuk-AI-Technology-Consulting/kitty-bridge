@@ -46,10 +46,18 @@ class _Recorder:
 
 
 async def _serve(handler: Callable, port: int) -> web.AppRunner:
-    """Start a local aiohttp app on *port* and return its runner."""
+    """Start a local aiohttp app on *port* and return its runner.
+
+    ``shutdown_timeout`` is deliberately short. ``cleanup()`` waits for in-flight
+    handlers, so a test that deliberately stalls one would otherwise pay the
+    handler's full sleep at teardown -- 30 s for a 1 s assertion. Worse, a
+    teardown blocked on a live connection is the shape that behaves differently
+    across this repo's 3.10-3.13 matrix, so it is bounded here rather than left
+    to the default.
+    """
     app = web.Application()
     app.router.add_route("*", "/{tail:.*}", handler)
-    runner = web.AppRunner(app)
+    runner = web.AppRunner(app, shutdown_timeout=0.1)
     await runner.setup()
     await web.TCPSite(runner, "127.0.0.1", port).start()
     return runner
