@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Iterable
+from collections.abc import Collection, Iterable
 from functools import cache, lru_cache
 from pathlib import Path
 
@@ -86,20 +86,7 @@ def _coerce_context_tokens(value: object) -> int | None:
 _AMBIGUOUS = object()
 
 
-def _catalog_tail(key: str) -> str:
-    """Return the part of a catalog key after its first separator.
-
-    Args:
-        key: A catalog key or model name, with or without a vendor prefix.
-
-    Returns:
-        The text after the first ``"/"``, or the whole key when it has none.
-    """
-    _, _, tail = key.partition("/")
-    return tail or key
-
-
-def _match_catalog(query: str, keys: set[str]) -> str | object | None:
+def _match_catalog(query: str, keys: Collection[str]) -> str | object | None:
     """Match a model name against a set of catalog keys.
 
     Tries, in order: an exact match; the query as a ``"/"``-delimited suffix of
@@ -110,7 +97,8 @@ def _match_catalog(query: str, keys: set[str]) -> str | object | None:
 
     Args:
         query: The model name to look up, already lowercased.
-        keys: The catalog's keys, already lowercased.
+        keys: The catalog's keys, already lowercased. The caller passes the
+            cached catalog mapping itself, so no copy is built per request.
 
     Returns:
         The matching key, :data:`_AMBIGUOUS` when a step matched more than one
@@ -138,7 +126,7 @@ def _match_catalog(query: str, keys: set[str]) -> str | object | None:
     return None
 
 
-def _resolve_catalog(model: str, keys: set[str]) -> str | None:
+def _resolve_catalog(model: str, keys: Collection[str]) -> str | None:
     """Resolve a model name against a catalog, retrying once without its prefix.
 
     A profile may name a model in its provider's dialect (``azure/gpt-4o``)
@@ -306,7 +294,7 @@ def _lookup_override(model: str) -> int | None:
     if not overrides:
         return None
 
-    key = _resolve_catalog(model, set(overrides))
+    key = _resolve_catalog(model, overrides)
     return overrides[key] if key is not None else None
 
 
@@ -373,7 +361,7 @@ def get_model_context_tokens(
         logger.warning("Invalid provider_config context_window for %s/%s", provider, model)
 
     metadata = _load_metadata()
-    matched_id = _resolve_catalog(model, set(metadata))
+    matched_id = _resolve_catalog(model, metadata)
     if matched_id is not None:
         value = _coerce_context_tokens(metadata[matched_id].get("context_length"))
         if value is not None:

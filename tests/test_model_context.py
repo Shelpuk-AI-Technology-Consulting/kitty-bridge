@@ -764,7 +764,7 @@ class TestPrefixedQueryTailRetry:
     def test_empty_head_still_resolves(self):
         """R4: a leading separator leaves a usable tail and must not raise.
 
-        ``"".partition("/")`` yields an empty head and a full tail, so this is
+        ``"/gpt-4o".partition("/")`` yields an empty head and a full tail, so this is
         the other half of the guard from ``test_empty_tail_returns_default``.
         """
         from kitty.providers.model_context import get_model_context_tokens
