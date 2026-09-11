@@ -1491,6 +1491,77 @@ class TestGetMaxContextChars:
             mc._load_overrides.cache_clear()
 
 
+class TestMaxContextCharsWithPrefixedProfileModel:
+    """KBR-151: a profile model with a provider prefix sizes the budget correctly.
+
+    ``_get_max_context_chars`` reads ``_active_model`` -- the raw profile model,
+    deliberately, since KBR-127 made ``cc_request["model"]`` the single string
+    every *routing* decision reads. A profile written ``azure/gpt-4o`` used to
+    miss the context catalog entirely and take the 200,000-token default, so the
+    bridge believed it had ~56% more room than the model has and sent an
+    oversized request instead of compacting.
+    """
+
+    def _budget_for(self, model: str) -> int:
+        server = _make_server()
+        server._active_provider = StubProvider()
+        server._active_model = model
+        server._active_provider_config = {}
+        server._backends = None
+        return server._get_max_context_chars()
+
+    @pytest.mark.parametrize(
+        ("prefixed", "bare"),
+        [
+            ("opencode/minimax-m2.5", "minimax-m2.5"),
+            ("azure/gpt-4o", "gpt-4o"),
+        ],
+    )
+    def test_prefixed_profile_model_gets_the_bare_models_budget(self, prefixed, bare):
+        budget = self._budget_for(prefixed)
+        assert budget == self._budget_for(bare)
+        # Equality alone passes when both sides sit on the default -- the bug.
+        assert budget != tokens_to_chars(DEFAULT_CONTEXT_TOKENS)
+
+    def test_balancing_pool_sees_the_prefixed_members_real_window(self):
+        """The pool's budget is its smallest member's, prefix or not.
+
+        The balancing branch reads each member profile's ``model``, a different
+        source from ``_active_model``, and ``min()`` only ever moves the budget
+        down -- so one member resolving the default hid the real, smaller window
+        of another and let the whole pool over-send.
+        """
+
+        def budget(azure_model: str) -> int:
+            server = _make_server()
+            server._backends = [
+                (
+                    StubProvider(),
+                    "key1",
+                    Profile(
+                        name="p1",
+                        provider="azure",
+                        model=azure_model,
+                        auth_ref="dd7f361b-3794-4343-a917-906760d3cde4",
+                    ),
+                ),
+                (
+                    StubProvider(),
+                    "key2",
+                    Profile(
+                        name="p2",
+                        provider="openrouter",
+                        model="google/gemini-2.0-flash-001",
+                        auth_ref="76df9193-5b84-4824-8c35-a1dce9c01d64",
+                    ),
+                ),
+            ]
+            return server._get_max_context_chars()
+
+        assert budget("azure/gpt-4o") == budget("gpt-4o")
+        assert budget("azure/gpt-4o") != tokens_to_chars(DEFAULT_CONTEXT_TOKENS)
+
+
 # ---------------------------------------------------------------------------
 # Context-aware compaction and size checking
 # ---------------------------------------------------------------------------

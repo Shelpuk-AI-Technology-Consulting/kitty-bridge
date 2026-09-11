@@ -1330,6 +1330,52 @@ component is exactly the mask — and test percent-encoded and URL-embedded form
 cases. For the broader "does the password reach a log" sweep, generate a distinctive sentinel
 that cannot collide with any other field.
 
+**Where the budget itself comes from — and why it is not `normalize_model_name`.** TR-3's Given
+is "a conversation that exceeds the model's context window". That window is a *resolved* value,
+not a given: `_get_max_context_chars` asks `get_model_context_tokens(provider, model, config)`,
+which searches two catalogs — the overrides catalog (`model_context_overrides.json`, or a newer
+revision **synced from GitHub at runtime**) and the OpenRouter-derived `model_metadata.json`.
+Until KBR-151 this document assumed the window was simply known. It was not: three of the four
+query/key spellings missed, and a miss is silent.
+
+- **Both catalogs are matched by one rule** (`_resolve_catalog`): exact, then query-as-suffix-of-key,
+  then key-as-suffix-of-query, then one retry with the query's leading vendor segment removed.
+  Before KBR-151 each catalog had one half of that rule, in opposite directions, so a profile
+  written `azure/gpt-4o` resolved the 200,000-token default instead of 128,000 — the bridge then
+  believed it had ~56% more room than the model has and sent an oversized request rather than
+  compacting. That is an I1 breach produced by arithmetic, not by translation, which is why it
+  went unnoticed by everything in §3.
+- **Not via the adapter's `normalize_model_name`**, which the ticket originally proposed. That
+  method translates into the **provider's** dialect; the catalogs are keyed in **OpenRouter's**.
+  Measured across all 23 providers: it would fix 5,336 lookups and break 754 — 395 on `anthropic`
+  (its `normalize_model_name` replaces dots with hyphens, and the catalog ids carry the dots) and
+  359 on `vertex` (its version prepends `google/`). It would also stand a second, differently
+  normalized model string beside `cc_request["model"]`, which KBR-127 made the single source of
+  truth for every routing decision — see M14 and P20.
+- **The invariant the matcher rests on: no two keys in a catalog end in the same segment.** Two
+  such keys both match one query, so every lookup for that model goes ambiguous and falls to the
+  default. Verified exhaustively, and the rule must be the **final** segment, not the part after
+  the first separator: the looser reading leaves 640 ambiguous combinations, and the two coincide
+  only while every key has at most two segments — true of both catalogs today, which is exactly
+  how a guard written on the loose rule would look correct and stop protecting the moment a
+  three-segment id appeared. The two catalogs are guarded differently **because they change through different
+  doors** — `model_metadata.json` moves by a refresh script landing in a pull request, so a **test**
+  suffices (L2, `test_model_context_packaged_catalog.py`); the overrides catalog can be replaced
+  from the network with no release and no review, so a colliding revision is **rejected at load**
+  in favour of the packaged file. Enforce where a file can change unreviewed; test where it cannot.
+- **Ambiguity is terminal.** A catalog that cannot identify the entry declines and the next
+  priority source answers; it does not retry a shorter string and return a number it has just
+  called ambiguous.
+- **A fall-through to `DEFAULT_CONTEXT_TOKENS` is logged**, at `INFO`, once per `(provider, model)`.
+  The budget is recomputed on every request, so an unconditional line would be one per turn — and
+  the silence is precisely what let KBR-151 live undetected. `INFO` not `WARNING`: an unknown model
+  is routine and correct for a profile naming a local or private model.
+- **Open, referred onward:** the overrides catalog outranks a profile's hand-written
+  `provider_config["context_window"]`, and since KBR-151 one key captures every prefixed spelling
+  of its model. Whether a *network-synced* catalog should outrank the one setting the operator
+  typed is a question about operator authority, not about prefixed names, and is filed as
+  [KBR-170](https://shelpuk.atlassian.net/browse/KBR-170) rather than decided inside a bug fix.
+
 **Mutation testing.** Line coverage cannot tell a real assertion from `assert result is not
 None`. `mutmut` closes that gap.
 
@@ -1349,6 +1395,7 @@ None`. `mutmut` closes that gap.
   | `kitty.bridge.messages.*`, `kitty.bridge.responses.*`, `kitty.bridge.gemini.*`, `kitty.bridge.engine` | Translation — I1 |
   | `kitty.bridge.server._compact_messages*`, `_compact_with_tighter_budget*`, `_validate_tool_call_pairing*`, `_truncate_oversized_tool_results*`, `_apply_compaction*`, `_normalize_model*`, `_get_max_context_chars*` | Compaction and pairing — the I1 core, and the thing the rationale was always about |
   | `kitty.providers.*` `translate_to_upstream` / `normalize_request` / `build_upstream_headers` | The register's provider half — I1 and I2 |
+  | `kitty.providers.model_context.*` | Where the compaction budget is actually resolved since KBR-151. The `_get_max_context_chars*` row above now covers a dispatcher: it reads `_active_model` and hands both catalogs to `_resolve_catalog`. A mutation in the matcher — dropping the tail retry, collapsing ambiguity into a miss — changes every budget in the product and would not be caught by any target listed above |
   | `kitty.providers.openai_subscription._cc_to_responses*`, `_prepare_responses_body*`, `_convert_content_types*`, `_build_user_agent*` | P13–P17 and the F1 user-agent. These are where the subscription path's real body is built; omitting them lets the score stay healthy while nothing detects a regression in the mutations this design only just registered |
   | `kitty.egress`, `kitty.egress_guard` | I3, including the startup guard |
   | `kitty.bridge.tool_audit`, `kitty.profiles.*`, `kitty.validation` | Supporting correctness |

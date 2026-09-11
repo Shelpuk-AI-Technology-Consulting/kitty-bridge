@@ -1,6 +1,7 @@
 """Tests for model_context.py — model metadata lookup."""
 
 import json
+import logging
 import os
 import time
 from pathlib import Path
@@ -659,3 +660,292 @@ class TestTokensToChars:
 
         assert tokens_to_chars(1) == TOKENS_TO_CHARS_FACTOR
         assert TOKENS_TO_CHARS_FACTOR == 4
+
+
+# ---------------------------------------------------------------------------
+# KBR-151 — a provider-prefixed model resolves the same window as the bare one
+# ---------------------------------------------------------------------------
+
+
+class TestPrefixedQueryTailRetry:
+    """A query carrying a provider prefix reaches a differently-prefixed catalog id.
+
+    The metadata table is keyed in OpenRouter's dialect (``openai/gpt-4o``) and
+    a profile may name the same model in its provider's dialect
+    (``azure/gpt-4o``). Before KBR-151 only the bare-query direction resolved,
+    so a prefixed profile model silently took ``DEFAULT_CONTEXT_TOKENS`` and
+    sized the compaction budget from a window the model does not have.
+    """
+
+    def test_provider_prefixed_query_matches_prefixed_catalog_entry(self):
+        """R1: ``custom/gpt-4o`` reaches ``openai/gpt-4o`` by dropping its prefix."""
+        from kitty.providers.model_context import get_model_context_tokens
+
+        assert get_model_context_tokens(provider="custom_openai", model="custom/gpt-4o") == 128000
+
+    def test_prefixed_query_matches_case_insensitively(self):
+        """R1: the tail retry folds case, like every other step of the lookup."""
+        from kitty.providers.model_context import get_model_context_tokens
+
+        assert get_model_context_tokens(provider="azure", model="Azure/GPT-4o") == 128000
+
+    def test_tail_retry_does_not_override_the_overrides_catalog(self):
+        """R2a: the overrides catalog still outranks anything metadata can reach."""
+        from kitty.providers.model_context import get_model_context_tokens
+
+        _set_overrides({"gpt-4o": 999_999})
+        assert get_model_context_tokens(provider="azure", model="azure/gpt-4o") == 999_999
+
+    def test_tail_retry_does_not_override_provider_config(self):
+        """R2b: an explicit per-profile context_window still outranks metadata."""
+        from kitty.providers.model_context import get_model_context_tokens
+
+        result = get_model_context_tokens(
+            provider="azure",
+            model="azure/gpt-4o",
+            provider_config={"context_window": 50_000},
+        )
+        assert result == 50_000
+
+    def test_exact_match_on_the_full_query_wins_over_the_tail(self):
+        """R2c: an OpenRouter-spelled query still resolves by exact match.
+
+        ``openai/gpt-4o-mini`` must not be reduced to ``gpt-4o-mini`` and
+        re-matched; the exact hit comes first and the retry never runs.
+        """
+        from kitty.providers.model_context import get_model_context_tokens
+
+        assert get_model_context_tokens(provider="openrouter", model="openai/gpt-4o-mini") == 128000
+
+    def test_ambiguous_tail_returns_default_and_warns_about_the_tail(self, tmp_path: Path, monkeypatch, caplog):
+        """R3a: a tail matching two vendors is not guessed at."""
+        import kitty.providers.model_context as mc
+
+        metadata_file = tmp_path / "ambiguous.json"
+        metadata_file.write_text(
+            json.dumps(
+                [
+                    {"id": "provider-a/shared-model", "name": "A", "context_length": 10000},
+                    {"id": "provider-b/shared-model", "name": "B", "context_length": 20000},
+                ]
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(mc, "_METADATA_PATH", metadata_file)
+        mc._load_metadata.cache_clear()
+
+        with caplog.at_level(logging.WARNING, logger="kitty.providers.model_context"):
+            result = mc.get_model_context_tokens(provider="custom_openai", model="custom_openai/shared-model")
+
+        assert result == mc.DEFAULT_CONTEXT_TOKENS
+        assert any("shared-model" in r.getMessage() for r in caplog.records if r.levelname == "WARNING")
+
+    def test_only_the_first_segment_is_stripped(self, tmp_path: Path, monkeypatch):
+        """R4: a multi-segment path does not collapse to its last segment.
+
+        Fireworks passes full paths through unchanged, so the lookup must not
+        reduce ``accounts/fireworks/routers/gpt-4o`` to ``gpt-4o`` and claim a
+        window for an unrelated model.
+        """
+        import kitty.providers.model_context as mc
+
+        result = mc.get_model_context_tokens(
+            provider="fireworks",
+            model="accounts/fireworks/routers/gpt-4o",
+        )
+        assert result == mc.DEFAULT_CONTEXT_TOKENS
+
+    def test_empty_tail_returns_default(self):
+        """R4: a trailing separator has no tail to retry and must not raise."""
+        import kitty.providers.model_context as mc
+
+        assert mc.get_model_context_tokens(provider="azure", model="azure/") == mc.DEFAULT_CONTEXT_TOKENS
+
+    def test_empty_head_still_resolves(self):
+        """R4: a leading separator leaves a usable tail and must not raise.
+
+        ``"".partition("/")`` yields an empty head and a full tail, so this is
+        the other half of the guard from ``test_empty_tail_returns_default``.
+        """
+        from kitty.providers.model_context import get_model_context_tokens
+
+        assert get_model_context_tokens(provider="azure", model="/gpt-4o") == 128000
+
+
+class TestOverridesOutrankMetadataForEveryQueryShape:
+    """R9: a pinned model wins however the query and the key are spelled.
+
+    The overrides catalog exists to pin a window that must not be taken from
+    the OpenRouter metadata table. Before KBR-151 the two catalogs were matched
+    by opposite half-rules, so an overrides catalog carrying a *prefixed* key
+    was silently out-ranked by metadata for three of the four spellings — and
+    the overrides catalog is the one that can be replaced from the network
+    without a release.
+    """
+
+    @pytest.mark.parametrize(
+        "query",
+        ["z-ai/glm-5.3", "glm-5.3", "opencode/glm-5.3", "azure/glm-5.3"],
+    )
+    def test_pinned_model_wins_for_every_spelling(self, query, tmp_path: Path, monkeypatch):
+        import kitty.providers.model_context as mc
+
+        metadata_file = tmp_path / "glm.json"
+        metadata_file.write_text(
+            json.dumps([{"id": "z-ai/glm-5.3", "name": "GLM", "context_length": 1_310_720}]),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(mc, "_METADATA_PATH", metadata_file)
+        mc._load_metadata.cache_clear()
+        _set_overrides({"z-ai/glm-5.3": 1_048_576})
+
+        assert mc.get_model_context_tokens(provider="opencode_go", model=query) == 1_048_576
+
+
+class TestAmbiguityIsTerminal:
+    """R3b: a catalog that cannot tell which entry was meant declines outright.
+
+    Retrying the tail after an ambiguous match would log "ambiguous" and then
+    answer anyway, from the same catalog. If the matcher cannot identify the
+    entry, a second pass over a shorter string is guessing with extra steps.
+    """
+
+    def test_ambiguous_match_does_not_fall_through_to_the_tail_retry(self):
+        from kitty.providers.model_context import DEFAULT_CONTEXT_TOKENS, get_model_context_tokens
+
+        # Both keys are suffixes of the query, so the match is ambiguous --
+        # even though the tail "z-ai/glm-5.3" would match one of them exactly.
+        _set_overrides({"glm-5.3": 111_111, "z-ai/glm-5.3": 222_222})
+        result = get_model_context_tokens(provider="opencode_go", model="a/z-ai/glm-5.3")
+        assert result not in (111_111, 222_222)
+        assert result == DEFAULT_CONTEXT_TOKENS
+
+    def test_overrides_still_outrank_provider_config(self):
+        """R11: the documented precedence is pinned, not incidental."""
+        from kitty.providers.model_context import get_model_context_tokens
+
+        _set_overrides({"gpt-4o": 777_777})
+        result = get_model_context_tokens(
+            provider="azure",
+            model="gpt-4o",
+            provider_config={"context_window": 128_000},
+        )
+        assert result == 777_777
+
+
+class TestSyncedOverridesMustBeTailUnique:
+    """R10b: a synced catalog that would make the matcher ambiguous is refused.
+
+    Tail-uniqueness is what makes the matcher ambiguity-free, and the synced
+    catalog is the one artifact here that changes without a pull request. A
+    revision violating it is rejected wholesale rather than merged into an
+    ambiguous state, which is how ``_load_overrides`` already treats a cached
+    copy that is not a JSON object.
+    """
+
+    def test_colliding_synced_revision_is_rejected_for_the_packaged_catalog(self):
+        from kitty.providers.model_context import get_model_context_tokens
+
+        _set_overrides({"glm-5.3": 111_111})
+        _set_remote_cache({"z-ai/glm-5.3": 999_999, "zhipu/glm-5.3": 888_888})
+        assert get_model_context_tokens(provider="opencode_go", model="glm-5.3") == 111_111
+
+    def test_collision_is_judged_on_the_final_segment_not_the_first_split(self):
+        """A three-segment key collides with the bare key it ends in.
+
+        ``a/b/glm-5.3`` and ``glm-5.3`` are distinct after their first
+        separator, so a guard keyed on that would wave the pair through --
+        and the query ``glm-5.3`` would then match both. The rule is the
+        final segment.
+        """
+        from kitty.providers.model_context import _colliding_keys
+
+        assert _colliding_keys(["a/b/glm-5.3", "glm-5.3"]) == ["a/b/glm-5.3", "glm-5.3"]
+        assert _colliding_keys(["a/b/glm-5.3", "glm-5.2"]) == []
+
+    def test_multi_segment_colliding_revision_is_also_rejected(self):
+        from kitty.providers.model_context import get_model_context_tokens
+
+        _set_overrides({"glm-5.3": 111_111})
+        _set_remote_cache({"a/b/glm-5.3": 999_999, "glm-5.3": 888_888})
+        assert get_model_context_tokens(provider="opencode_go", model="glm-5.3") == 111_111
+
+    def test_tail_unique_synced_revision_still_replaces_the_packaged_catalog(self):
+        """The guard must not pass by rejecting every synced revision."""
+        from kitty.providers.model_context import get_model_context_tokens
+
+        _set_overrides({"glm-5.3": 111_111})
+        _set_remote_cache({"z-ai/glm-5.3": 999_999})
+        assert get_model_context_tokens(provider="opencode_go", model="glm-5.3") == 999_999
+
+
+class TestDefaultFallbackIsObservable:
+    """R6: falling back to the default is logged, once per model.
+
+    A silent fallback is what kept KBR-151 invisible. ``_get_max_context_chars``
+    runs on every request, so the line is deduplicated per (provider, model)
+    rather than emitted per turn.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _clear_fallback_log_cache(self):
+        import kitty.providers.model_context as mc
+
+        mc._log_default_fallback.cache_clear()
+        yield
+        mc._log_default_fallback.cache_clear()
+
+    def test_fallback_is_logged_once_naming_provider_model_and_window(self, caplog):
+        import kitty.providers.model_context as mc
+
+        with caplog.at_level(logging.INFO, logger="kitty.providers.model_context"):
+            mc.get_model_context_tokens(provider="ollama", model="llama3-custom")
+
+        records = [r for r in caplog.records if r.levelname == "INFO"]
+        assert len(records) == 1
+        message = records[0].getMessage()
+        assert "ollama" in message
+        assert "llama3-custom" in message
+        assert str(mc.DEFAULT_CONTEXT_TOKENS) in message.replace(",", "")
+
+    def test_repeating_the_same_lookup_logs_nothing_further(self, caplog):
+        import kitty.providers.model_context as mc
+
+        with caplog.at_level(logging.INFO, logger="kitty.providers.model_context"):
+            mc.get_model_context_tokens(provider="ollama", model="llama3-custom")
+            mc.get_model_context_tokens(provider="ollama", model="llama3-custom")
+
+        assert len([r for r in caplog.records if r.levelname == "INFO"]) == 1
+
+    def test_a_different_unknown_model_logs_again(self, caplog):
+        import kitty.providers.model_context as mc
+
+        with caplog.at_level(logging.INFO, logger="kitty.providers.model_context"):
+            mc.get_model_context_tokens(provider="ollama", model="llama3-custom")
+            mc.get_model_context_tokens(provider="ollama", model="mistral-custom")
+
+        assert len([r for r in caplog.records if r.levelname == "INFO"]) == 2
+
+    def test_the_same_model_on_a_different_provider_logs_again(self, caplog):
+        """The dedup key is the pair, not the model alone.
+
+        Two profiles can name the same unknown model on different providers,
+        and an operator fixing one needs to see the other.
+        """
+        import kitty.providers.model_context as mc
+
+        with caplog.at_level(logging.INFO, logger="kitty.providers.model_context"):
+            mc.get_model_context_tokens(provider="ollama", model="llama3-custom")
+            mc.get_model_context_tokens(provider="custom_openai", model="llama3-custom")
+
+        assert len([r for r in caplog.records if r.levelname == "INFO"]) == 2
+
+    def test_the_logged_model_is_the_one_the_operator_configured(self, caplog):
+        """The line names the query, never the tail the retry derived from it."""
+        import kitty.providers.model_context as mc
+
+        with caplog.at_level(logging.INFO, logger="kitty.providers.model_context"):
+            mc.get_model_context_tokens(provider="azure", model="azure/unknown-deployment")
+
+        message = caplog.records[0].getMessage()
+        assert "azure/unknown-deployment" in message
