@@ -6,6 +6,10 @@ from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
 from urllib.parse import urlsplit, urlunsplit
 
+# Stands in for anything withheld from a message or a log. Spelled the same as
+# `kitty.egress._MASK`, which masks a proxy password, so one convention covers both.
+_MASK = "****"
+
 
 class ProviderAdapter(ABC):
     """Interface for upstream Chat Completions API providers.
@@ -96,14 +100,188 @@ class ProviderAdapter(ABC):
         return self.default_base_url
 
     @staticmethod
+    def compose_upstream_url(base_url: str, endpoint_path: str) -> str:
+        """Join a base URL and an endpoint path into the address to request.
+
+        The bridge used to compose this by string concatenation, which put the
+        endpoint *after* any query string the base URL carried and sent the request
+        somewhere the profile never named (KBR-143).  Azure OpenAI's documented
+        endpoint always carries ``?api-version=``, so that class of base URL could
+        not be served at all.  This method is the one composition rule: every site
+        that needs an upstream address calls it.
+
+        The endpoint joins the **path** component.  Scheme, host, port and fragment
+        are the base URL's, untouched — only the endpoint's path and query are read,
+        so a protocol-relative ``endpoint_path`` cannot move the request to another
+        host.  Queries merge: when both sides carry one, the base URL's parameters
+        come first, minus any whose name the endpoint also uses, followed by the
+        endpoint's query verbatim.
+
+        The endpoint wins a name clash because the adapter that supplied it is
+        written against the API version it names, while the user's other parameters
+        survive because carrying them is why a query was pasted at all.  Surviving
+        parameters are copied as written rather than re-encoded: ``parse_qsl`` plus
+        ``urlencode`` would turn ``?a`` into ``a=`` and ``%20`` into ``+``, silently
+        rewriting a value the caller chose.
+
+        Args:
+            base_url: The provider's base URL, as :meth:`build_base_url` returns it.
+            endpoint_path: The endpoint to append, leading slash included — and
+                possibly carrying a query of its own, as Azure's does.
+
+        Returns:
+            The full URL to request.  A ``base_url`` that cannot be parsed falls
+            back to plain concatenation instead of raising: both
+            :func:`kitty.validation.validate_api_key` and
+            ``BridgeServer._translate_upstream_error`` compose where an exception
+            would replace a readable message with a traceback.
+        """
+        # `urlsplit` rejects a malformed IPv6 literal such as "https://[::1/v1".
+        # Such a URL is unusable either way; returning the old concatenation keeps
+        # the failure a message from the HTTP client rather than a crash here.
+        try:
+            base = urlsplit(base_url)
+            endpoint = urlsplit(endpoint_path)
+        except ValueError:
+            return base_url.rstrip("/") + endpoint_path
+
+        # `rstrip`, collapsing every trailing slash, because that is what the three
+        # concatenation sites this replaces did. Keeping a doubled trailing slash
+        # would be more faithful to what the user typed and would break a base URL
+        # that works today, for a shape that is a typo rather than an intention.
+        query = ProviderAdapter._merge_query(base.query, endpoint.query)
+        return urlunsplit(base._replace(path=base.path.rstrip("/") + endpoint.path, query=query))
+
+    @staticmethod
+    def redact_url_for_display(url: str) -> str:
+        """Return a form of ``url`` safe to put in a log, a message or a transcript.
+
+        Userinfo is dropped and every query **value** is masked, the parameter names
+        surviving.  Before KBR-143 a query-bearing base URL could not reach an
+        upstream at all, so no working profile carried one; now that they work, a
+        query is the standard place a gateway keeps a credential —
+        ``?subscription-key=``, ``?code=``, a SAS ``?sig=``.  Both places the bridge
+        echoes a composed URL reach a durable record: the HTTP 404 diagnostic travels
+        into the agent transcript and the access log, and pre-flight's failure reason
+        is printed at launch.
+
+        Values are masked indiscriminately rather than by name, because telling a
+        credential from a routing parameter means guessing, and a guess that is wrong
+        once leaks a key.  The parameter *name* is what the diagnostic needs — it says
+        the parameter was sent — so nothing useful is lost.
+
+        Args:
+            url: The URL about to be shown to a human.
+
+        A **valueless** parameter is left as written: ``?debug`` has no value to mask,
+        and its text is a name by this rule.  A bare token used as a parameter name
+        would therefore survive, which is accepted — masking names as well would cost
+        every parameter name in the diagnostic to protect a shape no API uses.
+
+        The fragment is masked whole rather than per-parameter, because an HTTP client
+        never sends one: there is nothing to diagnose in a component the provider does
+        not see, so none of it is worth keeping.
+
+        Returns:
+            The redacted URL.  An unparseable one — the very case a malformed-profile
+            message has to report — is redacted textually instead of being withheld
+            entirely, because a message that shows nothing diagnoses nothing.
+        """
+        try:
+            parts = urlsplit(url)
+        except ValueError:
+            return ProviderAdapter._redact_unparseable_url(url)
+
+        # A URL with no authority cannot be redacted structurally: "u:p@host/v1" parses
+        # as scheme "u" with the credentials in the PATH, where no netloc rule reaches
+        # them. Such a URL can never name a host, so it is only ever shown as an error.
+        if not parts.netloc:
+            return ProviderAdapter._redact_unparseable_url(url)
+
+        # Split on "&" rather than parsing: `parse_qsl` would decode the names, and
+        # re-encoding them could alter a name the reader needs to recognise.
+        if parts.query:
+            masked = [p if "=" not in p else f"{p.split('=', 1)[0]}={_MASK}" for p in parts.query.split("&")]
+            parts = parts._replace(query="&".join(masked))
+
+        if parts.fragment:
+            parts = parts._replace(fragment=_MASK)
+
+        # The common case has no userinfo, which keeps an ordinary URL byte-identical.
+        if "@" in parts.netloc:
+            parts = parts._replace(netloc=parts.netloc.rsplit("@", 1)[1])
+
+        return urlunsplit(parts)
+
+    @staticmethod
+    def _redact_unparseable_url(url: str) -> str:
+        """Redact a URL :func:`~urllib.parse.urlsplit` cannot read, by text alone.
+
+        There is no structure to edit, so this over-redacts deliberately: everything
+        from the first ``"?"`` is treated as query and dropped, and anything before an
+        ``"@"`` is treated as userinfo and dropped.  What survives is the scheme, host
+        and path — the part that names the address, which is what the message needs.
+
+        A path legitimately containing ``"@"`` loses its head under this rule. That is
+        an acceptable price on a URL that is already malformed, and the alternative —
+        showing the value whole — is how a credential reaches a log.
+
+        Args:
+            url: The unparseable URL.
+
+        Returns:
+            The textually redacted form.
+        """
+        head, query_separator, _ = url.partition("?")
+
+        # `partition` returns the whole string as its FIRST element when the separator
+        # is absent, so a URL with no "://" would otherwise be read as all scheme and
+        # no host -- leaving the userinfo strip below nothing to work on.
+        scheme, scheme_separator, rest = head.partition("://")
+        if not scheme_separator:
+            scheme, rest = "", head
+
+        if "@" in rest:
+            rest = rest.rsplit("@", 1)[1]
+
+        shown = f"{scheme}://{rest}" if scheme else rest
+        return f"{shown}?{_MASK}" if query_separator else shown
+
+    @staticmethod
+    def _merge_query(base_query: str, endpoint_query: str) -> str:
+        """Combine two query strings, letting the endpoint's parameters win.
+
+        Args:
+            base_query: The query component of the configured base URL.
+            endpoint_query: The query component of the adapter's endpoint path.
+
+        Returns:
+            The merged query, with every base parameter whose name the endpoint does
+            not also use, followed by ``endpoint_query`` unchanged.  When either
+            side is empty the other is returned byte-for-byte.
+        """
+        # The common case by far: one side has no query, so nothing is parsed and
+        # the surviving string cannot be altered.
+        if not endpoint_query:
+            return base_query
+        if not base_query:
+            return endpoint_query
+
+        # Names are compared as written, because percent-decoding them would mean
+        # re-encoding the values this split exists to leave alone.
+        endpoint_names = {pair.split("=", 1)[0] for pair in endpoint_query.split("&")}
+        kept = [pair for pair in base_query.split("&") if pair.split("=", 1)[0] not in endpoint_names]
+        return "&".join([*kept, endpoint_query])
+
+    @staticmethod
     def _strip_endpoint_suffix(url: str, suffix: str) -> str:
         """Remove one trailing copy of ``suffix`` from a base URL's path.
 
-        The bridge composes every request as ``base_url + endpoint path``, so a
-        base URL that already ends in that endpoint produces a doubled path and
-        a 404 from the upstream.  Users paste the full endpoint routinely —
-        it is the form every provider's documentation shows — so the redundant
-        tail is removed here rather than rejected (KBR-134).
+        The bridge appends the endpoint path to the base URL, so a base URL that
+        already ends in that endpoint produces a doubled path and a 404 from the
+        upstream.  Users paste the full endpoint routinely — it is the form every
+        provider's documentation shows — so the redundant tail is removed here
+        rather than rejected (KBR-134).
 
         The suffix is a **parameter rather than** :attr:`upstream_path` so that a
         caller always supplies the same path composition will use.  Adapters
@@ -117,9 +295,9 @@ class ProviderAdapter(ABC):
                 leading slash included — for example ``"/chat/completions"``.
 
         Returns:
-            ``url`` with one trailing ``suffix`` removed from its path, or
-            ``url`` unchanged when removing it would alter the address the
-            bridge ends up requesting, or when it cannot be parsed at all.
+            ``url`` with one trailing ``suffix`` removed from its path, or ``url``
+            unchanged when removing it would change the **path** the bridge ends up
+            requesting, or when it cannot be parsed at all.
         """
         # Match the parsed path, never the raw string: "https://chat/completions"
         # ends with "/chat/completions" as text, and stripping that eats the host.
@@ -139,14 +317,21 @@ class ProviderAdapter(ABC):
         if not path.endswith(suffix):
             return url
 
-        # Self-check: keep the candidate only if composing the endpoint back onto
-        # it reproduces the caller's own URL. A query, a fragment or a doubled
-        # slash all survive the match above but would move or change the address,
-        # and this one comparison rejects every such shape without enumerating them.
-        candidate = urlunsplit(parts._replace(path=path[: -len(suffix)]))
-        if candidate.rstrip("/") + suffix == url.rstrip("/"):
-            return candidate
-        return url
+        # Self-check, on the PATH rather than the whole URL (KBR-143). Keep the
+        # candidate only if composing the endpoint back onto it reproduces the path
+        # the caller gave. This still rejects a doubled slash, whose empty segment is
+        # part of the address -- "//chat/completions" and "/chat/completions" are
+        # different paths to nginx and to S3 -- without enumerating shapes.
+        #
+        # KBR-134 compared whole URLs here, which also rejected a query or a fragment,
+        # because it composed by concatenation and a query genuinely could not be
+        # handled. `compose_upstream_url` joins the path component instead, so neither
+        # belongs in the comparison any more: that is what makes Azure's documented
+        # endpoint reachable.
+        candidate_path = path[: -len(suffix)]
+        if candidate_path.rstrip("/") + suffix != path:
+            return url
+        return urlunsplit(parts._replace(path=candidate_path))
 
     def get_upstream_path(self, model: str) -> str:
         """Build the upstream path for a specific model.
@@ -464,4 +649,26 @@ class ProviderError(Exception):
     retry_after: int | None = None
 
 
-__all__ = ["ProviderAdapter", "ProviderError"]
+class UnsupportedModelError(ProviderError):
+    """Raised when a model is served on a dialect the adapter cannot write.
+
+    Distinct from every other :class:`ProviderError` in that **no upstream
+    request is ever made** — the adapter refuses while building the body. That
+    distinction is the reason it is a named class rather than a message:
+    ``BridgeServer._request_with_retry_balancing`` must not mark a backend
+    unhealthy on it, because there is no evidence against the backend, and a
+    balancing pool would otherwise be quarantined by one profile naming a model
+    kitty cannot serve.
+
+    It lives here rather than in the adapter that raises it (KBR-126,
+    ``opencode_go``) because the bridge catches it, and the bridge must not name
+    a concrete provider module.
+
+    It deliberately carries no ``http_status``. Setting ``400`` would reach
+    ``BridgeServer._provider_error_failure_kind``, whose ``400`` branch tests for
+    a context-too-large message and could route a configuration error into the
+    compaction-retry path.
+    """
+
+
+__all__ = ["ProviderAdapter", "ProviderError", "UnsupportedModelError"]

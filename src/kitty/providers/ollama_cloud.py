@@ -316,9 +316,21 @@ class OllamaCloudAdapter(ProviderAdapter):
         return self._session
 
     def _build_url(self, provider_config: dict) -> str:
-        """Build the full upstream URL."""
-        base = (provider_config.get("base_url") or self.default_base_url).rstrip("/")
-        return f"{base}{self.upstream_path}"
+        """Build the full upstream URL.
+
+        This adapter owns its transport, so it composes its own address rather than
+        going through ``BridgeServer._build_upstream_url``.  It shares the one
+        composition rule all the same (KBR-143).
+
+        Args:
+            provider_config: The profile's provider configuration, optionally
+                carrying ``base_url``.
+
+        Returns:
+            The full URL to request.
+        """
+        base = provider_config.get("base_url") or self.default_base_url
+        return self.compose_upstream_url(base, self.upstream_path)
 
     def parse_stream_to_cc_response(self, raw: bytes) -> dict:
         """Parse collected Chat Completions SSE chunks into a CC response."""

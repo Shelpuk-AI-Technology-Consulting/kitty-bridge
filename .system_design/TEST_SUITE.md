@@ -163,7 +163,7 @@ downstream error, so it mutates nothing — leaving **fourteen live** bridge-lev
 | M11 | Force `stream: False` | `_handle_gemini` | Gemini protocol, non-streaming `:generateContent` | The Gemini translator defaults `stream=True`; the non-streaming endpoint must not open an SSE stream. |
 | M12 | Substitute fallback assistant text | `_EMPTY_ASSISTANT_FALLBACK_TEXT` in `bridge/messages/translator.py` **and** `bridge/responses/translator.py` | Upstream returned an empty response | **Response-side**, not part of the twelve request-path rows. |
 | ~~M13~~ | **Withdrawn — no longer a mutation.** Was: discard the conversation and substitute a `[Kitty Bridge: …]` user message. | `_compact_messages` / `_apply_compaction` post-condition | No non-system message survives | **Closed by KBR-5.** The post-condition now raises `CompactionFailedError` and the handler returns a protocol-native 400 downstream; nothing is substituted, so there is no mutation left to register. The row is kept struck through rather than deleted so a reader of finding F3 can still find it. **The trigger recorded here was wrong** — see F3. |
-| M14 | **Replace the destination entirely** — scheme and host are built from the profile by `build_base_url()`; the path by `get_upstream_path(_route_model(cc_request))` — the **request's normalized model**, which is the normalized profile model when there is one and the agent's model when there is not. `_route_model` is the single place that answers this; the auth scheme (P9/P20) and the thinking carrier read it too, and the adapter reads the same key for the body (KBR-127 — it was the raw profile model, so path and body could route differently) | `BridgeServer._build_upstream_url` | Always | The agent addressed a loopback bridge; the request has to reach the real provider. Listed because **the destination is a mutation surface the body cannot show**: on Azure an identical body sent to the wrong deployment path is a different request entirely (§3.3.5). |
+| M14 | **Replace the destination entirely** — scheme and host are built from the profile by `build_base_url()`; the path by `get_upstream_path(_route_model(cc_request))` — the **request's normalized model**, which is the normalized profile model when there is one and the agent's model when there is not. `_route_model` is the single place that answers this; the auth scheme (P9/P20) and the thinking carrier read it too, and the adapter reads the same key for the body (KBR-127 — it was the raw profile model, so path and body could route differently). Base and path are then **composed** by `ProviderAdapter.compose_upstream_url`, not concatenated (KBR-143). | `BridgeServer._build_upstream_url` | Always | The agent addressed a loopback bridge; the request has to reach the real provider. Listed because **the destination is a mutation surface the body cannot show**: on Azure an identical body sent to the wrong deployment path is a different request entirely (§3.3.5). **The query is part of the mutation, not a passenger** (KBR-143): the endpoint joins the *path* component and the two queries merge, the endpoint's parameters winning a name clash and the base URL's others surviving unaltered. A row naming only "path" would let an oracle derive `route.query` and still not know which side owns a clash. The base URL's fragment is carried through and never sent, since no HTTP client puts one on the wire — so an oracle deriving `route.*` from the profile must expect it on the composed URL and absent from the request line. **The composed URL is redacted before it is echoed** into the 404 diagnostic or a pre-flight failure (`redact_url_for_display`): query values and the fragment are masked, which is an I2-adjacent containment property, not a fidelity one — nothing about the request changes. The composition helper is shared with `kitty.validation.validate_api_key` and `OllamaCloudAdapter._build_url`, but **this row's site is the bridge alone**: pre-flight's probe is not a request the agent made, and the register describes what happens to the agent's request. |
 | M15 | Rewrite a string `input` into the single-item list form `[{"type": "message", "role": "user", "content": [{"type": "input_text", "text": <s>}]}]` | `normalize_responses_request` (`bridge/responses/translator.py`), called from `_handle_responses` before the body forks | Always | OpenAI's `CreateResponse` defines the two forms as the **same request**: `input` is `oneOf` a string (*"a text input to the model, equivalent to a text input with the `user` role"*) or an array, and everything downstream reads the array. Fires on every request reaching the handler; a body already in the array form meets the row with a **no-op** rather than avoiding it, so there is no complement state for §3.3.2 assertion 2 to arrange, which is why it is unconditional. Listed rather than omitted because the rewrite is real bytes at the `curl_cffi` boundary of §3.2.3, where `_original_body` **is** this body; the projection cannot express the difference, so the row takes §3.3.1a's escape for P16's reason. **KBR-144.** |
 
 #### 3.2.2 Provider-level
@@ -1055,8 +1055,9 @@ not just the first, and is called from **five** sites in three files — `bridge
 logic.
 
 **Real-socket transport proof already exists, and is strong.** `tests/test_egress_https_proxy.py`
-(601 lines) stands up a local TLS CONNECT proxy that enforces Basic auth and **records every
-`CONNECT` it sees**, plus a local TLS target, and performs real TLS handshakes across all three
+stands up a local TLS CONNECT proxy that enforces Basic auth and **records every `CONNECT` it
+sees**, plus a local TLS target — both since T-W5 shared from
+`tests/harness/connect_proxy.py` (§7.3) — and performs real TLS handshakes across all three
 transport stacks kitty uses: aiohttp (driving the real `egress_cmd._probe`), `curl_cffi` with the
 exact `proxies=` mapping `openai_subscription` passes, and urllib3 shaped as
 `botocore.httpsession._get_proxy_manager` builds it. This is the strongest asset in the area and
@@ -1078,9 +1079,14 @@ the foundation the rest of §5 builds on rather than replaces.
 
 ### 5.2 The sealed-network harness
 
-An L3 harness that closes gaps 1 and 2, built by extending `tests/test_egress_https_proxy.py`'s
-`_ConnectProxy` and `_TlsTarget` rather than writing new infrastructure — that proxy already
+An L3 harness that closes gaps 1 and 2, built on `tests/harness/connect_proxy.py`'s
+`ConnectProxy` and `TlsTarget` rather than writing new infrastructure — that proxy already
 records CONNECT attempts, which is the observation the harness needs.
+
+Those two classes were `_ConnectProxy` and `_TlsTarget`, private to
+`tests/test_egress_https_proxy.py`, until **T-W5 ([KBR-28])** extracted them and registered their
+fixtures as a pytest plugin; §7.3 records what that delivered. `tests/test_egress_https_proxy.py`
+now imports them and keeps only `target_url`, the one seam specific to `kitty egress test`.
 
 ```
        ┌──────────── kitty BridgeServer ────────────┐
@@ -1111,15 +1117,27 @@ The correct assertion is at the **connection** level: every TCP connection the u
 must be attributable to a successful tunnel through the proxy, with any number of requests
 riding on it, and failed tunnels contributing no upstream connections.
 
-**The join.** `ConnectAttempt` records target and authentication status only, which is not enough
-to identify a connection at both ends. Extend it to record the **proxy's outbound source port**
-for each tunnel it opens; the recording upstream already records the peer port of each accepted
-connection. Joining on that port identifies each upstream connection with the tunnel that
-created it. An upstream connection with no matching tunnel port is a bypass, and it is the only
-thing this assertion needs to catch.
+**The join.** `ConnectAttempt` recorded target and authentication status only, which is not enough
+to identify a connection at both ends. **T-W5 added `source_port`** — the proxy's outbound source
+port for each tunnel it opens, and `None` where no tunnel was opened; the recording upstream
+records the peer port of each accepted connection. Joining on that port identifies each upstream
+connection with the tunnel that created it. An upstream connection with no matching tunnel port is
+a bypass, and it is the only thing this assertion needs to catch.
+`unattributable_peer_ports()` in the same module states the assertion once, so each transport
+slice inherits it rather than re-deriving it.
 
 (Peer *address* cannot do this job: with bridge, proxy and upstream on loopback in one process,
 proxied and direct connections both present `127.0.0.1`.)
+
+**The premise, which is a property of the wiring and not a law.** A source port identifies a
+connection only because every leg terminates on the same destination `ip:port`, so the kernel will
+not hand the same port to a second connection while the first is in `TIME_WAIT`. Point a future
+leg at a *different* destination and a direct connection may legitimately draw a live tunnel's
+source port and be attributed to it. The resulting error is a false negative — a breach
+unreported — never a false positive, so it degrades safety rather than stability. Re-derive this
+before adding a second upstream port. The join is also over **connections**, never requests: a
+request-level log must be reduced to its distinct connections first, since one tunnel may carry
+many requests.
 
 #### 5.2.2 The three phases, per transport
 
@@ -1249,7 +1267,7 @@ Three consequences the rest of §5 must not paper over:
 2. **The sealed-network harness proves nothing about them** unless parametrised over the
    transport. It must run over `{bridge aiohttp session, provider aiohttp session, curl_cffi
    session, botocore client}` — the shape `tests/test_egress_https_proxy.py` already uses, which
-   is a further reason to extend that module rather than start fresh.
+   is a further reason it was that module's proxy T-W5 extracted rather than a fresh one.
 3. **The OAuth leg runs at startup**, before anything else has been proven, and is the one most
    likely to fire on a fresh machine. It must not be left out.
 
@@ -1423,10 +1441,12 @@ inspecting a body it never sends.
 |---|---|
 | **Register completeness — shape diff at the wire** | For every adapter × representative model × transport, capture the body at the §3.2.3 boundary and assert the projected delta from the input is exactly the union of that adapter's register rows whose triggers the input met. **One fixed request is not sufficient** — each conditional row needs a trigger case and a complement case (§3.3.4), and adapters that route by model need one input per route. |
 | **Internal-key completeness** | AST-scan `bridge/**` **and `providers/**`** for every `_`-prefixed key written into **any** dict — the scan cannot narrow to request bodies, and must not try; see below — and assert each is a member of `_INTERNAL_KEYS`. **This is the guard that catches F4 (KBR-6).** The complementary check — that each `translate_to_upstream` override delegates or excludes the set — is necessary but not sufficient: every override strips it correctly today; the set itself is what is wrong. Two scoping rules make the scan sound; both are stated below. |
-| **Wire-shape honesty** | For every adapter × representative model, assert the adapter's declared wire shape agrees with the shape the body is actually written in. Catches F5 (KBR-7). **Two boundaries, two owners.** The *hook* form — observing `translate_to_upstream`'s return value — landed with **KBR-7** as `tests/test_wire_shape_honesty.py`, together with the fix: it asserts the per-model declaration `upstream_wire_is_messages_api_for_model(model)` against the emitted body, and the bare property against an explicitly declared default-route model. It guards itself so it cannot rot — the classifier is pinned against known Messages, Chat Completions and Converse bodies (including a Converse body with no tools, since the tools axis is what separates Converse from Messages); every registry key must be represented; every route of a model-routing adapter must be represented; and the custom-transport set is asserted rather than narrated. The *wire* form — observing the body at the §3.2.3 boundary — is **T-G4 / KBR-80** and is **not** delivered: for the three `use_custom_transport` adapters nothing in the hook-level guard observes the bytes that ship. On `openai_subscription` `translate_to_upstream` is never invoked on the request path at all — `_cc_to_responses` builds the Responses body inside the transport (P13–P17) — so there the exemption is load-bearing. On `bedrock` and `ollama_cloud` the transport mutates the hook's body afterwards (P18, P19); neither mutation changes the body's *shape family*, so for those two the exemption is precautionary — a guard must observe the shipped bytes, not infer them. The hook form also does not cover adapters constructed with `provider_config`, native-passthrough requests, whether a non-Messages body is *well-formed* (the declaration is a boolean, so Chat Completions and "neither" are collapsed) — **T-G4 inherits that one**, because it is a property of the declaration and not of the boundary — or whether the routing table matches the provider's published endpoint table (**KBR-126**). The declaration stays boolean deliberately: its consumer is binary (`_repair_thinking_roundtrip` picks between exactly two carriers), so widening it to an enum would change the repair's contract rather than this declaration's. If a routing adapter ever gains a third wire, the boolean must be **replaced**, not extended — a `False` meaning "Responses" would be F5 again in a new costume. |
+| **Wire-shape honesty** | For every adapter × representative model, assert the adapter's declared wire shape agrees with the shape the body is actually written in. Catches F5 (KBR-7). **Two boundaries, two owners.** The *hook* form — observing `translate_to_upstream`'s return value — landed with **KBR-7** as `tests/test_wire_shape_honesty.py`, together with the fix: it asserts the per-model declaration `upstream_wire_is_messages_api_for_model(model)` against the emitted body, and the bare property against an explicitly declared default-route model. It guards itself so it cannot rot — the classifier is pinned against known Messages, Chat Completions and Converse bodies (including a Converse body with no tools, since the tools axis is what separates Converse from Messages); every registry key must be represented; every route of a model-routing adapter must be represented; and the custom-transport set is asserted rather than narrated. The *wire* form — observing the body at the §3.2.3 boundary — is **T-G4 / KBR-80** and is **not** delivered: for the three `use_custom_transport` adapters nothing in the hook-level guard observes the bytes that ship. On `openai_subscription` `translate_to_upstream` is never invoked on the request path at all — `_cc_to_responses` builds the Responses body inside the transport (P13–P17) — so there the exemption is load-bearing. On `bedrock` and `ollama_cloud` the transport mutates the hook's body afterwards (P18, P19); neither mutation changes the body's *shape family*, so for those two the exemption is precautionary — a guard must observe the shipped bytes, not infer them. The hook form also does not cover adapters constructed with `provider_config`, native-passthrough requests, whether a non-Messages body is *well-formed* (the declaration is a boolean, so Chat Completions and "neither" are collapsed) — **T-G4 inherits that one**, because it is a property of the declaration and not of the boundary — or whether the routing table matches the provider's published endpoint table (**KBR-126 — now closed**; see the Endpoint-table row below). The declaration stays boolean deliberately: its consumer is binary (`_repair_thinking_roundtrip` picks between exactly two carriers), so widening it to an enum would change the repair's contract rather than this declaration's. If a routing adapter ever gains a third wire, the boolean must be **replaced**, not extended — a `False` meaning "Responses" would be F5 again in a new costume. **KBR-126 is the near miss that clarifies that rule rather than breaking it.** `OpenCodeGoAdapter.get_upstream_path` now reports three paths, so the sentence appears to bite; it does not, because the declaration describes the body `translate_to_upstream` *emits*, and for the four `/v1/responses` models it emits none — it raises `UnsupportedModelError`. There is no third wire to declare, only a refusal, and the declaration's sole consumer takes the body as its first argument, so it is unreachable for those models. The replacement obligation transfers intact to **KBR-137**, which is the change that actually emits a Responses body. |
 | **Bridge-introduced vendor token** | No content the bridge *introduces* into a request body or header contains `kitty` in any casing. Scoped by the projection diff (§3.3.3), never a flat scan of the serialized body — a flat scan would fail on a user legitimately writing the word, and "fixing" that would breach I1. Caught F3 (KBR-5). **F3 is now fixed, so this guard has no live positive fixture left**: its positive control is the synthetic historical M13 string held in `tests/bridge/test_vendor_token_guard.py`, which T-G5 inherits. That file is also the defect-scoped stand-in until T-G5 lands — it scans **source literals** against an allowlist, never traffic, so it does not fall into the flat-scan trap this row warns about. |
 | **Start-path domination** | Every `BridgeServer(` construction is dominated by an `egress_block_reason(` call **at AST level**, not merely co-located in the same file. `cli/main.py` already holds two of the five start paths (§5.1 gap 3). **Necessary but not sufficient — see below.** |
 | **Env-var register** | `_SETTINGS_ENV_OVERRIDE_KEYS` and `_CONFLICTING_ENV_VARS` (`launchers/claude.py`) match what `build_spawn_config` emits and what the README documents. |
+| **Provider routing table ⇄ provider docs** | For every model the provider publishes, the adapter routes to the endpoint the provider serves it on. Landed with **KBR-126** as `tests/data/opencode_go_endpoints.json` (a snapshot of OpenCode Go's published endpoint table, carrying `source_url`, `verified_utc` and a note on what a keyed probe would add) plus `tests/test_opencode_endpoint_table.py`. The snapshot is an **oracle**, deliberately not the routing table itself: deriving `_MESSAGES_MODELS` from it at import would remove the duplication and add a worse failure mode, since a missing or corrupt data file would silently route everything to the default endpoint — the defect, reintroduced invisibly. The checker is a pure function (`check_routing`) so the negative cases can hand it a deliberate defect, and it compares **set equality in both directions**: a constant naming a model the provider has *stopped* serving on a route is exactly as wrong as one it never started routing, and that is the shape KBR-126 actually was. **Honest limit:** snapshot and constants are written in the same commit, so a green run proves self-consistency, not agreement with the provider; no stronger evidence is reachable without a paid key, because an unauthenticated probe of either endpoint returns `401 AuthError` (auth precedes dialect). Hence gap **G24**. |
+| **`validation_model` reachability** | For every adapter that is not `use_custom_transport`, the path `validate_api_key` posts to and the bare `build_upstream_headers` agree on a dialect the key-check ping is written in. Landed with KBR-126 as `tests/test_validation_model_routing.py`. The ping body — `{model, messages, max_tokens, stream}` — is **simultaneously valid Chat Completions and valid Anthropic Messages**, which is why `anthropic`, `custom_anthropic`, `minimax_token` and `zai_coding` validate against `/v1/messages` and work. So the rule is *not* "`validation_model` must be Chat-Completions-routed": it is that path and auth must match. Pointing `opencode_go` at a Messages-routed model — the fix KBR-126's own ticket suggested — leaves the headers `Bearer` and fails every key check, and a path-only guard would pass it. |
 | **Endpoint table** | The README endpoint table matches `_register_routes`. Catches F2 (KBR-9). |
 | **Attribution-header table** | The README's `X-Kitty-*` table matches `_attribution_headers()`, and none of those names can reach any `build_upstream_headers()`. |
 | **Flag table** | The README logging-flag table matches the CLI parser. |
@@ -2013,17 +2033,48 @@ path has.
 
 ### 7.3 Recording CONNECT proxy
 
-**Already exists.** `tests/test_egress_https_proxy.py` contains `_ConnectProxy` (enforces Basic
-auth, records every `CONNECT` as a `ConnectAttempt`) and `_TlsTarget`, with throwaway
-certificates on ephemeral ports. Extend it rather than build a second:
+**Delivered by T-W5 ([KBR-28]) in `tests/harness/connect_proxy.py`**, extracted from
+`tests/test_egress_https_proxy.py` rather than written a second time — two proxy implementations
+is how two harnesses come to disagree about what "tunnelled" means. That module keeps its five
+tests, unchanged down to the collected node ids, and drives all three transport stacks through the
+extracted fixture; it is the regression evidence for the extraction.
 
-- expose it as a shared fixture;
-- add the ability to stop it mid-test, for §5.2.2 phase 2;
-- **record the outbound source port** of each tunnel it opens, so §5.2.1 can join tunnels to the
-  connections the recorders accept — `ConnectAttempt` carries target and auth status only today,
-  which is not enough to identify a connection at both ends;
-- resolve the harness hostname itself on the proxied leg, and expose a per-transport direct-route
-  override for §5.2.2 phase 1.
+What it provides:
+
+- **The fixtures**, registered as a pytest plugin from `tests/conftest.py`, so a test asks for
+  `connect_proxy` or `tls_target` by name and imports nothing.
+- **`ConnectAttempt.source_port`** — the local port of the proxy's outbound socket for each tunnel
+  it opens, and `None` where no tunnel was opened (rejected auth, or an unreachable upstream).
+  This is §5.2.1's join key; target and auth status alone cannot identify a connection at both
+  ends.
+- **`unattributable_peer_ports(peer_ports, attempts)`** — §5.2.1's assertion, stated once so each
+  transport slice inherits it rather than re-deriving it. It refuses an unset peer port rather
+  than guessing: a recorder that never populated `CapturedRequest.peer_port` would otherwise make
+  containment unfalsifiable in whichever direction the default happened to fall. *This is an
+  addition to T-W5's two named deliverables, made because §1.4 requires this delivery to ship a
+  falsification case and a falsification case needs a checkable assertion.* It does not discharge
+  **T-E2's** phase-3 obligation, which injects a bypass into the product rather than into the test.
+- **`ConnectProxy.stop()` and `TlsTarget.stop()`** — mid-test stoppability for §5.2.2 phase 2.
+  Both abort live connections rather than closing them (a TLS `close()` waits out
+  `ssl_shutdown_timeout`, 30s by default) and both retry until the listener has actually finished
+  closing. Python 3.12.1 changed `asyncio.Server.wait_closed()` to block until every connection is
+  dropped while 3.10 and 3.11 return immediately, so a teardown that merely closes the listener
+  hangs on half the support matrix and passes on the other half.
+- **The proxied-leg resolver** — `HARNESS_UPSTREAM_HOST` (`upstream.kitty-test.invalid`, §5.3) in
+  the target certificate's SAN, and an empty-by-default `ConnectProxy.resolve` map consulted
+  before the outbound connection. The harness owns the resolver because the harness is the proxy;
+  a client tunnelling to a `.invalid` name never resolves it itself, so this is the only place the
+  name can be mapped. **Shipped here, not in T-E1**, because T-E1 would otherwise have to edit a
+  module five tickets consume — the coordination problem Milestone 0 exists to remove.
+
+Still **T-E1's** (KBR-61): the per-transport **direct**-route override §5.2.2 phase 1 needs, and
+which transport gets which route. T-W5 ships the seam, not the policy.
+
+**A missing `openssl` fails, it does not skip.** `certs` is shared infrastructure, and §8's rule
+is that a skip in a gating job is a failure: a suite that quietly stops proving containment
+because a tool is absent is indistinguishable from one that proves it.
+
+[KBR-28]: https://shelpuk.atlassian.net/browse/KBR-28
 
 ### 7.4 Wire projections and the transparency oracle
 
@@ -2236,9 +2287,12 @@ standing amnesty:
 
 A consequence worth stating: **a test may not be moved to `l3` before the Subsystem job exists.**
 Roughly six modules under `tests/` bind real sockets or spawn processes and are `l1` by default
-today — `test_egress_https_proxy.py` foremost among them. Reclassifying them is correct and is
-T-K6's business, together with the job that runs them; doing it earlier would remove them from
-every gate. T-H1 must take that reclassification into account before it measures a mutation
+today — `test_egress_https_proxy.py` foremost among them, and since T-W5 the shared fixture it was
+extracted into plus `tests/harness/test_connect_proxy.py`, which must move **with** it: an
+extraction and its own regression evidence landing in two different jobs would leave one proving
+the other in a run that no longer includes it. Reclassifying them is correct and is T-K6's
+business, together with the job that runs them; doing it earlier would remove them from every
+gate. T-H1 must take that reclassification into account before it measures a mutation
 baseline, because it selects on `l1`.
 
 **Four modules have been added to that set since, and they are named here so T-K6 inherits a
@@ -2256,6 +2310,13 @@ list rather than a search** — the count is what T-K6 and T-H1 plan against.
   ephemeral port in four of its classes, following the existing convention of
   `tests/bridge/test_crash_resilience.py` rather than inventing a second one. The whole module
   runs in **~0.6 seconds**, measured, of which the socket-binding cases are ~0.1.
+
+KBR-10 added the largest one: `tests/cli/test_stream_encoding.py` spawns **35 child interpreters**
+per run, ×4 Python versions. It has no choice — the behaviour it proves is that kitty survives a
+hostile *interpreter start-up encoding*, and `PYTHONIOENCODING` is read before any in-process test
+exists, so a real child is the only oracle. Each spawn is short (the whole file runs in ~14s), but
+T-H1 should note that mutation testing over `l1` will re-pay that cost per mutant, and may want to
+deselect this file from the mutation baseline rather than from the gate.
 
 **The load gate has to be wired, not merely declared.** The table above marks Load as gating a
 release, but `publish.yml` currently depends only on the reusable `tests.yml`. Putting the load
@@ -2426,7 +2487,8 @@ Three assets stand out and are built on rather than replaced:
 
 - `tests/test_egress_https_proxy.py` — real TLS handshakes through a local recording CONNECT
   proxy, across all three transport stacks. The strongest existing proof of anything in this
-  document.
+  document. Since T-W5 the proxy, the target and the certificates are shared from
+  `tests/harness/connect_proxy.py`; the tests stayed here.
 - `tests/test_egress_coverage.py` — AST/regex structural guard over `src/` that also asserts its
   own scan finds known positives, so it cannot rot into a no-op.
 - `tests/test_github_actions.py` — treats the workflow definitions as testable artifacts.
@@ -2444,10 +2506,11 @@ does not surface work that is done. `TEST_SUITE_IMPLEMENTATION_PLAN.md` §16 mir
 | ~~**G14**~~ | ~~**F3 — the vendor name goes upstream in the body (M13)** — KBR-5~~ | **CLOSED 2026-09-07** | Post-condition raises; handlers render a downstream 400; defect-scoped source-literal guard (`tests/bridge/test_vendor_token_guard.py`) stands in until T-G5 | — |
 | **G15** | **F4 — `_effort` / `_thinking_adaptive` reach the wire** — KBR-6 | Live I1+I2 breach on every CC-wire provider | Add both to `_INTERNAL_KEYS`; internal-key completeness guard (§6.2.3); regression test at `BridgeServer._upstream_body_for`. Residual: `openai_subscription` alone builds its body independently of that boundary (allowlisted, hence never leaked); `bedrock` and `ollama_cloud` call `translate_to_upstream` inside their transports, so the assertion reaches their wire. Carried by T-G2 over T-D4–T-D9's captures | **0** |
 | **G16** | **F5 — `OpenCodeGoAdapter` misdeclared its wire shape** — KBR-7 · **CLOSED** | Was a latent defect in the M8 path and a trap for the oracle | Done: the declaration is per-model, both repair sites branch on it, and the **hook-level** honesty guard landed with the fix. The **wire-level** guard remains T-G4 / KBR-80 | — |
+| **G24** | **No staleness alarm on the provider endpoint snapshot** | KBR-126 checked in `tests/data/opencode_go_endpoints.json` as the routing oracle. Nothing detects that the provider has since changed its table: §8's determinism rules exclude both mechanisms that could — a networked check and a clock. Refreshing it is a human act | Accepted trade-off, recorded rather than fixed: a networked alarm makes CI depend on a third party's uptime and turns green into a statement about today's weather. Revisit only if the provider publishes a machine-readable endpoint table — today's `/v1/models` carries ids only, no endpoints, and still lists retired aliases | **3** |
 | **G23** | **`openai_subscription` injects `reasoning` from `_reasoning_effort`, unregistered** — KBR-149 | Three sites in `providers/openai_subscription.py` set `reasoning: {"effort": …}` from kitty's internal key. Structurally identical to P3 and P4, and **P4 cannot cover it**: §3.2.3 records that `translate_to_upstream` never runs on this adapter's request path. Unlike G22 this is a **request-body** row feeding §3.3.2 assertion 1, so the moment T-D5 drives a corpus entry carrying a reasoning effort the oracle reports a *false* I1 breach on a deliberate mutation — the under-claiming direction §3.3.1a calls unrecoverable | Add P22: trigger `REASONING_EFFORT_PRESENT`, conditional, anchored at `envelope.extra[reasoning]`. Needs a trigger case and a complement in the corpus. **Before T-D5** | **1** |
 | **G22** | **Register header coverage is partial and inconsistent** — KBR-148 | Rows exist for four adapters (P9a ×3, P9b, P9c). At least six more deviate from the base header set with none: `AnthropicAdapter` and its three subclasses plus `ZaiAnthropicAdapter` (`x-api-key` / `anthropic-version` / lowercase `content-type`), `AzureOpenAIAdapter` (`api-key` on the non-Entra credential), and `OllamaAdapter`, which drops `Authorization` entirely — the same shape as P9b, which *does* have a row. `openai_subscription` additionally sets a conditional `ChatGPT-Account-Id` no row names | One row per deviation; `ChatGPT-Account-Id` becomes P9d, conditional, with a claimless-`id_token` fixture for its assertion-2 complement. Then §4.3 C1's per-adapter expectation is *reviewable against the register* instead of written from scratch — which is what stops C1 reproducing the ad-hockery F1 names | **2** |
 | **G21** | **A declared trigger is never verified** — KBR-140 | §7.4 hands the oracle `triggers_met` as an argument and §3.3.2 asserts only that a row is **absent** when its trigger is not met. Nothing asserts a trigger declared met actually fired, so a corpus entry that over-declares makes assertion 1 claim every delta — the oracle reports green on a bridge that is rewriting messages. The same author writes the entry and its trigger index (T-W6), so the mechanism has no second reader | Roughly fifteen triggers are decidable from the inbound request; give those an optional predicate and have T-D8 require the declaration to agree with it. M6, M8, M9 and M12 depend on an upstream response and stay declaration-only — the stated residual risk. Blocked on T-A1/T-A2, since a predicate needs a projected request to read | **1** |
-| **G20** | **OpenCode Go's routing table does not match the provider** — KBR-126 | Found while fixing G16. As of 2026-09-07 (<https://opencode.ai/docs/go/>, "Endpoints") the provider serves eight models on `/v1/messages`; `_MESSAGES_MODELS` holds two, and a `/v1/responses` endpoint (four models) has no route at all. The wire-shape guard correctly reports the adapter *honest* — declaration and emitted body agree — because this is routing, not shape | Refresh the table against the provider's endpoint list; decide the Responses route; replace the stale `validation_model`. Consider a checked-in snapshot of the endpoint table, so the routing question gets an in-repo oracle | **1** |
+| ~~**G20**~~ | ~~**OpenCode Go's routing table does not match the provider** — KBR-126~~ | **CLOSED 2026-09-11.** Was: eight models served on `/v1/messages` against two routed there, four `/v1/responses` models with no route, and a `validation_model` that had left the catalogue — ten of twenty-eight models broken, presenting to the user as a false auth failure because the provider answers an unsupported model with `401` | Done: table refreshed against the provider's published list (re-verified live 2026-09-11); `/v1/responses` models route truthfully and are refused at serialization with `UnsupportedModelError` naming KBR-137, which owns the route itself; `validation_model` replaced and the whole class guarded registry-wide; snapshot oracle checked in. The balancing pool is explicitly protected from the refusal, mirroring the `CompactionFailedError` precedent | — |
 | **G19** | Routing was outside the register and outside the oracle | The destination is built from the profile (M14, P20, P21); a body-only check cannot see a misrouted Azure deployment | §3.3.5 — whole-request oracle with an independently derived route | **1** |
 | **G17** | Undecided behaviour for an irreducible final turn | Compaction emits an over-budget request, or (since KBR-5) the bridge refuses it downstream; neither was designed | Answer Q10, then align M3-M7, the 6.1 properties and TR-3 together | **2** |
 | **G18** | P13-P19 - seven transport-level mutations, unregistered in the first draft | Necessary (the Codex backend and boto3 require them) but invisible above DEBUG, and unreachable by a guard placed at `translate_to_upstream` | Rows P13-P19; boundary corrected in 3.2.3; Q5 decides user visibility | **3** |
@@ -2520,8 +2583,10 @@ L1 property test, stated *with* the `localhost` exclusions so it does not fail o
 weakened.
 
 **Extend the existing CONNECT proxy rather than build one (§7.3).** `test_egress_https_proxy.py`
-already owns a recording proxy across all three transport stacks. A second would duplicate the
-hard part and risk the two drifting on exactly the behaviour they both exist to pin.
+already had a recording proxy exercised across all three transport stacks. A second would
+duplicate the hard part and risk the two drifting on exactly the behaviour they both exist to pin.
+T-W5 carried this out: the proxy moved to `tests/harness/connect_proxy.py` and that module's five
+tests kept passing against it, unchanged down to their collected node ids.
 
 **Two L1 properties are stated with their exceptions (§6.1).** "Output ≤ budget" and "the last
 turn survives" are both false as absolutes — the compactor breaks out while still over budget

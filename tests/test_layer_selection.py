@@ -400,6 +400,12 @@ class TestTheWholeSuiteIsCoherent:
             "tests/test_internal_key_completeness.py",
             "tests/test_egress_coverage.py",
             "tests/test_wire_shape_honesty.py",
+            # KBR-126. Both are docs-vs-code guards in the §6.2.3 sense: one
+            # holds the OpenCode Go routing table against the provider's
+            # published endpoint table, the other holds every adapter's
+            # `validation_model` against the dialect `validate_api_key` speaks.
+            "tests/test_opencode_endpoint_table.py",
+            "tests/test_validation_model_routing.py",
             "tests/test_upstream_identity_consistency.py",
             "tests/test_upstream_route_source_of_truth.py",
             "tests/test_github_actions.py",
@@ -413,6 +419,7 @@ class TestTheWholeSuiteIsCoherent:
             # the file is what let each carry the marker it earns, since a
             # module-level `pytestmark` cannot be overridden per test.
             "tests/harness/test_register_agreement.py",
+            "tests/test_upstream_url_single_rule.py",
         }
 
         actual = {

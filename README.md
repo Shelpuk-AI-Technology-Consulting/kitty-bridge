@@ -417,7 +417,7 @@ is always `0` because there is nowhere to fail over to — check `mode` first.
 | Novita AI           | `novita`              |                                                   |
 | Ollama Cloud        | `ollama_cloud`        | Hosted models via ollama.com API                  |
 | OpenAI ChatGPT Plan | `openai_subscription` | Uses your ChatGPT Plus/Pro subscription via OAuth |
-| OpenCode Go         | `opencode_go`         |                                                   |
+| OpenCode Go         | `opencode_go`         | Picks the right endpoint from the model name. Four models are **not servable yet** — `grok-4.6`, `gpt-5.6-luna`, `muse-spark-1.3-contributor`, `muse-spark-1.2-contributor`: the provider serves these on the OpenAI Responses API, which kitty does not speak. Selecting one fails with a message saying so, rather than failing obscurely. |
 | Xiaomi MiMo         | `mimo`                |                                                   |
 | Z.AI Coding Plan    | `zai_coding`          | Coding-optimized endpoint                         |
 
@@ -441,6 +441,15 @@ This works with DeepSeek, Together AI, Groq, vLLM, LM Studio, and any other serv
 
 **The base URL ends at the API root** — Kitty appends `/chat/completions` itself. Give it
 `https://api.mistral.ai/v1`, not `https://api.mistral.ai/v1/chat/completions`.
+
+Pasting the full endpoint works anyway: Kitty drops the duplicate path instead of failing. That
+holds for an endpoint carrying a query string too, and the query is kept and sent with every
+request — so **Azure OpenAI** works through this provider with the endpoint Microsoft's own
+documentation shows, pasted verbatim:
+
+```
+https://<resource>.openai.azure.com/openai/deployments/<deployment>/chat/completions?api-version=2024-02-01
+```
 
 ```bash
 $ kitty setup
