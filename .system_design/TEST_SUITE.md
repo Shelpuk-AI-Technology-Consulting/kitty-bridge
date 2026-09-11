@@ -143,10 +143,10 @@ body. Established by reading `src/kitty/bridge/server.py` and all 23 adapters in
 
 #### 3.2.1 Bridge-level
 
-Eleven request-path rows (M1–M11), one response-path row (M12), and the routing row **M14**
+Twelve request-path rows (M1–M11 and M15), one response-path row (M12), and the routing row **M14**
 (§3.3.5), which is listed here because the destination is a mutation surface the body cannot show.
-Fourteen rows in all. The former substitution row M13 is **withdrawn** — KBR-5 replaced it with a
-downstream error, so it mutates nothing — leaving **thirteen live** bridge-level rows.
+Fifteen rows in all. The former substitution row M13 is **withdrawn** — KBR-5 replaced it with a
+downstream error, so it mutates nothing — leaving **fourteen live** bridge-level rows.
 
 | # | Mutation | Site | Trigger | Why it is necessary |
 |---|---|---|---|---|
@@ -161,9 +161,10 @@ downstream error, so it mutates nothing — leaving **thirteen live** bridge-lev
 | M9 | Convert a native Messages body to CC format and re-send the same backend | `_convert_native_to_cc_format`, then a re-run of `_normalize_model` and `normalize_request` | Upstream returned a `tool_use` format error on the native path | Fallback that keeps the session alive rather than failing the turn. Also an I2 exception. |
 | M10 | Inject the model from the URL path into the body | `_handle_gemini` | Gemini protocol only | Gemini carries the model in the path, not the body; `_normalize_model` needs it in the body to override it. |
 | M11 | Force `stream: False` | `_handle_gemini` | Gemini protocol, non-streaming `:generateContent` | The Gemini translator defaults `stream=True`; the non-streaming endpoint must not open an SSE stream. |
-| M12 | Substitute fallback assistant text | `_EMPTY_ASSISTANT_FALLBACK_TEXT` in `bridge/messages/translator.py` **and** `bridge/responses/translator.py` | Upstream returned an empty response | **Response-side**, not part of the eleven request-path rows. |
+| M12 | Substitute fallback assistant text | `_EMPTY_ASSISTANT_FALLBACK_TEXT` in `bridge/messages/translator.py` **and** `bridge/responses/translator.py` | Upstream returned an empty response | **Response-side**, not part of the twelve request-path rows. |
 | ~~M13~~ | **Withdrawn — no longer a mutation.** Was: discard the conversation and substitute a `[Kitty Bridge: …]` user message. | `_compact_messages` / `_apply_compaction` post-condition | No non-system message survives | **Closed by KBR-5.** The post-condition now raises `CompactionFailedError` and the handler returns a protocol-native 400 downstream; nothing is substituted, so there is no mutation left to register. The row is kept struck through rather than deleted so a reader of finding F3 can still find it. **The trigger recorded here was wrong** — see F3. |
 | M14 | **Replace the destination entirely** — scheme and host are built from the profile by `build_base_url()`; the path by `get_upstream_path(_route_model(cc_request))` — the **request's normalized model**, which is the normalized profile model when there is one and the agent's model when there is not. `_route_model` is the single place that answers this; the auth scheme (P9/P20) and the thinking carrier read it too, and the adapter reads the same key for the body (KBR-127 — it was the raw profile model, so path and body could route differently). Base and path are then **composed** by `ProviderAdapter.compose_upstream_url`, not concatenated (KBR-143). | `BridgeServer._build_upstream_url` | Always | The agent addressed a loopback bridge; the request has to reach the real provider. Listed because **the destination is a mutation surface the body cannot show**: on Azure an identical body sent to the wrong deployment path is a different request entirely (§3.3.5). **The query is part of the mutation, not a passenger** (KBR-143): the endpoint joins the *path* component and the two queries merge, the endpoint's parameters winning a name clash and the base URL's others surviving unaltered. A row naming only "path" would let an oracle derive `route.query` and still not know which side owns a clash. The base URL's fragment is carried through and never sent, since no HTTP client puts one on the wire — so an oracle deriving `route.*` from the profile must expect it on the composed URL and absent from the request line. **The composed URL is redacted before it is echoed** into the 404 diagnostic or a pre-flight failure (`redact_url_for_display`): query values and the fragment are masked, which is an I2-adjacent containment property, not a fidelity one — nothing about the request changes. The composition helper is shared with `kitty.validation.validate_api_key` and `OllamaCloudAdapter._build_url`, but **this row's site is the bridge alone**: pre-flight's probe is not a request the agent made, and the register describes what happens to the agent's request. |
+| M15 | Rewrite a string `input` into the single-item list form `[{"type": "message", "role": "user", "content": [{"type": "input_text", "text": <s>}]}]` | `normalize_responses_request` (`bridge/responses/translator.py`), called from `_handle_responses` before the body forks | Always | OpenAI's `CreateResponse` defines the two forms as the **same request**: `input` is `oneOf` a string (*"a text input to the model, equivalent to a text input with the `user` role"*) or an array, and everything downstream reads the array. Fires on every request reaching the handler; a body already in the array form meets the row with a **no-op** rather than avoiding it, so there is no complement state for §3.3.2 assertion 2 to arrange, which is why it is unconditional. Listed rather than omitted because the rewrite is real bytes at the `curl_cffi` boundary of §3.2.3, where `_original_body` **is** this body; the projection cannot express the difference, so the row takes §3.3.1a's escape for P16's reason. **KBR-144.** |
 
 #### 3.2.2 Provider-level
 
@@ -224,7 +225,7 @@ partial today — see gap G22.
 
 **Conditional rows are the point.** Every row whose trigger is a condition must be provably
 *inert* when that condition is absent — the sharpest form of "unless absolutely necessary", and
-what §3.3.2 assertion 2 tests, with the trigger complements §3.3.4 requires. M1, M2, M10, M14, P1,
+what §3.3.2 assertion 2 tests, with the trigger complements §3.3.4 requires. M1, M2, M10, M14, M15, P1,
 P6, P9a, P9b, P9c, P10, P11, P12, P13, P14, P15, P16, P17, P18, P19, P20 and P21 are unconditional
 by design and are exempt from that assertion.
 
@@ -562,7 +563,8 @@ the path.
 **`not projectable` is a legal value for the register's field column, and it requires a reason.**
 P16 uses it — the `input_text`/`output_text` tag is redundant with the turn's role, so carrying it
 would put one vendor's spelling into a wire-independent form — as do the whole-body protocol
-translations M2, M9, P11 and P12, and **P1** for the reason below. An empty cell would leave those
+translations M2, M9, P11 and P12, **P1** for the reason below, and **M15**, whose two spellings of
+a Responses `input` are one request (KBR-144). An empty cell would leave those
 rows silently unfalsifiable; an explicit value with a reason does not.
 
 ⚠️ **`residual` is never a legal register anchor.** P1 strips kitty's internal keys, which no
@@ -2350,7 +2352,7 @@ business, together with the job that runs them; doing it earlier would remove th
 gate. T-H1 must take that reclassification into account before it measures a mutation
 baseline, because it selects on `l1`.
 
-**Three modules have been added to that set since, and they are named here so T-K6 inherits a
+**Four modules have been added to that set since, and they are named here so T-K6 inherits a
 list rather than a search** — the count is what T-K6 and T-H1 plan against.
 
 - **KBR-132:** `tests/bridge/test_tls_certs.py` spawns a real `openssl` in one of its five cases.
@@ -2361,6 +2363,10 @@ list rather than a search** — the count is what T-K6 and T-H1 plan against.
   `tests/harness/test_recorder_conformance.py` is genuinely `l1` — its checks are pure functions
   over data and it opens nothing. The two socket-binding modules together run in **~1 second**,
   measured, which is the number the fast-gate budget should carry until T-K6 moves them.
+- **KBR-144:** `tests/bridge/test_responses_string_input.py` starts a real `BridgeServer` on an
+  ephemeral port in four of its classes, following the existing convention of
+  `tests/bridge/test_crash_resilience.py` rather than inventing a second one. The whole module
+  runs in **~0.6 seconds**, measured, of which the socket-binding cases are ~0.1.
 
 KBR-10 added the largest one: `tests/cli/test_stream_encoding.py` spawns **35 child interpreters**
 per run, ×4 Python versions. It has no choice — the behaviour it proves is that kitty survives a
