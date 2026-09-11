@@ -86,14 +86,14 @@ class TestTheParserReadsTheDesignDocument:
 
     def test_the_parser_reads_both_tables(self, markdown: str) -> None:
         """A parser that read only §3.2.1 would still look healthy on the M rows."""
-        assert len([i for i in r.parse_register_markdown(markdown).live_ids if i.startswith("M")]) == 13
+        assert len([i for i in r.parse_register_markdown(markdown).live_ids if i.startswith("M")]) == 14
         assert len([i for i in r.parse_register_markdown(markdown).live_ids if i.startswith("P")]) == 28
 
     def test_the_parser_reads_the_unconditional_list(self, markdown: str) -> None:
         """§3.2.2's closing paragraph is the only place the exemption is written down."""
         parsed = r.parse_register_markdown(markdown)
 
-        assert len(parsed.unconditional_ids) == 21
+        assert len(parsed.unconditional_ids) == 22
         assert {"M14", "P20", "P21"} <= set(parsed.unconditional_ids)
 
     def test_a_document_with_no_register_tables_is_an_error_not_an_empty_result(self) -> None:
@@ -130,7 +130,7 @@ class TestTheParserReadsTheDesignDocument:
         """
         defective = markdown.replace(
             "| M14 |",
-            "| **M15** | A new mutation | `X.y` | Always | because |\n| M14 |",
+            "| **M16** | A new mutation | `X.y` | Always | because |\n| M14 |",
             1,
         )
 
@@ -146,13 +146,13 @@ class TestTheParserReadsTheDesignDocument:
         """
         defective = markdown.replace(
             "| M14 |",
-            "| M15 | A new mutation | `X.y` | Always | because |\n| M14 |",
+            "| M16 | A new mutation | `X.y` | Always | because |\n| M14 |",
             1,
         )
 
         problems = r.register_disagreements(r.REGISTER, defective)
 
-        assert any("M15" in problem for problem in problems), problems
+        assert any("M16" in problem for problem in problems), problems
 
     def test_an_id_published_twice_is_refused(self, markdown: str) -> None:
         """An id is the register's addressing scheme, so a repeat makes it ambiguous.
@@ -275,7 +275,7 @@ class TestTheDataAndTheDesignNameTheSameRows:
         cell reads ``Always``. §3.3.2 assertion 2 would then demand a complement
         case for a mutation that always fires.
         """
-        defective = markdown.replace("M1, M2, M10, M14, P1,", "M1, M2, M10, P1,", 1)
+        defective = markdown.replace("M1, M2, M10, M14, M15, P1,", "M1, M2, M10, M15, P1,", 1)
 
         problems = r.register_disagreements(r.REGISTER, defective)
 
@@ -283,7 +283,7 @@ class TestTheDataAndTheDesignNameTheSameRows:
 
     def test_an_unconditional_list_naming_a_row_that_does_not_exist_is_caught(self, markdown: str) -> None:
         """A stale entry left behind when a row is renamed or withdrawn."""
-        defective = markdown.replace("M1, M2, M10, M14, P1,", "M1, M2, M10, M14, M99, P1,", 1)
+        defective = markdown.replace("M1, M2, M10, M14, M15, P1,", "M1, M2, M10, M14, M15, M99, P1,", 1)
 
         problems = r.register_disagreements(r.REGISTER, defective)
 

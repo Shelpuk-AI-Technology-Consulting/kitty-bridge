@@ -143,10 +143,10 @@ body. Established by reading `src/kitty/bridge/server.py` and all 23 adapters in
 
 #### 3.2.1 Bridge-level
 
-Eleven request-path rows (M1–M11), one response-path row (M12), and the routing row **M14**
+Twelve request-path rows (M1–M11 and M15), one response-path row (M12), and the routing row **M14**
 (§3.3.5), which is listed here because the destination is a mutation surface the body cannot show.
-Fourteen rows in all. The former substitution row M13 is **withdrawn** — KBR-5 replaced it with a
-downstream error, so it mutates nothing — leaving **thirteen live** bridge-level rows.
+Fifteen rows in all. The former substitution row M13 is **withdrawn** — KBR-5 replaced it with a
+downstream error, so it mutates nothing — leaving **fourteen live** bridge-level rows.
 
 | # | Mutation | Site | Trigger | Why it is necessary |
 |---|---|---|---|---|
@@ -161,9 +161,10 @@ downstream error, so it mutates nothing — leaving **thirteen live** bridge-lev
 | M9 | Convert a native Messages body to CC format and re-send the same backend | `_convert_native_to_cc_format`, then a re-run of `_normalize_model` and `normalize_request` | Upstream returned a `tool_use` format error on the native path | Fallback that keeps the session alive rather than failing the turn. Also an I2 exception. |
 | M10 | Inject the model from the URL path into the body | `_handle_gemini` | Gemini protocol only | Gemini carries the model in the path, not the body; `_normalize_model` needs it in the body to override it. |
 | M11 | Force `stream: False` | `_handle_gemini` | Gemini protocol, non-streaming `:generateContent` | The Gemini translator defaults `stream=True`; the non-streaming endpoint must not open an SSE stream. |
-| M12 | Substitute fallback assistant text | `_EMPTY_ASSISTANT_FALLBACK_TEXT` in `bridge/messages/translator.py` **and** `bridge/responses/translator.py` | Upstream returned an empty response | **Response-side**, not part of the eleven request-path rows. |
+| M12 | Substitute fallback assistant text | `_EMPTY_ASSISTANT_FALLBACK_TEXT` in `bridge/messages/translator.py` **and** `bridge/responses/translator.py` | Upstream returned an empty response | **Response-side**, not part of the twelve request-path rows. |
 | ~~M13~~ | **Withdrawn — no longer a mutation.** Was: discard the conversation and substitute a `[Kitty Bridge: …]` user message. | `_compact_messages` / `_apply_compaction` post-condition | No non-system message survives | **Closed by KBR-5.** The post-condition now raises `CompactionFailedError` and the handler returns a protocol-native 400 downstream; nothing is substituted, so there is no mutation left to register. The row is kept struck through rather than deleted so a reader of finding F3 can still find it. **The trigger recorded here was wrong** — see F3. |
 | M14 | **Replace the destination entirely** — scheme and host are built from the profile by `build_base_url()`; the path by `get_upstream_path(_route_model(cc_request))` — the **request's normalized model**, which is the normalized profile model when there is one and the agent's model when there is not. `_route_model` is the single place that answers this; the auth scheme (P9/P20) and the thinking carrier read it too, and the adapter reads the same key for the body (KBR-127 — it was the raw profile model, so path and body could route differently; and on `openai_subscription`'s Responses path the adapter read the *inbound* body's model instead until KBR-160, which was harmless for routing only because that provider posts to a fixed URL and derives no header from the model). Base and path are then **composed** by `ProviderAdapter.compose_upstream_url`, not concatenated (KBR-143). | `BridgeServer._build_upstream_url` | Always | The agent addressed a loopback bridge; the request has to reach the real provider. Listed because **the destination is a mutation surface the body cannot show**: on Azure an identical body sent to the wrong deployment path is a different request entirely (§3.3.5). **The query is part of the mutation, not a passenger** (KBR-143): the endpoint joins the *path* component and the two queries merge, the endpoint's parameters winning a name clash and the base URL's others surviving unaltered. A row naming only "path" would let an oracle derive `route.query` and still not know which side owns a clash. The base URL's fragment is carried through and never sent, since no HTTP client puts one on the wire — so an oracle deriving `route.*` from the profile must expect it on the composed URL and absent from the request line. **The composed URL is redacted before it is echoed** into the 404 diagnostic or a pre-flight failure (`redact_url_for_display`): query values and the fragment are masked, which is an I2-adjacent containment property, not a fidelity one — nothing about the request changes. The composition helper is shared with `kitty.validation.validate_api_key` and `OllamaCloudAdapter._build_url`, but **this row's site is the bridge alone**: pre-flight's probe is not a request the agent made, and the register describes what happens to the agent's request. |
+| M15 | Rewrite a string `input` into the single-item list form `[{"type": "message", "role": "user", "content": [{"type": "input_text", "text": <s>}]}]` | `normalize_responses_request` (`bridge/responses/translator.py`), called from `_handle_responses` before the body forks | Always | OpenAI's `CreateResponse` defines the two forms as the **same request**: `input` is `oneOf` a string (*"a text input to the model, equivalent to a text input with the `user` role"*) or an array, and everything downstream reads the array. Fires on every request reaching the handler; a body already in the array form meets the row with a **no-op** rather than avoiding it, so there is no complement state for §3.3.2 assertion 2 to arrange, which is why it is unconditional. Listed rather than omitted because the rewrite is real bytes at the `curl_cffi` boundary of §3.2.3, where `_original_body` **is** this body; the projection cannot express the difference, so the row takes §3.3.1a's escape for P16's reason. **KBR-144.** |
 
 #### 3.2.2 Provider-level
 
@@ -224,7 +225,7 @@ partial today — see gap G22.
 
 **Conditional rows are the point.** Every row whose trigger is a condition must be provably
 *inert* when that condition is absent — the sharpest form of "unless absolutely necessary", and
-what §3.3.2 assertion 2 tests, with the trigger complements §3.3.4 requires. M1, M2, M10, M14, P1,
+what §3.3.2 assertion 2 tests, with the trigger complements §3.3.4 requires. M1, M2, M10, M14, M15, P1,
 P6, P9a, P9b, P9c, P10, P11, P12, P13, P14, P15, P16, P17, P18, P19, P20 and P21 are unconditional
 by design and are exempt from that assertion.
 
@@ -562,7 +563,8 @@ the path.
 **`not projectable` is a legal value for the register's field column, and it requires a reason.**
 P16 uses it — the `input_text`/`output_text` tag is redundant with the turn's role, so carrying it
 would put one vendor's spelling into a wire-independent form — as do the whole-body protocol
-translations M2, M9, P11 and P12, and **P1** for the reason below. An empty cell would leave those
+translations M2, M9, P11 and P12, **P1** for the reason below, and **M15**, whose two spellings of
+a Responses `input` are one request (KBR-144). An empty cell would leave those
 rows silently unfalsifiable; an explicit value with a reason does not.
 
 ⚠️ **`residual` is never a legal register anchor.** P1 strips kitty's internal keys, which no
@@ -1218,6 +1220,11 @@ The `localhost` exclusions are not a caveat bolted on — `should_bypass` matche
 before it ever tries `ipaddress.ip_address`, and a property stated without them fails on day one
 and gets weakened, which removes the guard.
 
+An IPv4-mapped literal such as `::ffff:10.0.0.5` **is** an IP literal, so it takes the address
+branch and this property never reaches it. Its classification is a stdlib behaviour, pinned in
+§6.2.4 — including the note that one of the three terms the disjunction reads is not independently
+stable across interpreter patch releases.
+
 **A narrower user-visible consequence.** Because names outside the `localhost` family are not
 resolved, a user whose local model server is reached by a **LAN hostname** — not `localhost`, not
 an IP — will have that traffic tunnelled to a proxy that cannot reach it. The common
@@ -1301,7 +1308,7 @@ cannot be the L1 selection (§8).
 | `_compact_messages` | Identity below budget · no orphaned pair · idempotent · **output ≤ budget unless the surviving set is irreducible** (below) |
 | `_validate_tool_call_pairing` | Output contains no `tool_result` without a `tool_use`, in both message shapes |
 | `_truncate_oversized_tool_results` | Identity below the limit · output ≤ limit · non-tool-result content untouched |
-| `should_bypass` | Every address in a private range is bypassed · the §5.3 hostname property |
+| `should_bypass` | Every address in a private range is bypassed, **including the IPv4-mapped form of each range** (§6.2.4 pins why that is a stdlib claim and not a kitty one) · the §5.3 hostname property |
 | `parse_proxy_url` / `EgressConfig` | Credential round-trip · the redaction property below |
 | `describe_tool_input_anomaly` | Never reports an anomaly for input that validates against the declared schema |
 | Wire projections (§3.3.1) | Each reads its format correctly, tested against published format examples — never against kitty's own output |
@@ -1387,6 +1394,10 @@ None`. `mutmut` closes that gap.
 cannot rot into a no-op. `tests/test_egress_coverage.py` already does this
 (`test_the_scan_actually_finds_something`, `test_the_scan_finds_the_known_start_paths`) and is
 the pattern to copy.
+
+**And a contract pins what the code reads, never what it merely tolerates.** Pinning a value that is
+itself version-dependent enforces whatever the author's interpreter happened to say; the fix is to
+stop depending on it and pin the stable neighbour. Worked example and the precondition in §6.2.4.
 
 #### 6.2.1 Bridge endpoint schemas
 
@@ -1568,9 +1579,9 @@ user impact as a drifted API, and F2 shows it has already happened.
 
 #### 6.2.4 Dependency behaviour contracts
 
-Small, fast tests pinning third-party behaviour the invariants rest on, so a dependency bump
-fails here with a clear message rather than in production. The pin situation is worse than a
-glance suggests:
+Small, fast tests pinning dependency behaviour the invariants rest on — and the
+ordinary-correctness behaviour whose drift the gate cannot see — so an upgrade fails here with
+a clear message rather than in production. The pin situation is worse than a glance suggests:
 
 | Dependency | Declared pin | What must be pinned by test |
 |---|---|---|
@@ -1578,9 +1589,57 @@ glance suggests:
 | `curl_cffi` | `>=0.7` — **unbounded** | `proxies=` is honoured; its precedence over ambient `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` (this stack *does* read the environment); the impersonation target still exists. |
 | `botocore` | **not declared at all** — arrives transitively via `boto3>=1.34` | `Config(proxies=)` is honoured and takes precedence over the environment. It is botocore, not boto3, that implements this. An undeclared dependency owning a containment guarantee is worse than an unbounded one. |
 | `keyring` | `>=23.0` | Backend resolution on each supported platform. |
+| CPython `ipaddress` | `requires-python = ">=3.10"` — **minor only, no patch floor** | Two consumers. **I3:** `should_bypass` reads `is_loopback or is_private or is_link_local`, so the disjunction's verdict on the IPv4-mapped form of each range must be pinned — see the masking note below. **Liveness:** `_connect_target` reads `IPv6Address.ipv4_mapped` (the mapped `IPv4Address` for `::ffff:x.x.x.x`, `None` otherwise) and `is_unspecified` for `0.0.0.0` and `::`. What must **not** be pinned is `IPv6Address("::ffff:0.0.0.0").is_unspecified`: CPython [gh-122792](https://github.com/python/cpython/issues/122792) changed it mid-branch, so its value is a property of the patch release, and the code is written not to read it. |
 
 The ambient-environment cases are not hypothetical: `kitty.egress`'s docstring records the
 divergence, and a user with `HTTP_PROXY` set in their shell exercises it on two of three stacks.
+
+**The standard library is a dependency, and it is declared to the wrong precision.** Three of the
+other rows name a version range; `botocore` names none at all. The interpreter is a third shape —
+declared, but only to the *minor*, so `requires-python` admits both sides of a behaviour change that
+moved at a patch boundary. That is how KBR-146 reached `main` green: `ipaddress` answered one way on
+the runner and the other way on a stock Ubuntu 24.04 developer box, and nothing in the tree asserted
+which answer was being relied upon.
+
+**A contract pins what the code reads, never what it merely tolerates.** The pre-fix
+`_connect_target` would have been pinned by asserting `is_unspecified` is true for the mapped
+wildcard — red on the 35 supported releases that predate the backport (3.10.0–3.10.15,
+3.11.0–3.11.10, 3.12.0–3.12.6, 3.13.0) — so the contract would have enforced the defect rather than
+caught it. The rule this row establishes: when a dependency's behaviour is version-dependent, stop
+depending on it and pin the **stable neighbour** instead; pinning the moving value only relocates
+the failure. **Where no stable neighbour exists** — `keyring`'s backend resolution varies by
+platform by design, and `curl_cffi`'s impersonation targets come and go — the remaining options are
+a version floor or a runtime feature check, and the row must record which was chosen. A floor was
+rejected here for the reason a floor is usually wrong: it drops supported users to settle a question
+the code no longer asks. `tests/test_ipaddress_contract.py` holds the contract and says in its own
+docstring which property it refuses to assert and why.
+
+**Why forcing the property is a faithful stand-in for an old interpreter.** `ipv4_mapped` itself was
+measured identical on 18 releases spanning all four supported branches, which is what makes the L1
+test's forced `is_unspecified` a reproduction of a pre-backport interpreter rather than a resemblance
+to one. Everything else in the mapped path reads the same on both sides of gh-122792.
+
+**`should_bypass` survives gh-122792 by masking, not by independence — and that is a premise, not an
+accident.** `ipaddress.ip_address("::ffff:169.254.1.1").is_link_local` flips at the *same* four
+boundaries as `is_unspecified` (measured: `False` on 3.10.13–15, 3.11.8–10, 3.12.4–6 and 3.13.0;
+`True` from 3.10.16, 3.11.11, 3.12.7 and 3.13.1). The disjunction is stable only because
+`is_private` delegates to the mapped address on every supported release and IPv4's `is_private`
+already covers `169.254.0.0/16`. So I3's bypass decision *does* read a version-dependent value, and
+is saved by a sibling term. Anyone who later splits that disjunction, narrows it, or logs per term
+re-opens the patch dependence in the containment direction — which is why the contract pins the
+disjunction's verdict on the mapped forms rather than the individual terms. Upstream's own
+motivation for gh-122792 was "folks using IP address filtering before establishing a connection",
+which is precisely what `should_bypass` is.
+
+**What this contract does not prove, and what carries it instead.** `.github/workflows/tests.yml`
+names bare minor versions and `actions/setup-python` resolves each to the newest patch, so this
+module is only ever evaluated on the **new** side of every such boundary. It can therefore catch
+*forward* drift — a future interpreter changing a value we read — and cannot catch a value that
+differs on an older patch a user is actually running, which is the shape KBR-146 had. That half
+rests entirely on the L1 forced-property test, which holds both sides inside one run. Recorded as
+gap **G25** rather than closed by a matrix entry: `setup-python` does accept an exact patch version,
+so one pinned job would do it, and that is a CI-spend decision for the product owner rather than a
+change this defect's fix should make on its own authority.
 
 ### 6.3 L3 — Subsystem
 
@@ -2293,7 +2352,7 @@ business, together with the job that runs them; doing it earlier would remove th
 gate. T-H1 must take that reclassification into account before it measures a mutation
 baseline, because it selects on `l1`.
 
-**Three modules have been added to that set since, and they are named here so T-K6 inherits a
+**Four modules have been added to that set since, and they are named here so T-K6 inherits a
 list rather than a search** — the count is what T-K6 and T-H1 plan against.
 
 - **KBR-132:** `tests/bridge/test_tls_certs.py` spawns a real `openssl` in one of its five cases.
@@ -2304,6 +2363,10 @@ list rather than a search** — the count is what T-K6 and T-H1 plan against.
   `tests/harness/test_recorder_conformance.py` is genuinely `l1` — its checks are pure functions
   over data and it opens nothing. The two socket-binding modules together run in **~1 second**,
   measured, which is the number the fast-gate budget should carry until T-K6 moves them.
+- **KBR-144:** `tests/bridge/test_responses_string_input.py` starts a real `BridgeServer` on an
+  ephemeral port in four of its classes, following the existing convention of
+  `tests/bridge/test_crash_resilience.py` rather than inventing a second one. The whole module
+  runs in **~0.6 seconds**, measured, of which the socket-binding cases are ~0.1.
 
 KBR-10 added the largest one: `tests/cli/test_stream_encoding.py` spawns **35 child interpreters**
 per run, ×4 Python versions. It has no choice — the behaviour it proves is that kitty survives a
@@ -2519,7 +2582,8 @@ does not surface work that is done. `TEST_SUITE_IMPLEMENTATION_PLAN.md` §16 mir
 | **G6** | Docs drift undetected (F2) — KBR-9 | README endpoint table already wrong | README ⇄ code guards | **3** |
 | **G7** | No property-based tests | All example-based | `hypothesis` on the §6.1 list | **3** |
 | **G9** | C5 unmeasured | `force_close=True` gives a per-request connection pattern unlike the agent's | Connection-count baseline | **3** |
-| **G11** | Dependency behaviour unpinned; `curl_cffi` unbounded and **botocore undeclared** | Containment rests on an undeclared transitive dependency | Dependency contract tests (§6.2.4) + declare botocore | **3** |
+| **G11** | Dependency behaviour unpinned; `curl_cffi` unbounded, **botocore undeclared** and the interpreter declared to the minor only | One of five §6.2.4 contracts has landed — the stdlib `ipaddress` one (KBR-146). The four transport contracts and the `botocore` declaration remain, so containment still rests on an undeclared transitive dependency | Dependency contract tests (§6.2.4) + declare botocore | **3** |
+| **G25** | **§6.2.4 contracts are only ever evaluated on the newest patch of each minor** — KBR-146 | `tests.yml` names bare minor versions and `actions/setup-python` resolves each to the newest patch. Every dependency contract therefore proves forward drift only; a value that differs on an older patch a user runs — the shape KBR-146 had — is invisible to the gate. Today that half rests on one L1 test that forces the property both ways, which works because the surrounding behaviour was measured stable, and does not generalise to a contract whose neighbours have not been | One job pinned to the oldest supported patch (`setup-python` accepts an exact version, so it is one job, not four). Deferred as a CI-spend decision, not a technical one | **3** |
 | **G12** | Product layer effectively absent | 2 E2E tests, never run in CI | Nightly job, extended to 5 Claude Code cases | **4** |
 | **G13** | No answer-quality signal | Compaction and the Fireworks cap can degrade output invisibly | Paired delta eval | **4** |
 
@@ -2539,6 +2603,12 @@ per hour.
 
 Recorded per the repo's system-design discipline: the reasoning, especially where the choice was
 not the obvious one.
+
+**Pin what the code reads, not what it tolerates (§6.2.4).** A dependency contract that asserts a
+version-dependent value enforces the author's interpreter rather than the product's requirement —
+and, for KBR-146, would have enforced the defect. Where the dependency offers a stable neighbour the
+answer is to read that instead; where it does not, the row records whether a floor or a runtime
+check was chosen.
 
 **A permitted-mutation register instead of golden files (§3.1).** Golden files fail on every
 change, get regenerated reflexively, and prove nothing about unrecorded inputs. The register

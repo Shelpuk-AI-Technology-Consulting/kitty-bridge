@@ -420,6 +420,10 @@ class TestTheWholeSuiteIsCoherent:
             # module-level `pytestmark` cannot be overridden per test.
             "tests/harness/test_register_agreement.py",
             "tests/test_upstream_url_single_rule.py",
+            # KBR-146. A §6.2.4 dependency behaviour contract: it asserts what
+            # the interpreter does, which is an artifact upgraded separately
+            # from this one and by someone else entirely.
+            "tests/test_ipaddress_contract.py",
         }
 
         actual = {

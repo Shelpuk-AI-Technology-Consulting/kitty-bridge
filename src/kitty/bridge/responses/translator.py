@@ -32,7 +32,7 @@ from kitty.bridge.responses.events import (
     format_response_in_progress_event,
 )
 
-__all__ = ["ResponsesTranslator"]
+__all__ = ["InvalidResponsesRequest", "ResponsesTranslator", "normalize_responses_request"]
 
 # MiniMax interleaved thinking tags: <اخل>...</اخل>
 _THINKING_TAG_RE = re.compile(r"<\u0627\u062e\u0644>.*?</\u0627\u062e\u0644>", re.DOTALL)
@@ -67,6 +67,81 @@ def _empty_assistant_fallback_text(context: dict | None = None) -> str:
 def _strip_thinking_tags(text: str) -> str:
     """Strip MiniMax-style interleaved thinking tags from content."""
     return _THINKING_TAG_RE.sub("", text).strip()
+
+
+class InvalidResponsesRequest(ValueError):
+    """Raised when a Responses request carries a shape the dialect does not permit.
+
+    Carried out of :func:`normalize_responses_request` so
+    :meth:`kitty.bridge.server.BridgeServer._handle_responses` can answer with the
+    endpoint's 400 envelope.  Without a distinct type the handler's catch-all
+    renders every one of these as a 500, which
+    ``.system_design/TEST_SUITE.md`` §6.2.1 forbids: the bridge must never
+    return a server error for a client's malformed body.
+    """
+
+
+def normalize_responses_request(body: object) -> dict:
+    """Return a Responses request with ``input`` in its array form
+
+    OpenAI's ``CreateResponse`` schema defines ``input`` as ``oneOf`` a string
+    -- *"a text input to the model, equivalent to a text input with the*
+    ``user`` *role"* -- or an array of input items.  Everything downstream reads
+    the array, so the string is converted here, once, and the two forms become
+    one request.
+
+    **Call this before the inbound body forks.** ``.system_design/TEST_SUITE.md``
+    §3.2.3 records that two upstream bodies are built from one Responses
+    request: the Chat Completions body, from :meth:`ResponsesTranslator.translate_request`,
+    and -- on ``openai_subscription`` -- a Responses body built inside the
+    transport from the *raw* inbound dict.  Normalising only in the translator
+    leaves the second path iterating the string character by character and
+    shipping the user's text as a list of its own letters (KBR-144).
+
+    The rewrite is **register row M15** (§3.2.1).  It takes §3.3.1a's
+    ``not projectable`` escape, because both forms project to the same
+    wire-independent conversation -- one user turn carrying the text -- which is
+    the reasoning §3.3.1a applies to row P16.  The row exists rather than being
+    omitted because the rewrite is real bytes on the ``curl_cffi`` boundary, and
+    it binds the future OpenAI-Responses reader to read the two forms alike.
+
+    Args:
+        body: The decoded inbound request body.  Typed ``object`` rather than
+            ``dict`` because this is a trust boundary: the caller has decoded
+            arbitrary JSON, and annotating ``dict`` would make the guard below
+            look unreachable to a type checker.
+
+    Returns:
+        A body whose ``input``, if present, is a list of input-item objects.
+        The argument is never modified; an already-normalised body is returned
+        unchanged, so calling this twice is safe.
+
+    Raises:
+        InvalidResponsesRequest: The body is not a JSON object, or ``input`` is
+            neither a string nor an array of objects.
+    """
+    # A field can only be read off an object; valid JSON is a weaker claim.
+    if not isinstance(body, dict):
+        raise InvalidResponsesRequest(f"Request body must be a JSON object, got {type(body).__name__}")
+
+    if "input" not in body:
+        return body
+
+    value = body["input"]
+    # The spec's own equivalence, applied verbatim.
+    if isinstance(value, str):
+        item = {"type": "message", "role": "user", "content": [{"type": "input_text", "text": value}]}
+        return {**body, "input": [item]}
+
+    if not isinstance(value, list):
+        raise InvalidResponsesRequest(f"'input' must be a string or an array, got {type(value).__name__}")
+
+    # Reported by index, because a client sending a long transcript needs to know which item.
+    for index, element in enumerate(value):
+        if not isinstance(element, dict):
+            raise InvalidResponsesRequest(f"'input[{index}]' must be an object, got {type(element).__name__}")
+
+    return body
 
 
 class ResponsesTranslator:
@@ -124,6 +199,9 @@ class ResponsesTranslator:
 
     def translate_request(self, responses_request: dict) -> dict:
         """Convert a Responses API request to a Chat Completions request."""
+        # Idempotent, and the live caller has normalised already -- this is here so
+        # the translator is correct for any caller, not only the handler.
+        responses_request = normalize_responses_request(responses_request)
         messages = []
 
         # System instructions -> system message
@@ -155,7 +233,9 @@ class ResponsesTranslator:
         messages = self._merge_consecutive_system_messages(messages)
 
         result: dict = {
-            "model": responses_request["model"],
+            # `CreateResponse` declares no required fields, and register row M1
+            # replaces this with the profile's model anyway.
+            "model": responses_request.get("model", ""),
             "messages": messages,
             "stream": responses_request.get("stream", False),
         }
