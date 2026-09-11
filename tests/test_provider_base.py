@@ -110,6 +110,40 @@ class TestBuildUpstreamHeadersDefault:
         assert len(headers) == 2
 
 
+class TestBuildUpstreamHeadersForModelDefault:
+    """The per-model header hook defaults to the model-independent one.
+
+    Concrete on the base class rather than an optional hook the bridge finds
+    with ``hasattr`` (KBR-127): an adapter that routes auth per model and
+    forgets to define it would otherwise receive the default scheme in silence,
+    which is the same shape of defect as resolving the route from the wrong
+    model. The sibling ``upstream_wire_is_messages_api_for_model`` is concrete
+    for the reason KBR-7 gives, and this follows it.
+    """
+
+    def test_default_ignores_the_model(self):
+        adapter = _stub_adapter()
+        for model in ("gpt-4o", "opencode/minimax-m2.5", ""):
+            assert adapter.build_upstream_headers_for_model("sk-test-key-123", model) == adapter.build_upstream_headers(
+                "sk-test-key-123"
+            )
+
+    def test_follows_a_subclass_header_override(self):
+        """A subclass overriding only the model-independent form is still answered correctly.
+
+        The delegation is what lets every adapter but OpenCode Go leave this
+        alone; if it stopped following ``build_upstream_headers``, each of them
+        would silently start sending Bearer auth.
+        """
+
+        class _XApiKeyAdapter(type(_stub_adapter())):  # type: ignore[misc]  # concrete stub
+            def build_upstream_headers(self, api_key: str) -> dict[str, str]:
+                return {"x-api-key": api_key}
+
+        adapter = _XApiKeyAdapter()
+        assert adapter.build_upstream_headers_for_model("sk-test", "any-model") == {"x-api-key": "sk-test"}
+
+
 class TestTranslateToUpstreamDefault:
     """Default translate_to_upstream returns the request unchanged."""
 
