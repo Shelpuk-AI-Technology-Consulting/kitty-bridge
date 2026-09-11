@@ -100,8 +100,10 @@ def _run_openssl(*args: str) -> None:
             unhandled error is as loud as a failure.
     """
     # Bounded, and stdin closed, for the reason `tests/bridge/tls_certs.py`
-    # gives (KBR-132): this is the single entry point for five openssl calls
-    # inside the gate, and nothing else would stop a wedged one hanging it.
+    # gives (KBR-132): this is the single entry point for every openssl process
+    # this module spawns inside the gate, and nothing else would stop a wedged
+    # one hanging it. Deliberately no count -- "call sites" and "processes
+    # spawned" differ here, because `_generate_leaf` runs twice.
     completed = subprocess.run(
         ["openssl", *args],
         capture_output=True,
