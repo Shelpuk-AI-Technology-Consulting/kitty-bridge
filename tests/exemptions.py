@@ -42,7 +42,7 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
-from types import TracebackType
+from types import MappingProxyType, TracebackType
 
 # Every failure this module raises is prefixed with this, so a CI summary can
 # tell an exemption problem apart from the ordinary assertion failures around
@@ -93,7 +93,13 @@ class Exemption:
 # contains documents a fiction, and the unexpected-pass rule cannot catch that
 # one, because nothing ever runs it. Whichever of T-G1, T-G4, T-G5, T-G9 or
 # T-J2 lands first adds the first row.
-EXEMPTIONS: Mapping[str, Exemption] = {}
+#
+# A `MappingProxyType`, not a bare dict, so the value matches the read-only
+# annotation at runtime as well as to a type checker. `EXEMPTIONS[...] = ...`
+# from a guard would otherwise pass `mypy` and register a row nobody can find by
+# reading this file -- the one-registry invariant defeated by one line. Rows are
+# added by editing the literal below.
+EXEMPTIONS: Mapping[str, Exemption] = MappingProxyType({})
 
 
 class UnknownExemption(Exception):

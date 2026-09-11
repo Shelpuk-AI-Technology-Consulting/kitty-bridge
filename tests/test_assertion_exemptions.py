@@ -307,6 +307,22 @@ def test_registry_violations_reports_every_offender() -> None:
     assert len(violations) == 2
 
 
+def test_the_production_registry_cannot_be_added_to_at_runtime() -> None:
+    """A guard cannot register its own row by assigning into the registry.
+
+    The annotation says :class:`~collections.abc.Mapping`, which a type checker
+    enforces and a plain ``dict`` does not. Rows are added by editing the
+    literal in ``tests/exemptions.py``, where the list stays readable in one
+    place — §8's whole reason for having a registry.
+    """
+    with pytest.raises(TypeError):
+        EXEMPTIONS["smuggled-in"] = Exemption(  # type: ignore[index]
+            assertion="an assertion", condition="a condition", issue="KBR-8"
+        )
+
+    assert "smuggled-in" not in EXEMPTIONS
+
+
 def test_the_production_registry_is_well_formed() -> None:
     """Whatever rows the registry carries today, they are complete.
 
@@ -489,11 +505,13 @@ def test_ratchet_defaults_to_the_production_registry() -> None:
     """The registry argument is a private test seam, not the calling convention.
 
     Guards write ``with ratchet("some-id"):`` and get the one registry §8
-    requires; only this module passes its own, and the underscore says so. The
-    id below is one no production row is expected to take — the assertion
-    states that rather than assuming it, so this stays true as rows come and go.
+    requires; only this module passes its own, and the underscore says so.
+
+    The precondition is derived from :data:`SAMPLE_REGISTRY` rather than written
+    as a literal, so it keeps holding when a sample row is renamed and covers
+    every sample row rather than this one.
     """
-    assert "sample-only-header-subset" not in EXEMPTIONS
+    assert not (SAMPLE_REGISTRY.keys() & EXEMPTIONS.keys())
 
     def a_guard_using_the_calling_convention() -> None:
         """Stand in for a guard, which never passes a registry of its own."""
