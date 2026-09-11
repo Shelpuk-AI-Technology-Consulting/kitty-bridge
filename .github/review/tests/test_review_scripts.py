@@ -896,12 +896,21 @@ class TestSelectRules(unittest.TestCase):
 
         self.assertIn("docs", select_rules.select(["assets/logo.png"]))
 
-    def test_design_documents_select_the_docs_rule_if_they_ever_appear(self):
-        """Matched although this repository has none today.
+    def test_design_documents_select_the_docs_rule(self):
+        """Matched for the two tracked design documents and for paths not there yet.
 
-        The pattern costs one comparison and covers the directory the day it
-        appears; the alternative is a design document landing with no rule file
-        selected, which is the shape upstream recorded as a defect when a
+        ⚠️ This case was named `..._if_they_ever_appear` and opened "although
+        this repository has none today". Both stopped being true when PR #43
+        committed the test-suite design, and neither claim-sweep rule can see a
+        sentence shaped like that: it carries no forbidden phrase and puts no
+        exclusion verb beside the path. It is corrected by hand, which is what
+        the rules not covering it means in practice.
+
+        The forward-looking half stands: `SYSTEM_DESIGN.md`, a per-module
+        design directory, `CLAUDE.md` and `AGENTS.md` genuinely do not exist,
+        and each pattern costs one comparison while covering the file the day
+        it appears. The alternative is a design document landing with no rule
+        file selected, which is the shape upstream recorded as a defect when a
         397-file directory matched nothing for months. The leading `**/` is what
         reaches a per-module set rather than only the root one.
         """
@@ -1207,12 +1216,19 @@ class NoPrivateReferenceLeaksTests(unittest.TestCase):
     #:   design is built on, for a key already published together with its
     #:   tracker URL.
     #:
-    #: ⚠️ **Said plainly so a green run is not over-read: `.github/` carries no
-    #: token of this project's own key today, so this allowance changes no
-    #: current result.** It is the record of the decision, and the thing that
-    #: holds the day a comment here first needs to cite the ticket it came from.
-    #: Its controls are line-level for exactly that reason -- a sweep-level
-    #: control would pass identically with this constant deleted.
+    #: 🔴 **This allowance is LOAD-BEARING, and it became so in the commit that
+    #: added it.** `.github/` carried no token of this project's key beforehand,
+    #: which is why the first draft of this note said the allowance changed no
+    #: current result -- a claim the same change falsified, and exactly the
+    #: defect class this whole change exists to repair. The controls below cite
+    #: the key in three places, so emptying this constant now turns the ticket
+    #: sweep red rather than passing in silence.
+    #:
+    #: ⚠️ **Its controls are line-level even so**, and the reason survives the
+    #: correction: a sweep-level control depends on the tree happening to carry
+    #: a matching token, which is incidental and can be edited away without
+    #: anybody noticing the control went quiet. One line through one predicate
+    #: cannot.
     #:
     #: Matched on the whole prefix, never as a substring: `KBRX-1` and `XKBR-1`  # noqa: leak-guard
     #: are still reported, which is the shape a near-miss takes.
@@ -1305,7 +1321,7 @@ class NoPrivateReferenceLeaksTests(unittest.TestCase):
             # number, so editing the class cannot silently disable the guard.
             if "noqa: leak-guard" in line:
                 continue
-            for rule in rules or self._rules():
+            for rule in self._rules() if rules is None else rules:
                 for token in rule(line):
                     yield lineno, token, line.strip()[:100]
 
@@ -1357,6 +1373,13 @@ class NoPrivateReferenceLeaksTests(unittest.TestCase):
         :meth:`test_the_tracked_enumeration_reaches_the_whole_tree` is what
         catches an enumeration that has quietly stopped reaching anything.
 
+        ⚠️ **This is a narrowing as well as a widening, and only the widening
+        is obvious.** The sibling rule used to walk `.github/` directly, so an
+        UNTRACKED file a developer had put there was checked locally. It is not
+        any more. Nothing is lost in CI, where an untracked file cannot exist,
+        and the trade is the one stated above -- but a reader comparing the two
+        sweeps should not have to work that out.
+
         Yields:
             ``(repo_root, path)`` pairs for every tracked file that exists.
         """
@@ -1366,7 +1389,12 @@ class NoPrivateReferenceLeaksTests(unittest.TestCase):
             ["git", "ls-files"], cwd=repo, capture_output=True, text=True
         )
         if proc.returncode != 0:
-            self.skipTest("not a git checkout, so the tracked set is unknowable")
+            self.skipTest(
+                "not a git checkout, so the tracked set is unknowable. ⚠️ This "
+                "CANNOT happen under `review-scripts`, where `actions/checkout` "
+                "guarantees one -- a skip appearing there is a defect, not "
+                "normal, and means the leak guard did not run"
+            )
 
         tracked = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
         self.assertGreater(len(tracked), 100, "the tracked set looks truncated")
@@ -1396,6 +1424,28 @@ class NoPrivateReferenceLeaksTests(unittest.TestCase):
             "run as a statement about the rest of the tree"
         )
 
+    def _leak_message(self, offences):
+        """Return the ticket sweep's failure message for ``offences``.
+
+        A method rather than a string assembled inside the assertion, so the
+        control below can hold the scope sentence where a reader actually meets
+        it. Built inline, the sentence could be dropped from the message with
+        every test in this module still green.
+
+        Args:
+            offences: The formatted offence lines; may be empty.
+
+        Returns:
+            The complete assertion message, scope sentence included.
+        """
+
+        return (
+            "this repository is PUBLIC and these name a private project's issue "
+            "tracker -- rewrite each to say 'an internal repository' / "
+            "'upstream' rather than deleting the sentence, so the reasoning "
+            "survives. " + self._scope_note() + ":\n  " + "\n  ".join(offences)
+        )
+
     def test_the_ticket_scope_is_stated_where_it_is_narrowed(self):
         """🔴 The scope must be what it claims, and the message must say so.
 
@@ -1413,6 +1463,11 @@ class NoPrivateReferenceLeaksTests(unittest.TestCase):
                 self.assertIn(directory, note)
         self.assertIn("ONLY", note)
         self.assertIn("SWEPT_DIRS", note)
+
+        # 🔴 And that the sweep's message actually CARRIES it. Asserting the
+        # sentence's content alone leaves it deletable from the message with
+        # every test green, which is the same shape as a guard nobody runs.
+        self.assertIn(note, self._leak_message([]))
 
     def test_the_tracked_enumeration_reaches_the_whole_tree(self):
         """🔴 The control the tree-wide sweep cannot give itself.
@@ -1524,14 +1579,7 @@ class NoPrivateReferenceLeaksTests(unittest.TestCase):
                         f"{token!r} in {line}"
                     )
 
-        self.assertFalse(
-            offences,
-            "this repository is PUBLIC and these name a private project's issue "
-            "tracker -- rewrite each to say 'an internal repository' / "
-            "'upstream' rather than deleting the sentence, so the reasoning "
-            "survives. " + self._scope_note() + ":\n  "
-            + "\n  ".join(offences),
-        )
+        self.assertFalse(offences, self._leak_message(offences))
 
     def test_no_tracked_file_names_a_sibling_repository(self):
         """The SIBLING rule, over every tracked file in the repository.
@@ -1692,10 +1740,10 @@ class NoPrivateReferenceLeaksTests(unittest.TestCase):
         test got it wrong in exactly the way this class warns about.
 
         A sweep-level assertion -- "with the allowance disabled, the sweep
-        reports something" -- passes identically whether the allowance exists or
-        has been deleted, because the tree carries hundreds of tokens the
-        allowance never touches. That is a control which asserts nothing while
-        still looking like one.
+        reports something" -- was the first draft, and it passes identically
+        whether the allowance exists or has been deleted: the tree carries
+        plenty of tokens the allowance never touches. That is a control which
+        asserts nothing while still looking like one.
 
         So the claim is made where it is decidable: one line, one predicate,
         with the allowance and without it. The allowance is emptied by setting
@@ -1740,9 +1788,13 @@ class NoPrivateReferenceLeaksTests(unittest.TestCase):
             for _, token, _ in self._offences_in_line(line)
         ]
         self.assertEqual(from_file, from_lines)
-        # The control: two empty lists are equal and would prove nothing. Both
-        # rules must have fired, or this compares silence with silence.
-        self.assertEqual(len(from_file), 2, from_file)
+        # The control: two empty lists are equal and would prove nothing. Named
+        # rather than counted, because a count of two is satisfied by one rule
+        # firing twice -- and the order is itself the claim, since :meth:`_rules`
+        # is required to keep the ticket rule ahead of the sibling one.
+        self.assertEqual(
+            from_file, ["QQX-197", f"{self.OWNER}/some-other-project"]  # noqa: leak-guard
+        )
 
     def _offences_in_line(self, line):
         """Yield ``(lineno, token, line)`` for one line, without touching disk.
@@ -13230,6 +13282,13 @@ class RecordedTestCountTests(unittest.TestCase):
     QUOTING = (
         Path(__file__).resolve().parents[1] / "README.md",
         Path(__file__).resolve().parents[2] / "workflows" / "ci.yml",
+        # 🔴 The THIRD document, added after it was found two behind while the
+        # other two were current -- the partial-fix shape this module records
+        # paying for elsewhere. `pyproject.toml` cites the figure to explain why
+        # a linter exclusion is not "that code is unchecked", and a reader who
+        # checks that claim and finds a stale number has no way to tell which of
+        # the three is right.
+        Path(__file__).resolve().parents[3] / "pyproject.toml",
     )
 
     def _total(self):
@@ -13549,6 +13608,59 @@ class NoDocumentClaimsTheRepositoryHasNoTestGateTests(unittest.TestCase):
         "The class also now asserts `.system_design` is **absent** from the excluded\n"
         "set",
     )
+
+    def test_the_fixtures_are_not_empty_and_every_rule_is_exercised(self):
+        """🔴 Four controls above pass over an EMPTY list, which is no control.
+
+        Both fixtures were literals inside the test bodies until they were
+        hoisted into constants so the disjointness and presence checks could
+        share them. That move made emptying either one a single edit to a
+        constant, leaving all four controls green -- the shape this class exists
+        to refuse. Measured rather than assumed: with both tuples emptied, the
+        four of them pass.
+
+        The second half is stronger than a length. Every RULE must be exercised
+        by at least one specimen; without that, a third rule can be added with
+        no specimen and the recognition control still passes, which is exactly
+        how a mistyped pattern survives for ever.
+        """
+
+        self.assertGreaterEqual(
+            len(self.SPECIMENS), 11, "the specimen list has been emptied"
+        )
+        self.assertGreaterEqual(
+            len(self.ALLOWED), 8, "the allowed-paragraph list has been emptied"
+        )
+
+        for rule, _ in self.CLAIMS:
+            with self.subTest(rule=rule.pattern[:48]):
+                self.assertTrue(
+                    [text for text in self.SPECIMENS if rule.search(text)],
+                    "no specimen exercises this rule, so a typo in it would "
+                    "never be caught -- add the sentence it retired",
+                )
+
+    def test_the_marked_code_line_still_needs_its_marker(self):
+        """🔴 A suppression nothing checks becomes dead suppression in silence.
+
+        Exactly one CODE line carries the marker for these rules, and not
+        because it says anything false: the join fuses it with the comment
+        beneath it into a sentence the gitignore rule matches. That is a
+        tolerated false positive, and the price of tolerating it is that the
+        marker stays honest. If the rule is ever narrowed so the fusion no
+        longer matches, the marker is doing nothing and should be removed --
+        and nothing else in this suite would say so.
+        """
+
+        fused = (
+            "ignored = self._ignored_prefixes()"
+            " `.system_design` was the second specimen until the design documents"
+        )
+        self.assertTrue(
+            any(rule.search(fused) for rule, _ in self.CLAIMS),
+            "the marked line no longer matches any rule, so its "
+            "`noqa: ci-claim` marker is dead suppression -- remove it",
+        )
 
     def test_every_rule_recognises_the_claim_it_forbids(self):
         """🔴 The control the sweep cannot give itself.
@@ -14068,6 +14180,7 @@ class OutcomeChainCancellationWiringTests(unittest.TestCase):
                     "superseded push comments or annotates once per push",
                 )
 
+
 class ReviewerIsPointedAtTheDesignDocumentsTests(unittest.TestCase):
     """🔴 The instruction must be PRESENT, and only a positive check can say so.
 
@@ -14121,6 +14234,16 @@ class ReviewerIsPointedAtTheDesignDocumentsTests(unittest.TestCase):
             "the setup document states which specifications exist",
         ),
         (
+            REVIEW_DIR / "REVIEW_PROMPT.md",
+            "relevant part rather than the whole file",
+            "the prompt is what the model receives, and the budget is real",
+        ),
+        (
+            REVIEW_DIR / "rules" / "docs.md",
+            "read the relevant section, not the whole thing",
+            "the rule file must not ask for a 133 KB read either",
+        ),
+        (
             REVIEW_DIR / "rules" / "docs.md",
             "a design left stale by a change that invalidates it",
             "the failure mode that gets missed -- a wrong docstring one level up",
@@ -14147,7 +14270,7 @@ class ReviewerIsPointedAtTheDesignDocumentsTests(unittest.TestCase):
             "the table row no longer offers the document conditionally",
         ),
         (
-            REVIEW_DIR.parent / "review" / "scripts" / "select_rules.py",
+            REVIEW_DIR / "scripts" / "select_rules.py",
             "deliberately leaves `.system_design/` tracked",
             "the selector's comments no longer claim the paths are unreachable",
         ),
@@ -15565,7 +15688,7 @@ class NoDocumentAttributesTheCatalogueRefreshToTheGateTests(unittest.TestCase):
     #
     # 🔴 `runs it\b`, not `runs it`. Without the boundary it also matches "runs
     # **its**" -- and `pyproject.toml` really does say "`ci.yml` runs its
-    # 606-case suite on every pull request", a true sentence about the test job
+    # 619-case suite on every pull request", a true sentence about the test job
     # which the loose form read as a false attribution of the catalogue refresh.
     # Found by this repository's own review of the commit that added this guard,
     # while the sweep was still scoped narrowly enough not to reach that file.
@@ -15649,7 +15772,7 @@ class NoDocumentAttributesTheCatalogueRefreshToTheGateTests(unittest.TestCase):
         🔴 **The first entry is quoted from `pyproject.toml`, verbatim, and it is
         the one that matters.** The earlier version of this case said its
         sentences were "real, correct sentences in this tree" when they were
-        paraphrases -- and the actual sentence, "``ci.yml`` runs its 606-case
+        paraphrases -- and the actual sentence, "``ci.yml`` runs its 619-case
         suite on every pull request", DID fire the rule as first written. The
         guard passed only because the sweep did not reach that file. Both halves
         are fixed: the rule requires a word boundary after "runs it", and the
@@ -15659,7 +15782,7 @@ class NoDocumentAttributesTheCatalogueRefreshToTheGateTests(unittest.TestCase):
 
         for sentence in (
             "# on every pull request, and that suite carries guards this linter could not",
-            "`ci.yml` runs its 606-case suite",
+            "`ci.yml` runs its 619-case suite",
             "`ci.yml` is the merge gate, and `ci-required` aggregates it",
             "refreshed weekly by `model-metadata.yml`",
             "a job added to `ci.yml` must also be added to the aggregate",
