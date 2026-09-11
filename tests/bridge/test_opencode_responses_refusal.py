@@ -36,12 +36,21 @@ Responses route starts working.  So the surfaces are pinned here rather than
 changed, and the property that actually matters is asserted on every one of
 them: **the message reaches the user, and no upstream request is made.**
 
-**Not covered here.**  The four streaming handlers call ``translate_to_upstream``
-again after a mid-stream failover, so a pool that fails over *to* a
-Responses-routed backend ends the stream at that point.  No pool damage results —
-those handlers' outer ``except Exception`` does not mark a backend unhealthy —
-so it is uncovered rather than defective, and said out loud so a green run here
-is not read as covering it.
+**The mid-stream failover path.**  The four streaming handlers call
+``translate_to_upstream`` again after a backend re-selection, so a pool that
+fails over *onto* a Responses-routed backend meets the refusal with its SSE
+response already committed.  Earlier rounds of review argued about what that
+does; :func:`test_a_failover_onto_a_refused_backend_damages_nothing` measures it
+instead.  What it shows: the refusal marks **no** backend unhealthy — only the
+sibling that genuinely failed is cooled — and the message still reaches the
+client, but in a generic ``internal_error`` frame rather than the deliberate
+refusal surface a first request gets.
+
+That asymmetry is real and is **not** fixed here.  Removing it means an inner
+``try/except UnsupportedModelError`` at thirteen call sites across four
+handlers, every line of which exists only to refuse and all of which KBR-137
+deletes.  The test below pins the behaviour so the claim is evidence rather than
+argument, and so the day it changes is a visible decision.
 """
 
 from __future__ import annotations
@@ -78,6 +87,9 @@ class _CountingUpstream:
         #: Number of leading non-streaming replies to answer with empty content,
         #: so a test can drive the bridge's empty-response retry ladder.
         self.empty_replies = 0
+        #: Number of leading replies to answer with a 500, so a test can force a
+        #: backend failover.
+        self.error_replies = 0
         self._runner: web.AppRunner | None = None
         self.port = 0
 
@@ -103,6 +115,9 @@ class _CountingUpstream:
         retries — so it would be proving nothing, slowly.
         """
         self.hits.append(request.path)
+        if self.error_replies:
+            self.error_replies -= 1
+            return web.json_response({"error": {"message": "upstream boom"}}, status=500)
         # Answers Chat Completions chunks whatever dialect the request was
         # written in. Correct today because every positive control here uses
         # SERVED_MODEL, which is Chat-Completions-routed — but a Messages-routed
@@ -470,3 +485,55 @@ async def test_a_refusal_does_not_steal_the_retry_ladder_from_a_healthy_sibling(
     assert status == 200, f"the ladder must still run for the servable sibling, got {status}: {body[:200]}"
     assert "ok" in body
     assert slept, "the empty-response ladder was skipped entirely"
+
+
+@pytest.mark.asyncio
+async def test_a_failover_onto_a_refused_backend_damages_nothing(upstream: _CountingUpstream, monkeypatch):
+    """The mid-stream failover path, measured rather than argued about.
+
+    Three rounds of review disagreed about this path while neither side had run
+    it.  The setup is the one nothing else covers: a **balancing pool**, a
+    **streaming** request, and a failover that lands on the refused backend
+    after the SSE response is already committed.
+
+    Backend 0 is servable and answers ``500``, forcing failover; backend 1's
+    profile names a Responses-routed model, so re-serialization refuses.
+
+    The two properties that matter hold, and are what this asserts:
+
+    * **no backend is quarantined by the refusal** — only backend 0 is cooled,
+      and it earned that by actually failing;
+    * **the message still reaches the client**, so the user is told why.
+
+    The third observation is the concession: the envelope is a generic
+    ``internal_error`` frame, not the deliberate refusal surface. Pinned here so
+    it is a recorded interim shape rather than a thing nobody has looked at.
+    """
+    _pin_backend_order(monkeypatch)
+    server = _balancing_server(upstream, [SERVED_MODEL, REFUSED_MODEL])
+    cooled: list[tuple[int, str]] = []
+    monkeypatch.setattr(
+        server, "_mark_backend_unhealthy", lambda idx, **kw: cooled.append((idx, kw.get("failure_kind")))
+    )
+    upstream.error_replies = 1
+
+    port = await server.start_async()
+    try:
+        status, body = await _post(port, "/v1/chat/completions", _payload("chat_completions", SERVED_MODEL, True))
+    finally:
+        await server.stop_async()
+
+    # Committed before the body was built, as with every streaming surface.
+    assert status == 200
+
+    assert REFUSED_MODEL in body, "the user must still be told which model cannot be served"
+    assert "/v1/chat/completions" in body
+
+    # The refusal itself is not evidence against anything. Backend 0 is cooled
+    # because it returned a 500; backend 1, which merely could not be
+    # serialized, must not appear at all.
+    assert [idx for idx, _kind in cooled] == [0], f"only the backend that actually failed may be cooled: {cooled}"
+
+    # The concession, pinned: a first request would have produced the dialect's
+    # own refusal envelope. KBR-137 removes the asymmetry by removing the refusal.
+    assert "internal_error" in body
