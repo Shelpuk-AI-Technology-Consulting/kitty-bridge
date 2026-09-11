@@ -367,7 +367,7 @@ one case it existed for. T-E1 now ships the report; T-E9 only checks it is compl
 | **T-G6** | OpenAPI 3.1 + schemathesis | | T-W8 | Five POST routes plus `/healthz`, `/stats`, `/v1/models`, **targeting bridge mode**; plus a per-protocol registration-matrix guard | §6.2.1 | L |
 | **T-G7** | SSE grammar state machine | | T-B4, T-W8 | Every stream, including error streams and mid-stream failover, is a sentence in the grammar | §6.2.2 | M |
 | **T-G8** | aiohttp proxy contract | | T-W5 | Session-level proxy across `>=3.11,<3.14`; a per-request `proxy=None` cannot escape it | §6.2.4 | S |
-| **T-G9** | **Header contract** | defect | T-W7 | Exact header set per adapter — names, absences, casing, value shape. No `User-Agent` or version header derived from `kitty.__version__`; where both are sent they agree. **This catches KBR-8** | §4.3 C1 | M |
+| **T-G9** | **Header contract** | defect | T-W7 | Exact header set per adapter — names, absences, casing, value shape. No `User-Agent` or version header derived from `kitty.__version__`; where both are sent they agree. **KBR-8 fixed the defect and landed those two assertions behaviourally** in `tests/test_upstream_identity_consistency.py`, so T-G9's remaining scope is the exact set — names, absences, casing, value shape — and it inherits that file's positive controls | §4.3 C1 | M |
 | **T-G10** | curl_cffi proxy contract | | T-W5 | `proxies=` honoured; precedence over ambient `HTTP_PROXY`/`NO_PROXY` | §6.2.4 | S |
 | **T-G11** | botocore proxy contract + **declare `botocore`** | | T-W5 | `Config(proxies=)` precedence over the environment; and the dependency is declared, since a containment guarantee currently rests on an undeclared transitive | §6.2.4 | S |
 | **T-G12** | `keyring` backend contract | | — | Backend resolution on each supported platform | §6.2.4 | S |
@@ -565,7 +565,7 @@ merge.** So:
 | ~~KBR-5~~ | ~~G14~~ | T-G5, TR-4 | **DONE 2026-09-07** — atomic fix + tests, red at base revision. TR-4's exemption withdrawn |
 | KBR-6 | G15 | T-G3 | Atomic fix + test now |
 | KBR-7 · **CLOSED** | G16 | T-G4 | Route taken: atomic fix + hook-level guard landed together, red evidence in the PR. T-G4 still owns the wire boundary. (Status convention: `TEST_SUITE.md` §9.2.) |
-| KBR-8 | G3 | T-G9, TR-1c | Atomic fix + test now |
+| KBR-8 · **CLOSED** | G3 | T-G9, TR-1c | Route taken: atomic fix + behavioural guard landed together, red evidence in the PR (2026-09-11). T-G9 still owns the exact-set contract and TR-1c the acceptance scenario; G3's policy half waits on Q1. (Status convention: `TEST_SUITE.md` §9.2.) |
 | KBR-9 | G6 | T-G1 | Atomic fix + test now |
 | KBR-132 · **CLOSED** | G21 | — | Route taken: atomic fix + regression test, red at base, evidence in the PR. The broader guard is **KBR-138**, which has no plan-task ID because it was filed after this plan was written; G21 is its design gap. (Status convention: `TEST_SUITE.md` §9.2.) |
 

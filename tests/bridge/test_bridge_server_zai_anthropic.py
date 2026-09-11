@@ -48,21 +48,24 @@ def server():
 
 class TestBridgeZaiAnthropicURL:
     def test_upstream_url_uses_messages_path(self, server):
-        url = server._build_upstream_url()
+        # An empty request, deliberately: this server carries no profile model and
+        # this adapter's route does not depend on the model, so the empty case is
+        # the strongest form of the claim (KBR-127).
+        url = server._build_upstream_url({})
         assert url == "https://api.z.ai/api/anthropic/v1/messages"
 
 
 class TestBridgeZaiAnthropicHeaders:
     def test_uses_bearer_auth(self, server):
-        headers = server._build_upstream_headers()
+        headers = server._build_upstream_headers({})
         assert headers["Authorization"] == "Bearer sk-zai-test123"
 
     def test_has_anthropic_version(self, server):
-        headers = server._build_upstream_headers()
+        headers = server._build_upstream_headers({})
         assert "anthropic-version" in headers
 
     def test_no_x_api_key(self, server):
-        headers = server._build_upstream_headers()
+        headers = server._build_upstream_headers({})
         assert "x-api-key" not in headers
 
 

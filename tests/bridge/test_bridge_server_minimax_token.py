@@ -351,15 +351,18 @@ class TestMiniMaxTokenTranslatedPath:
 
     def test_global_default(self):
         server = _make_server()
-        assert server._build_upstream_url() == f"{_GLOBAL_URL}{_MESSAGES_PATH}"
+        # An empty request, deliberately: this server carries no profile model and
+        # this adapter's route does not depend on the model, so the empty case is
+        # the strongest form of the claim (KBR-127).
+        assert server._build_upstream_url({}) == f"{_GLOBAL_URL}{_MESSAGES_PATH}"
 
     def test_cn_region_routes_to_cn_host(self):
         server = _make_server(provider_config={"region": "cn"})
-        assert server._build_upstream_url() == f"{_CN_URL}{_MESSAGES_PATH}"
+        assert server._build_upstream_url({}) == f"{_CN_URL}{_MESSAGES_PATH}"
 
     def test_explicit_global_region_uses_global_host(self):
         server = _make_server(provider_config={"region": "global"})
-        assert server._build_upstream_url() == f"{_GLOBAL_URL}{_MESSAGES_PATH}"
+        assert server._build_upstream_url({}) == f"{_GLOBAL_URL}{_MESSAGES_PATH}"
 
 
 # ── Opt-in native passthrough ──────────────────────────────────────────────

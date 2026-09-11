@@ -406,6 +406,8 @@ class TestTheWholeSuiteIsCoherent:
             # `validation_model` against the dialect `validate_api_key` speaks.
             "tests/test_opencode_endpoint_table.py",
             "tests/test_validation_model_routing.py",
+            "tests/test_upstream_identity_consistency.py",
+            "tests/test_upstream_route_source_of_truth.py",
             "tests/test_github_actions.py",
             "tests/test_layer_markers.py",
             "tests/test_layer_selection.py",
