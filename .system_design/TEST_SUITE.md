@@ -1885,9 +1885,10 @@ has to keep it, and the fix for a red gate is to install `openssl`, never to rei
 resource.** §8.1's `RESOURCE_DEPENDENT_LAYERS` excludes a whole **layer** whose resource a
 developer's machine may not have — a pinned agent binary, live credentials, a load rig — so a bare
 `pytest` reports those as *deselected*, not skipped. That mechanism is layer-granular by
-construction, and `openssl` is needed by a handful of tests *inside* `l1`, spread across three
-modules. A resource used by part of a gating layer therefore has only two possible treatments:
-skip it, which §8 forbids, or require it.
+construction, and `openssl` is needed by *some tests inside* `l1` rather than by a layer — stated
+as that property rather than as a count of modules, which is the kind of number that goes stale
+silently. A resource used by part of a gating layer has only two possible treatments: skip it,
+which §8 forbids, or require it.
 The two rules are consistent, and the seam between them is worth naming because the obvious
 reading of §8.1 suggests a third option that does not exist.
 
