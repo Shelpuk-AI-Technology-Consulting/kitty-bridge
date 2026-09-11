@@ -400,6 +400,7 @@ class TestTheWholeSuiteIsCoherent:
             "tests/test_internal_key_completeness.py",
             "tests/test_egress_coverage.py",
             "tests/test_wire_shape_honesty.py",
+            "tests/test_upstream_identity_consistency.py",
             "tests/test_github_actions.py",
             "tests/test_layer_markers.py",
             "tests/test_layer_selection.py",

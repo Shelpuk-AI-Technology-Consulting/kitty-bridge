@@ -733,18 +733,30 @@ documentation only; each needed its own ticket. F3, F4 and F5 were live breaches
 defined above. **F5 has since been fixed under KBR-7**, together with the hook-level half of its
 guard; see its entry below and §6.2.3. The rest remain open.
 
-- **F1 — Agent identity is handled per-provider, not by policy.** *(KBR-8.)* Upstream headers are built from
+- **F1 — Agent identity is handled per-provider, not by policy.** *(KBR-8 — the self-contradiction
+  **fixed**; the policy gap remains.)* Upstream headers are built from
   scratch, so Claude Code's `user-agent`, `x-app`, `anthropic-beta` and `x-stainless-*` never
   reach the provider. Four adapters compensate ad hoc (P9a, P9c): `KimiCodeAdapter`, `BytePlusAdapter`
   and `MimoAdapter` hard-code `User-Agent: claude-code/1.0` — Kimi's carries a comment recording
   the string was on the provider's allowlist as of 2026-04-18 — and `OpenAISubscriptionAdapter`
   synthesises a Codex CLI identity. Everywhere else, including `zai_coding`, aiohttp's default
   goes instead.
-  **The subscription adapter contradicts itself in a single request:** its user-agent is
-  `codex_cli_rs/{kitty.__version__}` (currently `1.9.0`) while its `version` header is the
-  constant `0.128.0`. A client claiming to be Codex CLI 1.9.0 *and* 0.128.0 at once is a one-line
-  detection rule — and the user-agent tracks kitty's release train, so it changes with every
-  kitty release and with nothing else. Tracked as G3, KBR-8 and Q1.
+  **The subscription adapter contradicted itself in a single request — FIXED (KBR-8,
+  2026-09-11).** Its user-agent was `codex_cli_rs/{kitty.__version__}` while its `version` header
+  was the constant `0.128.0`. A client claiming to be Codex CLI 1.9.1 *and* 0.128.0 at once is a
+  one-line detection rule, and the user-agent tracked kitty's release train, changing with every
+  kitty release and with nothing else. **The finding's own text demonstrates it:** the defect was
+  filed reading `1.9.0` and measured reading `1.9.1`, moved by a kitty release and nothing else.
+  `_build_user_agent` now reads `_CODEX_CLI_VERSION`, the same constant the `version` header
+  carries, so the two agree by construction. The behavioural guard is
+  `tests/test_upstream_identity_consistency.py`, which sweeps every registered adapter through a
+  mirror of `BridgeServer._build_upstream_headers` — plus the subscription adapter's
+  `_build_codex_headers`, since it overrides no hook and would otherwise be invisible. It stands
+  in until T-G9 / KBR-78 lands the exact-set contract, exactly as
+  `tests/bridge/test_vendor_token_guard.py` stands in until T-G5.
+  **What KBR-8 did not close:** identity is still ad hoc per adapter — three hard-coded
+  `claude-code/1.0` strings, one synthesised Codex identity, and aiohttp's default everywhere else.
+  That is the policy half of G3, and it waits on Q1.
 - **F2 — The README's endpoint table does not match the router.** *(KBR-9.)* README documents
   `POST /v1/gemini/generateContent`; `_register_routes` registers
   `/v1beta/models/{model}:generateContent` and `:streamGenerateContent`, and the README omits
@@ -2033,7 +2045,7 @@ does not surface work that is done. `TEST_SUITE_IMPLEMENTATION_PLAN.md` §16 mir
 | **G21** | §8's skip rule is stated in prose and nothing checks it — KBR-138 | Found while closing KBR-132. The known breach is fixed, and every skip left in a *gating* layer is a platform or interpreter one — but that is an observation, not a mechanism, and the next resource-availability skip written into `l1`, `l2`, `l3` or `acceptance` re-creates the same silent-green defect | A check over the collected suite that fails on a resource-availability skip in a gating layer, with a planted skip as its falsification case (§1.4). It must be **layer-aware**: `tests/integration/test_agent_e2e.py` holds three legitimate resource skips (missing credentials, profile, agent binary) that are legal only because they sit in `agent_live`, so a flat grep would report them and be turned off. Two further questions: static sweep or runtime hook, and whether a permitted skip is recognised by condition shape or declared by marker | **3** |
 | **G1** | I1 is unstated and untested | No definition of "unchanged"; mutation sites discoverable only by reading 6,463 lines | Register (§3.2) + oracle (§3.3) | **1** |
 | **G2** | No-bypass unproven **for the bridge's serving path**; no negative assertion; start-path guard is file-granular | `test_egress_https_proxy.py` proves the transports and drives `egress_cmd._probe` | Sealed-network harness (§5.2) per transport (§5.5) + AST start-path guard | **1** |
-| **G3** | I2 partially breached (F1) — KBR-8 | Identity ad hoc per adapter; the subscription adapter reports two different versions in one request | Header contract + parity baseline, then a policy and a code fix | **2** |
+| **G3** | I2 partially breached (F1) — KBR-8 · **fix landed, gap open** | Identity is still ad hoc per adapter. The subscription adapter no longer reports two different versions in one request: **KBR-8 fixed that on 2026-09-11**, and `tests/test_upstream_identity_consistency.py` guards both halves of §4.3 C1's F1 assertions across every registered adapter | Remaining: the exact-set header contract (T-G9 / **KBR-78**) and the parity baseline (T-C7, T-I12), then a policy — Q1 | **2** |
 | **G4** | L1 strength unmeasured | Line coverage only | `mutmut` ≥ 85% **per target group** on the §6.1 scope | **2** |
 | **G8** | No corpus of real agent traffic | Synthetic fixtures encode our assumptions | Golden corpus (§7.1) | **2** |
 | **G10** | Custom-transport containment untested | Proven at transport level, never through the bridge; ambient `HTTP_PROXY`/`NO_PROXY` untested; the OAuth leg untested | §5.5 + §6.2.4 | **2** |
