@@ -88,7 +88,8 @@ class Exemption:
 # list is supposed to trend towards zero.
 #
 # It ships EMPTY, deliberately. TEST_SUITE.md §8 names one row -- TR-1c's
-# header-subset assertion, KBR-8 -- but TR-1c is an acceptance scenario that
+# header-subset assertion, pending G3's policy half (Q1); it was keyed to KBR-8
+# until that shipped without closing parity -- but TR-1c is an acceptance scenario that
 # does not exist yet (§6.4.1, plan task T-J2). A row for an assertion no test
 # contains documents a fiction, and the unexpected-pass rule cannot catch that
 # one, because nothing ever runs it. Whichever of T-G1, T-G4, T-G5, T-G9 or

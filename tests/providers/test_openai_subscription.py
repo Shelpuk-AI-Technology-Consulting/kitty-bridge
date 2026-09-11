@@ -552,6 +552,35 @@ class TestCodexHeaders:
 
         assert headers["version"] == _CODEX_CLI_VERSION
 
+    def test_user_agent_version_is_the_codex_version(
+        self, adapter: OpenAISubscriptionAdapter
+    ) -> None:
+        """The user-agent reports the impersonated Codex CLI version (KBR-8).
+
+        Both version fields come from ``_CODEX_CLI_VERSION``, so the assertion
+        is against that constant rather than a literal: pinning the literal here
+        would make bumping the impersonated version fail a test that has no
+        opinion about which version it should be.
+        """
+        from kitty.providers.openai_subscription import _CODEX_CLI_VERSION
+
+        assert adapter._build_user_agent().startswith(f"codex_cli_rs/{_CODEX_CLI_VERSION} (")
+
+    def test_user_agent_and_version_header_agree(
+        self, adapter: OpenAISubscriptionAdapter
+    ) -> None:
+        """One request states one client version (KBR-8).
+
+        A client claiming to be Codex CLI 1.9.1 in its user-agent and 0.128.0 in
+        its ``version`` header identifies itself as an intermediary outright.
+        """
+        headers = adapter._build_codex_headers("tok", _make_id_token())
+
+        # Asserted as a prefix rather than by parsing the product out of the
+        # user-agent: a second parser here would be a second shape to keep in
+        # step with the one in `tests/test_upstream_identity_consistency.py`.
+        assert headers["User-Agent"].startswith(f"codex_cli_rs/{headers['version']} (")
+
 
 # ── curl_cffi error mapping ──────────────────────────────────────────────
 
