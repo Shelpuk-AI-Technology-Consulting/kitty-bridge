@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from kitty import __version__
+from kitty.io_encoding import harden_output_streams
 
 __all__ = ["main", "map_child_exit_code"]
 
@@ -131,6 +132,10 @@ def _build_parser():
 
 def main() -> None:
     """Main entry point for the kitty CLI."""
+    # Before the first write of any kind: on Windows a piped stdout encodes
+    # with the locale codepage and dies on the banner's em dash (KBR-10).
+    harden_output_streams()
+
     from kitty.tui.display import print_banner
 
     print_banner(__version__)

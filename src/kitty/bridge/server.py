@@ -44,7 +44,7 @@ from kitty.bridge.responses.translator import ResponsesTranslator
 from kitty.bridge.tool_audit import AUDIT_MARKER, ToolUseAuditor, collect_tool_schemas, report_tool_use
 from kitty.cloudflare import is_cloudflare_block
 from kitty.egress import EgressConfig, should_bypass
-from kitty.providers.base import ProviderAdapter, ProviderError
+from kitty.providers.base import ProviderAdapter, ProviderError, UnsupportedModelError
 
 if TYPE_CHECKING:
     # Type-only imports. The layering contract in pyproject.toml forbids
@@ -2784,9 +2784,12 @@ class BridgeServer:
         try:
             url = self._build_upstream_url(cc_request)
             headers = self._build_upstream_headers(cc_request)
+            # Logged after the body is built, as the other three handlers do:
+            # serialization can refuse (KBR-126), and logging first would record
+            # a POST that never happens.
+            upstream_body = self._active_provider.translate_to_upstream(cc_request)
             logger.debug("Upstream POST → %s", url)
 
-            upstream_body = self._active_provider.translate_to_upstream(cc_request)
             stream_timeout = aiohttp.ClientTimeout(total=None, sock_connect=30, sock_read=_STREAM_READ_TIMEOUT)
 
             # Retry loop with backend failover for balancing mode
@@ -4679,6 +4682,20 @@ class BridgeServer:
         # found nothing left to send. Re-initialised per attempt below; bound here
         # only so the post-loop check is safe when the loop body never runs.
         compaction_exhausted = False
+        # KBR-126: how many attempts ran, and how many of them ended because the
+        # adapter refused to serialize the request for that backend's model.
+        #
+        # Counters rather than a flag, because both obvious flag forms are wrong
+        # and wrong in opposite directions. Sticky ("any attempt ever refused")
+        # lets a refusal become the verdict for a later backend's unrelated
+        # transient failure. Per-attempt ("the most recent refused") is merely
+        # order-dependent: the same mixed pool succeeds or fails depending on
+        # which backend selection happened to try last. The question that
+        # actually decides whether the final retry ladder can help is "did
+        # *every* attempt refuse" — only then is there no servable backend for a
+        # re-selection to find.
+        attempts_run = 0
+        refusals = 0
 
         # FI-8.4: warn once if the request is oversized before the first attempt.
         self._maybe_warn_oversized(cc_request)
@@ -4692,6 +4709,8 @@ class BridgeServer:
                     break
                 self._normalize_model(cc_request)
                 self._active_provider.normalize_request(cc_request)
+
+            attempts_run += 1
 
             # Reset per attempt: the flag must mean "the MOST RECENT attempt
             # ended in compaction exhaustion", never "one ever did". Left
@@ -4802,6 +4821,33 @@ class BridgeServer:
                     n_backends,
                     exc.status,
                 )
+            except UnsupportedModelError as exc:
+                # KBR-126: the adapter refused to build a body for this
+                # backend's model. Placed above `except Exception` because it is
+                # a ProviderError and would otherwise be marked "hard".
+                #
+                # Deliberately no _mark_backend_unhealthy — the same reasoning
+                # the CompactionFailedError branch above records: no upstream
+                # request was made, so there is no evidence against this backend,
+                # and cooling it down would take the pool offline for
+                # `backend_cooldown` because one profile names a model kitty
+                # cannot serve.
+                #
+                # Still `continue` rather than raise: a balancing pool can mix
+                # models across backends, and `_normalize_model` rewrites the
+                # model for each one, so a sibling may well be servable.
+                # A refusal carries strictly less information than a real
+                # upstream status — no `http_status`, no `retry_after` — so it
+                # must not displace one a previous attempt recorded.
+                if last_exc is None:
+                    last_exc = exc
+                refusals += 1
+                logger.warning(
+                    "Backend attempt %d/%d cannot serve this model (%s), trying the next backend",
+                    attempt + 1,
+                    n_backends,
+                    exc,
+                )
             except Exception as exc:
                 last_exc = exc
                 idx = self._current_backend_idx
@@ -4823,6 +4869,20 @@ class BridgeServer:
         # left to send. Raised here, above the final empty-response retries,
         # because those sleep 20s and then re-send the identical oversized body
         # — pure latency for a failure that is already deterministic.
+        # KBR-126: mirrors the compaction case immediately below, and for the
+        # same reason. The final loop sleeps 20s then 40s and re-sends; a model
+        # name is deterministic, so those 60 seconds buy nothing and the loop's
+        # own `except Exception` would mark every remaining backend unhealthy on
+        # the way through — reinstating the quarantine the handler above exists
+        # to prevent.
+        # Skip the ladder only when nothing *but* a refusal ever happened. If
+        # any attempt did something else — an empty response, a 429 — the ladder
+        # may still rescue it, and stealing it is the regression this handler
+        # first shipped with. The `last_exc is not None` conjunct narrows the
+        # type; it is not a reachable case, since the first refusal assigns it.
+        if refusals and refusals == attempts_run and last_exc is not None:
+            raise last_exc from None
+
         if compaction_exhausted:
             # Chained so the upstream rejection that started recovery stays in
             # the traceback for operators; the client still sees only the 400.
@@ -4859,6 +4919,17 @@ class BridgeServer:
                     else:
                         failure_kind = "hard"
                     self._mark_backend_unhealthy(idx, failure_kind=failure_kind)
+                continue
+            except UnsupportedModelError as exc:
+                # KBR-126: the second mark site. Same reasoning as the failover
+                # loop above — nothing was sent, so there is no evidence against
+                # this backend — and the ladder may still rescue a sibling that
+                # returned an empty response, so this continues rather than
+                # raising. As above, a refusal must not displace a real upstream
+                # status: losing a 429's `retry_after` to "cannot serve this
+                # model" would be a worse answer, not a different one.
+                if last_exc is None:
+                    last_exc = exc
                 continue
             except Exception as exc:
                 last_exc = exc

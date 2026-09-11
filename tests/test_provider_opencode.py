@@ -4,7 +4,13 @@ import json
 
 import pytest
 
-from kitty.providers.opencode import _MESSAGES_MODELS, OpenCodeGoAdapter
+from kitty.providers.base import ProviderError
+from kitty.providers.opencode import (
+    _MESSAGES_MODELS,
+    _RESPONSES_MODELS,
+    OpenCodeGoAdapter,
+    UnsupportedModelError,
+)
 
 # ── CC format samples ──────────────────────────────────────────────────────
 
@@ -14,7 +20,7 @@ SAMPLE_CC_RESPONSE = {
     "id": "chatcmpl-123",
     "object": "chat.completion",
     "created": 1700000000,
-    "model": "glm-5",
+    "model": "glm-5.2",
     "choices": [
         {
             "index": 0,
@@ -29,7 +35,7 @@ SAMPLE_TOOL_CALL_RESPONSE = {
     "id": "chatcmpl-456",
     "object": "chat.completion",
     "created": 1700000000,
-    "model": "kimi-k2.5",
+    "model": "kimi-k2.6",
     "choices": [
         {
             "index": 0,
@@ -155,17 +161,29 @@ class TestOpenCodeGoAdapterProperties:
     def test_default_upstream_path_is_chat_completions(self):
         assert self.adapter.upstream_path == "/v1/chat/completions"
 
+    def test_validation_model(self):
+        """Pin the literal, alongside the two structural checks it is paired with.
+
+        ``tests/test_opencode_endpoint_table.py`` asserts this name is in the
+        provider's published catalogue and
+        ``tests/test_validation_model_routing.py`` asserts the key-check ping can
+        reach it; both are stronger than this line. It is here so the value
+        cannot change silently — the previous one, ``glm-5``, left the catalogue
+        without anything noticing (KBR-126).
+        """
+        assert self.adapter.validation_model == "mimo-v2.5"
+
 
 class TestOpenCodeGoNormalizeModelName:
     def setup_method(self):
         self.adapter = OpenCodeGoAdapter()
 
     def test_returns_unchanged(self):
-        assert self.adapter.normalize_model_name("glm-5") == "glm-5"
-        assert self.adapter.normalize_model_name("kimi-k2.5") == "kimi-k2.5"
+        assert self.adapter.normalize_model_name("glm-5.2") == "glm-5.2"
+        assert self.adapter.normalize_model_name("kimi-k2.6") == "kimi-k2.6"
 
     def test_strips_provider_prefix(self):
-        assert self.adapter.normalize_model_name("opencode/glm-5") == "glm-5"
+        assert self.adapter.normalize_model_name("opencode/glm-5.2") == "glm-5.2"
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -174,35 +192,67 @@ class TestOpenCodeGoNormalizeModelName:
 
 
 class TestOpenCodeGoAutoRouting:
-    """Verify that the adapter routes to the correct endpoint based on model name."""
+    """Routing per model, against the provider's published endpoint table (KBR-126).
+
+    The table itself is the oracle and lives in
+    ``tests/data/opencode_go_endpoints.json``; the whole-catalogue sweep is
+    ``tests/test_opencode_endpoint_table.py``.  What is proven here is the
+    *predicate* — one model per route, plus the two inputs that name no model —
+    so the 28-model agreement claim is asserted in exactly one place.
+    """
 
     def setup_method(self):
         self.adapter = OpenCodeGoAdapter()
 
-    def test_glm5_routes_to_chat_completions(self):
-        assert self.adapter.get_upstream_path("glm-5") == "/v1/chat/completions"
+    @pytest.mark.parametrize(
+        ("model", "expected"),
+        [
+            ("minimax-m3", "/v1/messages"),
+            ("qwen3.8-max", "/v1/messages"),
+            ("grok-4.6", "/v1/responses"),
+            ("muse-spark-1.3-contributor", "/v1/responses"),
+            ("glm-5.2", "/v1/chat/completions"),
+        ],
+    )
+    def test_one_literal_model_per_route(self, model, expected):
+        """Literals, not the routing sets — otherwise the assertion is circular.
 
-    def test_glm51_routes_to_chat_completions(self):
-        assert self.adapter.get_upstream_path("glm-5.1") == "/v1/chat/completions"
+        Parametrising over ``_MESSAGES_MODELS`` and asserting the Messages path
+        is true for *any* content of that set, including an empty or wrong one:
+        it restates the implementation rather than checking it.  Spelled-out
+        names catch a reversed or mis-ordered branch here, at L1, and not only
+        in the snapshot sweep.
+        """
+        assert self.adapter.get_upstream_path(model) == expected
 
-    def test_kimi_routes_to_chat_completions(self):
-        assert self.adapter.get_upstream_path("kimi-k2.5") == "/v1/chat/completions"
+    def test_responses_models_report_the_endpoint_the_provider_serves_them_on(self):
+        """The truthful path, even though no request is ever sent there.
 
-    def test_mimo_pro_routes_to_chat_completions(self):
-        assert self.adapter.get_upstream_path("mimo-v2-pro") == "/v1/chat/completions"
+        ``translate_to_upstream`` refuses these models, so reporting
+        ``/v1/chat/completions`` here would cost nothing at runtime — and would
+        put the lie back in the routing table that KBR-126 exists to remove, and
+        force an exemption list into the snapshot guard.
+        """
+        paths = {self.adapter.get_upstream_path(m) for m in _RESPONSES_MODELS}
 
-    def test_mimo_omni_routes_to_chat_completions(self):
-        assert self.adapter.get_upstream_path("mimo-v2-omni") == "/v1/chat/completions"
+        assert paths == {"/v1/responses"}
 
-    def test_minimax_m25_routes_to_messages(self):
-        assert self.adapter.get_upstream_path("minimax-m2.5") == "/v1/messages"
+    @pytest.mark.parametrize("model", ["glm-5.2", "kimi-k2.7-code", "mimo-v2.5", "hy3"])
+    def test_chat_completions_models_take_the_default_route(self, model):
+        assert self.adapter.get_upstream_path(model) == "/v1/chat/completions"
 
-    def test_minimax_m27_routes_to_messages(self):
-        assert self.adapter.get_upstream_path("minimax-m2.7") == "/v1/messages"
+    @pytest.mark.parametrize("model", ["", "some-future-model", "glm-5"])
+    def test_an_unknown_model_falls_through_to_chat_completions(self, model):
+        """``glm-5`` is here on purpose: a retired name *is* the unknown case."""
+        assert self.adapter.get_upstream_path(model) == "/v1/chat/completions"
 
-    def test_unknown_model_routes_to_chat_completions(self):
-        """Unknown models default to Chat Completions."""
-        assert self.adapter.get_upstream_path("some-future-model") == "/v1/chat/completions"
+    def test_the_two_routing_sets_are_disjoint(self):
+        """A model in both sets would make the routing order decide the dialect."""
+        assert not (_MESSAGES_MODELS & _RESPONSES_MODELS)
+
+    def test_both_routing_sets_are_populated(self):
+        """Neither sweep above may pass by having nothing to iterate."""
+        assert _MESSAGES_MODELS and _RESPONSES_MODELS
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -220,7 +270,7 @@ class TestOpenCodeGoHeadersRouting:
         assert headers["Content-Type"] == "application/json"
 
     def test_chat_completions_model_gets_bearer(self):
-        headers = self.adapter.build_upstream_headers_for_model("sk-test", "glm-5")
+        headers = self.adapter.build_upstream_headers_for_model("sk-test", "glm-5.2")
         assert headers["Authorization"] == "Bearer sk-test"
         assert "x-api-key" not in headers
 
@@ -235,6 +285,27 @@ class TestOpenCodeGoHeadersRouting:
         headers = self.adapter.build_upstream_headers_for_model("sk-test", "minimax-m2.5")
         assert headers["x-api-key"] == "sk-test"
         assert "Authorization" not in headers
+
+    @pytest.mark.parametrize("model", sorted(_MESSAGES_MODELS))
+    def test_every_messages_model_gets_anthropic_auth(self, model):
+        """R5 — all eight, not just the two that were already routed."""
+        headers = self.adapter.build_upstream_headers_for_model("sk-test", model)
+        assert headers["x-api-key"] == "sk-test"
+        assert headers["anthropic-version"] == "2023-06-01"
+        assert "Authorization" not in headers
+
+    @pytest.mark.parametrize("model", sorted(_RESPONSES_MODELS))
+    def test_responses_models_get_bearer(self, model):
+        """R5 — the Responses API is Bearer-authenticated, like Chat Completions.
+
+        Unreachable in practice, since ``translate_to_upstream`` refuses these
+        models before any request is built.  Asserted anyway so the answer is
+        correct on the day KBR-137 makes it reachable, rather than silently
+        wrong.
+        """
+        headers = self.adapter.build_upstream_headers_for_model("sk-test", model)
+        assert headers["Authorization"] == "Bearer sk-test"
+        assert "x-api-key" not in headers
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -277,6 +348,18 @@ class TestOpenCodeGoWireShapeDeclaration:
 
     @pytest.mark.parametrize("model", _CHAT_COMPLETIONS_MODELS)
     def test_declares_chat_completions_for_non_messages_models(self, model):
+        assert self.adapter.upstream_wire_is_messages_api_for_model(model) is False
+
+    @pytest.mark.parametrize("model", sorted(_RESPONSES_MODELS))
+    def test_declares_not_messages_for_responses_models(self, model):
+        """R6 — ``False`` here means "not a Messages body", and that is honest.
+
+        ``TEST_SUITE.md`` §6.2.3 says a routing adapter that gains a third wire
+        must *replace* this boolean rather than overload ``False``.  That
+        obligation belongs to KBR-137, not here: the declaration describes the
+        body ``translate_to_upstream`` emits, and for these models it emits
+        none — it raises.  There is no third wire to declare yet, only a refusal.
+        """
         assert self.adapter.upstream_wire_is_messages_api_for_model(model) is False
 
     def test_bare_property_reports_the_default_chat_completions_route(self):
@@ -325,12 +408,80 @@ class TestOpenCodeGoWireShapeDeclaration:
         assert self.adapter.upstream_wire_is_messages_api_for_model(model) is emitted_messages_api
 
 
+class TestOpenCodeGoResponsesRefusal:
+    """R4 — a model served on ``/v1/responses`` is refused, not mis-serialized.
+
+    KBR-126: these four were previously given a Chat Completions body and sent
+    to ``/v1/chat/completions``.  The provider answers an unsupported model with
+    ``401``, and ``BridgeServer`` classifies ``401`` as an auth failure — so the
+    user was told their API key was bad.  Refusing here makes the real reason
+    reach them instead.  KBR-137 replaces the refusal with a working route.
+    """
+
+    def setup_method(self):
+        self.adapter = OpenCodeGoAdapter()
+
+    @pytest.mark.parametrize("model", sorted(_RESPONSES_MODELS))
+    def test_translate_to_upstream_refuses_every_responses_model(self, model):
+        with pytest.raises(UnsupportedModelError):
+            self.adapter.translate_to_upstream({"model": model, "messages": SAMPLE_MESSAGES})
+
+    @pytest.mark.parametrize("model", sorted(_RESPONSES_MODELS))
+    def test_the_message_names_the_model_the_endpoint_and_the_alternatives(self, model):
+        """The message is the whole user-facing artifact — it must be actionable.
+
+        On three of the four inbound protocols the SSE response is already
+        committed with status 200 before the body is built, so this text is all
+        the user gets.  Asserted rather than trusted for that reason.
+        """
+        with pytest.raises(UnsupportedModelError) as excinfo:
+            self.adapter.translate_to_upstream({"model": model, "messages": SAMPLE_MESSAGES})
+
+        message = str(excinfo.value)
+        assert model in message
+        assert "/v1/responses" in message
+        # The alternatives, not a ticket id: this is printed in an end user's
+        # terminal and they cannot reach this project's issue tracker.
+        assert "/v1/chat/completions" in message
+        assert "KBR-" not in message
+
+    def test_the_error_is_a_provider_error(self):
+        """Existing ``except ProviderError`` handlers must keep catching it."""
+        with pytest.raises(ProviderError):
+            self.adapter.translate_to_upstream({"model": "grok-4.6", "messages": SAMPLE_MESSAGES})
+
+    def test_the_error_carries_no_http_status(self):
+        """A ``400`` here would reach the bridge's context-too-large branch.
+
+        ``_provider_error_failure_kind`` inspects ``http_status == 400`` for an
+        oversized-context message and can route such a failure into the
+        compaction-retry path.  A configuration error must not land there.
+        """
+        with pytest.raises(UnsupportedModelError) as excinfo:
+            self.adapter.translate_to_upstream({"model": "grok-4.6", "messages": SAMPLE_MESSAGES})
+
+        assert excinfo.value.http_status == 0
+
+    @pytest.mark.parametrize("model", ["glm-5.2", "minimax-m2.7", "", "some-future-model"])
+    def test_no_other_model_is_refused(self, model):
+        """The positive control: the refusal is scoped, not a blanket failure.
+
+        Asserts the returned body carries the conversation, not merely that
+        something truthy came back — an adapter returning ``{"x": 1}`` would
+        satisfy a truthiness check while having lost the request.
+        """
+        body = self.adapter.translate_to_upstream({"model": model, "messages": SAMPLE_MESSAGES})
+
+        assert body["model"] == model
+        assert body["messages"] == SAMPLE_MESSAGES
+
+
 class TestOpenCodeGoChatCompletionsPassthrough:
     def setup_method(self):
         self.adapter = OpenCodeGoAdapter()
 
     def test_translate_to_upstream_passthrough_for_cc_model(self):
-        cc = {"model": "glm-5", "messages": SAMPLE_MESSAGES, "stream": True}
+        cc = {"model": "glm-5.2", "messages": SAMPLE_MESSAGES, "stream": True}
         result = self.adapter.translate_to_upstream(cc)
         assert result == cc
 
@@ -351,18 +502,18 @@ class TestOpenCodeGoBuildRequest:
 
     def test_build_request_basic(self):
         result = self.adapter.build_request(
-            model="glm-5",
+            model="glm-5.2",
             messages=SAMPLE_MESSAGES,
             stream=True,
         )
-        assert result["model"] == "glm-5"
+        assert result["model"] == "glm-5.2"
         assert result["messages"] == SAMPLE_MESSAGES
         assert result["stream"] is True
 
     def test_build_request_with_tools(self):
         tools = [{"type": "function", "function": {"name": "f", "parameters": {}}}]
         result = self.adapter.build_request(
-            model="kimi-k2.5",
+            model="kimi-k2.6",
             messages=SAMPLE_MESSAGES,
             stream=False,
             tools=tools,
@@ -476,7 +627,7 @@ class TestOpenCodeGoMessagesTranslateToUpstream:
 
     def test_cc_model_is_not_translated(self):
         """Non-messages models should pass through without Anthropic translation."""
-        cc = {"model": "glm-5", "messages": CC_MESSAGES_BASIC, "stream": True}
+        cc = {"model": "glm-5.2", "messages": CC_MESSAGES_BASIC, "stream": True}
         result = self.adapter.translate_to_upstream(cc)
         assert result == cc  # same content, passthrough
 
