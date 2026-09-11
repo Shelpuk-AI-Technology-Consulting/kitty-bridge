@@ -167,7 +167,15 @@ class TestEnvelope:
 
 
 class TestToolChoiceNormalisation:
-    """All nine published `ToolChoiceParam` forms, onto the canonical vocabulary."""
+    """All nine published `ToolChoiceParam` forms, onto the canonical vocabulary.
+
+    Nine *forms* — the members of `ToolChoiceParam.oneOf` — but twenty *values*,
+    because three of them carry closed enumerations of their own:
+    `ToolChoiceOptions` has three strings, `ToolChoiceAllowed` two modes, and
+    `ToolChoiceTypes` eight built-in tool types. Every value is exercised, not
+    one representative per form, because the normalisation differs *within*
+    those enumerations — `required` becomes `any` while `auto` does not.
+    """
 
     @pytest.mark.parametrize(
         ("choice", "expected"),
@@ -948,6 +956,25 @@ class TestOpaqueItems:
         projected = project({"input": [{"id": "msg_1", "type": None}]})
 
         assert projected.conversation.turns == (c.Turn("user", [c.Opaque("item_reference")]),)
+
+    def test_additional_tools_lands_in_a_user_turn_despite_declaring_developer(self) -> None:
+        """The named exception whose reasoning is hardest to guess from the rule.
+
+        `AdditionalToolsItemParam` is the only opaque item carrying a `role` of
+        its own, and its sole published value is `developer` — which everywhere
+        else in this reader lifts into `conversation.system`. It cannot here:
+        `Conversation.system` is enforced `Text`-only and an `Opaque` has no home
+        in it. So the item lands in a `user` turn, on the ground that
+        `developer` is client-supplied.
+
+        Worth its own test rather than only the parametrised sweep, because a
+        future reader seeing `role: "developer"` would reasonably try to lift it
+        and would then be changing turn indices for every later turn.
+        """
+        projected = project({"input": [{"type": "additional_tools", "role": "developer"}]})
+
+        assert projected.conversation.system == ()
+        assert projected.conversation.turns == (c.Turn("user", [c.Opaque("additional_tools")]),)
 
     def test_an_item_reference_is_recognised_without_a_type(self) -> None:
         """`ItemReferenceParam.type` is nullable, so `{"id": ...}` alone is legal."""
