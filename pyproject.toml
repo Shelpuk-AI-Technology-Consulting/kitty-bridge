@@ -206,6 +206,39 @@ forbidden_modules = ["kitty.cli"]
 # above enforces, and would NOT be caught, because kitty.bridge_runner is a
 # sibling top-level module rather than a descendant of kitty.bridge. This
 # contract pins the property the module docstring claims.
+# kitty.codex_identity holds the impersonated Codex CLI version and user-agent,
+# which BOTH legs of the OpenAI subscription provider present: the API leg in
+# kitty.providers and the OAuth token leg in kitty.auth. KBR-8 is the defect
+# where one request stated two versions, so there must be exactly one source and
+# it must sit below every layer that reads it.
+#
+# This list names EVERY sibling, not the seven kitty.io_encoding's contract
+# names. kitty.auth is the one that matters and is the one a copy of that list
+# would have omitted: kitty.providers already imports kitty.auth, so a
+# codex_identity -> kitty.auth edge is the cycle this module exists to avoid.
+[[tool.importlinter.contracts]]
+name = "The Codex-identity leaf must import nothing from kitty"
+type = "forbidden"
+source_modules = ["kitty.codex_identity"]
+forbidden_modules = [
+    "kitty.auth",
+    "kitty.bridge",
+    "kitty.bridge_runner",
+    "kitty.cli",
+    "kitty.cloudflare",
+    "kitty.credentials",
+    "kitty.egress",
+    "kitty.egress_guard",
+    "kitty.egress_store",
+    "kitty.io_encoding",
+    "kitty.launchers",
+    "kitty.profiles",
+    "kitty.providers",
+    "kitty.tui",
+    "kitty.types",
+    "kitty.validation",
+]
+
 [[tool.importlinter.contracts]]
 name = "The stream-encoding leaf must import nothing from kitty"
 type = "forbidden"

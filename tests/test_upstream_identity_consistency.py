@@ -70,9 +70,13 @@ bound the version in ``__init__`` would escape a sweep that built it first.
 * Adapters branch on their inputs, and only the branches :func:`wire_routes`
   names are swept — both of ``opencode_go``'s model routes and both of
   ``azure``'s credential shapes, one branch of anything added later.
-* The token-exchange leg at ``auth/openai_oauth.py:310-312`` sends only
-  ``Authorization`` — the same impersonated client making a request under a
-  different identity.  That is Q1's territory, not KBR-8's.
+* The OAuth token legs are **not** swept here, and structurally cannot be:
+  this file enumerates *adapter header builders*, and those requests are built
+  by free functions in :mod:`kitty.auth` that never reach an adapter.  As of
+  KBR-161 they carry the same impersonated identity as the API leg, from the
+  same source — :mod:`kitty.codex_identity` — and
+  ``tests/test_oauth_leg_identity.py`` is the sibling that proves the two legs
+  agree.
 * The exact-set header contract — names, absences, casing, value shape per
   adapter — is **T-G9 / KBR-78**, not this file.  This is the defect-scoped
   guard ``TEST_SUITE_IMPLEMENTATION_PLAN.md`` §16 asks for on the KBR-8 row's
@@ -92,9 +96,10 @@ from typing import NamedTuple
 
 import pytest
 
+from kitty.codex_identity import CODEX_CLI_VERSION as _CODEX_CLI_VERSION
 from kitty.providers.base import ProviderAdapter
 from kitty.providers.openai import OpenAIAdapter
-from kitty.providers.openai_subscription import _CODEX_CLI_VERSION, OpenAISubscriptionAdapter
+from kitty.providers.openai_subscription import OpenAISubscriptionAdapter
 from kitty.providers.registry import _registry, get_provider
 
 pytestmark = pytest.mark.l2

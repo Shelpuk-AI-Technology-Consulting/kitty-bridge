@@ -29,7 +29,6 @@ import contextlib
 import json
 import logging
 import os
-import platform
 import random
 import time
 import uuid
@@ -39,6 +38,7 @@ from typing import Protocol
 
 import curl_cffi.requests
 
+from kitty import codex_identity
 from kitty.auth.oauth_session import OAuthRefreshFailed, OAuthSession
 from kitty.cloudflare import get_cloudflare_signature, is_cloudflare_block
 from kitty.egress import aiohttp_session_kwargs, get_egress
@@ -94,17 +94,6 @@ def _codex_backoff(attempt: int) -> float:
     jitter = random.uniform(0.9, 1.1)  # noqa: S311
     return float((millis * jitter) / 1000.0)
 
-
-# The impersonated Codex CLI version, and the single source for BOTH version
-# fields this adapter sends -- the `version` header and the user-agent's product
-# version -- because a client stating two different versions in one request is an
-# intermediary and nothing else (KBR-8).
-#
-# The value is the real released Codex CLI version, not kitty's.  (Codex's own
-# checked-in reference workspace carries 0.0.0, a dev placeholder; its release
-# builds carry the real one, which is what this impersonates.)  Nothing rewrites
-# this at build time -- it is edited here when the impersonated version moves.
-_CODEX_CLI_VERSION = "0.128.0"
 
 # curl_cffi TLS impersonation target — matches the browser-like TLS fingerprint
 # that Codex CLI's reqwest+rustls produces.  Without impersonate=, curl_cffi
@@ -289,21 +278,18 @@ class OpenAISubscriptionAdapter(OpenAIAdapter):
         ``codex-rs/login/src/auth/default_client.rs``.
 
         Returns:
-            The impersonated Codex CLI user-agent, versioned from
-            :data:`_CODEX_CLI_VERSION` -- the same constant
-            :meth:`_build_codex_headers` puts in the ``version`` header.
+            The impersonated Codex CLI user-agent, from
+            :func:`kitty.codex_identity.build_codex_user_agent` -- the same
+            source :meth:`_build_codex_headers` reads the ``version`` header
+            from, and the same one the OAuth token leg presents (KBR-161).
 
-        The version is deliberately **not** ``kitty.__version__`` (KBR-8).
-        Reading it from there made a single request claim to be two different
-        Codex CLI versions at once -- something no genuine client does, and so a
-        one-line detection rule for bridge traffic -- and tied the header to
-        kitty's release train, changing it on every kitty release and nothing
-        else.  See ``.system_design/TEST_SUITE.md`` finding F1 and 4.3 C1.
+        The version is deliberately **not** ``kitty.__version__`` (KBR-8), and
+        deliberately not a copy held here: it lives in
+        :mod:`kitty.codex_identity` because :mod:`kitty.auth` presents it too,
+        and two sources is the defect itself.  See
+        ``.system_design/TEST_SUITE.md`` finding F1 and 4.3 C1.
         """
-        os_type = platform.system()
-        os_version = platform.release()
-        arch = platform.machine()
-        return f"codex_cli_rs/{_CODEX_CLI_VERSION} ({os_type} {os_version}; {arch})"
+        return codex_identity.build_codex_user_agent()
 
     def _build_codex_headers(self, access_token: str, id_token: str) -> dict[str, str]:
         """Build headers matching the Codex CLI (reqwest + rustls).
@@ -323,7 +309,7 @@ class OpenAISubscriptionAdapter(OpenAIAdapter):
             "Accept": "text/event-stream",
             "Authorization": f"Bearer {access_token}",
             "User-Agent": self._build_user_agent(),
-            "version": _CODEX_CLI_VERSION,
+            "version": codex_identity.CODEX_CLI_VERSION,
         }
         account_id = self._extract_account_id(id_token)
         if account_id:
