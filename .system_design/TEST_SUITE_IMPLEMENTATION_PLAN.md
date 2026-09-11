@@ -94,7 +94,7 @@ After Milestone 0, seven streams advance independently, each owning its own modu
 | ID | Task | Depends on | Design | Size |
 |---|---|---|---|---|
 | **T-W1** | Layer markers, CI selection rules, per-category collection checks | — | §8, §8.1, §8.2 | M |
-| **T-W2** | **The input contract** — request/capture types and the projection protocol | — | §3.3.1 | S |
+| **T-W2** | **The input contract** — request/capture types, the projection protocol, the path vocabulary and the normalisation rules | — | §3.3.1, §3.3.1a, §3.3.1b | ~~S~~ **M** |
 | **T-W3** | Register schema and data | T-W2 | §3.2 | M |
 | **T-W4** | Recorder implementation — primary aiohttp recorder | T-W2 | §7.2 | M |
 | **T-W5** | Shared CONNECT proxy fixture | — | §7.3 | M |
@@ -116,9 +116,36 @@ tests exist the expression collects them and passes happily with zero agent-smok
 reconcile the existing `--runslow` silent skip with the same rule.
 
 **T-W2 — the input contract.** One owner for everything a projection reads and a recorder produces:
-`Request(envelope, conversation, residual)`, `Envelope`, `Conversation`, `Turn`, `Part` variants,
-`Reply` for the response direction, **`CapturedRequest(method, scheme, host, path, query, headers,
-body)`**, and the `Projection` protocol.
+`Request(envelope, conversation, residual, consumed, source)`, `Envelope`, `Conversation`, `Turn`,
+`Part` variants, `Reply` for the response direction, **`CapturedRequest(method, scheme, host, path,
+query, headers, body)`**, `CapturedReply`, the closed `WireFormat` enum, the `Projection` and
+`ReplyProjection` protocols, **the path vocabulary and its pattern matcher (§3.3.1a)**, and **the
+cross-format normalisation rules (§3.3.1b)**.
+
+**Delivered in `tests/harness/contract.py`.** The **package** `tests/harness/` is the home for
+T-W4's recorder, T-W5's proxy fixture, T-W6's corpus loader and T-W8's bridge fixture — each in its
+own module beside the contract, not inside it. `contract.py` defines shapes and rules; it captures
+nothing and reads no bodies.
+
+**The path vocabulary and the normalisation rules were added after a design review**, and both are
+here for the reason `CapturedRequest` is: T-W3 cannot fill its "projection field it touches" column
+without a path form, and T-D1 must emit the same strings when it reports a delta — neither can
+define the vocabulary without the other agreeing. Likewise six readers written by six authors
+produce incomparable output unless the canonical roles, placements and sampling spellings are fixed
+once. Both are exactly the coordination problem Milestone 0 exists to remove.
+
+**T-W3 inherits two acceptance criteria from this work.**
+
+1. Every row M1–M14 and P1–P21 carries either a path in T-W2's vocabulary or `not projectable`
+   **with a reason**, asserted against the register data so a new row cannot escape it. T-W2 proves
+   the vocabulary is *expressive*; the row-by-row assignment is T-W3's, because a copy of that
+   table inside T-W2 would be a second source of truth that stays green while the register moves.
+2. **Every row is anchored at the *narrowest* path that covers its effect.** A pattern is a prefix
+   (§3.3.1a), so a coarser anchor silently claims every delta beneath it — anchoring P15 at
+   `conversation.tools[*]` rather than `conversation.tools[*].strict` would claim a *deleted tool
+   description*, which is one of §3.3.1's own five oracle falsification cases. The matcher cannot
+   detect this, by construction; **T-D3 gains the paired falsification case** — mutate a field
+   beneath a registered row's anchor and assert the oracle still fails.
 
 **`CapturedRequest` lives here, not in T-W4.** An earlier draft titled this task "request/capture types" while T-W4 defined `CapturedRequest` with no dependency between them — so the recorder author and the Gemini reader author (who needs the URL, §3.3.5) could have started against two different readings of the same contract. That is precisely the coordination problem Milestone 0 exists to remove.
 
@@ -233,7 +260,7 @@ matrix, serialising unrelated provider coverage.
 |---|---|---|---|---|---|
 | **T-D1** | Oracle core **+ first falsification case** | T-W2, T-W3, T-W8, T-W9, T-A1, T-A2, T-C1 | Both §3.3.2 assertions on one adapter; accepts `expected_route` so T-D2 is a filling-in; includes the byte-level key-order assertion on the native passthrough path; **a changed model must fail the oracle** | §3.3, §4.3 C2 | L |
 | **T-D2** | Routing expectation **+ its falsification** | T-D1, T-A4 | Route derived from the profile using the provider's *published* URL shape, never `build_base_url()`; a changed Azure deployment segment with a byte-identical body must fail | §3.3.5 | M |
-| **T-D3** | Remaining falsification cases | T-D1, T-D2 | Flipped `stream`, deleted tool description, stripped `strict`, injected metadata field. **Hard prerequisite for T-J2** — the oracle does not gate acceptance until its falsification suite is complete | §3.3.1 | M |
+| **T-D3** | Remaining falsification cases | T-D1, T-D2 | Flipped `stream`, deleted tool description, stripped `strict`, injected metadata field, **plus a mutation *beneath* a registered row's anchor** (§3.3.1a — a pattern is a prefix, so an over-coarse anchor silently claims what it should not, and only this case catches it). **Hard prerequisite for T-J2** — the oracle does not gate acceptance until its falsification suite is complete | §3.3.1, §3.3.1a | M |
 | **T-D4** | Default-transport slice | T-D1, T-D2, T-B4 | One representative default adapter, end to end | §3.3.4 | M |
 | **T-D5** | curl_cffi slice | T-D1, T-D2, T-B2, T-A3 | `openai_subscription`, observing P13–P17 | §3.3.2 | M |
 | **T-D6** | botocore slice | T-D1, T-D2, T-B3, T-A5 | `bedrock`, observing the Converse payload after P18 | §3.3.2 | M |
@@ -413,11 +440,17 @@ available in tiers 0–2.**
 
 | Milestone | Longest chain to it | Days |
 |---|---|---|
-| Oracle core proven (**T-D1**) | T-W2 → T-W3 → T-W6 → T-C1 → T-D1 | 8.0 |
-| Containment slice proven (**T-E2**) | T-W2 → T-W4 → T-W8 → T-W9 → T-E1 → T-E2 | 12.0 |
-| Fidelity matrix complete (**T-D9**) | … → T-D1 → T-D2 → T-D4 → T-D9 | 15.0 |
-| Fidelity acceptance (**T-J2**) | … → T-D9 → T-J2 | 16.5 |
-| **Everything gating (T-K9)** | … → T-J2 → T-K9 | **17.0** |
+| Oracle core proven (**T-D1**) | T-W2 → T-W3 → T-W6 → T-C1 → T-D1 | 9.0 |
+| Containment slice proven (**T-E2**) | T-W2 → T-W4 → T-W8 → T-W9 → T-E1 → T-E2 | 13.0 |
+| Fidelity matrix complete (**T-D9**) | … → T-D1 → T-D2 → T-D4 → T-D9 | 16.0 |
+| Fidelity acceptance (**T-J2**) | … → T-D9 → T-J2 | 17.5 |
+| **Everything gating (T-K9)** | … → T-J2 → T-K9 | **18.0** |
+
+> **Recomputed 2026-09-07.** T-W2 was **S** and is now **M** (§3, and KBR-25's requirements §0.3):
+> the path vocabulary and the normalisation rules were added to it after a design review. T-W2
+> heads every chain above, so **each gained 1.0 day**. §14 opens with "recompute after any
+> dependency change"; a size change on the head of every chain is one. No ordering changed — T-W2
+> was already first and alone.
 
 **The critical path runs through the corpus**, not through containment:
 `T-W2 → T-W3 → T-W6 → T-C1 → T-D1 → T-D2 → T-D4 → T-D9 → T-J2 → T-K9`. Four sequential tasks
@@ -434,8 +467,12 @@ exist, and the plan should not offer it.
 
 ### 14.4 Consequences worth acting on
 
-1. **T-W2 is the single most blocking task.** It heads both chains, it is sized S, and it now owns
-   the whole input contract (§3). It goes first, alone, and lands before the streams branch.
+1. **T-W2 is the single most blocking task.** It heads both chains and it owns the whole input
+   contract (§3). It goes first, alone, and lands before the streams branch. **Sized M, not S** —
+   a design review established that without the path vocabulary T-W3 cannot be written and without
+   the normalisation rules the six readers produce incomparable output, so both moved into it. The
+   day that added is on every chain (§14.3), and it is the cheapest place in the plan to spend it:
+   the alternative is eleven tasks each solving the same problem differently.
 2. **T-W3 and T-W6 follow immediately** — they sit second and third on the critical path, ahead of
    any test.
 3. **T-E1 is the riskiest single task**; containment carries ~5 days of slack against the critical
