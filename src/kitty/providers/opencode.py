@@ -228,11 +228,18 @@ class OpenCodeGoAdapter(AnthropicAdapter):
         # Refuse before anything is built: the alternative is a Chat Completions
         # body at a Responses endpoint, which the provider rejects with a 401
         # that the bridge then reports to the user as a bad API key.
+        #
+        # The message carries no ticket id. It is printed in an end user's
+        # terminal, and that reader cannot reach this project's issue tracker —
+        # the same reason the README names no ticket either. What they can act
+        # on is the endpoint and the alternative, so that is what it says. The
+        # tracking ticket lives in this module's docstring, whose audience is a
+        # maintainer.
         if _is_responses_model(model):
             raise UnsupportedModelError(
                 f"OpenCode Go serves {model!r} on the OpenAI Responses API (/v1/responses), "
-                f"which kitty cannot speak for this provider yet (KBR-137). "
-                f"Choose a model served on /v1/messages or /v1/chat/completions."
+                f"which kitty does not speak for this provider yet. Choose a model served on "
+                f"/v1/messages or /v1/chat/completions — see the OpenCode Go row in kitty's README."
             )
         if _is_messages_model(model):
             return AnthropicAdapter.translate_to_upstream(self, cc_request)

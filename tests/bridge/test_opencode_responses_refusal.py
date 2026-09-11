@@ -254,7 +254,9 @@ async def test_a_responses_model_is_refused_and_nothing_is_sent(
     assert status == expected_status
     assert REFUSED_MODEL in body
     assert "/v1/responses" in body
-    assert "KBR-137" in body
+    # What the user can act on, rather than an internal ticket id they cannot
+    # look up: the alternative routes are named in the message itself.
+    assert "/v1/chat/completions" in body
     assert upstream.hits == [], "the provider must never see a request for a model kitty cannot serialize"
 
 

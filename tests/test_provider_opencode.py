@@ -427,7 +427,7 @@ class TestOpenCodeGoResponsesRefusal:
             self.adapter.translate_to_upstream({"model": model, "messages": SAMPLE_MESSAGES})
 
     @pytest.mark.parametrize("model", sorted(_RESPONSES_MODELS))
-    def test_the_message_names_the_model_the_endpoint_and_the_ticket(self, model):
+    def test_the_message_names_the_model_the_endpoint_and_the_alternatives(self, model):
         """The message is the whole user-facing artifact — it must be actionable.
 
         On three of the four inbound protocols the SSE response is already
@@ -440,7 +440,10 @@ class TestOpenCodeGoResponsesRefusal:
         message = str(excinfo.value)
         assert model in message
         assert "/v1/responses" in message
-        assert "KBR-137" in message
+        # The alternatives, not a ticket id: this is printed in an end user's
+        # terminal and they cannot reach this project's issue tracker.
+        assert "/v1/chat/completions" in message
+        assert "KBR-" not in message
 
     def test_the_error_is_a_provider_error(self):
         """Existing ``except ProviderError`` handlers must keep catching it."""
