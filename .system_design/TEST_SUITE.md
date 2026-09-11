@@ -161,7 +161,7 @@ M13 is **withdrawn** — KBR-5 replaced it with a downstream error, so it mutate
 | M11 | Force `stream: False` | `_handle_gemini` | Gemini protocol, non-streaming `:generateContent` | The Gemini translator defaults `stream=True`; the non-streaming endpoint must not open an SSE stream. |
 | M12 | Substitute fallback assistant text | `_EMPTY_ASSISTANT_FALLBACK_TEXT` in `bridge/messages/translator.py` **and** `bridge/responses/translator.py` | Upstream returned an empty response | **Response-side**, not part of the eleven request-path rows. |
 | ~~M13~~ | **Withdrawn — no longer a mutation.** Was: discard the conversation and substitute a `[Kitty Bridge: …]` user message. | `_compact_messages` / `_apply_compaction` post-condition | No non-system message survives | **Closed by KBR-5.** The post-condition now raises `CompactionFailedError` and the handler returns a protocol-native 400 downstream; nothing is substituted, so there is no mutation left to register. The row is kept struck through rather than deleted so a reader of finding F3 can still find it. **The trigger recorded here was wrong** — see F3. |
-| M14 | **Replace the destination entirely** — scheme, host and path are built from the profile by `build_base_url()` + `get_upstream_path()` | `BridgeServer._build_upstream_url` | Always | The agent addressed a loopback bridge; the request has to reach the real provider. Listed because **the destination is a mutation surface the body cannot show**: on Azure an identical body sent to the wrong deployment path is a different request entirely (§3.3.5). |
+| M14 | **Replace the destination entirely** — scheme and host are built from the profile by `build_base_url()`; the path by `get_upstream_path(cc_request["model"])`, the **request's normalized model**, which is the normalized profile model when there is one and the agent's model when there is not (KBR-127 — it was the raw profile model, so path and body could route differently) | `BridgeServer._build_upstream_url` | Always | The agent addressed a loopback bridge; the request has to reach the real provider. Listed because **the destination is a mutation surface the body cannot show**: on Azure an identical body sent to the wrong deployment path is a different request entirely (§3.3.5). |
 
 #### 3.2.2 Provider-level
 
@@ -183,7 +183,7 @@ trigger no test can fail — so each material mutation gets its own row.
 | P5d | Map `_thinking_adaptive` → `thinking: {"type":"adaptive"}` and `_effort` → top-level `effort` | same | Those keys present | Passthrough of an agent signal. |
 | P5e | Inject an empty `{"type":"thinking","thinking":""}` block into assistant messages | `AnthropicAdapter._translate_assistant_msg` | Assistant message lacks one while thinking is active | The Anthropic-path analogue of P8. **A message-content change**, not a parameter change. |
 | P6 | Remove `model` from the body | `AzureOpenAIAdapter` | Always | Azure selects the model by deployment id in the URL; the body field is rejected. |
-| P20 | **Encode the profile's model as the deployment id in the URL path** | `AzureOpenAIAdapter.get_upstream_path` | Always | The counterpart of P6: what P6 removes from the body reappears in the path. A register that records only P6 makes the model look *dropped* when it was *moved*, and leaves the move unchecked. |
+| P20 | **Encode the request's normalized model as the deployment id in the URL path** | `AzureOpenAIAdapter.get_upstream_path` | Always | The counterpart of P6: what P6 removes from the body reappears in the path. A register that records only P6 makes the model look *dropped* when it was *moved*, and leaves the move unchecked. Before KBR-127 this read *the profile's* model, so a profile written `azure/my-deploy` addressed a `/deployments/azure/my-deploy/` segment that cannot exist. |
 | P21 | Encode `project_id` and `location` in the base URL | `VertexAIAdapter.build_base_url` | Always | Vertex addresses a project-scoped endpoint. Same class as P20: routing carried outside the body. |
 | P7 | **Cap the agent's `max_tokens` at 4096** | `FireworksAdapter.normalize_request` | Non-streaming request with `max_tokens > 4096` | Fireworks rejects non-streaming requests above 4096. **User-visible** as shortened output. |
 | P8 | Inject empty `reasoning_content` into assistant messages | `ProviderAdapter._inject_empty_reasoning_content`, called from `KimiCodeAdapter`, `_ZaiBase`, `CustomOpenAIAdapter` | Thinking signalled **or** inferred from prior `reasoning_content` via `_detect_thinking_from_messages` | Those providers reject the request without it. The *inferred* trigger matters: it fires with no signal from the agent at all. |
@@ -592,7 +592,7 @@ the request went. Three providers carry routing outside the body:
 
 | Provider | What lives in the URL | Consequence |
 |---|---|---|
-| Azure | The deployment id, which **is** the profile's model (P20) — and P6 deliberately removes `model` from the body | Two requests to two different deployments have **byte-identical bodies**. A body-only oracle cannot tell them apart, so a misrouted request is invisible. |
+| Azure | The deployment id, which **is** the request's normalized model (P20) — and P6 deliberately removes `model` from the body | Two requests to two different deployments have **byte-identical bodies**. A body-only oracle cannot tell them apart, so a misrouted request is invisible. |
 | Vertex | `project_id` and `location` (P21) | The account being billed is a URL component |
 | Gemini | Model and operation (`:generateContent` vs `:streamGenerateContent`) in the inbound path | M10 lifts the model into the body precisely because it is not there to begin with |
 
@@ -601,13 +601,19 @@ body — and asserts routing separately from content.
 
 **The routing expectation is derived independently.** It is computed in the test from the
 configured profile — provider, model, `provider_config` — using the provider's *published* URL
-shape, not by calling `build_base_url()` / `get_upstream_path()`. Asking the code under test where
-it meant to go and then checking it went there proves nothing; this is the same independent-oracle
-rule §3.3.1 applies to bodies.
+shape, not by calling `build_base_url()` / `get_upstream_path()`. The model half of that
+derivation is `normalize_model_name(profile.model)` when the profile names a model, and the
+model the agent asked for when it does not: since KBR-127 the path resolves from
+`cc_request["model"]`, so deriving it from the profile's raw string would encode the very defect
+KBR-127 removed. Asking the code under test where it meant to go and then checking it went there
+proves nothing; this is the same independent-oracle rule §3.3.1 applies to bodies.
 
 **Falsification control.** Alongside the five body cases in §3.3.1, a sixth: change the Azure
 deployment segment in the captured path while leaving the body byte-identical. The oracle must
-fail. Without this case there is no evidence the routing assertion is wired to anything.
+fail. A seventh, from KBR-127: give the profile a prefixed model (`opencode/minimax-m2.5`) and
+assert path, auth scheme and body shape agree — the defect showed a correct body reaching a
+correct-looking host at the wrong path under the wrong auth, which each of the three checked alone
+would pass. Without these cases there is no evidence the routing assertion is wired to anything.
 
 The recorders already capture method, path and query (§7.2). The gap was that the assertion did
 not consume them.

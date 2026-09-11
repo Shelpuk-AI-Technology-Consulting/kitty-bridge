@@ -6641,7 +6641,14 @@ class BridgeServer:
         Otherwise uses aiohttp with retry/backoff.
 
         Args:
-            cc_request: The request payload in CC format.
+            cc_request: The request payload in CC format. It must already have
+                been through :meth:`_normalize_model` for the currently selected
+                backend: since KBR-127 the URL and the auth headers resolve from
+                ``cc_request["model"]``, so an un-normalized request here routes
+                to the wrong endpoint rather than merely naming the wrong model.
+                ``_request_with_retry_balancing`` re-normalizes after each
+                ``_select_backend()``; ``_request_with_retry_single`` does not
+                re-select, and relies on its caller having normalized once.
             retry_rate_limit: When False, 429 is not retried on this backend
                 (the caller handles failover instead).
             grace: The request's tolerance for upstream connection trouble,
