@@ -907,7 +907,9 @@ class TestSelectRules(unittest.TestCase):
         the rules not covering it means in practice.
 
         The forward-looking half stands: `SYSTEM_DESIGN.md`, a per-module
-        design directory, `CLAUDE.md` and `AGENTS.md` genuinely do not exist,
+        design directory, `CLAUDE.md` and `AGENTS.md` are in no checkout --
+        `CLAUDE.md` is gitignored rather than absent, which is a distinction
+        this module turns on elsewhere --
         and each pattern costs one comparison while covering the file the day
         it appears. The alternative is a design document landing with no rule
         file selected, which is the shape upstream recorded as a defect when a
@@ -1337,9 +1339,8 @@ class NoPrivateReferenceLeaksTests(unittest.TestCase):
     #: not one of them is a leak.** 127 are this project's own key; the other
     #: 214 are acceptance-criterion identifiers, test-scenario identifiers,
     #: third-party model names (`GPT-5`, `GLM-5`) and protocol tokens  # noqa: leak-guard
-    #: (`HTTP-413`, `ISO-8859`) -- all the same shape, because the shape is  # noqa: leak-guard
-    #: all
-    #: this rule has to go on.
+    #: (`HTTP-413`, `ISO-8859`) -- all the same shape, because the shape is all this  # noqa: leak-guard
+    #: rule has to go on.
     #:
     #: 🔴 **The obvious repair is the one this class already forbids.** An
     #: allowlist of those namespaces is precisely the "broad allowlist"
@@ -1744,6 +1745,11 @@ class NoPrivateReferenceLeaksTests(unittest.TestCase):
         whether the allowance exists or has been deleted: the tree carries
         plenty of tokens the allowance never touches. That is a control which
         asserts nothing while still looking like one.
+
+        The concrete form of "incidental": all three of the tokens that make the
+        allowance load-bearing at sweep level sit in this one class, so a single
+        refactor of it removes every one of them from `.github/` and a
+        sweep-level control goes quiet with nothing red.
 
         So the claim is made where it is decidable: one line, one predicate,
         with the allowance and without it. The allowance is emptied by setting
@@ -13257,7 +13263,7 @@ class MatrixRunnerResolutionTests(unittest.TestCase):
 
 
 class RecordedTestCountTests(unittest.TestCase):
-    """Two documents quote how many tests are in this file. Both must be true.
+    """Every document in :data:`QUOTING` quotes how many tests this file has.
 
     🔴 **A quoted count is a claim that rots silently.** `README.md` tells a
     contributor what to expect from a local run and `ci.yml` tells an operator
@@ -13272,13 +13278,18 @@ class RecordedTestCountTests(unittest.TestCase):
     could not do.
 
     ⚠️ The cost is real and is the point: adding a test to this file means
-    updating two sentences. They were 24 out of date when this guard was written,
-    which is how long it takes.
+    updating every sentence in :data:`QUOTING`. They were 24 out of date when
+    this guard was written, which is how long it takes.
+
+    ⚠️ **No count of DOCUMENTS appears in this docstring, deliberately.** It
+    said "two documents" and "two sentences" while `QUOTING` held three, which
+    is the same rot one level up -- in the guard that exists because quoted
+    figures rot. A number nothing checks does not belong here.
     """
 
     #: The documents quoting the figure. Enumerated rather than swept: a sweep
     #: for "a number near the word tests" over the whole tree is a guess, and
-    #: these two sentences are specific claims about this module.
+    #: each of these is a specific claim about this module.
     QUOTING = (
         Path(__file__).resolve().parents[1] / "README.md",
         Path(__file__).resolve().parents[2] / "workflows" / "ci.yml",
@@ -13301,7 +13312,7 @@ class RecordedTestCountTests(unittest.TestCase):
         loader = unittest.defaultTestLoader
         return loader.loadTestsFromModule(sys.modules[__name__]).countTestCases()
 
-    def test_both_documents_quote_the_real_count(self):
+    def test_every_document_quotes_the_real_count(self):
         """The claim. Read from the loader, compared against each document."""
 
         total = self._total()
@@ -13607,6 +13618,8 @@ class NoDocumentClaimsTheRepositoryHasNoTestGateTests(unittest.TestCase):
         "longer forbids sending the reviewer there",
         "The class also now asserts `.system_design` is **absent** from the excluded\n"
         "set",
+        "documents are the internal one. Read the design document covering the area the\n"
+        "change touches, and judge the change against it",
     )
 
     def test_the_fixtures_are_not_empty_and_every_rule_is_exercised(self):
@@ -13631,6 +13644,26 @@ class NoDocumentClaimsTheRepositoryHasNoTestGateTests(unittest.TestCase):
         self.assertGreaterEqual(
             len(self.ALLOWED), 8, "the allowed-paragraph list has been emptied"
         )
+        # 🔴 Distinct, and exercising the rules it exists to keep off true
+        # prose. Measured: padding this list with duplicates of one unrelated
+        # sentence satisfies the floor above while deleting every paragraph the
+        # design-document rules could have fired on -- an empty control that
+        # still looks like one, one level down from the emptiness this floor
+        # catches.
+        self.assertEqual(
+            len(set(self.ALLOWED)), len(self.ALLOWED), "duplicate entries pad the floor"
+        )
+        self.assertGreaterEqual(
+            len([text for text in self.ALLOWED if ".system_design" in text]),
+            3,
+            "no allowed paragraph names the directory, so the gitignore rule "
+            "has nothing here to stay off",
+        )
+        self.assertTrue(
+            [text for text in self.ALLOWED if "design document" in text],
+            "no allowed paragraph carries the phrase the other rule bounds, so "
+            "a rule widened to forbid it outright would pass this control",
+        )
 
         for rule, _ in self.CLAIMS:
             with self.subTest(rule=rule.pattern[:48]):
@@ -13640,26 +13673,51 @@ class NoDocumentClaimsTheRepositoryHasNoTestGateTests(unittest.TestCase):
                     "never be caught -- add the sentence it retired",
                 )
 
+    #: The one CODE line that carries a marker for these rules. Held as a
+    #: fragment so the control below can FIND it rather than restate it.
+    MARKED_CODE_LINE = "ignored = self._ignored_prefixes()"
+
     def test_the_marked_code_line_still_needs_its_marker(self):
         """🔴 A suppression nothing checks becomes dead suppression in silence.
 
-        Exactly one CODE line carries the marker for these rules, and not
-        because it says anything false: the join fuses it with the comment
-        beneath it into a sentence the gitignore rule matches. That is a
-        tolerated false positive, and the price of tolerating it is that the
-        marker stays honest. If the rule is ever narrowed so the fusion no
-        longer matches, the marker is doing nothing and should be removed --
-        and nothing else in this suite would say so.
+        Exactly one code line carries the marker for these rules, and not
+        because it says anything false. **Stripped of the marker** it fuses with
+        the comment beneath it into a sentence the gitignore rule matches; with
+        the marker in place it does not fuse at all, because the sweep honours a
+        marked line. Removing the marker is therefore what turns the sweep red,
+        which is the sense in which it is load-bearing.
+
+        The price of tolerating that false positive is that the marker stays
+        honest: if the rule is ever narrowed so the stripped fusion no longer
+        matches, the marker does nothing and should go, and nothing else here
+        would say so.
+
+        ⚠️ **Read out of this file rather than typed.** The first version of
+        this case hand-wrote the fused pair, which made it a control over text
+        the tree does not contain -- rewording the comment on the next line
+        would have left the marker dead and this case green, the exact failure
+        it was added to catch.
         """
 
-        fused = (
-            "ignored = self._ignored_prefixes()"
-            " `.system_design` was the second specimen until the design documents"
+        lines = Path(__file__).resolve().read_text(encoding="utf-8").splitlines()
+        marked = [
+            index
+            for index, line in enumerate(lines)
+            if self.MARKED_CODE_LINE in line and self.MARKER in line
+        ]
+        self.assertEqual(
+            len(marked), 1, "exactly one code line should carry this marker"
         )
+
+        index = marked[0]
+        stripped = lines[index].replace(f"  # {self.MARKER}", "")
+        self.assertNotIn(self.MARKER, stripped, "the marker was not removed")
+        _, _, joined = next(iter(self._joined_lines([stripped, lines[index + 1]])))
+
         self.assertTrue(
-            any(rule.search(fused) for rule, _ in self.CLAIMS),
-            "the marked line no longer matches any rule, so its "
-            "`noqa: ci-claim` marker is dead suppression -- remove it",
+            any(rule.search(joined) for rule, _ in self.CLAIMS),
+            "stripped of its marker, this line no longer matches any rule, so "
+            "the marker is dead suppression -- remove it:\n  " + joined,
         )
 
     def test_every_rule_recognises_the_claim_it_forbids(self):
@@ -14241,7 +14299,7 @@ class ReviewerIsPointedAtTheDesignDocumentsTests(unittest.TestCase):
         (
             REVIEW_DIR / "rules" / "docs.md",
             "read the relevant section, not the whole thing",
-            "the rule file must not ask for a 133 KB read either",
+            "the rule file must not ask for a six-figure read either",
         ),
         (
             REVIEW_DIR / "rules" / "docs.md",
@@ -14315,6 +14373,20 @@ class ReviewerIsPointedAtTheDesignDocumentsTests(unittest.TestCase):
         ):
             with self.subTest(name=name):
                 self.assertIn(name, named)
+
+        # 🔴 Coverage by the KIND of instruction, not only by document, and the
+        # difference is not academic. Two rows name documents other rows already
+        # name, so deleting both leaves the set above unchanged and every
+        # assertion green -- measured. Keyed on the reason each row exists.
+        reasons = " ".join(why for _, _, why in self.REQUIRED)
+        for kind in (
+            "the prompt is what the model receives",
+            "the rule file must not ask for a six-figure read",
+            "the failure mode that gets missed",
+            "nothing else catches re-ignoring the directory",
+        ):
+            with self.subTest(kind=kind):
+                self.assertIn(kind, reasons)
 
 
 class GitignoredDocumentsAreNotPromisedTests(unittest.TestCase):
