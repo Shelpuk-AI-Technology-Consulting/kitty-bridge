@@ -16189,12 +16189,13 @@ class QuotaVocabularyTests(unittest.TestCase):
         whose message tells them the number may only go down, and why.
         """
 
-        self.assertLessEqual(
+        self.assertEqual(
             len(QUOTA_PATTERNS_WITHOUT_FIXTURES),
             4,
             "this list may only shrink -- KBR-166 removes `quota` and `\\bbilling\\b`; "
             "a NEW quota pattern needs a verbatim fixture, not an exemption",
         )
+
 
 def _quota_diagnostic(execution_text, status, reason):
     """Render a diagnostic for one attempt and report whether it advises a top-up.
@@ -16219,7 +16220,12 @@ def _quota_diagnostic(execution_text, status, reason):
             record_present=True,
             execution_text=execution_text,
         )
-        return "Top up the balance" in path.read_text(encoding="utf-8")
+        body = path.read_text(encoding="utf-8")
+
+    # Split the record echo off first: it reproduces `execution_text` verbatim, so
+    # a fixture that happened to contain this phrase would satisfy the search
+    # through its own text rather than through the advice branch.
+    return "Top up the balance" in body.split("--- execution record (tail) ---")[0]
 
 
 class SpentBalanceIsNotAWorkflowFaultTests(unittest.TestCase):
@@ -16474,6 +16480,7 @@ class VerdictAndAdviceAgreeTests(unittest.TestCase):
             "the refusal branch must win over the quota paragraph",
         )
 
+
 def fail_job_annotation(result, attempts="1", diagnostic="(diagnostic body)"):
     """Execute the real `Fail when no review was produced` step and capture its output.
 
@@ -16503,7 +16510,7 @@ def fail_job_annotation(result, attempts="1", diagnostic="(diagnostic body)"):
         )
         env = dict(os.environ, RESULT=result, ATTEMPTS=attempts)
         proc = subprocess.run(
-            ["bash", "-c", script],
+            [BASH, "-c", script],
             cwd=root,
             env=env,
             capture_output=True,
@@ -16514,6 +16521,7 @@ def fail_job_annotation(result, attempts="1", diagnostic="(diagnostic body)"):
     return proc.stdout
 
 
+@unittest.skipIf(BASH is None, "bash is required to run workflow steps")
 class OperatorSurfacesAgreeTests(unittest.TestCase):
     """KBR-145. Every surface an operator reads must name the same cause.
 
@@ -16575,7 +16583,7 @@ class OperatorSurfacesAgreeTests(unittest.TestCase):
         self.assertIn("the provider quota needs topping up", notice)
         self.assertNotIn("## Automatic code review failed", notice)
 
-    def test_the_job_summary_headline_names_the_provider(self):
+    def test_the_job_summary_headline_says_the_provider_was_unavailable(self):
         """Asserted positively; a negative alone is satisfied by `ok` and `cancelled`."""
 
         _, resolved = self._resolved()
@@ -16604,6 +16612,7 @@ class OperatorSurfacesAgreeTests(unittest.TestCase):
         self.assertIn("Top up or wait, then re-run", printed)
         self.assertNotIn("the workflow", printed.split("::error::")[-1].lower())
 
+
 class QuotaAdviceNamesNoRetiredProviderTests(unittest.TestCase):
     """KBR-145. The most-read failure paragraph must not name a provider we dropped.
 
@@ -16615,14 +16624,42 @@ class QuotaAdviceNamesNoRetiredProviderTests(unittest.TestCase):
     def test_the_advice_still_tells_the_operator_what_to_do(self):
         """The actionable half must survive the rewording.
 
-        Asserted first and separately, because a paragraph can be made neutral by
-        being emptied, and the absence test below would pass for that too.
+        🔴 **This asserted the WRONG SENTENCE and could not fail.** It checked for
+        "Top up the balance and re-run", which is the third sentence of the branch
+        and is not what KBR-145 rewrote; blanking the rewritten sentence entirely
+        left all 642 tests green. That is the same "assertion through a proxy" this
+        file documents twice, committed inside the test whose own docstring claimed
+        to guard against being emptied. It now asserts the replacement text.
         """
 
         for name, record in QUOTA_FIXTURES:
             with self.subTest(fixture=name):
                 status, reason = interpret.classify(record)
                 self.assertTrue(_quota_diagnostic(record, status, reason), name)
+                self.assertIn("the active kitty profile points at", self._advice())
+                self.assertIn("topped up", self._advice())
+
+    def _advice(self):
+        """Render a spent-balance diagnostic and return only its advice section.
+
+        Returns:
+            Everything above the execution-record echo, which is where the branch
+            under test writes and where the record cannot contaminate the match.
+        """
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "diagnostic.txt"
+            interpret._write_diagnostic(
+                str(path),
+                tier="kitty-bridge",
+                status="exhausted",
+                reason="provider quota exhausted: 'insufficient balance'",
+                retryable=True,
+                record_present=True,
+                execution_text=DEEPSEEK_NO_BALANCE,
+            )
+            body = path.read_text(encoding="utf-8")
+        return body.split("--- execution record (tail) ---")[0]
 
     def test_the_advice_names_no_retired_provider(self):
         """OpenRouter has not been the configured gateway since 2026-07-28."""

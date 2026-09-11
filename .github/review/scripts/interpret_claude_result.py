@@ -510,7 +510,15 @@ def _extract_structured_output(raw_output: str, execution_text: str) -> dict | N
 #: patterns are searched. Reviewing a change under `.github/review/scripts/` therefore fed this
 #: module's own source into its own matcher: `interpret_claude_result.py` contains the literals
 #: ``\b400\b``, ``quota``, ``insufficient balance`` and ``billing``, and one read of it matches
-#: **nine** of :data:`QUOTA_PATTERNS` and three of :data:`FATAL_PATTERNS`.
+#: **most of** :data:`QUOTA_PATTERNS` and **every** fatal pattern in the file.
+#:
+#: ⚠️ **Stated as a shape rather than as figures, because the figures rotted.** This line
+#: quoted "nine of QUOTA_PATTERNS and three of FATAL_PATTERNS"; re-derived by running the
+#: match, the first was already wrong (ten of eleven) and the second was broken by KBR-145
+#: itself — splitting the fatal set and documenting the split introduced the literal
+#: ``invalid_request_error`` into this file, so that pattern began self-matching where its
+#: own bare regex text never had. The argument never rested on the counts, only on this
+#: module matching a great many of its own patterns, and nothing checked the numbers.
 #:
 #: Measured on PR #237: a genuine transient ``server_error`` — whose correct verdict is
 #: ``exhausted`` and whose correct advice is "re-run" — was reported as ``fatal``, *"re-running
@@ -720,10 +728,16 @@ def classify(
         return "exhausted", f"provider rejected the credentials or model: {hit!r}"
 
     # 🔴 KBR-145. A generic error CODE is fatal only once the two sets that name a
-    # provider-side cause have had their turn. Both of those bill nothing, so the
-    # retry this verdict unlocks costs runner minutes rather than model spend --
-    # which is why the tier stops here and does not also yield to the transient set
-    # below, whose weakest members are ordinary English words.
+    # provider-side cause have had their turn: DeepSeek reports a spent balance with
+    # OpenAI's generic code, so checking it first called a billing state a broken
+    # workflow. Reaching this branch returns `fatal`, which retries NOTHING -- the
+    # retry is what the two sets above unlock by matching instead.
+    #
+    # The tier stops HERE and does not also yield to the transient set below, whose
+    # weakest members (`\btimeout\b`, `\bcapacity\b`) a model can write in its own
+    # prose: that would call a $1.79 billed rejection `exhausted` and spend it again.
+    # The symmetric exposure from quota's own weak members is real and is stated
+    # beside the tuple rather than denied here.
     hit = _first_match(FATAL_UNLESS_PROVIDER_NAMED_PATTERNS, haystack)
     if hit:
         return "fatal", f"workflow-level failure: {hit!r}"
