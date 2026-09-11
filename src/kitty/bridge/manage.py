@@ -114,13 +114,18 @@ def _connect_target(host: str) -> str:
         address = ipaddress.ip_address(host)
     except ValueError:
         return host
+    # The IPv4-mapped form is settled from ``ipv4_mapped`` before anything asks
+    # ``is_unspecified``, because that property's answer for ``::ffff:0.0.0.0``
+    # is a property of the interpreter's patch release, not of the address.
+    # CPython gh-122792 made it delegate to the mapped address and was backported
+    # mid-branch -- 3.10.16, 3.11.11, 3.12.7 and 3.13.1 -- while ``requires-python``
+    # bounds the minor version only. ``ipv4_mapped`` reads the same on all of them.
+    mapped = address.ipv4_mapped if isinstance(address, ipaddress.IPv6Address) else None
+    if mapped is not None:
+        return "127.0.0.1" if mapped.is_unspecified else host
     if not address.is_unspecified:
         return host
-    # ``is_unspecified`` is also true for the IPv4-mapped form ``::ffff:0.0.0.0``,
-    # which wants an IPv4 loopback despite reporting version 6.
-    if address.version == 6 and address.ipv4_mapped is None:
-        return "::1"
-    return "127.0.0.1"
+    return "::1" if address.version == 6 else "127.0.0.1"
 
 
 def bridge_reachable(host: str, port: int, timeout: float = PROBE_TIMEOUT_SECONDS) -> bool:
