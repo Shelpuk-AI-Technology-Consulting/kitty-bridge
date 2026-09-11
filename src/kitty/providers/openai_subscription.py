@@ -480,6 +480,15 @@ class OpenAISubscriptionAdapter(OpenAIAdapter):
         :meth:`_cc_to_responses` exactly, so this adapter's two body builders
         cannot drift apart again.
 
+        ``.get`` with a default, not ``or``, and the difference is deliberate:
+        ``.get`` substitutes only for an **absent** key, so a present-but-falsy
+        model would pass straight through rather than become ``"gpt-5.4"``. That
+        is unreachable — ``Profile.model`` is required and rejects empty and
+        whitespace-only values, and ``ResponsesTranslator`` subscripts ``model``
+        — and the two spellings are therefore equivalent for every input that can
+        occur.  Written down because the equivalence rests on those two
+        invariants, not on anything local to this function.
+
         Args:
             cc_request: The normalized request.  Only its ``model`` is read;
                 every other field of the shipped body comes from the agent's own

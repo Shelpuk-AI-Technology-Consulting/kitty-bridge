@@ -265,7 +265,10 @@ _BRIDGE_ROWS: tuple[MutationRow, ...] = (
         # That unreachability is load-bearing and is enforced elsewhere:
         # `Profile.model` is a required field whose validator rejects empty and
         # whitespace-only values, and every `BridgeServer` construction passes a
-        # profile's model. Remove either and this flag is wrong.
+        # profile's model. Remove either and this flag is wrong — and so is
+        # `OpenAISubscriptionAdapter._prepare_responses_body`'s `.get`, which
+        # relies on the same invariant to treat an absent and a falsy model as
+        # equivalent. Its docstring records why.
         #
         # KBR-160: the row was true at this site and false downstream of it —
         # `OpenAISubscriptionAdapter._prepare_responses_body` rebuilt the shipped
