@@ -320,6 +320,42 @@ class TestTheRoutingKeyFallback:
         assert _route_model(cc_request) == ""
 
 
+class TestTheCustomUrlErrorPathStaysModelIndependent:
+    """The 404 message rebuilds a route with no request in scope."""
+
+    def test_no_custom_url_adapter_routes_on_the_model(self) -> None:
+        """``_translate_upstream_error`` may only skip the model while this holds.
+
+        KBR-134's 404 branch reports the URL the bridge asked for, and it runs
+        where no ``cc_request`` exists. It is sound only because both adapters
+        that set ``requires_custom_url`` inherit ``get_upstream_path``, which
+        ignores its argument — so the reported route cannot depend on the model.
+
+        An adapter that required a custom URL *and* routed per model would make
+        that message name an endpoint the request never used, which on a 404 is
+        the one moment the user is being told to go and check it. This fails
+        first, so that lands as a decision rather than a wrong error string.
+        """
+        offenders = sorted(
+            name
+            for name in _registry
+            if get_provider(name).requires_custom_url
+            and type(get_provider(name)).get_upstream_path is not ProviderAdapter.get_upstream_path
+        )
+
+        assert not offenders, (
+            f"{offenders} both require a custom URL and route on the model. The 404 branch in "
+            "_translate_upstream_error builds its route from an empty request, so it would now "
+            "report the wrong endpoint; give it the real model or narrow the branch."
+        )
+
+    def test_the_subject_set_is_not_empty(self) -> None:
+        """The check above passes trivially if no adapter requires a custom URL."""
+        requiring = sorted(name for name in _registry if get_provider(name).requires_custom_url)
+
+        assert requiring == ["custom_anthropic", "custom_openai"], requiring
+
+
 class TestTheRoutingKeySurvivesSerialization:
     """``translate_to_upstream`` must not remove ``model`` from the request it is given."""
 

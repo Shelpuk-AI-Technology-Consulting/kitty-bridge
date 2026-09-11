@@ -6514,8 +6514,17 @@ class BridgeServer:
         custom_url: str | None = None
         path: str | None = None
         if status == 404 and provider.requires_custom_url:
-            custom_url = self._redact_userinfo(self._build_upstream_url())
-            path = provider.get_upstream_path(self._active_model or "")
+            # No request is in scope here -- this formats an error for twelve
+            # call sites, most of which have none -- and both adapters that
+            # require a custom URL inherit `get_upstream_path`, which ignores
+            # the model. So the reported route is model-independent, and saying
+            # so with an empty request is honest where reaching for
+            # `_active_model` would reintroduce KBR-127 in the error path.
+            # `test_no_custom_url_adapter_routes_on_the_model` fails if a future
+            # adapter makes that untrue.
+            model_independent: dict = {}
+            custom_url = self._redact_userinfo(self._build_upstream_url(model_independent))
+            path = provider.get_upstream_path(_route_model(model_independent))
         return self._translate_upstream_error_text(status, body, custom_url=custom_url, appended_path=path)
 
     @staticmethod
