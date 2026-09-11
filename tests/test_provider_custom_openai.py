@@ -332,6 +332,31 @@ class TestCustomOpenAIBaseUrlEndpointSuffix:
         """
         return CustomOpenAIAdapter().build_base_url({"base_url": url})
 
+    # Every shape the two properties below sweep: KBR-134's enumeration, which the
+    # new query and fragment cases join rather than replace.
+    _CORPUS = tuple(
+        f"{scheme}://{host}{path}"
+        for scheme in ("http", "https")
+        for host in ("gw", "gw.example", "gw.example:8443", "u:p@gw.example")
+        for path in (
+            "",
+            "/",
+            "/v1",
+            "/v1/",
+            "/chat/completions",
+            "/chat/completions/",
+            "/v1/chat/completions",
+            "/v1/chat/completions/",
+            "/v1/chat/completions/chat/completions",
+            "//chat/completions",
+            "/v1/chat/completions;x=1",
+            "/v1/chat/completions?q=1",
+            "/v1/chat/completions#f",
+            "/v1/chat/completions?q=1#f",
+            "/openai/deployments/d/chat/completions?api-version=2024-02-01",
+        )
+    )
+
     # ── The reported defect ────────────────────────────────────────────────
 
     def test_strips_endpoint_suffix(self):
@@ -374,22 +399,53 @@ class TestCustomOpenAIBaseUrlEndpointSuffix:
         """``urlsplit`` keeps ``;x=1`` in the path, so the match correctly fails."""
         assert self._build("https://host/v1/chat/completions;x=1") == "https://host/v1/chat/completions;x=1"
 
-    def test_leaves_query_bearing_url_untouched(self):
-        """Stripping would move the query ahead of the appended path (D10)."""
-        assert self._build("https://gw/v1/chat/completions?tenant=x") == "https://gw/v1/chat/completions?tenant=x"
+    # ── Shapes KBR-134 refused, two of which are now handled (KBR-143) ──────
+    #
+    # KBR-134's self-check compared whole URLs, so it refused every shape where
+    # stripping moved anything at all -- a query, a fragment, and a doubled slash
+    # alike (its decision D10, filed as KBR-143).  The check now compares *paths*,
+    # which is the component the strip actually edits.  A query and a fragment stop
+    # blocking it, because they are no longer part of the comparison.  A doubled
+    # slash still does, because it is part of the path and collapsing it would
+    # request a different address -- see `test_still_leaves_a_doubled_slash_alone`.
 
-    def test_leaves_fragment_bearing_url_untouched(self):
-        """Same defect as the query case, via the fragment (D10)."""
-        assert self._build("https://gw/v1/chat/completions#frag") == "https://gw/v1/chat/completions#frag"
+    def test_strips_the_suffix_and_keeps_the_query(self):
+        """The query stays with the base URL; only the endpoint leaves the path."""
+        assert self._build("https://gw/v1/chat/completions?tenant=x") == "https://gw/v1?tenant=x"
 
-    def test_leaves_doubled_slash_untouched(self):
-        """Stripping would yield a different address, not a shorter one (D10)."""
+    def test_strips_the_suffix_and_keeps_the_fragment(self):
+        """Same for a fragment, which no HTTP client puts on the wire anyway."""
+        assert self._build("https://gw/v1/chat/completions#frag") == "https://gw/v1#frag"
+
+    def test_still_leaves_a_doubled_slash_alone(self):
+        """An empty path segment is part of the address, so it is not collapsed.
+
+        ``//chat/completions`` and ``/chat/completions`` are different paths to
+        nginx, to S3 and to most gateways.  Stripping here would compose back to the
+        single-slash form, which is a different address rather than a cleaner one —
+        the same reason KBR-134 gave for stripping exactly once, applied to the same
+        URL from the other side.  KBR-134's behaviour is kept deliberately.
+        """
         assert self._build("https://gw//chat/completions") == "https://gw//chat/completions"
 
-    def test_leaves_azure_style_endpoint_untouched(self):
-        """Azure's documented endpoint carries a query and cannot be composed at all."""
+    def test_strips_azures_documented_endpoint(self):
+        """The URL Microsoft's own documentation shows, normalised (KBR-143)."""
         azure = "https://res.openai.azure.com/openai/deployments/d/chat/completions?api-version=2024-02-01"
-        assert self._build(azure) == azure
+
+        assert self._build(azure) == "https://res.openai.azure.com/openai/deployments/d?api-version=2024-02-01"
+
+    def test_azure_endpoint_composes_back_to_itself(self):
+        """The claim the customer cares about: pasted verbatim, requested verbatim.
+
+        This is the acceptance criterion of KBR-143 at the lowest layer that can
+        carry it — normalisation and composition together, with no server.
+        """
+        azure = "https://res.openai.azure.com/openai/deployments/d/chat/completions?api-version=2024-02-01"
+        adapter = CustomOpenAIAdapter()
+
+        composed = adapter.compose_upstream_url(self._build(azure), adapter.upstream_path)
+
+        assert composed == azure
 
     def test_match_is_case_sensitive(self):
         """URL paths are case-sensitive by specification, so an upper-case path is left alone."""
@@ -397,42 +453,54 @@ class TestCustomOpenAIBaseUrlEndpointSuffix:
 
     # ── The property the strip must never violate ──────────────────────────
 
-    def test_composition_is_never_changed(self):
-        """Normalisation never alters the URL the bridge ends up requesting.
+    def test_normalisation_touches_only_the_path(self):
+        """Normalisation may edit the path.  It may not touch anything else.
 
-        For every input, either the value is returned unchanged — in which case
-        the composed URL is what it always was — or composing the endpoint back
-        onto the result reproduces the caller's own URL exactly.  This is the
-        invariant the self-check in ``_strip_endpoint_suffix`` enforces, and it
-        is what makes "strip the suffix" safe without a list of special cases.
+        KBR-134 stated this as "the composed URL never changes", which was the
+        honest property of a fix that composed by concatenation and therefore could
+        not handle a query at all.  That property is retired deliberately (KBR-143):
+        a query-bearing URL *must* now compose differently, because before it
+        composed to an address the user never asked for.
+
+        What replaces it is structural and narrower — the strip rewrites the path
+        component and ``urlunsplit``s the rest untouched — so a future edit that
+        reaches the host, the query or the fragment fails here.
         """
+        from urllib.parse import urlsplit
+
         suffix = CustomOpenAIAdapter().upstream_path
-        urls = [
-            f"{scheme}://{host}{path}"
-            for scheme in ("http", "https")
-            for host in ("gw", "gw.example", "gw.example:8443", "u:p@gw.example")
-            for path in (
-                "",
-                "/",
-                "/v1",
-                "/v1/",
-                "/chat/completions",
-                "/chat/completions/",
-                "/v1/chat/completions",
-                "/v1/chat/completions/",
-                "/v1/chat/completions/chat/completions",
-                "//chat/completions",
-                "/v1/chat/completions;x=1",
-                "/v1/chat/completions?q=1",
-                "/v1/chat/completions#f",
-                "/openai/deployments/d/chat/completions?api-version=2024-02-01",
-            )
-        ]
-        for url in urls:
-            result = self._build(url)
-            if result == url:
+        for url in self._CORPUS:
+            try:
+                before, after = urlsplit(url), urlsplit(self._build(url))
+            except ValueError:
                 continue
-            assert result.rstrip("/") + suffix == url.rstrip("/"), url
+            assert (before.scheme, before.netloc, before.query, before.fragment) == (
+                after.scheme,
+                after.netloc,
+                after.query,
+                after.fragment,
+            ), url
+            assert after.path in (before.path, before.path.rstrip("/")[: -len(suffix)]), url
+
+    def test_composing_the_endpoint_back_reproduces_the_pasted_address(self):
+        """The claim a user would make: what they pasted is what Kitty requests.
+
+        This is KBR-143's replacement for the retired property above, and it is the
+        one that carries the ticket's acceptance criterion.  It holds only for a URL
+        that was actually normalised; a URL left alone keeps whatever address it
+        always composed to, which may well be wrong, and saying otherwise would
+        claim this change fixes shapes it does not touch.
+        """
+        from urllib.parse import urlsplit
+
+        adapter = CustomOpenAIAdapter()
+        for url in self._CORPUS:
+            normalised = self._build(url)
+            if normalised == url:
+                continue
+            composed = adapter.compose_upstream_url(normalised, adapter.upstream_path)
+            assert urlsplit(composed).path == urlsplit(url).path.rstrip("/"), url
+            assert urlsplit(composed).query == urlsplit(url).query, url
 
     def test_scheme_and_host_are_preserved(self):
         """Normalisation touches the path and nothing else."""

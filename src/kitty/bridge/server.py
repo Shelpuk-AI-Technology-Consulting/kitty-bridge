@@ -20,7 +20,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from types import TracebackType
 from typing import TYPE_CHECKING, NoReturn, TextIO, TypedDict, cast
-from urllib.parse import urlsplit, urlunsplit
 
 import aiohttp
 from aiohttp import web
@@ -6431,31 +6430,6 @@ class BridgeServer:
 
         return details
 
-    @staticmethod
-    def _redact_userinfo(url: str) -> str:
-        """Strip any ``user:password@`` component from a URL.
-
-        The 404 message travels into the agent transcript and the access log, and
-        userinfo is never needed to diagnose a wrong endpoint.
-
-        Args:
-            url: The URL to redact.
-
-        Returns:
-            The URL without its userinfo component, unchanged when it has none.
-        """
-        # No "@" anywhere means no userinfo, so the common case never parses. That
-        # also keeps this off `urlsplit`, which raises on a malformed IPv6 literal
-        # -- unreachable here, since such a URL cannot have produced an HTTP status
-        # for us to format, but not worth depending on.
-        if "@" not in url:
-            return url
-        parts = urlsplit(url)
-        if "@" not in parts.netloc:
-            return url
-        host = parts.netloc.rsplit("@", 1)[1]
-        return urlunsplit(parts._replace(netloc=host))
-
     def _translate_upstream_error(self, status: int, body: object) -> str:
         """Translate an upstream error, supplying this request's endpoint context.
 
@@ -6479,7 +6453,7 @@ class BridgeServer:
         custom_url: str | None = None
         path: str | None = None
         if status == 404 and provider.requires_custom_url:
-            custom_url = self._redact_userinfo(self._build_upstream_url())
+            custom_url = provider.redact_url_for_display(self._build_upstream_url())
             path = provider.get_upstream_path(self._active_model or "")
         return self._translate_upstream_error_text(status, body, custom_url=custom_url, appended_path=path)
 
@@ -6562,10 +6536,17 @@ class BridgeServer:
         )
 
     def _build_upstream_url(self) -> str:
-        base = self._active_provider.build_base_url(self._active_provider_config).rstrip("/")
+        """Return the upstream address for the backend currently selected.
+
+        Returns:
+            The full URL to request, composed rather than concatenated: a base URL
+            carrying a query string used to push the endpoint path behind the query
+            and address something the profile never named (KBR-143).
+        """
+        base = self._active_provider.build_base_url(self._active_provider_config)
         model = self._active_model or ""
         path = self._active_provider.get_upstream_path(model)
-        return f"{base}{path}"
+        return self._active_provider.compose_upstream_url(base, path)
 
     def _upstream_body_for(self, cc_request: dict) -> dict:
         """Serialize ``cc_request`` for the backend currently selected.

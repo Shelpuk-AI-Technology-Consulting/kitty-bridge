@@ -77,6 +77,37 @@ def test_readme_states_the_rule():
     assert "The base URL ends at the API root" in text
 
 
+def test_readme_documents_the_azure_endpoint_it_now_accepts():
+    """KBR-143 — the Azure form works, so the README has to say so.
+
+    The ticket's commercial case is that a customer following Microsoft's
+    documentation could not be served at all.  A fix nobody is told about leaves that
+    customer exactly where they were, so the documented endpoint is part of the
+    deliverable rather than a footnote.
+    """
+    text = _README.read_text(encoding="utf-8")
+
+    assert "openai.azure.com" in text, "README does not show the Azure endpoint form"
+    assert "api-version" in text, "README does not show that the query is kept"
+
+
+def test_the_documented_azure_endpoint_actually_composes_back_to_itself():
+    """The documented URL is checked against the code, not just spell-checked.
+
+    A README example that has drifted from the behaviour is worse than none: it is an
+    instruction to reproduce a bug.  This reads the URL out of the README and runs it
+    through normalisation and composition.
+    """
+    adapter = CustomOpenAIAdapter()
+    match = re.search(r"^(https://<resource>\.openai\.azure\.com\S+)$", _README.read_text(encoding="utf-8"), re.M)
+    assert match, "the Azure endpoint example is no longer on a line of its own"
+
+    documented = match.group(1)
+    composed = adapter.compose_upstream_url(adapter.build_base_url({"base_url": documented}), adapter.upstream_path)
+
+    assert composed == documented
+
+
 @pytest.mark.parametrize("path", _PROMPT_FILES, ids=lambda p: p.name)
 def test_wizard_prompt_names_the_api_root(path: Path):
     """Both places a user types the value say what the value is.

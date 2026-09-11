@@ -7,6 +7,8 @@ import json
 import pytest
 
 from kitty.bridge.server import BridgeServer
+from kitty.providers.base import ProviderAdapter
+from kitty.providers.custom_openai import CustomOpenAIAdapter
 
 
 class TestTranslateUpstreamError:
@@ -369,26 +371,52 @@ class TestCustomUrl404Message:
         assert "authentication failed" in result.lower()
 
 
-class TestUserinfoRedaction:
-    """A URL echoed into an error message must not carry credentials."""
+class TestCredentialRedaction:
+    """A URL echoed into an error message must not carry credentials.
+
+    KBR-134 redacted userinfo here through ``BridgeServer._redact_userinfo``.  That
+    helper is superseded by ``ProviderAdapter.redact_url_for_display``, which also
+    masks query values — a query could not reach an upstream before KBR-143, and is
+    where gateways keep keys now that it can.  These cases are carried over rather
+    than rewritten; the query ones are new.
+    """
 
     def test_userinfo_is_removed(self):
         """The message travels into the agent transcript and the access log."""
-        redacted = BridgeServer._redact_userinfo("https://u:p@gw.example/v1/chat/completions")
+        redacted = ProviderAdapter.redact_url_for_display("https://u:p@gw.example/v1/chat/completions")
         assert redacted == "https://gw.example/v1/chat/completions"
 
     def test_url_without_userinfo_is_unchanged(self):
         """Redaction is a no-op for the ordinary case."""
         url = "https://gw.example:8443/v1/chat/completions"
-        assert BridgeServer._redact_userinfo(url) == url
+        assert ProviderAdapter.redact_url_for_display(url) == url
 
     def test_redacted_url_reaches_the_message(self):
         """Neither the password nor the ``user:pass@`` form survives into the text."""
         result = BridgeServer._translate_upstream_error_text(
             404,
             {},
-            custom_url=BridgeServer._redact_userinfo("https://u:hunter2@gw.example/v1/chat/completions"),
+            custom_url=ProviderAdapter.redact_url_for_display("https://u:hunter2@gw.example/v1/chat/completions"),
             appended_path="/chat/completions",
         )
         assert "hunter2" not in result
         assert "u:" not in result
+
+    def test_a_query_credential_does_not_reach_the_message(self):
+        """KBR-143 — the server composes the URL, so the server must redact it too.
+
+        Built through the real instance method rather than handed a pre-redacted
+        string: the claim is that *the bridge* redacts, not that a redactor exists.
+        """
+        server = BridgeServer(
+            None,  # type: ignore[arg-type]
+            CustomOpenAIAdapter(),
+            "test-key",
+            model="some-model",
+            provider_config={"base_url": "https://gw.example/v1?subscription-key=s3cret"},
+        )
+
+        result = server._translate_upstream_error(404, {})
+
+        assert "s3cret" not in result
+        assert "subscription-key=****" in result

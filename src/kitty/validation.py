@@ -5,11 +5,12 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
+from urllib.parse import urlsplit
 
 import aiohttp
 
 from kitty.egress import EgressConfig, aiohttp_session_kwargs, should_bypass
-from kitty.providers.base import ProviderAdapter
+from kitty.providers.base import ProviderAdapter, ProviderError
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +25,41 @@ class ValidationResult:
     valid: bool
     reason: str | None = None
     warning: str | None = None
+
+
+def _unusable_url_result(
+    provider: ProviderAdapter,
+    provider_config: dict,
+    exc: Exception,
+) -> ValidationResult:
+    """Build the failure for a profile whose base URL cannot produce a request.
+
+    Before KBR-143 this condition was reported as ``API key for <provider> contains
+    invalid characters``, which sent the user to replace a credential that was never
+    the problem — the same misdirection KBR-134 was filed about, one layer in.
+
+    Args:
+        provider: The adapter whose profile is being validated.
+        provider_config: The profile's provider configuration, read only for the
+            ``base_url`` the message quotes back.
+        exc: What resolving the URL raised.
+
+    Returns:
+        An invalid result naming the provider and the configured base URL.  The URL is
+        redacted, because this reason is printed at launch and a query is where a
+        gateway keeps its credentials.
+    """
+    # Quote the configured value rather than the composed one: it is what the user
+    # would edit, and when `build_base_url` raised there is no composed URL to show.
+    configured = provider_config.get("base_url") or provider.default_base_url
+    return ValidationResult(
+        valid=False,
+        reason=(
+            f"Cannot build a request URL for {provider.provider_type} from this profile's base URL "
+            f"({provider.redact_url_for_display(str(configured))}): {exc}. "
+            f"Run `kitty profile` to correct it."
+        ),
+    )
 
 
 async def validate_api_key(
@@ -60,10 +96,22 @@ async def validate_api_key(
         return ValidationResult(valid=True)
 
     provider_config = provider_config or {}
-    base_url = provider.build_base_url(provider_config).rstrip("/")
-    model = provider.normalize_model_name(provider.validation_model)
-    path = provider.get_upstream_path(model)
-    url = f"{base_url}{path}"
+
+    # Resolve the probe URL under a guard, because everything that consumes it runs
+    # before the request block below and each fails misleadingly on a bad URL:
+    # `build_base_url` raises for a profile it rejects, `should_bypass` parses the URL
+    # again to decide on the proxy, and `aiohttp.InvalidURL` is a `ValueError` —
+    # indistinguishable, in the handler below, from a key containing whitespace.
+    try:
+        base_url = provider.build_base_url(provider_config)
+        model = provider.normalize_model_name(provider.validation_model)
+        path = provider.get_upstream_path(model)
+        url = provider.compose_upstream_url(base_url, path)
+        if not urlsplit(url).netloc:
+            raise ValueError("the composed URL has no host")
+    except (ValueError, ProviderError) as exc:
+        return _unusable_url_result(provider, provider_config, exc)
+
     headers = provider.build_upstream_headers(api_key)
 
     body = {

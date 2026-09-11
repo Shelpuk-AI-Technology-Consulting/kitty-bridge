@@ -442,6 +442,15 @@ This works with DeepSeek, Together AI, Groq, vLLM, LM Studio, and any other serv
 **The base URL ends at the API root** — Kitty appends `/chat/completions` itself. Give it
 `https://api.mistral.ai/v1`, not `https://api.mistral.ai/v1/chat/completions`.
 
+Pasting the full endpoint works anyway: Kitty drops the duplicate path instead of failing. That
+holds for an endpoint carrying a query string too, and the query is kept and sent with every
+request — so **Azure OpenAI** works through this provider with the endpoint Microsoft's own
+documentation shows, pasted verbatim:
+
+```
+https://<resource>.openai.azure.com/openai/deployments/<deployment>/chat/completions?api-version=2024-02-01
+```
+
 ```bash
 $ kitty setup
   ? Provider: Custom OpenAI-Compatible

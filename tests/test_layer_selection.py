@@ -404,6 +404,7 @@ class TestTheWholeSuiteIsCoherent:
             "tests/test_layer_markers.py",
             "tests/test_layer_selection.py",
             "tests/test_custom_url_docs.py",
+            "tests/test_upstream_url_single_rule.py",
         }
 
         actual = {

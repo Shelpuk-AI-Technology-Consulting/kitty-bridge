@@ -435,13 +435,29 @@ class TestCustomAnthropicBaseUrlEndpointSuffix:
         """``https://v1/messages`` ends with the suffix as a *string* only."""
         assert self._build("https://v1/messages") == "https://v1/messages"
 
-    def test_leaves_query_bearing_url_untouched(self):
-        """Stripping would move the query ahead of the appended path (D10)."""
-        url = "https://gw.example/v1/messages?tenant=x"
-        assert self._build(url) == url
+    def test_strips_the_suffix_and_keeps_the_query(self):
+        """KBR-143 — the query stays on the base URL; the endpoint leaves the path.
 
-    def test_composition_is_never_changed(self):
-        """Normalisation never alters the URL the bridge ends up requesting."""
+        KBR-134 left this URL untouched (its decision D10) because it composed by
+        concatenation and stripping would have pushed ``/v1/messages`` inside the
+        query value.  Composition joins the path component now, so the strip is safe.
+        """
+        assert self._build("https://gw.example/v1/messages?tenant=x") == "https://gw.example?tenant=x"
+
+    def test_still_leaves_a_doubled_slash_alone(self):
+        """An empty path segment is part of the address and is not collapsed."""
+        assert self._build("https://gw.example//v1/messages") == "https://gw.example//v1/messages"
+
+    def test_normalisation_touches_only_the_path(self):
+        """Normalisation may edit the path.  It may not touch anything else.
+
+        The replacement for KBR-134's "the composed URL never changes", which that
+        fix could state only because it refused every query-bearing URL.  See the
+        twin of this test in ``tests/test_provider_custom_openai.py`` for the reason
+        the old property is retired rather than broken.
+        """
+        from urllib.parse import urlsplit
+
         suffix = CustomAnthropicAdapter().upstream_path
         for path in (
             "",
@@ -452,13 +468,19 @@ class TestCustomAnthropicBaseUrlEndpointSuffix:
             "//v1/messages",
             "/v1/messages?q=1",
             "/v1/messages#f",
+            "/v1/messages?q=1#f",
             "/proxy/v1/messages",
         ):
             url = f"https://gw.example{path}"
-            result = self._build(url)
-            if result == url:
-                continue
-            assert result.rstrip("/") + suffix == url.rstrip("/"), url
+            before, after = urlsplit(url), urlsplit(self._build(url))
+
+            assert (before.scheme, before.netloc, before.query, before.fragment) == (
+                after.scheme,
+                after.netloc,
+                after.query,
+                after.fragment,
+            ), url
+            assert after.path in (before.path, before.path.rstrip("/")[: -len(suffix)]), url
 
     def test_rejects_empty_url(self):
         """An empty base URL still raises, with the existing message."""
