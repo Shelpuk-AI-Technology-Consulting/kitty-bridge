@@ -2033,8 +2033,12 @@ class TestClassify(unittest.TestCase):
         (401, "See interpret_claude_result.py:401 for the credential set."),
         (403, "Compare with interpret_claude_result.py:403 above."),
         (429, "The retry ladder at line 429 caps it."),
+        (500, "The redactor caps each field at 500 characters."),
+        (502, "A 502 from the gateway would be transient."),
         (503, "A 503 would be transient, so the verdict should be exhausted."),
         (1308, "Issue 1308 tracks the ladder rewrite."),
+        (1310, "Ticket 1310 covers the reset window."),
+        (1113, "The retry table at line 1113 lists each tier."),
     )
 
     @staticmethod
@@ -2090,6 +2094,40 @@ class TestClassify(unittest.TestCase):
                     f"the model's own prose voted {code} into the verdict",
                 )
                 self.assertIn("structured_output", reason)
+
+    def test_every_bare_status_code_the_classifier_matches_has_a_prose_row(self):
+        """The corpus above is read from the module, not restated beside it.
+
+        A hand-written list of codes is the drift this suite keeps paying for: the sweep
+        passes while a pattern added later has no row, and nothing says so. This derives
+        the population from :mod:`interpret`'s own tuples, so adding a bare-number pattern
+        without a prose row fails here rather than going unnoticed.
+
+        `BRIDGE_*` sets are excluded deliberately — they read the wrapper's stderr, which
+        the model does not write, and their `403` is already context-anchored.
+        """
+
+        bare_number = re.compile(r"^\\b[0-9\[\]]+\\b$")
+        covered = {code for code, _ in self.PROSE_NAMING_A_STATUS_CODE}
+        checked = 0
+
+        for name in dir(interpret):
+            if not name.endswith("_PATTERNS") or name.startswith("BRIDGE_"):
+                continue
+            for pattern in getattr(interpret, name):
+                if not isinstance(pattern, str) or not bare_number.match(pattern):
+                    continue
+                checked += 1
+                with self.subTest(pattern=pattern, tier=name):
+                    self.assertTrue(
+                        any(re.search(pattern, str(code)) for code in covered),
+                        f"{name} matches {pattern!r} and no row in "
+                        "PROSE_NAMING_A_STATUS_CODE exercises it",
+                    )
+
+        # Without this the test passes by finding nothing — the vacuity that makes a
+        # containment guard look green while it reads an empty set.
+        self.assertGreater(checked, 0, "no bare-number pattern was found to check")
 
     def test_a_400_in_the_models_prose_does_not_abandon_the_review(self):
         """🔴 KBR-172. The one code whose false match changes the DECISION, not the wording.
@@ -2197,7 +2235,13 @@ class TestClassify(unittest.TestCase):
                 ),
                 record_present=True,
             )
-            guidance = path.read_text(encoding="utf-8").split("Record (last")[0]
+            # The same delimiter `test_the_DIAGNOSTIC_is_scoped_too_not_just_the_verdict`
+            # uses, and it has to be the real one: the diagnostic appends the record's
+            # own tail verbatim, so a split on a string the file never contains silently
+            # asserts against the whole document — including the prose under test.
+            guidance = path.read_text(encoding="utf-8").split(
+                "--- execution record (tail) ---"
+            )[0]
 
         self.assertNotIn("Top up the balance", guidance)
 
