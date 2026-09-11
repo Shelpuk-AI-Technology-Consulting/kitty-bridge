@@ -262,6 +262,18 @@ _BRIDGE_ROWS: tuple[MutationRow, ...] = (
         # firing. M2 and M10 are exempt for the same shape of reason — their
         # triggers are properties of the route, not of the request.
         #
+        # That unreachability is load-bearing and is enforced elsewhere:
+        # `Profile.model` is a required field whose validator rejects empty and
+        # whitespace-only values, and every `BridgeServer` construction passes a
+        # profile's model. Remove either and this flag is wrong.
+        #
+        # KBR-160: the row was true at this site and false downstream of it —
+        # `OpenAISubscriptionAdapter._prepare_responses_body` rebuilt the shipped
+        # body from the raw inbound body and dropped the normalized model. Nothing
+        # in this data was wrong, which is the point: a row's `paths` claim can be
+        # broken by a consumer, and only an assertion at §3.2.3's capture boundary
+        # sees it.
+        #
         # The model, and nothing else. This is the row that makes a total
         # projection necessary at all (§3.3.1): a conversation-only projection
         # could not see the product's entire purpose.

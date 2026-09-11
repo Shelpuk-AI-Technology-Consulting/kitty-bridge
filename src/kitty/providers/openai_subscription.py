@@ -462,13 +462,32 @@ class OpenAISubscriptionAdapter(OpenAIAdapter):
     )
 
     @staticmethod
-    def _prepare_responses_body(original_body: dict) -> dict:
+    def _prepare_responses_body(cc_request: dict, original_body: dict) -> dict:
         """Clean a Responses API request for the Codex backend.
 
         The Codex backend uses strict parameter validation — it rejects
         any parameter not in the Codex CLI's allowlist (e.g.
         ``max_output_tokens``, ``temperature``, ``strict`` on tools).
         This method builds a clean body from only the allowed fields.
+
+        The **model** is the one exception to "only the allowed fields of
+        ``original_body``".  It is read from ``cc_request``, which
+        :meth:`~kitty.bridge.server.BridgeServer._normalize_model` has already
+        replaced with the profile's model and provider-normalised.  Reading it
+        from ``original_body`` instead shipped whatever model the agent asked
+        for and silently discarded the profile's, which is the product's whole
+        purpose (KBR-160).  The expression deliberately matches
+        :meth:`_cc_to_responses` exactly, so this adapter's two body builders
+        cannot drift apart again.
+
+        Args:
+            cc_request: The normalized request.  Only its ``model`` is read;
+                every other field of the shipped body comes from the agent's own
+                body, and the internal keys this dict carries must not leak.
+            original_body: The agent's inbound Responses API body, verbatim.
+
+        Returns:
+            A body carrying only the parameters the Codex backend accepts.
         """
         # Log dropped parameters so users understand why settings don't apply
         dropped = set(original_body) - OpenAISubscriptionAdapter._ALLOWED_RESPONSES_PARAMS
@@ -478,7 +497,7 @@ class OpenAISubscriptionAdapter(OpenAIAdapter):
         # Only pass parameters that the Codex backend accepts.
         # Additional parameters cause 400 "Unsupported parameter: X".
         body: dict = {
-            "model": original_body.get("model", "gpt-5.4"),
+            "model": cc_request.get("model", "gpt-5.4"),
             "stream": True,
             "store": False,
         }
@@ -527,7 +546,7 @@ class OpenAISubscriptionAdapter(OpenAIAdapter):
         """
         original_body = cc_request.get("_original_body")
         if original_body:
-            resp_body = self._prepare_responses_body(original_body)
+            resp_body = self._prepare_responses_body(cc_request, original_body)
             if "reasoning" not in resp_body:
                 effort = cc_request.get("_reasoning_effort")
                 if effort and effort != "none":
@@ -696,7 +715,7 @@ class OpenAISubscriptionAdapter(OpenAIAdapter):
         """
         original_body = cc_request.get("_original_body")
         if original_body:
-            resp_body = self._prepare_responses_body(original_body)
+            resp_body = self._prepare_responses_body(cc_request, original_body)
             if "reasoning" not in resp_body:
                 effort = cc_request.get("_reasoning_effort")
                 if effort and effort != "none":
