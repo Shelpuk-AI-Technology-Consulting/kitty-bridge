@@ -10,11 +10,15 @@ from kitty.bridge.server import BridgeServer
 
 
 class TestTranslateUpstreamError:
-    """Unit tests for BridgeServer._translate_upstream_error."""
+    """Unit tests for the static core, ``BridgeServer._translate_upstream_error_text``.
+
+    The same-named instance method wraps this to supply the endpoint context; it
+    is exercised in ``tests/bridge/test_custom_url_404.py``.
+    """
 
     @staticmethod
     def _call(status: int, body: object) -> str:
-        return BridgeServer._translate_upstream_error(status, body)
+        return BridgeServer._translate_upstream_error_text(status, body)
 
     # ── Z.AI code 1261: Prompt exceeds max length ─────────────────────────
 
@@ -305,3 +309,86 @@ class TestTranslateUpstreamError:
         assert "/clear" in result
         # Tool-call-specific phrasing, not the context-window hint
         assert "broken tool_use/tool_result pairing" in result
+
+
+class TestCustomUrl404Message:
+    """KBR-134 — a 404 from a user-configured endpoint must name the address.
+
+    Claude Code renders any 404 on a model request as "that model may not
+    exist", which sent the reporter hunting for a model problem that did not
+    exist.  When the profile supplied the URL, the bridge says so instead.
+    """
+
+    # The text pinned in the requirements document, spelled out rather than
+    # imported: an assertion that reads the implementation's own constant
+    # proves only that the constant equals itself.
+    EXPECTED = (
+        'Upstream returned HTTP 404 for https://api.mistral.ai/v1/chat/completions/chat/completions. '
+        "Either the model is not available at that endpoint, or this profile's base URL is wrong: "
+        'Kitty appends "/chat/completions" to the base URL itself, so the base URL must end at the '
+        'API root. Details: {"detail": "Not Found"}'
+    )
+
+    def test_names_the_requested_url_and_the_rule(self):
+        """The reporter's exact failure produces the pinned message."""
+        result = BridgeServer._translate_upstream_error_text(
+            404,
+            {"detail": "Not Found"},
+            custom_url="https://api.mistral.ai/v1/chat/completions/chat/completions",
+            appended_path="/chat/completions",
+        )
+        assert result == self.EXPECTED
+
+    def test_omits_details_when_body_is_empty(self):
+        """An empty upstream body drops the trailing clause rather than dangling."""
+        result = BridgeServer._translate_upstream_error_text(
+            404, None, custom_url="https://gw.example/v1/chat/completions", appended_path="/chat/completions"
+        )
+        assert result.endswith("must end at the API root.")
+        assert "Details:" not in result
+
+    def test_fixed_endpoint_provider_is_unaffected(self):
+        """Without a custom URL the 404 body passes through exactly as before."""
+        result = BridgeServer._translate_upstream_error_text(404, {"x": 1})
+        assert result == json.dumps({"x": 1}, ensure_ascii=False)
+
+    def test_context_window_error_still_wins(self):
+        """A 404 carrying a context-window body keeps the more actionable /clear advice."""
+        body = {"error": {"code": "1261", "message": "Prompt exceeds max length"}}
+        result = BridgeServer._translate_upstream_error_text(
+            404, body, custom_url="https://gw.example/v1/chat/completions", appended_path="/chat/completions"
+        )
+        assert "/clear" in result
+        assert "base URL" not in result
+
+    def test_auth_error_still_wins(self):
+        """The 404 branch does not disturb the auth branch it sits below."""
+        result = BridgeServer._translate_upstream_error_text(
+            401, {"error": "Unauthorized"}, custom_url="https://gw.example/v1", appended_path="/chat/completions"
+        )
+        assert "authentication failed" in result.lower()
+
+
+class TestUserinfoRedaction:
+    """A URL echoed into an error message must not carry credentials."""
+
+    def test_userinfo_is_removed(self):
+        """The message travels into the agent transcript and the access log."""
+        redacted = BridgeServer._redact_userinfo("https://u:p@gw.example/v1/chat/completions")
+        assert redacted == "https://gw.example/v1/chat/completions"
+
+    def test_url_without_userinfo_is_unchanged(self):
+        """Redaction is a no-op for the ordinary case."""
+        url = "https://gw.example:8443/v1/chat/completions"
+        assert BridgeServer._redact_userinfo(url) == url
+
+    def test_redacted_url_reaches_the_message(self):
+        """Neither the password nor the ``user:pass@`` form survives into the text."""
+        result = BridgeServer._translate_upstream_error_text(
+            404,
+            {},
+            custom_url=BridgeServer._redact_userinfo("https://u:hunter2@gw.example/v1/chat/completions"),
+            appended_path="/chat/completions",
+        )
+        assert "hunter2" not in result
+        assert "u:" not in result

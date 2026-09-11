@@ -6,7 +6,7 @@
     <img src="https://img.shields.io/pypi/pyversions/kitty-bridge.svg" alt="Python version">
   </a>
   <img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT">
-  <img src="https://img.shields.io/github/actions/workflow/status/Shelpuk-AI-Technology-Consulting/kitty-code/ci.yml?branch=main" alt="CI">
+  <img src="https://img.shields.io/github/actions/workflow/status/Shelpuk-AI-Technology-Consulting/kitty-bridge/ci.yml?branch=main" alt="CI">
   <a href="https://pepy.tech/projects/kitty-bridge" target="_blank" rel="noopener noreferrer">
     <img src="https://static.pepy.tech/badge/kitty-bridge" alt="Total PyPI downloads">
   </a>
@@ -17,7 +17,7 @@ Use your favorite coding agent with any LLM provider.
 > **Claude Code with MiniMax. Codex with GLM. Gemini CLI with OpenRouter. One command.**
 
 <p align="left">
-  <img src="https://raw.githubusercontent.com/Shelpuk-AI-Technology-Consulting/kitty-code/main/assets/logo.png" alt="Kitty Bridge" width="800">
+  <img src="https://raw.githubusercontent.com/Shelpuk-AI-Technology-Consulting/kitty-bridge/main/assets/logo.png" alt="Kitty Bridge" width="800">
 </p>
 
 ## Why Kitty Bridge?
@@ -439,6 +439,9 @@ Use the `custom_openai` provider to connect to **any** service that exposes an O
 This works with DeepSeek, Together AI, Groq, vLLM, LM Studio, and any other service that accepts
 `POST /v1/chat/completions` with Bearer auth and SSE streaming.
 
+**The base URL ends at the API root** — Kitty appends `/chat/completions` itself. Give it
+`https://api.mistral.ai/v1`, not `https://api.mistral.ai/v1/chat/completions`.
+
 ```bash
 $ kitty setup
   ? Provider: Custom OpenAI-Compatible
@@ -459,6 +462,7 @@ $ kitty claude
 | Together AI  | `https://api.together.xyz/v1`           |
 | Groq         | `https://api.groq.com/openai/v1`        |
 | Fireworks    | `https://api.fireworks.ai/inference/v1` |
+| Mistral      | `https://api.mistral.ai/v1`             |
 | vLLM (local) | `http://localhost:8000/v1`              |
 | LM Studio    | `http://localhost:1234/v1`              |
 
@@ -755,6 +759,13 @@ ruff check .
 mypy src/kitty
 ```
 
+The suite also needs `openssl` on your `PATH` — a few tests generate a throwaway TLS certificate
+with it. A missing `openssl` fails those tests rather than skipping them, deliberately: a test that
+removes itself when a resource is absent lets CI report success without having run it. That is a
+different treatment from the deselected categories described below, and the difference is the
+granularity: a resource needed by a whole *layer* is excluded by selection, while a resource needed
+by a handful of tests inside a layer CI gates on has to be present.
+
 ### Running a subset of the tests
 
 Every test carries exactly one layer marker, so you can ask for the part you need:
@@ -777,6 +788,25 @@ pytest -m agent_live  # launches real agent CLIs against live credentials
 
 The marker is assigned automatically from the file's path; a test only declares its own layer
 where that default is wrong. `.system_design/TEST_SUITE.md` §8 has the full matrix.
+
+### Exempting a known-failing assertion
+
+A guard sometimes covers a class of check broader than the one defect it happens to expose, so it
+would land red on a single assertion. `tests/exemptions.py` exempts **that one assertion** and
+nothing else:
+
+```python
+from exemptions import ratchet
+
+with ratchet("tr-1c-header-subset"):
+    assert bridge_headers <= native_headers
+```
+
+Every other assertion in the test, and all of its setup, still gates. A broken fixture inside the
+block still fails. And when the assertion starts passing, the run **fails** and tells you to
+delete the row -- so an exemption cannot outlive the defect it describes. Each row names the
+assertion, the condition it is expected to fail under, and its Jira key; the registry is one file
+and is meant to trend towards empty. `.system_design/TEST_SUITE.md` §8.3 has the reasoning.
 
 ## License
 
