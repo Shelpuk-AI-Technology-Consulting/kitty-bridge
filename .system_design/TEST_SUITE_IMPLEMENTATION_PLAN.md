@@ -579,6 +579,7 @@ merge.** So:
 | KBR-8 · **CLOSED** | G3 | T-G9, TR-1c | Route taken: atomic fix + behavioural guard landed together, red evidence in the PR (2026-09-11). T-G9 still owns the exact-set contract and TR-1c the acceptance scenario; G3's policy half waits on Q1. (Status convention: `TEST_SUITE.md` §9.2.) |
 | KBR-9 | G6 | T-G1 | Atomic fix + test now |
 | KBR-132 · **CLOSED** | G21 | — | Route taken: atomic fix + regression test, red at base, evidence in the PR. The broader guard is **KBR-138**, which has no plan-task ID because it was filed after this plan was written; G21 is its design gap. (Status convention: `TEST_SUITE.md` §9.2.) |
+| KBR-146 · **CLOSED** | G25 | — | Route taken: atomic fix + regression tests, red at base on both sides of the interpreter boundary, evidence in the PR. Landed the fifth §6.2.4 contract (`tests/test_ipaddress_contract.py`) ahead of all four planned ones; no plan-task ID, filed after this plan was written. G25 records what that contract still cannot prove. Duplicates KBR-141/142/150/162. (Status convention: `TEST_SUITE.md` §9.2.) |
 
 ---
 
@@ -611,7 +612,7 @@ Every design requirement has an owner. "Existing" means the current suite alread
 | §6.2.1 | OpenAPI, schemathesis, registration matrix | T-G6 |
 | §6.2.2 | SSE grammar | T-G7 |
 | §6.2.3 | Register, internal-key, wire-shape, vendor-token, docs guards | T-G1–T-G5 — T-G3 delivered by KBR-6, and the **hook-level** half of wire-shape honesty by KBR-7; T-G4 still owns the wire boundary |
-| §6.2.4 | Four dependency contracts | T-G8, T-G10, T-G11, T-G12 |
+| §6.2.4 | Five dependency contracts | T-G8, T-G10, T-G11, T-G12 — the fifth, the stdlib `ipaddress` contract, was **delivered by KBR-146** and has no plan-task ID because the defect was filed after this plan was written |
 | §6.3.1 | Bridge-with-sockets scenarios | T-I7–T-I11 |
 | §6.3.2 | CLI lifecycle | T-I1–T-I4 |
 | §6.4.1 | Gherkin scenarios | T-J1–T-J3 |

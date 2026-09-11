@@ -1218,6 +1218,11 @@ The `localhost` exclusions are not a caveat bolted on — `should_bypass` matche
 before it ever tries `ipaddress.ip_address`, and a property stated without them fails on day one
 and gets weakened, which removes the guard.
 
+An IPv4-mapped literal such as `::ffff:10.0.0.5` **is** an IP literal, so it takes the address
+branch and this property never reaches it. Its classification is a stdlib behaviour, pinned in
+§6.2.4 — including the note that one of the three terms the disjunction reads is not independently
+stable across interpreter patch releases.
+
 **A narrower user-visible consequence.** Because names outside the `localhost` family are not
 resolved, a user whose local model server is reached by a **LAN hostname** — not `localhost`, not
 an IP — will have that traffic tunnelled to a proxy that cannot reach it. The common
@@ -1301,7 +1306,7 @@ cannot be the L1 selection (§8).
 | `_compact_messages` | Identity below budget · no orphaned pair · idempotent · **output ≤ budget unless the surviving set is irreducible** (below) |
 | `_validate_tool_call_pairing` | Output contains no `tool_result` without a `tool_use`, in both message shapes |
 | `_truncate_oversized_tool_results` | Identity below the limit · output ≤ limit · non-tool-result content untouched |
-| `should_bypass` | Every address in a private range is bypassed · the §5.3 hostname property |
+| `should_bypass` | Every address in a private range is bypassed, **including the IPv4-mapped form of each range** (§6.2.4 pins why that is a stdlib claim and not a kitty one) · the §5.3 hostname property |
 | `parse_proxy_url` / `EgressConfig` | Credential round-trip · the redaction property below |
 | `describe_tool_input_anomaly` | Never reports an anomaly for input that validates against the declared schema |
 | Wire projections (§3.3.1) | Each reads its format correctly, tested against published format examples — never against kitty's own output |
@@ -1387,6 +1392,10 @@ None`. `mutmut` closes that gap.
 cannot rot into a no-op. `tests/test_egress_coverage.py` already does this
 (`test_the_scan_actually_finds_something`, `test_the_scan_finds_the_known_start_paths`) and is
 the pattern to copy.
+
+**And a contract pins what the code reads, never what it merely tolerates.** Pinning a value that is
+itself version-dependent enforces whatever the author's interpreter happened to say; the fix is to
+stop depending on it and pin the stable neighbour. Worked example and the precondition in §6.2.4.
 
 #### 6.2.1 Bridge endpoint schemas
 
@@ -1568,9 +1577,9 @@ user impact as a drifted API, and F2 shows it has already happened.
 
 #### 6.2.4 Dependency behaviour contracts
 
-Small, fast tests pinning third-party behaviour the invariants rest on, so a dependency bump
-fails here with a clear message rather than in production. The pin situation is worse than a
-glance suggests:
+Small, fast tests pinning dependency behaviour the invariants rest on — and the
+ordinary-correctness behaviour whose drift the gate cannot see — so an upgrade fails here with
+a clear message rather than in production. The pin situation is worse than a glance suggests:
 
 | Dependency | Declared pin | What must be pinned by test |
 |---|---|---|
@@ -1578,9 +1587,57 @@ glance suggests:
 | `curl_cffi` | `>=0.7` — **unbounded** | `proxies=` is honoured; its precedence over ambient `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` (this stack *does* read the environment); the impersonation target still exists. |
 | `botocore` | **not declared at all** — arrives transitively via `boto3>=1.34` | `Config(proxies=)` is honoured and takes precedence over the environment. It is botocore, not boto3, that implements this. An undeclared dependency owning a containment guarantee is worse than an unbounded one. |
 | `keyring` | `>=23.0` | Backend resolution on each supported platform. |
+| CPython `ipaddress` | `requires-python = ">=3.10"` — **minor only, no patch floor** | Two consumers. **I3:** `should_bypass` reads `is_loopback or is_private or is_link_local`, so the disjunction's verdict on the IPv4-mapped form of each range must be pinned — see the masking note below. **Liveness:** `_connect_target` reads `IPv6Address.ipv4_mapped` (the mapped `IPv4Address` for `::ffff:x.x.x.x`, `None` otherwise) and `is_unspecified` for `0.0.0.0` and `::`. What must **not** be pinned is `IPv6Address("::ffff:0.0.0.0").is_unspecified`: CPython [gh-122792](https://github.com/python/cpython/issues/122792) changed it mid-branch, so its value is a property of the patch release, and the code is written not to read it. |
 
 The ambient-environment cases are not hypothetical: `kitty.egress`'s docstring records the
 divergence, and a user with `HTTP_PROXY` set in their shell exercises it on two of three stacks.
+
+**The standard library is a dependency, and it is declared to the wrong precision.** Three of the
+other rows name a version range; `botocore` names none at all. The interpreter is a third shape —
+declared, but only to the *minor*, so `requires-python` admits both sides of a behaviour change that
+moved at a patch boundary. That is how KBR-146 reached `main` green: `ipaddress` answered one way on
+the runner and the other way on a stock Ubuntu 24.04 developer box, and nothing in the tree asserted
+which answer was being relied upon.
+
+**A contract pins what the code reads, never what it merely tolerates.** The pre-fix
+`_connect_target` would have been pinned by asserting `is_unspecified` is true for the mapped
+wildcard — red on the 35 supported releases that predate the backport (3.10.0–3.10.15,
+3.11.0–3.11.10, 3.12.0–3.12.6, 3.13.0) — so the contract would have enforced the defect rather than
+caught it. The rule this row establishes: when a dependency's behaviour is version-dependent, stop
+depending on it and pin the **stable neighbour** instead; pinning the moving value only relocates
+the failure. **Where no stable neighbour exists** — `keyring`'s backend resolution varies by
+platform by design, and `curl_cffi`'s impersonation targets come and go — the remaining options are
+a version floor or a runtime feature check, and the row must record which was chosen. A floor was
+rejected here for the reason a floor is usually wrong: it drops supported users to settle a question
+the code no longer asks. `tests/test_ipaddress_contract.py` holds the contract and says in its own
+docstring which property it refuses to assert and why.
+
+**Why forcing the property is a faithful stand-in for an old interpreter.** `ipv4_mapped` itself was
+measured identical on 18 releases spanning all four supported branches, which is what makes the L1
+test's forced `is_unspecified` a reproduction of a pre-backport interpreter rather than a resemblance
+to one. Everything else in the mapped path reads the same on both sides of gh-122792.
+
+**`should_bypass` survives gh-122792 by masking, not by independence — and that is a premise, not an
+accident.** `ipaddress.ip_address("::ffff:169.254.1.1").is_link_local` flips at the *same* four
+boundaries as `is_unspecified` (measured: `False` on 3.10.13–15, 3.11.8–10, 3.12.4–6 and 3.13.0;
+`True` from 3.10.16, 3.11.11, 3.12.7 and 3.13.1). The disjunction is stable only because
+`is_private` delegates to the mapped address on every supported release and IPv4's `is_private`
+already covers `169.254.0.0/16`. So I3's bypass decision *does* read a version-dependent value, and
+is saved by a sibling term. Anyone who later splits that disjunction, narrows it, or logs per term
+re-opens the patch dependence in the containment direction — which is why the contract pins the
+disjunction's verdict on the mapped forms rather than the individual terms. Upstream's own
+motivation for gh-122792 was "folks using IP address filtering before establishing a connection",
+which is precisely what `should_bypass` is.
+
+**What this contract does not prove, and what carries it instead.** `.github/workflows/tests.yml`
+names bare minor versions and `actions/setup-python` resolves each to the newest patch, so this
+module is only ever evaluated on the **new** side of every such boundary. It can therefore catch
+*forward* drift — a future interpreter changing a value we read — and cannot catch a value that
+differs on an older patch a user is actually running, which is the shape KBR-146 had. That half
+rests entirely on the L1 forced-property test, which holds both sides inside one run. Recorded as
+gap **G25** rather than closed by a matrix entry: `setup-python` does accept an exact patch version,
+so one pinned job would do it, and that is a CI-spend decision for the product owner rather than a
+change this defect's fix should make on its own authority.
 
 ### 6.3 L3 — Subsystem
 
@@ -2519,7 +2576,8 @@ does not surface work that is done. `TEST_SUITE_IMPLEMENTATION_PLAN.md` §16 mir
 | **G6** | Docs drift undetected (F2) — KBR-9 | README endpoint table already wrong | README ⇄ code guards | **3** |
 | **G7** | No property-based tests | All example-based | `hypothesis` on the §6.1 list | **3** |
 | **G9** | C5 unmeasured | `force_close=True` gives a per-request connection pattern unlike the agent's | Connection-count baseline | **3** |
-| **G11** | Dependency behaviour unpinned; `curl_cffi` unbounded and **botocore undeclared** | Containment rests on an undeclared transitive dependency | Dependency contract tests (§6.2.4) + declare botocore | **3** |
+| **G11** | Dependency behaviour unpinned; `curl_cffi` unbounded, **botocore undeclared** and the interpreter declared to the minor only | One of five §6.2.4 contracts has landed — the stdlib `ipaddress` one (KBR-146). The four transport contracts and the `botocore` declaration remain, so containment still rests on an undeclared transitive dependency | Dependency contract tests (§6.2.4) + declare botocore | **3** |
+| **G25** | **§6.2.4 contracts are only ever evaluated on the newest patch of each minor** — KBR-146 | `tests.yml` names bare minor versions and `actions/setup-python` resolves each to the newest patch. Every dependency contract therefore proves forward drift only; a value that differs on an older patch a user runs — the shape KBR-146 had — is invisible to the gate. Today that half rests on one L1 test that forces the property both ways, which works because the surrounding behaviour was measured stable, and does not generalise to a contract whose neighbours have not been | One job pinned to the oldest supported patch (`setup-python` accepts an exact version, so it is one job, not four). Deferred as a CI-spend decision, not a technical one | **3** |
 | **G12** | Product layer effectively absent | 2 E2E tests, never run in CI | Nightly job, extended to 5 Claude Code cases | **4** |
 | **G13** | No answer-quality signal | Compaction and the Fireworks cap can degrade output invisibly | Paired delta eval | **4** |
 
@@ -2539,6 +2597,12 @@ per hour.
 
 Recorded per the repo's system-design discipline: the reasoning, especially where the choice was
 not the obvious one.
+
+**Pin what the code reads, not what it tolerates (§6.2.4).** A dependency contract that asserts a
+version-dependent value enforces the author's interpreter rather than the product's requirement —
+and, for KBR-146, would have enforced the defect. Where the dependency offers a stable neighbour the
+answer is to read that instead; where it does not, the row records whether a floor or a runtime
+check was chosen.
 
 **A permitted-mutation register instead of golden files (§3.1).** Golden files fail on every
 change, get regenerated reflexively, and prove nothing about unrecorded inputs. The register
