@@ -19,6 +19,16 @@ from kitty.io_encoding import harden_output_streams
 
 
 def main() -> None:
+    """Run the bridge server in the foreground until it is signalled to stop.
+
+    Invoked as ``python -m kitty.bridge_runner`` by
+    :func:`kitty.bridge.manage.start_bridge`, which owns the daemonisation. This
+    is the second of kitty's two process entry points, so anything that
+    configures the *process* rather than the server belongs here as well as in
+    :func:`kitty.cli.main.main`.
+
+    Reads its configuration from the command line; see ``--help``.
+    """
     # `kitty bridge start` spawns this process with stdout and stderr as pipes,
     # so the locale-codepage path is not an edge case here -- it is the only
     # path. The parent reads this stderr back and decodes it as UTF-8

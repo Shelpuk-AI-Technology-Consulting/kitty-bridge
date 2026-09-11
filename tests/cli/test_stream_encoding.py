@@ -22,6 +22,7 @@ file among the ``l1`` modules that spawn processes, for T-K6 and T-H1.
 
 from __future__ import annotations
 
+import inspect
 import io
 import os
 import subprocess
@@ -29,6 +30,8 @@ import sys
 from pathlib import Path
 
 import pytest
+
+from kitty.tui.display import print_info
 
 # Locale codepages a Windows machine really uses, none of which is a superset of
 # the other: cp1252 holds the em dash but not the status glyphs, cp437 holds
@@ -59,6 +62,13 @@ NON_ASCII_DIRECTORY = "дом"
 # assertion alone passes against the defect — the ticket names this trap
 # explicitly.
 _CRASH_MARKERS = ("UnicodeEncodeError", "Traceback (most recent call last)")
+
+# The character `print_info` emits, and the reason the falsification case below
+# is a defect at all. Named here so the test can check its own premise: if the
+# product ever swapped this glyph for one a codepage *can* encode, the
+# falsification assertion would go red saying the harness is broken, when what
+# actually changed is the bait. See `test_the_harness_detects_an_unhardened_child`.
+FALSIFICATION_GLYPH = "\u2139"
 
 
 def _isolated_environment(home: Path, encoding: str) -> dict[str, str]:
@@ -460,6 +470,17 @@ def test_the_harness_detects_an_unhardened_child(encoding: str, tmp_path: Path) 
         encoding: The start-up encoding forced on the child.
         tmp_path: Per-test isolated home.
     """
+    # Check the premise before trusting the conclusion: this case only tests the
+    # harness while `print_info` still emits a character `encoding` cannot hold.
+    source = inspect.getsource(print_info)
+    assert FALSIFICATION_GLYPH in source, (
+        f"`print_info` no longer emits {FALSIFICATION_GLYPH!r}, so driving it is "
+        "no longer a deliberate defect. The harness is not broken — this test's "
+        "bait is. Pick a character no codepage in HOSTILE_ENCODINGS can encode."
+    )
+    with pytest.raises(UnicodeEncodeError):
+        FALSIFICATION_GLYPH.encode(encoding)
+
     completed = _run_child(
         ["-c", "from kitty.tui.display import print_info; print_info('x')"],
         home=tmp_path / "home",
