@@ -65,6 +65,11 @@ _HELPERS = ("_build_upstream_url", "_build_upstream_headers")
 # the defect, so the guard forbids all three rather than the one the bug used.
 _FORBIDDEN_ATTRIBUTES = ("_active_model", "_model", "_backends")
 
+# The one function that answers "which model is this request for?". Both
+# helpers must go through it; a helper that re-derives the answer inline is
+# a second source of truth again, whatever it derives it from.
+_ROUTE_MODEL = "_route_model"
+
 _SERVER_MODULE = Path(__file__).resolve().parent.parent / "src" / "kitty" / "bridge" / "server.py"
 _SCANNED_TREES = (
     Path(__file__).resolve().parent.parent / "src",
@@ -108,18 +113,20 @@ def _self_attributes_read(function: ast.FunctionDef) -> set[str]:
     }
 
 
-def _reads_name(function: ast.FunctionDef, name: str) -> bool:
-    """Return whether a function body reads a bare name.
+def _calls(function: ast.FunctionDef, name: str) -> bool:
+    """Return whether a function body calls a bare-named function.
 
     Args:
         function: The definition to inspect.
-        name: The identifier to look for — here, the parameter that carries the
-            request.
+        name: The function name to look for.
 
     Returns:
-        True when the name is loaded anywhere in the body.
+        True when the body contains a call to that name.
     """
-    return any(isinstance(node, ast.Name) and node.id == name for node in ast.walk(function))
+    return any(
+        isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == name
+        for node in ast.walk(function)
+    )
 
 
 def _helper_aliases(tree: ast.AST) -> set[str]:
@@ -140,11 +147,16 @@ def _helper_aliases(tree: ast.AST) -> set[str]:
     aliases: set[str] = set()
 
     for node in ast.walk(tree):
-        if not isinstance(node, ast.Assign) or not isinstance(node.value, ast.Attribute):
+        # Both spellings: `real = obj.helper` and `real: Callable = obj.helper`.
+        if isinstance(node, ast.Assign):
+            targets, value = node.targets, node.value
+        elif isinstance(node, ast.AnnAssign):
+            targets, value = [node.target], node.value
+        else:
             continue
-        if node.value.attr not in _HELPERS:
+        if not isinstance(value, ast.Attribute) or value.attr not in _HELPERS:
             continue
-        aliases.update(t.id for t in node.targets if isinstance(t, ast.Name))
+        aliases.update(t.id for t in targets if isinstance(t, ast.Name))
 
     return aliases
 
@@ -219,11 +231,15 @@ class TestRouteResolutionHasOneSourceOfTruth:
         )
 
     @pytest.mark.parametrize("helper", _HELPERS)
-    def test_the_helper_reads_the_request_it_was_given(self, helpers, helper: str) -> None:
-        """Absence is not enough — the helper must read ``cc_request``.
+    def test_the_helper_resolves_the_model_through_the_one_function_that_owns_it(
+        self, helpers, helper: str
+    ) -> None:
+        """Absence is not enough — the helper must call :func:`_route_model`.
 
-        A helper that read nothing at all, returning a hardcoded route, would
-        satisfy the absence check while being just as wrong.
+        A helper that read nothing at all and returned a hardcoded route would
+        satisfy the absence check while being just as wrong.  Requiring the call
+        is stricter than requiring a read of ``cc_request``, which any incidental
+        lookup — ``cc_request.get("stream")`` — would satisfy.
 
         Args:
             helpers: The parsed helper definitions.
@@ -232,9 +248,10 @@ class TestRouteResolutionHasOneSourceOfTruth:
         parameters = [arg.arg for arg in helpers[helper].args.args]
 
         assert "cc_request" in parameters, f"{helper} no longer takes cc_request; it takes {parameters}"
-        assert _reads_name(helpers[helper], "cc_request"), (
-            f"{helper} takes cc_request and never reads it, so the route is resolved from "
-            "something other than the request it is for."
+        assert _calls(helpers[helper], _ROUTE_MODEL), (
+            f"{helper} does not call {_ROUTE_MODEL}(). The model every routing decision "
+            "reads is defined in exactly one place; a helper that re-derives it inline is "
+            "the second source of truth KBR-127 removed."
         )
 
     def test_no_call_site_resolves_a_route_without_naming_the_request(self) -> None:
@@ -292,15 +309,29 @@ class TestRouteResolutionHasOneSourceOfTruth:
             f"the absence check did not notice a helper that {defect}"
         )
 
-    def test_the_presence_check_detects_a_helper_that_reads_nothing(self) -> None:
-        """A hardcoded route passes the absence check, so the presence check must fail it."""
-        source = "def _build_upstream_headers(self, cc_request):\n    return {'Authorization': 'Bearer x'}\n"
+    @pytest.mark.parametrize(
+        ("defect", "body"),
+        [
+            ("returns a hardcoded route", "    return {'Authorization': 'Bearer x'}"),
+            ("re-derives the model inline", "    return cc_request.get('model', '')"),
+        ],
+    )
+    def test_the_presence_check_detects_a_helper_that_bypasses_the_owner(self, defect: str, body: str) -> None:
+        """Both bypass shapes must fail the presence check.
+
+        The hardcoded one reads nothing and the inline one reads the right key
+        the wrong way — a second copy of the rule, which is the thing KBR-127
+        removed rather than the value it produced.
+
+        Args:
+            defect: What the synthetic helper does wrong.
+            body: Its body.
+        """
+        source = f"def _build_upstream_headers(self, cc_request):\n{body}\n"
         function = _function_defs(ast.parse(source), _HELPERS)["_build_upstream_headers"]
 
         assert not _self_attributes_read(function) & set(_FORBIDDEN_ATTRIBUTES), "precondition: no forbidden read"
-        assert not _reads_name(function, "cc_request"), (
-            "the presence check did not notice a helper that ignores the request it was given"
-        )
+        assert not _calls(function, _ROUTE_MODEL), f"the presence check did not notice a helper that {defect}"
 
     def test_the_call_site_sweep_detects_a_zero_argument_call(self) -> None:
         """The sweep must report a no-argument call, or it is a no-op over a clean tree."""
@@ -308,13 +339,27 @@ class TestRouteResolutionHasOneSourceOfTruth:
 
         assert _zero_argument_calls(ast.parse(source)) == [1]
 
-    def test_the_call_site_sweep_detects_a_zero_argument_call_through_an_alias(self) -> None:
-        """The aliased shape must be reported too, or the one site that uses it is invisible."""
+    @pytest.mark.parametrize(
+        ("spelling", "binding"),
+        [
+            ("bare", "real_headers = server._build_upstream_headers"),
+            ("annotated", "real_headers: Callable = server._build_upstream_headers"),
+        ],
+    )
+    def test_the_call_site_sweep_detects_a_zero_argument_call_through_an_alias(
+        self, spelling: str, binding: str
+    ) -> None:
+        """The aliased shape must be reported too, or the one site using it is invisible.
+
+        Args:
+            spelling: How the alias is bound.
+            binding: The binding statement.
+        """
         source = (
-            "real_headers = server._build_upstream_headers\n"
+            f"{binding}\n"
             "captured.update(real_headers())\n"
             "kept = server._build_upstream_url\n"
             "url = kept(cc_request)\n"
         )
 
-        assert _zero_argument_calls(ast.parse(source)) == [2]
+        assert _zero_argument_calls(ast.parse(source)) == [2], f"the {spelling} alias was not seen"

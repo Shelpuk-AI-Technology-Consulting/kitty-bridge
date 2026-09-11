@@ -369,6 +369,41 @@ def _with_thinking_carrier(msg: dict, *, native: bool) -> dict | None:
     return None
 
 
+def _route_model(cc_request: dict) -> str:
+    """Return the model every routing decision for this request must read.
+
+    One question — "which model is this request for?" — kept in one place. On
+    the bridge's side the upstream **path**, the auth **scheme** and the
+    thinking-repair carrier's dialect all read it; on the adapter's side
+    ``translate_to_upstream`` reads the same key directly, because
+    ``kitty.providers`` cannot import from ``kitty.bridge``. Keeping those two
+    halves on one string is what this function is for.
+
+    It must be ``cc_request["model"]`` and not
+    :attr:`BridgeServer._active_model`, because only the former has been through
+    :meth:`BridgeServer._normalize_model` — the profile-model override followed
+    by the adapter's ``normalize_model_name``. Reading the raw profile model
+    instead sent an Anthropic Messages body to a Chat Completions path under
+    Bearer auth whenever a profile carried a provider prefix, and resolved the
+    adapter's default route for every model when a backend had no profile model
+    at all (KBR-127; the body half was KBR-7).
+
+    Args:
+        cc_request: The request, already normalized by
+            :meth:`BridgeServer._normalize_model` for the selected backend.
+
+    Returns:
+        The normalized model name, or ``""`` when the request carries none
+        usable — the fallback ``_active_model or ""`` produced for the same
+        input, so a malformed request still takes the default route and
+        collects the provider's error rather than a 500 from the bridge.
+    """
+    # Not `.get("model", "")`: nothing validates the field, so `null` and
+    # non-strings reach here and the getter's default covers neither.
+    model = cc_request.get("model")
+    return model if isinstance(model, str) else ""
+
+
 def _repair_thinking_roundtrip(body: dict, *, native: bool) -> bool:
     """Give every assistant turn the thinking carrier its target requires.
 
@@ -3559,7 +3594,7 @@ class BridgeServer:
                                 and _repair_thinking_roundtrip(
                                     upstream_body,
                                     native=self._active_provider.upstream_wire_is_messages_api_for_model(
-                                        cc_request.get("model", "")
+                                        _route_model(cc_request)
                                     ),
                                 )
                             ):
@@ -6480,13 +6515,10 @@ class BridgeServer:
     def _build_upstream_url(self, cc_request: dict) -> str:
         """Build the upstream endpoint URL for the request about to be sent.
 
-        The model comes from ``cc_request`` and not from ``_active_model``,
-        because the adapter routes the **body** on that same key and only
-        ``cc_request["model"]`` has been through :meth:`_normalize_model`.  A
-        profile written ``model: opencode/minimax-m2.5`` otherwise produced a
-        Messages body addressed to the Chat Completions path, and a backend
-        with no profile model at all resolved the adapter's default route for
-        every model the agent asked for (KBR-127).
+        The path is resolved from :func:`_route_model`, which is where the rule
+        and its reasoning live — the body, the auth scheme and the thinking
+        carrier read the same answer, and KBR-127 was what happened when this
+        one read a different one.
 
         Args:
             cc_request: The request, already normalized by
@@ -6496,7 +6528,7 @@ class BridgeServer:
             The absolute upstream URL.
         """
         base = self._active_provider.build_base_url(self._active_provider_config).rstrip("/")
-        model = cc_request.get("model", "")
+        model = _route_model(cc_request)
         path = self._active_provider.get_upstream_path(model)
         return f"{base}{path}"
 
@@ -6535,19 +6567,18 @@ class BridgeServer:
         if self._current_backend_idx in self._thinking_repair_backends:
             _repair_thinking_roundtrip(
                 upstream_body,
-                native=self._active_provider.upstream_wire_is_messages_api_for_model(cc_request.get("model", "")),
+                native=self._active_provider.upstream_wire_is_messages_api_for_model(_route_model(cc_request)),
             )
         return upstream_body
 
     def _build_upstream_headers(self, cc_request: dict) -> dict[str, str]:
         """Build the upstream auth headers for the request about to be sent.
 
-        Reads the model from ``cc_request`` for the same reason
-        :meth:`_build_upstream_url` does, and it is the same defect: an
-        OpenCode Go profile carrying a provider prefix sent a Messages body
-        under ``Authorization: Bearer`` instead of ``x-api-key`` (KBR-127).
-        Path and auth must resolve from one string, or a request can be
-        correctly shaped, correctly addressed, and still rejected.
+        The auth scheme is resolved from :func:`_route_model`, for the reason
+        recorded there and by the same defect: an OpenCode Go profile carrying
+        a provider prefix sent a Messages body under ``Authorization: Bearer``
+        instead of ``x-api-key``.  A request can be correctly shaped, correctly
+        addressed, and still rejected on the third answer alone.
 
         Args:
             cc_request: The request, already normalized by
@@ -6556,13 +6587,10 @@ class BridgeServer:
         Returns:
             The headers to send upstream.
         """
-        provider = self._active_provider
-        # Providers that route to different endpoints per model may need
-        # model-aware header construction (e.g. OpenCode Go).
-        if hasattr(provider, "build_upstream_headers_for_model"):
-            model = cc_request.get("model", "")
-            return cast("dict[str, str]", provider.build_upstream_headers_for_model(self._active_key, model))  # type: ignore[attr-defined]  # optional provider hook
-        return provider.build_upstream_headers(self._active_key)
+        # Every adapter answers this; the default ignores the model and returns
+        # what `build_upstream_headers` does, so only adapters that route auth
+        # per model (OpenCode Go) override it.
+        return self._active_provider.build_upstream_headers_for_model(self._active_key, _route_model(cc_request))
 
     async def _wait_out_transport_blip(self, exc: Exception, grace: TransportGrace) -> bool:
         """Sleep out a connection blip, or report that the grace period is over.

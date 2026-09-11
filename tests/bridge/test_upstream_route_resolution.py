@@ -43,7 +43,7 @@ from __future__ import annotations
 
 import pytest
 
-from kitty.bridge.server import BridgeServer
+from kitty.bridge.server import BridgeServer, _route_model
 from kitty.providers.azure import AzureOpenAIAdapter
 from kitty.providers.base import ProviderAdapter
 from kitty.providers.opencode import OpenCodeGoAdapter
@@ -292,6 +292,34 @@ class TestAnAdapterThatIgnoresTheModelIsUnaffected:
         assert url.endswith("/endpoints/openapi/chat/completions"), url
 
 
+class TestTheRoutingKeyFallback:
+    """Every shape that is not a usable model resolves to the same empty answer."""
+
+    @pytest.mark.parametrize(
+        ("label", "cc_request"),
+        [
+            ("absent", {}),
+            ("null", {"model": None}),
+            ("empty", {"model": ""}),
+            ("not a string", {"model": 123}),
+        ],
+    )
+    def test_an_unusable_model_falls_back_to_the_empty_string(self, label: str, cc_request: dict) -> None:
+        """``_route_model`` must fold all of them to ``""``, as ``_active_model or ""`` did.
+
+        Nothing validates this field's type, so a client can send any of these.
+        The fallback is deliberately byte-identical to what the code KBR-127
+        replaced produced: the request takes the adapter's default route and
+        collects a proper error from the provider, rather than a 500 from the
+        bridge or a route picked from a number.
+
+        Args:
+            label: What the request carries in place of a model.
+            cc_request: The request.
+        """
+        assert _route_model(cc_request) == ""
+
+
 class TestTheRoutingKeySurvivesSerialization:
     """``translate_to_upstream`` must not remove ``model`` from the request it is given."""
 
@@ -319,4 +347,27 @@ class TestTheRoutingKeySurvivesSerialization:
         assert cc_request.get("model") == "kitty-test-model", (
             f"{provider_type} removed or rewrote cc_request['model'] in place; every helper "
             "that re-reads the route after serialization would resolve the wrong one."
+        )
+
+    @pytest.mark.parametrize("provider_type", sorted(_registry))
+    def test_no_adapter_rewrites_the_model_in_normalize_request(self, provider_type: str) -> None:
+        """``normalize_request`` runs between ``_normalize_model`` and the helpers.
+
+        At every one of the 46 call sites the order is normalize, then
+        ``normalize_request``, then build the route.  So an adapter that
+        rewrote ``model`` in that hook would hand the helpers a string
+        ``_normalize_model`` never produced, and the body and the route would
+        diverge again by a different door.
+
+        Args:
+            provider_type: A key of the provider registry.
+        """
+        adapter = get_provider(provider_type)
+        cc_request = _probe_request("kitty-test-model")
+
+        adapter.normalize_request(cc_request)
+
+        assert cc_request.get("model") == "kitty-test-model", (
+            f"{provider_type}.normalize_request changed cc_request['model']; the route would "
+            "then resolve from a string _normalize_model never produced."
         )
