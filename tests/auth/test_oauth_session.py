@@ -172,7 +172,6 @@ class _FakeTransport:
         *,
         headers: Mapping[str, str] | None = None,
         timeout: float,
-        proxies: Mapping[str, str] | None = None,
     ) -> tuple[int, str]:
         self.calls.append(
             {"url": url, "data": dict(data), "headers": dict(headers or {}), "timeout": timeout}
