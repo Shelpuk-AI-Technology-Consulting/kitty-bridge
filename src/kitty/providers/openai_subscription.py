@@ -95,12 +95,15 @@ def _codex_backoff(attempt: int) -> float:
     return float((millis * jitter) / 1000.0)
 
 
-# Codex CLI version.  The single source for BOTH version fields this adapter
-# sends -- the `version` header and the user-agent's product version -- because a
-# client stating two different versions in one request is an intermediary and
-# nothing else (KBR-8).
-# The checked-in reference workspace has 0.0.0 (dev placeholder), but
-# the real released Codex CLI version is used in production builds.
+# The impersonated Codex CLI version, and the single source for BOTH version
+# fields this adapter sends -- the `version` header and the user-agent's product
+# version -- because a client stating two different versions in one request is an
+# intermediary and nothing else (KBR-8).
+#
+# The value is the real released Codex CLI version, not kitty's.  (Codex's own
+# checked-in reference workspace carries 0.0.0, a dev placeholder; its release
+# builds carry the real one, which is what this impersonates.)  Nothing rewrites
+# this at build time -- it is edited here when the impersonated version moves.
 _CODEX_CLI_VERSION = "0.128.0"
 
 # curl_cffi TLS impersonation target — matches the browser-like TLS fingerprint

@@ -576,8 +576,10 @@ class TestCodexHeaders:
         """
         headers = adapter._build_codex_headers("tok", _make_id_token())
 
-        user_agent_version = headers["User-Agent"].split("/", 1)[1].split(" ", 1)[0]
-        assert user_agent_version == headers["version"]
+        # Asserted as a prefix rather than by parsing the product out of the
+        # user-agent: a second parser here would be a second shape to keep in
+        # step with the one in `tests/test_upstream_identity_consistency.py`.
+        assert headers["User-Agent"].startswith(f"codex_cli_rs/{headers['version']} (")
 
 
 # ── curl_cffi error mapping ──────────────────────────────────────────────
