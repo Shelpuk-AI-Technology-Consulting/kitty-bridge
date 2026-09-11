@@ -143,8 +143,10 @@ body. Established by reading `src/kitty/bridge/server.py` and all 23 adapters in
 
 #### 3.2.1 Bridge-level
 
-Eleven request-path rows (M1–M11) plus one response-path row (M12). The former substitution row
-M13 is **withdrawn** — KBR-5 replaced it with a downstream error, so it mutates nothing.
+Eleven request-path rows (M1–M11), one response-path row (M12), and the routing row **M14**
+(§3.3.5), which is listed here because the destination is a mutation surface the body cannot show.
+Fourteen rows in all. The former substitution row M13 is **withdrawn** — KBR-5 replaced it with a
+downstream error, so it mutates nothing — leaving **thirteen live** bridge-level rows.
 
 | # | Mutation | Site | Trigger | Why it is necessary |
 |---|---|---|---|---|
@@ -170,6 +172,25 @@ M13 is **withdrawn** — KBR-5 replaced it with a downstream error, so it mutate
 adapters into one row would make the register unfalsifiable — "the provider overrides it" is a
 trigger no test can fail — so each material mutation gets its own row.
 
+**Header rows record *deviations from the base header set*, and headers are never diffed against
+the inbound request.** §4.2 C1 records that `build_upstream_headers()` builds the upstream set from
+scratch and forwards no inbound agent header, so there is no "unchanged except" claim to make about
+headers and no inbound counterpart to diff against — such a diff would report every header on every
+adapter. I1's subject is the agent's **message content**. The baseline is therefore
+`ProviderAdapter.build_upstream_headers` — `Authorization: Bearer <key>` and
+`Content-Type: application/json` — and a P9 row names what an adapter **adds to, removes from, or
+re-spells in** that set. A header matching the baseline in name, casing and value *shape* is not a
+mutation even when the value differs: every adapter substitutes the profile's credential for the
+agent's, which is M14, not a per-adapter effect. That is why `Content-Type` and `Authorization`
+carry no row anywhere — including on `openai_subscription`, whose `Authorization` is still
+`Bearer <opaque>`, and which does not override `build_upstream_headers` at all: its curl_cffi
+transport calls `_build_codex_headers` instead, so the inherited hook is as dead there as §3.2.3
+says `translate_to_upstream` is.
+
+**The consumer of a header row is §4.3 C1's exact-set assertion, not §3.3.2 assertion 1.** A header
+added without a row is caught by C1's exact-set assertion failing, never by the oracle. Coverage is
+partial today — see gap G22.
+
 | # | Mutation | Site | Trigger | Why it is necessary |
 |---|---|---|---|---|
 | P1 | Strip kitty's internal metadata keys | `ProviderAdapter._INTERNAL_KEYS` via `translate_to_upstream` | Always | These keys are kitty's own; forwarding them is both an I1 and an I2 breach. **The set is incomplete — see F4.** Note it also strips `base_url`, which is *not* kitty-internal: it is defence-in-depth against a URL override arriving in the body, and is the one entry that could discard a field a caller meant. |
@@ -189,7 +210,7 @@ trigger no test can fail — so each material mutation gets its own row.
 | P8 | Inject empty `reasoning_content` into assistant messages | `ProviderAdapter._inject_empty_reasoning_content`, called from `KimiCodeAdapter`, `_ZaiBase`, `CustomOpenAIAdapter` | Thinking signalled **or** inferred from prior `reasoning_content` via `_detect_thinking_from_messages` | Those providers reject the request without it. The *inferred* trigger matters: it fires with no signal from the agent at all. |
 | P9a | Set `User-Agent` to `claude-code/1.0` | `KimiCodeAdapter`, `BytePlusAdapter`, `MimoAdapter` `.build_upstream_headers` | Always, on those three | Those providers 403 without a recognised coding-agent user-agent. Central to I2 — F1. |
 | P9b | Remove `Authorization`, add `api-key` | `MimoAdapter.build_upstream_headers` | Always | MiMo does not use Bearer auth. An auth-**scheme** change §4.3 C1's exact-set assertion must encode. |
-| P9c | Synthesise a Codex CLI `User-Agent` and a `version` header | `OpenAISubscriptionAdapter` | Always | Impersonation required by the subscription endpoint. **The two disagree — see F1.** |
+| P9c | Synthesise a Codex CLI `User-Agent` and a `version` header, and add `Accept: text/event-stream` | `OpenAISubscriptionAdapter._build_codex_headers` / `._build_user_agent` | Always | Impersonation required by the subscription endpoint; `Accept` is the header half of P17's forced streaming — the Codex backend is streaming-only. **The two versions disagree — see F1.** The conditional `ChatGPT-Account-Id` this site also sets has no row yet; see G22 |
 | P10 | Set `reasoning_split = True` | `MiniMaxAdapter.normalize_request` | **Unconditionally** | Makes MiniMax return thinking in `reasoning_details` instead of inline tags. Unconditional, so exempt from §3.3.2 assertion 2. |
 | P11 | Translate CC → Bedrock Converse | `BedrockAdapter.translate_to_upstream` | Always, on `bedrock` | A third upstream wire format M2 does not name. Custom transport — see §3.3.4. |
 | P12 | Translate CC → Ollama `/api/chat` | `OllamaCloudAdapter.translate_to_upstream` | Always, on `ollama_cloud` | A fourth wire format. Custom transport. |
@@ -198,14 +219,20 @@ trigger no test can fail — so each material mutation gets its own row.
 | P15 | **Strip `strict` from every tool declaration** | `_prepare_responses_body` | Always, on the Responses-origin path | The Codex backend rejects it. A change to the **tool schema** the agent declared, not to a sampling parameter — a different kind of fidelity mutation and worth its own row. |
 | P16 | Rewrite content types `input_text` → `output_text` | `_convert_content_types`, called from `_prepare_responses_body` | Always, on the Responses-origin path | The Codex backend validates content types strictly. **Message-content mutation.** |
 | P17 | Inject `stream: True` and `store: False` | `_cc_to_responses` and the Responses-origin body builder | **Unconditionally**, both subscription paths | The Codex backend is streaming-only; kitty reassembles a non-streaming reply from the SSE. Note `stream: True` **overrides a non-streaming client request** — the subscription-path analogue of M11. |
-| P18 | Remove `modelId` and `stream` from the Converse payload | ``BedrockAdapter` transport (`make_request` / `stream_request`)` | Always, on `bedrock` | boto3 takes the model id as a call argument and selects streaming by choosing `converse` vs `converse_stream`, so both must leave the body. Applied **in the transport, after `translate_to_upstream`**. |
+| P18 | Remove `modelId` and `stream` from the Converse payload | `BedrockAdapter` transport (`make_request` / `stream_request`) | Always, on `bedrock` | boto3 takes the model id as a call argument and selects streaming by choosing `converse` vs `converse_stream`, so both must leave the body. Applied **in the transport, after `translate_to_upstream`**. |
 | P19 | Overwrite `stream` | `OllamaCloudAdapter` transport (`make_request` sets `False`, `stream_request` sets `True`) | Always, on `ollama_cloud` | The transport, not the caller, decides which Ollama endpoint mode is used. Applied **after `translate_to_upstream`** has already set it from the request. |
 
 **Conditional rows are the point.** Every row whose trigger is a condition must be provably
 *inert* when that condition is absent — the sharpest form of "unless absolutely necessary", and
-what §3.3.2 assertion 2 tests, with the trigger complements §3.3.4 requires. M1, M2, M10, P1,
-P6, P9a–c, P10, P11, P12, P13, P14, P15, P16, P17, P18 and P19 are unconditional by design and
-are exempt from that assertion.
+what §3.3.2 assertion 2 tests, with the trigger complements §3.3.4 requires. M1, M2, M10, M14, P1,
+P6, P9a, P9b, P9c, P10, P11, P12, P13, P14, P15, P16, P17, P18, P19, P20 and P21 are unconditional
+by design and are exempt from that assertion.
+
+**M14, P20 and P21 were missing from that list until KBR-26**, while their own trigger cells read
+`Always`. A row that always fires has no complement, so assertion 2 would have demanded a corpus
+entry nobody could ever write. The list is also written out id by id rather than abbreviated as a
+range: `P9a–c` names three rows in one token, and §3.2.4's guard has to either guess at the
+expansion or drop two rows from the comparison. It refuses the notation instead.
 
 **Register maintenance.** The register is the specification. A pull request that adds a mutation
 site without adding a row fails the L2 register guards (§6.2.3).
@@ -230,6 +257,94 @@ Every guard and every oracle run in this document targets the right-hand column,
 that precedes it. Where the body is built in the hook and mutated in the transport, "after the
 mutation" is the boundary — capturing the hook's return value would miss P18 and P19 exactly as
 it missed P13.
+
+#### 3.2.4 The register as data
+
+§3.2.1 and §3.2.2 are the register's reviewed prose. `tests/harness/register.py` is its
+machine-readable form, and three consumers read the second rather than the first: the oracle
+(§3.3, which §7.4 gives `register` and `triggers_met` as arguments), the coverage checks (T-G2,
+T-D8), and the corpus loader (T-W6, which indexes captured sessions **by trigger**).
+
+**Authority is split, deliberately.** The markdown remains the reviewed record of *why* each
+mutation is necessary — a reviewer reads a table, not a tuple. The data is what tests execute.
+Ids and the conditional/unconditional classification are **mechanically reconciled** between the
+two by an L2 guard. Paths and sites are **not**, because the tables have no path column and their
+Site cells are prose (M4's reads "step 1", P17's "and the Responses-origin body builder", P2b's
+simply "same"). Sites are checked against the **source tree** instead, which is the stronger
+check: it catches a renamed mutation site, which no comparison against a prose cell could.
+
+**The Trigger column is reconciled by nothing, and that is the third state.** Editing a Trigger
+cell produces no disagreement. Those cells are prose of the same kind as Site — "Always, on the
+**CC-origin** path", "Serialized messages exceed the model-derived budget" — while the data's
+`Trigger` is a closed vocabulary, and comparing them needs a mapping that would itself be a third
+artifact to keep in step. What holds a trigger honest instead is the classification check: a row
+whose trigger is `ALWAYS` may not be conditional, and §3.2.2's unconditional list is compared id
+by id. Beyond that the Trigger column is reviewed, not tested, until G21 closes.
+
+**The schema is the six fields plan §3 names, plus one.** `id`, `site`, `trigger`, `paths`,
+`conditional`, `design_ref` — and `not_projectable_reason`, required exactly when `paths` carries
+the §3.3.1a escape, because an escape without a reason is a row nothing can falsify.
+
+**A trigger is a name, not a callable.** The obvious reading of "trigger predicate" is a function
+of the inbound request. It cannot work: M6 fires on an upstream 400, M8 on a rejected thinking
+round-trip, M9 on an upstream tool-use format error, M12 on an empty upstream response. None is a
+property of the request. §7.4 settles it — the oracle is *given* `triggers_met`, so the register's
+job is to name the conditions and the test that drove the request declares which it arranged.
+
+**`conditional` is a second field, not a consequence of the trigger.** It answers one question:
+does §3.3.2 assertion 2 apply — must a corpus entry exist in which this row's mutation is provably
+**absent**. A trigger is either a property of the *route* or a property of the *request*, and only
+the second can be varied by a corpus entry. P13's `CC_ORIGIN_PATH` is a route property; every
+request on that route meets it, so there is no complement to write. M2 and M10 are the same shape
+and were already exempt, which is why this reads as a rule rather than a P-row exception.
+
+**Two fields that must agree are cross-checked in the data**, because leaving them uncompared
+reproduces the D1 defect inside `register.py`: a row carrying `ALWAYS` may not be conditional, and
+rows sharing a trigger must agree on whether it is.
+
+**Expected shapes are T-D1's, not the register's.** P2a and P2b both land on
+`envelope.extra[thinking]` and differ only in the value injected — `{"type": "enabled"}` against
+`{"type": "disabled"}`. The §3.3 diagram's third step, "assert the row's stated shape held", is
+therefore written per-row in oracle test code. The register says *where* a mutation may appear and
+*when*; it does not say what the value must be. M3/M4 and P5a/P5c have the same property.
+
+**Scope is not carried here, and the site does not supply it.** §6.2.3's completeness guard and
+T-D8 both need to know, per adapter, which rows are reachable. Reading that off the site's class is
+wrong twice: P8's site is `ProviderAdapter._inject_empty_reasoning_content`, a **base class**
+method that reads as all 23 adapters while only four call it (`kimi`, `custom_openai`,
+`zai_regular`, `zai_coding_cc`); and P5a–d's site is `AnthropicAdapter.translate_to_upstream`,
+which four subclasses override *and conditionally delegate back to*, so the row is also reachable
+on `custom_anthropic`, `zai_coding`, `minimax_token` and `opencode_go` — which no static rule over
+the class hierarchy finds. Authoring scope now would ship data **nothing in T-W3 could prove
+wrong**, since no wire-level capture exists yet to contradict a bad entry, and that is what
+plan §1.4's harness rule forbids. It is filed as **KBR-139** rather than guessed at.
+
+**A declared trigger is not a verified one**, and that is a known gap — see G21 in §9.2.
+
+#### 3.2.5 What T-W3's guards own, and what they do not
+
+§6.2.3's register row and this section are easy to read as one thing. They are two, at two layers:
+
+| Guard | Layer | Task | Reads |
+|---|---|---|---|
+| Data ⇄ §3.2 markdown — ids and conditionality | L2 | **T-W3** | Two files. No sockets |
+| Data ⇄ source tree — every site resolves | L2 | **T-W3** | The AST of `src/kitty`. No sockets |
+| Register completeness — projected delta at the wire equals the triggered rows | **L3** | T-G2 | Captures from T-D4–T-D9 |
+
+The first two are what make the register *well-formed*. Only the third makes it *true*, and it
+cannot run until a recorder and an oracle exist.
+
+**None of the three proves the register is *complete*.** They prove the data and the document say
+the same thing, and that every site named still exists. A mutation the product performs and
+*neither* artifact records is invisible to all of them — only the wire-level guard can catch that,
+and it needs a recorder and an oracle. Two such omissions are already known and filed: G22
+(headers) and G23 (`openai_subscription`'s `reasoning` injection), the second found by walking the
+subscription request path by hand while writing the data.
+
+**A header row's `paths` are checked by none of the three.** Under §3.2.2's header rule they are
+consumed by §4.3 C1's exact-set assertion, which does not exist yet — so for P9a, P9b and P9c only
+the id, the conditionality and the sites are under test today. `headers[user-agent]` is a reviewed
+claim, not yet a tested one.
 
 ### 3.3 The transparency oracle
 
@@ -368,7 +483,8 @@ than a lookup.
 
 T-W2 owns the string form, because it has **two** consumers that must agree exactly: a delta the
 oracle reports (§3.3.4), and the "projection field it touches" column of every register row
-(T-W3). Neither can define it without the other agreeing.
+(T-W3). Neither can define it without the other agreeing. `headers[<name>]` is the one form with
+only the second consumer; §3.2.2 says why.
 
 | Path form | Names |
 |---|---|
@@ -378,8 +494,8 @@ oracle reports (§3.3.4), and the "projection field it touches" column of every 
 | `conversation.turns[<i>].role` · `.parts[<j>]` | A turn, or one part of it |
 | `conversation.tools[<name>].description` · `.schema` · `.strict` | A tool declaration, **by name** |
 | `conversation.sampling[<key>]` | One sampling parameter |
-| `conversation.turns` · `.system` · `.tools` · `.sampling` | A **whole collection** — M5 and M13 rewrite the turns, P5b joins the system blocks, §3.3.1 pins P13/P14 to the bare `sampling` |
-| `headers[<name>]` | A header — P9a, P9b, P9c, and §4.3 C1 |
+| `conversation.turns` · `.system` · `.tools` · `.sampling` | A **whole collection** — M5, M6 and M7 rewrite the turns, P5b joins the system blocks, §3.3.1 pins P13/P14 to the bare `sampling` |
+| `headers[<name>]` | A header — P9a, P9b, P9c, and §4.3 C1. **Not produced by the projection diff**: `Request` carries no headers and no inbound header is forwarded, so this form addresses a per-adapter *deviation from the base header set* (§3.2.2), never a delta between two projections |
 | `residual[<path>]` | An unclassified value |
 | `reply.parts[<i>]` · `reply.stop_reason` · `reply.usage[<key>]` | The response direction — M12, T-D10 |
 | `route.method` · `.scheme` · `.host` · `.path` · `.query` | The route (§3.3.5) — M14, P20, P21 |
@@ -415,6 +531,29 @@ claim paths nested under it. `residual[generationConfig]` does **not** match
 `residual[generationConfig.topK]`; `residual[*]` and the bare `residual` both do. This is a second
 rule sitting beside the first and it is the one that surprises.
 
+**`envelope.extra` is diffed one wire key at a time.** The value under a wire key is compared
+**whole**: a difference anywhere inside it is reported at `envelope.extra[<wire key>]`, never at a
+dotted sub-path. `envelope.extra[thinking.budget_tokens]` is **not** a path this vocabulary
+defines and a reader must not emit one. The dotted-bracket form exists for `residual` alone,
+because §3.3.1 gives nesting to the residual deliberately — `consumed` covers top-level keys, the
+path-keyed residual covers what nobody classified. A key in `extra` *has* been classified, so its
+address is the key.
+
+This is what makes P5c's anchor correct rather than lucky: `AnthropicAdapter.translate_to_upstream`
+writes `thinking` whole — `{"type": "enabled", "budget_tokens": max_tokens - 1}` — over whatever
+the agent sent, so the delta is at the key. P2a, P2b, P3, P4, P5d and P10 are anchored the same way
+for the same reason. Under the other spelling every one of those six rows would match nothing and
+§3.3.2 assertion 1 would report a false I1 breach on six *registered* mutations — the under-claiming
+direction this section warns is the unrecoverable one. `extra_path()` **enforces** the rule: a key
+containing a dot raises, so a reader cannot emit the nested form by accident.
+
+**The cost, recorded so it is not discovered later.** `envelope.extra[<key>]` is the narrowest
+address the vocabulary offers, so a row anchored there claims everything inside that key by
+construction. **T-D3's falsification case — mutate a field beneath a registered anchor and assert
+the oracle still fails — therefore cannot be sited under `envelope.extra`.** It needs a path with
+addressable depth: `conversation.tools[*]` versus `conversation.tools[*].strict`, which is the
+example this section already gives.
+
 `[*]` is the wildcard. `[]` is accepted as its **legacy spelling**, because §3.3.1 wrote P15 as
 `conversation.tools[].strict` before this vocabulary existed and a row carried over in the old
 notation must not silently match nothing. An unbalanced bracket **raises** rather than mis-splitting
@@ -423,8 +562,24 @@ the path.
 **`not projectable` is a legal value for the register's field column, and it requires a reason.**
 P16 uses it — the `input_text`/`output_text` tag is redundant with the turn's role, so carrying it
 would put one vendor's spelling into a wire-independent form — as do the whole-body protocol
-translations M2, M9, P11 and P12. An empty cell would leave those rows silently unfalsifiable;
-an explicit value with a reason does not.
+translations M2, M9, P11 and P12, and **P1** for the reason below. An empty cell would leave those
+rows silently unfalsifiable; an explicit value with a reason does not.
+
+⚠️ **`residual` is never a legal register anchor.** P1 strips kitty's internal keys, which no
+reader maps, so its effect can only ever appear *as* a residual — which makes `residual` look like
+the natural anchor. It is the opposite. A bare collection claims its members, P1's trigger is
+`Always`, and a non-empty residual **fails the run before register matching happens at all**
+(§3.3.1). Such a row could therefore only ever claim a delta the oracle was supposed to stop at:
+the injected `x-kitty-trace` field that is one of §3.3.1's five mandatory falsification cases, and
+a real internal-key leak — the defect P1 exists to prevent. P1 takes the escape instead.
+
+**The index builders accept the wildcard (KBR-26).** `system_path`, `turn_path`, `part_path` and
+`reply_part_path` take `WILDCARD` where they take a position, because a register row writes a
+pattern over every turn and part — M3, M4, M8, P5e and P8 all do — where a delta writes concrete
+indices. Both come from one builder, or the spelling drifts between T-W3 and T-D1, which is the
+drift this vocabulary exists to prevent. An index that is neither a position nor the wildcard
+raises: `mypy` covers `src/kitty` only, so a typo would otherwise build a path that looks concrete
+and matches nothing.
 
 #### 3.3.1b Normalisation rules the six readers share
 
@@ -465,6 +620,10 @@ agree on a canonical form. They are six separate tasks, so the agreement is part
   The set is **enforced**, not merely declared: `Conversation` rejects a non-canonical sampling key
   the way `Turn` rejects a role outside `user`/`assistant`. Six readers cannot quietly disagree
   about whether `n` is sampling.
+- **`extra` is keyed, never nested.** A reader emits one entry per wire key and the oracle
+  compares its value whole. No reader emits `envelope.extra[<key>.<subkey>]`; nesting belongs to
+  the residual (§3.3.1a). Six readers cannot quietly disagree about whether `thinking.budget_tokens`
+  has an address of its own.
 - **`tool_choice`** unifies four wire keys — CC/Messages `tool_choice`, Converse's
   `toolConfig.toolChoice`, Gemini's `functionCallingConfig.mode` — onto
   `envelope.extra["tool_choice"]`, with the **value** normalised to `auto` · `any` · `none` ·
@@ -604,6 +763,16 @@ configured profile — provider, model, `provider_config` — using the provider
 shape, not by calling `build_base_url()` / `get_upstream_path()`. Asking the code under test where
 it meant to go and then checking it went there proves nothing; this is the same independent-oracle
 rule §3.3.1 applies to bodies.
+
+**One normalisation the independent derivation has to reproduce (KBR-134).** `build_base_url()`
+strips a trailing endpoint suffix from a user-configured base URL, because users routinely paste
+the full endpoint their provider's documentation shows and the bridge would otherwise compose a
+doubled path. A profile whose `base_url` already ends in `/chat/completions` therefore reaches the
+same destination as one that does not. T-D2 must apply the same rule when it computes the expected
+route, or that profile reports a routing mismatch against a request that went exactly where it
+should. This is the awkward edge of the independent-derivation rule — the expectation has to
+reimplement a behaviour rather than observe it — and it is recorded here because the alternative is
+T-D2 discovering it as a failing test with no obvious cause.
 
 **Falsification control.** Alongside the five body cases in §3.3.1, a sixth: change the Azure
 deployment segment in the captured path while leaving the body byte-identical. The oracle must
@@ -2244,6 +2413,9 @@ does not surface work that is done. `TEST_SUITE_IMPLEMENTATION_PLAN.md` §16 mir
 | ~~**G14**~~ | ~~**F3 — the vendor name goes upstream in the body (M13)** — KBR-5~~ | **CLOSED 2026-09-07** | Post-condition raises; handlers render a downstream 400; defect-scoped source-literal guard (`tests/bridge/test_vendor_token_guard.py`) stands in until T-G5 | — |
 | **G15** | **F4 — `_effort` / `_thinking_adaptive` reach the wire** — KBR-6 | Live I1+I2 breach on every CC-wire provider | Add both to `_INTERNAL_KEYS`; internal-key completeness guard (§6.2.3); regression test at `BridgeServer._upstream_body_for`. Residual: `openai_subscription` alone builds its body independently of that boundary (allowlisted, hence never leaked); `bedrock` and `ollama_cloud` call `translate_to_upstream` inside their transports, so the assertion reaches their wire. Carried by T-G2 over T-D4–T-D9's captures | **0** |
 | **G16** | **F5 — `OpenCodeGoAdapter` misdeclared its wire shape** — KBR-7 · **CLOSED** | Was a latent defect in the M8 path and a trap for the oracle | Done: the declaration is per-model, both repair sites branch on it, and the **hook-level** honesty guard landed with the fix. The **wire-level** guard remains T-G4 / KBR-80 | — |
+| **G23** | **`openai_subscription` injects `reasoning` from `_reasoning_effort`, unregistered** — KBR-149 | Three sites in `providers/openai_subscription.py` set `reasoning: {"effort": …}` from kitty's internal key. Structurally identical to P3 and P4, and **P4 cannot cover it**: §3.2.3 records that `translate_to_upstream` never runs on this adapter's request path. Unlike G22 this is a **request-body** row feeding §3.3.2 assertion 1, so the moment T-D5 drives a corpus entry carrying a reasoning effort the oracle reports a *false* I1 breach on a deliberate mutation — the under-claiming direction §3.3.1a calls unrecoverable | Add P22: trigger `REASONING_EFFORT_PRESENT`, conditional, anchored at `envelope.extra[reasoning]`. Needs a trigger case and a complement in the corpus. **Before T-D5** | **1** |
+| **G22** | **Register header coverage is partial and inconsistent** — KBR-148 | Rows exist for four adapters (P9a ×3, P9b, P9c). At least six more deviate from the base header set with none: `AnthropicAdapter` and its three subclasses plus `ZaiAnthropicAdapter` (`x-api-key` / `anthropic-version` / lowercase `content-type`), `AzureOpenAIAdapter` (`api-key` on the non-Entra credential), and `OllamaAdapter`, which drops `Authorization` entirely — the same shape as P9b, which *does* have a row. `openai_subscription` additionally sets a conditional `ChatGPT-Account-Id` no row names | One row per deviation; `ChatGPT-Account-Id` becomes P9d, conditional, with a claimless-`id_token` fixture for its assertion-2 complement. Then §4.3 C1's per-adapter expectation is *reviewable against the register* instead of written from scratch — which is what stops C1 reproducing the ad-hockery F1 names | **2** |
+| **G21** | **A declared trigger is never verified** — KBR-140 | §7.4 hands the oracle `triggers_met` as an argument and §3.3.2 asserts only that a row is **absent** when its trigger is not met. Nothing asserts a trigger declared met actually fired, so a corpus entry that over-declares makes assertion 1 claim every delta — the oracle reports green on a bridge that is rewriting messages. The same author writes the entry and its trigger index (T-W6), so the mechanism has no second reader | Roughly fifteen triggers are decidable from the inbound request; give those an optional predicate and have T-D8 require the declaration to agree with it. M6, M8, M9 and M12 depend on an upstream response and stay declaration-only — the stated residual risk. Blocked on T-A1/T-A2, since a predicate needs a projected request to read | **1** |
 | **G20** | **OpenCode Go's routing table does not match the provider** — KBR-126 | Found while fixing G16. As of 2026-09-07 (<https://opencode.ai/docs/go/>, "Endpoints") the provider serves eight models on `/v1/messages`; `_MESSAGES_MODELS` holds two, and a `/v1/responses` endpoint (four models) has no route at all. The wire-shape guard correctly reports the adapter *honest* — declaration and emitted body agree — because this is routing, not shape | Refresh the table against the provider's endpoint list; decide the Responses route; replace the stale `validation_model`. Consider a checked-in snapshot of the endpoint table, so the routing question gets an in-repo oracle | **1** |
 | **G19** | Routing was outside the register and outside the oracle | The destination is built from the profile (M14, P20, P21); a body-only check cannot see a misrouted Azure deployment | §3.3.5 — whole-request oracle with an independently derived route | **1** |
 | **G17** | Undecided behaviour for an irreducible final turn | Compaction emits an over-budget request, or (since KBR-5) the bridge refuses it downstream; neither was designed | Answer Q10, then align M3-M7, the 6.1 properties and TR-3 together | **2** |
