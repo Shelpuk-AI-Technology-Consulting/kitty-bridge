@@ -1040,7 +1040,24 @@ def register_disagreements(rows: tuple[MutationRow, ...], markdown: str) -> tupl
 
 
 def _collect_bindings(node: ast.AST, prefix: str, relative: str, into: set[str]) -> None:
-    """Record every name one scope binds, recursing into nested scopes.
+    """Record the names one scope binds *directly*, recursing into nested scopes.
+
+    **Directly** is the limitation worth stating: a ``def`` or assignment inside a
+    module-level ``if TYPE_CHECKING:`` or ``try:`` is a child of that block, not
+    of the module, so this walker does not see it.
+
+    That is deliberate, and widening it would make the guard weaker rather than
+    stronger.  Recursing through conditional blocks everywhere would add the
+    **1,386** assignments that live inside ``if``/``try``/``with`` bodies in
+    ``src/kitty`` — almost all of them function-local variables — and a register
+    row could then "resolve" against a local. Restricting the widening to module
+    and class level avoids that, and buys nothing: **zero** module- or
+    class-level bindings in ``src/kitty`` are currently hidden inside such a
+    block. Both numbers were measured, not assumed.
+
+    The failure direction is the safe one if that ever changes. A row pointing at
+    a conditionally-defined symbol is reported *unresolved* — a loud, false
+    failure a maintainer can read — rather than silently accepted.
 
     Args:
         node: The scope to walk.

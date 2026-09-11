@@ -41,16 +41,26 @@ _COLLECTION_ANCHORS = (
     c.CONVERSATION_SAMPLING,
 )
 
-#: Every pattern *shape* the register uses, paired with a concrete path built
-#: from the same helper. Module-level so that the parametrised test and the
-#: coverage check below read one list rather than two that agree by luck.
+#: Every register path whose *pattern* form differs from its concrete form,
+#: paired with a concrete path built from the same helper. Module-level so the
+#: parametrised test and the coverage check below read one list rather than two
+#: that agree by luck.
+#:
+#: **Only those.** A path with no wildcard that claims no members -- ``envelope.
+#: model``, ``headers[user-agent]``, ``conversation.sampling[max_tokens]``,
+#: ``reply.parts[0]`` -- *is* its own concrete form, so asserting it matches
+#: itself proves nothing: `_segment_matches` returns ``True`` on string equality
+#: for any bracket-balanced string. Those paths are covered by
+#: :meth:`TestThePathsEachRowTouches.test_every_path_has_balanced_brackets` and
+#: by :data:`_LEGAL_ROOTS`, which is the honest division of labour. An earlier
+#: draft listed ``reply.parts[0]`` against itself here and was exactly that
+#: tautology.
 _SHAPES: tuple[tuple[str, str], ...] = (
     (c.part_path(c.WILDCARD, c.WILDCARD), c.part_path(2, 0)),
     (c.tool_path(c.WILDCARD, "strict"), c.tool_path("get_weather", "strict")),
     (c.CONVERSATION_SAMPLING, c.sampling_path("temperature")),
     (c.CONVERSATION_SYSTEM, c.system_path(1)),
     (c.CONVERSATION_TURNS, c.turn_path(0, "role")),
-    (c.reply_part_path(0), c.reply_part_path(0)),
 )
 
 
@@ -234,22 +244,24 @@ class TestThePathsEachRowTouches:
         assert pattern in {path for row in r.REGISTER for path in row.paths}, f"{pattern} is unused by the register"
         assert c.path_matches(pattern, concrete)
 
-    def test_the_shape_list_above_covers_every_pattern_the_register_uses(self) -> None:
-        """Otherwise a newly introduced shape joins the register unproven.
+    def test_every_register_path_that_is_a_pattern_is_listed_in_the_shapes(self) -> None:
+        """Otherwise a newly introduced pattern joins the register unproven.
 
-        The list above is hand-written, so nothing would force
+        :data:`_SHAPES` is hand-written, so nothing would force
         ``turn_path(WILDCARD, "role")`` into it if a future row used one. A
         pattern that matches no concrete path claims nothing, and §3.3.2
         assertion 1 then reports a false I1 breach on a *registered* mutation —
         the direction §3.3.1a calls unrecoverable.
+
+        Named for what it checks: a *pattern*, meaning a path whose form differs
+        from the concrete path it names — one carrying a wildcard, or a bare
+        collection that claims its members. A plain path such as
+        ``headers[user-agent]`` is its own concrete form, so it is out of scope
+        here by construction rather than by oversight; :data:`_SHAPES` records
+        why.
         """
         covered = {pattern for pattern, _ in _SHAPES}
-        used = {
-            path
-            for row in r.REGISTER
-            for path in row.paths
-            if c.WILDCARD in path or path in _COLLECTION_ANCHORS or path.startswith("reply.")
-        }
+        used = {path for row in r.REGISTER for path in row.paths if c.WILDCARD in path or path in _COLLECTION_ANCHORS}
 
         assert used - covered == set(), (
             f"used by the register but never shown to match anything: {sorted(used - covered)}"
