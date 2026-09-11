@@ -32,7 +32,7 @@ than nominal:
 2. ``openai_subscription`` is swept on ``_build_codex_headers`` as well.  It does
    not override ``build_upstream_headers`` at all, so **the KBR-8 defect is
    invisible without that entry**: its custom transport builds wire headers at
-   ``openai_subscription.py:551`` and ``:723`` and hands them to curl_cffi.
+   ``openai_subscription.py:564`` and ``:736`` and hands them to curl_cffi.
 
 Both are §6.2.3's "the hook is not the wire", which already caught this repo out
 in KBR-7; here it is the difference between a guard and a decoration.
@@ -46,6 +46,12 @@ two of the three are the cases where a sweep can look busy and see nothing:
 * ``bedrock`` — **not covered.**  It builds no headers of its own; boto3 signs
   the request and botocore sets its own ``User-Agent``.  The dict the inherited
   hook returns never ships.  Residual recorded against T-G9 / KBR-78.
+
+That these three are the *only* custom-transport adapters is not re-asserted
+here: ``tests/test_wire_shape_honesty.py`` pins the set mechanically, on the
+``use_custom_transport`` property that makes this sweep blind in the first
+place.  A fourth adapter forces a decision there, and this list is then stale by
+the same test.
 
 **Why behavioural rather than a source scan.**  The checks patch
 ``kitty.__version__`` and read the headers that come out, instead of grepping
@@ -134,8 +140,9 @@ def header_value(headers: Mapping[str, str], name: str) -> str | None:
 
     Returns:
         The matching header's value, or ``None`` when the set has no such
-        header.  The first match wins; adapters build these from dict literals,
-        so a duplicate name cannot occur.
+        header.  The first match wins, which is arbitrary only if a set carries
+        the same name in two casings (``Version`` beside ``version`` are distinct
+        dict keys); no adapter does, and T-G9 owns the exact set.
 
     HTTP header names are case-insensitive (RFC 9110 §5.1), and this codebase
     exercises that freely — ``OpenAISubscriptionAdapter`` sends ``User-Agent``
@@ -317,10 +324,12 @@ _ROUTE_IDS = [route.label for route in _WIRE_ROUTES]
 class _RegressedSubscriptionAdapter(OpenAISubscriptionAdapter):
     """The KBR-8 defect, restored, so the checks can be shown to catch it.
 
-    ``_build_user_agent`` here is the implementation this change removed: the
+    ``_build_user_agent`` here reproduces the *defect* this change removed: the
     version comes from ``kitty.__version__`` while the inherited
     ``_build_codex_headers`` still sends ``_CODEX_CLI_VERSION`` in the ``version``
-    header, so one object exhibits both defects at once.
+    header, so one object exhibits both defects at once.  The OS suffix is frozen
+    rather than read from :mod:`platform`, so the control can assert the emitted
+    header by equality instead of by pattern.
 
     The positive control is the *historical* defect rather than an invented one,
     so it cannot drift away from what the guard claims to prevent — the same
@@ -435,8 +444,13 @@ class TestNoHeaderIsDerivedFromKittyVersion:
     ) -> None:
         """No header an adapter emits carries kitty's version."""
         monkeypatch.setattr("kitty.__version__", _SENTINEL)
+        headers = route.headers()
 
-        leaks = kitty_version_leaks(route.headers(), _SENTINEL)
+        # An adapter returning {} would satisfy every assertion below by having
+        # emitted nothing at all.
+        assert headers, f"{route.label} produced no headers"
+
+        leaks = kitty_version_leaks(headers, _SENTINEL)
 
         assert not leaks, (
             f"{route.label} derives an upstream header from kitty.__version__, "
@@ -471,12 +485,14 @@ class TestClientVersionIsStatedOnce:
         user-agent's shape would empty the population the check inspects, and
         every assertion in this class would stay green while stating nothing.
         """
-        pair_bearing = [
-            route.label
-            for route in _WIRE_ROUTES
-            if header_value(route.headers(), "user-agent") is not None
-            and header_value(route.headers(), "version") is not None
-        ]
+        pair_bearing = []
+        for route in _WIRE_ROUTES:
+            headers = route.headers()
+            if (
+                header_value(headers, "user-agent") is not None
+                and header_value(headers, "version") is not None
+            ):
+                pair_bearing.append(route.label)
 
         assert "openai_subscription[_build_codex_headers]" in pair_bearing, (
             "No swept route states both a user-agent version and a version "
@@ -510,11 +526,13 @@ class TestTheChecksCatchTheDefectTheyDescribe:
 
         assert disagreement == (__version__, _CODEX_CLI_VERSION)
 
-    def test_an_agreeing_header_set_is_not_flagged(self) -> None:
-        """The agreement check does not fire when the two versions match.
+    def test_the_check_distinguishes_agreeing_from_disagreeing_pairs(self) -> None:
+        """The agreement check fires on a mismatch and stays silent on a match.
 
-        Without this, a ``version_disagreement`` that returned ``None``
-        unconditionally would satisfy every other assertion in this file.
+        Both directions in one test because they are one logical fact.  Without
+        the agreeing half, a ``version_disagreement`` that returned ``None``
+        unconditionally would satisfy every other assertion in this file;
+        without the disagreeing half, one that always reported a conflict would.
         """
         assert version_disagreement({"User-Agent": "codex_cli_rs/1.2.3", "version": "1.2.3"}) is None
         assert version_disagreement({"User-Agent": "codex_cli_rs/1.2.3", "version": "9.9.9"}) == (
@@ -588,10 +606,49 @@ class TestTheSweepLooksAtEverything:
         assert "openai_subscription[_build_codex_headers]" in _ROUTE_IDS
 
     def test_both_model_routes_of_the_routing_adapter_are_covered(self) -> None:
-        """``opencode_go`` picks its header set by model, so both routes are swept."""
+        """``opencode_go``'s swept models select *different* header sets.
+
+        Asserting the labels alone would be self-referential — this file builds
+        both the labels and the list it looks them up in, so the assertion holds
+        even if both models land on the same route and one branch goes unswept.
+        Comparing the emitted sets is what makes the claim about the adapter.
+        ``_MESSAGES_MODELS`` is slated to change under KBR-126, so this is a live
+        risk rather than a theoretical one.
+        """
+        by_model = {
+            model: Route(label=model, provider_type="opencode_go", model=model).headers()
+            for model in _OPENCODE_MODELS
+        }
+
         for model in _OPENCODE_MODELS:
             assert f"opencode_go[{model}]" in _ROUTE_IDS
 
+        # Compared by header *name*, not by value: the routes are built with the
+        # same credential, so a value comparison would pass on two identical
+        # branches only by accident, and fail to notice the day they collapse.
+        distinct = {tuple(sorted(headers)) for headers in by_model.values()}
+        assert len(distinct) == len(_OPENCODE_MODELS), (
+            f"the swept models no longer select different header sets, so one "
+            f"of opencode_go's routes is unswept: {by_model}"
+        )
+
     def test_both_azure_credential_shapes_are_covered(self) -> None:
-        """``azure`` returns a different header set per credential shape."""
+        """``azure`` returns a *different* header set per credential shape.
+
+        Same reasoning as above: ``_ENTRA_KEY`` must actually satisfy
+        ``AzureOpenAIAdapter.is_entra_token``, or the sweep covers the ``api-key``
+        branch twice and the label assertion never notices.
+        """
         assert "azure[entra]" in _ROUTE_IDS
+
+        api_key_headers = Route(label="k", provider_type="azure", api_key=_API_KEY).headers()
+        entra_headers = Route(label="e", provider_type="azure", api_key=_ENTRA_KEY).headers()
+
+        # By header *name*. The two routes carry different credentials, so their
+        # values differ even when both take the same branch -- comparing values
+        # would report success for a sweep that covered `api-key` twice.
+        assert sorted(api_key_headers) != sorted(entra_headers), (
+            f"both azure routes produced the same header names, so "
+            f"_ENTRA_KEY no longer reaches the Entra branch and one credential "
+            f"shape is unswept: {sorted(api_key_headers)}"
+        )
