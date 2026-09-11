@@ -378,4 +378,26 @@ class ProviderError(Exception):
     retry_after: int | None = None
 
 
-__all__ = ["ProviderAdapter", "ProviderError"]
+class UnsupportedModelError(ProviderError):
+    """Raised when a model is served on a dialect the adapter cannot write.
+
+    Distinct from every other :class:`ProviderError` in that **no upstream
+    request is ever made** — the adapter refuses while building the body. That
+    distinction is the reason it is a named class rather than a message:
+    ``BridgeServer._request_with_retry_balancing`` must not mark a backend
+    unhealthy on it, because there is no evidence against the backend, and a
+    balancing pool would otherwise be quarantined by one profile naming a model
+    kitty cannot serve.
+
+    It lives here rather than in the adapter that raises it (KBR-126,
+    ``opencode_go``) because the bridge catches it, and the bridge must not name
+    a concrete provider module.
+
+    It deliberately carries no ``http_status``. Setting ``400`` would reach
+    ``BridgeServer._provider_error_failure_kind``, whose ``400`` branch tests for
+    a context-too-large message and could route a configuration error into the
+    compaction-retry path.
+    """
+
+
+__all__ = ["ProviderAdapter", "ProviderError", "UnsupportedModelError"]

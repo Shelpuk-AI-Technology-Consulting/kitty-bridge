@@ -400,6 +400,12 @@ class TestTheWholeSuiteIsCoherent:
             "tests/test_internal_key_completeness.py",
             "tests/test_egress_coverage.py",
             "tests/test_wire_shape_honesty.py",
+            # KBR-126. Both are docs-vs-code guards in the §6.2.3 sense: one
+            # holds the OpenCode Go routing table against the provider's
+            # published endpoint table, the other holds every adapter's
+            # `validation_model` against the dialect `validate_api_key` speaks.
+            "tests/test_opencode_endpoint_table.py",
+            "tests/test_validation_model_routing.py",
             "tests/test_github_actions.py",
             "tests/test_layer_markers.py",
             "tests/test_layer_selection.py",
