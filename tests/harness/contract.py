@@ -1082,11 +1082,15 @@ def _index(value: int | str) -> str:
 
     Raises:
         ValueError: When ``value`` is neither an ``int`` nor :data:`WILDCARD`.
+            ``True`` and ``False`` are rejected despite ``bool`` being a subclass
+            of ``int``.
     """
-    # Checking only the string branch would still admit `part_path(None, 0)` and
-    # `system_path(1.5)`, which build a path that looks concrete and matches
-    # nothing -- the same failure the string check exists to prevent.
-    if value != WILDCARD and not isinstance(value, int):
+    # `bool` first, because it is a subclass of `int`: without that clause
+    # `part_path(True, 0)` builds "conversation.turns[True].parts[0]", which
+    # reads as concrete and matches nothing -- the exact failure this validator
+    # exists to prevent, and the one an `isinstance(value, int)` test waves
+    # through. `None` and `1.5` are the other half.
+    if isinstance(value, bool) or (value != WILDCARD and not isinstance(value, int)):
         raise ValueError(f"a path index must be an int or {WILDCARD!r}, got {value!r}")
     return str(value)
 

@@ -1,4 +1,4 @@
-"""The register's agreement guards — data against the design, data against the source.
+"""Contract guard — the register data, the design document and the source tree must agree.
 
 ``.system_design/TEST_SUITE.md`` §6.2.3 · plan task **T-W3** (KBR-26).
 
@@ -28,6 +28,7 @@ under test are pure — they take the markdown text and the row tuple as argumen
 from __future__ import annotations
 
 import dataclasses
+import re
 from pathlib import Path
 
 import pytest
@@ -44,6 +45,19 @@ _DESIGN = _REPO_ROOT / ".system_design" / "TEST_SUITE.md"
 
 #: The import roots the register's sites are addressed under.
 _SRC = _REPO_ROOT / "src"
+
+
+@pytest.fixture(scope="module")
+def symbols() -> frozenset[str]:
+    """Return every symbol defined under ``src``, addressed as a register site.
+
+    Module-scoped because the scan parses 87 files and seven assertions below
+    need it; per-test it was most of this file's runtime.
+
+    Returns:
+        The output of :func:`~harness.register.defined_symbols`.
+    """
+    return r.defined_symbols(_SRC)
 
 
 @pytest.fixture(scope="module")
@@ -92,10 +106,17 @@ class TestTheParserReadsTheDesignDocument:
             r.parse_register_markdown("# A document with no register in it\n")
 
     def test_a_table_that_has_lost_its_rows_is_an_error(self, markdown: str) -> None:
-        """The heading can survive a reformatting that the row shape does not."""
-        defective = markdown.replace("| M1 |", "  M1  ").replace("| M", "  M")
+        """The heading can survive a reformatting that the row shape does not.
 
-        with pytest.raises(r.RegisterMarkdownError):
+        Only §3.2.1's own rows are unpiped — anchored at line start with a full
+        id cell — so §3.2.2 stays intact and the failure is attributable to the
+        section the test names. A blanket ``replace("| M", "  M")`` also hit
+        prose mentions of M-numbers, which made a failure here harder to read
+        than the defect it was demonstrating.
+        """
+        defective = re.sub(r"^\| (M\d+[a-z]?) \|", r"  \1  ", markdown, flags=re.MULTILINE)
+
+        with pytest.raises(r.RegisterMarkdownError, match="no live register rows"):
             r.parse_register_markdown(defective)
 
     def test_a_row_whose_id_cell_is_formatted_is_refused_not_skipped(self, markdown: str) -> None:
@@ -132,6 +153,19 @@ class TestTheParserReadsTheDesignDocument:
         problems = r.register_disagreements(r.REGISTER, defective)
 
         assert any("M15" in problem for problem in problems), problems
+
+    def test_an_id_published_twice_is_refused(self, markdown: str) -> None:
+        """An id is the register's addressing scheme, so a repeat makes it ambiguous.
+
+        Caught here rather than left to :func:`register_disagreements`, which
+        compares membership by *set*: a duplicate leaves the sets equal and the
+        lengths unequal, so it either escaped entirely or surfaced as a
+        nonsensical ordering complaint about an unrelated row.
+        """
+        defective = markdown.replace("| M7 |", "| M7 | a copy | `X.y` | Always | because |\n| M7 |", 1)
+
+        with pytest.raises(r.RegisterMarkdownError, match="more than once"):
+            r.parse_register_markdown(defective)
 
     def test_an_abbreviated_range_in_the_unconditional_list_is_refused(self, markdown: str) -> None:
         """The notation §3.2.2 used to carry, and why it had to go.
@@ -203,6 +237,22 @@ class TestTheDataAndTheDesignNameTheSameRows:
 
         assert any("order" in problem for problem in r.register_disagreements(reversed_rows, markdown))
 
+    def test_a_duplicated_row_in_the_data_is_reported_not_raised(self, markdown: str) -> None:
+        """This function's contract is to *return* problems, never to raise.
+
+        A copy-pasted row leaves the id sets equal while the lengths differ. The
+        order comparison used to pair the two sequences strictly and died with
+        ``ValueError: zip() argument 2 is longer than argument 1`` — an exception
+        out of a function whose callers hand it damaged artifacts on purpose, and
+        a message naming nothing a maintainer could act on.
+        """
+        duplicated = r.REGISTER + (r.REGISTER[-1],)
+
+        problems = r.register_disagreements(duplicated, markdown)
+
+        assert problems, "a duplicated row must be reported"
+        assert all(isinstance(problem, str) for problem in problems)
+
     def test_flipping_a_conditional_flag_is_caught(self, markdown: str) -> None:
         """§3.2.2's unconditional list drives §3.3.2 assertion 2.
 
@@ -243,23 +293,21 @@ class TestTheDataAndTheDesignNameTheSameRows:
 class TestEverySiteResolvesInTheSource:
     """A row naming a symbol that no longer exists is a register that has rotted."""
 
-    def test_every_site_symbol_exists(self) -> None:
+    def test_every_site_symbol_exists(self, symbols: frozenset[str]) -> None:
         """The invariant: `site` is checkable data, not prose."""
-        assert r.unresolved_sites(r.REGISTER, _SRC) == ()
+        assert r.unresolved_sites(r.REGISTER, symbols) == ()
 
-    def test_the_scan_resolves_a_known_positive(self) -> None:
+    def test_the_scan_resolves_a_known_positive(self, symbols: frozenset[str]) -> None:
         """The self-check §6.2 requires.
 
         A resolver that answered "everything exists" would make the test above
         pass forever. Both a method and a module-level constant, since a register
         row may name either.
         """
-        symbols = r.defined_symbols(_SRC)
-
         assert "kitty/bridge/server.py:BridgeServer._normalize_model" in symbols
         assert "kitty/providers/base.py:ProviderAdapter._INTERNAL_KEYS" in symbols
 
-    def test_the_scan_resolves_a_name_that_twelve_modules_define(self) -> None:
+    def test_the_scan_resolves_a_name_that_twelve_modules_define(self, symbols: frozenset[str]) -> None:
         """The positive control for *qualified* resolution, which is the whole point.
 
         ``build_upstream_headers`` is defined in twelve provider modules, so a
@@ -268,16 +316,14 @@ class TestEverySiteResolvesInTheSource:
         resolves on MiMo and does **not** resolve on Fireworks is what
         distinguishes a qualified scan from a name-level one.
         """
-        symbols = r.defined_symbols(_SRC)
-
         assert "kitty/providers/mimo.py:MimoAdapter.build_upstream_headers" in symbols
         assert "kitty/providers/fireworks.py:FireworksAdapter.build_upstream_headers" not in symbols
 
-    def test_the_scan_does_not_invent_symbols(self) -> None:
+    def test_the_scan_does_not_invent_symbols(self, symbols: frozenset[str]) -> None:
         """The complement: a resolver matching anything would also pass above."""
-        assert "kitty/bridge/server.py:BridgeServer._method_that_does_not_exist" not in r.defined_symbols(_SRC)
+        assert "kitty/bridge/server.py:BridgeServer._method_that_does_not_exist" not in symbols
 
-    def test_a_site_naming_a_missing_symbol_is_caught(self) -> None:
+    def test_a_site_naming_a_missing_symbol_is_caught(self, symbols: frozenset[str]) -> None:
         """The falsification case for the site scan."""
         renamed = tuple(
             dataclasses.replace(row, site=("kitty/bridge/server.py:BridgeServer._renamed_away",))
@@ -286,11 +332,11 @@ class TestEverySiteResolvesInTheSource:
             for row in r.REGISTER
         )
 
-        problems = r.unresolved_sites(renamed, _SRC)
+        problems = r.unresolved_sites(renamed, symbols)
 
         assert any("M1" in problem for problem in problems), problems
 
-    def test_a_site_naming_the_right_symbol_in_the_wrong_class_is_caught(self) -> None:
+    def test_a_site_naming_the_right_symbol_in_the_wrong_class_is_caught(self, symbols: frozenset[str]) -> None:
         """A rename that moves a method between adapters leaves the leaf name intact.
 
         This is the case a name-level scan cannot see, and the reason
@@ -304,6 +350,6 @@ class TestEverySiteResolvesInTheSource:
             for row in r.REGISTER
         )
 
-        problems = r.unresolved_sites(moved, _SRC)
+        problems = r.unresolved_sites(moved, symbols)
 
         assert any("P9b" in problem for problem in problems), problems

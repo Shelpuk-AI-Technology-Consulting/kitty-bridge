@@ -71,6 +71,13 @@ inbound request alone and could carry a predicate; they do not, because no
 reader produces a projected request yet (Epic A), so every predicate would ship
 unexercised — §1.4 again.  Recorded as gap G21 in §9.2 and carried by `KBR-140`.
 
+**These guards prove the register is *well-formed*, never that it is *complete*.**  A mutation the
+product performs that neither §3.2 nor this module records is invisible to all of them; only the
+wire-level guard (§6.2.3, T-G2) can catch that.  Two omissions are already known and filed —
+`KBR-148` (headers) and `KBR-149` (`openai_subscription` injecting `reasoning` from
+`_reasoning_effort`, which P4 cannot cover because `translate_to_upstream` never runs on that
+adapter's request path).  Do not read a green suite as "the register is the whole truth".
+
 ⚠️ **Anchoring discipline.**  §3.3.1a: a path pattern is a **prefix**, claiming
 its node and everything beneath it.  A row must therefore be anchored at the
 **narrowest** path covering its effect.  Anchoring P15 at
@@ -85,6 +92,8 @@ from __future__ import annotations
 
 import ast
 import re
+from collections import Counter
+from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -225,6 +234,13 @@ def row_shape_problems(row: MutationRow) -> tuple[str, ...]:
 
 
 # Spelled once, so the data below reads as a table rather than as an argument list.
+#
+# `_SERVER` carries an assumption worth stating: every bridge-level row's site is
+# in `server.py` today. Two are not -- M2's translators and M12's fallback
+# constants -- and those spell their files in full rather than reaching for an
+# alias. A row that moves out of `server.py` must do the same; silently keeping
+# the alias would point it at a file that no longer defines it, and only
+# `unresolved_sites` would notice, after the row was committed.
 _SERVER = "kitty/bridge/server.py"
 _BASE = "kitty/providers/base.py"
 _SUBSCRIPTION = "kitty/providers/openai_subscription.py"
@@ -803,6 +819,81 @@ def _section(text: str, heading: str) -> str:
     return text[start:] if end < 0 else text[start:end]
 
 
+def _scan_table(text: str, heading: str) -> tuple[list[str], list[str]]:
+    """Read one register table's ids, in document order.
+
+    Args:
+        text: The full document.
+        heading: The section's heading line prefix, e.g. ``#### 3.2.1``.
+
+    Returns:
+        The section's live ids and its struck-through ids, each in the order the
+        document lists them.
+
+    Raises:
+        RegisterMarkdownError: When a table row's id cell cannot be read, or when
+            the section yields no live row at all.
+    """
+    live: list[str] = []
+    struck: list[str] = []
+
+    for line in _section(text, heading).splitlines():
+        match = _ROW_ID.match(line)
+        if match is None:
+            # A table row that is not the header or separator and yields no id is
+            # a row this parser cannot see. Skipping it would make the guard
+            # silent about exactly the edit it exists to catch.
+            if _TABLE_ROW.match(line) and not _NOT_A_DATA_ROW.match(line):
+                raise RegisterMarkdownError(
+                    f"{heading} has a table row whose id cell cannot be read: {line[:60]!r}. "
+                    "An id is a bare M- or P-number in the first cell; formatting it hides the "
+                    "row from this guard. A second table in this section -- a legend or a "
+                    "summary -- trips this too, and needs its own section or a widening here."
+                )
+            continue
+        (struck if match.group(1) else live).append(match.group(2))
+
+    # Counting *live* rows, not rows. A table reformatted into something this
+    # parser cannot read would still show one match on the struck M13 row, and a
+    # section whose live rows have all become unreadable is exactly the silent
+    # no-op §6.2 forbids.
+    if not live:
+        raise RegisterMarkdownError(f"{heading} yielded no live register rows — the table's shape has changed")
+
+    return live, struck
+
+
+def _unconditional_ids(section: str) -> tuple[str, ...]:
+    """Read §3.2.2's list of rows exempt from §3.3.2 assertion 2.
+
+    Args:
+        section: The body of §3.2.2.
+
+    Returns:
+        The ids the closing paragraph names, in the order it names them.
+
+    Raises:
+        RegisterMarkdownError: When the sentence is gone, or when it abbreviates
+            ids as a range instead of naming each one.
+    """
+    sentence_match = _UNCONDITIONAL_SENTENCE.search(section)
+    if sentence_match is None:
+        raise RegisterMarkdownError("§3.2.2 no longer states which rows are unconditional")
+
+    sentence = sentence_match.group(1)
+
+    # `P9a–c` names three rows in one token. Expanding it is guesswork and
+    # skipping it drops two rows from the comparison, so the notation is refused.
+    range_match = _ID_RANGE.search(sentence)
+    if range_match is not None:
+        raise RegisterMarkdownError(
+            f"§3.2.2's unconditional list abbreviates {range_match.group(0)!r} as a range; "
+            "name every id, or the rows inside the range are dropped from the comparison"
+        )
+
+    return tuple(dict.fromkeys(_ID_TOKEN.findall(sentence)))
+
+
 def parse_register_markdown(text: str) -> ParsedRegister:
     """Read the register out of ``.system_design/TEST_SUITE.md``.
 
@@ -818,61 +909,57 @@ def parse_register_markdown(text: str) -> ParsedRegister:
 
     Raises:
         RegisterMarkdownError: When a heading is missing, when a table yields no
-            rows, when the unconditional sentence is absent, or when that
-            sentence uses a range notation instead of naming every id.
+            live rows, when a row's id cell cannot be read, when an id is
+            published twice, when the unconditional sentence is absent, or when
+            that sentence uses a range notation instead of naming every id.
     """
     live: list[str] = []
     struck: list[str] = []
 
     # Both tables, read in document order so `live_ids` matches the published one.
     for heading in _SECTION_HEADINGS:
-        live_here = 0
-        for line in _section(text, heading).splitlines():
-            match = _ROW_ID.match(line)
-            if match is None:
-                # A table row that is not the header or separator and yields no
-                # id is a row this parser cannot see. Skipping it would make the
-                # guard silent about exactly the edit it exists to catch.
-                if _TABLE_ROW.match(line) and not _NOT_A_DATA_ROW.match(line):
-                    raise RegisterMarkdownError(
-                        f"{heading} has a table row whose id cell cannot be read: {line[:60]!r}. "
-                        "An id is a bare M- or P-number in the first cell; formatting it hides the "
-                        "row from this guard. A second table in this section -- a legend or a "
-                        "summary -- trips this too, and needs its own section or a widening here."
-                    )
-                continue
-            if match.group(1):
-                struck.append(match.group(2))
-            else:
-                live.append(match.group(2))
-                live_here += 1
+        section_live, section_struck = _scan_table(text, heading)
+        live += section_live
+        struck += section_struck
 
-        # Counting *live* rows, not rows. A table reformatted into something this
-        # parser cannot read would still show one match on the struck M13 row,
-        # and a section whose live rows have all become unreadable is exactly the
-        # silent no-op §6.2 forbids.
-        if live_here == 0:
-            raise RegisterMarkdownError(f"{heading} yielded no live register rows — the table's shape has changed")
-
-    # §3.2.2's closing paragraph is the document's statement of which rows are
-    # exempt from §3.3.2 assertion 2, and the only place it is written down.
-    sentence_match = _UNCONDITIONAL_SENTENCE.search(_section(text, _SECTION_HEADINGS[1]))
-    if sentence_match is None:
-        raise RegisterMarkdownError("§3.2.2 no longer states which rows are unconditional")
-
-    sentence = sentence_match.group(1)
-    range_match = _ID_RANGE.search(sentence)
-    if range_match is not None:
-        raise RegisterMarkdownError(
-            f"§3.2.2's unconditional list abbreviates {range_match.group(0)!r} as a range; "
-            "name every id, or the rows inside the range are dropped from the comparison"
-        )
+    # An id is how every document, ticket and test refers to a row, so a repeat
+    # makes the register ambiguous. Refused here rather than left to
+    # `register_disagreements`, which compares by set and would either miss it or
+    # report it as a confusing ordering problem.
+    repeated = sorted(row_id for row_id, count in Counter(live + struck).items() if count > 1)
+    if repeated:
+        raise RegisterMarkdownError(f"§3.2 publishes these ids more than once: {repeated}")
 
     return ParsedRegister(
         live_ids=tuple(live),
         struck_ids=tuple(struck),
-        unconditional_ids=tuple(dict.fromkeys(_ID_TOKEN.findall(sentence))),
+        unconditional_ids=_unconditional_ids(_section(text, _SECTION_HEADINGS[1])),
     )
+
+
+def _first_divergence(data_order: Sequence[str], published: Sequence[str]) -> str:
+    """Return the first id at which two orderings of the register differ.
+
+    Total by construction, including when the two differ only in length.
+    :func:`register_disagreements` must *return* problems rather than raise —
+    its callers hand it damaged artifacts on purpose — so this must not be a
+    strict pairing that dies on a length mismatch.
+
+    Args:
+        data_order: The ids in :data:`REGISTER` order.
+        published: The ids in §3.2's order.
+
+    Returns:
+        The id naming the divergence: the first position where the two disagree,
+        or the first id past the end of the shorter one.
+    """
+    for mine, theirs in zip(data_order, published, strict=False):
+        if mine != theirs:
+            return mine
+
+    # One is a prefix of the other, so the divergence is the first id past it.
+    longer = data_order if len(data_order) > len(published) else published
+    return longer[min(len(data_order), len(published))]
 
 
 def register_disagreements(rows: tuple[MutationRow, ...], markdown: str) -> tuple[str, ...]:
@@ -904,11 +991,15 @@ def register_disagreements(rows: tuple[MutationRow, ...], markdown: str) -> tupl
     for row_id in parsed.live_ids:
         if row_id not in by_id:
             problems.append(f"{row_id}: published in TEST_SUITE.md §3.2 but missing from the register data")
+    struck = set(parsed.struck_ids)
     for row in rows:
-        if row.id not in published:
-            problems.append(f"{row.id}: in the register data but not published in TEST_SUITE.md §3.2")
-        if row.id in parsed.struck_ids:
+        # A struck row IS published, so the two branches are alternatives, not
+        # both. Reporting "not published" alongside "struck through" named one
+        # problem twice and the first message was false.
+        if row.id in struck:
             problems.append(f"{row.id}: struck through in TEST_SUITE.md §3.2 but still live in the register data")
+        elif row.id not in published:
+            problems.append(f"{row.id}: in the register data but not published in TEST_SUITE.md §3.2")
 
     # Classification. §3.3.2 assertion 2 applies to exactly the rows the document
     # does *not* list as unconditional, so a disagreement here means a row is
@@ -926,18 +1017,19 @@ def register_disagreements(rows: tuple[MutationRow, ...], markdown: str) -> tupl
 
     # Order, but only once membership agrees -- otherwise a single deleted row
     # renumbers everything after it and buries the real problem under noise.
-    if not problems:
-        data_order = tuple(row.id for row in rows)
-        if data_order != parsed.live_ids:
-            first = next(
-                (a for a, b in zip(data_order, parsed.live_ids, strict=True) if a != b),
-                data_order[0],
-            )
-            problems.append(
-                f"{first}: the register data is in a different order from TEST_SUITE.md §3.2 — "
-                "the document interleaves P20 and P21 between P6 and P7, and the data follows it "
-                "so the two can be read side by side"
-            )
+    #
+    # Not `zip(strict=True)`: this function's contract is to *return* problems so
+    # a test can hand it a damaged artifact, and a raise breaks that contract.
+    # Equal lengths follow from set equality plus uniqueness on both sides, but
+    # deriving safety from an invariant proved elsewhere is how the guard starts
+    # crashing the day one of them moves.
+    data_order = tuple(row.id for row in rows)
+    if not problems and data_order != parsed.live_ids:
+        problems.append(
+            f"{_first_divergence(data_order, parsed.live_ids)}: the register data is in a different "
+            "order from TEST_SUITE.md §3.2 — the document interleaves P20 and P21 between P6 and "
+            "P7, and the data follows it so the two can be read side by side"
+        )
 
     return tuple(problems)
 
@@ -945,6 +1037,29 @@ def register_disagreements(rows: tuple[MutationRow, ...], markdown: str) -> tupl
 # --------------------------------------------------------------------------
 # Reading the source tree
 # --------------------------------------------------------------------------
+
+
+def _collect_bindings(node: ast.AST, prefix: str, relative: str, into: set[str]) -> None:
+    """Record every name one scope binds, recursing into nested scopes.
+
+    Args:
+        node: The scope to walk.
+        prefix: The qualified name of that scope, empty at module level.
+        relative: The file's path under ``src``, which prefixes every address.
+        into: The set to add addresses to.
+    """
+    for child in ast.iter_child_nodes(node):
+        if isinstance(child, ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef):
+            qualified = f"{prefix}.{child.name}" if prefix else child.name
+            into.add(f"{relative}:{qualified}")
+            _collect_bindings(child, qualified, relative, into)
+        elif isinstance(child, ast.Assign | ast.AnnAssign):
+            # A register row may name a constant -- P1's site is `_INTERNAL_KEYS`.
+            targets = child.targets if isinstance(child, ast.Assign) else [child.target]
+            for target in targets:
+                if isinstance(target, ast.Name):
+                    qualified = f"{prefix}.{target.id}" if prefix else target.id
+                    into.add(f"{relative}:{qualified}")
 
 
 def defined_symbols(src_root: Path) -> frozenset[str]:
@@ -967,52 +1082,32 @@ def defined_symbols(src_root: Path) -> frozenset[str]:
 
     for path in sorted(src_root.rglob("*.py")):
         relative = path.relative_to(src_root).as_posix()
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-
-        def collect(node: ast.AST, prefix: str, relative: str = relative) -> None:
-            """Walk one scope, recording what it binds.
-
-            Args:
-                node: The scope to walk.
-                prefix: The qualified name of that scope, empty at module level.
-                relative: The file's path under ``src``.
-            """
-            for child in ast.iter_child_nodes(node):
-                if isinstance(child, ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef):
-                    qualified = f"{prefix}.{child.name}" if prefix else child.name
-                    symbols.add(f"{relative}:{qualified}")
-                    collect(child, qualified)
-                elif isinstance(child, ast.Assign | ast.AnnAssign):
-                    targets = child.targets if isinstance(child, ast.Assign) else [child.target]
-                    for target in targets:
-                        if isinstance(target, ast.Name):
-                            qualified = f"{prefix}.{target.id}" if prefix else target.id
-                            symbols.add(f"{relative}:{qualified}")
-
-        collect(tree, "")
+        _collect_bindings(ast.parse(path.read_text(encoding="utf-8")), "", relative, symbols)
 
     return frozenset(symbols)
 
 
-def unresolved_sites(rows: tuple[MutationRow, ...], src_root: Path) -> tuple[str, ...]:
+def unresolved_sites(rows: tuple[MutationRow, ...], symbols: frozenset[str]) -> tuple[str, ...]:
     """Report every register site that names no symbol in the source tree.
 
     This is what makes :attr:`MutationRow.site` data rather than decoration.  A
     mutation site renamed without the register following it leaves a row pointing
     at nothing while the register goes on looking complete.
 
+    Takes the symbol set rather than a path, so the comparison is pure and the
+    tree is parsed once per test module instead of once per assertion.  The I/O
+    lives in :func:`defined_symbols` alone.
+
     Args:
         rows: The register data, normally :data:`REGISTER`.
-        src_root: The ``src`` directory.
+        symbols: The output of :func:`defined_symbols`.
 
     Returns:
         One message per unresolved site, in register order.  Empty when every
         site resolves.
     """
-    symbols = defined_symbols(src_root)
-
     return tuple(
-        f"{row.id}: site {site!r} names no symbol under {src_root.name}/"
+        f"{row.id}: site {site!r} names no symbol in the source tree"
         for row in rows
         for site in row.site
         if site not in symbols

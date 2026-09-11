@@ -676,6 +676,20 @@ class TestPathVocabulary:
         with pytest.raises(ValueError):
             c.system_path(1.5)  # type: ignore[arg-type]
 
+    def test_a_boolean_index_is_rejected_even_though_bool_is_an_int(self) -> None:
+        """The case an ``isinstance(value, int)`` check waves through.
+
+        ``bool`` subclasses ``int``, so ``part_path(True, 0)`` would build
+        ``conversation.turns[True].parts[0]`` — a path that reads as concrete and
+        matches nothing, which is precisely what this validator exists to stop.
+        """
+        for bad in (True, False):
+            with pytest.raises(ValueError):
+                c.part_path(bad, 0)  # type: ignore[arg-type]
+
+            with pytest.raises(ValueError):
+                c.reply_part_path(bad)  # type: ignore[arg-type]
+
     def test_the_remaining_forms_build(self) -> None:
         """Each form exists because a register row or a design section needs it."""
         assert c.extra_path("thinking") == "envelope.extra[thinking]"

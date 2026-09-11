@@ -26,6 +26,12 @@ from harness import contract as c
 from harness import register as r
 from harness.test_contract import _KITTY_IMPORT
 
+#: The path roots a register row may start at. ``residual`` is deliberately
+#: **absent**: §3.3.1a makes it never a legal anchor, because a bare collection
+#: claims its members and a non-empty residual fails the run before matching, so
+#: such a row could only ever claim a delta the oracle was meant to stop at.
+_LEGAL_ROOTS = ("envelope.", "conversation.", "headers[", "reply.", "route.")
+
 #: The bare-collection anchors §3.3.1a defines, which claim their members and so
 #: need the same "does this match anything" proof a wildcard does.
 _COLLECTION_ANCHORS = (
@@ -251,13 +257,29 @@ class TestThePathsEachRowTouches:
 
     def test_every_path_starts_at_a_root_the_vocabulary_defines(self) -> None:
         """§3.3.1a closes the set of roots. A typo would build an unreachable path."""
-        roots = ("envelope.", "conversation.", "headers[", "residual", "reply.", "route.")
-
         for row in r.REGISTER:
             if not row.is_projectable:
                 continue
             for path in row.paths:
-                assert path.startswith(roots), f"{row.id}: {path!r} names no root in the vocabulary"
+                assert path.startswith(_LEGAL_ROOTS), f"{row.id}: {path!r} names no root in the vocabulary"
+
+    def test_every_legal_root_is_one_the_register_actually_uses(self) -> None:
+        """The other half, and the half that caught a contradiction.
+
+        ``residual`` was on this list while
+        :meth:`test_no_row_is_anchored_at_the_residual` forbade it and §3.3.1a
+        called it never legal — two assertions in one class stating opposite
+        rules, with nothing to say which was the rule. A permitted-roots list
+        nothing checks drifts into describing a vocabulary rather than this
+        register's use of it.
+        """
+        unused = [
+            root
+            for root in _LEGAL_ROOTS
+            if not any(path.startswith(root) for row in r.REGISTER if row.is_projectable for path in row.paths)
+        ]
+
+        assert unused == [], f"declared legal but used by no row: {unused}"
 
     def test_no_row_is_anchored_at_the_residual(self) -> None:
         """§3.3.1a: `residual` is never a legal anchor.
