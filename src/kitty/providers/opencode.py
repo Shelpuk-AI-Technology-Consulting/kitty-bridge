@@ -22,8 +22,10 @@ Responses body is three translation hooks kitty does not have on this transport,
 and it would require replacing the boolean wire-shape declaration with a
 three-valued type (``.system_design/TEST_SUITE.md`` §6.2.3).  That is KBR-137.
 Until it lands, :class:`UnsupportedModelError` fails the request with a message
-naming the model and the ticket, instead of silently posting a Chat Completions
-body to an endpoint that does not speak it — which is what this adapter did
+naming the model, the endpoint, and the routes the user can switch to instead —
+no ticket id, since that message is printed in an end user's terminal — rather
+than silently posting a Chat Completions body to an endpoint that does not speak
+it — which is what this adapter did
 before, and which the provider answers with a ``401`` the bridge then reports to
 the user as a bad API key.
 """

@@ -255,8 +255,11 @@ async def test_a_responses_model_is_refused_and_nothing_is_sent(
     assert REFUSED_MODEL in body
     assert "/v1/responses" in body
     # What the user can act on, rather than an internal ticket id they cannot
-    # look up: the alternative routes are named in the message itself.
+    # look up: the alternative routes are named in the message itself. Pinned
+    # here as well as at L1 because this is the only place that observes the
+    # body a user actually receives, on all eight surfaces.
     assert "/v1/chat/completions" in body
+    assert "KBR-" not in body, "no internal tracker id may reach an end user's terminal"
     assert upstream.hits == [], "the provider must never see a request for a model kitty cannot serialize"
 
 
