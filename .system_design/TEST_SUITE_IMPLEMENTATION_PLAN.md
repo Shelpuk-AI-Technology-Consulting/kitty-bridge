@@ -96,7 +96,7 @@ After Milestone 0, seven streams advance independently, each owning its own modu
 | **T-W1** | Layer markers, CI selection rules, per-category collection checks | — | §8, §8.1, §8.2 | M |
 | **T-W2** | **The input contract** — request/capture types, the projection protocol, the path vocabulary and the normalisation rules | — | §3.3.1, §3.3.1a, §3.3.1b | ~~S~~ **M** |
 | **T-W3** | Register schema and data | T-W2 | §3.2 | M |
-| **T-W4** | Recorder implementation — primary aiohttp recorder | T-W2 | §7.2 | M |
+| **T-W4** | Recorder implementation — primary aiohttp recorder | T-W2 | §7.2, §7.2.1 | ~~M~~ **L** |
 | **T-W5** | Shared CONNECT proxy fixture | — | §7.3 | M |
 | **T-W6** | Corpus format, capture procedure, scrubber, loader | T-W3 | §7.1 | M |
 | **T-W7** | Assertion exemption registry | T-W1 | §8 | M |
@@ -136,7 +136,7 @@ once. Both are exactly the coordination problem Milestone 0 exists to remove.
 
 **T-W3 inherits two acceptance criteria from this work.**
 
-1. Every row M1–M14 and P1–P21 carries either a path in T-W2's vocabulary or `not projectable`
+1. Every one of the 41 live rows carries either a path in T-W2's vocabulary or `not projectable`
    **with a reason**, asserted against the register data so a new row cannot escape it. T-W2 proves
    the vocabulary is *expressive*; the row-by-row assignment is T-W3's, because a copy of that
    table inside T-W2 would be a second source of truth that stays green while the register moves.
@@ -152,18 +152,39 @@ once. Both are exactly the coordination problem Milestone 0 exists to remove.
 Includes the **totality rule**: every key classifies into envelope, conversation or residual, and a
 non-empty residual raises. *Falsification:* a stub reader that drops an unknown key fails it.
 
-**T-W3 — register.** One entry per row M1–M14 and P1–P21: id, site symbol, trigger predicate, the
-projection field it touches, conditional or not, design anchor. Defines the trigger vocabulary
-T-W6 indexes by. *Falsification:* delete a row from the markdown or the data; the agreement test
-fails.
+**T-W3 — register.** One entry per live row of §3.2.1 and §3.2.2. The families are M1–M14 and
+P1–P21, but the **sub-lettered rows are separate rows with separate triggers**, so the count is
+**42 published, 41 live** — M13 is withdrawn (KBR-5) and excluded from the data, with the parser
+asserting the struck set is exactly `{M13}` so a new strike-through is a deliberate decision.
+
+Per row: id, site symbols, trigger, the projection paths it touches, conditional or not, design
+reference — plus `not_projectable_reason`, required exactly when the row takes §3.3.1a's escape.
+Defines the trigger vocabulary T-W6 indexes by. *Falsification:* delete a row from the markdown or
+the data; the agreement test fails.
+
+**A trigger is a name, not a callable**, and **scope is deliberately absent** — both decisions,
+with their evidence, are recorded in design §3.2.4. Scope is **KBR-139**; verifying a declared
+trigger is gap **G21 / KBR-140**. Delivered in `tests/harness/register.py` beside the contract,
+with the schema tests at `l1` and the two agreement guards at `l2`.
 
 **T-W4 — recorder implementation.** Implements T-W2's `CapturedRequest` — original casing and order,
 arrival timestamp, and **the peer port of the accepted connection** — for the primary aiohttp
 recorder. It consumes the contract rather than defining it. Ships **one minimal valid success
-response per protocol** — without it any request
-driven through a real bridge falls into the retry paths, which are themselves body-mutating. The
-failure library is T-B4. Peer-port and casing capture are enforced by a **conformance test every
-Epic B recorder must pass**.
+response per protocol, per stream mode** — Claude Code sends `"stream": true`, and a streaming
+request answered with a JSON body is not a success. The failure library is T-B4. Peer-port and
+casing capture are enforced by a **conformance test every Epic B recorder must pass**, and it
+also records every **accepted connection**, including one that carries no request — §5.2.1's
+bypass shape, which no request list can express.
+
+~~without it any request driven through a real bridge falls into the retry paths, which are
+themselves body-mutating~~ — **this was wrong, and §4.3 C3 says the opposite**: transport-blip
+and empty-response retries are "the two that repeat a request unchanged" and must be
+byte-identical; the four mutating paths are M6, M8, M9 and failover. The two real reasons an
+empty or mis-shaped reply is unacceptable are sharper: it costs **80 seconds** of real
+`asyncio.sleep` per affected test (`_EMPTY_RETRY_DELAYS` + `_EMPTY_FINAL_DELAYS`) in a gating
+job, and on a **balancing** profile it fails over — and failover *is* body-mutating, so the
+harness would manufacture a delta no product code caused. A harness **413** is the same family:
+it is M6's own trigger. See §7.2.1.
 
 **T-W5 — CONNECT proxy.** Extract `_ConnectProxy`/`_TlsTarget` from
 `tests/test_egress_https_proxy.py`; add tunnel source-port recording and mid-test stoppability. An
@@ -175,8 +196,11 @@ fixture fails a CI lint.
 
 **T-W7 — exemption registry.** Plain pytest, not BDD-specific. An entry names **one assertion**,
 its expected failure condition and its ticket; everything else in the test gates normally; an
-unexpected pass fails (`xfail(strict=True)`). *Falsification:* a second, non-exempt failing
-assertion in the same test must still fail the job.
+unexpected pass fails (`xfail(strict=True)`). *Falsification, both required:* a second,
+non-exempt failing assertion in the same test must still fail the job; and an exempt assertion
+that starts passing must fail it. Each falsification case must assert the **exact** exception
+that escapes, through a `BaseException` guard — `pytest.raises(AssertionError)` cannot see
+`pytest.xfail`, so an implementation that amnesties the whole test reports green through it.
 
 **T-W8 — bridge fixture core and extension interface.** A profile/backend factory and a real
 `BridgeServer` started against a recorder, for the **default aiohttp transport only**, plus the
@@ -189,7 +213,23 @@ core.
 and assert the capture is complete and **type-compatible with T-W2's declared contract** — the
 recorder's output must satisfy what a projection expects to read. Small, but it is the first
 moment the contracts are known to compose rather than merely to exist.
-*Falsification:* a recorder that drops the query string fails it.
+*Falsification:* a recorder that drops the query string fails it. T-W4 ships its **own**
+query-drop case against the recorder in isolation; this one is the end-to-end claim, and the two
+must not be collapsed.
+
+**T-W9 inherits three obligations T-W4 could not discharge**, because T-W4 starts no
+`BridgeServer` and they are only observable with one running:
+
+1. **Exactly one upstream request per inbound request.** T-W4 proves its replies are non-empty by
+   the judgements it can call directly; that is necessary and not sufficient. A second capture in
+   the recording is the only real evidence the retry ladder never fired.
+2. **The `has_content` cell of §7.2.1's table.** It is a local flag in the pass-through streaming
+   loop (`server.py:5145`), not a function — unreachable except by driving a bridge. T-W4's
+   streams satisfy its precondition by construction; nothing has confirmed it.
+3. **The empty-ladder timing.** `_EMPTY_RETRY_DELAYS` + `_EMPTY_FINAL_DELAYS` is 80 seconds of
+   real sleep. The slice should assert its own wall-clock bound, so a regression that
+   reintroduces the ladder fails rather than merely slowing the gate — the defect commit
+   `691e974` fixed once already.
 
 ---
 
@@ -361,10 +401,10 @@ that makes *its* bytes observable. Bundled, the Ollama half would have had no ev
 | **T-I6** | Agent settings precedence | blocked Q12 | T-I5 | Three runs, three winners; every sentinel demonstrated live | §6.4.2 | M |
 | **T-I7** | Streaming recovery — content | partial Q14 | T-B4, T-G7, T-W8 | Four injection points; no duplicated text, no reused tool-call id, no spliced arguments. Positive oracle waits on Q14 | §6.3.1 | L |
 | **T-I8** | Cross-attempt content and cadence | | T-D1, T-W8, T-B4 | Blip and empty-response retries byte-identical; M6, M8, M9 and failover re-normalisation each fire only on trigger | §4.3 C3 | M |
-| **T-I9** | Connection lifecycle baseline | | T-W8, T-C7 | Distinct connections per session vs the native capture; ratcheted | §4.3 C5 | M |
+| **T-I9** | Connection lifecycle baseline | | T-W8, T-C7 | Distinct connections per session vs the native capture; ratcheted — a **reported baseline**, not `exemptions.ratchet`, which is the unrelated gating mechanism of §8.3 | §4.3 C5 | M |
 | **T-I10** | `_backend_context` isolation | | T-W8 | Deterministic; belongs here, not in load | §6.3.1 | S |
 | **T-I11** | Failover, disconnect, error envelopes | | T-B4, T-W8 | Mid-stream failover; disconnect releases upstream without marking unhealthy; 503 in each native envelope; oversized in the protocol's error shape | §6.3.1 | M |
-| **T-I12** | Fingerprint parity report | | T-C7, T-W8, T-G9 | Header set vs the native baseline; **reported with a ratchet, not gating**, until gap G3 closes | §4.3 C1b | M |
+| **T-I12** | Fingerprint parity report | | T-C7, T-W8, T-G9 | Header set vs the native baseline; **reported with a ratchet, not gating**, until gap G3 closes. The ratchet here is a monotonic baseline; do **not** import `exemptions.ratchet`, which gates and fails when parity improves (§8.3) | §4.3 C1b | M |
 | **T-I13** | Side traffic | | T-W8 | `/healthz` and `/stats` cause no upstream request; pre-flight pinned as a declared exception; `--no-validate` removes it | §4.3 C6 | M |
 | **T-I14** | **Expand live-agent coverage to five Claude Code scenarios** | | — | Plain turn, tool-using turn, multi-turn with tool results, extended thinking, and a session crossing the compaction threshold. The existing file has two cases; scheduling it nightly does not expand it | §6.4.2 | M |
 
@@ -510,8 +550,13 @@ merge.** So:
   PR that the test fails at the base revision and passes with the fix. A guard written after the
   fix with no such evidence is still not acceptable — that is what the rule exists to prevent.
 - **Exemption path** only where the fix must genuinely follow later, or where the guard's scope is
-  broader than one defect. T-G1, T-G3, T-G4, T-G5 and T-G9 each cover a class of check beyond a
-  single defect, so they may land first with a single-assertion exemption.
+  broader than one defect. T-G1, T-G4, T-G5 and T-G9 each cover a class of check beyond a
+  single defect, so they may land first with a single-assertion exemption. (T-G3 was on this list
+  until KBR-6 fixed its defect and landed the guard green; its row in §10 records the dropped
+  dependency.) **A guard taking that
+  path states its verdict as an `assert`**, not `pytest.fail` — only `AssertionError` is
+  amnestied, and the established shape in this repo is `pytest.fail` with a diff, so this is the
+  one thing to get right before writing the guard. Design §8.3.
 - **Later acceptance scenarios pass normally** if the defect is already fixed. T-J2 does not need
   TR-1c and TR-4 to be red; it needs them to be correct.
 
@@ -564,6 +609,7 @@ Every design requirement has an owner. "Existing" means the current suite alread
 | §6.4.4 | Load rig and gate | T-K4, T-K5 |
 | §7.1–§7.4 | Corpus, recorders, proxy, oracle | T-W6/Epic C, T-W4/Epic B, T-W5, T-W2/T-D1 |
 | §8 | Markers, selection, job activation | T-W1, T-K6–T-K12 |
+| §8, §8.3 | Assertion exemption policy and registry | T-W7 |
 | §5.1 | Real-socket transport proof across three stacks | **Existing** — `tests/test_egress_https_proxy.py`, extended by T-W5 |
 | §6.2.3 | A structural scan that asserts its own positives | **Existing** — `tests/test_egress_coverage.py`, the pattern T-E7 copies |
 

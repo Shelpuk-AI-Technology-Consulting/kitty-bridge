@@ -1018,8 +1018,8 @@ ENVELOPE_MODEL = "envelope.model"
 ENVELOPE_STREAM = "envelope.stream"
 ENVELOPE_STORE = "envelope.store"
 
-#: Bare-collection anchors, for rows that change a collection as a whole: M5 and
-#: M13 rewrite the turns, P5b joins the system blocks, and §3.3.1 pins P13 and
+#: Bare-collection anchors, for rows that change a collection as a whole: M5, M6
+#: and M7 rewrite the turns, P5b joins the system blocks, and §3.3.1 pins P13 and
 #: P14 to ``conversation.sampling`` rather than to one key.
 CONVERSATION_SYSTEM = "conversation.system"
 CONVERSATION_TURNS = "conversation.turns"
@@ -1066,15 +1066,60 @@ NOT_PROJECTABLE = "not projectable"
 WILDCARD = "*"
 
 
+def _index(value: int | str) -> str:
+    """Render a collection index for a path, concrete or wildcard.
+
+    ``mypy`` runs on ``src/kitty`` only (plan §1.3), so the ``int | str``
+    annotation on the builders below is documentation rather than enforcement.
+    A typo such as ``part_path(0, "oops")`` would otherwise build a path that
+    looks concrete, matches nothing, and makes a register row claim nothing.
+
+    Args:
+        value: A position, or :data:`WILDCARD`.
+
+    Returns:
+        The index in its string form.
+
+    Raises:
+        ValueError: When ``value`` is neither an ``int`` nor :data:`WILDCARD`.
+            ``True`` and ``False`` are rejected despite ``bool`` being a subclass
+            of ``int``.
+    """
+    # `bool` first, because it is a subclass of `int`: without that clause
+    # `part_path(True, 0)` builds "conversation.turns[True].parts[0]", which
+    # reads as concrete and matches nothing -- the exact failure this validator
+    # exists to prevent, and the one an `isinstance(value, int)` test waves
+    # through. `None` and `1.5` are the other half.
+    if isinstance(value, bool) or (value != WILDCARD and not isinstance(value, int)):
+        raise ValueError(f"a path index must be an int or {WILDCARD!r}, got {value!r}")
+    return str(value)
+
+
 def extra_path(key: str) -> str:
     """Return the path naming a format-specific control field.
+
+    §3.3.1a: ``extra`` is diffed **one wire key at a time** and the value under a
+    key is compared whole, so ``envelope.extra[thinking.budget_tokens]`` is not a
+    path this vocabulary defines.  Enforced rather than merely stated, the way
+    :class:`Conversation` enforces the closed sampling set: six readers written
+    by six authors cannot quietly disagree about whether a nested value has an
+    address of its own.  The trade is that a vendor shipping a dotted wire key
+    would have to be a design decision rather than a silent match failure.
+    ``residual_path`` still accepts dots, and its docstring says why.
 
     Args:
         key: The wire key, e.g. ``thinking`` for P2a.
 
     Returns:
         A path of the form ``envelope.extra[<key>]``.
+
+    Raises:
+        ValueError: When ``key`` contains a dot.
     """
+    if "." in key:
+        raise ValueError(
+            f"envelope.extra is keyed by wire key and compared whole (§3.3.1a); {key!r} names a nested value"
+        )
     return f"envelope.extra[{key}]"
 
 
@@ -1090,46 +1135,53 @@ def sampling_path(key: str) -> str:
     return f"conversation.sampling[{key}]"
 
 
-def system_path(index: int) -> str:
+def system_path(index: int | str) -> str:
     """Return the path naming one system text part.
 
     Args:
-        index: Position in :attr:`Conversation.system`.
+        index: Position in :attr:`Conversation.system`, or :data:`WILDCARD`
+            when a register row names every one of them.
 
     Returns:
         A path of the form ``conversation.system[<i>]``.
     """
-    return f"conversation.system[{index}]"
+    return f"conversation.system[{_index(index)}]"
 
 
-def turn_path(index: int, field_name: str | None = None) -> str:
+def turn_path(index: int | str, field_name: str | None = None) -> str:
     """Return the path naming one turn, or a field of it.
 
     Args:
-        index: Position in :attr:`Conversation.turns`.
+        index: Position in :attr:`Conversation.turns`, or :data:`WILDCARD`
+            when a register row names every one of them.
         field_name: An optional field, e.g. ``role``.
 
     Returns:
         A path of the form ``conversation.turns[<i>]``, with ``.<field>``
         appended when one is given.
     """
-    base = f"conversation.turns[{index}]"
+    base = f"conversation.turns[{_index(index)}]"
     return f"{base}.{field_name}" if field_name else base
 
 
-def part_path(turn_index: int, part_index: int) -> str:
+def part_path(turn_index: int | str, part_index: int | str) -> str:
     """Return the path naming one part of one turn.
 
     §3.3.4 requires a failure to name the exact turn and part.
 
+    Either index accepts :data:`WILDCARD`.  A register row writes a *pattern*
+    over every turn and part — M3, M4, M8, P5e and P8 all do — where a delta
+    writes concrete indices, and both must come from this one builder or the
+    spelling drifts between T-W3 and T-D1.
+
     Args:
-        turn_index: Position in :attr:`Conversation.turns`.
-        part_index: Position in that turn's parts.
+        turn_index: Position in :attr:`Conversation.turns`, or :data:`WILDCARD`.
+        part_index: Position in that turn's parts, or :data:`WILDCARD`.
 
     Returns:
         A path of the form ``conversation.turns[<i>].parts[<j>]``.
     """
-    return f"conversation.turns[{turn_index}].parts[{part_index}]"
+    return f"conversation.turns[{_index(turn_index)}].parts[{_index(part_index)}]"
 
 
 def tool_path(name: str, field_name: str | None = None) -> str:
@@ -1180,16 +1232,21 @@ def residual_path(key: str) -> str:
     return f"residual[{key}]"
 
 
-def reply_part_path(index: int) -> str:
+def reply_part_path(index: int | str) -> str:
     """Return the path naming one part of a reply.
 
     Args:
-        index: Position in :attr:`Reply.parts`.
+        index: Position in :attr:`Reply.parts`, or :data:`WILDCARD` for a row
+            naming every part. M12 does **not** use the wildcard — it is
+            anchored at index 0, because both translators substitute one text
+            part into a reply that was empty. The wildcard is here for T-D10,
+            whose reply diff reports concrete positions the register may need to
+            claim in bulk.
 
     Returns:
         A path of the form ``reply.parts[<i>]``.
     """
-    return f"reply.parts[{index}]"
+    return f"reply.parts[{_index(index)}]"
 
 
 def reply_usage_path(key: str) -> str:
@@ -1316,9 +1373,11 @@ def path_matches(pattern: str, concrete: str) -> bool:
     that last case unclaimed, and under §3.3.2 assertion 1 an unclaimed delta
     fails the run: a false I1 breach manufactured by the matcher itself.
 
-    Over-claiming in the other direction costs nothing, because a register row
-    is anchored at the coarsest node it affects and every path beneath that node
-    is, by construction, part of what the row changed.
+    Over-claiming in the other direction is *recoverable*, not free, and only
+    because §3.3.1a requires a row to be anchored at the **narrowest** path
+    covering its effect — so every path beneath that node is, by construction,
+    part of what the row changed. A coarser anchor silently claims what it must
+    not, which is why T-W3 carries the discipline and T-D3 the falsification case.
 
     Args:
         pattern: A path which may carry ``[*]`` wildcards.
