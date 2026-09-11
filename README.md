@@ -778,6 +778,25 @@ pytest -m agent_live  # launches real agent CLIs against live credentials
 The marker is assigned automatically from the file's path; a test only declares its own layer
 where that default is wrong. `.system_design/TEST_SUITE.md` §8 has the full matrix.
 
+### Exempting a known-failing assertion
+
+A guard sometimes covers a class of check broader than the one defect it happens to expose, so it
+would land red on a single assertion. `tests/exemptions.py` exempts **that one assertion** and
+nothing else:
+
+```python
+from exemptions import ratchet
+
+with ratchet("tr-1c-header-subset"):
+    assert bridge_headers <= native_headers
+```
+
+Every other assertion in the test, and all of its setup, still gates. A broken fixture inside the
+block still fails. And when the assertion starts passing, the run **fails** and tells you to
+delete the row -- so an exemption cannot outlive the defect it describes. Each row names the
+assertion, the condition it is expected to fail under, and its Jira key; the registry is one file
+and is meant to trend towards empty. `.system_design/TEST_SUITE.md` §8.3 has the reasoning.
+
 ## License
 
 MIT

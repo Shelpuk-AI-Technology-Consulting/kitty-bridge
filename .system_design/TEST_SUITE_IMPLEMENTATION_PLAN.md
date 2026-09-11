@@ -175,8 +175,11 @@ fixture fails a CI lint.
 
 **T-W7 — exemption registry.** Plain pytest, not BDD-specific. An entry names **one assertion**,
 its expected failure condition and its ticket; everything else in the test gates normally; an
-unexpected pass fails (`xfail(strict=True)`). *Falsification:* a second, non-exempt failing
-assertion in the same test must still fail the job.
+unexpected pass fails (`xfail(strict=True)`). *Falsification, both required:* a second,
+non-exempt failing assertion in the same test must still fail the job; and an exempt assertion
+that starts passing must fail it. Each falsification case must assert the **exact** exception
+that escapes, through a `BaseException` guard — `pytest.raises(AssertionError)` cannot see
+`pytest.xfail`, so an implementation that amnesties the whole test reports green through it.
 
 **T-W8 — bridge fixture core and extension interface.** A profile/backend factory and a real
 `BridgeServer` started against a recorder, for the **default aiohttp transport only**, plus the
@@ -361,10 +364,10 @@ that makes *its* bytes observable. Bundled, the Ollama half would have had no ev
 | **T-I6** | Agent settings precedence | blocked Q12 | T-I5 | Three runs, three winners; every sentinel demonstrated live | §6.4.2 | M |
 | **T-I7** | Streaming recovery — content | partial Q14 | T-B4, T-G7, T-W8 | Four injection points; no duplicated text, no reused tool-call id, no spliced arguments. Positive oracle waits on Q14 | §6.3.1 | L |
 | **T-I8** | Cross-attempt content and cadence | | T-D1, T-W8, T-B4 | Blip and empty-response retries byte-identical; M6, M8, M9 and failover re-normalisation each fire only on trigger | §4.3 C3 | M |
-| **T-I9** | Connection lifecycle baseline | | T-W8, T-C7 | Distinct connections per session vs the native capture; ratcheted | §4.3 C5 | M |
+| **T-I9** | Connection lifecycle baseline | | T-W8, T-C7 | Distinct connections per session vs the native capture; ratcheted — a **reported baseline**, not `exemptions.ratchet`, which is the unrelated gating mechanism of §8.3 | §4.3 C5 | M |
 | **T-I10** | `_backend_context` isolation | | T-W8 | Deterministic; belongs here, not in load | §6.3.1 | S |
 | **T-I11** | Failover, disconnect, error envelopes | | T-B4, T-W8 | Mid-stream failover; disconnect releases upstream without marking unhealthy; 503 in each native envelope; oversized in the protocol's error shape | §6.3.1 | M |
-| **T-I12** | Fingerprint parity report | | T-C7, T-W8, T-G9 | Header set vs the native baseline; **reported with a ratchet, not gating**, until gap G3 closes | §4.3 C1b | M |
+| **T-I12** | Fingerprint parity report | | T-C7, T-W8, T-G9 | Header set vs the native baseline; **reported with a ratchet, not gating**, until gap G3 closes. The ratchet here is a monotonic baseline; do **not** import `exemptions.ratchet`, which gates and fails when parity improves (§8.3) | §4.3 C1b | M |
 | **T-I13** | Side traffic | | T-W8 | `/healthz` and `/stats` cause no upstream request; pre-flight pinned as a declared exception; `--no-validate` removes it | §4.3 C6 | M |
 | **T-I14** | **Expand live-agent coverage to five Claude Code scenarios** | | — | Plain turn, tool-using turn, multi-turn with tool results, extended thinking, and a session crossing the compaction threshold. The existing file has two cases; scheduling it nightly does not expand it | §6.4.2 | M |
 
@@ -510,8 +513,13 @@ merge.** So:
   PR that the test fails at the base revision and passes with the fix. A guard written after the
   fix with no such evidence is still not acceptable — that is what the rule exists to prevent.
 - **Exemption path** only where the fix must genuinely follow later, or where the guard's scope is
-  broader than one defect. T-G1, T-G3, T-G4, T-G5 and T-G9 each cover a class of check beyond a
-  single defect, so they may land first with a single-assertion exemption.
+  broader than one defect. T-G1, T-G4, T-G5 and T-G9 each cover a class of check beyond a
+  single defect, so they may land first with a single-assertion exemption. (T-G3 was on this list
+  until KBR-6 fixed its defect and landed the guard green; its row in §10 records the dropped
+  dependency.) **A guard taking that
+  path states its verdict as an `assert`**, not `pytest.fail` — only `AssertionError` is
+  amnestied, and the established shape in this repo is `pytest.fail` with a diff, so this is the
+  one thing to get right before writing the guard. Design §8.3.
 - **Later acceptance scenarios pass normally** if the defect is already fixed. T-J2 does not need
   TR-1c and TR-4 to be red; it needs them to be correct.
 
@@ -563,6 +571,7 @@ Every design requirement has an owner. "Existing" means the current suite alread
 | §6.4.4 | Load rig and gate | T-K4, T-K5 |
 | §7.1–§7.4 | Corpus, recorders, proxy, oracle | T-W6/Epic C, T-W4/Epic B, T-W5, T-W2/T-D1 |
 | §8 | Markers, selection, job activation | T-W1, T-K6–T-K12 |
+| §8, §8.3 | Assertion exemption policy and registry | T-W7 |
 | §5.1 | Real-socket transport proof across three stacks | **Existing** — `tests/test_egress_https_proxy.py`, extended by T-W5 |
 | §6.2.3 | A structural scan that asserts its own positives | **Existing** — `tests/test_egress_coverage.py`, the pattern T-E7 copies |
 
