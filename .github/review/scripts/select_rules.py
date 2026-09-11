@@ -93,6 +93,15 @@ RULE_SPECS: tuple[RuleSpec, ...] = (
             f"{PKG}/bridge/**/*.py",
             f"{PKG}/bridge_runner.py",
             f"{PKG}/cloudflare.py",
+            # `io_encoding.py` sets the process's stdout and stderr encoding and
+            # is called by `bridge_runner.main`. It appears here AND under `cli`
+            # -- deliberately, because its two callers are the two entry points
+            # and a change to it changes what both of them emit. It is not in
+            # `core`: that rule's membership test is "imported by every layer",
+            # and this is imported by exactly two modules, so putting it there
+            # would fan out to providers, launchers and credentials rules that
+            # have nothing to say about it.
+            f"{PKG}/io_encoding.py",
         ),
     ),
     # The provider adapters: upstream request build, auth, headers, error mapping,
@@ -162,6 +171,11 @@ RULE_SPECS: tuple[RuleSpec, ...] = (
         patterns=(
             f"{PKG}/cli/**/*.py",
             f"{PKG}/tui/**/*.py",
+            # The other half of the pair described under `bridge`: this is what
+            # `cli.main.main` calls before it writes anything, so `cli.md`'s
+            # "errors to stderr, results to stdout" section is the rule a change
+            # here has to be read against.
+            f"{PKG}/io_encoding.py",
         ),
     ),
     RuleSpec(
