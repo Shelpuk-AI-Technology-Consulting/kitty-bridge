@@ -89,6 +89,15 @@ _ALLOWLIST: dict[str, str] = {
         "contains a tool result whose matching tool call was lost. Start a new conversation "
         "(/clear), or switch to a model with a larger context window."
     ): "downstream 400 body for an irreducible conversation (KBR-5)",
+    # KBR-134's 404 diagnostic. Downstream only, by construction: it is built by
+    # _translate_upstream_error_text() and every caller writes the result into a
+    # response to the agent. No build_upstream_headers() or translate_to_upstream()
+    # can reach it -- the function is only ever called with an upstream status in
+    # hand, i.e. after the request has already gone out.
+    (
+        '. Either the model is not available at that endpoint, or this profile\'s '
+        'base URL is wrong: Kitty appends "'
+    ): "downstream error body: how the user fixes a wrong base URL (KBR-134)",
 }
 
 #: The string this ticket deleted. The scanner must still be able to see it.

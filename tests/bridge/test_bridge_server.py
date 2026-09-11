@@ -761,7 +761,7 @@ class TestCloudflareDetection:
         assert BridgeServer._is_cloudflare_block(403, "<html>Forbidden</html>") is False
 
     def test_translate_upstream_error_cloudflare(self) -> None:
-        msg = BridgeServer._translate_upstream_error(
+        msg = BridgeServer._translate_upstream_error_text(
             403,
             "<html>cf-browser-verification window._cf_chl_opt = {};</html>",
         )

@@ -439,6 +439,9 @@ Use the `custom_openai` provider to connect to **any** service that exposes an O
 This works with DeepSeek, Together AI, Groq, vLLM, LM Studio, and any other service that accepts
 `POST /v1/chat/completions` with Bearer auth and SSE streaming.
 
+**The base URL ends at the API root** — Kitty appends `/chat/completions` itself. Give it
+`https://api.mistral.ai/v1`, not `https://api.mistral.ai/v1/chat/completions`.
+
 ```bash
 $ kitty setup
   ? Provider: Custom OpenAI-Compatible
@@ -459,6 +462,7 @@ $ kitty claude
 | Together AI  | `https://api.together.xyz/v1`           |
 | Groq         | `https://api.groq.com/openai/v1`        |
 | Fireworks    | `https://api.fireworks.ai/inference/v1` |
+| Mistral      | `https://api.mistral.ai/v1`             |
 | vLLM (local) | `http://localhost:8000/v1`              |
 | LM Studio    | `http://localhost:1234/v1`              |
 

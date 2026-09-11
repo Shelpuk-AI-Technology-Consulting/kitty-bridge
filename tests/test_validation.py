@@ -194,3 +194,55 @@ async def test_validate_dirty_key_returns_invalid(mock_session_cls):
     assert result.valid is False
     assert "invalid characters" in result.reason
     assert "kitty setup" in result.reason
+
+
+@pytest.mark.asyncio
+@patch("kitty.validation.aiohttp.ClientSession")
+async def test_preflight_probes_the_normalised_url(mock_session_cls):
+    """KBR-134 — pre-flight inherits the base-URL fix, because it composes the same way.
+
+    ``validate_api_key`` builds its probe URL through ``build_base_url``, so the
+    reporter's stored profile is probed at Mistral's real endpoint rather than at
+    the doubled path that produced the original 404.  Nothing in
+    ``validation.py`` changed to achieve this; the test pins the consequence so a
+    later refactor cannot quietly undo it.
+    """
+    from kitty.providers.custom_openai import CustomOpenAIAdapter
+
+    provider = CustomOpenAIAdapter()
+    mock_response = AsyncMock()
+    mock_response.status = 200
+    mock_response.__aenter__ = AsyncMock(return_value=mock_response)
+    mock_response.__aexit__ = AsyncMock(return_value=False)
+
+    mock_session = AsyncMock()
+    mock_session.post = MagicMock(return_value=mock_response)
+    mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+    mock_session.__aexit__ = AsyncMock(return_value=False)
+    mock_session_cls.return_value = mock_session
+
+    result = await validate_api_key(
+        provider,
+        "any-key",
+        {"base_url": "https://api.mistral.ai/v1/chat/completions"},
+    )
+
+    assert result.valid is True
+    assert mock_session.post.call_args.args[0] == "https://api.mistral.ai/v1/chat/completions"
+
+
+@pytest.mark.asyncio
+async def test_preflight_does_not_raise_on_an_unparseable_base_url():
+    """A malformed stored base URL yields a result, not a traceback.
+
+    ``validate_api_key`` builds its probe URL *before* its own ``try`` block, and
+    ``launcher.py`` does not wrap the call, so anything ``build_base_url`` raises
+    reaches the user as a Python traceback at launch.  Normalisation parses the
+    URL where nothing did before, which made that reachable; this pins the
+    graceful path.
+    """
+    from kitty.providers.custom_openai import CustomOpenAIAdapter
+
+    result = await validate_api_key(CustomOpenAIAdapter(), "any-key", {"base_url": "https://[::1/v1"})
+
+    assert result.valid is False

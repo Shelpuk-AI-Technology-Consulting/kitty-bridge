@@ -66,7 +66,9 @@ class CustomAnthropicAdapter(AnthropicAdapter):
                 raise ValueError(
                     f"Invalid base_url in provider_config: {url!r}. Must be a non-empty http:// or https:// URL."
                 )
-            return str(url)
+            # KBR-134: a pasted full endpoint would otherwise be composed into a
+            # doubled path and rejected upstream as a missing model.
+            return self._strip_endpoint_suffix(str(url), self.upstream_path)
         return self.default_base_url
 
     def translate_to_upstream(self, cc_request: dict) -> dict:

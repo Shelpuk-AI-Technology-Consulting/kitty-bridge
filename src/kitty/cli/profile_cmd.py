@@ -168,7 +168,7 @@ def _create_profile_flow(store: ProfileStore, cred_store: CredentialStore) -> Pr
     provider_config: dict = {}
     if provider_adapter.requires_custom_url:
         while True:
-            base_url = prompt_text("API base URL (e.g. https://api.deepseek.com/v1): ")
+            base_url = prompt_text("API base URL — the API root, e.g. https://api.deepseek.com/v1: ")
             if base_url and base_url.strip():
                 provider_config = {"base_url": base_url.strip()}
                 break

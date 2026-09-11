@@ -403,6 +403,7 @@ class TestTheWholeSuiteIsCoherent:
             "tests/test_github_actions.py",
             "tests/test_layer_markers.py",
             "tests/test_layer_selection.py",
+            "tests/test_custom_url_docs.py",
         }
 
         actual = {
