@@ -13266,8 +13266,10 @@ class RecordedTestCountTests(unittest.TestCase):
     """Every document in :data:`QUOTING` quotes how many tests this file has.
 
     🔴 **A quoted count is a claim that rots silently.** `README.md` tells a
-    contributor what to expect from a local run and `ci.yml` tells an operator
-    what the job covers; a reader who runs the suite and sees a different number
+    contributor what to expect from a local run, `ci.yml` tells an operator what
+    the job covers, and `pyproject.toml` cites it to explain why a linter
+    exclusion is not a coverage gap; a reader who runs the suite and sees a
+    different number
     cannot tell whether tests were added, whether some failed to load, or whether
     the document was simply never updated. The third of those is the only one
     that is harmless, and it is indistinguishable from the second.
@@ -13281,10 +13283,11 @@ class RecordedTestCountTests(unittest.TestCase):
     updating every sentence in :data:`QUOTING`. They were 24 out of date when
     this guard was written, which is how long it takes.
 
-    ⚠️ **No count of DOCUMENTS appears in this docstring, deliberately.** It
-    said "two documents" and "two sentences" while `QUOTING` held three, which
-    is the same rot one level up -- in the guard that exists because quoted
-    figures rot. A number nothing checks does not belong here.
+    ⚠️ **The number of documents is not stated here, deliberately.** This
+    docstring said "two documents" and "two sentences" long after `QUOTING` had
+    grown past that -- the same rot one level up, inside the guard that exists
+    because quoted figures rot. A figure nothing checks does not belong in
+    prose; :data:`QUOTING` is the list, and it is the thing that is checked.
     """
 
     #: The documents quoting the figure. Enumerated rather than swept: a sweep
@@ -13655,9 +13658,18 @@ class NoDocumentClaimsTheRepositoryHasNoTestGateTests(unittest.TestCase):
         )
         self.assertGreaterEqual(
             len([text for text in self.ALLOWED if ".system_design" in text]),
-            3,
+            4,
             "no allowed paragraph names the directory, so the gitignore rule "
             "has nothing here to stay off",
+        )
+        # 🔴 And the hardest one by name, because a floor is met by the three
+        # easy ones. This is the sentence the rule's post-verb bound was
+        # measured against: an exclusion verb 21 characters from the path, where
+        # the bound is 12. Lose it and the negative control for that measurement
+        # is gone while the floor still passes.
+        self.assertTrue(
+            [text for text in self.ALLOWED if "deliberately **not** excluded" in text],
+            "the near-miss that fixes the rule's post-verb bound is gone",
         )
         self.assertTrue(
             [text for text in self.ALLOWED if "design document" in text],
@@ -13683,9 +13695,11 @@ class NoDocumentClaimsTheRepositoryHasNoTestGateTests(unittest.TestCase):
         Exactly one code line carries the marker for these rules, and not
         because it says anything false. **Stripped of the marker** it fuses with
         the comment beneath it into a sentence the gitignore rule matches; with
-        the marker in place it does not fuse at all, because the sweep honours a
-        marked line. Removing the marker is therefore what turns the sweep red,
-        which is the sense in which it is load-bearing.
+        the marker in place the sweep skips the line before its fusion is ever
+        tested -- and that fusion would not match anyway, because the marker's
+        own characters push the path past the rule's bound. Removing the marker
+        is what turns the sweep red, which is the sense in which it is
+        load-bearing.
 
         The price of tolerating that false positive is that the marker stays
         honest: if the rule is ever narrowed so the stripped fusion no longer
@@ -14355,7 +14369,17 @@ class ReviewerIsPointedAtTheDesignDocumentsTests(unittest.TestCase):
         skipped by any future loop that tolerates a missing path.
         """
 
-        self.assertGreaterEqual(len(self.REQUIRED), 8, "the table has been emptied")
+        self.assertGreaterEqual(len(self.REQUIRED), 12, "a row has been removed")
+        # 🔴 One reason per row, so the floor above cannot be met by duplicating
+        # one. Measured: with the floor at 8 against 12 rows, the row carrying
+        # the prompt's core instruction -- the sentence telling the model it may
+        # read the internal specification, in the file the model receives -- was
+        # deletable with every assertion here green.
+        self.assertEqual(
+            len({why for _, _, why in self.REQUIRED}),
+            len(self.REQUIRED),
+            "two rows give the same reason, so one is deletable in silence",
+        )
         for path, _, _ in self.REQUIRED:
             with self.subTest(document=str(path)):
                 self.assertTrue(path.is_file(), f"{path} does not exist")
