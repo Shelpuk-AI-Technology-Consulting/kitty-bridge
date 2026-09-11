@@ -15,9 +15,16 @@ import sys
 from pathlib import Path
 
 from kitty.bridge.server import BridgeServer
+from kitty.io_encoding import harden_output_streams
 
 
 def main() -> None:
+    # `kitty bridge start` spawns this process with stdout and stderr as pipes,
+    # so the locale-codepage path is not an edge case here -- it is the only
+    # path. The parent reads this stderr back and decodes it as UTF-8
+    # (`bridge/manage.py`), which is correct only because of this call.
+    harden_output_streams()
+
     parser = argparse.ArgumentParser(prog="kitty.bridge_runner")
     parser.add_argument("--host", default=None)
     parser.add_argument("--port", type=int, default=None)

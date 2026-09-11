@@ -198,3 +198,24 @@ name = "Launchers must not import CLI module"
 type = "forbidden"
 source_modules = ["kitty.launchers"]
 forbidden_modules = ["kitty.cli"]
+
+# kitty.io_encoding is imported by BOTH entry points -- kitty.cli.main and
+# kitty.bridge_runner -- so it has to sit below every layer. That is the whole
+# reason it is its own module rather than a function in cli/main.py: a
+# bridge_runner -> kitty.cli import would invert the direction the contract
+# above enforces, and would NOT be caught, because kitty.bridge_runner is a
+# sibling top-level module rather than a descendant of kitty.bridge. This
+# contract pins the property the module docstring claims.
+[[tool.importlinter.contracts]]
+name = "The stream-encoding leaf must import nothing from kitty"
+type = "forbidden"
+source_modules = ["kitty.io_encoding"]
+forbidden_modules = [
+    "kitty.cli",
+    "kitty.bridge",
+    "kitty.launchers",
+    "kitty.tui",
+    "kitty.profiles",
+    "kitty.credentials",
+    "kitty.providers",
+]

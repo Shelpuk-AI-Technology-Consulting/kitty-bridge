@@ -1973,6 +1973,13 @@ its five cases. Named here rather than left for T-K6 to rediscover, since the co
 and T-H1 plan against. KBR-132 deliberately did **not** move it — the rule above applies to a test
 fixing a skip defect exactly as it applies to any other.
 
+KBR-10 added the largest one: `tests/cli/test_stream_encoding.py` spawns **35 child interpreters**
+per run, ×4 Python versions. It has no choice — the behaviour it proves is that kitty survives a
+hostile *interpreter start-up encoding*, and `PYTHONIOENCODING` is read before any in-process test
+exists, so a real child is the only oracle. Each spawn is short (the whole file runs in ~14s), but
+T-H1 should note that mutation testing over `l1` will re-pay that cost per mutant, and may want to
+deselect this file from the mutation baseline rather than from the gate.
+
 **The load gate has to be wired, not merely declared.** The table above marks Load as gating a
 release, but `publish.yml` currently depends only on the reusable `tests.yml`. Putting the load
 run in "its own workflow" would leave publication free to proceed while load fails — or while it
