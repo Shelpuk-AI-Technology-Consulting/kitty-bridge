@@ -287,24 +287,70 @@ the whole request and accounts for every field:
 Request                          -- the complete request; nothing is dropped silently
   envelope:     Envelope         -- routing and control
   conversation: Conversation     -- semantic content
-  residual:     {key: value}     -- anything the reader did not account for
+  residual:     {path: value}    -- anything the reader did not account for
+  consumed:     {key}            -- top-level body keys the reader DID account for
+  source:       {key: value}     -- the mapping the reader parsed
 
 Envelope
   model, stream, store, and every other control field the format defines
-  (Bedrock's modelId and Responses' store live here too)
+  in `extra`, keyed by the wire key
+  (Bedrock's modelId normalises onto `model`; Responses' store lives here too)
 
 Conversation
   system:   ordered text parts
-  turns:    ordered [ Turn(role, parts) ]
+  turns:    ordered [ Turn(role, parts) ]        -- role is `user` or `assistant`, only
   tools:    ordered [ ToolDecl(name, description, schema, strict) ]
-  sampling: { max_tokens, temperature, top_p, stop, seed, ... } -- declared, may be absent
+  sampling: a CLOSED set of fifteen canonical keys (§3.3.1b) -- declared, may be absent
 
 Part = Text(str)
-     | ToolUse(id, name, arguments)
-     | ToolResult(tool_use_id, content, is_error)
-     | Thinking(text)
-     | Image(digest)
+     | ToolUse(name, arguments, id?)
+     | ToolResult(content, tool_use_id?, is_error)   -- content: [ Text | Image | Json | Opaque ]
+     | Thinking(text, signature?)
+     | Image(digest?, media_type?, ref?)
+     | Json(value)
+     | Opaque(kind, digest?)
 ```
+
+**`consumed` is why a dropped key is detectable.** A reader that *drops* an unknown key produces
+an **empty** residual, so "the residual must be empty" would pass it — and T-W2's own falsification
+case is a stub reader that drops an unknown key. Totality is decidable only against the source
+body, so the projection records what the reader claimed to handle. `consumed` covers top-level keys
+and catches drops; the **path-keyed** residual covers nesting and fails closed, which matters
+because Gemini puts every sampling parameter under `generationConfig` and Converse nests
+`inferenceConfig` and `toolConfig`.
+
+> **The boundary, stated so nobody over-reads a green run.** `consumed` holds *top-level* keys, so
+> a reader that claims `generationConfig` and **silently drops** `topK` inside it **passes**
+> `verify_total`. Catching that would require the contract to walk the body itself — making it a
+> second reader, which the independent-oracle rule forbids. What closes it instead: each reader's
+> own L1 tests against its format's published examples (§7.4), and **T-D8**, which owns "residual
+> empty across the whole corpus" for all seven readers. T-W2 pins this boundary with its own test,
+> so it stays a decision rather than an assumption.
+
+**Optional ids, because two formats have none.** Gemini's `functionCall`/`functionResponse` carry
+no id; pairing there is by tool name and the k-th unanswered call of that name in the most recent
+assistant turn. A required id would force those readers to synthesise one and show a delta on every
+tool turn.
+
+**`ToolResult.content` is wider than text and images**, because Converse's `toolResult.content`
+carries `json` (the common case), `document`, `video` and `searchResult`, Anthropic's carries
+`document` and `search_result`, and Gemini's `functionResponse.response` is a bare struct. `Json`
+carries structured results; `Opaque(kind, ...)` keeps the rest **detectable** without modelling six
+vendors' block zoos, with `kind` a canonical snake_case name rather than the wire's spelling.
+
+**An empty block is a part with an empty string, never nothing.** P5e injects an empty `thinking`
+block and P8 an empty `reasoning_content`; P8's trigger is conditional and *inferred*, so §3.3.2
+assertion 2 needs its absence to be observable. `Thinking.signature` carries what M8's carrier
+repair manipulates.
+
+**`Image.digest` is the lowercase hex SHA-256 of the decoded bytes**, with `media_type` excluded
+from it and carried separately, so a changed media type is its own delta. Gemini's
+`fileData.fileUri` has no bytes: `digest` is then absent and `ref` holds the URI. Unpinned, the
+Messages reader and the Chat Completions reader would produce different digests for one image.
+
+The contract lives in `tests/harness/contract.py` (T-W2). The **package** `tests/harness/` is the
+home of T-W4's recorder, T-W5's proxy fixture, T-W6's corpus loader and T-W8's bridge fixture, each
+in its own module beside it — `contract.py` itself captures nothing and reads nothing.
 
 **Unknown fields fail closed.** Each reader must classify **every** key in the body into exactly
 one of: mapped to the envelope, mapped to the conversation, or residual. A non-empty `residual`
@@ -314,9 +360,133 @@ skips what it does not recognise is a reader that cannot prove completeness. Add
 wire format therefore forces a deliberate decision: map it, or declare it ignored with a reason.
 
 **Every register row names the field it touches.** M1 is `envelope.model`; P17 is
-`envelope.stream` and `envelope.store`; P15 is `conversation.tools[].strict`; P13 is
+`envelope.stream` and `envelope.store`; P15 is `conversation.tools[*].strict`; P13 is
 `conversation.sampling`. Without that, "claimed by a register row" is a judgement call rather
 than a lookup.
+
+#### 3.3.1a The path vocabulary
+
+T-W2 owns the string form, because it has **two** consumers that must agree exactly: a delta the
+oracle reports (§3.3.4), and the "projection field it touches" column of every register row
+(T-W3). Neither can define it without the other agreeing.
+
+| Path form | Names |
+|---|---|
+| `envelope.model` · `envelope.stream` · `envelope.store` | The named control fields |
+| `envelope.extra[<wire key>]` | A format-specific control field — P2a `thinking`, P3 `reasoning`, P4 `reasoning_effort`, P10 `reasoning_split` |
+| `conversation.system[<i>]` | One system text part |
+| `conversation.turns[<i>].role` · `.parts[<j>]` | A turn, or one part of it |
+| `conversation.tools[<name>].description` · `.schema` · `.strict` | A tool declaration, **by name** |
+| `conversation.sampling[<key>]` | One sampling parameter |
+| `conversation.turns` · `.system` · `.tools` · `.sampling` | A **whole collection** — M5 and M13 rewrite the turns, P5b joins the system blocks, §3.3.1 pins P13/P14 to the bare `sampling` |
+| `headers[<name>]` | A header — P9a, P9b, P9c, and §4.3 C1 |
+| `residual[<path>]` | An unclassified value |
+| `reply.parts[<i>]` · `reply.stop_reason` · `reply.usage[<key>]` | The response direction — M12, T-D10 |
+| `route.method` · `.scheme` · `.host` · `.path` · `.query` | The route (§3.3.5) — M14, P20, P21 |
+
+**Tools are addressed by name, not index**, because translators reorder and filter declarations; a
+positional path would report a delta whenever the order changed and the declaration did not.
+
+**Two kinds of path, and a matcher.** A register row writes a **pattern** with the `[*]` wildcard
+(`conversation.tools[*].strict` — every tool); a delta is **concrete**
+(`conversation.tools[get_weather].strict`). §3.3.2 assertion 1 is literally a match of one against
+the other, so T-W2 supplies the predicate rather than leaving T-W3 to write patterns and T-D1 a
+matcher that agree only by luck.
+
+**A pattern is a prefix.** It names its node and everything beneath it, at any depth — so a row
+anchored at `conversation.turns[*].parts[*]` claims
+`conversation.turns[2].parts[0].signature`, which is what M8's carrier repair produces.
+
+The rule is deliberately **asymmetric**, and the asymmetry is the reason to prefer it:
+under-claiming manufactures a *false* I1 breach, failing the run over a mutation that **is**
+registered; over-claiming is silent. So the error the matcher can make is the recoverable one — but
+it is recoverable only if the register is written carefully:
+
+> ⚠️ **A row must be anchored at the *narrowest* path that covers its effect.** A coarser anchor
+> silently claims every delta beneath it. Anchoring P15 at `conversation.tools[*]` rather than
+> `conversation.tools[*].strict` would claim a *deleted tool description* — which is one of
+> §3.3.1's own five oracle falsification cases. The matcher cannot catch that; **T-W3's anchoring
+> discipline and T-D3's falsification case (mutate a field beneath a registered anchor and assert
+> the oracle still fails) are what keep it honest.**
+
+**The prefix stops at a bracket.** Bracket contents are literal and are never re-parsed — which is
+what makes `residual[generationConfig.topK]` legal — so a pattern naming a *parent key* does not
+claim paths nested under it. `residual[generationConfig]` does **not** match
+`residual[generationConfig.topK]`; `residual[*]` and the bare `residual` both do. This is a second
+rule sitting beside the first and it is the one that surprises.
+
+`[*]` is the wildcard. `[]` is accepted as its **legacy spelling**, because §3.3.1 wrote P15 as
+`conversation.tools[].strict` before this vocabulary existed and a row carried over in the old
+notation must not silently match nothing. An unbalanced bracket **raises** rather than mis-splitting
+the path.
+
+**`not projectable` is a legal value for the register's field column, and it requires a reason.**
+P16 uses it — the `input_text`/`output_text` tag is redundant with the turn's role, so carrying it
+would put one vendor's spelling into a wire-independent form — as do the whole-body protocol
+translations M2, M9, P11 and P12. An empty cell would leave those rows silently unfalsifiable;
+an explicit value with a reason does not.
+
+#### 3.3.1b Normalisation rules the six readers share
+
+The claim that "a conversation is a conversation" holds only if six independently written readers
+agree on a canonical form. They are six separate tasks, so the agreement is part of the contract.
+
+- **Roles** are `user` or `assistant`, and nothing else. Gemini's `model` maps to `assistant`.
+- **System instructions lift into `Conversation.system`**, never into a turn — from a dedicated
+  field (Messages, Converse, Gemini `systemInstruction`), a `role: "system"` message, a
+  `role: "developer"` message, or Responses' `instructions` field.
+- **A tool result is a `ToolResult` part inside a `user` turn**, by a **merge rule**: a maximal run
+  of consecutive tool results forms one turn; an immediately following non-tool user message merges
+  into it; `ToolResult` parts come first; consecutive same-role turns merge. *An orphan tool result
+  still projects, in the turn where it occurred* — M7 exists to drop orphans, so a reader that
+  raised on one would fail instead of producing the delta that names it.
+
+  A lift rule ("into the user turn that follows the assistant turn") does **not** work: the standard
+  Chat Completions exchange ends `assistant(tool_calls) → tool → tool`, with no following user
+  message at all. And because paths are index-based, any disagreement about turn boundaries reports
+  a delta on *every* subsequent turn.
+- **`modelId` and Azure's deployment id normalise onto `envelope.model`**, or P18 and P6/P20 cannot
+  be expressed as `envelope.model` and a *moved* field looks *dropped*.
+- **Sampling normalises to the Chat Completions spelling**, onto this **closed set of fifteen** —
+  the fourteen P13 drops, plus `top_k`, which Gemini and Converse carry and Chat Completions does
+  not:
+
+  `temperature` · `top_p` · `top_k` · `max_tokens` · `max_completion_tokens` ·
+  `frequency_penalty` · `presence_penalty` · `logprobs` · `top_logprobs` · `response_format` ·
+  `stop` · `n` · `stream_options` · `seed` · `logit_bias`
+
+  Responses' `max_output_tokens` maps onto `max_tokens`; `max_completion_tokens` stays distinct,
+  because P13 drops it in its own right, so a reader must not collapse both. A key outside the set
+  that the reader **recognises as a declared control field of that format** maps to
+  `envelope.extra[<wire key>]` — only an *unrecognised* key residualises. Without that split,
+  Gemini's `generationConfig.responseSchema` and Converse's `guardrailConfig` would fail the run as
+  unaccounted fields, on the two formats the CC-shaped set was not derived from.
+
+  The set is **enforced**, not merely declared: `Conversation` rejects a non-canonical sampling key
+  the way `Turn` rejects a role outside `user`/`assistant`. Six readers cannot quietly disagree
+  about whether `n` is sampling.
+- **`tool_choice`** unifies four wire keys — CC/Messages `tool_choice`, Converse's
+  `toolConfig.toolChoice`, Gemini's `functionCallingConfig.mode` — onto
+  `envelope.extra["tool_choice"]`, with the **value** normalised to `auto` · `any` · `none` ·
+  `tool:<name>`. This is the one deliberate exception to keying `extra` by the wire key, because
+  four spellings name one concept.
+- **On the response direction**, `stop_reason` is `end_turn` · `max_tokens` · `stop_sequence` ·
+  `tool_use` · `error` · `other`, where `other` keeps the wire's own string in
+  **`Reply.stop_reason_raw`** — Gemini adds `SAFETY` and `RECITATION`, and a closed set with no
+  escape would fail the run on a legitimate safety-blocked reply.
+
+  **Not in the residual**, and the reason generalises: a non-empty residual *fails the run*, so
+  building an escape out of the residual defeats the escape. A value mapped to `other` has been
+  seen and classified — it is accounted for. The residual means only *nobody has looked at this*.
+
+  **The pairing is enforced, both ways.** `other` without `stop_reason_raw` is rejected, because a
+  reader that maps both `SAFETY` and `RECITATION` to a bare `other` has discarded exactly what
+  T-D10 needs; and a `stop_reason_raw` beside a canonical reason is rejected as a stale leftover.
+  An invariant stated only in a docstring is a comment, not a rule — the same posture the closed
+  vocabularies take.
+
+  **`usage` is carried but excluded from the diff**: it is provider-reported, never agent-supplied,
+  so a difference carries no I1 information.
 
 Then write one **hand-written reader per wire format** — Anthropic Messages, Chat Completions,
 OpenAI Responses, Gemini, Bedrock Converse, Ollama `/api/chat` — each written directly against
@@ -1597,13 +1767,41 @@ output.
 requests**, not bodies:
 
 ```
-CapturedRequest(method, scheme, host, path, query, headers, body)
+CapturedRequest(method, scheme, host, path, query, headers, body,
+                arrival?, peer_port?)      -- the last two are T-W4's to populate (§5.2.1)
+CapturedReply(status, headers, body)
+
+Projection      -- wire_format: WireFormat ; read_request(CapturedRequest) -> Request
+ReplyProjection -- wire_format: WireFormat ; read_reply(CapturedReply)    -> Reply
+
+verify_total(projected)                     -- the totality rule; Request or Reply
 
 assert_no_unclaimed_mutation(inbound:  CapturedRequest, inbound_format,
                              captured: CapturedRequest, captured_format,
                              register, triggers_met,
                              expected_route)   # derived from the profile, independently
 ```
+
+`WireFormat` is a **closed** enumeration of the six formats above. §7.4 already notes that a
+boolean declaration cannot select among six projections; a bare string has the opposite failure,
+where six reader authors spell one format three ways and the format-keyed lookup silently misses.
+
+**Two protocols, not one with two methods.** §3.3.1 makes response translation "a different claim
+[that] gets a different test", and the plan splits the work as six request readers (T-A1–T-A6)
+against one reply task (T-A7) with its own comparison (T-D10).
+
+**`arrival` and `peer_port` sit on `CapturedRequest` but belong to T-W4.** They serve containment's
+tunnel join (§5.2.1), and no fidelity assertion reads them. They live on the shared type rather than
+on a T-W4 subclass so that T-W4, T-B1–T-B3 and T-E2 consume one type instead of two.
+
+**Projection values are not hashable** — `__hash__` is set to `None` on every one, deliberately, so
+the limitation is total rather than data-dependent. §3.3.3's counterpart matching must therefore be
+an **order-aware multiset** match, not a set difference: a set-based implementation would pass on
+text-only fixtures and raise on the first corpus entry carrying a `ToolUse`. Capture types *are*
+hashable; only projections are not.
+
+**A body that cannot be read raises `UnreadableBodyError`**, named in the contract so that T-C6's
+malformed corpus entry is distinguishable from an I1 breach without catching bare `Exception`.
 
 **Bodies alone cannot prove correct routing** (§3.3.5). Both formats are supplied by the harness
 from the observed wire shape (§3.3.4), never read from the adapter's own declaration. That
