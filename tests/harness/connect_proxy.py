@@ -497,7 +497,11 @@ class ConnectProxy:
             TimeoutError: When the listener will not finish closing; see
                 :func:`_drain_server`, which carries the reasoning.
         """
-        server = self._server
+        # Claimed up front, so the fixture's teardown call after a test has
+        # already stopped the proxy -- or after a `stop()` that raised --
+        # returns instead of spending the drain deadline again and reporting
+        # the same failure twice. The first report already named it.
+        server, self._server = self._server, None
         if server is None:
             return
 
@@ -518,11 +522,6 @@ class ConnectProxy:
             tunnel.cancel()
         await asyncio.gather(*self._tunnels, return_exceptions=True)
         await _drain_server(server, self._writers)
-        # Cleared last: a `stop()` that raised has not stopped anything, and
-        # the fixture's teardown call must chase the connection again rather
-        # than return quietly and swallow the diagnostic.
-        self._server = None
-        self._writers.clear()
 
     async def handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         """Serve one CONNECT exchange: record it, check auth, then pipe.
@@ -651,7 +650,7 @@ class TlsTarget:
             TimeoutError: When the listener will not finish closing; see
                 :func:`_drain_server`.
         """
-        server = self._server
+        server, self._server = self._server, None
         if server is None:
             return
 
@@ -660,8 +659,6 @@ class TlsTarget:
         # this class cancels nothing. `_drain_server` does the aborting.
         server.close()
         await _drain_server(server, self._writers)
-        self._server = None
-        self._writers.clear()
 
     async def handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         """Answer any single request with the fixed target body.
