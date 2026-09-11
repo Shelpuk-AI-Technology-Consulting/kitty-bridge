@@ -577,6 +577,14 @@ DEEPSEEK_NO_BALANCE_ABRIDGED = (
     'API Error: 402 {"error":{"message":"Insufficient Balance"}}'
 )
 
+#: The header `_write_diagnostic` writes above the record tail.
+#:
+#: Named because a test that splits the diagnostic on the WRONG delimiter does not
+#: fail — `str.split` returns the whole document, so the guidance and the record tail
+#: are asserted together and the isolation the test claims never happens. KBR-172
+#: shipped exactly that bug, carrying a sibling repository's wording.
+RECORD_TAIL_HEADER = "--- execution record (tail) ---"
+
 #: The one refusal this configuration is documented to be able to hit, lifted to a
 #: module constant by KBR-145 so that `classify` and `_write_diagnostic` are judged
 #: against the SAME string. Two copies could drift, and the drift would hide exactly
@@ -2235,13 +2243,17 @@ class TestClassify(unittest.TestCase):
                 ),
                 record_present=True,
             )
-            # The same delimiter `test_the_DIAGNOSTIC_is_scoped_too_not_just_the_verdict`
-            # uses, and it has to be the real one: the diagnostic appends the record's
-            # own tail verbatim, so a split on a string the file never contains silently
-            # asserts against the whole document — including the prose under test.
-            guidance = path.read_text(encoding="utf-8").split(
-                "--- execution record (tail) ---"
-            )[0]
+            written = path.read_text(encoding="utf-8")
+
+        # ⚠️ The delimiter is asserted before it is used, and that is the whole point.
+        # A split on a string the file never contains does not fail — it silently
+        # returns the WHOLE document, so the test still passes and the scoping it
+        # claims to check is never isolated. Measured: reverting this line to the
+        # wrong delimiter leaves the assertion below green, so nothing but this
+        # assertion can catch it. The first version of this test had exactly that
+        # bug, carrying a sibling repository's wording.
+        self.assertIn(RECORD_TAIL_HEADER, written)
+        guidance = written.split(RECORD_TAIL_HEADER)[0]
 
         self.assertNotIn("Top up the balance", guidance)
 
