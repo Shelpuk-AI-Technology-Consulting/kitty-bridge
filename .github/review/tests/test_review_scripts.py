@@ -1335,12 +1335,26 @@ class NoPrivateReferenceLeaksTests(unittest.TestCase):
     #: list used to carry a standing note asking to be extended the day
     #: `/.system_design/` stopped being ignored. That day came, and extending it
     #: was tried first: run over every tracked file outside `.github/`, the
-    #: TICKET rule reports **341 tokens on 309 lines in 38 distinct forms, and
-    #: not one of them is a leak.** 127 are this project's own key; the other
-    #: 214 are acceptance-criterion identifiers, test-scenario identifiers,
-    #: third-party model names (`GPT-5`, `GLM-5`) and protocol tokens  # noqa: leak-guard
-    #: (`HTTP-413`, `ISO-8859`) -- all the same shape, because the shape is all this  # noqa: leak-guard
-    #: rule has to go on.
+    #: TICKET rule reports **hundreds of tokens across dozens of distinct forms,
+    #: and not one of them is a leak.** Roughly a third are this project's own
+    #: key; the rest are acceptance-criterion identifiers, test-scenario
+    #: identifiers, third-party model names (`GPT-5`, `GLM-5`) and protocol  # noqa: leak-guard
+    #: tokens (`HTTP-413`, `ISO-8859`) -- all the same shape, because the shape  # noqa: leak-guard
+    #: is all this rule has to go on.
+    #:
+    #: 🔴 **Dated, and deliberately not exact.** At `acd9e9b` (2026-09-11)
+    #: it was 341 hits on 309 lines in 38 forms; one merge from `main` moved it
+    #: to 344 on 312 in 39 without touching anything this rule cares about. An
+    #: exact figure in prose is the thing :class:`RecordedTestCountTests` exists
+    #: because of, and nothing checks this one -- so what is recorded here is
+    #: the shape of the result, which does not move, plus the command that shows
+    #: it, which is the only honest form for a figure no test holds. The command
+    #: prints the RAW shape count and its distribution, before
+    #: :data:`NOT_TICKETS` and :data:`OWN_PREFIXES` are applied -- the
+    #: distribution is the argument, and it is what does not change::
+    #:
+    #:     git ls-files | grep -v '^\.github/' | xargs grep -hoE \
+    #:       '\b[A-Z][A-Z0-9]{1,9}-[0-9]{1,6}\b' | sort | uniq -c | sort -rn  # noqa: leak-guard
     #:
     #: 🔴 **The obvious repair is the one this class already forbids.** An
     #: allowlist of those namespaces is precisely the "broad allowlist"
@@ -1494,7 +1508,11 @@ class NoPrivateReferenceLeaksTests(unittest.TestCase):
             read += 1
             relative = path.relative_to(repo).as_posix()
             seen.add(relative)
-            tops.add(relative.split("/", 1)[0] if "/" in relative else "")
+            head, separator, _ = relative.partition("/")
+            # "" is the repository root: a path with no separator is a root
+            # file, and grouping those under their own key is what lets the
+            # floor below name the root alongside the directories.
+            tops.add(head if separator else "")
 
         for name in (
             "README.md",
@@ -1737,10 +1755,10 @@ class NoPrivateReferenceLeaksTests(unittest.TestCase):
                     )
 
     def test_the_own_key_allowance_is_load_bearing(self):
-        """🔴 The control a SWEEP cannot give itself, and the first draft of this
-        test got it wrong in exactly the way this class warns about.
+        """🔴 The control a SWEEP cannot give itself.
 
-        A sweep-level assertion -- "with the allowance disabled, the sweep
+        The first draft of this test got it wrong in exactly the way this class
+        warns about. A sweep-level assertion -- "with the allowance disabled, the sweep
         reports something" -- was the first draft, and it passes identically
         whether the allowance exists or has been deleted: the tree carries
         plenty of tokens the allowance never touches. That is a control which
@@ -13625,7 +13643,7 @@ class NoDocumentClaimsTheRepositoryHasNoTestGateTests(unittest.TestCase):
         "change touches, and judge the change against it",
     )
 
-    def test_the_fixtures_are_not_empty_and_every_rule_is_exercised(self):
+    def test_neither_fixture_is_degenerate(self):
         """🔴 Four controls above pass over an EMPTY list, which is no control.
 
         Both fixtures were literals inside the test bodies until they were
@@ -13635,10 +13653,11 @@ class NoDocumentClaimsTheRepositoryHasNoTestGateTests(unittest.TestCase):
         to refuse. Measured rather than assumed: with both tuples emptied, the
         four of them pass.
 
-        The second half is stronger than a length. Every RULE must be exercised
-        by at least one specimen; without that, a third rule can be added with
-        no specimen and the recognition control still passes, which is exactly
-        how a mistyped pattern survives for ever.
+        A length alone is not enough, and that was measured too: padding
+        :data:`ALLOWED` with duplicates of one unrelated sentence meets the floor
+        while deleting every paragraph the design-document rules could fire on.
+        So the entries must also be distinct, and the two shapes those rules have
+        to stay off must both be represented.
         """
 
         self.assertGreaterEqual(
@@ -13647,26 +13666,21 @@ class NoDocumentClaimsTheRepositoryHasNoTestGateTests(unittest.TestCase):
         self.assertGreaterEqual(
             len(self.ALLOWED), 8, "the allowed-paragraph list has been emptied"
         )
-        # 🔴 Distinct, and exercising the rules it exists to keep off true
-        # prose. Measured: padding this list with duplicates of one unrelated
-        # sentence satisfies the floor above while deleting every paragraph the
-        # design-document rules could have fired on -- an empty control that
-        # still looks like one, one level down from the emptiness this floor
-        # catches.
         self.assertEqual(
             len(set(self.ALLOWED)), len(self.ALLOWED), "duplicate entries pad the floor"
         )
+
         self.assertGreaterEqual(
             len([text for text in self.ALLOWED if ".system_design" in text]),
             4,
             "no allowed paragraph names the directory, so the gitignore rule "
             "has nothing here to stay off",
         )
-        # 🔴 And the hardest one by name, because a floor is met by the three
-        # easy ones. This is the sentence the rule's post-verb bound was
-        # measured against: an exclusion verb 21 characters from the path, where
-        # the bound is 12. Lose it and the negative control for that measurement
-        # is gone while the floor still passes.
+        # 🔴 And the hardest one BY NAME, because a floor is met by the easy
+        # ones. This is the sentence the rule's post-verb bound was measured
+        # against: an exclusion verb 21 characters from the path, where the
+        # bound is 12. Lose it and the negative control for that measurement is
+        # gone while the floor still passes.
         self.assertTrue(
             [text for text in self.ALLOWED if "deliberately **not** excluded" in text],
             "the near-miss that fixes the rule's post-verb bound is gone",
@@ -13676,6 +13690,16 @@ class NoDocumentClaimsTheRepositoryHasNoTestGateTests(unittest.TestCase):
             "no allowed paragraph carries the phrase the other rule bounds, so "
             "a rule widened to forbid it outright would pass this control",
         )
+
+    def test_every_rule_is_exercised_by_a_specimen(self):
+        """🔴 Stronger than "every specimen is caught by some rule".
+
+        That weaker claim -- which
+        :meth:`test_every_rule_recognises_the_claim_it_forbids` makes -- is
+        satisfied by a third rule with no specimen at all, and a rule no
+        specimen exercises is a rule whose typo is never caught. This asserts
+        the other direction, once per rule.
+        """
 
         for rule, _ in self.CLAIMS:
             with self.subTest(rule=rule.pattern[:48]):
@@ -14343,7 +14367,7 @@ class ReviewerIsPointedAtTheDesignDocumentsTests(unittest.TestCase):
         ),
         (
             REVIEW_DIR / "scripts" / "select_rules.py",
-            "deliberately leaves `.system_design/` tracked",
+            "deliberately leaving `.system_design/` tracked",
             "the selector's comments no longer claim the paths are unreachable",
         ),
     )
@@ -14354,11 +14378,17 @@ class ReviewerIsPointedAtTheDesignDocumentsTests(unittest.TestCase):
         for path, required, why in self.REQUIRED:
             with self.subTest(document=path.name, required=required[:48]):
                 text = " ".join(path.read_text(encoding="utf-8").split())
-                self.assertIn(
-                    " ".join(required.split()),
-                    text,
+                # 🔴 `assertTrue`, not `assertIn`: the latter renders the
+                # haystack, and the haystack here is a whole document -- the
+                # first version of this case put ten kilobytes of
+                # `select_rules.py` under its own diagnosis. The message IS the
+                # diagnosis, and :class:`RecordedTestCountTests` makes exactly
+                # this trade one screen up for exactly this reason.
+                self.assertTrue(
+                    " ".join(required.split()) in text,
                     f"{path.name} no longer carries this, and it is what holds: "
-                    f"{why}. Restore the instruction rather than this test.",
+                    f"{why}. Restore the instruction rather than this test.\n"
+                    f"  missing: {required}",
                 )
 
     def test_the_requirement_table_is_not_vacuous(self):
@@ -14566,7 +14596,13 @@ class GitignoredDocumentsAreNotPromisedTests(unittest.TestCase):
         # two rule files were outside it until the design-document fix put them
         # in. Named, not counted -- a count gets edited rather than believed.
         names = {document.name for document in documents}
-        for name in ("REVIEW_PROMPT.md", "REVIEW_GUIDE.md", "README.md", "docs.md", "packaging.md"):
+        for name in (
+            "REVIEW_PROMPT.md",
+            "REVIEW_GUIDE.md",
+            "README.md",
+            "docs.md",
+            "packaging.md",
+        ):
             self.assertIn(name, names, "the sweep no longer reaches this document")
 
         for document in documents:
@@ -15784,7 +15820,7 @@ class NoDocumentAttributesTheCatalogueRefreshToTheGateTests(unittest.TestCase):
     #
     # 🔴 `runs it\b`, not `runs it`. Without the boundary it also matches "runs
     # **its**" -- and `pyproject.toml` really does say "`ci.yml` runs its
-    # 619-case suite on every pull request", a true sentence about the test job
+    # 620-case suite on every pull request", a true sentence about the test job
     # which the loose form read as a false attribution of the catalogue refresh.
     # Found by this repository's own review of the commit that added this guard,
     # while the sweep was still scoped narrowly enough not to reach that file.
@@ -15868,7 +15904,7 @@ class NoDocumentAttributesTheCatalogueRefreshToTheGateTests(unittest.TestCase):
         🔴 **The first entry is quoted from `pyproject.toml`, verbatim, and it is
         the one that matters.** The earlier version of this case said its
         sentences were "real, correct sentences in this tree" when they were
-        paraphrases -- and the actual sentence, "``ci.yml`` runs its 619-case
+        paraphrases -- and the actual sentence, "``ci.yml`` runs its 620-case
         suite on every pull request", DID fire the rule as first written. The
         guard passed only because the sweep did not reach that file. Both halves
         are fixed: the rule requires a word boundary after "runs it", and the
@@ -15878,7 +15914,7 @@ class NoDocumentAttributesTheCatalogueRefreshToTheGateTests(unittest.TestCase):
 
         for sentence in (
             "# on every pull request, and that suite carries guards this linter could not",
-            "`ci.yml` runs its 619-case suite",
+            "`ci.yml` runs its 620-case suite",
             "`ci.yml` is the merge gate, and `ci-required` aggregates it",
             "refreshed weekly by `model-metadata.yml`",
             "a job added to `ci.yml` must also be added to the aggregate",

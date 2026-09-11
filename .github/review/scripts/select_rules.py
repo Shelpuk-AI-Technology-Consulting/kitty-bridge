@@ -183,8 +183,8 @@ RULE_SPECS: tuple[RuleSpec, ...] = (
     # which is why this rule pulls in `cli` -- the entry point is that component's.
     #
     # 🔴 `.gitignore` is here, and it is not filler. It excludes `.requirements/`
-    # and `CLAUDE.md`, and deliberately leaves `.system_design/` tracked --
-    # so it is what decides which documents reach a CI checkout, and therefore
+    # and `CLAUDE.md` while deliberately leaving `.system_design/` tracked, so
+    # it is what decides which documents reach a CI checkout, and therefore
     # what the reviewer in `claude-code-review.yml` is able to read at all. A
     # line added or removed there silently widens or narrows every future
     # review; re-ignoring `.system_design/` would blind the reviewer to the
