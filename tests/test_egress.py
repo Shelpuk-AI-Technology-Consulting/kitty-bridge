@@ -123,6 +123,15 @@ class TestShouldBypass:
             "http://172.31.255.254/v1",
             "http://192.168.1.50:8000",
             "http://169.254.169.254/latest/meta-data",  # AWS IMDS
+            # IPv4-mapped forms of the same ranges. Driven through
+            # `should_bypass` itself, not just through `ipaddress`: the L2
+            # contract (KBR-146) pins the interpreter's verdict, and this pins
+            # the consumer's, so a rewrite of the disjunction cannot pass by
+            # leaving the stdlib untouched.
+            "http://[::ffff:127.0.0.1]:8080",
+            "http://[::ffff:10.0.0.5]/v1",
+            "http://[::ffff:192.168.1.50]:8000",
+            "http://[::ffff:169.254.169.254]/latest/meta-data",
         ],
     )
     def test_local_destinations_bypass(self, url: str):
@@ -137,6 +146,10 @@ class TestShouldBypass:
             "https://8.8.8.8/v1",
             "https://172.32.0.1/v1",   # just outside 172.16/12
             "https://11.0.0.1/v1",     # just outside 10/8
+            # The mapped form of a public address must not be bypassed either,
+            # or the rows above would pass under a rule that bypasses every
+            # `::ffff:` destination.
+            "https://[::ffff:8.8.8.8]/v1",
         ],
     )
     def test_public_destinations_use_the_proxy(self, url: str):
