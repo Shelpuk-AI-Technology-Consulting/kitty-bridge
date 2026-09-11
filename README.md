@@ -6,7 +6,7 @@
     <img src="https://img.shields.io/pypi/pyversions/kitty-bridge.svg" alt="Python version">
   </a>
   <img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT">
-  <img src="https://img.shields.io/github/actions/workflow/status/Shelpuk-AI-Technology-Consulting/kitty-code/ci.yml?branch=main" alt="CI">
+  <img src="https://img.shields.io/github/actions/workflow/status/Shelpuk-AI-Technology-Consulting/kitty-bridge/ci.yml?branch=main" alt="CI">
   <a href="https://pepy.tech/projects/kitty-bridge" target="_blank" rel="noopener noreferrer">
     <img src="https://static.pepy.tech/badge/kitty-bridge" alt="Total PyPI downloads">
   </a>
@@ -17,7 +17,7 @@ Use your favorite coding agent with any LLM provider.
 > **Claude Code with MiniMax. Codex with GLM. Gemini CLI with OpenRouter. One command.**
 
 <p align="left">
-  <img src="https://raw.githubusercontent.com/Shelpuk-AI-Technology-Consulting/kitty-code/main/assets/logo.png" alt="Kitty Bridge" width="800">
+  <img src="https://raw.githubusercontent.com/Shelpuk-AI-Technology-Consulting/kitty-bridge/main/assets/logo.png" alt="Kitty Bridge" width="800">
 </p>
 
 ## Why Kitty Bridge?
