@@ -982,17 +982,34 @@ class TestOpaqueItems:
 
         assert projected.conversation.turns == (c.Turn("user", [c.Opaque("item_reference")]),)
 
-    def test_the_closed_set_matches_the_published_schema_counts(self) -> None:
-        """A guard on the tables themselves.
+    def test_the_closed_sets_are_internally_consistent_and_sized_as_recorded(self) -> None:
+        """A guard on the module's own tables — **not** on OpenAI's schema.
 
-        The counts are the ones §3.3.1's "map it, or declare it ignored" rule
-        turns into a decision; if OpenAI adds an item type, this fails here
-        rather than silently widening the residual in T-D5.
+        Worth being exact about, because the obvious reading is wrong and an
+        earlier version of this docstring made the claim: the suite has no
+        network and vendors no copy of `openapi.yaml`, so nothing here can
+        notice OpenAI *adding* an item type. What this catches is an edit to
+        this module — a type moved between the role tables, or dropped — which
+        is the direction a maintainer can cause.
+
+        **Spec drift is caught elsewhere, and loudly.** A type outside these
+        sets residualises, and a non-empty residual fails the run (§3.3.1) — so
+        the first request carrying a new item type fails at the point it
+        matters, rather than being quietly absorbed. That is the designed
+        behaviour, not a gap: §3.3.1 wants a new wire field to *force a
+        deliberate decision*. `SCHEMA_VERSION` records which revision these
+        tables were derived from so the decision has a starting point.
         """
         assert len(r.PUBLISHED_ITEM_TYPES) == 31
         assert len(r._OPAQUE_USER_ITEMS) == 12
         assert len(r._OPAQUE_ASSISTANT_ITEMS) == 15
         assert r._OPAQUE_USER_ITEMS.isdisjoint(r._OPAQUE_ASSISTANT_ITEMS)
+
+        # The modelled four and the opaque twenty-seven must partition the set,
+        # or a type could be both modelled and placeheld and the dispatch order
+        # would silently decide which wins.
+        assert r._MODELLED_ITEMS.isdisjoint(r._OPAQUE_USER_ITEMS | r._OPAQUE_ASSISTANT_ITEMS)
+        assert len(r._MODELLED_ITEMS) + len(r._OPAQUE_USER_ITEMS) + len(r._OPAQUE_ASSISTANT_ITEMS) == 31
 
     def test_the_mechanical_role_rule_reproduces_the_table(self) -> None:
         """The rule in the docstring and the table must not drift apart.
