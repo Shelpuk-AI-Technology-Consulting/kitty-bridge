@@ -1845,8 +1845,9 @@ The exemption is therefore narrow and accountable:
 
 - It attaches to **one assertion**, named, with its expected failure condition and its issue key
   (TR-1c's header-subset assertion → KBR-8. TR-4's no-vendor-content assertion → KBR-5 was the
-  only other entry and was **withdrawn on 2026-09-07** when KBR-5 shipped; the registry is now one
-  row long, which is the length it is supposed to trend towards).
+  only other entry and was **withdrawn on 2026-09-07** when KBR-5 shipped, which leaves the
+  registry one row long **in the state this document describes** — the length it is supposed to
+  trend towards, and not a count of what is in the file today; see §8.3).
 - **Setup and every other assertion in the scenario gate normally.** If TR-4 cannot reach the
   bridge, the job fails — that is not the known defect.
 - **An unexpected pass fails the job.** When the assertion starts passing, the defect is fixed
@@ -1963,9 +1964,10 @@ not against an empty one.
 
 ### 8.3 The exemption mechanism
 
-Delivered by T-W7 (KBR-30), ahead of the guards that need it: T-G1, T-G4, T-G5, T-G9 and T-J1
+Delivered by T-W7 (KBR-30), ahead of the guards that need it: T-G1, T-G4, T-G5, T-G9 and T-J2
 each cover a class of check broader than the one defect they happen to expose, so each is
-expected to land red on one assertion (plan §16).
+expected to land red on one assertion (plan §16). T-J1 is the blocked *dependency* rather than a
+guard — it is the pytest-bdd wiring T-J2's scenarios are written against.
 
 **`tests/exemptions.py`** holds the registry and the decisions over it, in the shape §8.1 uses
 for the selection rules: every decision is a **pure function** — `outcome_for`,
@@ -2085,9 +2087,9 @@ the same way §8.2 makes each pending layer someone's named handoff.
 assertion, KBR-8 — belongs to an acceptance scenario that does not exist yet (§6.4.1, delivered
 by T-J2 downstream of T-J1). A registry row for an assertion no test contains documents a
 fiction, and the guard against a fiction cannot be the unexpected-pass rule, because nothing ever
-runs it. Whichever of T-G1, T-G4, T-G5, T-G9 or T-J2 lands first adds the first row. §8's own
-row-count parenthetical above, §6.4.1 and §6.2.3 are not amended to say so: this document states
-the To-Be state, in which those rows exist.
+runs it. Whichever of T-G1, T-G4, T-G5, T-G9 or T-J2 lands first adds the first row. §6.4.1 and
+§6.2.3 are not amended to say so: this document states the To-Be state, in which those rows
+exist, and §8's row-count parenthetical now says which state it is counting.
 
 That makes the registry-shape check itself vulnerable to §8's own "green because it stopped
 looking": a validator run over zero rows passes perfectly. So `registry_violations` is proved
