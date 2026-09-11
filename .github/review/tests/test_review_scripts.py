@@ -550,7 +550,52 @@ CODING_PLAN_WEEKLY_QUOTA = (
 # It differs in the way that matters: it carries no reset time, because a
 # topped-up balance has no schedule. Anything that lifts a reset time into a
 # message must therefore stay optional.
-DEEPSEEK_NO_BALANCE = 'API Error: 402 {"error":{"message":"Insufficient Balance"}}'
+#
+# 🔴 **VERBATIM from run 34622141943 (PR #54), and the abridgement it replaces is
+# what KBR-145 was filed about.** This fixture used to be the first line below,
+# `DEEPSEEK_NO_BALANCE_ABRIDGED` -- real, but SHORTENED, and the part removed was
+# the part that changes the answer. DeepSeek reports a purely financial condition
+# with OpenAI's generic `"code":"invalid_request_error"`, which `FATAL_PATTERNS`
+# matched before `QUOTA_PATTERNS` was ever consulted, so a spent balance was
+# reported as a broken workflow. Confirmed against DeepSeek's own error-code
+# documentation and an independent third-party report of the same body.
+#
+# The module header requires every provider error string to be "copied verbatim
+# from a real workflow run, not invented". An ABRIDGED real string satisfies that
+# rule to the letter and defeats its purpose; that is the whole lesson here.
+DEEPSEEK_NO_BALANCE = (
+    'API Error: 402 {"error":{"message":"Insufficient Balance",'
+    '"type":"unknown_error","param":null,"code":"invalid_request_error"}}'
+)
+
+#: The abridged form, kept as a NAMED CONTROL rather than deleted.
+#:
+#: Its only job is to prove the two forms classify the same way. Deleting it would
+#: lose the evidence that they once did not, and a future edit could quietly
+#: re-abridge the fixture above with nothing to notice.
+DEEPSEEK_NO_BALANCE_ABRIDGED = (
+    'API Error: 402 {"error":{"message":"Insufficient Balance"}}'
+)
+
+#: The one refusal this configuration is documented to be able to hit, lifted to a
+#: module constant by KBR-145 so that `classify` and `_write_diagnostic` are judged
+#: against the SAME string. Two copies could drift, and the drift would hide exactly
+#: the regression the demotion risks.
+#:
+#: 🔴 **It carries a billing word on purpose** -- "No quota was consumed" matches
+#: `QUOTA_PATTERNS`' bare `quota`. That is what makes `\b400\b` staying in tier 1
+#: load-bearing rather than incidental: demote it below quota and this genuine
+#: workflow fault is reported as a spent balance.
+CONTEXT_MANAGEMENT_400_REFUSAL = (
+    "API Error: 400 No endpoints available that support Anthropic's "
+    "context management features (context-management-2025-06-27). "
+    "Context management requires a supported provider (Anthropic). "
+    "No quota was consumed for this request."
+)
+
+#: OpenRouter's wording for the same condition, lifted out of the two tests that
+#: inlined it so :data:`QUOTA_FIXTURES` can cover `insufficient credits`.
+OPENROUTER_NO_CREDITS = 'API Error: 402 {"error":{"message":"Insufficient credits"}}'
 # Observed: apostrophes in the schema truncated the shell argument.
 SCHEMA_UNTERMINATED = (
     "Error: --json-schema is not valid JSON: JSON Parse error: Unterminated string"
@@ -1888,8 +1933,15 @@ class TestClassify(unittest.TestCase):
         any file the reviewer opened landed in the haystack. Reviewing a change under
         `.github/review/scripts/` fed this module's own source into its own matcher: it
         contains the literals ``\\b400\\b``, ``quota``, ``insufficient balance`` and
-        ``billing``, and one read of it matches nine `QUOTA_PATTERNS` and three
-        `FATAL_PATTERNS`.
+        ``billing``, and one read of it matches most of `QUOTA_PATTERNS` and most of the
+        fatal vocabulary.
+
+        ⚠️ **Counted as a shape, not as a figure.** This sentence quoted "nine
+        `QUOTA_PATTERNS` and three `FATAL_PATTERNS`" until KBR-145 split the fatal set
+        in two and moved an entry between them, at which point the second number was
+        wrong and nothing checked it. The argument never depended on the exact counts --
+        it depends on this file matching a great many of its own patterns -- so the
+        durable form states that and the assertion below measures the rest.
 
         The consequence was not a vague mislabel. A transient `server_error` — whose correct
         verdict is `exhausted` and whose correct advice is "re-run" — was reported as `fatal`,
@@ -1998,9 +2050,16 @@ class TestClassify(unittest.TestCase):
         string values would classify a real provider failure as "no recognisable error" —
         scoping the haystack must not become ignoring it.
 
-        ⚠️ The error `type` here is deliberately not `invalid_request_error`: that string
-        matches `FATAL_PATTERNS`, which is checked first, so such a fixture would pass for
-        the wrong reason and prove nothing about reading nested values.
+        ⚠️ The error `type` here is deliberately not one that an EARLIER tier matches,
+        so the verdict below can only have come from reading the nested value. Any tier
+        consulted before quota would decide this record without the nested read ever
+        mattering, and the test would pass proving nothing.
+
+        🔴 **That constraint used to name `invalid_request_error` specifically**, because
+        it sat in `FATAL_PATTERNS` and was checked first. KBR-145 moved it to
+        `FATAL_UNLESS_PROVIDER_NAMED_PATTERNS`, which is consulted AFTER quota, so the
+        old sentence now describes a precedence the module no longer has. The rule it was
+        an instance of is the durable form and is what stands above.
         """
 
         record = json.dumps(
@@ -2023,7 +2082,13 @@ class TestClassify(unittest.TestCase):
         """Scoping too tightly would classify every failure as 'no recognisable error'."""
 
         record = json.dumps(
-            [{"type": "result", "result": DEEPSEEK_NO_BALANCE, "is_error": True}]
+            [
+                {
+                    "type": "result",
+                    "result": DEEPSEEK_NO_BALANCE_ABRIDGED,
+                    "is_error": True,
+                }
+            ]
         )
         status, reason = interpret.classify(record)
         self.assertEqual(status, "exhausted")
@@ -2198,12 +2263,7 @@ class TestClassify(unittest.TestCase):
         load-bearing rather than incidental.
         """
 
-        refusal = (
-            "API Error: 400 No endpoints available that support Anthropic's "
-            "context management features (context-management-2025-06-27). "
-            "Context management requires a supported provider (Anthropic). "
-            "No quota was consumed for this request."
-        )
+        refusal = CONTEXT_MANAGEMENT_400_REFUSAL
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "diagnostic.txt"
             interpret._write_diagnostic(
@@ -15987,6 +16047,601 @@ class NoDocumentAttributesTheCatalogueRefreshToTheGateTests(unittest.TestCase):
         self.assertNotIn("update-metadata:", gate)
         self.assertNotIn("cron:", gate)
 
+
+# ---------------------------------------------------------------------------
+# KBR-145 -- a spent balance is not a workflow fault
+# ---------------------------------------------------------------------------
+
+#: Every record whose correct verdict is reached through `QUOTA_PATTERNS`.
+#:
+#: Named as a set so the classifier/diagnostic agreement below is asserted over all
+#: of them at once, and so :meth:`QuotaVocabularyTests.test_every_quota_pattern_is_exercised`
+#: can hold the set accountable to the patterns rather than the other way round.
+QUOTA_FIXTURES = (
+    ("CODING_PLAN_5H_QUOTA", CODING_PLAN_5H_QUOTA),
+    ("CODING_PLAN_WEEKLY_QUOTA", CODING_PLAN_WEEKLY_QUOTA),
+    ("DEEPSEEK_NO_BALANCE", DEEPSEEK_NO_BALANCE),
+    ("DEEPSEEK_NO_BALANCE_ABRIDGED", DEEPSEEK_NO_BALANCE_ABRIDGED),
+    ("OPENROUTER_NO_CREDITS", OPENROUTER_NO_CREDITS),
+)
+
+#: Quota patterns that no fixture above matches, each with the reason it is exempt.
+#:
+#: 🔴 **This tuple may only ever get SHORTER, and the length is frozen below to make
+#: that visible.** Fabricating a payload for any of these would violate the rule that
+#: every provider error string is copied verbatim from a real run -- and for the two
+#: KBR-166 entries it would cement in a test the very patterns that ticket exists to
+#: delete. The frozen length is a REVIEW TRIGGER, not an enforcement: a future author
+#: can still edit the number, but not without editing a line that says not to.
+QUOTA_PATTERNS_WITHOUT_FIXTURES = {
+    # Inherited-unobservable. May legitimately never earn a fixture.
+    r"\b1113\b": "inherited numeric code; no record on this endpoint carries it",
+    r"exceeded your current": "inherited wording; never observed in this repository",
+    # Unanchored-harmful. KBR-166's subject; these must disappear, not gain fixtures.
+    r"quota": "unanchored word -- KBR-166 anchors or deletes it",
+    r"\bbilling\b": "unanchored word -- KBR-166 anchors or deletes it",
+}
+
+#: A billed `invalid_request` whose prose matches ONLY `EXHAUSTED_PATTERNS`.
+#:
+#: ⚠️ **SYNTHETIC, and the verbatim-fixture rule is suspended for it deliberately.**
+#: No such record has been observed. It is admissible because it tests an ORDERING
+#: between two pattern tiers rather than a provider's wording -- it invents no
+#: provider vocabulary, only a prose word the model itself could write. It is the
+#: only row separating the chosen tier position from placing the tier last, and
+#: :meth:`TierPositionTests.test_the_generic_tier_is_consulted_before_transients`
+#: asserts its four discriminating properties before trusting its verdict.
+BILLED_INVALID_REQUEST_WITH_TRANSIENT_PROSE = json.dumps(
+    [
+        {
+            "type": "result",
+            "subtype": "error",
+            "error": {
+                "type": "invalid_request_error",
+                "message": "the request was rejected after a tool timeout",
+            },
+        }
+    ]
+)
+
+#: A rejected key reported with the CLI's generic error code.
+#:
+#: Observed vocabulary, not invented: `OpenAIAdapter.map_error` and
+#: `FireworksAdapter.map_error` are both fixtured against exactly this shape in
+#: `tests/test_provider_openai.py` and `tests/test_provider_fireworks.py`, and
+#: `map_error` maps a PROVIDER's response. So an OpenAI-compatible endpoint reports a
+#: dead key with the same generic code DeepSeek uses for a spent balance.
+CREDENTIAL_401_WITH_GENERIC_CODE = (
+    'API Error: 401 {"error":{"message":"invalid api key",'
+    '"type":"invalid_request_error"}}'
+)
+
+
+class QuotaVocabularyTests(unittest.TestCase):
+    """KBR-145. The quota fixtures must be accountable to the quota patterns.
+
+    A fixture list that nothing holds to account drifts silently: a pattern added to
+    `QUOTA_PATTERNS` with no fixture behind it is a classification nobody tests, and
+    the defect this ticket fixes was exactly an untested classification.
+    """
+
+    def test_every_quota_pattern_is_exercised_or_declared_exempt(self):
+        """Every quota pattern is covered by a fixture, or exempt with a reason.
+
+        🔴 **The bare form of this -- "every pattern has a fixture" -- is RED on
+        `main`**, and measuring it before writing it is what caught that. Four
+        patterns have no fixture, and fabricating payloads for them would invent
+        provider vocabulary this file forbids. So they are declared instead.
+        """
+
+        for pattern in interpret.QUOTA_PATTERNS:
+            with self.subTest(pattern=pattern):
+                covered = [
+                    name
+                    for name, text in QUOTA_FIXTURES
+                    if re.search(pattern, text.lower())
+                ]
+                self.assertTrue(
+                    covered or pattern in QUOTA_PATTERNS_WITHOUT_FIXTURES,
+                    f"{pattern!r} is matched by no fixture and is not declared "
+                    "exempt -- add a verbatim fixture, or declare it with a reason",
+                )
+
+    def test_no_exemption_is_stale(self):
+        """An exempt pattern that a fixture now matches must lose its exemption.
+
+        This is the half that makes the tuple shrink rather than merely permit
+        growth: as KBR-166 anchors `quota` and `\\bbilling\\b`, or as a real payload
+        arrives for an inherited code, the exemption goes red and must be removed.
+        """
+
+        for pattern in QUOTA_PATTERNS_WITHOUT_FIXTURES:
+            with self.subTest(pattern=pattern):
+                matching = [
+                    name
+                    for name, text in QUOTA_FIXTURES
+                    if re.search(pattern, text.lower())
+                ]
+                self.assertEqual(
+                    matching,
+                    [],
+                    f"{pattern!r} is declared exempt but {matching} now matches it "
+                    "-- delete the exemption",
+                )
+
+    def test_no_exemption_names_a_retired_pattern(self):
+        """Deleting a quota pattern must not leave a phantom exemption behind."""
+
+        for pattern in QUOTA_PATTERNS_WITHOUT_FIXTURES:
+            with self.subTest(pattern=pattern):
+                self.assertIn(
+                    pattern,
+                    interpret.QUOTA_PATTERNS,
+                    f"{pattern!r} is declared exempt but is no longer a quota "
+                    "pattern -- delete the exemption",
+                )
+
+    def test_the_exemption_list_only_ever_shrinks(self):
+        """Freeze the count so growing it is a deliberate, reviewed act.
+
+        ⚠️ Honestly a **review trigger, not an enforcement**. A future author can
+        edit this number; the point is that they cannot do it without editing a line
+        whose message tells them the number may only go down, and why.
+        """
+
+        self.assertLessEqual(
+            len(QUOTA_PATTERNS_WITHOUT_FIXTURES),
+            4,
+            "this list may only shrink -- KBR-166 removes `quota` and `\\bbilling\\b`; "
+            "a NEW quota pattern needs a verbatim fixture, not an exemption",
+        )
+
+def _quota_diagnostic(execution_text, status, reason):
+    """Render a diagnostic for one attempt and report whether it advises a top-up.
+
+    Args:
+        execution_text: The execution record to classify and embed.
+        status: The verdict to write into the diagnostic header.
+        reason: The reason line to write beneath it.
+
+    Returns:
+        True when the rendered diagnostic carries the top-up paragraph.
+    """
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "diagnostic.txt"
+        interpret._write_diagnostic(
+            str(path),
+            tier="kitty-bridge",
+            status=status,
+            reason=reason,
+            retryable=False,
+            record_present=True,
+            execution_text=execution_text,
+        )
+        return "Top up the balance" in path.read_text(encoding="utf-8")
+
+
+class SpentBalanceIsNotAWorkflowFaultTests(unittest.TestCase):
+    """KBR-145. A spent provider balance must not be reported as a broken workflow.
+
+    Observed live on PR #54, run ``34622141943``: DeepSeek reports a spent prepaid
+    balance as HTTP 402 whose body carries OpenAI's generic
+    ``"code":"invalid_request_error"``. That matched ``FATAL_PATTERNS``, which
+    :func:`interpret_claude_result.classify` consulted before ``QUOTA_PATTERNS``, so
+    the operator was sent to debug a workflow that was correct.
+    """
+
+    def test_the_observed_payload_is_a_spent_balance(self):
+        """The live payload from run 34622141943 classifies as exhausted.
+
+        Asserted on the literal ``insufficient balance`` rather than on the word
+        "balance", which the fixture itself contains and which would therefore be
+        satisfied whether the quota branch fired or not.
+        """
+
+        status, reason = interpret.classify(DEEPSEEK_NO_BALANCE)
+
+        self.assertEqual(status, "exhausted")
+        self.assertIn("insufficient balance", reason.lower())
+
+    def test_the_abridged_and_verbatim_payloads_agree(self):
+        """🔴 The control this ticket turns on: the two forms must not diverge.
+
+        They differ by one JSON field, and before KBR-145 that field flipped the
+        verdict -- the abridged form was ``exhausted`` while the real one was
+        ``fatal``. Naming both forms explicitly is what stops a future edit
+        collapsing them back into one.
+        """
+
+        abridged = interpret.classify(DEEPSEEK_NO_BALANCE_ABRIDGED)
+        verbatim = interpret.classify(DEEPSEEK_NO_BALANCE)
+
+        self.assertEqual(abridged[0], "exhausted", "the abridged form")
+        self.assertEqual(verbatim[0], "exhausted", "the verbatim form")
+        self.assertEqual(abridged, verbatim, "abridging the fixture changed the verdict")
+
+    def test_the_fixture_is_the_unabridged_payload(self):
+        """Guard the fixture itself, because abridging it is the defect.
+
+        Without this, a future edit could shorten the payload back to the form that
+        hid the bug and every behavioural test above would still pass.
+        """
+
+        self.assertIn('"code":"invalid_request_error"', DEEPSEEK_NO_BALANCE)
+        self.assertNotIn(
+            '"code":"invalid_request_error"',
+            DEEPSEEK_NO_BALANCE_ABRIDGED,
+            "the control must stay abridged or it controls nothing",
+        )
+
+    def test_a_rejected_key_reported_generically_is_not_a_workflow_fault(self):
+        """A 401 carrying the generic code is the same defect one tier over.
+
+        Observed vocabulary: `map_error` maps a PROVIDER's response, and both
+        `tests/test_provider_openai.py` and `tests/test_provider_fireworks.py`
+        fixture a 401 whose ``type`` is ``invalid_request_error``.
+        """
+
+        status, reason = interpret.classify(CREDENTIAL_401_WITH_GENERIC_CODE)
+
+        self.assertEqual(status, "exhausted")
+        self.assertIn("credential", reason.lower())
+
+
+class TierPositionTests(unittest.TestCase):
+    """KBR-145. Where the demoted pattern sits, proven by behaviour not by source order.
+
+    ``invalid[_ ]request`` moves out of ``FATAL_PATTERNS`` into
+    ``FATAL_UNLESS_PROVIDER_NAMED_PATTERNS``, consulted **after** quota and
+    credentials and **before** transients. Every assertion below is a verdict rather
+    than a reading of the tuple, because a tuple can be rewritten to satisfy a
+    membership check while restoring the defect.
+    """
+
+    def test_the_demoted_pattern_no_longer_decides_a_spent_balance(self):
+        """Membership, asserted through the matcher rather than through `in`.
+
+        🔴 `assertNotIn(r"invalid[_ ]request", FATAL_PATTERNS)` would be satisfied by
+        rewriting the entry as ``r"invalid[_ ]request(_error)?"`` inside
+        ``FATAL_PATTERNS`` -- restoring the bug while the test stayed green.
+        """
+
+        haystack = DEEPSEEK_NO_BALANCE.lower()
+
+        self.assertIsNone(
+            interpret._first_match(interpret.FATAL_PATTERNS, haystack),
+            "no tier-1 pattern may match a spent balance",
+        )
+        self.assertIsNotNone(
+            interpret._first_match(
+                interpret.FATAL_UNLESS_PROVIDER_NAMED_PATTERNS, haystack
+            ),
+            "the demoted tier must still recognise the generic code",
+        )
+
+    def test_the_generic_tier_is_consulted_after_quota_and_credentials(self):
+        """A quota or credential signal outranks the generic code.
+
+        These are the two rows that move the tier past `CREDENTIAL_PATTERNS`; both
+        carry `invalid_request` AND a more specific signal, and both bill nothing, so
+        a retry costs runner minutes rather than model spend.
+        """
+
+        for label, record, expected in (
+            ("spent balance", DEEPSEEK_NO_BALANCE, "insufficient balance"),
+            ("rejected key", CREDENTIAL_401_WITH_GENERIC_CODE, "401"),
+        ):
+            with self.subTest(record=label):
+                status, reason = interpret.classify(record)
+                self.assertEqual(status, "exhausted", label)
+                self.assertIn(expected, reason.lower(), label)
+
+    def test_the_generic_tier_is_consulted_before_transients(self):
+        """A transient WORD in a billed failure's prose must not make it retryable.
+
+        🔴 **The fixture's discriminating properties are asserted before its verdict
+        is trusted.** It is synthetic, and a synthetic discriminator can stop
+        discriminating silently: change its prose from "timeout" to "quota" and the
+        decision moves to `QUOTA_PATTERNS`, at which point the row returns
+        `exhausted` under every candidate position and pins nothing -- while still
+        passing. The four checks below are what make that go red instead.
+
+        The cost this pins is real money. `retry_verdict`'s exhausted branch retries
+        a non-timed-out attempt, and the record this shape is drawn from billed
+        $1.79 across 24 turns.
+        """
+
+        scoped = interpret._outcome_text(BILLED_INVALID_REQUEST_WITH_TRANSIENT_PROSE)
+        haystack = scoped.lower()
+
+        # The fixture discriminates only while exactly one tier claims it.
+        self.assertIsNone(interpret._first_match(interpret.FATAL_PATTERNS, haystack))
+        self.assertIsNone(interpret._first_match(interpret.QUOTA_PATTERNS, haystack))
+        self.assertIsNone(
+            interpret._first_match(interpret.CREDENTIAL_PATTERNS, haystack)
+        )
+        self.assertIsNotNone(
+            interpret._first_match(interpret.EXHAUSTED_PATTERNS, haystack),
+            "the fixture has stopped exercising the transient tier",
+        )
+
+        status, _ = interpret.classify(BILLED_INVALID_REQUEST_WITH_TRANSIENT_PROSE)
+        self.assertEqual(
+            status, "fatal", "a transient word must not outrank the generic code"
+        )
+
+    def test_a_schema_rejection_still_wins_over_everything(self):
+        """Tier 1 keeps its precedence, which is the reason it is checked first."""
+
+        for label, record in (
+            ("unterminated", SCHEMA_UNTERMINATED),
+            ("bad $schema ref", SCHEMA_BAD_REF),
+            ("context-management refusal", CONTEXT_MANAGEMENT_400_REFUSAL),
+        ):
+            with self.subTest(record=label):
+                self.assertEqual(interpret.classify(record)[0], "fatal", label)
+
+    def test_a_billed_generic_rejection_is_still_fatal(self):
+        """The demotion must not reach a record with no provider signal at all.
+
+        `BILLED_INVALID_REQUEST` billed $1.79 across 24 turns and names nothing an
+        operator could top up, so calling it `exhausted` would both mislabel it and
+        spend that again.
+        """
+
+        self.assertEqual(interpret.classify(BILLED_INVALID_REQUEST)[0], "fatal")
+
+
+class VerdictAndAdviceAgreeTests(unittest.TestCase):
+    """KBR-145. The status line and the advice beneath it must not contradict.
+
+    This is the invariant whose breach IS the reported defect. On `main` the live
+    402 rendered as::
+
+        status: fatal
+        retryable: false (another attempt could not help)
+        reason: workflow-level failure: 'invalid_request'
+
+        The provider could not serve the request because its quota or balance is
+        spent... Top up the balance and re-run.
+
+    -- because `_write_diagnostic`'s quota branch reads the EVIDENCE while `classify`
+    read pattern ORDER. The operator was handed two contradictory instructions and
+    the authoritative-looking one was wrong.
+    """
+
+    def test_a_quota_verdict_and_a_top_up_paragraph_imply_each_other(self):
+        """For an ordinary quota failure, the verdict and the advice agree.
+
+        Scoped to the guards the code actually imposes: a record-present attempt with
+        no findings payload, whose evidence matches neither tier 1 nor the
+        context-management refusal. The two exclusions below are what those guards
+        are for.
+        """
+
+        for name, record in QUOTA_FIXTURES:
+            with self.subTest(fixture=name):
+                status, reason = interpret.classify(record)
+                self.assertEqual(status, "exhausted", name)
+                self.assertTrue(
+                    reason.startswith("provider quota exhausted"),
+                    f"{name}: resolved by {reason!r}, not by the quota tier",
+                )
+                self.assertTrue(
+                    _quota_diagnostic(record, status, reason),
+                    f"{name}: verdict says quota, advice does not",
+                )
+
+    def test_a_tier_one_record_carrying_a_billing_word_is_a_named_exclusion(self):
+        """🔴 Excluded, and correctly so -- both halves of it are true.
+
+        A 400 whose message mentions a billing account is a genuine workflow fault
+        AND genuinely worth showing a billing paragraph for. The invariant above does
+        not reach it, and the fix is NOT to reorder `_write_diagnostic`: the
+        context-management branch forbids that in the other direction.
+        """
+
+        record = (
+            'API Error: 400 {"error":{"message":"the billing account is not '
+            'permitted to use this model"}}'
+        )
+        status, reason = interpret.classify(record)
+
+        self.assertEqual(status, "fatal")
+        self.assertTrue(_quota_diagnostic(record, status, reason))
+
+    def test_a_context_management_refusal_is_the_mirror_exclusion(self):
+        """🔴 The other direction, one branch up, and also correct.
+
+        The refusal branch sits ABOVE the quota branch in `_write_diagnostic`, so a
+        record matching the refusal and a quota word gets refusal advice and no
+        top-up paragraph -- while `classify` may still resolve it through quota. The
+        refusal advice is the more useful of the two, so the requirement is what
+        yields here, not the code.
+        """
+
+        record = (
+            "API Error: context-management-2025-06-27 is not supported by this "
+            "endpoint. No quota was consumed for this request."
+        )
+        status, reason = interpret.classify(record)
+
+        self.assertEqual(status, "exhausted")
+        self.assertTrue(reason.startswith("provider quota exhausted"))
+        self.assertFalse(
+            _quota_diagnostic(record, status, reason),
+            "the refusal branch must win over the quota paragraph",
+        )
+
+def fail_job_annotation(result, attempts="1", diagnostic="(diagnostic body)"):
+    """Execute the real `Fail when no review was produced` step and capture its output.
+
+    🔴 **A text assertion over this step's body cannot fail, which is why this
+    executor exists.** The step is one ``if``/``else`` carrying BOTH ``::error::``
+    lines unconditionally -- `test_the_error_line_states_the_attempt_count_on_both_branches`
+    asserts exactly that, with ``len(errors) == 2``. So ``assertIn("Top up or wait",
+    _step(...))`` is satisfied by the source on every branch, before any fix and under
+    every mutant. :func:`resolve_outcome` cannot stand in either: it asserts exit 0,
+    and this step ends ``exit 1``.
+
+    Args:
+        result: The resolved outcome the step is handed, ``exhausted`` or ``fatal``.
+        attempts: How many attempts the run made, as the step receives it.
+        diagnostic: Body written to the diagnostic file the step reads.
+
+    Returns:
+        Everything the step printed to stdout, annotations included.
+    """
+
+    script = _workflow_step_script("Fail when no review was produced")
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        (root / "artifacts").mkdir()
+        (root / "artifacts" / "claude_diagnostic.txt").write_text(
+            diagnostic, encoding="utf-8"
+        )
+        env = dict(os.environ, RESULT=result, ATTEMPTS=attempts)
+        proc = subprocess.run(
+            ["bash", "-c", script],
+            cwd=root,
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+    # The step fails the job by design, so a non-zero exit is the expected path and
+    # only a missing annotation is a defect.
+    return proc.stdout
+
+
+class OperatorSurfacesAgreeTests(unittest.TestCase):
+    """KBR-145. Every surface an operator reads must name the same cause.
+
+    The workflow treats the annotation and the pull request comment as one voice --
+    its own comment says they "must not disagree". The job summary is the third.
+    All three are driven from `Resolve outcome`'s real output here, never hand-fed:
+    a hand-fed outcome tests the renderer and says nothing about the fix.
+    """
+
+    def _resolved(self):
+        """Run the observed payload through the classifier and the resolve step.
+
+        Returns:
+            A ``(interpret outputs, resolve outputs)`` pair.
+        """
+
+        record = json.dumps(
+            [
+                {
+                    "type": "result",
+                    "subtype": "success",
+                    "api_error_status": 402,
+                    "terminal_reason": "api_error",
+                    "result": DEEPSEEK_NO_BALANCE,
+                }
+            ]
+        )
+        interpreted = _interpret_outputs(record=record)
+        return interpreted, resolve_outcome(status=interpreted["status"])
+
+    def test_the_observed_payload_is_retried_rather_than_abandoned(self):
+        """KBR-145's AC4, in this repository's terms.
+
+        The ticket asks that "the fallback chain advances to the next provider".
+        There is no chain here -- the module says so -- and the equivalent is that
+        the workflow's one automatic retry runs instead of the attempt being
+        abandoned. A 402 bills nothing, so that retry costs runner minutes only.
+        """
+
+        interpreted, _ = self._resolved()
+
+        self.assertEqual(interpreted["status"], "exhausted")
+        self.assertEqual(interpreted["retryable"], "true")
+
+    def test_the_pull_request_notice_names_the_balance(self):
+        """Asserted on a string only `build`'s exhausted branch can produce.
+
+        🔴 NOT on "top up": that phrase reaches the notice through
+        `embed_diagnostic` from the diagnostic's own quota paragraph, so it is
+        present under `outcome="fatal"` too and would pass whether the fix worked or
+        not.
+        """
+
+        _, resolved = self._resolved()
+        notice = build_failure_notice.build(
+            resolved["result"], ["Kitty Bridge (attempt 1)"], "(diagnostic body)"
+        )
+
+        self.assertIn("the provider quota needs topping up", notice)
+        self.assertNotIn("## Automatic code review failed", notice)
+
+    def test_the_job_summary_headline_names_the_provider(self):
+        """Asserted positively; a negative alone is satisfied by `ok` and `cancelled`."""
+
+        _, resolved = self._resolved()
+        summary = build_run_summary.build(
+            resolved["result"],
+            "",
+            [
+                build_run_summary.Tier(
+                    "Kitty Bridge (attempt 1)",
+                    "true",
+                    "exhausted",
+                    "provider quota exhausted",
+                )
+            ],
+        )
+
+        self.assertIn("## No review this run — the provider was unavailable", summary)
+        self.assertNotIn("## Review failed — the workflow needs fixing", summary)
+
+    def test_the_job_annotation_tells_the_operator_to_top_up(self):
+        """The third surface, executed rather than read."""
+
+        _, resolved = self._resolved()
+        printed = fail_job_annotation(resolved["result"])
+
+        self.assertIn("Top up or wait, then re-run", printed)
+        self.assertNotIn("the workflow", printed.split("::error::")[-1].lower())
+
+class QuotaAdviceNamesNoRetiredProviderTests(unittest.TestCase):
+    """KBR-145. The most-read failure paragraph must not name a provider we dropped.
+
+    Fixing the classifier promotes this branch from rarely-reached to the text an
+    operator sees on the commonest failure, so a stale provider name stops being
+    cosmetic and becomes a wrong instruction at the worst moment.
+    """
+
+    def test_the_advice_still_tells_the_operator_what_to_do(self):
+        """The actionable half must survive the rewording.
+
+        Asserted first and separately, because a paragraph can be made neutral by
+        being emptied, and the absence test below would pass for that too.
+        """
+
+        for name, record in QUOTA_FIXTURES:
+            with self.subTest(fixture=name):
+                status, reason = interpret.classify(record)
+                self.assertTrue(_quota_diagnostic(record, status, reason), name)
+
+    def test_the_advice_names_no_retired_provider(self):
+        """OpenRouter has not been the configured gateway since 2026-07-28."""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "diagnostic.txt"
+            interpret._write_diagnostic(
+                str(path),
+                tier="kitty-bridge",
+                status="exhausted",
+                reason="provider quota exhausted: 'insufficient balance'",
+                retryable=True,
+                record_present=True,
+                execution_text=DEEPSEEK_NO_BALANCE,
+            )
+            body = path.read_text(encoding="utf-8")
+
+        advice = body.split("--- execution record (tail) ---")[0]
+        self.assertNotIn("OpenRouter", advice)
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
