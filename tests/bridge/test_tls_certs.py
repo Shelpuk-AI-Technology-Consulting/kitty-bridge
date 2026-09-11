@@ -1,7 +1,7 @@
 """Tests for KBR-132: the certificate helper fails loudly, it never skips.
 
 ``.system_design/TEST_SUITE.md`` §8 forbids a resource-availability skip inside
-a gating job. :mod:`bridge.tls_certs` is where that rule is kept for the bridge
+a gating job. ``tls_certs`` alongside this module is where that rule is kept for the bridge
 TLS tests, and this module is the check on it.
 
 🔴 **The catch shape below is the point of these tests, not ceremony.**
@@ -29,7 +29,7 @@ from pathlib import Path
 
 import pytest
 
-from bridge.tls_certs import generate_self_signed_cert
+from .tls_certs import generate_self_signed_cert
 
 # Distinctive enough that finding it in a failure message proves the helper
 # passed openssl's own diagnostics through rather than inventing a summary.
@@ -69,41 +69,48 @@ def _failure_message_from(tmp_path: Path) -> str:
     )
 
 
+@pytest.fixture()
+def no_openssl_on_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Point ``PATH`` at an empty directory for the duration of one test.
+
+    Args:
+        tmp_path: The test's temporary directory, which also holds the empty
+            directory ``PATH`` is redirected to.
+        monkeypatch: Fixture restoring the real ``PATH`` afterwards.
+
+    The binary is made genuinely absent rather than :func:`subprocess.run` being
+    stubbed, because absence is the CI condition being guarded; a stub would
+    prove only that the ``except`` branch is reachable.
+    """
+    empty = tmp_path / "no-binaries"
+    empty.mkdir()
+
+    monkeypatch.setenv("PATH", str(empty))
+
+
 class TestMissingOpensslFailsTheRun:
     """The resource is absent: the run goes red, never green-by-omission."""
 
     def test_missing_openssl_fails_it_does_not_skip(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, no_openssl_on_path: None
     ) -> None:
         """PATH carrying no openssl produces a failure, not a skip (AC1).
 
-        ``PATH`` is scrubbed rather than :func:`subprocess.run` stubbed, because
-        absence of the binary is the actual CI condition being guarded and a
-        stub would prove only that the ``except`` branch is reachable.
-
-        This is also the falsification case for the whole change: restoring the
+        This is the falsification case for the whole change: restoring the
         ``pytest.skip`` in the helper turns this test red.
         """
-        empty = tmp_path / "no-binaries"
-        empty.mkdir()
-        monkeypatch.setenv("PATH", str(empty))
-
         message = _failure_message_from(tmp_path)
 
         assert "openssl" in message
 
     def test_the_failure_message_says_why_it_did_not_skip(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, no_openssl_on_path: None
     ) -> None:
         """The message names the rule, so a CI log is self-explanatory (AC1b).
 
         Asserted rather than left to prose: a reader of a red CI job needs to
         know that reinstating the skip is the one fix that is not available.
         """
-        empty = tmp_path / "no-binaries"
-        empty.mkdir()
-        monkeypatch.setenv("PATH", str(empty))
-
         message = _failure_message_from(tmp_path)
 
         assert "TEST_SUITE.md" in message
@@ -160,7 +167,7 @@ class TestOpensslMisbehaviourFailsTheRun:
         message = _failure_message_from(tmp_path)
 
         assert seen.get("timeout"), "openssl is spawned with no timeout; nothing bounds a wedged process"
-        assert seen.get("stdin") is subprocess.DEVNULL, (
+        assert seen.get("stdin") == subprocess.DEVNULL, (
             "openssl inherits stdin; an unexpected prompt would block on the terminal, "
             "not on the timeout above"
         )

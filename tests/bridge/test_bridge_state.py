@@ -8,10 +8,11 @@ from pathlib import Path
 
 import pytest
 
-from bridge.tls_certs import generate_self_signed_cert
 from kitty.bridge.server import BridgeServer
 from kitty.bridge.state import BridgeState, load_state, remove_state, write_state
 from kitty.providers.zai import ZaiRegularAdapter
+
+from .tls_certs import generate_self_signed_cert
 
 
 def _default_state_path() -> Path:

@@ -20,10 +20,14 @@ it builds a CA and two signed leaves with different extensions, which is a
 different function, and ``TEST_SUITE.md`` §8.2 names that module for relocation
 under T-K6 (KBR-115).
 
-**Import note.** Imported as ``bridge.tls_certs``: ``tests/`` has no
-``__init__.py`` but ``tests/bridge/`` has one, so pytest's ``prepend`` import
-mode puts ``tests/`` on ``sys.path`` and ``bridge`` is the package. The same
-caveat as ``tests/layers.py`` applies — adding ``tests/__init__.py`` breaks it.
+**Import note.** Imported relatively -- ``from .tls_certs import ...`` -- which
+is how ``tests/bridge/test_tool_use_auditor.py`` already reaches its sibling,
+and which resolves through the package rather than through ``sys.path``. The
+absolute spelling works today too, but only because ``tests/`` has no
+``__init__.py`` while ``tests/bridge/`` does, so pytest's ``prepend`` import
+mode puts ``tests/`` on ``sys.path``. That is a property of the import mode, not
+of this package; ``tests/layers.py`` already rests on it once, and the relative
+form avoids adding a second place that breaks if the mode ever changes.
 """
 
 from __future__ import annotations
