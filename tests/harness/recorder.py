@@ -503,13 +503,17 @@ class RecordingUpstream:
         self._slots.append(_PENDING)
 
         connection_id = self._by_handler.get(request.protocol, -1)
-        if 0 <= connection_id < len(self.connections):
-            existing = self.connections[connection_id]
-            self.connections[connection_id] = ConnectionRecord(
-                existing.connection_id, existing.peer_port, existing.requests + 1
-            )
 
+        # Read the body before counting it. A client that disconnects mid-body
+        # leaves its slot unfilled and therefore out of `requests` -- so counting
+        # at handler entry would leave the connection log claiming a request the
+        # request list does not have, and `check_connection_logged`'s
+        # `carried == len(sent)` half would fail for a disconnect rather than for
+        # a defect. Section 6.3.1 injects exactly that disconnect at four points.
         body = await request.read()
+
+        self.count_on_connection(connection_id)
+
         captured = self.capture(request, body, arrival)
         self.store(index, captured)
 
@@ -517,6 +521,29 @@ class RecordingUpstream:
         responder = self.responder or self._default_responder
         await responder(captured, response)
         return response
+
+    def count_on_connection(self, connection_id: int) -> None:
+        """Attribute one completed request to the connection that carried it.
+
+        The second half of R1.10: §4.3 C5 counts distinct connections, and a
+        capture has to be attributable to one of them. A seam of its own, beside
+        :meth:`capture` and :meth:`store`, so a falsification recorder can
+        miscount without also disturbing what was captured or where it was
+        filed.
+
+        Args:
+            connection_id: The connection's id, or a negative value when the
+                connection is already gone.
+        """
+        if not 0 <= connection_id < len(self.connections):
+            return
+
+        existing = self.connections[connection_id]
+        # Read-modify-write with no `await` between the read and the write, so
+        # the event loop cannot interleave another handler here.
+        self.connections[connection_id] = ConnectionRecord(
+            existing.connection_id, existing.peer_port, existing.requests + 1
+        )
 
     def capture(
         self, request: web.BaseRequest, body: bytes, arrival: float

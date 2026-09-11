@@ -309,22 +309,29 @@ class TextRoundTripRecorder(RecordingUpstream):
 
 
 class ReorderingRecorder(RecordingUpstream):
-    """Files captures in a stable order of its own instead of arrival order.
+    """Publishes captures in a stable order of its own, not arrival order.
 
     Sorted by the probe marker, descending — not by path, which every request in
     an ordinary probe shares, and which would therefore make this "defect" a
     no-op that proved nothing.
+
+    **The defect is in the published view, not in the slots.** Sorting
+    ``_slots`` in place would move entries out from under the indices reserved
+    for requests still in flight, so a third concurrent request would overwrite
+    someone else's row — a second, accidental defect, and the falsification
+    matrix could no longer say which one a failure came from. A recorder
+    subclass is a template as much as a test; the shape it teaches has to be the
+    safe one.
     """
 
-    def store(self, index: int, captured: CapturedRequest) -> None:
-        """File the capture, then re-sort the slots by marker.
+    @property
+    def requests(self) -> list[CapturedRequest]:
+        """Return the captures sorted by marker instead of by arrival.
 
-        Args:
-            index: The slot reserved when the request arrived.
-            captured: The capture to file.
+        Returns:
+            The completed captures, in the wrong order.
         """
-        self._slots[index] = captured
-        self._slots.sort(key=lambda c: marker_of(c) or "", reverse=True)
+        return sorted(super().requests, key=lambda c: marker_of(c) or "", reverse=True)
 
 
 class DroppingRecorder(RecordingUpstream):
@@ -332,18 +339,38 @@ class DroppingRecorder(RecordingUpstream):
 
     Nothing but the coverage check catches this, and §4.3 C6's *"``/healthz``
     never causes an upstream request"* rests on a recorder that cannot lose one.
+
+    Like :class:`ReorderingRecorder`, the loss is in the published view. Popping
+    from ``_slots`` would shift every higher index down by one and corrupt the
+    rows of requests still in flight.
     """
 
-    def store(self, index: int, captured: CapturedRequest) -> None:
-        """File the capture, then discard every second one.
+    @property
+    def requests(self) -> list[CapturedRequest]:
+        """Return every other capture.
+
+        Returns:
+            The completed captures with the odd-numbered ones missing.
+        """
+        return [c for i, c in enumerate(super().requests) if i % 2 == 0]
+
+
+class MiscountingConnectionRecorder(RecordingUpstream):
+    """Logs every connection, but never records what rode on it.
+
+    The other half of R1.10, and the half the matrix was missing: a log that
+    lists the right connections but cannot attribute a capture to one of them
+    still cannot support §4.3 C5's distinct-connection count. It passes the
+    "every opened port is logged" half of :func:`check_connection_logged`
+    outright, so only the carried-count assertion rejects it.
+    """
+
+    def count_on_connection(self, connection_id: int) -> None:
+        """Do not attribute the request to its connection.
 
         Args:
-            index: The slot reserved when the request arrived.
-            captured: The capture to file.
+            connection_id: The connection's id, ignored.
         """
-        super().store(index, captured)
-        if index % 2 == 1:
-            self._slots.pop(index)
 
 
 class LazyConnectionServer(_ConnectionLoggingServer):
@@ -619,6 +646,18 @@ class TestSessionDefectsAreCaughtByExactlyTheirOwnCheck:
         failing = next(c for c in PER_SESSION_CHECKS if c.__name__ == "check_request_count")
         recording, sent, opened = await self._run_pair(DroppingRecorder)
         self._assert_only(failing, recording, sent, opened, "no capture for")
+
+    async def test_a_miscounting_connection_log_fails_only_the_connection_check(self) -> None:
+        """Assert a log that cannot attribute a capture to a connection is caught.
+
+        Distinct from the lazy log above: every opened port *is* recorded, so
+        the first half of the check passes and only the carried-count half
+        fires. Both halves need their own defect, or one of them is an assertion
+        nothing exercises.
+        """
+        failing = next(c for c in PER_SESSION_CHECKS if c.__name__ == "check_connection_logged")
+        recording, sent, opened = await self._run_pair(MiscountingConnectionRecorder)
+        self._assert_only(failing, recording, sent, opened, "accounts for 0 requests")
 
     async def test_a_frozen_clock_fails_only_the_arrival_check(self) -> None:
         """Assert a constant clock is attributable to the arrival check alone."""

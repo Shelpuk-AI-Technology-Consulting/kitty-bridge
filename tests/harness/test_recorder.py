@@ -27,6 +27,7 @@ from pathlib import Path
 import pytest
 
 import harness.recorder as recorder_module
+import harness.recorder_conformance as conformance_module
 from harness.contract import CapturedRequest, WireFormat
 from harness.recorder import (
     RecordingUpstream,
@@ -40,6 +41,7 @@ from harness.recorder_conformance import (
     PER_EXCHANGE_CHECKS,
     PER_SESSION_CHECKS,
     RICH_PROBE,
+    check_connection_logged,
     correlate,
     probe,
     recording_of,
@@ -322,18 +324,26 @@ class TestCaptureFidelity:
             b"X-Probe-Marker: gone\r\nContent-Length: 50\r\n\r\nx"
         )
         sock = socket.create_connection((recorder.host, recorder.port))
+        aborted_port = sock.getsockname()[1]
         try:
             await asyncio.to_thread(sock.sendall, truncated)
             await _until(lambda: bool(recorder.connections), what="the connection to be accepted")
         finally:
             sock.close()
 
-        await send(recorder.host, recorder.port, probe("real"), marker="real")
+        sent = await send(recorder.host, recorder.port, probe("real"), marker="real")
 
         assert [c.path for c in recorder.requests] == ["/v1/chat/completions"]
         assert all(c.method for c in recorder.requests), (
             f"a slot for an incomplete request was published: {recorder.requests}"
         )
+
+        # The connection log has to agree with the request list, not merely be
+        # populated. Filtering the unfilled slot out of `requests` while still
+        # counting it on its connection would leave the two halves of R1.10
+        # contradicting each other — and `check_connection_logged` is the thing
+        # that would notice, so it is what this asserts through.
+        check_connection_logged(recording_of(recorder), [sent], [aborted_port, sent.source_port])
 
 
 class TestTheConnectionLog:
@@ -702,17 +712,32 @@ class TestTheRecorderStaysIndependentOfKitty:
     nothing"*.
     """
 
-    def test_the_recorder_imports_nothing_from_kitty(self) -> None:
-        """Assert the recorder is not written in terms of the code under test.
+    @pytest.mark.parametrize(
+        "module", [recorder_module, conformance_module], ids=lambda m: m.__name__
+    )
+    def test_it_imports_nothing_from_kitty(self, module) -> None:
+        """Assert a support module is not written in terms of the code under test.
 
         A recorder that asked kitty how to read a request would inherit kitty's
         bugs, and the fidelity claim would reduce to self-consistency.
+
+        **Both** support modules are guarded, not just the recorder. The
+        conformance module happens to import nothing from kitty today, and
+        nothing would have noticed if that changed: none of its checks touch a
+        translator, so adding one would pass every test here while quietly
+        taking on the dependency the recorder forbids. The two *test* modules
+        are deliberately not guarded — ``test_recorder.py`` imports kitty on
+        purpose, to ask the bridge's own judgement whether a reply reads as
+        empty.
+
+        Args:
+            module: The support module whose source is read.
         """
-        source = Path(recorder_module.__file__).read_text(encoding="utf-8")
+        source = Path(module.__file__).read_text(encoding="utf-8")
         assert len(source) > 1000, "read no meaningful source; the guard would pass vacuously"
 
         offending = [line.strip() for line in source.splitlines() if _KITTY_IMPORT.search(line)]
-        assert offending == [], f"recorder.py must not import kitty: {offending}"
+        assert offending == [], f"{module.__name__} must not import kitty: {offending}"
 
 
 async def _until(predicate: Callable[[], bool], *, what: str) -> None:
