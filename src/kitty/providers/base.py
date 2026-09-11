@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
+from urllib.parse import urlsplit, urlunsplit
 
 
 class ProviderAdapter(ABC):
@@ -93,6 +94,59 @@ class ProviderAdapter(ABC):
             Base URL string (without the endpoint path).
         """
         return self.default_base_url
+
+    @staticmethod
+    def _strip_endpoint_suffix(url: str, suffix: str) -> str:
+        """Remove one trailing copy of ``suffix`` from a base URL's path.
+
+        The bridge composes every request as ``base_url + endpoint path``, so a
+        base URL that already ends in that endpoint produces a doubled path and
+        a 404 from the upstream.  Users paste the full endpoint routinely —
+        it is the form every provider's documentation shows — so the redundant
+        tail is removed here rather than rejected (KBR-134).
+
+        The suffix is a **parameter rather than** :attr:`upstream_path` so that a
+        caller always supplies the same path composition will use.  Adapters
+        that route per model through :meth:`get_upstream_path` (Azure, Vertex,
+        OpenCode) would otherwise be normalised against a path they never
+        request.
+
+        Args:
+            url: The configured base URL, already validated as ``http(s)``.
+            suffix: The endpoint path that will be appended to the result,
+                leading slash included — for example ``"/chat/completions"``.
+
+        Returns:
+            ``url`` with one trailing ``suffix`` removed from its path, or
+            ``url`` unchanged when removing it would alter the address the
+            bridge ends up requesting, or when it cannot be parsed at all.
+        """
+        # Match the parsed path, never the raw string: "https://chat/completions"
+        # ends with "/chat/completions" as text, and stripping that eats the host.
+        # `urlsplit`, not `urlparse` -- the latter splits a trailing ";params" off
+        # the last path segment and reattaches it to whichever segment ends up last.
+        #
+        # An unparseable URL is returned untouched rather than allowed to raise:
+        # `urlsplit` rejects a malformed IPv6 literal such as "https://[::1/v1", and
+        # this helper runs inside `build_base_url`, which pre-flight validation calls
+        # OUTSIDE its own try block. Raising here would turn a bad stored profile into
+        # a traceback at launch, where it previously produced an error message.
+        try:
+            parts = urlsplit(url)
+        except ValueError:
+            return url
+        path = parts.path.rstrip("/")
+        if not path.endswith(suffix):
+            return url
+
+        # Self-check: keep the candidate only if composing the endpoint back onto
+        # it reproduces the caller's own URL. A query, a fragment or a doubled
+        # slash all survive the match above but would move or change the address,
+        # and this one comparison rejects every such shape without enumerating them.
+        candidate = urlunsplit(parts._replace(path=path[: -len(suffix)]))
+        if candidate.rstrip("/") + suffix == url.rstrip("/"):
+            return candidate
+        return url
 
     def get_upstream_path(self, model: str) -> str:
         """Build the upstream path for a specific model.

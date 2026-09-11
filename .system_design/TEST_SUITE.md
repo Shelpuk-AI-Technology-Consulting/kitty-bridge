@@ -143,8 +143,10 @@ body. Established by reading `src/kitty/bridge/server.py` and all 23 adapters in
 
 #### 3.2.1 Bridge-level
 
-Eleven request-path rows (M1–M11) plus one response-path row (M12). The former substitution row
-M13 is **withdrawn** — KBR-5 replaced it with a downstream error, so it mutates nothing.
+Eleven request-path rows (M1–M11), one response-path row (M12), and the routing row **M14**
+(§3.3.5), which is listed here because the destination is a mutation surface the body cannot show.
+Fourteen rows in all. The former substitution row M13 is **withdrawn** — KBR-5 replaced it with a
+downstream error, so it mutates nothing — leaving **thirteen live** bridge-level rows.
 
 | # | Mutation | Site | Trigger | Why it is necessary |
 |---|---|---|---|---|
@@ -170,6 +172,25 @@ M13 is **withdrawn** — KBR-5 replaced it with a downstream error, so it mutate
 adapters into one row would make the register unfalsifiable — "the provider overrides it" is a
 trigger no test can fail — so each material mutation gets its own row.
 
+**Header rows record *deviations from the base header set*, and headers are never diffed against
+the inbound request.** §4.2 C1 records that `build_upstream_headers()` builds the upstream set from
+scratch and forwards no inbound agent header, so there is no "unchanged except" claim to make about
+headers and no inbound counterpart to diff against — such a diff would report every header on every
+adapter. I1's subject is the agent's **message content**. The baseline is therefore
+`ProviderAdapter.build_upstream_headers` — `Authorization: Bearer <key>` and
+`Content-Type: application/json` — and a P9 row names what an adapter **adds to, removes from, or
+re-spells in** that set. A header matching the baseline in name, casing and value *shape* is not a
+mutation even when the value differs: every adapter substitutes the profile's credential for the
+agent's, which is M14, not a per-adapter effect. That is why `Content-Type` and `Authorization`
+carry no row anywhere — including on `openai_subscription`, whose `Authorization` is still
+`Bearer <opaque>`, and which does not override `build_upstream_headers` at all: its curl_cffi
+transport calls `_build_codex_headers` instead, so the inherited hook is as dead there as §3.2.3
+says `translate_to_upstream` is.
+
+**The consumer of a header row is §4.3 C1's exact-set assertion, not §3.3.2 assertion 1.** A header
+added without a row is caught by C1's exact-set assertion failing, never by the oracle. Coverage is
+partial today — see gap G22.
+
 | # | Mutation | Site | Trigger | Why it is necessary |
 |---|---|---|---|---|
 | P1 | Strip kitty's internal metadata keys | `ProviderAdapter._INTERNAL_KEYS` via `translate_to_upstream` | Always | These keys are kitty's own; forwarding them is both an I1 and an I2 breach. **The set is incomplete — see F4.** Note it also strips `base_url`, which is *not* kitty-internal: it is defence-in-depth against a URL override arriving in the body, and is the one entry that could discard a field a caller meant. |
@@ -189,7 +210,7 @@ trigger no test can fail — so each material mutation gets its own row.
 | P8 | Inject empty `reasoning_content` into assistant messages | `ProviderAdapter._inject_empty_reasoning_content`, called from `KimiCodeAdapter`, `_ZaiBase`, `CustomOpenAIAdapter` | Thinking signalled **or** inferred from prior `reasoning_content` via `_detect_thinking_from_messages` | Those providers reject the request without it. The *inferred* trigger matters: it fires with no signal from the agent at all. |
 | P9a | Set `User-Agent` to `claude-code/1.0` | `KimiCodeAdapter`, `BytePlusAdapter`, `MimoAdapter` `.build_upstream_headers` | Always, on those three | Those providers 403 without a recognised coding-agent user-agent. Central to I2 — F1. |
 | P9b | Remove `Authorization`, add `api-key` | `MimoAdapter.build_upstream_headers` | Always | MiMo does not use Bearer auth. An auth-**scheme** change §4.3 C1's exact-set assertion must encode. |
-| P9c | Synthesise a Codex CLI `User-Agent` and a `version` header | `OpenAISubscriptionAdapter` | Always | Impersonation required by the subscription endpoint. **The two disagree — see F1.** |
+| P9c | Synthesise a Codex CLI `User-Agent` and a `version` header, and add `Accept: text/event-stream` | `OpenAISubscriptionAdapter._build_codex_headers` / `._build_user_agent` | Always | Impersonation required by the subscription endpoint; `Accept` is the header half of P17's forced streaming — the Codex backend is streaming-only. **The two versions disagree — see F1.** The conditional `ChatGPT-Account-Id` this site also sets has no row yet; see G22 |
 | P10 | Set `reasoning_split = True` | `MiniMaxAdapter.normalize_request` | **Unconditionally** | Makes MiniMax return thinking in `reasoning_details` instead of inline tags. Unconditional, so exempt from §3.3.2 assertion 2. |
 | P11 | Translate CC → Bedrock Converse | `BedrockAdapter.translate_to_upstream` | Always, on `bedrock` | A third upstream wire format M2 does not name. Custom transport — see §3.3.4. |
 | P12 | Translate CC → Ollama `/api/chat` | `OllamaCloudAdapter.translate_to_upstream` | Always, on `ollama_cloud` | A fourth wire format. Custom transport. |
@@ -198,14 +219,20 @@ trigger no test can fail — so each material mutation gets its own row.
 | P15 | **Strip `strict` from every tool declaration** | `_prepare_responses_body` | Always, on the Responses-origin path | The Codex backend rejects it. A change to the **tool schema** the agent declared, not to a sampling parameter — a different kind of fidelity mutation and worth its own row. |
 | P16 | Rewrite content types `input_text` → `output_text` | `_convert_content_types`, called from `_prepare_responses_body` | Always, on the Responses-origin path | The Codex backend validates content types strictly. **Message-content mutation.** |
 | P17 | Inject `stream: True` and `store: False` | `_cc_to_responses` and the Responses-origin body builder | **Unconditionally**, both subscription paths | The Codex backend is streaming-only; kitty reassembles a non-streaming reply from the SSE. Note `stream: True` **overrides a non-streaming client request** — the subscription-path analogue of M11. |
-| P18 | Remove `modelId` and `stream` from the Converse payload | ``BedrockAdapter` transport (`make_request` / `stream_request`)` | Always, on `bedrock` | boto3 takes the model id as a call argument and selects streaming by choosing `converse` vs `converse_stream`, so both must leave the body. Applied **in the transport, after `translate_to_upstream`**. |
+| P18 | Remove `modelId` and `stream` from the Converse payload | `BedrockAdapter` transport (`make_request` / `stream_request`) | Always, on `bedrock` | boto3 takes the model id as a call argument and selects streaming by choosing `converse` vs `converse_stream`, so both must leave the body. Applied **in the transport, after `translate_to_upstream`**. |
 | P19 | Overwrite `stream` | `OllamaCloudAdapter` transport (`make_request` sets `False`, `stream_request` sets `True`) | Always, on `ollama_cloud` | The transport, not the caller, decides which Ollama endpoint mode is used. Applied **after `translate_to_upstream`** has already set it from the request. |
 
 **Conditional rows are the point.** Every row whose trigger is a condition must be provably
 *inert* when that condition is absent — the sharpest form of "unless absolutely necessary", and
-what §3.3.2 assertion 2 tests, with the trigger complements §3.3.4 requires. M1, M2, M10, P1,
-P6, P9a–c, P10, P11, P12, P13, P14, P15, P16, P17, P18 and P19 are unconditional by design and
-are exempt from that assertion.
+what §3.3.2 assertion 2 tests, with the trigger complements §3.3.4 requires. M1, M2, M10, M14, P1,
+P6, P9a, P9b, P9c, P10, P11, P12, P13, P14, P15, P16, P17, P18, P19, P20 and P21 are unconditional
+by design and are exempt from that assertion.
+
+**M14, P20 and P21 were missing from that list until KBR-26**, while their own trigger cells read
+`Always`. A row that always fires has no complement, so assertion 2 would have demanded a corpus
+entry nobody could ever write. The list is also written out id by id rather than abbreviated as a
+range: `P9a–c` names three rows in one token, and §3.2.4's guard has to either guess at the
+expansion or drop two rows from the comparison. It refuses the notation instead.
 
 **Register maintenance.** The register is the specification. A pull request that adds a mutation
 site without adding a row fails the L2 register guards (§6.2.3).
@@ -230,6 +257,94 @@ Every guard and every oracle run in this document targets the right-hand column,
 that precedes it. Where the body is built in the hook and mutated in the transport, "after the
 mutation" is the boundary — capturing the hook's return value would miss P18 and P19 exactly as
 it missed P13.
+
+#### 3.2.4 The register as data
+
+§3.2.1 and §3.2.2 are the register's reviewed prose. `tests/harness/register.py` is its
+machine-readable form, and three consumers read the second rather than the first: the oracle
+(§3.3, which §7.4 gives `register` and `triggers_met` as arguments), the coverage checks (T-G2,
+T-D8), and the corpus loader (T-W6, which indexes captured sessions **by trigger**).
+
+**Authority is split, deliberately.** The markdown remains the reviewed record of *why* each
+mutation is necessary — a reviewer reads a table, not a tuple. The data is what tests execute.
+Ids and the conditional/unconditional classification are **mechanically reconciled** between the
+two by an L2 guard. Paths and sites are **not**, because the tables have no path column and their
+Site cells are prose (M4's reads "step 1", P17's "and the Responses-origin body builder", P2b's
+simply "same"). Sites are checked against the **source tree** instead, which is the stronger
+check: it catches a renamed mutation site, which no comparison against a prose cell could.
+
+**The Trigger column is reconciled by nothing, and that is the third state.** Editing a Trigger
+cell produces no disagreement. Those cells are prose of the same kind as Site — "Always, on the
+**CC-origin** path", "Serialized messages exceed the model-derived budget" — while the data's
+`Trigger` is a closed vocabulary, and comparing them needs a mapping that would itself be a third
+artifact to keep in step. What holds a trigger honest instead is the classification check: a row
+whose trigger is `ALWAYS` may not be conditional, and §3.2.2's unconditional list is compared id
+by id. Beyond that the Trigger column is reviewed, not tested, until G21 closes.
+
+**The schema is the six fields plan §3 names, plus one.** `id`, `site`, `trigger`, `paths`,
+`conditional`, `design_ref` — and `not_projectable_reason`, required exactly when `paths` carries
+the §3.3.1a escape, because an escape without a reason is a row nothing can falsify.
+
+**A trigger is a name, not a callable.** The obvious reading of "trigger predicate" is a function
+of the inbound request. It cannot work: M6 fires on an upstream 400, M8 on a rejected thinking
+round-trip, M9 on an upstream tool-use format error, M12 on an empty upstream response. None is a
+property of the request. §7.4 settles it — the oracle is *given* `triggers_met`, so the register's
+job is to name the conditions and the test that drove the request declares which it arranged.
+
+**`conditional` is a second field, not a consequence of the trigger.** It answers one question:
+does §3.3.2 assertion 2 apply — must a corpus entry exist in which this row's mutation is provably
+**absent**. A trigger is either a property of the *route* or a property of the *request*, and only
+the second can be varied by a corpus entry. P13's `CC_ORIGIN_PATH` is a route property; every
+request on that route meets it, so there is no complement to write. M2 and M10 are the same shape
+and were already exempt, which is why this reads as a rule rather than a P-row exception.
+
+**Two fields that must agree are cross-checked in the data**, because leaving them uncompared
+reproduces the D1 defect inside `register.py`: a row carrying `ALWAYS` may not be conditional, and
+rows sharing a trigger must agree on whether it is.
+
+**Expected shapes are T-D1's, not the register's.** P2a and P2b both land on
+`envelope.extra[thinking]` and differ only in the value injected — `{"type": "enabled"}` against
+`{"type": "disabled"}`. The §3.3 diagram's third step, "assert the row's stated shape held", is
+therefore written per-row in oracle test code. The register says *where* a mutation may appear and
+*when*; it does not say what the value must be. M3/M4 and P5a/P5c have the same property.
+
+**Scope is not carried here, and the site does not supply it.** §6.2.3's completeness guard and
+T-D8 both need to know, per adapter, which rows are reachable. Reading that off the site's class is
+wrong twice: P8's site is `ProviderAdapter._inject_empty_reasoning_content`, a **base class**
+method that reads as all 23 adapters while only four call it (`kimi`, `custom_openai`,
+`zai_regular`, `zai_coding_cc`); and P5a–d's site is `AnthropicAdapter.translate_to_upstream`,
+which four subclasses override *and conditionally delegate back to*, so the row is also reachable
+on `custom_anthropic`, `zai_coding`, `minimax_token` and `opencode_go` — which no static rule over
+the class hierarchy finds. Authoring scope now would ship data **nothing in T-W3 could prove
+wrong**, since no wire-level capture exists yet to contradict a bad entry, and that is what
+plan §1.4's harness rule forbids. It is filed as **KBR-139** rather than guessed at.
+
+**A declared trigger is not a verified one**, and that is a known gap — see G21 in §9.2.
+
+#### 3.2.5 What T-W3's guards own, and what they do not
+
+§6.2.3's register row and this section are easy to read as one thing. They are two, at two layers:
+
+| Guard | Layer | Task | Reads |
+|---|---|---|---|
+| Data ⇄ §3.2 markdown — ids and conditionality | L2 | **T-W3** | Two files. No sockets |
+| Data ⇄ source tree — every site resolves | L2 | **T-W3** | The AST of `src/kitty`. No sockets |
+| Register completeness — projected delta at the wire equals the triggered rows | **L3** | T-G2 | Captures from T-D4–T-D9 |
+
+The first two are what make the register *well-formed*. Only the third makes it *true*, and it
+cannot run until a recorder and an oracle exist.
+
+**None of the three proves the register is *complete*.** They prove the data and the document say
+the same thing, and that every site named still exists. A mutation the product performs and
+*neither* artifact records is invisible to all of them — only the wire-level guard can catch that,
+and it needs a recorder and an oracle. Two such omissions are already known and filed: G22
+(headers) and G23 (`openai_subscription`'s `reasoning` injection), the second found by walking the
+subscription request path by hand while writing the data.
+
+**A header row's `paths` are checked by none of the three.** Under §3.2.2's header rule they are
+consumed by §4.3 C1's exact-set assertion, which does not exist yet — so for P9a, P9b and P9c only
+the id, the conditionality and the sites are under test today. `headers[user-agent]` is a reviewed
+claim, not yet a tested one.
 
 ### 3.3 The transparency oracle
 
@@ -368,7 +483,8 @@ than a lookup.
 
 T-W2 owns the string form, because it has **two** consumers that must agree exactly: a delta the
 oracle reports (§3.3.4), and the "projection field it touches" column of every register row
-(T-W3). Neither can define it without the other agreeing.
+(T-W3). Neither can define it without the other agreeing. `headers[<name>]` is the one form with
+only the second consumer; §3.2.2 says why.
 
 | Path form | Names |
 |---|---|
@@ -378,8 +494,8 @@ oracle reports (§3.3.4), and the "projection field it touches" column of every 
 | `conversation.turns[<i>].role` · `.parts[<j>]` | A turn, or one part of it |
 | `conversation.tools[<name>].description` · `.schema` · `.strict` | A tool declaration, **by name** |
 | `conversation.sampling[<key>]` | One sampling parameter |
-| `conversation.turns` · `.system` · `.tools` · `.sampling` | A **whole collection** — M5 and M13 rewrite the turns, P5b joins the system blocks, §3.3.1 pins P13/P14 to the bare `sampling` |
-| `headers[<name>]` | A header — P9a, P9b, P9c, and §4.3 C1 |
+| `conversation.turns` · `.system` · `.tools` · `.sampling` | A **whole collection** — M5, M6 and M7 rewrite the turns, P5b joins the system blocks, §3.3.1 pins P13/P14 to the bare `sampling` |
+| `headers[<name>]` | A header — P9a, P9b, P9c, and §4.3 C1. **Not produced by the projection diff**: `Request` carries no headers and no inbound header is forwarded, so this form addresses a per-adapter *deviation from the base header set* (§3.2.2), never a delta between two projections |
 | `residual[<path>]` | An unclassified value |
 | `reply.parts[<i>]` · `reply.stop_reason` · `reply.usage[<key>]` | The response direction — M12, T-D10 |
 | `route.method` · `.scheme` · `.host` · `.path` · `.query` | The route (§3.3.5) — M14, P20, P21 |
@@ -415,6 +531,29 @@ claim paths nested under it. `residual[generationConfig]` does **not** match
 `residual[generationConfig.topK]`; `residual[*]` and the bare `residual` both do. This is a second
 rule sitting beside the first and it is the one that surprises.
 
+**`envelope.extra` is diffed one wire key at a time.** The value under a wire key is compared
+**whole**: a difference anywhere inside it is reported at `envelope.extra[<wire key>]`, never at a
+dotted sub-path. `envelope.extra[thinking.budget_tokens]` is **not** a path this vocabulary
+defines and a reader must not emit one. The dotted-bracket form exists for `residual` alone,
+because §3.3.1 gives nesting to the residual deliberately — `consumed` covers top-level keys, the
+path-keyed residual covers what nobody classified. A key in `extra` *has* been classified, so its
+address is the key.
+
+This is what makes P5c's anchor correct rather than lucky: `AnthropicAdapter.translate_to_upstream`
+writes `thinking` whole — `{"type": "enabled", "budget_tokens": max_tokens - 1}` — over whatever
+the agent sent, so the delta is at the key. P2a, P2b, P3, P4, P5d and P10 are anchored the same way
+for the same reason. Under the other spelling every one of those six rows would match nothing and
+§3.3.2 assertion 1 would report a false I1 breach on six *registered* mutations — the under-claiming
+direction this section warns is the unrecoverable one. `extra_path()` **enforces** the rule: a key
+containing a dot raises, so a reader cannot emit the nested form by accident.
+
+**The cost, recorded so it is not discovered later.** `envelope.extra[<key>]` is the narrowest
+address the vocabulary offers, so a row anchored there claims everything inside that key by
+construction. **T-D3's falsification case — mutate a field beneath a registered anchor and assert
+the oracle still fails — therefore cannot be sited under `envelope.extra`.** It needs a path with
+addressable depth: `conversation.tools[*]` versus `conversation.tools[*].strict`, which is the
+example this section already gives.
+
 `[*]` is the wildcard. `[]` is accepted as its **legacy spelling**, because §3.3.1 wrote P15 as
 `conversation.tools[].strict` before this vocabulary existed and a row carried over in the old
 notation must not silently match nothing. An unbalanced bracket **raises** rather than mis-splitting
@@ -423,8 +562,24 @@ the path.
 **`not projectable` is a legal value for the register's field column, and it requires a reason.**
 P16 uses it — the `input_text`/`output_text` tag is redundant with the turn's role, so carrying it
 would put one vendor's spelling into a wire-independent form — as do the whole-body protocol
-translations M2, M9, P11 and P12. An empty cell would leave those rows silently unfalsifiable;
-an explicit value with a reason does not.
+translations M2, M9, P11 and P12, and **P1** for the reason below. An empty cell would leave those
+rows silently unfalsifiable; an explicit value with a reason does not.
+
+⚠️ **`residual` is never a legal register anchor.** P1 strips kitty's internal keys, which no
+reader maps, so its effect can only ever appear *as* a residual — which makes `residual` look like
+the natural anchor. It is the opposite. A bare collection claims its members, P1's trigger is
+`Always`, and a non-empty residual **fails the run before register matching happens at all**
+(§3.3.1). Such a row could therefore only ever claim a delta the oracle was supposed to stop at:
+the injected `x-kitty-trace` field that is one of §3.3.1's five mandatory falsification cases, and
+a real internal-key leak — the defect P1 exists to prevent. P1 takes the escape instead.
+
+**The index builders accept the wildcard (KBR-26).** `system_path`, `turn_path`, `part_path` and
+`reply_part_path` take `WILDCARD` where they take a position, because a register row writes a
+pattern over every turn and part — M3, M4, M8, P5e and P8 all do — where a delta writes concrete
+indices. Both come from one builder, or the spelling drifts between T-W3 and T-D1, which is the
+drift this vocabulary exists to prevent. An index that is neither a position nor the wildcard
+raises: `mypy` covers `src/kitty` only, so a typo would otherwise build a path that looks concrete
+and matches nothing.
 
 #### 3.3.1b Normalisation rules the six readers share
 
@@ -465,6 +620,10 @@ agree on a canonical form. They are six separate tasks, so the agreement is part
   The set is **enforced**, not merely declared: `Conversation` rejects a non-canonical sampling key
   the way `Turn` rejects a role outside `user`/`assistant`. Six readers cannot quietly disagree
   about whether `n` is sampling.
+- **`extra` is keyed, never nested.** A reader emits one entry per wire key and the oracle
+  compares its value whole. No reader emits `envelope.extra[<key>.<subkey>]`; nesting belongs to
+  the residual (§3.3.1a). Six readers cannot quietly disagree about whether `thinking.budget_tokens`
+  has an address of its own.
 - **`tool_choice`** unifies four wire keys — CC/Messages `tool_choice`, Converse's
   `toolConfig.toolChoice`, Gemini's `functionCallingConfig.mode` — onto
   `envelope.extra["tool_choice"]`, with the **value** normalised to `auto` · `any` · `none` ·
@@ -608,12 +767,33 @@ model the agent asked for when it does not: since KBR-127 the path resolves from
 KBR-127 removed. Asking the code under test where it meant to go and then checking it went there
 proves nothing; this is the same independent-oracle rule §3.3.1 applies to bodies.
 
+**One normalisation the independent derivation has to reproduce (KBR-134).** `build_base_url()`
+strips a trailing endpoint suffix from a user-configured base URL, because users routinely paste
+the full endpoint their provider's documentation shows and the bridge would otherwise compose a
+doubled path. A profile whose `base_url` already ends in `/chat/completions` therefore reaches the
+same destination as one that does not. T-D2 must apply the same rule when it computes the expected
+route, or that profile reports a routing mismatch against a request that went exactly where it
+should. This is the awkward edge of the independent-derivation rule — the expectation has to
+reimplement a behaviour rather than observe it — and it is recorded here because the alternative is
+T-D2 discovering it as a failing test with no obvious cause.
+
 **Falsification control.** Alongside the five body cases in §3.3.1, a sixth: change the Azure
 deployment segment in the captured path while leaving the body byte-identical. The oracle must
 fail. A seventh, from KBR-127: give the profile a prefixed model (`opencode/minimax-m2.5`) and
 assert path, auth scheme and body shape agree — the defect showed a correct body reaching a
 correct-looking host at the wrong path under the wrong auth, which each of the three checked alone
 would pass. Without these cases there is no evidence the routing assertion is wired to anything.
+
+**T-D2 must normalise the authority and scheme before comparing, and this is not optional.**
+A published URL shape is `https://…` on the provider's own hostname; the harness serves
+`http://127.0.0.1:<ephemeral>`. T-W4's recorder captures the `Host` header **verbatim,
+port included** — correct, because that is what the client sent, and because the ephemeral
+port is the only thing distinguishing one recorder from another. The consequence is that
+`route.host` and `route.scheme` mismatch **by construction** on every comparison unless the
+expectation is rewritten with the harness's own authority and scheme. Path and query need no
+such treatment, and they are where the Azure case lives. Stated here because nothing else
+assigns this, and a reader discovering it at T-D2 time would reasonably conclude the recorder
+was wrong.
 
 The recorders already capture method, path and query (§7.2). The gap was that the assertion did
 not consume them.
@@ -686,7 +866,8 @@ Two further C1 assertions arising from F1:
 **C1b — Fingerprint parity (L3).** Compare kitty's header set against a captured Claude Code
 native set (§7.1 captures both). Assert kitty's is a *subset*, and report the difference. Today
 the difference is large; the test's job is to make it visible and stop it growing, not to fail
-the build on day one — a reported baseline with a ratchet, becoming a gate once G3 closes.
+the build on day one — a reported baseline with a ratchet (the monotonic kind, not the §8.3
+exemption), becoming a gate once G3 closes.
 
 **C2 — Body shape (L3).** Covered by the transparency oracle (§3.3), plus two assertions the
 oracle's projection makes possible and a flat scan cannot:
@@ -1549,7 +1730,7 @@ The exemption covers **one assertion**, never the scenario. In TR-1c it is the h
 assertion (KBR-8). Every other step in
 those scenarios — setup, the `Given` clauses, and any other `Then` — gates normally, so a broken
 fixture or an unrelated regression still fails the build. An unexpected pass also fails, forcing
-the exemption off when the defect closes. The full policy and the exemption registry are in §8;
+the exemption off when the defect closes. The full policy is in §8 and the registry in §8.3;
 this section does not restate it, so the two cannot drift apart.
 
 **Three scenarios were corrected against the implementation, not the other way round.**
@@ -1679,7 +1860,8 @@ that is a gate — it is the "as appropriate" this document forbids elsewhere. S
   window after the run, proving `force_close` and the connection-limit behave under saturation.
 
 The ceilings and floors are numbers this document does not invent: they come from a first
-baseline run, recorded and then ratcheted. **`_backend_context` isolation moved to L3** (§6.3.1)
+baseline run, recorded and then ratcheted — again the monotonic kind, not the §8.3 exemption.
+**`_backend_context` isolation moved to L3** (§6.3.1)
 — it is deterministic and does not need a load rig to prove.
 
 ## 7. Shared test infrastructure
@@ -1745,6 +1927,69 @@ context-too-large rejections, and disconnects at each of §6.3.1's four injectio
 **Casing** is asserted by C1; **order** is recorded for the C1b baseline report only, not
 asserted — what reaches the wire is the client library's ordering, not the agent's. Peer
 *address* is deliberately not used for containment (§5.2.1).
+
+#### 7.2.1 What T-W4 settled — read this before writing another recorder
+
+The primary recorder is `tests/harness/recorder.py`; the contract every recorder is
+judged against is `tests/harness/recorder_conformance.py`, and plan §5 requires T-B1–T-B3 to
+pass it. The following were established by probe on the pinned stack (aiohttp 3.13.5) and are
+not matters of taste — each is a way a recorder can look correct and lie.
+
+| Field | Read it from | Never from |
+|---|---|---|
+| Headers | `raw_headers`, decoded **latin-1** | `request.headers`; and never `utf-8`, which refuses obs-text |
+| Path | `rel_url.raw_path` | `request.path` — percent-**decoded** |
+| Query | `rel_url.raw_query_string` | `request.query_string` — percent-**decoded** |
+| Authority | the `Host` header itself; `""` when absent | `request.host` — falls back to `socket.getfqdn()`, **inventing the build machine's name**, and that fallback differs across the `>=3.11,<3.14` pin range. `request.url` lower-cases the host |
+| Peer port | `transport.get_extra_info("peername")[1]` | `request.remote` — address only |
+
+Three server-construction facts, each of which fails as a bare client-side
+`ConnectionResetError` with no traceback if got wrong:
+
+- **`client_max_size=0`**, supplied through a `request_factory` — it is a `BaseRequest`
+  argument, *not* a `Server`/`RequestHandler` one. The 1 MiB default turns §7.1's
+  over-budget corpus entries into a harness **413**, which is M6's own trigger, so the
+  harness would manufacture the compaction the oracle exists to detect. Zero disables the
+  check outright; a fixed ceiling is something a later corpus entry outgrows, and the
+  comparison is `>=`. The recorder then buffers bodies unbounded, which is acceptable only
+  because it is a loopback double whose clients are the harness's own.
+- **`auto_decompress=False`**. Left on, a `Content-Encoding: gzip` body is captured
+  decompressed *beside a header saying it is compressed* — an internally inconsistent
+  capture, and C1 asserts on that header.
+- **Connection logging via `web.Server.connection_made(handler, transport)`**, which is the
+  only public seam that sees a connection carrying **no** request — §5.2.1's bypass shape,
+  and structurally invisible in any request list. Wrapping the protocol object is
+  impossible: `RequestHandler` defines `__slots__`. Key the log on the **handler object**;
+  never on `id(handler)`, whose addresses CPython reuses, which would reintroduce the
+  port-reuse aliasing one level down, and never on a `WeakKeyDictionary`, because
+  `RequestHandler` is not weak-referenceable.
+
+**Limitation.** With a TLS-terminating site, `connection_made` fires *after* the handshake,
+so a connection that fails negotiation is not logged — and §5.2.1 names a failed TLS
+negotiation as a real bypass. **T-B2 and T-E2 must observe at socket level or accept this
+explicitly.**
+
+**A recorder produces no `CapturedReply`.** The reply is the script; the test already knows
+it. T-A7 and T-D10 need not reopen this contract to ask for one.
+
+**The reply's format is chosen by a path *suffix*** — `/v1/messages` or `/messages` for
+Anthropic Messages, `/chat/completions` for Chat Completions — because a recorder is
+impersonating a provider and providers dispatch on the URL. An exact match would serve
+`anthropic` and `custom_anthropic` and get Azure, vertex, ollama, opencode and
+zai_anthropic wrong. §3.3.4's "select by the shape observed on the wire" governs the
+**oracle's** choice of projection and must not be wired to this decision. An unmatched path
+falls back to a declared default and is **recorded**, failing the fixture at teardown: a
+wrong-format reply is not a loud failure but an apparently empty response, and that costs
+the 80-second retry ladder.
+
+**One thing no bridge-side judgement checks.** §4.3 C3's emptiness oracles are keyed on the
+**upstream** format: `_is_empty_cc_response` for non-streaming, `translator.response_was_empty`
+plus the `has_content` byte flag for Chat Completions streams — and **nothing at all** for a
+native Anthropic Messages stream, which `server.py:3616` forwards to the client byte-for-byte.
+A recorder's Anthropic SSE success is therefore guarded only by §6.2.2's grammar. That is a
+property of the product, not of the harness: an upstream returning a well-formed but
+contentless Anthropic stream reaches Claude Code with none of the retry the Chat Completions
+path has.
 
 ### 7.3 Recording CONNECT proxy
 
@@ -1840,7 +2085,7 @@ release must not wait on an LLM eval. Both cannot hold. Evals and the live-agent
 **alerting**, not gating: they are nondeterministic and depend on a third party's availability,
 and a release that can be blocked by someone else's rate limiter is not a release process.
 
-**`@ratchet` exempts one named assertion, not a scenario.** A scenario-wide exemption is a
+**`ratchet` exempts one named assertion, not a scenario.** A scenario-wide exemption is a
 blanket amnesty: a broken fixture, a failure in a `Given` step, or an unrelated regression inside
 that scenario all become invisible, indistinguishable from the known defect. That is a worse
 outcome than the red gate it was meant to avoid.
@@ -1849,8 +2094,9 @@ The exemption is therefore narrow and accountable:
 
 - It attaches to **one assertion**, named, with its expected failure condition and its issue key
   (TR-1c's header-subset assertion → KBR-8. TR-4's no-vendor-content assertion → KBR-5 was the
-  only other entry and was **withdrawn on 2026-09-07** when KBR-5 shipped; the registry is now one
-  row long, which is the length it is supposed to trend towards).
+  only other entry and was **withdrawn on 2026-09-07** when KBR-5 shipped, which leaves the
+  registry one row long **in the state this document describes** — the length it is supposed to
+  trend towards, and not a count of what is in the file today; see §8.3).
 - **Setup and every other assertion in the scenario gate normally.** If TR-4 cannot reach the
   bridge, the job fails — that is not the known defect.
 - **An unexpected pass fails the job.** When the assertion starts passing, the defect is fixed
@@ -1867,10 +2113,44 @@ most expensive kind of false confidence.
 
 **One exception, stated so the rule is honest.** A **platform or interpreter** skip is permitted:
 `tests/test_launcher_discovery.py` skips POSIX cases on Windows, and the matrix is what covers
-them. A **resource-availability** skip is not, and the suite has one today —
-`tests/bridge/test_bridge_state.py` calls `pytest.skip("openssl not available")` inside a gating
-job, which is the exact shape this rule forbids. Filed as KBR-132 rather than quietly
-grandfathered — the rule is only worth stating if its one known breach has an owner.
+them. A **resource-availability** skip is not. The suite had one — `tests/bridge/test_bridge_state.py`
+called `pytest.skip("openssl not available")` inside a gating job, the exact shape this rule
+forbids — filed as KBR-132 rather than quietly grandfathered, and **closed on 2026-09-11**.
+
+**How it is upheld there now.** `tests/bridge/tls_certs.py` owns the certificate generation the
+bridge TLS tests need, and every non-success exit from it goes through `pytest.fail`: a missing
+binary, a non-zero exit, a timeout. `tests/bridge/test_tls_certs.py` is the check on that, and its
+falsification case — restore the skip, the test must go **red** — is what makes it a detector
+rather than a decoration. That case is written out in the module rather than left to a
+`pytest.raises`, because `Failed` and `Skipped` are *sibling* classes: `pytest.raises(Failed)` does
+not catch a `Skipped`, so the obvious spelling would have reported the reintroduced defect as a
+*skipped* test, passing the gate. A detector that fails by skipping is the defect wearing the
+uniform of its own guard.
+
+**A consequence, stated because it is now load-bearing:** `openssl` is an **environment
+prerequisite of the Fast job**, not something a test may probe for. Forbidding the
+resource-availability skip and requiring the runner to provide the resource are the same statement.
+`ubuntu-latest` ships it; a change of runner image, a container job, or a non-Ubuntu matrix entry
+has to keep it, and the fix for a red gate is to install `openssl`, never to reinstate the skip.
+
+**Why that is not handled by deselection, which is this document's other answer for a missing
+resource.** §8.1's `RESOURCE_DEPENDENT_LAYERS` excludes a whole **layer** whose resource a
+developer's machine may not have — a pinned agent binary, live credentials, a load rig — so a bare
+`pytest` reports those as *deselected*, not skipped. That mechanism is layer-granular by
+construction, and `openssl` is needed by *some tests inside* `l1` rather than by a layer — stated
+as that property rather than as a count of modules, which is the kind of number that goes stale
+silently. A resource used by part of a gating layer has only two possible treatments: skip it,
+which §8 forbids, or require it.
+The two rules are consistent, and the seam between them is worth naming because the obvious
+reading of §8.1 suggests a third option that does not exist.
+
+**The rule itself is still only prose.** Nothing checks that a *future* test does not do what
+`test_bridge_state.py` did. The property holds today — no test in a gating layer calls
+`pytest.skip`, and every `skipif` left there tests `sys.platform`, `os.name`, `sys.version_info` or
+`hasattr(signal, ...)` — but that is an observation about the present, not a mechanism, and it is
+the kind of observation that stops being true without anyone noticing. Filed as
+[KBR-138](https://shelpuk.atlassian.net/browse/KBR-138), by the same reasoning that filed KBR-132:
+the rule is only worth stating if the gap between it and its enforcement has an owner.
 
 ### 8.1 The selection mechanism
 
@@ -1940,6 +2220,18 @@ T-K6's business, together with the job that runs them; doing it earlier would re
 every gate. T-H1 must take that reclassification into account before it measures a mutation
 baseline, because it selects on `l1`.
 
+**Three modules have been added to that set since, and they are named here so T-K6 inherits a
+list rather than a search** — the count is what T-K6 and T-H1 plan against.
+
+- **KBR-132:** `tests/bridge/test_tls_certs.py` spawns a real `openssl` in one of its five cases.
+  KBR-132 deliberately did **not** move it — the rule above applies to a test fixing a skip defect
+  exactly as it applies to any other.
+- **T-W4 (KBR-27):** `tests/harness/test_recorder.py` and
+  `tests/harness/test_recorder_falsification.py` both bind real sockets.
+  `tests/harness/test_recorder_conformance.py` is genuinely `l1` — its checks are pure functions
+  over data and it opens nothing. The two socket-binding modules together run in **~1 second**,
+  measured, which is the number the fast-gate budget should carry until T-K6 moves them.
+
 **The load gate has to be wired, not merely declared.** The table above marks Load as gating a
 release, but `publish.yml` currently depends only on the reusable `tests.yml`. Putting the load
 run in "its own workflow" would leave publication free to proceed while load fails — or while it
@@ -1964,6 +2256,140 @@ versions. The new L3 work adds real sockets to that gate. If the fast gate stops
 people route around it, so the marker split above is also the mechanism for keeping the per-PR
 path bounded — and the mutation-cadence measurement (Q11) has to be taken against that budget,
 not against an empty one.
+
+### 8.3 The exemption mechanism
+
+Delivered by T-W7 (KBR-30), ahead of the guards that need it: T-G1, T-G4, T-G5, T-G9 and T-J2
+each cover a class of check broader than the one defect they happen to expose, so each is
+expected to land red on one assertion (plan §16). T-J1 is the blocked *dependency* rather than a
+guard — it is the pytest-bdd wiring T-J2's scenarios are written against.
+
+**`tests/exemptions.py`** holds the registry and the decisions over it, in the shape §8.1 uses
+for the selection rules: every decision is a **pure function** — `outcome_for`,
+`lookup_exemption`, `registry_violations`, `unexpected_pass_message` — so each can be handed a
+deliberate defect, per plan §1.4. There is no pytest hook, no plugin and no new CI flag; a test
+that uses an exemption is an ordinary test carrying its ordinary layer marker.
+
+```python
+# tests/exemptions.py — the one registry
+EXEMPTIONS: Mapping[str, Exemption] = {
+    "tr-1c-header-subset": Exemption(
+        assertion="the header set is a subset of what Claude Code sends natively",
+        condition="the bridge sends a User-Agent the agent does not",
+        issue="KBR-8",
+    ),
+}
+```
+
+```python
+# the guard. Imported as `exemptions`, not `tests.exemptions`: `tests/` has no
+# `__init__.py`, so pytest's `prepend` import mode puts it on `sys.path` —
+# `tests/layers.py` carries the same caveat in its module docstring.
+from exemptions import ratchet
+
+with ratchet("tr-1c-header-subset"):
+    assert bridge_headers <= native_headers
+```
+
+**Two words spelled the same.** `ratchet(...)` here is the **exemption**: binary, gating, and it
+fails when its assertion starts passing. A *"ratcheted baseline"* in §4.3 C1b, §6.3.1 and §6.4.4,
+and in plan tasks T-I9 and T-I12, is a **different and non-gating** mechanism: record a number,
+report it, tighten it monotonically. The collision predates this section — §8 above already calls
+the exemption `@ratchet` — and the name is kept because §8 is the section the guards are written
+against. T-I9 and T-I12 must not import this symbol; their plan rows say so.
+
+**Ids are lowercase kebab-case**, and that much is checked, because five tasks add rows
+independently. Prefixing an id with the guard or scenario it belongs to is a convention, not a
+check — see the stated limits below. **One row per assertion, not per defect:** two guards over
+KBR-8 take two rows, since each must be withdrawn on the day its own cell starts passing.
+
+**Parametrised guards.** The blocked consumers are per-adapter (T-G9) and per adapter × model ×
+transport (T-G4), and the defect is usually one cell of that matrix. Exempt the cell, not the
+parametrisation:
+
+```python
+exemption = (
+    ratchet("t-g9-openai-subscription-user-agent")
+    if adapter == "openai_subscription"
+    else nullcontext()
+)
+with exemption:
+    assert headers(adapter) <= native_headers(adapter)
+```
+
+The other adapters gate normally; the exempt one still fails the job the day it starts passing.
+The row's `condition` column names the cell in prose, because nothing else does. **In a
+parametrised guard a cell is an assertion:** three exempt cells take three rows, so each can be
+withdrawn on the day its own cell starts passing, and the count in the registry stays a count of
+outstanding defects.
+
+Six decisions in that mechanism depart from the obvious option, and are recorded because the
+obvious option is what a future reader will otherwise assume was intended:
+
+- **A context manager, not a decorator.** The paragraph above writes `@ratchet`, and a decorator
+  is what pytest's own `xfail` would give. But a decorator can only wrap a **whole test**, which
+  is exactly the scenario-wide amnesty this section rejects: it would hide a broken fixture and
+  every healthy assertion beside the exempt one. Assertion scope needs a block. The name is kept.
+- **Only `AssertionError` is amnestied; every other exception propagates.** An exemption says
+  "this claim is known to be false", not "this region of the test may do anything". A `KeyError`
+  inside the block is a broken fixture and fails the job. `pytest.fail()`, `pytest.xfail()`,
+  `pytest.skip()` and **a missed `pytest.raises()`** are not `AssertionError`s and are therefore
+  **not** amnestied — the safe direction, since an exemption that could turn a test into a skip is
+  the failure §8 names two paragraphs above, but a surprise for the author of an L2 guard that
+  reports its verdict with `pytest.fail` and a diff, which is the shape
+  `tests/test_github_actions.py` uses today. **A guard that needs an exemption states its verdict
+  as an `assert`**: catch with `try`/`except` and assert on what you caught, rather than leaning on
+  `pytest.raises` or `pytest.fail`.
+- **An unexpected pass raises a non-`AssertionError` exception.** `UnexpectedExemptionPass`
+  descends from `Exception`, deliberately not from `AssertionError`, so that a nested or adjacent
+  `ratchet` block can never swallow it. A strictness signal that another exemption can amnesty is
+  not strictness.
+- **The registry seam is private.** `ratchet` takes an underscored `_registry` keyword so that
+  this mechanism's own tests can have rows while the production registry is empty. **A guard must
+  never pass it.** A public `registry=` would be a documented back door into the one-registry
+  invariant: a local amnesty nobody can count by reading one file.
+- **No orphan-row scan.** A row whose assertion has since been deleted is stale documentation,
+  but it grants amnesty to nothing and so cannot hide a failure; the mechanism against an
+  exemption outliving its defect is the unexpected-pass rule. A text scan of `tests/**` for unused
+  ids would buy tidiness at the price of a false positive on any id named in a comment.
+  Considered and declined, not overlooked.
+- **No terminal reporting of fired exemptions.** Visibility is the registry file, which is what
+  §8 asks for — "one registry … short, visible". A per-run summary would be a `conftest.py` hook,
+  and the value of this mechanism is precisely that it changes no job's collection or selection.
+  The residual risk is real and accepted: a CI log gives no sign that an exemption fired.
+
+**Two limits the mechanism cannot enforce, stated so they are not mistaken for guarantees.**
+
+- **The block must hold exactly one assertion** and the statements that build its subject.
+  Nothing detects a second: once the first assertion fails, the second is never evaluated, and a
+  failure it would have reported is invisible — a miniature of the blanket amnesty §8 rejects.
+  The enforcement is review, and the rule is in `.github/review/rules/python-tests.md`.
+- **The `condition` column is documentation, not an assertion.** Any `AssertionError` from the
+  block is amnestied, including one raised by an unrelated regression that happens to break the
+  same assertion. The mitigation is the single-statement scope above, not the column.
+- **The id prefix is a convention.** `registry_violations` checks the casing, not that an id
+  names its guard or scenario, and it cannot check that a parametrised guard took one row per
+  exempt cell. An allow-list of permitted prefixes would need editing for every new guard, which
+  buys tidiness at the price of friction on the path this mechanism exists to keep open.
+
+**The unexpected-pass rule only fires in a job that runs the test.** A row attached to a test on
+a layer in `PENDING_ACTIVATION_LAYERS` (§8.2) — `l3` and `acceptance` today, which is where T-G4,
+T-G5 and T-J2 land — is unchecked until that job is activated, so there the exemption *can*
+outlive its defect. The task that activates the job owns re-checking the rows on its layer, in
+the same way §8.2 makes each pending layer someone's named handoff.
+
+**The registry ships empty, today.** The row this section names — TR-1c's header-subset
+assertion, KBR-8 — belongs to an acceptance scenario that does not exist yet (§6.4.1, delivered
+by T-J2 downstream of T-J1). A registry row for an assertion no test contains documents a
+fiction, and the guard against a fiction cannot be the unexpected-pass rule, because nothing ever
+runs it. Whichever of T-G1, T-G4, T-G5, T-G9 or T-J2 lands first adds the first row. §6.4.1 and
+§6.2.3 are not amended to say so: this document states the To-Be state, in which those rows
+exist, and §8's row-count parenthetical now says which state it is counting.
+
+That makes the registry-shape check itself vulnerable to §8's own "green because it stopped
+looking": a validator run over zero rows passes perfectly. So `registry_violations` is proved
+against a **fabricated malformed registry** rather than against the production one, and the
+production registry is asserted clean as a separate, weaker claim.
 
 ## 9. Gap register
 
@@ -1993,10 +2419,14 @@ does not surface work that is done. `TEST_SUITE_IMPLEMENTATION_PLAN.md` §16 mir
 | ~~**G14**~~ | ~~**F3 — the vendor name goes upstream in the body (M13)** — KBR-5~~ | **CLOSED 2026-09-07** | Post-condition raises; handlers render a downstream 400; defect-scoped source-literal guard (`tests/bridge/test_vendor_token_guard.py`) stands in until T-G5 | — |
 | **G15** | **F4 — `_effort` / `_thinking_adaptive` reach the wire** — KBR-6 | Live I1+I2 breach on every CC-wire provider | Add both to `_INTERNAL_KEYS`; internal-key completeness guard (§6.2.3); regression test at `BridgeServer._upstream_body_for`. Residual: `openai_subscription` alone builds its body independently of that boundary (allowlisted, hence never leaked); `bedrock` and `ollama_cloud` call `translate_to_upstream` inside their transports, so the assertion reaches their wire. Carried by T-G2 over T-D4–T-D9's captures | **0** |
 | **G16** | **F5 — `OpenCodeGoAdapter` misdeclared its wire shape** — KBR-7 · **CLOSED** | Was a latent defect in the M8 path and a trap for the oracle | Done: the declaration is per-model, both repair sites branch on it, and the **hook-level** honesty guard landed with the fix. The **wire-level** guard remains T-G4 / KBR-80 | — |
+| **G23** | **`openai_subscription` injects `reasoning` from `_reasoning_effort`, unregistered** — KBR-149 | Three sites in `providers/openai_subscription.py` set `reasoning: {"effort": …}` from kitty's internal key. Structurally identical to P3 and P4, and **P4 cannot cover it**: §3.2.3 records that `translate_to_upstream` never runs on this adapter's request path. Unlike G22 this is a **request-body** row feeding §3.3.2 assertion 1, so the moment T-D5 drives a corpus entry carrying a reasoning effort the oracle reports a *false* I1 breach on a deliberate mutation — the under-claiming direction §3.3.1a calls unrecoverable | Add P22: trigger `REASONING_EFFORT_PRESENT`, conditional, anchored at `envelope.extra[reasoning]`. Needs a trigger case and a complement in the corpus. **Before T-D5** | **1** |
+| **G22** | **Register header coverage is partial and inconsistent** — KBR-148 | Rows exist for four adapters (P9a ×3, P9b, P9c). At least six more deviate from the base header set with none: `AnthropicAdapter` and its three subclasses plus `ZaiAnthropicAdapter` (`x-api-key` / `anthropic-version` / lowercase `content-type`), `AzureOpenAIAdapter` (`api-key` on the non-Entra credential), and `OllamaAdapter`, which drops `Authorization` entirely — the same shape as P9b, which *does* have a row. `openai_subscription` additionally sets a conditional `ChatGPT-Account-Id` no row names | One row per deviation; `ChatGPT-Account-Id` becomes P9d, conditional, with a claimless-`id_token` fixture for its assertion-2 complement. Then §4.3 C1's per-adapter expectation is *reviewable against the register* instead of written from scratch — which is what stops C1 reproducing the ad-hockery F1 names | **2** |
+| **G21** | **A declared trigger is never verified** — KBR-140 | §7.4 hands the oracle `triggers_met` as an argument and §3.3.2 asserts only that a row is **absent** when its trigger is not met. Nothing asserts a trigger declared met actually fired, so a corpus entry that over-declares makes assertion 1 claim every delta — the oracle reports green on a bridge that is rewriting messages. The same author writes the entry and its trigger index (T-W6), so the mechanism has no second reader | Roughly fifteen triggers are decidable from the inbound request; give those an optional predicate and have T-D8 require the declaration to agree with it. M6, M8, M9 and M12 depend on an upstream response and stay declaration-only — the stated residual risk. Blocked on T-A1/T-A2, since a predicate needs a projected request to read | **1** |
 | **G20** | **OpenCode Go's routing table does not match the provider** — KBR-126 | Found while fixing G16. As of 2026-09-07 (<https://opencode.ai/docs/go/>, "Endpoints") the provider serves eight models on `/v1/messages`; `_MESSAGES_MODELS` holds two, and a `/v1/responses` endpoint (four models) has no route at all. The wire-shape guard correctly reports the adapter *honest* — declaration and emitted body agree — because this is routing, not shape | Refresh the table against the provider's endpoint list; decide the Responses route; replace the stale `validation_model`. Consider a checked-in snapshot of the endpoint table, so the routing question gets an in-repo oracle | **1** |
 | **G19** | Routing was outside the register and outside the oracle | The destination is built from the profile (M14, P20, P21); a body-only check cannot see a misrouted Azure deployment | §3.3.5 — whole-request oracle with an independently derived route | **1** |
 | **G17** | Undecided behaviour for an irreducible final turn | Compaction emits an over-budget request, or (since KBR-5) the bridge refuses it downstream; neither was designed | Answer Q10, then align M3-M7, the 6.1 properties and TR-3 together | **2** |
 | **G18** | P13-P19 - seven transport-level mutations, unregistered in the first draft | Necessary (the Codex backend and boto3 require them) but invisible above DEBUG, and unreachable by a guard placed at `translate_to_upstream` | Rows P13-P19; boundary corrected in 3.2.3; Q5 decides user visibility | **3** |
+| **G21** | §8's skip rule is stated in prose and nothing checks it — KBR-138 | Found while closing KBR-132. The known breach is fixed, and every skip left in a *gating* layer is a platform or interpreter one — but that is an observation, not a mechanism, and the next resource-availability skip written into `l1`, `l2`, `l3` or `acceptance` re-creates the same silent-green defect | A check over the collected suite that fails on a resource-availability skip in a gating layer, with a planted skip as its falsification case (§1.4). It must be **layer-aware**: `tests/integration/test_agent_e2e.py` holds three legitimate resource skips (missing credentials, profile, agent binary) that are legal only because they sit in `agent_live`, so a flat grep would report them and be turned off. Two further questions: static sweep or runtime hook, and whether a permitted skip is recognised by condition shape or declared by marker | **3** |
 | **G1** | I1 is unstated and untested | No definition of "unchanged"; mutation sites discoverable only by reading 6,463 lines | Register (§3.2) + oracle (§3.3) | **1** |
 | **G2** | No-bypass unproven **for the bridge's serving path**; no negative assertion; start-path guard is file-granular | `test_egress_https_proxy.py` proves the transports and drives `egress_cmd._probe` | Sealed-network harness (§5.2) per transport (§5.5) + AST start-path guard | **1** |
 | **G3** | I2 partially breached (F1) — KBR-8 | Identity ad hoc per adapter; the subscription adapter reports two different versions in one request | Header contract + parity baseline, then a policy and a code fix | **2** |

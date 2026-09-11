@@ -45,7 +45,9 @@ class CustomOpenAIAdapter(ProviderAdapter):
                 raise ValueError(
                     f"Invalid base_url in provider_config: {url!r}. Must be a non-empty http:// or https:// URL."
                 )
-            return str(url)
+            # KBR-134: a pasted full endpoint would otherwise be composed into a
+            # doubled path and rejected upstream as a missing model.
+            return self._strip_endpoint_suffix(str(url), self.upstream_path)
         return self.default_base_url
 
     def build_upstream_headers(self, api_key: str) -> dict[str, str]:

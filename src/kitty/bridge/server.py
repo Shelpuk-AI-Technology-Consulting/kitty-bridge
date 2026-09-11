@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from types import TracebackType
 from typing import TYPE_CHECKING, NoReturn, TextIO, TypedDict, cast
+from urllib.parse import urlsplit, urlunsplit
 
 import aiohttp
 from aiohttp import web
@@ -6370,11 +6371,30 @@ class BridgeServer:
         return False
 
     @staticmethod
-    def _translate_upstream_error(status: int, body: object) -> str:
+    def _translate_upstream_error_text(
+        status: int,
+        body: object,
+        custom_url: str | None = None,
+        appended_path: str | None = None,
+    ) -> str:
         """Translate an upstream HTTP error into a user-friendly message.
 
         For auth errors (401/403), returns a clear message indicating the
         API key issue.
+
+        Args:
+            status: The upstream HTTP status code.
+            body: The upstream error body, as a dict or a raw string.
+            custom_url: The URL the bridge requested, already redacted, when the
+                profile supplied it.  ``None`` for fixed-endpoint providers,
+                which disables the 404 branch — advising those users to check a
+                base URL they never set would be wrong.
+            appended_path: The endpoint path the bridge appended to the
+                configured base URL, named in the 404 message so a doubled path
+                is self-evident.
+
+        Returns:
+            The message shown to the agent.
         """
         if isinstance(body, dict):
             details = json.dumps(body, ensure_ascii=False)
@@ -6432,7 +6452,71 @@ class BridgeServer:
                 prefix = "Upstream provider temporary internal failure (HTTP 500). Please retry shortly."
             return f"{prefix} Details: {details}" if details else prefix
 
+        # KBR-134: the profile supplied this address, so a 404 is as likely to be
+        # the URL as the model. Sits below the branches above deliberately -- a
+        # 404 carrying a context-window or tool-pairing body has more actionable
+        # advice than "check your base URL".
+        if status == 404 and custom_url and appended_path:
+            prefix = (
+                f"Upstream returned HTTP 404 for {custom_url}. Either the model is not available "
+                f"at that endpoint, or this profile's base URL is wrong: Kitty appends "
+                f'"{appended_path}" to the base URL itself, so the base URL must end at the API root.'
+            )
+            return f"{prefix} Details: {details}" if details else prefix
+
         return details
+
+    @staticmethod
+    def _redact_userinfo(url: str) -> str:
+        """Strip any ``user:password@`` component from a URL.
+
+        The 404 message travels into the agent transcript and the access log, and
+        userinfo is never needed to diagnose a wrong endpoint.
+
+        Args:
+            url: The URL to redact.
+
+        Returns:
+            The URL without its userinfo component, unchanged when it has none.
+        """
+        # No "@" anywhere means no userinfo, so the common case never parses. That
+        # also keeps this off `urlsplit`, which raises on a malformed IPv6 literal
+        # -- unreachable here, since such a URL cannot have produced an HTTP status
+        # for us to format, but not worth depending on.
+        if "@" not in url:
+            return url
+        parts = urlsplit(url)
+        if "@" not in parts.netloc:
+            return url
+        host = parts.netloc.rsplit("@", 1)[1]
+        return urlunsplit(parts._replace(netloc=host))
+
+    def _translate_upstream_error(self, status: int, body: object) -> str:
+        """Translate an upstream error, supplying this request's endpoint context.
+
+        An instance method rather than a static one so that every existing call
+        site — all twelve already call it on ``self`` — gains the 404 context
+        without being edited.  The static core remains available for unit tests
+        that have no server.
+
+        Args:
+            status: The upstream HTTP status code.
+            body: The upstream error body.
+
+        Returns:
+            The message shown to the agent.
+        """
+        # Only a provider whose URL the user configured can have a wrong one, and
+        # only a 404 reads it. Narrow on both counts because `build_base_url` is a
+        # documented raiser: rebuilding the URL while *formatting* an error would
+        # let a bad base_url replace an upstream error with an unhandled one.
+        provider = self._active_provider
+        custom_url: str | None = None
+        path: str | None = None
+        if status == 404 and provider.requires_custom_url:
+            custom_url = self._redact_userinfo(self._build_upstream_url())
+            path = provider.get_upstream_path(self._active_model or "")
+        return self._translate_upstream_error_text(status, body, custom_url=custom_url, appended_path=path)
 
     @staticmethod
     def _map_provider_error(exc: Exception) -> tuple[int, str]:
