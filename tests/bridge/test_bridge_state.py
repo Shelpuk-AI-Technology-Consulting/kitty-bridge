@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from bridge.tls_certs import generate_self_signed_cert
 from kitty.bridge.server import BridgeServer
 from kitty.bridge.state import BridgeState, load_state, remove_state, write_state
 from kitty.providers.zai import ZaiRegularAdapter
@@ -63,34 +64,10 @@ class TestBridgeStateFile:
     async def test_state_file_with_tls_flag(self, tmp_path: Path):
         """State file records tls=True when TLS is configured."""
         state_path = tmp_path / "bridge_state.json"
-        # We need a cert/key to start TLS — skip if openssl not available
-        import subprocess
-
-        try:
-            cert = tmp_path / "cert.pem"
-            key = tmp_path / "key.pem"
-            subprocess.run(
-                [
-                    "openssl",
-                    "req",
-                    "-x509",
-                    "-newkey",
-                    "rsa:2048",
-                    "-keyout",
-                    str(key),
-                    "-out",
-                    str(cert),
-                    "-days",
-                    "1",
-                    "-nodes",
-                    "-subj",
-                    "/CN=localhost",
-                ],
-                check=True,
-                capture_output=True,
-            )
-        except (FileNotFoundError, subprocess.CalledProcessError):
-            pytest.skip("openssl not available")
+        # A missing openssl fails this test rather than skipping it: this is a
+        # gating layer, and TEST_SUITE.md section 8 forbids the quiet version
+        # (KBR-132). `tls_certs` owns that behaviour.
+        cert, key = generate_self_signed_cert(tmp_path)
 
         server = BridgeServer(
             adapter=None,

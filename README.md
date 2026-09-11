@@ -755,6 +755,13 @@ ruff check .
 mypy src/kitty
 ```
 
+The suite also needs `openssl` on your `PATH` — a few tests generate a throwaway TLS certificate
+with it. A missing `openssl` fails those tests rather than skipping them, deliberately: a test that
+removes itself when a resource is absent lets CI report success without having run it. That is a
+different treatment from the deselected categories described below, and the difference is the
+granularity: a resource needed by a whole *layer* is excluded by selection, while a resource needed
+by a handful of tests inside a layer CI gates on has to be present.
+
 ### Running a subset of the tests
 
 Every test carries exactly one layer marker, so you can ask for the part you need:

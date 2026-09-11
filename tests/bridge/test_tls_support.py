@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from bridge.tls_certs import generate_self_signed_cert
 from kitty.bridge.server import BridgeServer
 from kitty.providers.zai import ZaiRegularAdapter
 
@@ -21,42 +22,13 @@ def _make_server(**kwargs):
     )
 
 
-def _generate_self_signed_cert(tmp_path: Path) -> tuple[Path, Path]:
-    """Generate a self-signed cert+key for testing using openssl."""
-    import subprocess
-
-    cert_path = tmp_path / "cert.pem"
-    key_path = tmp_path / "key.pem"
-    subprocess.run(
-        [
-            "openssl",
-            "req",
-            "-x509",
-            "-newkey",
-            "rsa:2048",
-            "-keyout",
-            str(key_path),
-            "-out",
-            str(cert_path),
-            "-days",
-            "1",
-            "-nodes",
-            "-subj",
-            "/CN=localhost",
-        ],
-        check=True,
-        capture_output=True,
-    )
-    return cert_path, key_path
-
-
 class TestTLSSupport:
     """TLS configuration for the bridge server."""
 
     @pytest.mark.asyncio
     async def test_tls_cert_and_key_enables_https(self, tmp_path: Path):
         """Providing both cert and key enables HTTPS."""
-        cert, key = _generate_self_signed_cert(tmp_path)
+        cert, key = generate_self_signed_cert(tmp_path)
         server = _make_server(tls_cert=str(cert), tls_key=str(key))
         port = await server.start_async()
         try:
@@ -117,6 +89,6 @@ class TestTLSWarning:
         assert server._should_warn_no_tls() is False
 
     def test_non_localhost_with_tls_no_warn(self, tmp_path: Path):
-        cert, key = _generate_self_signed_cert(tmp_path)
+        cert, key = generate_self_signed_cert(tmp_path)
         server = _make_server(host="0.0.0.0", tls_cert=str(cert), tls_key=str(key))
         assert server._should_warn_no_tls() is False
