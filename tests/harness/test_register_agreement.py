@@ -122,6 +122,51 @@ def _allowlisted_responses_params(source: str) -> frozenset[str]:
     raise AssertionError(f"{_ALLOWLIST_MODULE.name} no longer defines {_ALLOWLIST_NAME}")
 
 
+def published_row_cell(markdown: str, row_id: str, heading: str) -> str:
+    """Return one cell of a §3.2 register row, located by its column heading.
+
+    Positional indexing was the obvious spelling and is wrong in the quiet
+    direction: §3.2.2's table has five columns today, so ``split("|")[2]`` is the
+    Mutation cell, and a future edit that adds or removes a column would leave the
+    assertion reading a *different* cell and passing.  Reading the heading row
+    makes that edit a loud failure instead.
+
+    One limitation, stated rather than discovered: a cell containing a literal
+    ``|`` would split wrongly.  No register cell does, and the failure would be a
+    mismatch rather than a silent pass.
+
+    Args:
+        markdown: The full text of ``.system_design/TEST_SUITE.md``.
+        row_id: The row's id, e.g. ``P23``.
+        heading: The column's heading exactly as the table spells it.
+
+    Returns:
+        The cell's text, stripped.
+
+    Raises:
+        RegisterMarkdownError: When the row, its heading row, or that column is
+            absent — each of which would otherwise make this guard compare
+            nothing.
+    """
+    lines = markdown.splitlines()
+
+    # The heading row is the nearest `| # | ...` above the data row, so the two
+    # tables of §3.2 cannot be crossed.
+    row_index = next((i for i, line in enumerate(lines) if line.startswith(f"| {row_id} |")), None)
+    if row_index is None:
+        raise r.RegisterMarkdownError(f"§3.2 publishes no row {row_id}")
+    heading_index = next((i for i in range(row_index, -1, -1) if lines[i].startswith("| # |")), None)
+    if heading_index is None:
+        raise r.RegisterMarkdownError(f"{row_id} sits under no table heading — §3.2's tables have changed shape")
+
+    headings = [cell.strip() for cell in lines[heading_index].split("|")]
+    if heading not in headings:
+        raise r.RegisterMarkdownError(f"§3.2's table has no {heading!r} column; it has {headings[1:-1]}")
+
+    cells = lines[row_index].split("|")
+    return cells[headings.index(heading)].strip()
+
+
 def _claimable_paths(control_fields: frozenset[str], allowlist: frozenset[str]) -> frozenset[str]:
     """Return the projection paths a row must claim for the allowlist's drops.
 
@@ -511,10 +556,33 @@ class TestP23ClaimsTheControlFieldsOutsideTheCodexAllowlist:
         published cell, and changing "sixteen" to "fifteen", each left the whole
         suite green.
         """
-        cell = next(line for line in markdown.splitlines() if line.startswith("| P23 |")).split("|")[2]
+        cell = published_row_cell(markdown, "P23", "Mutation")
 
         assert set(re.findall(r"`(\w+)`", cell)) == set(r._CODEX_DROPPED_CONTROL_FIELDS)
         assert "**sixteen**" in markdown, "§3.2.2's P23 cell no longer states the count it enumerates"
+
+    def test_the_cell_is_found_by_its_heading_and_not_by_its_position(self, markdown: str) -> None:
+        """The falsification case for the locator, since a wrong cell would pass quietly.
+
+        A column inserted before ``Mutation`` shifts every index by one.  Under
+        positional indexing the assertion above would then compare the *Site*
+        cell's backticks against the sixteen keys — or, worse on a different
+        edit, a cell that happens to match.  Three shapes are pinned: the column
+        moves, the column goes, and the row goes.
+        """
+        # Both heading rows, because §3.2.1's table comes first and a `count=1`
+        # replace shifts the wrong one -- which this test caught when written.
+        shifted = markdown.replace("| # | Mutation |", "| # | Owner | Mutation |").replace(
+            "| P23 | **Drop", "| P23 | someone | **Drop", 1
+        )
+
+        assert published_row_cell(shifted, "P23", "Mutation") == published_row_cell(markdown, "P23", "Mutation")
+
+        with pytest.raises(r.RegisterMarkdownError, match="Mutation"):
+            published_row_cell(markdown.replace("| # | Mutation |", "| # | Effect |"), "P23", "Mutation")
+
+        with pytest.raises(r.RegisterMarkdownError, match="P23"):
+            published_row_cell(markdown.replace("| P23 |", "| P99 |"), "P23", "Mutation")
 
     def test_a_malformed_allowlist_spelling_reports_as_a_parse_fault(self) -> None:
         """The second half of the deliberate defect above: present, but not a literal.
