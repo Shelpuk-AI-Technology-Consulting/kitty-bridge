@@ -92,15 +92,21 @@ jobs:
       # silently ignores it there and 9.1 does not, so a config-file placement
       # would mean the gate behaves differently on two contributors' machines.
       # `pyproject.toml` carries the reasoning in full.
-      # 🔴 `-rs` lists every skipped test WITH its reason. §8 makes a skip a
-      # failure in a gating job and permits exactly one exception — a platform or
-      # interpreter skip — which is precisely what the Windows and macOS legs
-      # produce. A silent skip count is how such a leg goes green by running
-      # nothing, so the reasons are printed on every leg. One invocation, shared
-      # by all six: a second one here would be the "second, weaker definition"
-      # this file's header exists to rule out.
+      # 🔴 `-rsfE`, and the `fE` half is NOT decoration. `-r` STORES reportchars,
+      # it does not append to them: a bare `-rs` REPLACES pytest's default `fE`
+      # and deletes the `FAILED …` summary from the end of the log. Measured on
+      # pytest 9.1.1 with this exact command — `-q -rs` printed the skip list and
+      # no FAILED line at all. On a ~3,600-item suite that summary is how a red
+      # leg is read, and the first red Windows leg is exactly when it is needed.
+      #
+      # `s` is what this change added. §8 makes a skip a failure in a gating job
+      # and permits one exception — a platform or interpreter skip — which is
+      # precisely what the Windows and macOS legs produce. A silent skip count is
+      # how such a leg goes green by running nothing, so every skip is printed
+      # with its reason. One invocation shared by all six legs: a second one here
+      # would be the "second, weaker definition" this file's header rules out.
       - name: Test
         run: >-
-          pytest -m "l1 or l2" -q -rs --strict-markers
+          pytest -m "l1 or l2" -q -rsfE --strict-markers
           --require-category=l1 --require-category=l2
 

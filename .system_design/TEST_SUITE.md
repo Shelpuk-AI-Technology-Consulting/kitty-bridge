@@ -3018,21 +3018,90 @@ matrix job is held to the **lowest** platform ceiling among the labels its matri
 all three labels here are ordinary GitHub-hosted 4-CPU runners at **360 minutes**, so the cap is
 bounded by measurement rather than by the platform.
 
-**The measurement, because the number beside it used to be fiction.** The Linux legs take
-**19–20 minutes** (six successful jobs on 2026-09-12, e.g. 01:17:37Z → 01:36:34Z) — the comment
-that stood beside `timeout-minutes: 30` claimed *"the suite runs in a couple of minutes"* and was
-stale by an order of magnitude, leaving the backstop only ~50% headroom on a leg nobody had
-timed. The cap is **60**, sized to clear the slowest platform leg with headroom. The cost of that
-choice, stated rather than hidden: a **hung Linux leg is now noticed 30 minutes later than it
-was**. On a free runner that is cheap, and a cap too low is worse — it kills a healthy Windows
-leg and reads as a product failure.
+**`openssl` is an environment prerequisite on all three images, and §8 already said so.** The
+paragraph above on the resource-availability rule states the duty in advance of this change: *"a
+non-Ubuntu matrix entry has to keep it, and the fix for a red gate is to install `openssl`, never
+to reinstate the skip."* `tests/bridge/tls_certs.py` calls `pytest.fail` — not `skip` — when the
+binary is absent, so a missing `openssl` is a red gating leg with no sanctioned recovery.
+Discharged, and recorded rather than assumed: **confirmed 2026-09-12** against the
+`actions/runner-images` image manifests — Windows Server 2025 ships **OpenSSL 3.6.4**, macOS 15
+arm64 ships **OpenSSL 1.1.1w**, Ubuntu 24.04 ships **3.0.13**. A future image bump inherits that
+duty. ⚠️ If the Windows TLS tests go red, check `-subj "/CN=localhost"` first: a leading-slash
+argument is mangled by MSYS2 path conversion if the resolved `openssl.exe` is the Git-for-Windows
+build rather than the native one.
+
+**`fail-fast: false` is load-bearing now, and was merely tidy before.** With six legs it is the
+only reason a Windows failure does not cancel the four Linux legs mid-run. Cancelling them would
+destroy the evidence needed to tell "Windows is broken" from "this change is broken" — which is
+the first question asked of every red platform leg. It predates this subsection; its importance
+does not.
+
+**A red platform leg blocks a release, deliberately.** `publish.yml` calls this same reusable
+workflow, so macOS and Windows have just joined the release gate — which is not free, and the
+cost is named rather than discovered later. `rules/ci.md` already notes that the release path
+carries blast radius beyond itself; after this change a red or flaky platform leg stops a PyPI
+release of a product whose platform behaviour was, until now, never exercised at all. That is the
+correct trade — shipping a release known to be broken on Windows is the worse outcome — and the
+break-glass is the same admin path `review/README.md` documents.
+
+**The measurement, because the number beside it used to be fiction.** The comment that stood
+beside `timeout-minutes: 30` claimed *"the suite runs in a couple of minutes"* — stale by an
+order of magnitude, leaving the backstop only ~50% headroom on a leg nobody had timed. Measured
+on the first six-leg run (2026-09-12, run 34689734864):
+
+| Leg | Wall clock | Outcome |
+|---|---|---|
+| Linux × 4 | 19.5 – 19.7 min | passed |
+| **macOS** | **20.6 min** | **passed, whole suite, first run** |
+| Windows | 2.3 min | **not a measurement** — aborted early on KBR-180 |
+
+The cap is **60**, which clears the slowest *completed* leg (macOS, 20.6) by ~3×. ⚠️ Windows is
+**not yet timed**: its first run aborted 227 tests in, so the figure above measures a failure, not
+the suite. Whoever next reads a green Windows leg should set this number from it. The cost of 60,
+stated rather than hidden: a **hung Linux leg is noticed 30 minutes later than it was**. On a free
+runner that is cheap, and a cap too low is worse — it kills a healthy leg and reads as a product
+failure. **A platform leg killed at the cap is a cap problem until proven otherwise**, never
+triaged as a hang; the platform ceiling is 360, so there is room to raise it.
+
+**What the legs found on their first run, recorded because it is the argument for the whole
+subsection.** macOS passed the entire suite immediately. Windows did not, and the failure was not
+a latent POSIX assumption in a test — it was a **user-facing product defect**
+([KBR-180](https://shelpuk.atlassian.net/browse/KBR-180)): `probe_pid` in `bridge/manage.py`
+probes liveness with `os.kill(pid, 0)`, and `signal.CTRL_C_EVENT` **is** `0` on Windows, so that
+call broadcasts a Ctrl+C to every process sharing the console instead of probing. It is reached by
+`kitty bridge status`, `stop`, `start` and `restart`, so each of those interrupted the user's own
+shell. Its docstring asserted the opposite — *"on Windows as well as POSIX — it does not terminate
+the target"* — and the `except OSError` branch beneath it explained a Windows code path that call
+never reaches. Both were written by reasoning about Windows rather than running there. **That is
+the failure mode a platform leg exists to end**, and it was caught within two minutes of the leg
+first existing.
 
 **Skips are named, not counted in silence.** §8's rule — a gating job that goes green because it
 ran nothing is the most expensive false confidence — is what a new platform leg is most likely to
 breach, because a **platform** skip is the one kind §8 permits. So the gate's pytest invocation
-carries **`-rs`**: every skipped test is listed in the log *with its reason*, on all six legs. The
-flag is on the one shared invocation rather than on the platform legs alone, because a second
+carries **`-rsfE`**: every skipped test is listed in the log *with its reason*, on all six legs.
+The flag is on the one shared invocation rather than on the platform legs alone, because a second
 invocation in the file is exactly the second definition this subsection's first decision rejects.
+
+🔴 **`fE` is not decoration, and the obvious spelling is a trap this section fell into before it
+was corrected.** `-r` **stores** reportchars; it does not append to them. A bare `-rs` therefore
+*replaces* pytest's default `fE` and **deletes the `FAILED …` summary** from the end of the run —
+measured on pytest 9.1.1 with this exact command. On a suite of this size that summary is how a
+red leg is read, and the first red platform leg is precisely when it is needed. The skip letter
+must be **added** to the defaults, never substituted for them. An earlier draft of this paragraph
+claimed the visibility "costs one flag"; it costs one flag *only* when the defaults are restated
+alongside it. `tests/test_github_actions.py::…::test_the_gate_keeps_its_failure_summary_while_reporting_skips`
+is the check, because a claim about a flag that nothing verifies is how the first spelling
+survived review.
+
+⚠️ **A platform skip is not a licence to skip a platform's defects.** §8 permits a skip for
+behaviour that *does not exist* on a platform — no `SIGKILL`, no POSIX path semantics — and the
+distinction matters most here, where a leg is new and red. A test that fails because a tool is
+missing or behaves differently is a **resource-availability** skip in platform clothing: the
+shape §8 forbids and KBR-132 closed. The fix for that is to provision the runner or make the test
+platform-agnostic, never `skipif`. And a test that fails because the **product is broken on that
+platform** is neither: it is a defect, it gets a ticket, and the leg stays red until the defect is
+fixed. `tests/bridge/tls_certs.py` is the template for stating the difference in code.
 
 **A consequence that is a product win, not a side effect.** Two things in the repository have
 never executed even once:

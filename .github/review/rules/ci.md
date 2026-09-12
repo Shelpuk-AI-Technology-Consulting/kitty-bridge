@@ -231,8 +231,16 @@ that overrides the child's endpoint and credentials.
 ## Runner and caps
 
 - `runs-on: ubuntu-latest` for the review job, for `ci-required` and for the
-  `update-metadata` and test jobs; `ubuntu-slim` for the two review-system jobs in
-  `ci.yml`. All GitHub-hosted. This repository is public, and a runner group's
+  `update-metadata` job; `ubuntu-slim` for the two review-system jobs in
+  `ci.yml`. **The test matrix in `tests.yml` is the exception and is deliberate:
+  it produces `ubuntu-latest`, `windows-latest` and `macos-latest`** — the Fast
+  gate runs on all three since KBR-164, because a Linux-only matrix made every
+  Windows-only defect invisible until a user reported one. See
+  `.system_design/TEST_SUITE.md` §8.4 for the scope and its reasoning, and do
+  **not** flag a platform label there as a policy violation. All GitHub-hosted,
+  and all free: standard hosted runners are unmetered on public repositories, so
+  the 2× Windows and 10× macOS multipliers do not apply here.
+  This repository is public, and a runner group's
   *"Allow public repositories"* setting is off by default, so a `[self-hosted,
   …]` label reaches no group at all. A change that moves to one needs to say what
   changed about that grant, or it will silently never run.

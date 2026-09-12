@@ -125,10 +125,22 @@ class TestCIWorkflow:
         defers to a matrix is left to :class:`TestThePlatformLegsExist`, which
         reads the matrix the expression points at; the exact labels are held by
         `RUNNER_JOB_CEILING_MINUTES` in the review-scripts suite.
+
+        ⚠️ The exemption names the ONE job it is for rather than exempting the
+        shape. `${{ … }}` as a blanket excuse would let any future `ci.yml` job
+        opt out of this check by spelling its runner as an expression, and
+        :class:`TestThePlatformLegsExist` would not catch it -- that class reads
+        `tests.yml`'s `test` job and no other. Naming the job keeps the hole
+        one job wide instead of one *syntax* wide.
         """
         for job_name, job in _resolve_jobs(workflow).items():
             runs_on = str(job.get("runs-on", ""))
             if runs_on.startswith("${{"):
+                assert job_name == "test/test", (
+                    f"job {job_name!r} hides its runner behind an expression; only "
+                    f"the delegated tests.yml matrix may, and only because "
+                    f"TestThePlatformLegsExist reads that matrix directly"
+                )
                 continue
             assert "ubuntu" in runs_on, f"Job '{job_name}' must run on ubuntu"
 
@@ -755,6 +767,29 @@ class TestEveryJobVerifiesTheCategoriesItClaims:
         commands = " || ".join(_pytest_invocations())
 
         assert "--strict-markers" in commands
+
+    def test_the_gate_keeps_its_failure_summary_while_reporting_skips(self):
+        """``-r`` STORES reportchars -- it does not append to them.
+
+        🔴 This guard exists because the obvious spelling shipped and was
+        wrong. §8.4 needs every skip printed with its reason, and ``-rs`` does
+        that while **replacing** pytest's default ``fE`` -- deleting the
+        ``FAILED ...`` summary from the end of a ~3,600-item run. Measured on
+        pytest 9.1.1 with this job's exact command. The skip letter has to be
+        added to the defaults, never substituted for them, and the first
+        spelling survived because nothing checked the claim the comment made.
+        """
+        # `(?<!-)` keeps `--require-category` out of the match: its own `-r`
+        # is preceded by a dash, and without the lookbehind this guard would
+        # read `equire-category=l1` as a set of reportchars.
+        for command in _pytest_invocations():
+            reported = "".join(re.findall(r"(?<!-)-r([A-Za-z]+)", command))
+            if not reported:
+                continue
+            assert "A" in reported or {"f", "E"} <= set(reported), (
+                f"this run passes -r{reported}, which REPLACES pytest's default "
+                f"`fE` and drops the FAILED summary: {command}"
+            )
 
     def test_each_job_requires_every_layer_its_expression_selects(self):
         """The pairing that makes a job's claim about itself checkable.
