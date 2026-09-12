@@ -996,6 +996,8 @@ class TestTheResponderSeam:
                 # Onto the transport directly: past 64 KiB aiohttp's own write
                 # waits for the queue to fall to its low-water mark, nearly empty.
                 transport.write(b"x" * _OVERRUN_BYTES)
+                # `Reply.abort()` has no `await` before its close, so no loop turn
+                # separates this reading from the close, and the reader is held back.
                 queued_at_abort.append(transport.get_write_buffer_size())
                 await response.abort()
             finally:
