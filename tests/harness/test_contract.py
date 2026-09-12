@@ -391,7 +391,7 @@ class TestPartGrammar:
         """Carrying bytes would put megabytes into every failure message (R3.7)."""
         names = {f.name for f in dataclasses.fields(c.Image)}
 
-        assert names == {"digest", "media_type", "ref"}
+        assert names == {"digest", "media_type", "ref", "cache_control"}
 
     def test_the_documented_digest_is_sha256_over_the_decoded_bytes(self) -> None:
         """Unpinned, two readers produce different digests for one image and the corpus fails."""
@@ -412,6 +412,108 @@ class TestPartGrammar:
     def test_thinking_carries_the_signature_m8_manipulates(self) -> None:
         """Anthropic's `signature` and Gemini's `thoughtSignature` are M8's subject."""
         assert c.Thinking(text="t", signature="sig").signature == "sig"
+
+
+class TestCacheControlSlot:
+    """The cache breakpoint the grammar carries, and the two blocks it does not (KBR-167).
+
+    Claude Code sets a ``cache_control`` breakpoint on nearly every request. Without
+    a slot the field could only residualise, and §3.3.1's totality rule fails the run
+    on a non-empty residual — so the oracle would have failed on essentially every
+    real body. §3.3.1 records why this is a slot rather than a declared-ignored rule.
+    """
+
+    #: The wire form, and the extended-lifetime form that costs more.
+    EPHEMERAL = {"type": "ephemeral"}
+    ONE_HOUR = {"type": "ephemeral", "ttl": "1h"}
+
+    def test_every_block_anthropic_permits_a_breakpoint_on_carries_one(self) -> None:
+        """The six sites of Anthropic's published "what can be cached" list.
+
+        Asserted as a set derived from the module rather than six separate
+        assertions, so a seventh part type added later is a visible decision
+        rather than a silent omission.
+        """
+        carriers = (
+            c.Text("t", cache_control=self.EPHEMERAL),
+            c.ToolUse(name="f", arguments={}, cache_control=self.EPHEMERAL),
+            c.ToolResult(content=(), cache_control=self.EPHEMERAL),
+            c.Image(digest="d", cache_control=self.EPHEMERAL),
+            c.Opaque(kind="document", digest="d", cache_control=self.EPHEMERAL),
+            c.ToolDecl(name="f", cache_control=self.EPHEMERAL),
+        )
+
+        # A tuple, not a set: projections are deliberately unhashable (R3.11),
+        # so the obvious set literal raises rather than asserting anything.
+        carrying = {type(p).__name__ for p in carriers if p.cache_control is not None}
+        assert carrying == {"Text", "ToolUse", "ToolResult", "Image", "Opaque", "ToolDecl"}
+
+        for carrier in carriers:
+            assert dict(carrier.cache_control) == self.EPHEMERAL
+
+    def test_thinking_and_json_have_no_slot_because_the_vendor_forbids_one(self) -> None:
+        """Not an asymmetry to tidy away — it is Anthropic's rule.
+
+        A thinking block "cannot be cached directly with ``cache_control``", and a
+        sub-content block such as a citation is cached via its top-level block. A
+        body putting a breakpoint on either is one the API itself rejects, so the
+        reader must residualise it and fail the run with the field named, rather
+        than accept a request that cannot work.
+        """
+        for part_type in (c.Thinking, c.Json):
+            assert "cache_control" not in {f.name for f in dataclasses.fields(part_type)}
+
+        with pytest.raises(TypeError):
+            c.Thinking(text="t", cache_control=self.EPHEMERAL)  # type: ignore[call-arg]
+
+        with pytest.raises(TypeError):
+            c.Json(value={}, cache_control=self.EPHEMERAL)  # type: ignore[call-arg]
+
+    def test_absent_is_the_default_and_stays_distinct_from_present(self) -> None:
+        """``None`` means no breakpoint; ``{}`` would be a breakpoint with no type.
+
+        The distinction is what lets M16 show a *stripped* breakpoint as a delta
+        rather than as two blocks that merely disagree about a default.
+        """
+        assert c.Text("t").cache_control is None
+        assert c.Text("t", cache_control={}).cache_control is not None
+
+    def test_the_ttl_survives_because_the_two_lifetimes_cost_different_money(self) -> None:
+        """A one-hour write is 2x base input against 1.25x for the default five-minute one.
+
+        A boolean slot would carry "cached: yes" for both, so a translator that
+        silently downgraded ``1h`` would produce no delta — the exact class of
+        invisible loss the slot exists to expose.
+        """
+        assert c.Text("t", cache_control=self.ONE_HOUR).cache_control["ttl"] == "1h"
+        assert c.Text("t", cache_control=self.EPHEMERAL).cache_control.get("ttl") is None
+
+    def test_two_parts_differing_only_in_a_breakpoint_are_unequal(self) -> None:
+        """Plan §1.4's falsification case for this slot.
+
+        A slot that accepted its value and discarded it would satisfy every
+        assertion above about *presence*. Only an inequality proves the value
+        reaches the comparison the oracle actually runs.
+        """
+        assert c.Text("t", cache_control=self.EPHEMERAL) != c.Text("t")
+        assert c.Text("t", cache_control=self.ONE_HOUR) != c.Text("t", cache_control=self.EPHEMERAL)
+        assert c.ToolDecl(name="f", cache_control=self.EPHEMERAL) != c.ToolDecl(name="f")
+
+    def test_a_breakpoint_is_frozen_like_every_other_mapping_the_contract_holds(self) -> None:
+        """The oracle must not be able to alter what it compares (R3.8)."""
+        part = c.Text("t", cache_control=dict(self.EPHEMERAL))
+
+        with pytest.raises(TypeError):
+            part.cache_control["type"] = "tampered"  # type: ignore[index]
+
+    def test_freezing_copies_so_the_callers_dict_cannot_reach_inside(self) -> None:
+        """A reader that reuses one dict across blocks must not couple them."""
+        supplied = {"type": "ephemeral"}
+        part = c.Text("t", cache_control=supplied)
+
+        supplied["type"] = "mutated"
+
+        assert part.cache_control["type"] == "ephemeral"
 
 
 class TestEnvelopeAndConversation:
@@ -628,6 +730,44 @@ class TestPathVocabulary:
     def test_a_part_is_addressed_by_turn_and_part_index(self) -> None:
         """§3.3.4: a failure must name the exact turn and part."""
         assert c.part_path(2, 1) == "conversation.turns[2].parts[1]"
+
+    def test_the_three_carriers_of_a_cache_breakpoint_are_addressable(self) -> None:
+        """M16 claims a stripped breakpoint at all three, so all three need a path.
+
+        ``tool_path`` already took a field name for P15's ``.strict``; the other
+        two gain one rather than have the register hand-assemble the string, which
+        is the drift §3.3.1a says this vocabulary exists to prevent.
+        """
+        assert c.system_path(1, "cache_control") == "conversation.system[1].cache_control"
+        assert c.part_path(0, 2, "cache_control") == "conversation.turns[0].parts[2].cache_control"
+        assert c.tool_path("Bash", "cache_control") == "conversation.tools[Bash].cache_control"
+
+    def test_the_breakpoint_anchors_take_the_wildcard_a_register_row_writes(self) -> None:
+        """M16 fires on every block, so its row is a pattern, not three concrete paths."""
+        assert c.system_path(c.WILDCARD, "cache_control") == "conversation.system[*].cache_control"
+        assert (
+            c.part_path(c.WILDCARD, c.WILDCARD, "cache_control")
+            == "conversation.turns[*].parts[*].cache_control"
+        )
+        assert c.path_matches(
+            c.part_path(c.WILDCARD, c.WILDCARD, "cache_control"),
+            c.part_path(1, 0, "cache_control"),
+        )
+
+    def test_the_breakpoint_anchor_does_not_claim_the_block_it_sits_on(self) -> None:
+        """§3.3.1a's P15 lesson: a coarse anchor claims deltas it must not.
+
+        ``conversation.turns[*].parts[*]`` would claim a *deleted part* — one of
+        §3.3.1's five oracle falsification cases — so M16 names the field.
+        """
+        assert not c.path_matches(
+            c.part_path(c.WILDCARD, c.WILDCARD, "cache_control"),
+            c.part_path(1, 0),
+        )
+        assert not c.path_matches(
+            c.tool_path(c.WILDCARD, "cache_control"),
+            c.tool_path("Bash", "description"),
+        )
 
     def test_an_index_helper_also_builds_the_wildcard_a_register_row_writes(self) -> None:
         """T-W3 writes patterns with the same helpers T-D1 writes concrete paths with.

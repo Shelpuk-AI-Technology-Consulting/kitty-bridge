@@ -61,15 +61,22 @@ _SHAPES: tuple[tuple[str, str], ...] = (
     (c.CONVERSATION_SAMPLING, c.sampling_path("temperature")),
     (c.CONVERSATION_SYSTEM, c.system_path(1)),
     (c.CONVERSATION_TURNS, c.turn_path(0, "role")),
+    # M16's three, one per carrier Anthropic permits a cache breakpoint on.
+    (c.system_path(c.WILDCARD, "cache_control"), c.system_path(1, "cache_control")),
+    (
+        c.part_path(c.WILDCARD, c.WILDCARD, "cache_control"),
+        c.part_path(2, 0, "cache_control"),
+    ),
+    (c.tool_path(c.WILDCARD, "cache_control"), c.tool_path("Bash", "cache_control")),
 )
 
 
 class TestTheRowsThemselves:
-    """§3.2 publishes 42 live rows; the data must be those rows and no others."""
+    """§3.2 publishes 43 live rows; the data must be those rows and no others."""
 
     def test_the_register_holds_every_live_row(self) -> None:
-        """15 bridge-level rows less the withdrawn M13, plus 28 provider-level."""
-        assert len(r.REGISTER) == 42
+        """16 bridge-level rows less the withdrawn M13, plus 28 provider-level."""
+        assert len(r.REGISTER) == 43
 
     def test_the_register_is_a_tuple_and_not_a_list(self) -> None:
         """`mypy` does not run over `tests/`, so the annotation is not enforcement.

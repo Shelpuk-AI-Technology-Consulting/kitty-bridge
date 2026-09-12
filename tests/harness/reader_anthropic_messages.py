@@ -87,9 +87,11 @@ _SAMPLING_KEYS = {
 }
 
 #: Tool-declaration keys the grammar carries.  Anything else on a tool entry
-#: residualises — ``type`` on a server tool and ``cache_control`` are the two
-#: that occur (KBR-167).
-_TOOL_KEYS = frozenset({"name", "description", "input_schema"})
+#: residualises — ``type`` on a server tool is the one that occurs.
+#: ``cache_control`` joined this set with KBR-167: Anthropic caches tool
+#: definitions, and Claude Code marks the last declaration on nearly every
+#: request, so residualising it failed the run on every real body.
+_TOOL_KEYS = frozenset({"name", "description", "input_schema", "cache_control"})
 
 #: ``tool_choice.type`` values that map straight onto the canonical value.
 #: ``tool`` is handled separately because it carries a name.
@@ -311,8 +313,9 @@ def _read_system(value: Any, residual: dict[str, Any]) -> tuple[c.Text, ...]:
         if not isinstance(text, str):
             raise c.UnreadableBodyError(f"system[{index}] text must be a string, got {type(text).__name__}")
 
-        parts.append(c.Text(text))
-        _residualise(block, {"type", "text"}, f"system[{index}]", residual)
+        path = f"system[{index}]"
+        _residualise(block, {"type", "text", "cache_control"}, path, residual)
+        parts.append(c.Text(text, cache_control=_read_cache_control(block, path, residual)))
 
     return tuple(parts)
 
@@ -323,7 +326,8 @@ def _read_tools(value: Any, residual: dict[str, Any]) -> tuple[c.ToolDecl, ...]:
     Args:
         value: The ``tools`` field, absent or a list of declarations.
         residual: The residual mapping, extended with any entry key the grammar
-            cannot carry — ``type`` on a server tool and ``cache_control``.
+            cannot carry, such as ``type`` on a server tool. ``cache_control``
+            is carried rather than residualised, since KBR-167.
 
     Returns:
         The declarations, in order.
@@ -364,6 +368,7 @@ def _read_tools(value: Any, residual: dict[str, Any]) -> tuple[c.ToolDecl, ...]:
                 # Absent, not False: the Messages format defines no `strict`,
                 # and P15's presence and absence must stay distinguishable.
                 strict=None,
+                cache_control=_read_cache_control(tool, f"tools[{index}]", residual),
             )
         )
         # Indexed, not by name (§7.4.1): a residual key is the body's own path,
@@ -485,8 +490,8 @@ def _read_block(block: Any, path: str, residual: dict[str, Any]) -> c.Part:
         text = block["text"]
         if not isinstance(text, str):
             raise c.UnreadableBodyError(f"{path} text must be a string, got {type(text).__name__}")
-        _residualise(block, {"type", "text"}, path, residual)
-        return c.Text(text)
+        _residualise(block, {"type", "text", "cache_control"}, path, residual)
+        return c.Text(text, cache_control=_read_cache_control(block, path, residual))
 
     if kind == "thinking":
         # `signature` is mapped, never residualised: M8's carrier repair
@@ -516,11 +521,12 @@ def _read_block(block: Any, path: str, residual: dict[str, Any]) -> c.Part:
             residual[f"{path}.input"] = arguments
             arguments = None
 
-        _residualise(block, {"type", "name", "input", "id"}, path, residual)
+        _residualise(block, {"type", "name", "input", "id", "cache_control"}, path, residual)
         return c.ToolUse(
             name=block["name"],
             arguments=arguments or {},
             id=_typed_leaf(block, "id", str, path, residual),
+            cache_control=_read_cache_control(block, path, residual),
         )
 
     if kind == "tool_result":
@@ -533,7 +539,9 @@ def _read_block(block: Any, path: str, residual: dict[str, Any]) -> c.Part:
             residual[f"{path}.is_error"] = is_error
             is_error = False
 
-        _residualise(block, {"type", "tool_use_id", "content", "is_error"}, path, residual)
+        _residualise(
+            block, {"type", "tool_use_id", "content", "is_error", "cache_control"}, path, residual
+        )
         return c.ToolResult(
             content=_read_result_content(block.get("content"), path, residual),
             # Absent where a format carries none; pairing is then by name and
@@ -543,6 +551,7 @@ def _read_block(block: Any, path: str, residual: dict[str, Any]) -> c.Part:
             # producing the delta that names it.
             tool_use_id=_typed_leaf(block, "tool_use_id", str, path, residual),
             is_error=is_error,
+            cache_control=_read_cache_control(block, path, residual),
         )
 
     return _read_opaque(block, kind, path, residual)
@@ -569,7 +578,11 @@ def _read_image(block: Mapping[str, Any], path: str, residual: dict[str, Any]) -
         raise c.UnreadableBodyError(f"{path} image carries no source object")
 
     kind = source.get("type")
-    _residualise(block, {"type", "source"}, path, residual)
+    _residualise(block, {"type", "source", "cache_control"}, path, residual)
+
+    # The breakpoint sits on the *block*, not on its source, so it is read once
+    # here and handed to whichever of the three source kinds builds the part.
+    cache_control = _read_cache_control(block, path, residual)
 
     if kind == "base64":
         try:
@@ -584,15 +597,22 @@ def _read_image(block: Mapping[str, Any], path: str, residual: dict[str, Any]) -
         return c.Image(
             digest=c.image_digest(decoded),
             media_type=_typed_leaf(source, "media_type", str, f"{path}.source", residual),
+            cache_control=cache_control,
         )
 
     if kind == "url":
         _residualise(source, {"type", "url"}, f"{path}.source", residual)
-        return c.Image(ref=_typed_leaf(source, "url", str, f"{path}.source", residual))
+        return c.Image(
+            ref=_typed_leaf(source, "url", str, f"{path}.source", residual),
+            cache_control=cache_control,
+        )
 
     if kind == "file":
         _residualise(source, {"type", "file_id"}, f"{path}.source", residual)
-        return c.Image(ref=_typed_leaf(source, "file_id", str, f"{path}.source", residual))
+        return c.Image(
+            ref=_typed_leaf(source, "file_id", str, f"{path}.source", residual),
+            cache_control=cache_control,
+        )
 
     raise c.UnreadableBodyError(f"{path} image source type {kind!r} is not one the format defines")
 
@@ -673,17 +693,23 @@ def _read_opaque(block: Mapping[str, Any], kind: str, path: str, residual: dict[
         block: The block.
         kind: The block's wire type, which becomes :attr:`~harness.contract.Opaque.kind`.
         path: The block's path from the body root.
-        residual: The residual mapping, extended with the block's
-            ``cache_control`` only.
+        residual: The residual mapping, extended only when ``cache_control``
+            carries something that is not an object.
 
     Returns:
         The opaque part, carrying a digest of its payload.
     """
-    # `cache_control` residualises exactly as it does on a modelled block, so
-    # one field does not behave two ways — inside the digest it would produce a
-    # delta with no named cause (KBR-167).
-    _residualise(block, set(block) - {"cache_control"}, path, residual)
-    return c.Opaque(kind=kind, digest=_payload_digest(block))
+    # Every key is consumed — the payload lives in the digest — and
+    # `cache_control` maps to the slot exactly as it does on a modelled block,
+    # so one field does not behave two ways (KBR-167). It stays **out of the
+    # digest**: inside it, M16's strip would show as an opaque digest change
+    # that no register row could name.
+    _residualise(block, set(block), path, residual)
+    return c.Opaque(
+        kind=kind,
+        digest=_payload_digest(block),
+        cache_control=_read_cache_control(block, path, residual),
+    )
 
 
 def _payload_digest(block: Mapping[str, Any]) -> str:
@@ -740,6 +766,39 @@ def _typed_leaf(
     if value is not None and not isinstance(value, expected):
         residual[f"{path}.{key}" if path else key] = value
         return default
+    return value
+
+
+def _read_cache_control(
+    block: Mapping[str, Any], path: str, residual: dict[str, Any]
+) -> Mapping[str, Any] | None:
+    """Read a block's cache breakpoint into the grammar's slot.
+
+    Claude Code sets a ``cache_control`` breakpoint on nearly every request, so
+    before the grammar carried one this field alone failed the run on essentially
+    every real body (KBR-167).  Applied through one helper so the six carriers
+    cannot drift, and so the next field added inherits the typed-leaf rule.
+
+    Args:
+        block: The block, tool declaration or system block being read.
+        path: The object's path from the body root, for the residual key.
+        residual: The residual mapping, extended in place when the value is not
+            an object.
+
+    Returns:
+        The breakpoint as the wire mapping, or ``None`` when absent or unusable.
+    """
+    value = block.get("cache_control")
+    if value is None:
+        return None
+
+    # §7.4.1's wrongly-typed leaf: a bare string is not a breakpoint. Keeping it
+    # would put a value in the slot no comparison could read; coercing it would
+    # invent one the agent never sent.
+    if not isinstance(value, dict):
+        residual[f"{path}.cache_control"] = value
+        return None
+
     return value
 
 
