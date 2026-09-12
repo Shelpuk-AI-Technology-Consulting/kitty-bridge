@@ -391,7 +391,7 @@ class TestPartGrammar:
         """Carrying bytes would put megabytes into every failure message (R3.7)."""
         names = {f.name for f in dataclasses.fields(c.Image)}
 
-        assert names == {"digest", "media_type", "ref"}
+        assert names == {"digest", "media_type", "ref", "cache_control"}
 
     def test_the_documented_digest_is_sha256_over_the_decoded_bytes(self) -> None:
         """Unpinned, two readers produce different digests for one image and the corpus fails."""
@@ -412,6 +412,116 @@ class TestPartGrammar:
     def test_thinking_carries_the_signature_m8_manipulates(self) -> None:
         """Anthropic's `signature` and Gemini's `thoughtSignature` are M8's subject."""
         assert c.Thinking(text="t", signature="sig").signature == "sig"
+
+
+class TestCacheControlSlot:
+    """The cache breakpoint the grammar carries, and the two blocks it does not (KBR-167).
+
+    Claude Code sets a ``cache_control`` breakpoint on nearly every request. Without
+    a slot the field could only residualise, and §3.3.1's totality rule fails the run
+    on a non-empty residual — so the oracle would have failed on essentially every
+    real body. §3.3.1 records why this is a slot rather than a declared-ignored rule.
+    """
+
+    #: The wire form, and the extended-lifetime form that costs more.
+    EPHEMERAL = {"type": "ephemeral"}
+    ONE_HOUR = {"type": "ephemeral", "ttl": "1h"}
+
+    def test_every_block_anthropic_permits_a_breakpoint_on_carries_one(self) -> None:
+        """The six sites of Anthropic's published "what can be cached" list.
+
+        Asserted as a set derived from the module rather than six separate
+        assertions, so a seventh part type added later is a visible decision
+        rather than a silent omission.
+        """
+        carriers = (
+            c.Text("t", cache_control=self.EPHEMERAL),
+            c.ToolUse(name="f", arguments={}, cache_control=self.EPHEMERAL),
+            c.ToolResult(content=(), cache_control=self.EPHEMERAL),
+            c.Image(digest="d", cache_control=self.EPHEMERAL),
+            c.Opaque(kind="document", digest="d", cache_control=self.EPHEMERAL),
+            c.ToolDecl(name="f", cache_control=self.EPHEMERAL),
+        )
+
+        # A tuple, not a set: projections are deliberately unhashable (R3.11),
+        # so the obvious set literal raises rather than asserting anything.
+        carrying = {type(p).__name__ for p in carriers if p.cache_control is not None}
+        assert carrying == {"Text", "ToolUse", "ToolResult", "Image", "Opaque", "ToolDecl"}
+
+        for carrier in carriers:
+            assert dict(carrier.cache_control) == self.EPHEMERAL
+
+    def test_thinking_and_json_have_no_slot_for_two_different_reasons(self) -> None:
+        """Not an asymmetry to tidy away — and the two halves are not one rule.
+
+        ``Thinking``: Anthropic states a thinking block "cannot be cached
+        directly with ``cache_control``". Note the limit of that claim — thinking
+        blocks *can* be cached alongside other content in earlier assistant
+        turns, and no rejection is documented, so the honest statement is that
+        the vendor does not support a breakpoint there. A body carrying one
+        residualises and fails the run with the field named.
+
+        ``Json``: nothing to do with the sub-content rule. §7.4.1 fixes ``Json``
+        as the part for a format carrying a structured value *natively* —
+        Converse's ``toolResult.content.json``, Gemini's
+        ``functionResponse.response``. **Neither format has a ``cache_control``
+        concept**, and the Anthropic reader never emits a ``Json`` part, so no
+        reader could ever fill the slot.
+        """
+        for part_type in (c.Thinking, c.Json):
+            assert "cache_control" not in {f.name for f in dataclasses.fields(part_type)}
+
+        with pytest.raises(TypeError):
+            c.Thinking(text="t", cache_control=self.EPHEMERAL)  # type: ignore[call-arg]
+
+        with pytest.raises(TypeError):
+            c.Json(value={}, cache_control=self.EPHEMERAL)  # type: ignore[call-arg]
+
+    def test_absent_is_the_default_and_stays_distinct_from_present(self) -> None:
+        """``None`` means no breakpoint; ``{}`` would be a breakpoint with no type.
+
+        The distinction is what lets M16 show a *stripped* breakpoint as a delta
+        rather than as two blocks that merely disagree about a default.
+        """
+        assert c.Text("t").cache_control is None
+        assert c.Text("t", cache_control={}).cache_control is not None
+
+    def test_the_ttl_survives_because_the_two_lifetimes_cost_different_money(self) -> None:
+        """A one-hour write is 2x base input against 1.25x for the default five-minute one.
+
+        A boolean slot would carry "cached: yes" for both, so a translator that
+        silently downgraded ``1h`` would produce no delta — the exact class of
+        invisible loss the slot exists to expose.
+        """
+        assert c.Text("t", cache_control=self.ONE_HOUR).cache_control["ttl"] == "1h"
+        assert c.Text("t", cache_control=self.EPHEMERAL).cache_control.get("ttl") is None
+
+    def test_two_parts_differing_only_in_a_breakpoint_are_unequal(self) -> None:
+        """Plan §1.4's falsification case for this slot.
+
+        A slot that accepted its value and discarded it would satisfy every
+        assertion above about *presence*. Only an inequality proves the value
+        reaches the comparison the oracle actually runs.
+        """
+        assert c.Text("t", cache_control=self.EPHEMERAL) != c.Text("t")
+        assert c.Text("t", cache_control=self.ONE_HOUR) != c.Text("t", cache_control=self.EPHEMERAL)
+        assert c.ToolDecl(name="f", cache_control=self.EPHEMERAL) != c.ToolDecl(name="f")
+
+    def test_a_breakpoint_is_frozen_like_every_other_mapping_the_contract_holds(self) -> None:
+        """The oracle must not be able to alter what it compares (R3.8)."""
+        part = c.Text("t", cache_control=dict(self.EPHEMERAL))
+
+        with pytest.raises(TypeError):
+            part.cache_control["type"] = "tampered"  # type: ignore[index]
+
+    def test_freezing_copies_so_the_callers_dict_cannot_reach_inside(self) -> None:
+        """A reader that reuses one dict across blocks must not couple them."""
+        supplied = {"type": "ephemeral"}
+        part = c.Text("t", cache_control=supplied)
+
+        supplied["type"] = "mutated"
+
+        assert part.cache_control["type"] == "ephemeral"
 
 
 class TestEnvelopeAndConversation:
@@ -628,6 +738,44 @@ class TestPathVocabulary:
     def test_a_part_is_addressed_by_turn_and_part_index(self) -> None:
         """§3.3.4: a failure must name the exact turn and part."""
         assert c.part_path(2, 1) == "conversation.turns[2].parts[1]"
+
+    def test_the_three_carriers_of_a_cache_breakpoint_are_addressable(self) -> None:
+        """M16 claims a stripped breakpoint at all three, so all three need a path.
+
+        ``tool_path`` already took a field name for P15's ``.strict``; the other
+        two gain one rather than have the register hand-assemble the string, which
+        is the drift §3.3.1a says this vocabulary exists to prevent.
+        """
+        assert c.system_path(1, "cache_control") == "conversation.system[1].cache_control"
+        assert c.part_path(0, 2, "cache_control") == "conversation.turns[0].parts[2].cache_control"
+        assert c.tool_path("Bash", "cache_control") == "conversation.tools[Bash].cache_control"
+
+    def test_the_breakpoint_anchors_take_the_wildcard_a_register_row_writes(self) -> None:
+        """M16 fires on every block, so its row is a pattern, not three concrete paths."""
+        assert c.system_path(c.WILDCARD, "cache_control") == "conversation.system[*].cache_control"
+        assert (
+            c.part_path(c.WILDCARD, c.WILDCARD, "cache_control")
+            == "conversation.turns[*].parts[*].cache_control"
+        )
+        assert c.path_matches(
+            c.part_path(c.WILDCARD, c.WILDCARD, "cache_control"),
+            c.part_path(1, 0, "cache_control"),
+        )
+
+    def test_the_breakpoint_anchor_does_not_claim_the_block_it_sits_on(self) -> None:
+        """§3.3.1a's P15 lesson: a coarse anchor claims deltas it must not.
+
+        ``conversation.turns[*].parts[*]`` would claim a *deleted part* — one of
+        §3.3.1's five oracle falsification cases — so M16 names the field.
+        """
+        assert not c.path_matches(
+            c.part_path(c.WILDCARD, c.WILDCARD, "cache_control"),
+            c.part_path(1, 0),
+        )
+        assert not c.path_matches(
+            c.tool_path(c.WILDCARD, "cache_control"),
+            c.tool_path("Bash", "description"),
+        )
 
     def test_an_index_helper_also_builds_the_wildcard_a_register_row_writes(self) -> None:
         """T-W3 writes patterns with the same helpers T-D1 writes concrete paths with.
@@ -1156,6 +1304,331 @@ class _StubReader:
             protocol-conformance check.
         """
         return _project(consumed=set(), residual={}, source={})
+
+
+class TestArgumentsDecode:
+    """The one rule two formats' readers share for a JSON-string `arguments` (§3.3.1b).
+
+    Chat Completions and Responses both carry tool-call arguments as a JSON
+    *string* while `ToolUse.arguments` is a mapping, so both readers decode.
+    Pinned here — KBR-174 — because the two lived on opposite sides of register
+    rows P13-P17: if they decoded the malformed path differently, the
+    disagreement would surface as an unclaimed delta at
+    `conversation.turns[*].parts[*]` that no row claims, which §3.3.1a calls the
+    unrecoverable direction.
+    """
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            (None, {}),
+            ("", {}),
+            ("   ", {}),
+            ("\t\n ", {}),
+            ('{"a": 1}', {"a": 1}),
+            ("{}", {}),
+            ('{"nested": {"b": [1, 2]}}', {"nested": {"b": [1, 2]}}),
+        ],
+    )
+    def test_a_clean_value_decodes_and_leaves_the_residual_untouched(
+        self, raw: object, expected: dict[str, object]
+    ) -> None:
+        """Absent, blank and object-valued arguments are all fully accounted for."""
+        residual: dict[str, object] = {}
+
+        assert c.decode_arguments(raw, "input[0].arguments", residual) == expected
+        assert residual == {}
+
+    @pytest.mark.parametrize(
+        "raw",
+        ["[1, 2]", '"a string"', "7", "true", "null", "{oops", "", " "],
+    )
+    def test_every_shape_the_schema_forbids_is_either_clean_or_residualised(self, raw: str) -> None:
+        """Blank is clean, everything else the schema forbids residualises — never both, never neither."""
+        residual: dict[str, object] = {}
+
+        decoded = c.decode_arguments(raw, "p", residual)
+
+        assert decoded == {}
+        assert bool(residual) == bool(raw.strip())
+
+    @pytest.mark.parametrize("raw", ["[1, 2]", '"a string"', "7", "true", "null", "{oops"])
+    def test_a_residualised_string_stores_the_raw_wire_value_not_the_decoded_one(self, raw: str) -> None:
+        """`"[1,2]"` residualises as the *string*, never as `[1, 2]`.
+
+        Unpinned, T-A2 could store the decoded form and the two readers' residual
+        key sets would differ on content neither altered — which is exactly what
+        T-D8 diffs across all six readers.
+        """
+        residual: dict[str, object] = {}
+
+        c.decode_arguments(raw, "p", residual)
+
+        assert residual == {"p": raw}
+
+    @pytest.mark.parametrize("raw", [{"a": 1}, 7, ["a"], True, 1.5, b"{}"])
+    def test_a_value_that_is_not_a_string_residualises_including_a_decoded_object(self, raw: object) -> None:
+        """The already-decoded object form is NOT accepted, and that is the point.
+
+        A bridge that emitted an object where the schema demands a string is the
+        wire-format breach the readers exist to see; accepting it here would make
+        it invisible.
+        """
+        residual: dict[str, object] = {}
+
+        assert c.decode_arguments(raw, "p", residual) == {}
+        assert residual == {"p": raw}
+
+    def test_the_residual_path_is_the_caller_s_own(self) -> None:
+        """The decode is shared; the path is format-specific and stays each reader's."""
+        residual: dict[str, object] = {}
+
+        c.decode_arguments("{oops", "messages[1].tool_calls[0].function.arguments", residual)
+
+        assert residual == {"messages[1].tool_calls[0].function.arguments": "{oops"}
+
+    @pytest.mark.parametrize(
+        "raw",
+        [None, "", "{", "[", '{"a": 1}', 0, -1, 1.5, True, False, b"", b"{}", [], {}, set(), object(), ...],
+    )
+    def test_no_input_raises(self, raw: object) -> None:
+        """`contract` defines a reader-raised `ValueError` as a reader bug, so this fails closed.
+
+        Fuzzed over ill-typed values because that is how the harness's one
+        unhashable-membership defect reached the corpus.
+        """
+        c.decode_arguments(raw, "p", {})
+
+    def test_the_decoded_mapping_is_accepted_by_ToolUse(self) -> None:
+        """The decode's whole purpose is to feed `ToolUse.arguments`, so prove the pair composes.
+
+        Renamed from a claim about aliasing it did not test: `json.loads` always
+        returns a fresh object, so that claim was true for a reason the test
+        never exercised.
+        """
+        decoded = c.decode_arguments('{"a": 1}', "p", {})
+
+        assert c.ToolUse(name="t", arguments=decoded).arguments == {"a": 1}
+
+
+class TestOpaqueDigests:
+    """The two recipes that make unmodelled content detectable (§7.4.1, KBR-174).
+
+    `Opaque.digest` has **two** recipes and the boundary is stated: a block the
+    grammar cannot model digests as canonical JSON; content whose identity is a
+    run of text digests as its UTF-8 bytes. Chat Completions carries a refusal as
+    a bare string with no block to digest, so one recipe would force that reader
+    to invent a wrapper — a new thing six readers could disagree about.
+    """
+
+    #: A block that is non-ASCII, multi-key, and inserted in an order that is
+    #: **not** sorted order, with a nested object also out of order.  All three
+    #: properties are load-bearing: without them the `ensure_ascii`, `sort_keys`
+    #: and `separators` mutations are each invisible.  Do not simplify.
+    BLOCK = {
+        "type": "document",
+        "title": "Traité économique — 中文",
+        "cache_control": {"type": "ephemeral"},
+        "source": {"media_type": "application/pdf", "data": "JVBERi0x"},
+        "context": "résumé",
+    }
+
+    #: Computed by an independent route and pasted, never by calling
+    #: :func:`harness.contract.opaque_digest`.  This is the whole point: in T-A1
+    #: all three wrong spellings of the recipe survived mutation testing because
+    #: every other assertion compared two projections against each other, which
+    #: cannot see a recipe change that stays internally consistent.
+    EXPECTED = "dba40a0282b92fdb9c8155eb0d8490b27238531d3e5afd59e023e14adbd2c6a3"
+
+    def test_the_recipe_matches_an_externally_computed_literal(self) -> None:
+        """Pins `sort_keys`, `separators` and `ensure_ascii` against a value this module cannot produce."""
+        assert c.opaque_digest(self.BLOCK) == self.EXPECTED
+
+    def test_the_type_is_excluded_because_it_is_already_the_kind(self) -> None:
+        """Otherwise `kind` and `digest` would report one change twice."""
+        renamed = dict(self.BLOCK, type="search_result")
+
+        assert c.opaque_digest(renamed) == self.EXPECTED
+
+    def test_cache_control_is_excluded_because_it_residualises_instead(self) -> None:
+        """One field must not behave two ways — a diagnosed residual here, an unexplained digest change there."""
+        without = {k: v for k, v in self.BLOCK.items() if k != "cache_control"}
+        changed = dict(self.BLOCK, cache_control={"type": "persistent"})
+
+        assert c.opaque_digest(without) == self.EXPECTED
+        assert c.opaque_digest(changed) == self.EXPECTED
+
+    def test_reordering_keys_does_not_change_the_digest(self) -> None:
+        """A translator that reorders keys must not report a delta — the reason it is not `sha256(raw_bytes)`."""
+        reordered = dict(reversed(list(self.BLOCK.items())))
+
+        assert c.opaque_digest(reordered) == self.EXPECTED
+
+    @pytest.mark.parametrize("key", ["title", "source", "context"])
+    def test_changing_any_other_key_does_change_the_digest(self, key: str) -> None:
+        """The exclusions must be exactly two — a digest blind to content is worse than none."""
+        assert c.opaque_digest(dict(self.BLOCK, **{key: "altered"})) != self.EXPECTED
+
+    def test_a_nested_value_is_covered(self) -> None:
+        """`sort_keys` recurses, so a swapped nested payload is visible."""
+        nested = dict(self.BLOCK, source={"media_type": "application/pdf", "data": "T1RIRVI="})
+
+        assert c.opaque_digest(nested) != self.EXPECTED
+
+    def test_text_digest_is_sha256_of_the_utf8_encoding(self) -> None:
+        """Pinned against `hashlib` directly, not against itself."""
+        assert c.text_digest("no") == hashlib.sha256(b"no").hexdigest()
+
+    def test_text_digest_round_trips_non_ascii(self) -> None:
+        """UTF-8, not the platform encoding — `latin-1` would raise here and `cp1252` would differ."""
+        assert c.text_digest("résumé — 中文") == hashlib.sha256("résumé — 中文".encode()).hexdigest()
+
+    def test_the_two_recipes_are_different_and_that_is_deliberate(self) -> None:
+        """A refusal digests from its text, a block from its JSON — §7.4.1 states which applies."""
+        assert c.text_digest("no") != c.opaque_digest({"type": "refusal", "refusal": "no"})
+
+
+class TestOpaqueKindVocabulary:
+    """`Opaque.kind` is canonical, and canonical now means checked (KBR-174).
+
+    The docstring already required "a canonical snake_case name, never the wire's
+    spelling" and then named no vocabulary, so six readers had to invent the same
+    names independently — the failure that sentence describes. Two shipped
+    readers already named one concept two ways (`file` vs `document`).
+    """
+
+    def test_the_alias_table_is_read_only(self) -> None:
+        """A mutable shared vocabulary is one a reader can quietly extend."""
+        with pytest.raises(TypeError):
+            c.OPAQUE_ALIASES["x"] = "y"  # type: ignore[index]
+
+    @pytest.mark.parametrize(
+        ("wire", "canonical"),
+        [("input_file", "document"), ("file", "document"), ("searchResult", "search_result")],
+    )
+    def test_a_known_wire_spelling_maps_to_its_canonical_name(self, wire: str, canonical: str) -> None:
+        """Anthropic and Converse both write `document`; Responses writes `input_file` for the same thing."""
+        assert c.opaque_kind(wire) == canonical
+
+    def test_no_alias_resolves_to_another_alias(self) -> None:
+        """One hop, or `opaque_kind` would depend on iteration order."""
+        assert not set(c.OPAQUE_ALIASES.values()) & set(c.OPAQUE_ALIASES)
+
+    def test_every_canonical_name_is_itself_legal(self) -> None:
+        """The table cannot hand a reader a value `Opaque` would reject."""
+        for canonical in c.OPAQUE_ALIASES.values():
+            assert c.Opaque(canonical).kind == canonical
+
+    @pytest.mark.parametrize(
+        "wire",
+        ["web_search_call", "redacted_thinking", "server_tool_use", "search_result", "refusal", "brand_new_block"],
+    )
+    def test_a_format_unique_type_passes_through_unchanged(self, wire: str) -> None:
+        """The deliberate exception: with no second spelling, there is nothing to reconcile."""
+        assert c.opaque_kind(wire) == wire
+
+    @pytest.mark.parametrize(
+        "wire",
+        ["guardContent", "cachePoint", "reasoningContent", "citationsContent", "toolAddition", "toolRemoval"],
+    )
+    def test_a_camel_case_wire_type_raises_rather_than_being_converted(self, wire: str) -> None:
+        """Converse has nine of these. Raising is what puts T-A5's author here with a real corpus.
+
+        Converting instead would mean shipping a camelCase splitter with no caller
+        and no corpus, whose unexercised edge cases become a second source of
+        drift rather than a cure for one.
+        """
+        with pytest.raises(ValueError, match=wire):
+            c.opaque_kind(wire)
+
+    @pytest.mark.parametrize("wire", ["", "_x", "x_", "x__y", "2x", "X", "a-b", "a.b", "a b"])
+    def test_the_snake_case_predicate_is_pinned_at_its_edges(self, wire: str) -> None:
+        """Four rules hinge on this predicate, so it is defined by test and not by intuition."""
+        with pytest.raises(ValueError):
+            c.opaque_kind(wire)
+
+    @pytest.mark.parametrize("wire", [7, None, ["a"], b"document", {"a": 1}])
+    def test_a_wire_type_that_is_not_a_string_is_a_TypeError_here_too(self, wire: object) -> None:
+        """`opaque_kind` and `Opaque` must agree on the split, or D12 holds in one place only.
+
+        The unhashable case is the sharp one: a list reached
+        `OPAQUE_ALIASES.get()` before any guard and raised `TypeError:
+        unhashable type`, which the readers' `except ValueError` cannot catch —
+        so it escaped as a raw crash instead of `UnreadableBodyError`. That is
+        the membership defect this harness has already shipped once.
+        """
+        with pytest.raises(TypeError, match="must be a str"):
+            c.opaque_kind(wire)  # type: ignore[arg-type]
+
+    def test_a_digit_inside_a_segment_is_legal(self) -> None:
+        """`sha256`-style names are snake_case; only a *leading* digit is not."""
+        assert c.opaque_kind("mcp_call_2") == "mcp_call_2"
+
+
+class TestOpaqueRejectsANonCanonicalKind:
+    """The construction check — the half that makes the vocabulary a rule rather than a comment."""
+
+    @pytest.mark.parametrize("kind", ["input_file", "file"])
+    def test_a_known_alias_is_rejected_and_the_message_names_the_canonical_form(self, kind: str) -> None:
+        """A reader that bypasses `opaque_kind` must fail loudly, not project a rival name."""
+        with pytest.raises(ValueError, match="document"):
+            c.Opaque(kind)
+
+    @pytest.mark.parametrize("kind", ["guardContent", "myCustomBlock", "_x", "x_", "2x", "a-b", ""])
+    def test_a_kind_that_is_not_snake_case_is_rejected_even_with_no_alias_for_it(self, kind: str) -> None:
+        """The second branch, and it needs a value **no alias covers** to exercise at all.
+
+        An earlier version of this test used `searchResult`, which
+        :data:`OPAQUE_ALIASES` reconciles — so it was proving the alias branch
+        twice and the snake_case branch never. Deleting the snake_case check left
+        the suite green, which is how the falsification sweep caught it.
+        """
+        assert kind not in c.OPAQUE_ALIASES
+
+        with pytest.raises(ValueError):
+            c.Opaque(kind)
+
+    def test_an_alias_is_rejected_by_the_alias_branch_not_by_the_spelling_one(self) -> None:
+        """`searchResult` is camelCase *and* aliased; the message must name the canonical form."""
+        with pytest.raises(ValueError, match="search_result"):
+            c.Opaque("searchResult")
+
+    @pytest.mark.parametrize("kind", [7, None, b"document", ["document"]])
+    def test_a_kind_that_is_not_a_string_is_a_TypeError(self, kind: object) -> None:
+        """`contract`'s split: `TypeError` for a wrong type, `ValueError` for a wrong value.
+
+        **The message is pinned, and that is what makes this test able to fail.**
+        A bare `pytest.raises(TypeError)` passed with the guard deleted: every
+        parameter raises an *incidental* `TypeError` further down — `fullmatch`
+        rejects an int and a bytes pattern, and `OPAQUE_ALIASES.get` rejects an
+        unhashable list. Three tests in this change have now been caught proving
+        a guard by way of some other guard; when two checks raise the same type,
+        only the message tells them apart.
+        """
+        with pytest.raises(TypeError, match="must be a str"):
+            c.Opaque(kind)  # type: ignore[arg-type]
+
+    @pytest.mark.parametrize(
+        "kind",
+        ["document", "search_result", "refusal", "redacted_thinking", "server_tool_use", "web_search_call"],
+    )
+    def test_every_canonical_kind_still_constructs(self, kind: str) -> None:
+        """The control: a check that rejected everything would satisfy the tests above."""
+        assert c.Opaque(kind, digest="d").kind == kind
+
+    def test_the_twenty_seven_opaque_responses_item_types_stay_legal(self) -> None:
+        """The stated exception, asserted over the reader's own sets rather than a copy.
+
+        A hand-listed copy here would be a second source of truth that stays green
+        while the reader moves.
+        """
+        from harness import reader_responses as r
+
+        item_types = r._OPAQUE_USER_ITEMS | r._OPAQUE_ASSISTANT_ITEMS
+
+        assert len(item_types) == 27
+        for kind in item_types:
+            assert c.Opaque(kind).kind == kind
 
 
 def test_unreadable_body_error_is_named_by_the_contract() -> None:

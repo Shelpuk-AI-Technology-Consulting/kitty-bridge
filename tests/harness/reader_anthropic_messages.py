@@ -28,7 +28,6 @@ from __future__ import annotations
 
 import base64
 import binascii
-import hashlib
 import json
 from collections.abc import Mapping, Sequence
 from typing import Any
@@ -87,9 +86,11 @@ _SAMPLING_KEYS = {
 }
 
 #: Tool-declaration keys the grammar carries.  Anything else on a tool entry
-#: residualises — ``type`` on a server tool and ``cache_control`` are the two
-#: that occur (KBR-167).
-_TOOL_KEYS = frozenset({"name", "description", "input_schema"})
+#: residualises — ``type`` on a server tool is the one that occurs.
+#: ``cache_control`` joined this set with KBR-167: Anthropic caches tool
+#: definitions, and Claude Code marks the last declaration on nearly every
+#: request, so residualising it failed the run on every real body.
+_TOOL_KEYS = frozenset({"name", "description", "input_schema", "cache_control"})
 
 #: ``tool_choice.type`` values that map straight onto the canonical value.
 #: ``tool`` is handled separately because it carries a name.
@@ -311,8 +312,9 @@ def _read_system(value: Any, residual: dict[str, Any]) -> tuple[c.Text, ...]:
         if not isinstance(text, str):
             raise c.UnreadableBodyError(f"system[{index}] text must be a string, got {type(text).__name__}")
 
-        parts.append(c.Text(text))
-        _residualise(block, {"type", "text"}, f"system[{index}]", residual)
+        path = f"system[{index}]"
+        _residualise(block, {"type", "text", "cache_control"}, path, residual)
+        parts.append(c.Text(text, cache_control=_read_cache_control(block, path, residual)))
 
     return tuple(parts)
 
@@ -323,7 +325,8 @@ def _read_tools(value: Any, residual: dict[str, Any]) -> tuple[c.ToolDecl, ...]:
     Args:
         value: The ``tools`` field, absent or a list of declarations.
         residual: The residual mapping, extended with any entry key the grammar
-            cannot carry — ``type`` on a server tool and ``cache_control``.
+            cannot carry, such as ``type`` on a server tool. ``cache_control``
+            is carried rather than residualised, since KBR-167.
 
     Returns:
         The declarations, in order.
@@ -364,6 +367,7 @@ def _read_tools(value: Any, residual: dict[str, Any]) -> tuple[c.ToolDecl, ...]:
                 # Absent, not False: the Messages format defines no `strict`,
                 # and P15's presence and absence must stay distinguishable.
                 strict=None,
+                cache_control=_read_cache_control(tool, f"tools[{index}]", residual),
             )
         )
         # Indexed, not by name (§7.4.1): a residual key is the body's own path,
@@ -455,13 +459,15 @@ def _read_content(value: Any, message_index: int, residual: dict[str, Any]) -> t
     return tuple(parts)
 
 
-def _read_block(block: Any, path: str, residual: dict[str, Any]) -> c.Part:
+def _read_block(block: Any, path: str, residual: dict[str, Any], *, nested: bool = False) -> c.Part:
     """Read one content block into a part.
 
     Args:
         block: The block.
         path: The block's path from the body root, for residual keys.
         residual: The residual mapping.
+        nested: Whether the block sits inside a ``tool_result``. A nested block
+            may not carry a cache breakpoint -- see :func:`_read_cache_control`.
 
     Returns:
         The part.
@@ -485,8 +491,8 @@ def _read_block(block: Any, path: str, residual: dict[str, Any]) -> c.Part:
         text = block["text"]
         if not isinstance(text, str):
             raise c.UnreadableBodyError(f"{path} text must be a string, got {type(text).__name__}")
-        _residualise(block, {"type", "text"}, path, residual)
-        return c.Text(text)
+        _residualise(block, {"type", "text", "cache_control"}, path, residual)
+        return c.Text(text, cache_control=_read_cache_control(block, path, residual, permitted=not nested))
 
     if kind == "thinking":
         # `signature` is mapped, never residualised: M8's carrier repair
@@ -501,7 +507,7 @@ def _read_block(block: Any, path: str, residual: dict[str, Any]) -> c.Part:
         return c.Thinking(text=thinking, signature=_typed_leaf(block, "signature", str, path, residual))
 
     if kind == "image":
-        return _read_image(block, path, residual)
+        return _read_image(block, path, residual, nested=nested)
 
     if kind == "tool_use":
         if not isinstance(block.get("name"), str):
@@ -516,11 +522,12 @@ def _read_block(block: Any, path: str, residual: dict[str, Any]) -> c.Part:
             residual[f"{path}.input"] = arguments
             arguments = None
 
-        _residualise(block, {"type", "name", "input", "id"}, path, residual)
+        _residualise(block, {"type", "name", "input", "id", "cache_control"}, path, residual)
         return c.ToolUse(
             name=block["name"],
             arguments=arguments or {},
             id=_typed_leaf(block, "id", str, path, residual),
+            cache_control=_read_cache_control(block, path, residual),
         )
 
     if kind == "tool_result":
@@ -533,7 +540,9 @@ def _read_block(block: Any, path: str, residual: dict[str, Any]) -> c.Part:
             residual[f"{path}.is_error"] = is_error
             is_error = False
 
-        _residualise(block, {"type", "tool_use_id", "content", "is_error"}, path, residual)
+        _residualise(
+            block, {"type", "tool_use_id", "content", "is_error", "cache_control"}, path, residual
+        )
         return c.ToolResult(
             content=_read_result_content(block.get("content"), path, residual),
             # Absent where a format carries none; pairing is then by name and
@@ -543,18 +552,26 @@ def _read_block(block: Any, path: str, residual: dict[str, Any]) -> c.Part:
             # producing the delta that names it.
             tool_use_id=_typed_leaf(block, "tool_use_id", str, path, residual),
             is_error=is_error,
+            cache_control=_read_cache_control(block, path, residual),
         )
 
-    return _read_opaque(block, kind, path, residual)
+    # `nested` forwarded although `_read_result_content` routes only `text` and
+    # `image` back through here, so this tail is unreachable from a nested block
+    # today. Dropping it would be a silent trap the day that routing widens.
+    return _read_opaque(block, kind, path, residual, nested=nested)
 
 
-def _read_image(block: Mapping[str, Any], path: str, residual: dict[str, Any]) -> c.Image:
+def _read_image(
+    block: Mapping[str, Any], path: str, residual: dict[str, Any], *, nested: bool = False
+) -> c.Image:
     """Read an image block, identifying it by digest rather than carrying bytes.
 
     Args:
         block: The image block.
         path: The block's path from the body root.
         residual: The residual mapping.
+        nested: Whether the block sits inside a ``tool_result``. A nested block
+            may not carry a cache breakpoint -- see :func:`_read_cache_control`.
 
     Returns:
         The image part.
@@ -569,7 +586,11 @@ def _read_image(block: Mapping[str, Any], path: str, residual: dict[str, Any]) -
         raise c.UnreadableBodyError(f"{path} image carries no source object")
 
     kind = source.get("type")
-    _residualise(block, {"type", "source"}, path, residual)
+    _residualise(block, {"type", "source", "cache_control"}, path, residual)
+
+    # The breakpoint sits on the *block*, not on its source, so it is read once
+    # here and handed to whichever of the three source kinds builds the part.
+    cache_control = _read_cache_control(block, path, residual, permitted=not nested)
 
     if kind == "base64":
         try:
@@ -584,15 +605,22 @@ def _read_image(block: Mapping[str, Any], path: str, residual: dict[str, Any]) -
         return c.Image(
             digest=c.image_digest(decoded),
             media_type=_typed_leaf(source, "media_type", str, f"{path}.source", residual),
+            cache_control=cache_control,
         )
 
     if kind == "url":
         _residualise(source, {"type", "url"}, f"{path}.source", residual)
-        return c.Image(ref=_typed_leaf(source, "url", str, f"{path}.source", residual))
+        return c.Image(
+            ref=_typed_leaf(source, "url", str, f"{path}.source", residual),
+            cache_control=cache_control,
+        )
 
     if kind == "file":
         _residualise(source, {"type", "file_id"}, f"{path}.source", residual)
-        return c.Image(ref=_typed_leaf(source, "file_id", str, f"{path}.source", residual))
+        return c.Image(
+            ref=_typed_leaf(source, "file_id", str, f"{path}.source", residual),
+            cache_control=cache_control,
+        )
 
     raise c.UnreadableBodyError(f"{path} image source type {kind!r} is not one the format defines")
 
@@ -652,16 +680,18 @@ def _read_result_content(
         # reading it first would residualise its keys and then digest them too,
         # accounting for one key twice.
         if kind in ("text", "image"):
-            part = _read_block(block, member_path, residual)
+            part = _read_block(block, member_path, residual, nested=True)
             assert isinstance(part, c.RESULT_PART_TYPES)  # noqa: S101 - narrowing for mypy
             parts.append(part)
         else:
-            parts.append(_read_opaque(block, kind, member_path, residual))
+            parts.append(_read_opaque(block, kind, member_path, residual, nested=True))
 
     return tuple(parts)
 
 
-def _read_opaque(block: Mapping[str, Any], kind: str, path: str, residual: dict[str, Any]) -> c.Opaque:
+def _read_opaque(
+    block: Mapping[str, Any], kind: str, path: str, residual: dict[str, Any], *, nested: bool = False
+) -> c.Opaque:
     """Read a block the grammar does not model, keeping it detectable.
 
     Covers ``document``, ``search_result``, ``redacted_thinking``,
@@ -673,40 +703,39 @@ def _read_opaque(block: Mapping[str, Any], kind: str, path: str, residual: dict[
         block: The block.
         kind: The block's wire type, which becomes :attr:`~harness.contract.Opaque.kind`.
         path: The block's path from the body root.
-        residual: The residual mapping, extended with the block's
-            ``cache_control`` only.
+        residual: The residual mapping, extended when ``cache_control`` carries
+            something that is not an object, and when the block is ``nested``
+            and so may carry no breakpoint at all.
+        nested: Whether the block sits inside a ``tool_result``. A nested block
+            may not carry a cache breakpoint -- see :func:`_read_cache_control`.
 
     Returns:
         The opaque part, carrying a digest of its payload.
+
+    Raises:
+        UnreadableBodyError: When the wire type has no canonical name — a block
+            the projection cannot address, not a reader that mis-routed a field.
     """
-    # `cache_control` residualises exactly as it does on a modelled block, so
-    # one field does not behave two ways — inside the digest it would produce a
-    # delta with no named cause (KBR-167).
-    _residualise(block, set(block) - {"cache_control"}, path, residual)
-    return c.Opaque(kind=kind, digest=_payload_digest(block))
+    # Every key is consumed — the payload lives in the digest — and
+    # `cache_control` maps to the slot exactly as it does on a modelled block,
+    # so one field does not behave two ways (KBR-167). It stays **out of the
+    # digest**, which `opaque_digest` enforces: inside it, M16's strip would
+    # show as an opaque digest change that no register row could name.
+    _residualise(block, set(block), path, residual)
 
+    # `opaque_kind` raises when no canonical name can be derived. That is not a
+    # reader bug — the wire said it — so it is translated, per §7.4.1's rule that
+    # raising is right only when there is no partial projection to salvage.
+    try:
+        canonical = c.opaque_kind(kind)
+    except ValueError as exc:
+        raise c.UnreadableBodyError(f"{path}: {exc}") from exc
 
-def _payload_digest(block: Mapping[str, Any]) -> str:
-    """Return the digest of an unmodelled block's payload.
-
-    Over **canonical** JSON rather than the raw wire slice, so a translator that
-    reorders keys does not change the digest. ``ensure_ascii`` is pinned
-    alongside ``sort_keys`` and ``separators`` because its default is ``True``
-    while the surrounding prose says UTF-8: an author who passed ``False`` would
-    get a different digest for the same block, visible only on non-ASCII
-    content, which is the cross-reader disagreement §7.4.1 exists to prevent.
-
-    Args:
-        block: The block, whose ``type`` and ``cache_control`` are excluded —
-            ``type`` because it is already :attr:`~harness.contract.Opaque.kind`,
-            ``cache_control`` because it residualises instead.
-
-    Returns:
-        Lowercase hex SHA-256 of the canonical payload.
-    """
-    payload = {key: value for key, value in block.items() if key not in ("type", "cache_control")}
-    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return c.Opaque(
+        kind=canonical,
+        digest=c.opaque_digest(block),
+        cache_control=_read_cache_control(block, path, residual, permitted=not nested),
+    )
 
 
 def _typed_leaf(
@@ -740,6 +769,49 @@ def _typed_leaf(
     if value is not None and not isinstance(value, expected):
         residual[f"{path}.{key}" if path else key] = value
         return default
+    return value
+
+
+def _read_cache_control(
+    block: Mapping[str, Any], path: str, residual: dict[str, Any], *, permitted: bool = True
+) -> Mapping[str, Any] | None:
+    """Read a block's cache breakpoint into the grammar's slot.
+
+    Claude Code sets a ``cache_control`` breakpoint on nearly every request, so
+    before the grammar carried one this field alone failed the run on essentially
+    every real body (KBR-167).  Applied through one helper so the six carriers
+    cannot drift, and so the next field added inherits the typed-leaf rule.
+
+    Args:
+        block: The block, tool declaration or system block being read.
+        path: The object's path from the body root, for the residual key.
+        residual: The residual mapping, extended in place when the value is not
+            an object, or when the block may not carry a breakpoint at all.
+        permitted: Whether Anthropic permits a breakpoint on this block.
+            ``False`` for a block nested inside a ``tool_result``: the vendor
+            directs a sub-content block to be cached through its top-level block
+            instead, and §3.3.1a defines no path form reaching inside a
+            :class:`~harness.contract.ToolResult`, so a breakpoint mapped there
+            would be one **M16** could never claim -- the under-claiming
+            direction §3.3.1a calls a false I1 breach.
+
+    Returns:
+        The breakpoint as the wire mapping, or ``None`` when absent or unusable.
+    """
+    value = block.get("cache_control")
+    if value is None:
+        return None
+
+    # Two ways to be unusable, one outcome. §7.4.1's wrongly-typed leaf covers
+    # the first: a bare string is not a breakpoint, and keeping it would put a
+    # value in the slot no comparison could read while coercing it would invent
+    # one the agent never sent. The second is a breakpoint where the vendor
+    # permits none. Both residualise at the field's own path and fail the run
+    # with it named, which is the signal §3.3.1 asks for.
+    if not permitted or not isinstance(value, dict):
+        residual[f"{path}.cache_control"] = value
+        return None
+
     return value
 
 

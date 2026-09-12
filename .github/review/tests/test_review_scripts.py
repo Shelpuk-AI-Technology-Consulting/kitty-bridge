@@ -16308,6 +16308,39 @@ class NoDocumentAttributesTheCatalogueRefreshToTheGateTests(unittest.TestCase):
 # KBR-145 -- a spent balance is not a workflow fault
 # ---------------------------------------------------------------------------
 
+#: OpenAI's spent-quota body, **verbatim**.
+#:
+#: ⚠️ **The verbatim-fixture rule is suspended for this fixture and the next, and the
+#: suspension is deliberate** -- the protocol
+#: :data:`BILLED_INVALID_REQUEST_WITH_TRANSIENT_PROSE` established. Neither comes from a
+#: run of ours: this one is quoted from a public bug report (StackOverflow 77583070) and
+#: the next from Anthropic's own error reference. **A vendor stating its own error
+#: vocabulary is admissible where a fabrication is not** -- authenticity is exactly what
+#: the rule protects, and what it forbids is an author *inventing* wording so a pattern
+#: looks covered.
+OPENAI_INSUFFICIENT_QUOTA = json.dumps(
+    [
+        {
+            "type": "result",
+            "subtype": "error",
+            "error": {
+                "message": "You exceeded your current quota, please check your plan "
+                "and billing details.",
+                "type": "insufficient_quota",
+                "code": "insufficient_quota",
+            },
+        }
+    ]
+)
+
+#: Anthropic's documented 402. `platform.claude.com/docs/en/api/errors`, read 2026-09-12:
+#: `402 - billing_error`. Nothing in the quota set matched it before this ticket --
+#: `\bbilling\b` cannot, because `_` is a word character.
+ANTHROPIC_402_BILLING_ERROR = (
+    'API Error: 402 {"type":"error","error":{"type":"billing_error",'
+    '"message":"Your credit balance is too low"}}'
+)
+
 #: Every record whose correct verdict is reached through `QUOTA_PATTERNS`.
 #:
 #: Named as a set so the classifier/diagnostic agreement below is asserted over all
@@ -16319,6 +16352,10 @@ QUOTA_FIXTURES = (
     ("DEEPSEEK_NO_BALANCE", DEEPSEEK_NO_BALANCE),
     ("DEEPSEEK_NO_BALANCE_ABRIDGED", DEEPSEEK_NO_BALANCE_ABRIDGED),
     ("OPENROUTER_NO_CREDITS", OPENROUTER_NO_CREDITS),
+    # KBR-166. Both are vendor-stated rather than run-observed; the suspension of
+    # the verbatim rule is argued beside each fixture.
+    ("OPENAI_INSUFFICIENT_QUOTA", OPENAI_INSUFFICIENT_QUOTA),
+    ("ANTHROPIC_402_BILLING_ERROR", ANTHROPIC_402_BILLING_ERROR),
 )
 
 #: Quota patterns that no fixture above matches, each with the reason it is exempt.
@@ -16332,10 +16369,6 @@ QUOTA_FIXTURES = (
 QUOTA_PATTERNS_WITHOUT_FIXTURES = {
     # Inherited-unobservable. May legitimately never earn a fixture.
     r"\b1113\b": "inherited numeric code; no record on this endpoint carries it",
-    r"exceeded your current": "inherited wording; never observed in this repository",
-    # Unanchored-harmful. KBR-166's subject; these must disappear, not gain fixtures.
-    r"quota": "unanchored word -- KBR-166 anchors or deletes it",
-    r"\bbilling\b": "unanchored word -- KBR-166 anchors or deletes it",
 }
 
 #: A billed `invalid_request` whose prose matches ONLY `EXHAUSTED_PATTERNS`.
@@ -16373,6 +16406,23 @@ CREDENTIAL_401_WITH_GENERIC_CODE = (
 )
 
 
+def _every_quota_pattern():
+    """Return every pattern that can produce a quota verdict, in tier order.
+
+    🔴 **Both tuples, because KBR-166 split them and the accountability claim is about
+    the verdict, not about which tuple reaches it.** `QUOTA_WORD_PATTERNS` is searched
+    over provider-authored text only, but a hit there returns the same
+    ``provider quota exhausted`` status and fires the same advice branch -- so a pattern
+    added to it with no fixture behind it is exactly the untested classification this
+    class exists to catch.
+
+    Returns:
+        The concatenation of the anchored and provider-scoped quota tuples.
+    """
+
+    return interpret.QUOTA_PATTERNS + interpret.QUOTA_WORD_PATTERNS
+
+
 class QuotaVocabularyTests(unittest.TestCase):
     """KBR-145. The quota fixtures must be accountable to the quota patterns.
 
@@ -16390,7 +16440,7 @@ class QuotaVocabularyTests(unittest.TestCase):
         provider vocabulary this file forbids. So they are declared instead.
         """
 
-        for pattern in interpret.QUOTA_PATTERNS:
+        for pattern in _every_quota_pattern():
             with self.subTest(pattern=pattern):
                 covered = [
                     name
@@ -16432,7 +16482,7 @@ class QuotaVocabularyTests(unittest.TestCase):
             with self.subTest(pattern=pattern):
                 self.assertIn(
                     pattern,
-                    interpret.QUOTA_PATTERNS,
+                    _every_quota_pattern(),
                     f"{pattern!r} is declared exempt but is no longer a quota "
                     "pattern -- delete the exemption",
                 )
@@ -16447,9 +16497,11 @@ class QuotaVocabularyTests(unittest.TestCase):
 
         self.assertEqual(
             len(QUOTA_PATTERNS_WITHOUT_FIXTURES),
-            4,
-            "this list may only shrink -- KBR-166 removes `quota` and `\\bbilling\\b`; "
-            "a NEW quota pattern needs a verbatim fixture, not an exemption",
+            1,
+            "this list may only SHRINK -- a NEW quota pattern needs a fixture, not an "
+            "exemption. KBR-166 took it from four to one: `quota` and `\\bbilling\\b` "
+            "moved to `QUOTA_WORD_PATTERNS` and `exceeded your current` was retired by "
+            "the verbatim OpenAI body that arrived with them",
         )
 
 
@@ -16935,6 +16987,595 @@ class QuotaAdviceNamesNoRetiredProviderTests(unittest.TestCase):
 
         advice = body.split("--- execution record (tail) ---")[0]
         self.assertNotIn("OpenRouter", advice)
+
+# ---------------------------------------------------------------------------
+# KBR-166 -- a model's own prose must not decide why a run failed
+# ---------------------------------------------------------------------------
+
+#: Anthropic's documented 401 and 403, same source: `401 - authentication_error`,
+#: `403 - permission_error`. Both carry a named cause and a status code.
+ANTHROPIC_401_AUTHENTICATION_ERROR = (
+    'API Error: 401 {"type":"error","error":{"type":"authentication_error",'
+    '"message":"invalid x-api-key"}}'
+)
+ANTHROPIC_403_PERMISSION_ERROR = (
+    'API Error: 403 {"type":"error","error":{"type":"permission_error",'
+    '"message":"not permitted to use this resource"}}'
+)
+
+#: OpenAI's 401 as a gateway that forwards only `message` and `type` delivers it.
+#:
+#: 🔴 **This fixture is the one that killed three candidate fixes.** Its message carries
+#: no credential vocabulary at all -- `Incorrect API key provided` matches neither
+#: `invalid[_ ]api[_ ]key` nor any named type -- so the ONLY thing identifying it is the
+#: status code. Every design that deleted or anchored `\b401\b` sent this record to
+#: `FATAL_UNLESS_PROVIDER_NAMED_PATTERNS` and told the operator their workflow was
+#: broken while their key was dead: KBR-145's defect, one tier across.
+OPENAI_401_MESSAGE_ONLY = (
+    'API Error: 401 {"error":{"message":"Incorrect API key provided",'
+    '"type":"invalid_request_error"}}'
+)
+
+#: The **nested** carrier: a status code inside `error.message`, with no `API Error:`
+#: prefix and no brace beside the number. `BILLED_INVALID_REQUEST` uses this shape, so
+#: any rule keyed on the CLI's line shape is blind to it.
+NESTED_401_STATUS_IN_MESSAGE = json.dumps(
+    [
+        {
+            "type": "result",
+            "subtype": "error",
+            "error": {"type": "invalid_request_error", "message": "HTTP 401 Unauthorized"},
+        }
+    ]
+)
+NESTED_403_STATUS_IN_MESSAGE = json.dumps(
+    [
+        {
+            "type": "result",
+            "subtype": "error",
+            "error": {
+                "type": "invalid_request_error",
+                "message": "Request failed with status 403",
+            },
+        }
+    ]
+)
+
+#: Ten real ways a provider says "your quota is gone", each in the **hostile** carrier:
+#: the body also carries the generic `invalid_request_error` code, which is what DeepSeek
+#: does for a spent balance and the reason KBR-145 exists.
+#:
+#: 🔴 **The carrier is the point.** With no generic code a missed wording degrades
+#: harmlessly to the transient tier; with one, `FATAL_UNLESS_PROVIDER_NAMED_PATTERNS`
+#: claims it and the run is `fatal`, not retried, with no advice. Measured: an anchored
+#: quota pattern missed four of these and all four failed that way.
+QUOTA_WORDINGS = (
+    "You exceeded your current quota, please check your plan and billing details.",
+    "Quota exceeded for quota metric 'generate requests'",
+    "Monthly quota reached for this key",
+    "Quota exhausted for project p",
+    "Quota limit exceeded.",
+    "quota_exceeded",
+    "You have insufficient quota for this model",
+    "The organisation is out of quota",
+    "Your quota has been used up",
+    "RESOURCE_EXHAUSTED: quota metric exceeded",
+)
+
+
+def billed_rejection(message, result=None):
+    """Build a billed gateway rejection, optionally carrying model-authored prose.
+
+    The shape of :data:`BILLED_INVALID_REQUEST` -- a record that exists, so the model ran
+    and was billed, carrying the CLI's generic ``invalid_request_error`` code and nothing
+    an operator could top up.
+
+    Args:
+        message: The provider-authored ``error.message`` text.
+        result: Model-authored ``result`` text, or None to omit the field entirely.
+
+    Returns:
+        The execution record as a JSON string.
+    """
+
+    event = {
+        "type": "result",
+        "subtype": "error",
+        "error": {"type": "invalid_request_error", "message": message},
+    }
+    if result is not None:
+        event["result"] = result
+    return json.dumps([event])
+
+
+def quota_rejection(message):
+    """Build a 429 whose body also carries the generic error code.
+
+    Args:
+        message: The provider's quota wording.
+
+    Returns:
+        The execution record as a CLI error string.
+    """
+
+    body = json.dumps({"error": {"message": message, "type": "invalid_request_error"}})
+    return f"API Error: 429 {body}"
+
+
+#: Lines this repository ALREADY contains, verbatim, which a reviewer reading those
+#: files would quote back into `result`.
+#:
+#: 🔴 **Seeded rather than composed, and code review is why.** An earlier version of this
+#: corpus claimed exactly this provenance and had none -- every string was author-written,
+#: so the defence it was offered for ("an author who picks the strings can always pick
+#: ones that miss") was unearned, in a file whose whole culture is *measured, not
+#: assumed*. These five are real: `grep` finds each at the path named beside it. They are
+#: drawn from the README and the workflow and deliberately **not** from
+#: `interpret_claude_result.py` or this file, both of which quote every pattern by
+#: construction -- self-matching there is an accepted residual, not a defect.
+SEEDED_PROSE_FROM_THIS_REPOSITORY = (
+    # .github/review/README.md -- the `exhausted` bullet
+    "the provider could not serve the request (quota, credentials,",
+    # .github/workflows/claude-code-review.yml -- the token-scope comment
+    "that API. A read grant would 403 on exactly the run that has nothing else",
+    # .github/workflows/claude-code-review.yml -- a PR NUMBER that reads as a status code
+    "re-emit all of it. Measured on PR #401 run 32487762502: 224s of model",
+    # .github/workflows/claude-code-review.yml -- the pipefail comment
+    "without pipefail a curl 429/403 flows to `bash -s` reading empty",
+    # .github/workflows/claude-code-review.yml -- the failure annotation
+    "The provider could not serve the review request -- quota, credentials or a",
+)
+
+#: Sentences a reviewer of this repository could plausibly write into `result`.
+#:
+#: ⚠️ Author-composed, and said plainly. :data:`SEEDED_PROSE_FROM_THIS_REPOSITORY` is the
+#: half that cannot be curated around a pattern; these are the shapes that half does not
+#: reach. Both are swept by the same guard.
+REVIEWER_PROSE_SHAPES = SEEDED_PROSE_FROM_THIS_REPOSITORY + (
+    "the request was rejected after a quota problem",
+    "quota exhaustion is handled at the tier below",
+    "the quota tier wins over the generic tier",
+    "check your plan and quota settings in the console",
+    "the quota check exceeded its timeout",
+    "we reached the quota module while reviewing",
+    "this exceeded the line quota for the file",
+    "this change affects the billing details shown to the operator",
+    "the billing account must be topped up before the next run",
+    "the handler returns 401 when the key is dead",
+    "a 403 from the egress gateway means the address is not allowed",
+    "status 403 means forbidden, not unauthorised",
+    "error 401 is fatal here",
+    "http 403 forbidden is returned by the proxy",
+    "the 401 path and the 403 path share a tier",
+)
+
+#: Patterns that still match ordinary prose, named so the exposure cannot hide.
+#:
+#: 🔴 **Filed as KBR-181, not fixed here.** Two of them match this file's own live line
+#: numbers -- it is 16,922 lines long, so "test_review_scripts.py:1308" is a citation a
+#: reviewer of this area really would write. KBR-166 scopes itself to the four patterns
+#: its title names; listing these by name is what stops a sixth being added quietly.
+GRANDFATHERED_PROSE_LEAKS = {
+    r"\b1308\b": "bare code; matches this file's own line 1308 -- KBR-181",
+    r"\b1310\b": "bare code; matches this file's own line 1310 -- KBR-181",
+    r"\b1113\b": "bare code -- KBR-181",
+    r"limit will reset": "ordinary English -- KBR-181",
+    r"exceeded your current": "ordinary English -- KBR-181",
+}
+
+#: Prose that trips a grandfathered pattern, kept so KBR-181 has its evidence to hand.
+GRANDFATHERED_LEAK_EVIDENCE = (
+    "see test_review_scripts.py:1308 for the assertion",
+    "line 1310 of the workflow sets the cap",
+    "row 1113 of the table is the one that matters",
+    "the retry limit will reset after the backoff window",
+    "the budget exceeded your current API_TIMEOUT_MS",
+)
+
+
+def _advice_section(execution_text, status, reason):
+    """Render a diagnostic and return only the part above the record echo.
+
+    The echo reproduces ``execution_text`` verbatim, so a search over the whole body
+    would be satisfied by the fixture's own text rather than by the advice branch.
+
+    Args:
+        execution_text: The execution record to classify and embed.
+        status: The verdict written into the diagnostic header.
+        reason: The reason line written beneath it.
+
+    Returns:
+        Everything above the execution-record echo.
+    """
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "diagnostic.txt"
+        interpret._write_diagnostic(
+            str(path),
+            tier="kitty-bridge",
+            status=status,
+            reason=reason,
+            retryable=False,
+            record_present=True,
+            execution_text=execution_text,
+        )
+        body = path.read_text(encoding="utf-8")
+    return body.split("--- execution record (tail) ---")[0]
+
+
+class ModelAuthoredProseTests(unittest.TestCase):
+    """KBR-166. What the MODEL wrote must not decide why the run failed.
+
+    `_outcome_text` includes `result`, and on a record with no structured-output marker
+    that field carries the model's own answer. Four patterns it searched were a bare word
+    or a bare number, so a reviewer that merely *wrote* "quota" changed the verdict on a
+    $1.79 billed rejection -- and `retry_verdict`'s exhausted branch then spent the $1.79
+    again.
+    """
+
+    def test_model_authored_prose_cannot_make_a_billed_rejection_retryable(self):
+        """The headline claim, across both record shapes and all three consequences.
+
+        🔴 **The unparseable shape is not decoration.** `_parse_events` returns None for
+        any record with text prepended or appended -- a shape its own docstring says has
+        been observed -- and a first version of this fix then searched the whole record,
+        `result` included, putting the prose straight back into the haystack.
+        """
+
+        for word in ("quota", "billing", "401", "403"):
+            prose = f"The handler returns a {word} problem when the key is stale."
+            shapes = {
+                "well-formed": billed_rejection("the request was rejected", prose),
+                "unparseable": billed_rejection("the request was rejected", prose)
+                + "\nAPI Error: connection reset",
+            }
+            for shape, record in shapes.items():
+                with self.subTest(word=word, shape=shape):
+                    status, reason = interpret.classify(record)
+
+                    self.assertEqual(status, "fatal", f"{word}/{shape}: verdict")
+                    self.assertIn("invalid_request", reason)
+                    self.assertFalse(
+                        interpret.retry_verdict(
+                            status,
+                            record_present=True,
+                            cause_named=False,
+                            elapsed_seconds=120,
+                        ),
+                        f"{word}/{shape}: a billed rejection was retried",
+                    )
+                    self.assertNotIn(
+                        "Top up the balance",
+                        _advice_section(record, status, reason),
+                        f"{word}/{shape}: advice contradicts the verdict",
+                    )
+
+    def test_the_prose_words_reach_no_provider_tier(self):
+        """Pin *why* the verdict above is `fatal`, not merely that it is.
+
+        Without this, the test above passes for any reason at all -- including a future
+        change that routes the record somewhere else entirely. The haystack is derived
+        through the real scoping functions rather than hand-built, matching
+        :meth:`TierPositionTests.test_the_generic_tier_is_consulted_before_transients`.
+        """
+
+        for word in ("quota", "billing", "401", "403"):
+            with self.subTest(word=word):
+                record = billed_rejection(
+                    "the request was rejected", f"a {word} problem is handled below"
+                )
+                haystack = interpret._outcome_text(record).lower()
+                provider = interpret._provider_outcome_text(record).lower()
+
+                for name, patterns in (
+                    ("QUOTA_PATTERNS", interpret.QUOTA_PATTERNS),
+                    ("CREDENTIAL_PATTERNS", interpret.CREDENTIAL_PATTERNS),
+                ):
+                    self.assertIsNone(
+                        interpret._first_match(patterns, haystack),
+                        f"{name} matched the model's prose",
+                    )
+                for name, patterns in (
+                    ("QUOTA_WORD_PATTERNS", interpret.QUOTA_WORD_PATTERNS),
+                    ("CREDENTIAL_STATUS_PATTERNS", interpret.CREDENTIAL_STATUS_PATTERNS),
+                ):
+                    self.assertIsNone(
+                        interpret._first_match(patterns, provider),
+                        f"{name} saw model-authored text",
+                    )
+
+
+class ProviderScopeTests(unittest.TestCase):
+    """KBR-166. `_provider_outcome_text` needs its OWN fallback contract.
+
+    🔴 Inheriting `_outcome_text`'s was the defect design review caught twice over. That
+    function searches an unparseable record whole, justified as *"a CLI-level failure
+    message with no tool results in it"* -- an argument about `message`/`content`, not
+    about `result`, which does not transfer to the who-wrote-this question.
+    """
+
+    def test_raw_cli_output_is_searched_whole(self):
+        """A record that is not JSON has no `result` field to exclude.
+
+        This is the path `OPENAI_401_MESSAGE_ONLY` depends on: returning "" here would
+        strip its only identifying signal and reopen the defect in the other direction.
+        """
+
+        self.assertIsNone(interpret._parse_events(OPENAI_401_MESSAGE_ONLY))
+        self.assertIn("401", interpret._provider_outcome_text(OPENAI_401_MESSAGE_ONLY))
+
+    def test_an_unreadable_record_claims_nothing(self):
+        """An unparseable record carrying a `result` key yields no provider text.
+
+        Its contents cannot be attributed to a writer, so the honest answer is to claim
+        nothing rather than to guess -- and guessing costs money, because the guess that
+        matters promotes a billed rejection to `exhausted`.
+        """
+
+        broken = (
+            billed_rejection("the request was rejected", "returns 401 when stale")
+            + "\nAPI Error: connection reset"
+        )
+
+        self.assertIsNone(interpret._parse_events(broken))
+        self.assertEqual(interpret._provider_outcome_text(broken), "")
+        self.assertEqual(interpret.classify(broken)[0], "fatal")
+
+    def test_a_result_value_is_not_a_result_key(self):
+        """🔴 The colon in the sentinel, pinned. Code review found nothing pinned it.
+
+        Every CLI result event carries ``"type": "result"``, so a sentinel of
+        ``"result"`` alone matches the string as a VALUE and refuses a record that has no
+        ``result`` field at all. Measured with the colon dropped: this shape -- a
+        truncated record whose only signal is its status code -- classified `fatal`,
+        which is KBR-145's defect and the one this ticket exists to close.
+        """
+
+        broken = (
+            json.dumps(
+                [
+                    {
+                        "type": "result",
+                        "subtype": "error",
+                        "error": {
+                            "type": "invalid_request_error",
+                            "message": "HTTP 401 Unauthorized",
+                        },
+                    }
+                ],
+                indent=2,
+            )
+            + "\nAPI Error: connection reset"
+        )
+
+        self.assertIsNone(interpret._parse_events(broken), "the fixture must be broken")
+        self.assertIn("401", interpret._provider_outcome_text(broken))
+        self.assertEqual(interpret.classify(broken)[0], "exhausted")
+
+    def test_the_scope_splits_by_author_not_by_content(self):
+        """The same string decides differently depending on which field carries it."""
+
+        provider_side = billed_rejection("HTTP 401 Unauthorized")
+        model_side = billed_rejection("the request was rejected", "HTTP 401 Unauthorized")
+
+        self.assertIn("401", interpret._provider_outcome_text(provider_side))
+        self.assertNotIn("401", interpret._provider_outcome_text(model_side))
+        self.assertIn("401", interpret._outcome_text(model_side))
+
+
+class CredentialCarrierTests(unittest.TestCase):
+    """KBR-166. A rejected key must read as a rejected key in EVERY carrier it arrives in.
+
+    🔴 **Three candidate fixes died here, and each died on a different row.** Named
+    vocabulary alone lost `OPENAI_401_MESSAGE_ONLY`; a structural anchor on the CLI's
+    `API Error: NNN {` shape lost both nested rows. Each failure was the same one:
+    `FATAL_UNLESS_PROVIDER_NAMED_PATTERNS` claimed the record and an operator with a dead
+    key was sent to debug a correct workflow -- KBR-145's filed defect, one tier across.
+    """
+
+    CARRIERS = (
+        ("anthropic 401, named type", ANTHROPIC_401_AUTHENTICATION_ERROR),
+        ("anthropic 403, named type", ANTHROPIC_403_PERMISSION_ERROR),
+        ("generic code, CLI prefix", CREDENTIAL_401_WITH_GENERIC_CODE),
+        ("message only, CLI prefix", OPENAI_401_MESSAGE_ONLY),
+        ("status in message, nested", NESTED_401_STATUS_IN_MESSAGE),
+        ("status in message, nested 403", NESTED_403_STATUS_IN_MESSAGE),
+    )
+
+    def test_a_credential_rejection_is_not_a_workflow_fault_in_either_carrier(self):
+        """Every carrier resolves through a credential tier, not the generic one."""
+
+        for label, record in self.CARRIERS:
+            with self.subTest(carrier=label):
+                status, reason = interpret.classify(record)
+
+                self.assertEqual(status, "exhausted", label)
+                self.assertTrue(
+                    reason.startswith("provider rejected the credentials or model"),
+                    f"{label}: resolved by {reason!r}",
+                )
+
+    def test_a_named_type_is_reported_in_preference_to_its_status_code(self):
+        """Tuple order is load-bearing for the reason an operator reads.
+
+        `authentication_error` names a cause; `401` names a number. Both are correct and
+        one is more useful, so the named set is consulted first -- and without this
+        assertion that ordering is untested prose.
+
+        🔴 **Both types, because code review found the 403 half unpinned.** Its row in
+        :data:`CARRIERS` passed through `\b40[13]\b` instead, so deleting
+        `\bpermission_error\b` left the suite green while the pattern did nothing.
+        """
+
+        for named, record in (
+            ("authentication_error", ANTHROPIC_401_AUTHENTICATION_ERROR),
+            ("permission_error", ANTHROPIC_403_PERMISSION_ERROR),
+        ):
+            with self.subTest(type=named):
+                _, reason = interpret.classify(record)
+
+                self.assertIn(named, reason)
+
+    def test_a_named_cause_carries_a_body_that_has_no_number(self):
+        """The reason the named types exist beside the status tier at all.
+
+        A body can name its cause and carry no status code anywhere the classifier can
+        see it, because a numeric ``api_error_status`` never reaches the haystack
+        (KBR-182). Without this fixture that rationale is prose nothing exercises.
+        """
+
+        record = json.dumps(
+            [
+                {
+                    "type": "result",
+                    "subtype": "error",
+                    "api_error_status": 403,
+                    "error": {
+                        "type": "permission_error",
+                        "message": "not permitted to use this resource",
+                    },
+                }
+            ]
+        )
+
+        self.assertNotIn(
+            "403",
+            interpret._outcome_text(record),
+            "the numeric status must stay invisible, or this fixture proves nothing",
+        )
+        status, reason = interpret.classify(record)
+        self.assertEqual(status, "exhausted")
+        self.assertIn("permission_error", reason)
+
+
+class QuotaWordingTests(unittest.TestCase):
+    """KBR-166. Every real way a provider says "your quota is gone" still lands.
+
+    🔴 **Measured against the hostile carrier on purpose.** An anchored quota pattern
+    missed four of these ten, and design review proved the miss was not the cheap kind
+    claimed for it: with the generic code present the run became `fatal` with no retry and
+    no advice, not `exhausted` with a vaguer reason.
+    """
+
+    def test_every_real_quota_wording_still_reaches_the_quota_tier(self):
+        """Status, reason and advice, for all ten wordings."""
+
+        for wording in QUOTA_WORDINGS:
+            with self.subTest(wording=wording):
+                record = quota_rejection(wording)
+                status, reason = interpret.classify(record)
+
+                self.assertEqual(status, "exhausted", wording)
+                self.assertTrue(
+                    reason.startswith("provider quota exhausted"),
+                    f"{wording!r}: resolved by {reason!r}",
+                )
+                self.assertIn(
+                    "Top up the balance",
+                    _advice_section(record, status, reason),
+                    f"{wording!r}: verdict says quota, advice does not",
+                )
+
+    def test_a_documented_billing_error_is_a_spent_balance(self):
+        """Anthropic's 402 -- coverage that did not exist before this ticket.
+
+        `\\bbilling\\b` could never match `billing_error`, because `_` is a word
+        character, so the one documented status meaning "your balance is the problem"
+        reached nothing in the quota set.
+        """
+
+        status, reason = interpret.classify(ANTHROPIC_402_BILLING_ERROR)
+
+        self.assertEqual(status, "exhausted")
+        self.assertIn("billing_error", reason)
+
+
+class ProsePatternGuardTests(unittest.TestCase):
+    """KBR-166. No pattern searched over model-authored text may match ordinary prose.
+
+    Iterates the LIVE tuples, so a bare word added later goes red without anyone
+    remembering this test exists. The two provider-scoped tuples are exempt **by
+    construction** rather than by listing -- they never see model-authored text, which
+    :class:`ProviderScopeTests` asserts directly.
+    """
+
+    def test_no_classifier_pattern_matches_a_reviewers_prose(self):
+        """The guard itself, over both whole-haystack sets."""
+
+        patterns = interpret.QUOTA_PATTERNS + interpret.CREDENTIAL_PATTERNS
+        for pattern in patterns:
+            if pattern in GRANDFATHERED_PROSE_LEAKS:
+                continue
+            for prose in REVIEWER_PROSE_SHAPES:
+                with self.subTest(pattern=pattern, prose=prose):
+                    self.assertIsNone(
+                        re.search(pattern, prose),
+                        f"{pattern!r} matches a sentence a reviewer could write",
+                    )
+
+    def test_the_seeded_prose_really_comes_from_this_repository(self):
+        """🔴 The provenance claim, made checkable so it cannot rot as the last one did.
+
+        An earlier corpus asserted in its docstring that it was seeded from repo text and
+        was entirely author-written. A claim nothing checks is the failure mode this whole
+        module is about, so the claim now reads the files.
+        """
+
+        searched = [REVIEW_DIR / "README.md", *sorted(WORKFLOW_DIR.glob("*.yml"))]
+        corpus = [path.read_text(encoding="utf-8") for path in searched]
+
+        for line in SEEDED_PROSE_FROM_THIS_REPOSITORY:
+            with self.subTest(line=line[:48]):
+                self.assertTrue(
+                    any(line in text for text in corpus),
+                    f"{line!r} is presented as repo text but appears in none of "
+                    f"{[p.name for p in searched]} -- quote a real line or drop it",
+                )
+
+    def test_the_grandfather_list_only_shrinks(self):
+        """Freeze the count so growing it is a deliberate, reviewed act.
+
+        ⚠️ A **review trigger, not an enforcement**. A future author can edit this number;
+        the point is that they cannot do it without editing a line that says it may only
+        go down, and why.
+        """
+
+        self.assertEqual(
+            len(GRANDFATHERED_PROSE_LEAKS),
+            5,
+            "this list may only SHRINK -- KBR-181 removes these; a new pattern that "
+            "matches reviewer prose needs scoping or anchoring, not an entry here",
+        )
+
+    def test_no_grandfathered_pattern_is_retired(self):
+        """Fixing a leak must not leave a phantom entry behind."""
+
+        live = set(interpret.QUOTA_PATTERNS) | set(interpret.CREDENTIAL_PATTERNS)
+        for pattern in GRANDFATHERED_PROSE_LEAKS:
+            with self.subTest(pattern=pattern):
+                self.assertIn(
+                    pattern,
+                    live,
+                    f"{pattern!r} is grandfathered but is no longer a live pattern "
+                    "-- delete the entry",
+                )
+
+    def test_the_grandfathered_leaks_are_real(self):
+        """KBR-181's evidence, kept executable so it cannot rot before it is fixed."""
+
+        for prose in GRANDFATHERED_LEAK_EVIDENCE:
+            with self.subTest(prose=prose):
+                matched = [
+                    pattern
+                    for pattern in GRANDFATHERED_PROSE_LEAKS
+                    if re.search(pattern, prose)
+                ]
+                self.assertTrue(
+                    matched,
+                    f"{prose!r} no longer trips a grandfathered pattern -- if KBR-181 "
+                    "fixed it, delete the entry and this row together",
+                )
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

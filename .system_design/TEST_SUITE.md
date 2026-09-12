@@ -143,10 +143,10 @@ body. Established by reading `src/kitty/bridge/server.py` and all 23 adapters in
 
 #### 3.2.1 Bridge-level
 
-Twelve request-path rows (M1–M11 and M15), one response-path row (M12), and the routing row **M14**
-(§3.3.5), which is listed here because the destination is a mutation surface the body cannot show.
-Fifteen rows in all. The former substitution row M13 is **withdrawn** — KBR-5 replaced it with a
-downstream error, so it mutates nothing — leaving **fourteen live** bridge-level rows.
+Thirteen request-path rows (M1–M11, M15 and M16), one response-path row (M12), and the routing row
+**M14** (§3.3.5), which is listed here because the destination is a mutation surface the body cannot
+show. Sixteen rows in all. The former substitution row M13 is **withdrawn** — KBR-5 replaced it with
+a downstream error, so it mutates nothing — leaving **fifteen live** bridge-level rows.
 
 | # | Mutation | Site | Trigger | Why it is necessary |
 |---|---|---|---|---|
@@ -165,6 +165,7 @@ downstream error, so it mutates nothing — leaving **fourteen live** bridge-lev
 | ~~M13~~ | **Withdrawn — no longer a mutation.** Was: discard the conversation and substitute a `[Kitty Bridge: …]` user message. | `_compact_messages` / `_apply_compaction` post-condition | No non-system message survives | **Closed by KBR-5.** The post-condition now raises `CompactionFailedError` and the handler returns a protocol-native 400 downstream; nothing is substituted, so there is no mutation left to register. The row is kept struck through rather than deleted so a reader of finding F3 can still find it. **The trigger recorded here was wrong** — see F3. |
 | M14 | **Replace the destination entirely** — scheme and host are built from the profile by `build_base_url()`; the path by `get_upstream_path(_route_model(cc_request))` — the **request's normalized model**, which is the normalized profile model when there is one and the agent's model when there is not. `_route_model` is the single place that answers this; the auth scheme (P9/P20) and the thinking carrier read it too, and the adapter reads the same key for the body (KBR-127 — it was the raw profile model, so path and body could route differently; and on `openai_subscription`'s Responses path the adapter read the *inbound* body's model instead until KBR-160, which was harmless for routing only because that provider posts to a fixed URL and derives no header from the model). Base and path are then **composed** by `ProviderAdapter.compose_upstream_url`, not concatenated (KBR-143). | `BridgeServer._build_upstream_url` | Always | The agent addressed a loopback bridge; the request has to reach the real provider. Listed because **the destination is a mutation surface the body cannot show**: on Azure an identical body sent to the wrong deployment path is a different request entirely (§3.3.5). **The query is part of the mutation, not a passenger** (KBR-143): the endpoint joins the *path* component and the two queries merge, the endpoint's parameters winning a name clash and the base URL's others surviving unaltered. A row naming only "path" would let an oracle derive `route.query` and still not know which side owns a clash. The base URL's fragment is carried through and never sent, since no HTTP client puts one on the wire — so an oracle deriving `route.*` from the profile must expect it on the composed URL and absent from the request line. **The composed URL is redacted before it is echoed** into the 404 diagnostic or a pre-flight failure (`redact_url_for_display`): query values and the fragment are masked, which is an I2-adjacent containment property, not a fidelity one — nothing about the request changes. The composition helper is shared with `kitty.validation.validate_api_key` and `OllamaCloudAdapter._build_url`, but **this row's site is the bridge alone**: pre-flight's probe is not a request the agent made, and the register describes what happens to the agent's request. |
 | M15 | Rewrite a string `input` into the single-item list form `[{"type": "message", "role": "user", "content": [{"type": "input_text", "text": <s>}]}]` | `normalize_responses_request` (`bridge/responses/translator.py`), called from `_handle_responses` before the body forks | Always | OpenAI's `CreateResponse` defines the two forms as the **same request**: `input` is `oneOf` a string (*"a text input to the model, equivalent to a text input with the `user` role"*) or an array, and everything downstream reads the array. Fires on every request reaching the handler; a body already in the array form meets the row with a **no-op** rather than avoiding it, so there is no complement state for §3.3.2 assertion 2 to arrange, which is why it is unconditional. Listed rather than omitted because the rewrite is real bytes at the `curl_cffi` boundary of §3.2.3, where `_original_body` **is** this body; the projection cannot express the difference, so the row takes §3.3.1a's escape for P16's reason. **KBR-144.** |
+| M16 | **Strip every `cache_control` cache breakpoint** — from tool declarations, from system blocks and from message content blocks | `MessagesTranslator.translate_request` (`bridge/messages/translator.py`) | The upstream wire is not native Messages — i.e. the provider does not declare `use_native_messages` | The translator rebuilds the body for Chat Completions, which has no slot for a breakpoint: system blocks are joined into one string, tools are rebuilt as `{name, description, parameters}`, and content blocks are rebuilt. **This is the row whose cost is largest and least visible.** Anthropic prices a cache read at 0.1x base input, so a stripped breakpoint re-bills the agent's stable prefix — system prompt, tool definitions, history — at roughly ten times its cached rate, on every turn, with nothing in the product saying so. Registered rather than left to the residual precisely so the oracle reports it as a *claimed* delta attributable to this site; §3.3.1 records why the declared-ignored alternative was rejected. **The trigger is not `Always`, and the row is still exempt from §3.3.2 assertion 2** — the same shape as **M2**, which carries this identical trigger. The native passthrough branch (`BridgeServer`, `use_native_messages`) shallow-copies the inbound body, so breakpoints do survive there; but that complement is a property of the **route**, chosen by the profile, not of the request, and assertion 2 asks for an *input* that fails the trigger. A corpus entry cannot arrange a different provider. The native route's guarantee is therefore proven where it belongs — as product behaviour, in epic KBR-197 — rather than by a corpus complement nobody could author. Top-level `cache_control` (Anthropic's automatic caching) is **not** this row's: it lands in `envelope.extra[cache_control]` and P1's internal-key strip does not touch it. **KBR-167**; the product-behaviour suite for the same defect is epic KBR-197. |
 
 #### 3.2.2 Provider-level
 
@@ -216,7 +217,8 @@ partial today — see gap G22.
 | P11 | Translate CC → Bedrock Converse | `BedrockAdapter.translate_to_upstream` | Always, on `bedrock` | A third upstream wire format M2 does not name. Custom transport — see §3.3.4. |
 | P12 | Translate CC → Ollama `/api/chat` | `OllamaCloudAdapter.translate_to_upstream` | Always, on `ollama_cloud` | A fourth wire format. Custom transport. |
 | P13 | **Drop fourteen Chat-Completions-only parameters** — `temperature`, `top_p`, `max_tokens`, `max_completion_tokens`, `frequency_penalty`, `presence_penalty`, `logprobs`, `top_logprobs`, `response_format`, `stop`, `n`, `stream_options`, `seed`, `logit_bias` | `OpenAISubscriptionAdapter._cc_to_responses` | Always, on the **CC-origin** path | The Codex backend applies strict allowlist validation and rejects them with 400. **User-visible**: `max_tokens` and `temperature` silently do nothing on this provider. Logged at DEBUG. |
-| P14 | **Drop every parameter outside the Codex allowlist**, notably `max_output_tokens` | `OpenAISubscriptionAdapter._prepare_responses_body` | Always, on the **Responses-origin** path | Same backend restriction, different input shape — this path receives a Responses body, so the parameter is spelled `max_output_tokens`, not `max_tokens`. A single row cannot cover both paths; the sets differ. |
+| P14 | **Drop every *sampling* parameter outside the Codex allowlist**, notably `max_output_tokens` | `OpenAISubscriptionAdapter._prepare_responses_body` | Always, on the **Responses-origin** path | Same backend restriction, different input shape — this path receives a Responses body, so the parameter is spelled `max_output_tokens`, not `max_tokens`. A single row cannot cover both paths; the sets differ. **The non-sampling half of the same drop is P23**, which lands at `envelope.extra[<wire key>]` rather than here: one mutation site, two rows, because the register addresses effects and not sites. |
+| P23 | **Drop every non-sampling control field outside the Codex allowlist** — `background`, `context_management`, `conversation`, `max_tool_calls`, `metadata`, `moderation`, `previous_response_id`, `prompt`, `prompt_cache_key`, `prompt_cache_options`, `prompt_cache_retention`, `safety_identifier`, `service_tier`, `text`, `truncation`, `user` | `OpenAISubscriptionAdapter._prepare_responses_body` | Always, on the **Responses-origin** path | **P14's other half, and its own row because the two land at different addresses.** `CreateResponse` (`openai/openai-openapi` v2.3.0) defines 31 top-level request fields and `_ALLOWED_RESPONSES_PARAMS` keeps ten, so 21 are dropped: five are sampling parameters P14 claims at the bare `conversation.sampling`, and these **sixteen** are declared control fields, which §3.3.1b sends to `envelope.extra[<wire key>]` — an address no row reached. Under-claiming is the direction §3.3.1a calls unrecoverable, so the first T-D5 corpus entry carrying, say, `text` or `truncation` would have failed the run on a deliberate, legitimate mutation. **KBR-171.** The row **enumerates** its sixteen addresses instead of anchoring at a bare `envelope.extra`; §3.3.1a records why, and what enumerating costs. ⚠️ **"Dropped" here means *never copied*.** The allowlist literal is read only by the DEBUG log; the shipped body is an explicit `if` chain, and six of its branches test truthiness rather than presence — so an *allowlisted* field with a falsy value (`include: []`, `reasoning: {}`) is dropped too, and this row does **not** claim it. That residue is **G27**, because it is a conditional mutation with a trigger of its own and because claiming `envelope.extra[reasoning]` here would swallow G23. **User-visible**: `truncation`, `text` and `previous_response_id` silently do nothing on this provider. |
 | P15 | **Strip `strict` from every tool declaration** | `_prepare_responses_body` | Always, on the Responses-origin path | The Codex backend rejects it. A change to the **tool schema** the agent declared, not to a sampling parameter — a different kind of fidelity mutation and worth its own row. |
 | P16 | Rewrite content types `input_text` → `output_text` | `_convert_content_types`, called from `_prepare_responses_body` | Always, on the Responses-origin path | The Codex backend validates content types strictly. **Message-content mutation.** |
 | P17 | Inject `stream: True` and `store: False` | `_cc_to_responses` and the Responses-origin body builder | **Unconditionally**, both subscription paths | The Codex backend is streaming-only; kitty reassembles a non-streaming reply from the SSE. Note `stream: True` **overrides a non-streaming client request** — the subscription-path analogue of M11. |
@@ -225,9 +227,9 @@ partial today — see gap G22.
 
 **Conditional rows are the point.** Every row whose trigger is a condition must be provably
 *inert* when that condition is absent — the sharpest form of "unless absolutely necessary", and
-what §3.3.2 assertion 2 tests, with the trigger complements §3.3.4 requires. M1, M2, M10, M14, M15, P1,
-P6, P9a, P9b, P9c, P10, P11, P12, P13, P14, P15, P16, P17, P18, P19, P20 and P21 are unconditional
-by design and are exempt from that assertion.
+what §3.3.2 assertion 2 tests, with the trigger complements §3.3.4 requires. M1, M2, M10, M14, M15, M16, P1,
+P6, P9a, P9b, P9c, P10, P11, P12, P13, P14, P15, P16, P17, P18, P19, P20, P21 and P23 are
+unconditional by design and are exempt from that assertion.
 
 **M14, P20 and P21 were missing from that list until KBR-26**, while their own trigger cells read
 `Always`. A row that always fires has no complement, so assertion 2 would have demanded a corpus
@@ -235,8 +237,17 @@ entry nobody could ever write. The list is also written out id by id rather than
 range: `P9a–c` names three rows in one token, and §3.2.4's guard has to either guess at the
 expansion or drop two rows from the comparison. It refuses the notation instead.
 
+**The P family has a gap, and it is a reservation rather than an accident.** `P22` is held for
+the `reasoning` injection §9.2's G23 registers; P23 landed first (KBR-171) and did not take the
+reserved id, because an id is how every ticket and document refers to a row. The register is
+ordered by **document position**, not numerically — §3.2.2 already interleaves P20 and P21
+between P6 and P7 — so a row arriving out of numeric order costs nothing.
+
 **Register maintenance.** The register is the specification. A pull request that adds a mutation
-site without adding a row fails the L2 register guards (§6.2.3).
+site without adding a row fails the L2 register guards (§6.2.3). **A row's table entry here and its
+`MutationRow` in `register.py` are one change**, not two: the guard parses this document, so a
+commit carrying only one half red-lines the suite — at that commit and at every later bisect
+through it.
 
 #### 3.2.3 Serialization paths — where the register must actually be checked
 
@@ -269,10 +280,34 @@ T-D8), and the corpus loader (T-W6, which indexes captured sessions **by trigger
 **Authority is split, deliberately.** The markdown remains the reviewed record of *why* each
 mutation is necessary — a reviewer reads a table, not a tuple. The data is what tests execute.
 Ids and the conditional/unconditional classification are **mechanically reconciled** between the
-two by an L2 guard. Paths and sites are **not**, because the tables have no path column and their
-Site cells are prose (M4's reads "step 1", P17's "and the Responses-origin body builder", P2b's
-simply "same"). Sites are checked against the **source tree** instead, which is the stronger
-check: it catches a renamed mutation site, which no comparison against a prose cell could.
+two by an L2 guard. Paths and sites are **not reconciled against the markdown**, because the
+tables have no path column and their Site cells are prose (M4's reads "step 1", P17's "and the
+Responses-origin body builder", P2b's simply "same"). Sites are checked against the **source
+tree** instead, which is the stronger check: it catches a renamed mutation site, which no
+comparison against a prose cell could.
+
+**One row's paths are reconciled, and they are reconciled twice — against the source *and*
+against the markdown.** Both exceptions belong to P23 and neither generalises:
+
+1. **Against the source.** P23's sixteen addresses are the published control fields the Codex
+   allowlist does not keep, and an L2 guard recomputes that difference from the adapter's
+   allowlist literal and T-A3's control-field table. This buys less than it appears to, and the
+   difference matters: a bidirectional set-equality makes widening the allowlist a **deliberate**
+   edit to the row rather than a silent one — it does **not** make the row independent of the
+   code, because once the code changes the only route back to green is to edit the row to match.
+   It is the posture G24 records for the OpenCode endpoint snapshot: a green run proves
+   self-consistency, not agreement with the vendor.
+2. **Against the markdown**, which is the exception to the paragraph above and exists because
+   P23's Mutation cell **enumerates its sixteen wire keys in prose**. "The tables have no path
+   column" is the reason paths are not reconciled, and for this one row it stops being true: the
+   cell is a path list in all but spelling, so it is a second copy, and a second copy nothing
+   compares is one nobody will notice going stale. Measured before the guard existed — deleting
+   one of the sixteen from the cell, and changing its count word, each left the whole suite green.
+
+Every other row's paths stay reviewed rather than derived, and P23 is enumerated rather than
+computed at import so that a reviewer still reads a list. **The obligation travels with the
+shape, not with the row**: a future row that also spells its keys out in the markdown inherits
+both exceptions, and one that does not inherits neither.
 
 **The Trigger column is reconciled by nothing, and that is the third state.** Editing a Trigger
 cell produces no disagreement. Those cells are prose of the same kind as Site — "Always, on the
@@ -330,19 +365,27 @@ plan §1.4's harness rule forbids. It is filed as **KBR-139** rather than guesse
 |---|---|---|---|
 | Data ⇄ §3.2 markdown — ids and conditionality | L2 | **T-W3** | Two files. No sockets |
 | Data ⇄ source tree — every site resolves | L2 | **T-W3** | The AST of `src/kitty`. No sockets |
+| Data ⇄ the adapter's own drop set — P23's sixteen paths | L2 | **T-W3** | One module's AST plus T-A3's control-field table. No sockets |
+| Data ⇄ §3.2.2's P23 cell — the same sixteen, spelled in prose | L2 | **T-W3** | Two files. No sockets |
 | Register completeness — projected delta at the wire equals the triggered rows | **L3** | T-G2 | Captures from T-D4–T-D9 |
 
-The first two are what make the register *well-formed*. Only the third makes it *true*, and it
-cannot run until a recorder and an oracle exist.
+The first four are what make the register *well-formed*. Only the last makes it *true*, and it
+cannot run until a recorder and an oracle exist. The third and fourth are narrower than the first
+two — they check **one row**, for the two reasons §3.2.4 gives — and the third is the only guard
+anywhere that reads a *value* out of `src/kitty` rather than a name.
 
-**None of the three proves the register is *complete*.** They prove the data and the document say
-the same thing, and that every site named still exists. A mutation the product performs and
+**None of the well-formedness guards proves the register is *complete*.** They prove the data and
+the document say the same thing, that every site named still exists, and that one row's paths
+match one allowlist and one published cell. A mutation the product performs and
 *neither* artifact records is invisible to all of them — only the wire-level guard can catch that,
-and it needs a recorder and an oracle. Two such omissions are already known and filed: G22
-(headers) and G23 (`openai_subscription`'s `reasoning` injection), the second found by walking the
-subscription request path by hand while writing the data.
+and it needs a recorder and an oracle. Four such omissions are already known and filed: G22
+(headers), G23 (`openai_subscription`'s `reasoning` injection), G26 (P13's CC-origin twin) and
+G27 (an allowlisted field dropped for being falsy). The last three were each found by walking the
+subscription request path by hand rather than by any guard — which is the evidence for the
+sentence above, not a decoration on it.
 
-**A header row's `paths` are checked by none of the three.** Under §3.2.2's header rule they are
+**A header row's `paths` are checked by none of the four well-formedness guards**, and the two
+that do check paths check P23's alone. Under §3.2.2's header rule they are
 consumed by §4.3 C1's exact-set assertion, which does not exist yet — so for P9a, P9b and P9c only
 the id, the conditionality and the sites are under test today. `headers[user-agent]` is a reviewed
 claim, not yet a tested one.
@@ -415,17 +458,74 @@ Envelope
 Conversation
   system:   ordered text parts
   turns:    ordered [ Turn(role, parts) ]        -- role is `user` or `assistant`, only
-  tools:    ordered [ ToolDecl(name, description, schema, strict) ]
+  tools:    ordered [ ToolDecl(name, description, schema, strict, cache_control?) ]
   sampling: a CLOSED set of fifteen canonical keys (§3.3.1b) -- declared, may be absent
 
-Part = Text(str)
-     | ToolUse(name, arguments, id?)
-     | ToolResult(content, tool_use_id?, is_error)   -- content: [ Text | Image | Json | Opaque ]
-     | Thinking(text, signature?)
-     | Image(digest?, media_type?, ref?)
-     | Json(value)
-     | Opaque(kind, digest?)
+Part = Text(str, cache_control?)
+     | ToolUse(name, arguments, id?, cache_control?)
+     | ToolResult(content, tool_use_id?, is_error, cache_control?)
+     | Thinking(text, signature?)                     -- no cache_control: see below
+     | Image(digest?, media_type?, ref?, cache_control?)
+     | Json(value)                                    -- no cache_control: see below
+     | Opaque(kind, digest?, cache_control?)
 ```
+
+**`cache_control` is a slot on six of the eight, and the two exclusions are the vendor's rule
+rather than ours.** Claude Code sets a cache breakpoint on nearly every request, so without a slot
+the field could only residualise, and a non-empty residual fails the run — the grammar would reject
+essentially every real body (KBR-167). Anthropic's published "what can be cached" list permits a
+breakpoint on tool declarations, on system blocks, on text, image and document blocks, and on
+`tool_use` and `tool_result` blocks. The two exclusions have **different** reasons, and conflating
+them is how a later reader talks themselves into "fixing" the asymmetry:
+
+- **`Thinking`** — Anthropic states a thinking block "cannot be cached directly with
+  `cache_control`". Note what that does *not* say: thinking blocks **can** be cached alongside
+  other content when they appear in earlier assistant turns, so the exclusion is about the
+  breakpoint, not about cacheability. Anthropic does not document *rejecting* such a body, and its
+  nearest analogue goes the other way — a below-minimum prompt "will be processed without caching,
+  and no error is returned". So the honest statement is that the vendor does not support a
+  breakpoint there. The consequence is on the record: such a body **fails the run**, with the field
+  named, and the fix at that point is a slot or the third outcome, decided then.
+  **The exclusion is the `thinking` *type*, not thinking generally**: a
+  `redacted_thinking` block is `Opaque`, so it carries the slot like any other unmodelled block,
+  even though Anthropic gives it no `cache_control` field either. Left as is deliberately —
+  `Opaque` is the catch-all, and a per-kind exclusion table would be an abstraction with one user.
+- **`Json`** — not a sub-content rule, despite the neighbouring one about citations. §7.4.1 fixes
+  `Json` as the part for a format carrying a structured value *natively* — Converse's
+  `toolResult.content.json`, Gemini's `functionResponse.response`. **Neither format has a
+  `cache_control` concept at all**, and the Anthropic reader can never emit a `Json` part. A slot
+  there could not be filled by any reader.
+
+**A breakpoint nested inside a `ToolResult` residualises**, on the same two-reason pattern.
+Anthropic directs a sub-content block to be cached through its top-level block, and — the half
+that binds regardless — §3.3.1a defines **no path form reaching inside a `ToolResult`**, so a
+breakpoint mapped onto a nested part would be a delta **M16** could never claim. That is
+§3.3.1a's under-claiming direction, which manufactures a false I1 breach. The `ToolResult` itself
+is cacheable and carries its breakpoint normally.
+
+**The wire mapping is carried whole, not reduced to a boolean.** `{"type": "ephemeral"}` and
+`{"type": "ephemeral", "ttl": "1h"}` are different products at different prices (a 1-hour write
+costs 2x base input against 1.25x for the default five-minute one), so a boolean would make a
+silently downgraded TTL invisible — the same class of loss the slot exists to expose.
+
+**Only one reader can ever fill it.** `cache_control` is Anthropic's spelling. Converse has
+`cachePoint` — a *separate block* in the content list, not a field on one — Gemini has a top-level
+`cachedContent` reference, and OpenAI caches prefixes implicitly with no per-block marker at all
+(its GPT-5.6 `prompt_cache_breakpoint` is a Responses-API construct with no Chat Completions
+equivalent). So on every cross-format comparison this field is present on one side only, which is
+exactly what M16 needs, and an author of the Converse or Gemini reader should not go looking for an
+equivalent to map. A normalisation, if one is ever wanted, lands here with the first reader that
+needs it — the same rule §7.4.1 already applies to `Opaque`'s cross-vendor alias table.
+
+**Why a slot rather than §3.3.1's other outcome.** §3.3.1 offers "map it, or declare it ignored
+with a reason", and a reader-side declared-ignored mechanism would also have stopped the run
+failing. It was rejected deliberately: kitty's translated path **strips every breakpoint**, so
+under a declared-ignored rule the oracle would be blind, by construction, to a mutation that
+re-bills the user's cached prefix at **at least** ten times its cached rate — a cache read is
+0.1x base input on most models and 0.025x on Claude Fable 5.1 and Mythos 5.1, where the multiple
+is forty. Register row **M16** claims
+the strip instead, which keeps the cost visible and attributable. The declared-ignored mechanism
+therefore still does not exist; §7.4.1 records that, and no field currently needs it.
 
 **`consumed` is why a dropped key is detectable.** A reader that *drops* an unknown key produces
 an **empty** residual, so "the residual must be empty" would pass it — and T-W2's own falsification
@@ -488,7 +588,10 @@ wire format therefore forces a deliberate decision: map it, or declare it ignore
 
 **Every register row names the field it touches.** M1 is `envelope.model`; P17 is
 `envelope.stream` and `envelope.store`; P15 is `conversation.tools[*].strict`; P13 is
-`conversation.sampling`. Without that, "claimed by a register row" is a judgement call rather
+`conversation.sampling`. **M16 is the sharpest case** — three paths at once, each naming
+`.cache_control` rather than the block it sits on, because `conversation.turns[*].parts[*]` would
+also claim a *deleted part* and `conversation.tools[*]` a *deleted tool description*, which are two
+of §3.3.1's own five oracle falsification cases. Without that, "claimed by a register row" is a judgement call rather
 than a lookup.
 
 #### 3.3.1a The path vocabulary
@@ -501,11 +604,12 @@ only the second consumer; §3.2.2 says why.
 | Path form | Names |
 |---|---|
 | `envelope.model` · `envelope.stream` · `envelope.store` | The named control fields |
-| `envelope.extra[<wire key>]` | A format-specific control field — P2a `thinking`, P3 `reasoning`, P4 `reasoning_effort`, P10 `reasoning_split` |
+| `envelope.extra[<wire key>]` | A format-specific control field — P2a `thinking`, P3 `reasoning`, P4 `reasoning_effort`, P10 `reasoning_split`, and P23's sixteen dropped Responses control fields. **The bare `envelope.extra` is not a legal anchor** — see below |
 | `conversation.system[<i>]` | One system text part |
 | `conversation.turns[<i>].role` · `.parts[<j>]` | A turn, or one part of it |
 | `conversation.tools[<name>].description` · `.schema` · `.strict` | A tool declaration, **by name** |
 | `conversation.sampling[<key>]` | One sampling parameter |
+| `conversation.system[<i>].cache_control` · `conversation.turns[<i>].parts[<j>].cache_control` · `conversation.tools[<name>].cache_control` | One cache breakpoint — **M16**. ⚠️ **A coarser row can claim these first**: a pattern is a prefix, so P5b's bare `conversation.system` and M5/M6/M7's bare `conversation.turns` subsume the breakpoint paths beneath them whenever their own triggers are met — and P5b's `MULTIPLE_SYSTEM_BLOCKS` is met by most Claude Code bodies. M16 is therefore the row that fires only where no collection-level row does; on the system blocks that means the single-block case, since P5b changes the collection's length and no `system[i]` path survives it. The field addresses the same three carriers the grammar gives it a slot on; `system_path` and `part_path` take an optional field name for it, as `tool_path` already did for P15's `.strict` |
 | `conversation.turns` · `.system` · `.tools` · `.sampling` | A **whole collection** — M5, M6 and M7 rewrite the turns, P5b joins the system blocks, §3.3.1 pins P13/P14 to the bare `sampling` |
 | `headers[<name>]` | A header — P9a, P9b, P9c, and §4.3 C1. **Not produced by the projection diff**: `Request` carries no headers and no inbound header is forwarded, so this form addresses a per-adapter *deviation from the base header set* (§3.2.2), never a delta between two projections |
 | `residual[<path>]` | An unclassified value |
@@ -586,6 +690,38 @@ the natural anchor. It is the opposite. A bare collection claims its members, P1
 the injected `x-kitty-trace` field that is one of §3.3.1's five mandatory falsification cases, and
 a real internal-key leak — the defect P1 exists to prevent. P1 takes the escape instead.
 
+⚠️ **`envelope.extra` is not a legal register anchor either**, which is why the table above lists
+it only in its keyed form. `path_matches` would accept the bare spelling — a bracket-free pattern
+segment claims a bracketed member of itself, so `envelope.extra` names `envelope.extra[text]` —
+and that is exactly the problem: this is the one prohibition nothing else in the suite would
+notice. **P23 (KBR-171) is the row that wanted it**, and the reason it may not have it is a
+collision, not an aesthetic:
+
+> `extra` is where the *injections* live — P2a, P2b, P3, P4, P10, and the `reasoning` injection
+> G23 registers at `envelope.extra[reasoning]`. A P23 anchored at the bare collection and
+> triggered on `RESPONSES_ORIGIN_PATH` would claim that delta too, **on the same route**, so
+> G23's row could be deleted and nothing would go red. One row silently absorbing another is the
+> unrecoverable half of the asymmetry this section opens with.
+
+**P13/P14's bare `conversation.sampling` is not a precedent for it**, and not for the reason a
+first reading suggests. It is *not* that the bare anchor and an enumeration claim the same thing
+there — `SAMPLING_KEYS` has fifteen members and P13 drops fourteen, so the bare anchor
+additionally claims `conversation.sampling[top_k]`. Those rows anchor bare **deliberately**, so
+that a fifteenth key added upstream is claimed by the same row (`register.py` says so at P13).
+The difference is what the over-claim can swallow: `conversation.sampling` is a closed set that
+`Conversation` enforces and that no row injects into, so the widest thing the bare anchor can
+absorb is another sampling key. `envelope.extra` is open, and absorbs whole rows.
+
+**The cost of enumerating is real, and it is not "already paid for".** A thirty-second published
+field that the allowlist drops would be unclaimed, and the oracle would report a false breach on
+it. Nothing in the suite detects a vendor revision — no test reads the published schema, by §8's
+determinism rules, which is G24's shape rather than a solved problem. What the enumeration buys
+is that the failure is **loud, local and one line to fix**, where the bare anchor's over-claim is
+silent and costs a row. A bare anchor would not have detected the revision either; it would only
+have hidden it. What *is* pinned is the harness side: T-A3's control-field table is asserted
+against the published key count, so editing it goes red there and again in P23's derivation
+guard.
+
 **The index builders accept the wildcard (KBR-26).** `system_path`, `turn_path`, `part_path` and
 `reply_part_path` take `WILDCARD` where they take a position, because a register row writes a
 pattern over every turn and part — M3, M4, M8, P5e and P8 all do — where a delta writes concrete
@@ -661,11 +797,22 @@ agree on a canonical form. They are six separate tasks, so the agreement is part
   `""` claims a tool *named* empty-string, and a call nobody can name cannot be paired or
   addressed. Apply that test to every required field, not only these two.
 
+  **A value that is not a string at all — including an already-decoded object — residualises
+  too.** Accepting the object form would make a bridge that emitted it where the schema demands a
+  string invisible to the oracle, which is the wire-format breach the readers exist to see. And
+  what residualises is the **raw wire value, unmodified** — `"[1,2]"` stores the *string*, never
+  the decoded list — because T-D8 diffs residual key sets across all six readers, and two
+  renderings of one unreadable value would report a delta neither reader caused.
+
   Six readers cannot quietly disagree about what `arguments: ""` means, and it is not
   hypothetical — `openai_subscription.py:OpenAISubscriptionAdapter._cc_to_responses` writes
   `func.get("arguments", "")`. The residual *path* is format-specific and stays each reader's own;
-  only the decode and the fail-closed policy are shared. Tracked for pinning as code beside
-  `image_digest` — KBR-174.
+  only the decode and the fail-closed policy are shared.
+
+  **Pinned as code: `contract.decode_arguments(raw, path, residual)`** (KBR-174), beside
+  `image_digest` and for the same reason. It takes the residual as a parameter rather than
+  reporting a flag the caller must act on: `mypy` covers `src/kitty` only, so a reader that
+  ignored such a flag would be caught by nothing.
 - **`tool_choice`** unifies four wire keys — CC/Messages `tool_choice`, Converse's
   `toolConfig.toolChoice`, Gemini's `functionCallingConfig.mode` — onto
   `envelope.extra["tool_choice"]`, with the **value** normalised to `auto` · `any` · `none` ·
@@ -941,7 +1088,11 @@ The assertions:
 
 - *(i)* Transport-blip retries and empty-response retries — the two that repeat a request
   unchanged — must be **byte-identical** to the attempt they repeat: same body, same headers, no
-  added retry-count or correlation header.
+  added retry-count or correlation header. **Quantified over the retry arm, not the balancing
+  arm**: the latter re-runs `_normalize_model` and `normalize_request` and is the failover
+  re-normalisation exception in the table above, not a repeat. §11 Q14(b) widens this row's
+  population — once the preamble hold lands, empty-response retries become reachable on the
+  native-passthrough adapters too, so **T-I8** must name that path.
 - *(ii)* Each of the four paths above is a **declared exception**: assert each fires only under
   its own trigger and never otherwise. A provider that hashes bodies can see all four; whether to
   close any of them is Q6.
@@ -1598,6 +1749,7 @@ inspecting a body it never sends.
 | **Endpoint table** | The README endpoint table matches `_register_routes`. Catches F2 (KBR-9). |
 | **Attribution-header table** | The README's `X-Kitty-*` table matches `_attribution_headers()`, and none of those names can reach any `build_upstream_headers()`. |
 | **Flag table** | The README logging-flag table matches the CLI parser. |
+| **Answered questions ⇄ dependent passages** | A question `TEST_SUITE.md` §11 marks **ANSWERED** is not described as open or blocking anywhere in either design document. Landed with **KBR-163** as `tests/test_answered_questions_are_settled.py`. Range mentions (`Q10-Q13`) are expanded, because the site that escaped the hand-written enumeration was a range; §15's blocking table is checked by **row content** rather than by phrase, since such a row states the block by position and contains no still-open word at all. The one exclusion — a question's own §11 entry, which keeps the original wording verbatim — carries its own bound assertion, per the rule below. **Two stated limits:** a passage must *name the number* to be seen, and a paraphrase that never does is a reading job, not a scan. |
 
 
 **Scoping the internal-key scan (1): `providers/**` is in scope, not only `bridge/**`.** An earlier
@@ -1807,7 +1959,7 @@ each show how easily one goes vacuous.
 | Sealed network (§5.2), all three phases, per transport (§5.5) | Positive control passes; zero connections with the proxy down; the falsification control fails the harness |
 | Cross-attempt content (§4.3 C3) | Transport-blip and empty-response retries byte-identical; each of M6, M8, M9 and failover re-normalisation fires only under its own trigger |
 | Connection lifecycle (§4.3 C5) | Distinct-connection count per session, against the native baseline |
-| **Streaming recovery — content, not just grammar** (below) | Four injection points; no duplication, no replayed tool calls, no spliced arguments |
+| **Streaming recovery — content, not just grammar** (below) | Four injection points; no duplication, no replayed tool calls, no spliced arguments — and, per §11 Q14, exactly one upstream request at the recorder for the three post-emission points |
 | Client disconnect during a stream | Upstream connection released; the backend not marked unhealthy for a client-side fault |
 | All backends unhealthy | The 503 arrives in each protocol's native error envelope |
 | Oversized request | Rejected with the protocol's own error shape, not a raw 413 |
@@ -1826,19 +1978,30 @@ sequence rather than timing:
 | Injection point | Assertion |
 |---|---|
 | Before any downstream byte | Clean failover; the client sees one complete stream from the second backend |
-| After text has been emitted | No text the client already received is repeated; the transcript reads as one message |
-| Mid `input_json_delta`, tool arguments partly sent | Arguments are never a splice of two attempts. **The acceptance oracle here is undecided — Q14.** Until it is answered this row asserts only the negative (no silent merge, no reused id across attempts), which is weaker than the row needs to be |
-| After content, before the terminal event | Exactly one terminal outcome reaches the client; `message_stop` is not duplicated or omitted |
+| After text has been emitted | No text the client already received is repeated — **because there is no second attempt to repeat it from**: the recording upstream sees exactly one request, and the transcript reads as one message ending in a terminal error event. A clean failover to a second backend also satisfies "no repeated text", which is why the recorder assertion and not the transcript is what makes this row bite |
+| Mid `input_json_delta`, tool arguments partly sent | Arguments are never a splice of two attempts, **and the turn ends there**: per Q14 the client receives no argument bytes from a second attempt, the partial `tool_use` block is closed, and one terminal error follows. The negatives still hold — no silent merge, no reused id across attempts — but they are no longer the whole oracle |
+| After content, before the terminal event | Exactly one terminal outcome reaches the client, and per Q14 it is the **error** event rather than a `message_stop` synthesised from a second attempt; `message_stop` is not duplicated or omitted |
 
-Each case asserts tool-call **identity** (ids stable within an attempt, never reused across
-attempts) and a single terminal outcome.
+Each case asserts tool-call **identity** and a single terminal outcome. Only the first case has
+two attempts to compare, so only there does "never reused **across** attempts" have content; for
+the other three the stronger assertion is that no second attempt exists at all.
 
-**The post-emission semantics are a prerequisite, and they are not decided.** Once bytes have
-reached the client, what a correct recovery even *looks like* is a product decision, not a test
-detail: abandon and re-open, fail the turn, or something else. Writing "whichever the agreed
-semantics say" into a test specification leaves it without an acceptance oracle — the same defect
-this document objects to elsewhere. It is tracked as **Q14** rather than left as prose, so the
-gap is visible in the question list where decisions are collected, not buried in a table.
+**The post-emission semantics are settled — §11, Q14, answered 2026-09-12.** Once a byte has
+reached the client the bridge does not retry and does not fail over: it closes any half-open
+block, emits one terminal error, and lets the agent retry the turn. So every row above has a full
+acceptance oracle, and the four injection points divide cleanly — the first is pre-emission and
+recovers silently, the other three are post-emission and terminate.
+
+That is the same choice `bridge/server.py` already makes for a mid-stream transport drop — **the
+transport class only**; the timeout class still fails over after emission, which is gap G26 /
+KBR-183 — and
+the same one the real Anthropic API makes: its mid-stream failures arrive as an SSE `error` event on
+an already-`200` response and are raised to the caller, never resumed. **I2** is why that matters
+— a bridge that recovers where the provider gives up is observably not the provider.
+
+The empty-stream case does not reach these rows at all: per Q14(b) the native passthrough holds
+its leading events until the first content event, so a contentless reply is still pre-emission
+when it is detected. That is KBR-155's to implement; the rows here assume it.
 
 `/stats` remains authoritative for attribution after a mid-stream failover, per the README's own
 caveat that the headers name whoever produced the first byte.
@@ -2527,7 +2690,7 @@ and the second is the one that surprises:
    wrong defect. `residual_path()` renders a *delta path* for the oracle to report; it never
    builds this mapping.
 2. A nested key is keyed by its path from the body root with **array positions as indices** —
-   `tools[0].type`, `messages[2].content[0].cache_control`, `system[0].cache_control`. It does
+   `tools[0].type`, `messages[2].content[0].x_vendor_marker`, `system[0].x_vendor_marker`. It does
    **not** inherit §3.3.1a's by-name tool addressing. That convention exists because "translators
    reorder and filter declarations", which is a property of a *comparison*; a residual key is
    never matched against a register pattern, so the reason does not apply and one rule is better
@@ -2537,15 +2700,51 @@ and the second is the one that surprises:
 **`Opaque` consumes its block, and carries a payload digest.** A block type the grammar does not
 model projects as `Opaque(kind=…, digest=…)` where:
 
-- `kind` is the wire `type` converted to snake_case. Anthropic's spellings (`document`,
-  `search_result`, `redacted_thinking`, `server_tool_use`) are already canonical; Converse writes
-  `searchResult` for the same thing, so **the cross-vendor alias table lands in this section with
-  the first reader that needs one** (T-A5), rather than being invented twice.
-- `digest` is exactly
-  `hashlib.sha256(json.dumps(rest, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")).hexdigest()`,
-  where `rest` is the block without `type` and without `cache_control`.
+- `kind` is **named through `contract.opaque_kind()`** — not restated by each reader. For most
+  types that is the wire `type` itself; where two vendors spell one concept differently the table
+  reconciles them, and where a type is not snake_case at all it raises rather than converting (see
+  below). Anthropic's spellings (`document`, `search_result`,
+  `redacted_thinking`, `server_tool_use`) are already canonical; a format-unique type keeps its own
+  spelling, which is the deliberate exception to "never the wire's spelling".
+
+  **The alias table arrived with T-A3, not T-A5.** This section deferred it to "the first reader
+  that needs one"; that was wrong, and the cost was paid before it was noticed. T-A1 and T-A3
+  landed first and named one concept two ways — Anthropic's `document` and Responses' `file` for
+  an attached file — which is the permanent unclaimed delta the deferral was meant to avoid.
+  `document` is canonical because Anthropic Messages **and** Bedrock Converse both spell it that
+  way on the wire, so exactly one reader moved. The table is `contract.OPAQUE_ALIASES` and it is
+  **enforced**: `Opaque` rejects any key of it, so a reader cannot quietly project a rival name.
+  The lesson generalises — a shared vocabulary deferred to the reader that first needs it is
+  deferred to the *second* reader, because the first has already answered it alone.
+
+  **A non-snake_case wire type with no alias raises.** `opaque_kind` does not convert it: a
+  camelCase splitter with no caller and no corpus is a second source of drift, not a cure for one,
+  so the conversion belongs to the author who first meets a real one. That is **T-A5, nine times**
+  — Converse's `ContentBlock` union is `text` `image` `document` `video` `audio` `toolUse`
+  `toolResult` `guardContent` `cachePoint` `reasoningContent` `citationsContent` `searchResult`
+  `toolAddition` `toolRemoval` (confirmed against the `bedrock-runtime` 2023-09-30 service model),
+  of which nine are camelCase. A **reader** meeting such a type translates the `ValueError` into
+  `UnreadableBodyError`: the body is not projectable, but the reader is not at fault, and
+  `contract` defines a reader-raised `ValueError` as a reader bug. A new *snake_case* vendor type
+  needs no decision and still projects, so a vendor release is not a harness outage.
+- `digest` has **two recipes**, and which applies is a property of the content, not of the format:
+
+  * `contract.opaque_digest(block)` for a block the grammar cannot model — exactly
+    `hashlib.sha256(json.dumps(rest, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")).hexdigest()`,
+    where `rest` is the block without `type` and without `cache_control`.
+  * `contract.text_digest(text)` for content whose identity is a run of text — a refusal is the
+    case. One recipe was considered and rejected on a checked fact: Chat Completions carries a
+    refusal as a **bare string** on the message (`ChatCompletionResponseMessage.refusal` is
+    `anyOf[string, null]`), so there is no block for T-A2 to hash and a single rule would force it
+    to invent a wrapper — and the wrapper's shape would be a new thing six readers could disagree
+    about, which is this rule's own defect one level down.
+
+  Both are pinned in `contract.py` rather than restated here (KBR-174), because prose did not hold
+  the first one: in T-A1 all three wrong spellings survived mutation testing until a test pinned a
+  digest to an external literal.
 - the block's every other key is **consumed** — nothing beneath it residualises — while
-  `cache_control` residualises under its path exactly as it does on a modelled block.
+  `cache_control` maps to `Opaque.cache_control` exactly as it does on a modelled block (KBR-167;
+  it residualised until the grammar gained the slot).
 
 Each clause is load-bearing. A bare `Opaque("document")` makes two different documents project
 identically, so a swapped or truncated document produces no delta at all — and §3.3.1 put
@@ -2555,9 +2754,12 @@ the grammar's known limit. **Canonical JSON rather than the raw wire slice**, be
 that reorders keys must not change the digest; that is the whole reason the recipe is not
 `sha256(raw_block_bytes)`. **`ensure_ascii` is pinned** because its default is `True` while the
 surrounding prose says UTF-8: an author who "helpfully" passes `False` gets a different digest for
-the same block, and it would surface only on non-ASCII content. **`cache_control` is excluded**
-so that one field behaves the same way everywhere — inside the digest it would produce a delta
-with no named cause, on a path where the same field on a modelled block produces a diagnosis.
+the same block, and it would surface only on non-ASCII content. **`cache_control` is excluded from
+the digest** so that one field behaves the same way everywhere — inside the digest it would produce
+a delta with no named cause, on a path where the same field on a modelled block produces a
+diagnosis. That exclusion is unchanged now the field has a slot, and it is what lets **M16** claim
+a stripped breakpoint on an unmodelled block by path: were it inside the digest, the strip would
+show as an opaque digest change no row could name.
 
 > **The cost, recorded so it is not discovered later.** The digest is over *that format's* JSON, so
 > one document carried from Messages to Converse digests differently and shows a cross-format
@@ -2648,8 +2850,9 @@ exceptions, and they are not interchangeable:
    **No key currently exercises this branch**, and that is worth saying: an earlier draft of this
    section presented it as the general case using `effort` as its example, which is wrong twice
    — `effort` is client-sent, and generalising from it would have told six authors to ask "does a
-   register row name this?" about fields no row names, such as `context_management` and
-   `output_config`, and to residualise them.
+   register row name this?" about fields no row names, such as `output_config`, and to residualise
+   them. (`context_management` stood beside it until **P23** claimed it — which is the point:
+   membership of that set is a fact about the register on the day you read it.)
 
 A key kitty emits that **no** register row names is an *unregistered* mutation. That is the defect
 the oracle exists to find, and it must residualise.
@@ -2661,10 +2864,15 @@ implements the first and the residual; there is **no reader-side declared-ignore
 say. Until T-W2 adds one, a field the grammar cannot carry has only the residual, and the residual
 fails the run.
 
-That is the correct signal and it is also a deadline. Claude Code sets a block-level
-`cache_control` on nearly every request and the grammar has no slot for it, so **T-C2's corpus
-entry — `system` with `cache_control` — fails the first oracle run.** Tracked as a blocking edge
-onto T-D1, not as a note here.
+That deadline **has been met, and not by building the mechanism.** Claude Code sets a block-level
+`cache_control` on nearly every request, so T-C2's corpus entry — `system` with `cache_control` —
+would have failed the first oracle run. KBR-167 resolved it by giving the field a **slot** in the
+grammar (§3.3.1) and a register row (**M16**), because kitty strips every breakpoint and the
+declared-ignored route would have made that loss invisible to the oracle by construction. So the
+third outcome is still unbuilt, and **no field currently needs it** — which is the reason not to
+build it yet rather than an oversight. The next field the grammar cannot carry is the one that
+should settle whether a slot or a mechanism is the right answer; §3.3.1 records the trade-off that
+decision turns on.
 
 #### 7.4.2 What T-A4 settled — seven more rules, and which readers each one binds
 
@@ -3288,6 +3496,13 @@ guessing which set it joins.)
   `tests/bridge/test_crash_resilience.py` rather than inventing a second one. The whole module
   runs in **~0.6 seconds**, measured, of which the socket-binding cases are ~0.1.
 
+**One cross-cutting cost, added by KBR-188's fix.** Every conformance probe now begins by waiting
+for the clock to report a new instant (§8.3). Measured at **80 calls** across the harness suite:
+immeasurable on Linux and macOS, where the clock resolves in nanoseconds and the first look
+returns, and a worst case of **~1.2 s** on the Windows leg, whose step is ~15.6 ms. It scales with
+the number of raw-socket probes, so a future recorder adds to it in proportion to the probes it
+drives, not to its test count.
+
 KBR-10 added the largest one: `tests/cli/test_stream_encoding.py` spawns **35 child interpreters**
 per run, ×4 Python versions. It has no choice — the behaviour it proves is that kitty survives a
 hostile *interpreter start-up encoding*, and `PYTHONIOENCODING` is read before any in-process test
@@ -3448,6 +3663,52 @@ registry row for an assertion no test contains documents a fiction — so it is 
 What arrived first instead were the **Windows cells** of five assertions that the platform legs
 (§8.4) found to be false on Windows and true everywhere else: four over KBR-188 and one over
 KBR-189.
+
+**Four of those five are gone again, and why they could not have worked is the lesson.** KBR-188
+was one defect — Windows' `time.monotonic` advances in ~15.6 ms steps, so two probes sent back to
+back are stamped at the same instant and `check_arrival_increases` is false. Its four rows
+exempted the assertions that observed it. But **whether a given pair collides is a race**, not a
+platform property: a pair that straddles a step boundary is stamped at two instants and the
+assertion *passes*. An exemption fails on an unexpected pass — deliberately, so debt cannot
+outlive its defect — so the leg went red in **both** directions on alternate runs. Measured on
+2026-09-12: one run failed `check_arrival_increases`, the next failed the exemption for passing.
+
+The rule that follows, and it generalises past this defect: **an exemption is only sound over an
+assertion that is deterministically false on the exempt platform.** Over a racing one it converts
+a flaky assertion into a job that is red either way. A nondeterministic platform difference has to
+be removed, not exempted.
+
+Removed here by `recorder_conformance._advance_clock()`, which stands a probe apart from whatever
+arrived before it by waiting — on a **condition**, that the clock has reported a new instant,
+never on a fixed sleep. It lives in the shared driver, so §7.2's four recorders inherit it rather
+than each carrying a row, and it costs nothing measurable where the clock is fine: 80 calls across
+the harness suite, a worst case of ~1.2 s on Windows and immeasurable on Linux and macOS. Its own
+bound is a **poll count, not a deadline**, because a deadline is computed from a clock and the case
+it exists for is a clock that has stopped — the frozen-clock defect `check_arrival_increases` is
+there to catch, and the first draft of the function hung the suite on it. The case that pins that
+bound counts polls for the same reason: an earlier version asserted elapsed *wall time* and went
+red on the macOS leg, where `time.sleep(0.001)` takes about eleven milliseconds. Sleep accuracy is
+the platform's business; the count is the only part the driver promises.
+
+**The wait goes before the probe, not after it, and the first fix got that wrong.** Waiting after
+the reply separates a probe from the driver's own previous probe and from nothing else — so a
+probe following a request the driver did **not** send still shares that request's instant. §6.3's
+slow-body pair is exactly that shape: it hand-rolls its first request on a raw socket so that
+arrival order and completion order differ, and the driven probe behind it collided anyway. The
+Windows leg stayed red. Waiting at the *start* of `send_raw` is the general form — every probe is
+separated from everything before it, however the earlier request was produced.
+
+**A clock quantised from real time could not have caught that**, which is the sharper lesson. It
+reproduces the platform but keeps the race: whether a given pair collides still depends on how
+fast the runner is, so a case built on it passes against the defect most of the time. Measured:
+the slow-body pair collided in four runs out of eight at a 50 ms quantum. `test_recorder.py`
+therefore pins the *placement* against a clock that moves **only when something sleeps on it** —
+no real time passes and every run agrees. That clock is sound only away from the event loop, which
+reads `time.monotonic` for its own timers, so the end-to-end cases keep the quantised clock and
+the placement case, which never opens a loop, uses the stepped one.
+
+Only KBR-189's row survives, over a different defect: a mid-stream abort that wins its race
+against the first chunk. That one is deterministic on Windows.
 
 They are the parametrised-cell shape above rather than whole-test exemptions, and the reason is
 the rule this section opens with. A `skipif` would have been the obvious move and is the wrong
@@ -3658,6 +3919,8 @@ does not surface work that is done. `TEST_SUITE_IMPLEMENTATION_PLAN.md` §16 mir
 | **G15** | **F4 — `_effort` / `_thinking_adaptive` reach the wire** — KBR-6 | Live I1+I2 breach on every CC-wire provider | Add both to `_INTERNAL_KEYS`; internal-key completeness guard (§6.2.3); regression test at `BridgeServer._upstream_body_for`. Residual: `openai_subscription` alone builds its body independently of that boundary (allowlisted, hence never leaked); `bedrock` and `ollama_cloud` call `translate_to_upstream` inside their transports, so the assertion reaches their wire. Carried by T-G2 over T-D4–T-D9's captures | **0** |
 | **G16** | **F5 — `OpenCodeGoAdapter` misdeclared its wire shape** — KBR-7 · **CLOSED** | Was a latent defect in the M8 path and a trap for the oracle | Done: the declaration is per-model, both repair sites branch on it, and the **hook-level** honesty guard landed with the fix. The **wire-level** guard remains T-G4 / KBR-80 | — |
 | **G24** | **No staleness alarm on the provider endpoint snapshot** | KBR-126 checked in `tests/data/opencode_go_endpoints.json` as the routing oracle. Nothing detects that the provider has since changed its table: §8's determinism rules exclude both mechanisms that could — a networked check and a clock. Refreshing it is a human act | Accepted trade-off, recorded rather than fixed: a networked alarm makes CI depend on a third party's uptime and turns green into a statement about today's weather. Revisit only if the provider publishes a machine-readable endpoint table — today's `/v1/models` carries ids only, no endpoints, and still lists retired aliases | **3** |
+| **G26** | **P13's CC-origin twin — the Codex body builder drops 17 non-sampling control fields, unregistered** — KBR-184 | Found while closing KBR-171, which closed the identical defect on the Responses-origin path with P23. `_cc_to_responses` carries `model`, `messages`→`input`, `stream`, `store`, `tools`, `tool_choice` and an injected `reasoning`; against `CreateChatCompletionRequest`'s 37 published fields that leaves **17** which are neither carried nor sampling — `parallel_tool_calls`, `metadata`, `user`, `service_tier` and the agent's own `reasoning_effort` among them. P13 is anchored at the bare `conversation.sampling` and reaches none of them, so T-D5 reports a false I1 breach on the CC-origin route exactly as it would have on the Responses-origin one | Row **P24**, enumerating one `envelope.extra[<wire key>]` per dropped control field, with the derivation guard P23 carries. **Blocked on T-A2 (KBR-34)**: the enumeration is the Chat Completions reader's control-field table minus what the builder carries, and that table does not exist yet — authoring it now is the guesswork §3.2.4 refuses for `scope`. **Before T-D5** | **1** |
+| **G27** | **An allowlisted Codex control field is dropped when its value is falsy, unregistered** — KBR-185 | Found by the design review of KBR-171 and confirmed by running the builder. `_ALLOWED_RESPONSES_PARAMS` is read only by `_prepare_responses_body`'s DEBUG log; the shipped body is an explicit `if` chain and six of its branches test **truthiness** (only `parallel_tool_calls` tests presence), so `include: []` and `reasoning: {}` are permitted by the allowlist and dropped anyway. The reader projects by presence, so each is an unclaimed `envelope.extra[...]` delta. P23 excludes both by construction (they are inside the allowlist), P14 reaches no `extra` path, and G23's planned P22 is conditional on `REASONING_EFFORT_PRESENT`, which this case does not meet | A row of its own — **conditional**, so it also owes §3.3.2 assertion 2 a complement, which P23 did not. Two decisions first: whether the truthiness tests are themselves the defect (`parallel_tool_calls` already uses `is not None`), and how the row's `envelope.extra[reasoning]` claim is to coexist with P22's. **Before T-D5** | **1** |
 | **G23** | **`openai_subscription` injects `reasoning` from `_reasoning_effort`, unregistered** — KBR-149 | Three sites in `providers/openai_subscription.py` set `reasoning: {"effort": …}` from kitty's internal key. Structurally identical to P3 and P4, and **P4 cannot cover it**: §3.2.3 records that `translate_to_upstream` never runs on this adapter's request path. Unlike G22 this is a **request-body** row feeding §3.3.2 assertion 1, so the moment T-D5 drives a corpus entry carrying a reasoning effort the oracle reports a *false* I1 breach on a deliberate mutation — the under-claiming direction §3.3.1a calls unrecoverable | Add P22: trigger `REASONING_EFFORT_PRESENT`, conditional, anchored at `envelope.extra[reasoning]`. Needs a trigger case and a complement in the corpus. **Before T-D5** | **1** |
 | **G22** | **Register header coverage is partial and inconsistent** — KBR-148 | Rows exist for four adapters (P9a ×3, P9b, P9c). At least six more deviate from the base header set with none: `AnthropicAdapter` and its three subclasses plus `ZaiAnthropicAdapter` (`x-api-key` / `anthropic-version` / lowercase `content-type`), `AzureOpenAIAdapter` (`api-key` on the non-Entra credential), and `OllamaAdapter`, which drops `Authorization` entirely — the same shape as P9b, which *does* have a row. `openai_subscription` additionally sets a conditional `ChatGPT-Account-Id` no row names | One row per deviation; `ChatGPT-Account-Id` becomes P9d, conditional, with a claimless-`id_token` fixture for its assertion-2 complement. Then §4.3 C1's per-adapter expectation is *reviewable against the register* instead of written from scratch — which is what stops C1 reproducing the ad-hockery F1 names | **2** |
 | **G21** | **A declared trigger is never verified** — KBR-140 | §7.4 hands the oracle `triggers_met` as an argument and §3.3.2 asserts only that a row is **absent** when its trigger is not met. Nothing asserts a trigger declared met actually fired, so a corpus entry that over-declares makes assertion 1 claim every delta — the oracle reports green on a bridge that is rewriting messages. The same author writes the entry and its trigger index (T-W6), so the mechanism has no second reader | Roughly fifteen triggers are decidable from the inbound request; give those an optional predicate and have T-D8 require the declaration to agree with it. M6, M8, M9 and M12 depend on an upstream response and stay declaration-only — the stated residual risk. Blocked on T-A1/T-A2, since a predicate needs a projected request to read | **1** |
@@ -3678,6 +3941,7 @@ does not surface work that is done. `TEST_SUITE_IMPLEMENTATION_PLAN.md` §16 mir
 | **G9** | C5 unmeasured | `force_close=True` gives a per-request connection pattern unlike the agent's | Connection-count baseline | **3** |
 | **G11** | Dependency behaviour unpinned; `curl_cffi` unbounded, **botocore undeclared** and the interpreter declared to the minor only | One of five §6.2.4 contracts has landed — the stdlib `ipaddress` one (KBR-146). The four transport contracts and the `botocore` declaration remain, so containment still rests on an undeclared transitive dependency | Dependency contract tests (§6.2.4) + declare botocore | **3** |
 | **G25** | **§6.2.4 contracts are only ever evaluated on the newest patch of each minor** — KBR-146 | `tests.yml` names bare minor versions and `actions/setup-python` resolves each to the newest patch. Every dependency contract therefore proves forward drift only; a value that differs on an older patch a user runs — the shape KBR-146 had — is invisible to the gate. Today that half rests on one L1 test that forces the property both ways, which works because the surrounding behaviour was measured stable, and does not generalise to a contract whose neighbours have not been | One job pinned to the oldest supported patch (`setup-python` accepts an exact version, so it is one job, not four). Deferred as a CI-spend decision, not a technical one | **3** |
+| **G26** | **Post-emission failover is reachable for the timeout class** — KBR-183 | §11 Q14(a) decides that once a byte has reached the client the bridge closes the turn rather than recovering. `bridge/server.py` honours that for the **transport** class only: `_is_transport_error` returns `False` for `asyncio.TimeoutError` by design, and the failover arm after it carries **no** emission test, so a mid-stream `sock_read` timeout after emission marks the backend unhealthy, selects another and writes a second attempt onto the already-prepared response. Measured on this interpreter: `ServerTimeoutError` and bare `asyncio.TimeoutError` are both retryable and not-transport. Second-order: `_attribution_headers()` is evaluated inside `_ensure_prepared`, so such a switch also ships headers naming the first backend while the second's content streams, which falsifies §6.3.1's `/stats` caveat | Consult `sr is not None` in the failover arm, not only in the transport branch — the decision's mechanical test is `_ensure_prepared`'s own contract, and **any new branch in the streaming handler must read it**. T-I7 covers it once written | **1** |
 | **G12** | Product layer effectively absent | 2 E2E tests, never run in CI | Nightly job, extended to 5 Claude Code cases | **4** |
 | **G13** | No answer-quality signal | Compaction and the Fireworks cap can degrade output invisibly | Paired delta eval | **4** |
 
@@ -3839,8 +4103,9 @@ memory does not grow is false on the paths that buffer a whole response.
 
 ## 11. Open questions for the product owner
 
-Answers belong in this document. They are not invented here. Q10-Q14 are prerequisites for the
-implementation work they name — each blocks a test whose acceptance oracle depends on it.
+Answers belong in this document. They are not invented here. Q10-Q13 are prerequisites for the
+implementation work they name — each blocks a test whose acceptance oracle depends on it. An
+answered question keeps its place in the list and carries its answer in the heading.
 
 **Q1 — How faithful should the agent's identity be (F1, G3, KBR-8)?** Three options, materially
 different: (a) forward a curated allowlist of the agent's real headers, uniformly, so every
@@ -3927,7 +4192,93 @@ input the direct-provider arm returns a 400, so there is no answer to compare ag
 Candidates: kitty against a larger-context model, or kitty with compaction relaxed. The choice
 determines what a regression in that arm actually means.
 
-**Q14 — What is a correct stream recovery after bytes have reached the client (§6.3.1)?** Failover
+**Q14 — ANSWERED by the product owner, 2026-09-12.** Two parts, and the second is what makes the
+first affordable.
+
+**(a) Post-emission, the bridge closes the turn and surfaces the error.** Once a byte has reached
+the client there is no retry and no failover. The bridge closes any half-open content block,
+emits one terminal error, and lets the agent retry the whole turn. The first candidate below —
+abandon the partial block and re-open under a new id — is **rejected**.
+
+**(b) An empty stream is kept out of that situation rather than recovered from inside it.** On
+the native passthrough the bridge performs a **preamble hold**: it withholds the stream's *leading*
+events until the first content event arrives, mirroring the buffer the translated path already
+keeps (*"Buffer finish events to detect empty responses before writing"*). A contentless reply is
+therefore still pre-emission when it is detected and keeps the ordinary retry ladder. This is the
+KBR-155 remedy; KBR-163 records it, KBR-155 implements it.
+
+Four things the implementer needs that the question itself did not settle, decided here so KBR-155
+is writable:
+
+- **What releases the hold.** The first `content_block_delta` of a non-thinking block. A
+  thinking-only reply and a `message_delta` carrying `stop_reason: max_tokens` with no content are
+  **not** content: the first is a reply the user cannot read, the second is a truncation no retry
+  can improve — so the first releases nothing, and the second exhausts the ladder rather than
+  restarting it.
+- **The held bytes are replayed verbatim, never re-serialised.** §4.3 C2 keeps a byte-level
+  key-order assertion that applies wherever kitty claims to be forwarding rather than translating.
+  A hold that re-emitted parsed events would break that claim while looking identical downstream.
+- **Ladder exhaustion.** When every attempt comes back empty the client receives a **terminal
+  error** — not fallback text, and not the empty stream. Nothing has been emitted, so this is the
+  ordinary pre-emission error path. Deliberately *not* the translated path's substituted fallback
+  text: that is register row **M12**, whose Site column names the two translators, and the native
+  path drives neither. Fallback text here would open a second place where the bridge puts words in
+  the model's mouth and would require M12's row to be widened in the same change; an error opens
+  none.
+- **The accepted cost, stated rather than discovered.** Under the hold a stalled native stream
+  produces *no* downstream bytes until `_STREAM_READ_TIMEOUT`, where today the client sees
+  `message_start` within a round trip; and because `sr` stays `None`, that failure then surfaces as
+  a pre-emission JSON error response rather than a `200` carrying an SSE `error` event. Both change
+  the downstream contract, and §6.2.2's grammar suite must cover the second.
+
+**Why, and not the obvious alternative.** Three reasons, in decreasing order of how much they
+would cost to be wrong about.
+
+1. **It is what the provider being imitated does.** Verified against the official Anthropic Python
+   SDK, `src/anthropic/_streaming.py` (the `sse.event == "error"` branch, sync and async): a
+   mid-stream failure arrives as an SSE `error` event and is raised to the caller. No resumption,
+   no re-opened block, no second attempt — the HTTP status was already `200` and the stream simply
+   ends in an error. The claim this rests on is §1's ordinary-correctness promise that *protocol
+   translation is faithful*, together with §6.2.2's SSE grammar — **not I2**, which the correction
+   below shows is upstream-side and says nothing about what the client is handed. The client is
+   Claude Code, and Claude Code is written against Anthropic's stream shape.
+2. **It ratifies a policy already in force.** `bridge/server.py`'s streaming handler already makes
+   exactly this choice for a mid-stream transport drop — *"Bytes already reached the client, so a
+   restart on any backend would duplicate them. Close the message off instead"* — for exactly this
+   reason, and calls it the same choice FI-8.3 makes for a clean truncation. Answering the other
+   way would mean **changing working code to introduce a duplication hazard**.
+
+   **The transport class only, and that is a gap rather than a hedge.** `_is_transport_error`
+   returns `False` for `asyncio.TimeoutError` deliberately, and the failover arm that follows
+   carries no emission test at all, so a mid-stream `sock_read` timeout **after** bytes have
+   reached the client still marks the backend unhealthy, selects another and writes a second
+   attempt onto the already-prepared response. Measured, not inferred: `ServerTimeoutError` and
+   bare `asyncio.TimeoutError` both report retryable and not-transport. So (a) is a decision the
+   code honours on one path and breaches on another — gap **G26**, filed as **KBR-183**.
+3. **The alternative is not soundly implementable.** Re-opening on a second backend lets the client
+   receive the same sentence twice, or tool-call arguments spliced from two attempts. §6.3.1 states
+   the consequence and it is not hypothetical: every SSE event stays syntactically valid while the
+   conversation is corrupt, and Claude Code will act on a duplicated tool call. De-duplicating
+   across attempts needs to know what the second backend was about to say.
+
+**One correction to the framing this question was filed under.** KBR-163 argued that buffering the
+passthrough "changes downstream latency and the observable timing that invariant **I2**
+constrains". It does not: every I2 channel in §4.2 — C1 headers, C2 body, C3 cross-attempt content
+and cadence, C4 transport fingerprint, C5 connection lifecycle — is **upstream-side**. What the
+downstream client is handed, and when, is invisible to the provider. The only coupling is TCP
+backpressure, and holding a bounded preamble makes the bridge read upstream *sooner*, not later,
+which is what any promptly-reading client does. The real cost of (b) is downstream
+time-to-first-token, which is a user-experience question and bounded by the preamble, not an I2
+breach. That is why (b) is affordable and full buffering — unbounded, and growing with stream
+length — still is not.
+
+**What this does not decide.** The wording of the terminal error the client receives follows Q9's
+precedent (downstream only, names the product) and is KBR-155's to settle. The *zero-chunk* case
+is untouched: if upstream yields no chunks at all the loop body never runs, `sr` stays `None`, and
+the ordinary pre-emission ladder already applies.
+
+*Original question:* what is a correct stream recovery after bytes have reached the client
+(§6.3.1)? Failover
 before the first downstream byte is unambiguous. After text has been emitted, or mid tool-call
 arguments, there is no obvious right answer: abandon the partial block and re-open under a new
 id, fail the turn and let the agent retry, or something else. Until this is decided the L3 row

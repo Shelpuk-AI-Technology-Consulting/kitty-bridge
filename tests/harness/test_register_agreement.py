@@ -27,12 +27,15 @@ under test are pure — they take the markdown text and the row tuple as argumen
 
 from __future__ import annotations
 
+import ast
 import dataclasses
 import re
 from pathlib import Path
 
 import pytest
 
+from harness import contract as c
+from harness import reader_responses as reader
 from harness import register as r
 
 pytestmark = pytest.mark.l2
@@ -45,6 +48,14 @@ _DESIGN = _REPO_ROOT / ".system_design" / "TEST_SUITE.md"
 
 #: The import roots the register's sites are addressed under.
 _SRC = _REPO_ROOT / "src"
+
+#: The adapter whose allowlist decides what P23 claims, and the name it spells it
+#: under.  Read as **text**: §3.2.4's independence rule is why
+#: :func:`~harness.register.defined_symbols` parses ``src/kitty`` with :mod:`ast`
+#: rather than importing it, and a guard that imported this adapter to read its
+#: allowlist would agree with the code instead of checking it.
+_ALLOWLIST_MODULE = _SRC / "kitty" / "providers" / "openai_subscription.py"
+_ALLOWLIST_NAME = "_ALLOWED_RESPONSES_PARAMS"
 
 
 @pytest.fixture(scope="module")
@@ -70,6 +81,109 @@ def markdown() -> str:
     return _DESIGN.read_text(encoding="utf-8")
 
 
+def _allowlisted_responses_params(source: str) -> frozenset[str]:
+    """Read the Codex allowlist out of the adapter's source text.
+
+    Takes the text rather than a path so the parse is pure and a deliberately
+    damaged module can be handed to it, which is what plan §1.4 requires of a new
+    guard.  It differs from :func:`~harness.register.defined_symbols` only in
+    needing the assignment's *value* as well as its name.
+
+    Args:
+        source: The text of ``src/kitty/providers/openai_subscription.py``.
+
+    Returns:
+        The parameter names ``_ALLOWED_RESPONSES_PARAMS`` keeps.
+
+    Raises:
+        AssertionError: When the module no longer defines the allowlist, or
+            spells it as something other than a ``frozenset`` of a literal.
+            Returning an empty set instead would make every control field look
+            dropped and leave this guard green for the wrong reason — the silent
+            no-op §6.2 forbids.
+    """
+    # Walked rather than read off the class, so the guard survives the allowlist
+    # moving to module level; the name is what identifies it.
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, ast.Assign):
+            continue
+        if not any(isinstance(target, ast.Name) and target.id == _ALLOWLIST_NAME for target in node.targets):
+            continue
+        if isinstance(node.value, ast.Call) and node.value.args:
+            # `literal_eval` raises on a computed argument -- `frozenset(_BASE | {...})`
+            # parses as a Call with one arg and is not a literal. Re-raised as the
+            # documented failure so both malformed spellings report alike.
+            try:
+                return frozenset(ast.literal_eval(node.value.args[0]))
+            except ValueError as exc:
+                raise AssertionError(f"{_ALLOWLIST_NAME} is no longer a frozenset built from a literal") from exc
+        raise AssertionError(f"{_ALLOWLIST_NAME} is no longer a frozenset built from a literal")
+
+    raise AssertionError(f"{_ALLOWLIST_MODULE.name} no longer defines {_ALLOWLIST_NAME}")
+
+
+def published_row_cell(markdown: str, row_id: str, heading: str) -> str:
+    """Return one cell of a §3.2 register row, located by its column heading.
+
+    Positional indexing was the obvious spelling and is wrong in the quiet
+    direction: §3.2.2's table has five columns today, so ``split("|")[2]`` is the
+    Mutation cell, and a future edit that adds or removes a column would leave the
+    assertion reading a *different* cell and passing.  Reading the heading row
+    makes that edit a loud failure instead.
+
+    One limitation, stated rather than discovered: a cell containing a literal
+    ``|`` would split wrongly.  No register cell does, and the failure would be a
+    mismatch rather than a silent pass.
+
+    Args:
+        markdown: The full text of ``.system_design/TEST_SUITE.md``.
+        row_id: The row's id, e.g. ``P23``.
+        heading: The column's heading exactly as the table spells it.
+
+    Returns:
+        The cell's text, stripped.
+
+    Raises:
+        RegisterMarkdownError: When the row, its heading row, or that column is
+            absent — each of which would otherwise make this guard compare
+            nothing.
+    """
+    lines = markdown.splitlines()
+
+    # The heading row is the nearest `| # | ...` above the data row, so the two
+    # tables of §3.2 cannot be crossed.
+    row_index = next((i for i, line in enumerate(lines) if line.startswith(f"| {row_id} |")), None)
+    if row_index is None:
+        raise r.RegisterMarkdownError(f"§3.2 publishes no row {row_id}")
+    heading_index = next((i for i in range(row_index, -1, -1) if lines[i].startswith("| # |")), None)
+    if heading_index is None:
+        raise r.RegisterMarkdownError(f"{row_id} sits under no table heading — §3.2's tables have changed shape")
+
+    headings = [cell.strip() for cell in lines[heading_index].split("|")]
+    if heading not in headings:
+        raise r.RegisterMarkdownError(f"§3.2's table has no {heading!r} column; it has {headings[1:-1]}")
+
+    cells = lines[row_index].split("|")
+    return cells[headings.index(heading)].strip()
+
+
+def _claimable_paths(control_fields: frozenset[str], allowlist: frozenset[str]) -> frozenset[str]:
+    """Return the projection paths a row must claim for the allowlist's drops.
+
+    The rule P23 encodes, as a function of the two artifacts that decide it, so
+    the falsification cases can hand it a doctored one.
+
+    Args:
+        control_fields: The wire keys the Responses reader sends to
+            ``envelope.extra`` — :data:`harness.reader_responses._EXTRA_KEYS`.
+        allowlist: The parameters the Codex backend accepts.
+
+    Returns:
+        One ``envelope.extra[<wire key>]`` path per dropped control field.
+    """
+    return frozenset(c.extra_path(key) for key in control_fields - allowlist)
+
+
 class TestTheParserReadsTheDesignDocument:
     """The scan must find what it claims to find, or it is a no-op (§6.2)."""
 
@@ -86,14 +200,14 @@ class TestTheParserReadsTheDesignDocument:
 
     def test_the_parser_reads_both_tables(self, markdown: str) -> None:
         """A parser that read only §3.2.1 would still look healthy on the M rows."""
-        assert len([i for i in r.parse_register_markdown(markdown).live_ids if i.startswith("M")]) == 14
-        assert len([i for i in r.parse_register_markdown(markdown).live_ids if i.startswith("P")]) == 28
+        assert len([i for i in r.parse_register_markdown(markdown).live_ids if i.startswith("M")]) == 15
+        assert len([i for i in r.parse_register_markdown(markdown).live_ids if i.startswith("P")]) == 29
 
     def test_the_parser_reads_the_unconditional_list(self, markdown: str) -> None:
         """§3.2.2's closing paragraph is the only place the exemption is written down."""
         parsed = r.parse_register_markdown(markdown)
 
-        assert len(parsed.unconditional_ids) == 22
+        assert len(parsed.unconditional_ids) == 24
         assert {"M14", "P20", "P21"} <= set(parsed.unconditional_ids)
 
     def test_a_document_with_no_register_tables_is_an_error_not_an_empty_result(self) -> None:
@@ -130,7 +244,11 @@ class TestTheParserReadsTheDesignDocument:
         """
         defective = markdown.replace(
             "| M14 |",
-            "| **M16** | A new mutation | `X.y` | Always | because |\n| M14 |",
+            # M99, not the next free id: this fixture used `M16` until KBR-167
+            # published a real M16, and the duplicate-id check then raised
+            # before the assertion could run. An id no row will ever take is the
+            # only spelling that cannot rot.
+            "| **M99** | A new mutation | `X.y` | Always | because |\n| M14 |",
             1,
         )
 
@@ -146,13 +264,14 @@ class TestTheParserReadsTheDesignDocument:
         """
         defective = markdown.replace(
             "| M14 |",
-            "| M16 | A new mutation | `X.y` | Always | because |\n| M14 |",
+            # M99 for the reason given on the bolded-id case above.
+            "| M99 | A new mutation | `X.y` | Always | because |\n| M14 |",
             1,
         )
 
         problems = r.register_disagreements(r.REGISTER, defective)
 
-        assert any("M16" in problem for problem in problems), problems
+        assert any("M99" in problem for problem in problems), problems
 
     def test_an_id_published_twice_is_refused(self, markdown: str) -> None:
         """An id is the register's addressing scheme, so a repeat makes it ambiguous.
@@ -275,7 +394,9 @@ class TestTheDataAndTheDesignNameTheSameRows:
         cell reads ``Always``. §3.3.2 assertion 2 would then demand a complement
         case for a mutation that always fires.
         """
-        defective = markdown.replace("M1, M2, M10, M14, M15, P1,", "M1, M2, M10, M15, P1,", 1)
+        defective = markdown.replace(
+            "M1, M2, M10, M14, M15, M16, P1,", "M1, M2, M10, M15, M16, P1,", 1
+        )
 
         problems = r.register_disagreements(r.REGISTER, defective)
 
@@ -283,7 +404,9 @@ class TestTheDataAndTheDesignNameTheSameRows:
 
     def test_an_unconditional_list_naming_a_row_that_does_not_exist_is_caught(self, markdown: str) -> None:
         """A stale entry left behind when a row is renamed or withdrawn."""
-        defective = markdown.replace("M1, M2, M10, M14, M15, P1,", "M1, M2, M10, M14, M15, M99, P1,", 1)
+        defective = markdown.replace(
+            "M1, M2, M10, M14, M15, M16, P1,", "M1, M2, M10, M14, M15, M16, M99, P1,", 1
+        )
 
         problems = r.register_disagreements(r.REGISTER, defective)
 
@@ -353,3 +476,152 @@ class TestEverySiteResolvesInTheSource:
         problems = r.unresolved_sites(moved, symbols)
 
         assert any("P9b" in problem for problem in problems), problems
+
+
+class TestP23ClaimsTheControlFieldsOutsideTheCodexAllowlist:
+    """KBR-171 — P23's sixteen paths are recomputed here, never transcribed.
+
+    §3.2.2's P23 enumerates sixteen ``envelope.extra[<wire key>]`` addresses
+    rather than anchoring at a bare ``envelope.extra``, for the reason §3.3.1a
+    gives.  An enumeration transcribed from a ticket would be a list nobody
+    re-reads; recomputing it from the two artifacts that decide the set — T-A3's
+    published control-field table and the adapter's allowlist — makes widening
+    either a **deliberate** edit to the row rather than a silent divergence.
+
+    ⚠️ **What this does not prove**, said here because the class name invites the
+    stronger reading.  It does not make P23 independent of the code: once the
+    code changes, the only route back to green is to edit the row to match, which
+    is the trade §3.2.4 records.  And "dropped" means **never copied** —
+    membership of the allowlist is *not* what carries a field through, since the
+    literal feeds only a DEBUG log while the shipped body is an explicit ``if``
+    chain testing truthiness.  An allowlisted field with a falsy value is dropped
+    as well, sits outside P23 by construction, and is `KBR-185` / G27.
+
+    The reader's table is a sound left-hand side because it is itself pinned:
+    ``test_reader_responses`` asserts it covers the published schema's 31 keys
+    exactly, and that each key lands at the path the table claims.  Nothing here
+    or there reads the vendor schema — §8's determinism rules forbid it — so a
+    revision by OpenAI goes undetected, which is G24's shape rather than a solved
+    problem.
+    """
+
+    def test_the_row_claims_every_control_field_outside_the_allowlist_and_nothing_else(self) -> None:
+        """AC R4 — set equality, so over-claiming fails as loudly as under-claiming."""
+        rows = [row for row in r.REGISTER if row.id == "P23"]
+        assert rows, "P23 is not in the register data — the Codex allowlist's drops are unclaimed (KBR-171)"
+
+        allowlist = _allowlisted_responses_params(_ALLOWLIST_MODULE.read_text(encoding="utf-8"))
+
+        assert set(rows[0].paths) == _claimable_paths(reader._EXTRA_KEYS, allowlist)
+
+    def test_widening_the_allowlist_would_unclaim_a_field(self) -> None:
+        """The allowlist half of the derivation is live, not decoration.
+
+        A guard that ignored its allowlist argument would pass the test above and
+        go on passing after the adapter started shipping ``text`` upstream.
+        """
+        allowlist = _allowlisted_responses_params(_ALLOWLIST_MODULE.read_text(encoding="utf-8"))
+
+        widened = _claimable_paths(reader._EXTRA_KEYS, allowlist | {"text"})
+
+        assert c.extra_path("text") not in widened
+        assert widened != _claimable_paths(reader._EXTRA_KEYS, allowlist)
+
+    def test_dropping_a_control_field_from_the_reader_would_unclaim_it(self) -> None:
+        """The other half: the reader's table decides which keys are addressable at all."""
+        allowlist = _allowlisted_responses_params(_ALLOWLIST_MODULE.read_text(encoding="utf-8"))
+
+        narrowed = _claimable_paths(reader._EXTRA_KEYS - {"truncation"}, allowlist)
+
+        assert c.extra_path("truncation") not in narrowed
+        assert narrowed != _claimable_paths(reader._EXTRA_KEYS, allowlist)
+
+    def test_a_source_that_does_not_define_the_allowlist_is_an_error(self) -> None:
+        """Plan §1.4's deliberate defect: an empty read must not pass for an empty allowlist.
+
+        An allowlist read as ``frozenset()`` makes every control field look
+        dropped, which is a state the set-equality test above would report as a
+        *register* problem while the real fault was the parse.
+        """
+        with pytest.raises(AssertionError, match=_ALLOWLIST_NAME):
+            _allowlisted_responses_params("UNRELATED = frozenset({'model'})\n")
+
+    def test_the_allowlist_read_finds_the_real_one(self, symbols: frozenset[str]) -> None:
+        """The positive control §6.2 requires beside the negative one above."""
+        assert f"kitty/providers/openai_subscription.py:OpenAISubscriptionAdapter.{_ALLOWLIST_NAME}" in symbols
+
+        allowlist = _allowlisted_responses_params(_ALLOWLIST_MODULE.read_text(encoding="utf-8"))
+
+        assert {"model", "reasoning", "tool_choice"} <= allowlist
+        assert "truncation" not in allowlist
+
+    def test_the_published_row_names_the_same_sixteen_keys(self, markdown: str) -> None:
+        """§3.2.2's P23 cell is a path list in all but spelling, so it is reconciled too.
+
+        §3.2.4 declines to reconcile paths against the markdown because "the tables
+        have no path column".  That stops being true for this one row: its Mutation
+        cell enumerates the sixteen wire keys in backticks, which is a second copy
+        of the data.  Measured during review — deleting ``truncation`` from the
+        published cell, and changing "sixteen" to "fifteen", each left the whole
+        suite green.
+        """
+        cell = published_row_cell(markdown, "P23", "Mutation")
+
+        assert set(re.findall(r"`(\w+)`", cell)) == set(r._CODEX_DROPPED_CONTROL_FIELDS)
+        assert "**sixteen**" in markdown, "§3.2.2's P23 cell no longer states the count it enumerates"
+
+    def test_the_cell_is_found_by_its_heading_and_not_by_its_position(self, markdown: str) -> None:
+        """The falsification case for the locator, since a wrong cell would pass quietly.
+
+        A column inserted before ``Mutation`` shifts every index by one.  Under
+        positional indexing the assertion above would then compare the *Site*
+        cell's backticks against the sixteen keys — or, worse on a different
+        edit, a cell that happens to match.  Three shapes are pinned: the column
+        moves, the column goes, and the row goes.
+        """
+        # Both heading rows, because §3.2.1's table comes first and a `count=1`
+        # replace shifts the wrong one -- which this test caught when written.
+        shifted = markdown.replace("| # | Mutation |", "| # | Owner | Mutation |").replace(
+            "| P23 | **Drop", "| P23 | someone | **Drop", 1
+        )
+
+        assert published_row_cell(shifted, "P23", "Mutation") == published_row_cell(markdown, "P23", "Mutation")
+
+        with pytest.raises(r.RegisterMarkdownError, match="Mutation"):
+            published_row_cell(markdown.replace("| # | Mutation |", "| # | Effect |"), "P23", "Mutation")
+
+        with pytest.raises(r.RegisterMarkdownError, match="P23"):
+            published_row_cell(markdown.replace("| P23 |", "| P99 |"), "P23", "Mutation")
+
+    def test_a_malformed_allowlist_spelling_reports_as_a_parse_fault(self) -> None:
+        """The second half of the deliberate defect above: present, but not a literal.
+
+        ``frozenset(_BASE | {"model"})`` parses as a ``Call`` with one argument and
+        reaches ``literal_eval``, which raises ``ValueError``.  Undressed, that
+        surfaces as a stack trace rather than the documented failure.
+        """
+        with pytest.raises(AssertionError, match="frozenset built from a literal"):
+            _allowlisted_responses_params('_ALLOWED_RESPONSES_PARAMS = frozenset(_BASE | {"model"})\n')
+
+    def test_an_allowlisted_field_dropped_for_being_falsy_is_outside_this_row(self) -> None:
+        """The boundary G27 / `KBR-185` owns, pinned so widening P23 cannot be accidental.
+
+        ``_prepare_responses_body`` copies ``include`` only when it is truthy, so
+        ``include: []`` — a legal ``CreateResponse`` body — is dropped while
+        sitting *inside* the allowlist.  The delta is real and P23 does not claim
+        it, which is deliberate: the mutation is conditional on the value, and
+        the same shape at ``reasoning`` would swallow G23's address.  Asserted
+        rather than left to a comment, because the cheapest wrong fix to that
+        report is to add the key here.
+
+        Reads the row only; the projection evidence lives in `KBR-185`, whose
+        reproduction is two bodies through
+        :meth:`~kitty.providers.openai_subscription.OpenAISubscriptionAdapter._prepare_responses_body`.
+        """
+        allowlist = _allowlisted_responses_params(_ALLOWLIST_MODULE.read_text(encoding="utf-8"))
+        p23 = next(row for row in r.REGISTER if row.id == "P23")
+
+        # Inside the allowlist, and therefore outside this row -- both halves, or
+        # the test passes for a key the reader never classified in the first place.
+        assert {"include", "reasoning"} <= allowlist & reader._EXTRA_KEYS
+        assert not any(c.path_matches(path, c.extra_path("include")) for path in p23.paths)

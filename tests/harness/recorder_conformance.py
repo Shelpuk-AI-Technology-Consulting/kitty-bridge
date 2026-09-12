@@ -33,6 +33,7 @@ from __future__ import annotations
 import asyncio
 import socket
 import ssl
+import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -79,6 +80,20 @@ __all__ = [
 #: fast and loudly: these tests run in the `l1` gate, where a socket that never
 #: answers would otherwise stall the job rather than fail it.
 PROBE_TIMEOUT = 5.0
+
+#: How long :func:`_advance_clock` will wait for the clock to report a new
+#: instant, expressed as a **number of polls** rather than a deadline. Windows'
+#: ``time.monotonic`` advances in ~15.6 ms steps, so 100 polls of a millisecond
+#: is several ticks of headroom.
+#:
+#: Counted rather than timed on purpose: a deadline has to be computed from a
+#: clock, and the case this budget exists for is a clock that has **stopped** —
+#: under which ``now < deadline`` stays true forever and the bound never fires.
+#: That is not hypothetical. The first draft of this function bounded itself with
+#: ``time.monotonic()`` and hung the suite on the frozen-clock case
+#: :func:`check_arrival_increases` exists to catch.
+_CLOCK_TICK_POLLS = 100
+_CLOCK_TICK_POLL = 0.001
 
 #: The header every probe request carries its correlation marker in. See
 #: :func:`marker_of` for why it must be a header and nothing else.
@@ -229,6 +244,11 @@ def send_raw(
     Returns:
         The :class:`SentRequest`, carrying the socket's own source port.
     """
+    # Stand this probe apart from whatever arrived before it, and do it *before*
+    # the request can reach the recorder: the earlier arrival may have been
+    # produced by hand rather than by this driver. See :func:`_advance_clock`.
+    _advance_clock()
+
     sock = socket.create_connection((host, port), timeout=PROBE_TIMEOUT)
     try:
         if ssl_context is not None:
@@ -245,6 +265,48 @@ def send_raw(
         sock.close()
 
     return _parse_sent(raw, source_port, marker)
+
+
+def _advance_clock() -> None:
+    """Block until ``time.monotonic()`` reports an instant later than now.
+
+    **Why the driver owns this.** :func:`check_arrival_increases` asserts that
+    arrival stamps *strictly* increase across a recorded session. That is a claim
+    about the recorder, but whether it can be true at all depends on the
+    platform's clock: ``time.monotonic()`` resolves to ~15.6 ms on Windows and to
+    nanoseconds on Linux and macOS, so two probes sent back to back are stamped
+    at the same instant on one platform and at different instants on the others.
+    Measured on CI: the same assertion failed on Windows in one run and passed in
+    the next, and KBR-188's exemptions — which fail when the assertion
+    *unexpectedly passes* — made the leg red in both directions.
+
+    Separating the probes is therefore the driver's job, not each test's, and not
+    an exemption's. It is done here, once, so every recorder and every check
+    inherits it: §7.2's four recorders are judged by one driver.
+
+    **Called before the exchange, not after it.** Waiting at the end of
+    :func:`send_raw` would separate a probe only from the driver's own previous
+    probe, leaving one that follows a hand-rolled request — §6.3's slow-body
+    pair sends its first request on a raw socket — sharing that request's
+    instant. Waiting at the start separates every probe from everything before
+    it, whoever sent it.
+
+    **A condition, never a fixed sleep.** It returns as soon as the clock has
+    moved, which on Linux and macOS is the first look and costs nothing
+    measurable. The rule the repo states about waiting is exactly this: wait on a
+    condition with a timeout.
+
+    On a clock that never advances it gives up after :data:`_CLOCK_TICK_POLLS`
+    looks and returns rather than raising. A stopped clock is the *constant
+    clock* defect :func:`check_arrival_increases` exists to catch, so the honest
+    outcome is to let that check fail — not to hang the gate, and not to report
+    the driver's own impatience as a recorder defect.
+    """
+    started = time.monotonic()
+    for _ in range(_CLOCK_TICK_POLLS):
+        if time.monotonic() != started:
+            return
+        time.sleep(_CLOCK_TICK_POLL)
 
 
 async def send(

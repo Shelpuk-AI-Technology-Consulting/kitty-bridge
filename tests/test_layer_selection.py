@@ -420,6 +420,11 @@ class TestTheWholeSuiteIsCoherent:
             # module-level `pytestmark` cannot be overridden per test.
             "tests/harness/test_register_agreement.py",
             "tests/test_upstream_url_single_rule.py",
+            # KBR-163. A §6.2.3 docs-vs-docs guard: TEST_SUITE.md §11 records an
+            # answer, and the passages that waited on it live in a second file
+            # edited separately. Reads two real artifacts, so it is a contract
+            # test rather than a unit one.
+            "tests/test_answered_questions_are_settled.py",
             # KBR-146. A §6.2.4 dependency behaviour contract: it asserts what
             # the interpreter does, which is an artifact upgraded separately
             # from this one and by someone else entirely.

@@ -73,10 +73,12 @@ unexercised — §1.4 again.  Recorded as gap G21 in §9.2 and carried by `KBR-1
 
 **These guards prove the register is *well-formed*, never that it is *complete*.**  A mutation the
 product performs that neither §3.2 nor this module records is invisible to all of them; only the
-wire-level guard (§6.2.3, T-G2) can catch that.  Two omissions are already known and filed —
-`KBR-148` (headers) and `KBR-149` (`openai_subscription` injecting `reasoning` from
+wire-level guard (§6.2.3, T-G2) can catch that.  Four omissions are already known and filed —
+`KBR-148` (headers), `KBR-149` (`openai_subscription` injecting `reasoning` from
 `_reasoning_effort`, which P4 cannot cover because `translate_to_upstream` never runs on that
-adapter's request path).  Do not read a green suite as "the register is the whole truth".
+adapter's request path), `KBR-184` (P13's CC-origin twin) and `KBR-185` (an allowlisted field
+dropped for being falsy).  Every one was found by reading the code by hand; none was found by a
+guard.  Do not read a green suite as "the register is the whole truth".
 
 ⚠️ **Anchoring discipline.**  §3.3.1a: a path pattern is a **prefix**, claiming
 its node and everything beneath it.  A row must therefore be anchored at the
@@ -246,6 +248,45 @@ _BASE = "kitty/providers/base.py"
 _SUBSCRIPTION = "kitty/providers/openai_subscription.py"
 
 _ALWAYS = Trigger.ALWAYS
+
+#: The wire keys P23 claims: the declared `CreateResponse` control fields the
+#: Codex allowlist never copies -- every published top-level field except the ten
+#: the allowlist keeps and the five sampling parameters P14 claims, which is
+#: 31 - 10 - 5 = 16. (The three conversation-carrying keys are *inside* the ten,
+#: so they are not a third subtraction.)
+#:
+#: Enumerated rather than computed at import so a reviewer reads a list, not an
+#: expression. Be honest about what that buys: `test_register_agreement`
+#: recomputes the same difference from the adapter's allowlist and fails on a
+#: disagreement, which makes widening the allowlist a **deliberate** edit here
+#: rather than a silent one -- it does *not* make this row independent of the
+#: code, because after the code changes the only way back to green is to edit
+#: this tuple. §3.2.4 records that trade and calls it G24's posture: a green run
+#: proves self-consistency, not agreement with the vendor.
+#:
+#: ⚠️ "Never copies" is the precise claim. The allowlist literal feeds only a
+#: DEBUG log; the body is an explicit `if` chain, and six of its branches test
+#: truthiness rather than presence (only `parallel_tool_calls` tests presence),
+#: so an *allowlisted* field with a falsy value is dropped as well and is **not**
+#: claimed here. That residue is G27 / `KBR-185`.
+_CODEX_DROPPED_CONTROL_FIELDS: tuple[str, ...] = (
+    "background",
+    "context_management",
+    "conversation",
+    "max_tool_calls",
+    "metadata",
+    "moderation",
+    "previous_response_id",
+    "prompt",
+    "prompt_cache_key",
+    "prompt_cache_options",
+    "prompt_cache_retention",
+    "safety_identifier",
+    "service_tier",
+    "text",
+    "truncation",
+    "user",
+)
 
 # --------------------------------------------------------------------------
 # §3.2.1 — bridge-level rows
@@ -466,6 +507,31 @@ _BRIDGE_ROWS: tuple[MutationRow, ...] = (
             "project two equivalent bodies apart, which is the failure the escape is void on. If it "
             "ever does, M15 needs a projectable anchor."
         ),
+    ),
+    MutationRow(
+        id="M16",
+        site=("kitty/bridge/messages/translator.py:MessagesTranslator.translate_request",),
+        # Unconditional for M2's reason, not M1's, and they share this trigger.
+        # The complement is real -- the native passthrough branch shallow-copies
+        # the inbound body, so breakpoints survive it -- but it is a property of
+        # the *route*, chosen by the profile, and §3.3.2 assertion 2 asks for an
+        # *input* that fails the trigger. No corpus entry can pick a provider.
+        # The native route's guarantee is proven as product behaviour instead
+        # (epic KBR-197), not by a complement nobody could author.
+        trigger=Trigger.NON_NATIVE_UPSTREAM_WIRE,
+        # Three anchors because Anthropic permits a breakpoint at three carriers
+        # and Claude Code uses all three. Each names the **field**, never the
+        # block: `conversation.turns[*].parts[*]` would also claim a deleted
+        # part, and `conversation.tools[*]` a deleted tool description -- two of
+        # §3.3.1's five oracle falsification cases. That is §3.3.1a's P15 lesson
+        # applied to a second row.
+        paths=(
+            c.system_path(c.WILDCARD, "cache_control"),
+            c.part_path(c.WILDCARD, c.WILDCARD, "cache_control"),
+            c.tool_path(c.WILDCARD, "cache_control"),
+        ),
+        conditional=False,
+        design_ref="§3.2.1 · §3.3.1 · §3.3.1a",
     ),
 )
 
@@ -715,6 +781,41 @@ _PROVIDER_ROWS: tuple[MutationRow, ...] = (
         paths=(c.CONVERSATION_SAMPLING,),
         conditional=False,
         design_ref="§3.2.2 · §3.3.1b",
+    ),
+    MutationRow(
+        id="P23",
+        site=(f"{_SUBSCRIPTION}:OpenAISubscriptionAdapter._prepare_responses_body",),
+        trigger=Trigger.RESPONSES_ORIGIN_PATH,
+        # P14's other half. The allowlist drops 21 of `CreateResponse`'s 31
+        # fields: five are sampling and P14 claims them at the bare collection,
+        # and these sixteen are declared control fields, which §3.3.1b sends to
+        # `envelope.extra[<wire key>]` -- an address no row reached (KBR-171).
+        #
+        # ⚠️ Enumerated, NOT anchored at a bare `envelope.extra`. The bare form
+        # would match -- a bracket-free pattern segment claims a bracketed member
+        # of itself -- and it is still the wrong anchor, because `extra` is where
+        # the *injections* live: a bare anchor on this trigger would also claim
+        # the `reasoning` injection §9.2's G23 registers at
+        # `envelope.extra[reasoning]` on this same route, so P22 could be deleted
+        # with nothing going red.
+        #
+        # P13/P14's bare `conversation.sampling` is not a precedent, and not
+        # because bare and enumerated agree there -- they do not, `SAMPLING_KEYS`
+        # has fifteen members and P13 drops fourteen. Those rows over-claim
+        # deliberately. The difference is what the over-claim can absorb: a
+        # closed set nothing injects into absorbs at worst another sampling key,
+        # while `envelope.extra` absorbs whole rows.
+        #
+        # Enumerating costs something and the cost is not zero: a thirty-second
+        # published field would be unclaimed until someone adds it here. Nothing
+        # detects a vendor revision (§8's determinism rules; G24's shape), so the
+        # trade is a loud one-line failure against a silent absorbed row.
+        #
+        # `P22` is skipped deliberately -- §9.2's G23 reserves it for KBR-149,
+        # and an id is how every ticket refers to a row.
+        paths=tuple(c.extra_path(key) for key in _CODEX_DROPPED_CONTROL_FIELDS),
+        conditional=False,
+        design_ref="§3.2.2 · §3.3.1a · §3.3.1b",
     ),
     MutationRow(
         id="P15",
