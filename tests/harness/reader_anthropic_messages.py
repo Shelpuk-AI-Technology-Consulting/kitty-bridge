@@ -126,7 +126,10 @@ class AnthropicMessagesProjection:
                 below is the actual guarantee: the contract names three failure
                 shapes, and an escaping ``KeyError`` would be an undefined
                 fourth on the one path T-D1 uses to tell an unreadable body from
-                an I1 breach.
+                an I1 breach. ``IndexError`` is deliberately **not** in the
+                tuple: the only positional index in this module is
+                ``merged[-1]``, guarded by ``if merged``, so catching it would
+                be handling an impossible case.
         """
         body = _parse_body(captured.body)
 
@@ -136,7 +139,7 @@ class AnthropicMessagesProjection:
         # the reader mis-routed a field, which is a reader bug and must surface.
         try:
             return _project(body)
-        except (KeyError, TypeError, AttributeError, IndexError) as exc:
+        except (KeyError, TypeError, AttributeError) as exc:
             raise c.UnreadableBodyError(f"unreadable Anthropic Messages body: {exc!r}") from exc
 
 
@@ -516,6 +519,15 @@ def _read_block(block: Any, path: str, residual: dict[str, Any]) -> c.Part:
         return c.ToolUse(name=block["name"], arguments=arguments or {}, id=block.get("id"))
 
     if kind == "tool_result":
+        # A wrongly-typed `is_error` residualises rather than being coerced, for
+        # the reason §7.4.1 gives: `bool("false")` is `True`, so the coercion
+        # invents the opposite of what the body said. `False` is the absent
+        # value the grammar already carries, so there is one to fall back to.
+        is_error = block.get("is_error", False)
+        if not isinstance(is_error, bool):
+            residual[f"{path}.is_error"] = is_error
+            is_error = False
+
         _residualise(block, {"type", "tool_use_id", "content", "is_error"}, path, residual)
         return c.ToolResult(
             content=_read_result_content(block.get("content"), path, residual),
@@ -525,7 +537,7 @@ def _read_block(block: Any, path: str, residual: dict[str, Any]) -> c.Part:
             # orphans, so a reader that raised on one would fail instead of
             # producing the delta that names it.
             tool_use_id=block.get("tool_use_id"),
-            is_error=bool(block.get("is_error", False)),
+            is_error=is_error,
         )
 
     return _read_opaque(block, kind, path, residual)

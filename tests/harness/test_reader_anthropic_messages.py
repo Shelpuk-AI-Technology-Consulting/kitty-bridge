@@ -548,6 +548,30 @@ class TestContentBlocks:
 
         assert projected.conversation.turns[0].parts[0].is_error is True
 
+    def test_a_wrongly_typed_error_flag_residualises_rather_than_being_coerced(self) -> None:
+        """R7.3 — `bool("false")` is `True`, so the coercion invents the opposite of the body.
+
+        `False` is the absent value the grammar already carries, so there is one
+        to fall back to — which is what makes this a wrongly-typed leaf rather
+        than a structural failure.
+        """
+        block = {"type": "tool_result", "tool_use_id": "t", "content": "x", "is_error": "false"}
+        projected = _read(_minimal(messages=[{"role": "user", "content": [block]}]))
+
+        assert projected.conversation.turns[0].parts[0].is_error is False
+        assert projected.residual == {"messages[0].content[0].is_error": "false"}
+        with pytest.raises(c.ResidualFieldsError):
+            c.verify_total(projected)
+
+    def test_cache_control_on_a_tool_use_block_residualises(self) -> None:
+        """R4.10 — Claude Code sets a breakpoint on tool blocks too, not only on text (KBR-167)."""
+        block = dict(PUBLISHED_TOOL_USE, cache_control={"type": "ephemeral"})
+        projected = _read(_minimal(messages=[{"role": "assistant", "content": [block]}]))
+
+        assert projected.residual == {"messages[0].content[0].cache_control": {"type": "ephemeral"}}
+        with pytest.raises(c.ResidualFieldsError):
+            c.verify_total(projected)
+
     def test_a_json_shaped_tool_result_string_is_text_and_never_json(self) -> None:
         """R4.5 — §7.4.1: `Json` is for a format carrying a structured value natively.
 
