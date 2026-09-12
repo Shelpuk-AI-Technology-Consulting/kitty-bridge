@@ -2136,7 +2136,7 @@ same interface to the tests:
 | Recorder | Serves | Observes |
 |---|---|---|
 | aiohttp server — bridge sessions | the 20 default-transport adapters | The primary; speaks Anthropic Messages and Chat Completions |
-| aiohttp server — provider sessions | `ollama_cloud`, and the `openai_subscription` **OAuth token legs** | Those adapters build their own sessions and never touch `_session_for`, so the bridge recorder never sees them. The OAuth leg runs at startup, before anything else has been proven (§5.5) |
+| aiohttp server — provider sessions | `ollama_cloud`, and the `openai_subscription` **OAuth login leg** | Those adapters build their own sessions and never touch `_session_for`, so the bridge recorder never sees them. The OAuth leg runs at startup, before anything else has been proven (§5.5). The **refresh** leg moved to `curl_cffi` in KBR-161 and is the row below's (§7.2.2) |
 | curl_cffi-reachable server | `openai_subscription` serving path | Must terminate TLS with the harness certificate; the only place `_cc_to_responses` output (P13, P17) can be seen |
 | botocore endpoint override | `bedrock` | Points the client at the local recorder rather than AWS; observes the Converse payload **after** the transport's `modelId`/`stream` pops (P18) |
 
@@ -2214,6 +2214,62 @@ A recorder's Anthropic SSE success is therefore guarded only by §6.2.2's gramma
 property of the product, not of the harness: an upstream returning a well-formed but
 contentless Anthropic stream reaches Claude Code with none of the retry the Chat Completions
 path has.
+
+#### 7.2.2 What T-B1 settled — the provider-session recorder
+
+**Delivered by T-B1 ([KBR-40]) in `tests/harness/provider_recorder.py` and
+`tests/harness/provider_aiohttp.py`**, registered as `provider_aiohttp` with a `CONFORMANCE_CASES`
+row naming `OLLAMA_CHAT` and the **Chat Completions** inbound route — named rather than derived,
+because `OLLAMA_CHAT` has no inbound route of its own (§7.5.1).
+
+**It subclasses T-W4's recorder rather than being a second server.** §7.2.1 catalogues six ways an
+aiohttp recorder can look correct and lie, and a second implementation is a second chance to get
+each of them wrong — §7.3's own argument, that "two proxy implementations is how two harnesses come
+to disagree". What differs between the two recorders is **vocabulary**: the format served, the
+suffix that selects a reply, and what a minimal success looks like. Those three are overridden and
+nothing else, so both recorders are judged by §7.2.1's fourteen checks over the same capture path.
+The claim that costs is `recorder_conformance`'s: running those checks against a subclass that
+overrides none of the capture path proves the overrides did not break it, not that a second
+implementation agrees. **What carries that weight instead is a falsification case against the
+overrides themselves** — a Chat Completions body and an SSE stream, each driven through the real
+adapter, which reads nothing out of either.
+
+**The OAuth token leg is served by this recorder and is *not* an `UpstreamTransport`** — §7.5's open
+question, decided. `bind()` must return `(adapter, provider_config)` and the conformance check drives
+a request through a real `BridgeServer`; the login leg has neither an adapter nor a bridge, so a
+transport for it could not satisfy the interface it joined. A seventh `WireFormat` was the other
+option and would mutate a contract six Epic A readers consume (T-W2, [KBR-25]) to add a value **no
+projection can read**: §3.3.1 pairs every format with a wire reader, and a form-encoded token grant
+is not an LLM request. So the recorder dispatches the leg by path suffix, `WireFormat` stays closed
+at six, and `oauth_token_endpoint()` is that leg's `bind()`.
+
+**Scope, after KBR-161: the login leg here, the refresh leg in T-B2.** §5.5's table records that the
+refresh leg now runs on the adapter's impersonating `curl_cffi` session, which an aiohttp recorder
+cannot observe. Note the consequence §5.5 already states from the other side: the `curl_cffi` leg
+"fires on every subsequent request, so that is the transport the harness must exercise first". T-B1
+therefore covers the **less** urgent of the two legs, deliberately — it is the one its stack can see
+— and T-B2 inherits the other. **Two constants named `OAUTH_TOKEN_URL` exist**, one per leg
+(`kitty.auth.openai_oauth` and `kitty.auth.oauth_session`); they are identical strings and unrelated
+variables, so a seam that swapped the wrong one would send a real request to `auth.openai.com`.
+
+**A one-format transport has one teardown check, and that is measured.** §7.5.4's row 4 — a declared
+format that was never under test — needs **two** served formats to stay silent: the recorder answers
+by path suffix, so the adapter parses the reply and the capture list comes out complete. With one
+served format the same mistake takes the fallback instead. Measured, against a transport whose
+adapter posted elsewhere and against one that posted at the OAuth endpoint: **4 captures and a
+10-second timeout each, 72 seconds including the teardown that waits out the retry ladder**. Both are
+caught loudly by the conformance check's first assertion, so a second teardown pass here would be an
+assertion no defect could falsify — which is what §7.5.4 found and removed in T-W8. The same
+measurement is why the reply-shape falsification cases are driven through the adapter and not
+through the bridge: the defect is caught either way, and one way costs milliseconds.
+
+**The OAuth endpoint is excluded from the declared-format claim by name, not by silence.** A token
+grant is answered before any format lookup — it has no `WireFormat` and must not be reported as a
+fallback — so `assert_teardown_clean()` passes over it, and a test pins that exclusion so it cannot
+be mistaken for a hole.
+
+[KBR-40]: https://shelpuk.atlassian.net/browse/KBR-40
+[KBR-25]: https://shelpuk.atlassian.net/browse/KBR-25
 
 ### 7.3 Recording CONNECT proxy
 
@@ -2504,7 +2560,9 @@ need it, and `tests/conftest.py` offers only `unused_tcp_port` today. Measured i
 their own stub adapter, fake upstream and `post()` helper; 25 of those *also* intercept the
 upstream with `aioresponses` rather than a real socket, and 24 start no server at all.
 
-**This is the one `tests/harness/` module that imports the product.** `contract.py` and
+**This was the one `tests/harness/` module that imports the product, and since T-B1 it is one of
+two** — an Epic B transport must build the adapter it binds, which is what `bind()` is for
+(§7.2.2). `contract.py` and
 `recorder.py` each carry a structural guard forbidding any `kitty` import, because §3.3.1's
 independent-oracle rule says a reader that asked kitty how to parse a body would inherit
 kitty's bugs. That rule governs what *judges* a request. This module *starts* the thing under
@@ -2938,8 +2996,8 @@ business, together with the job that runs them; doing it earlier would remove th
 gate. T-H1 must take that reclassification into account before it measures a mutation
 baseline, because it selects on `l1`.
 
-**Six modules are bulleted below, and `tests/cli/test_stream_encoding.py` (KBR-10) is described
-after them — seven in all, named here so T-K6 inherits a list rather than a search** — the count
+**Seven modules are bulleted below, and `tests/cli/test_stream_encoding.py` (KBR-10) is described
+after them — eight in all, named here so T-K6 inherits a list rather than a search** — the count
 is what T-K6 and T-H1 plan against. (The bullet count and the KBR-10 paragraph were already
 drifting apart before T-W8 added two; spelling out both is what stops the next addition
 guessing which set it joins.)
@@ -2959,6 +3017,15 @@ guessing which set it joins.)
   knowing while planning that move: the timeout case cost **30 seconds** until its responder was
   released explicitly, because `stop_async` waits for in-flight upstream handlers rather than
   aborting them — the same property §7.3 handles deliberately for the proxy.
+- **T-B1 (KBR-40):** `tests/harness/test_provider_aiohttp.py` binds a recorder in most of its
+  cases and a real `BridgeServer` in several, and drives the OpenAI login OAuth leg over loopback
+  in four more. It runs in **~0.6 seconds**, measured, which is the number the fast-gate budget
+  should carry until T-K6 moves it. It is one module rather than two because its falsification
+  cases are defects in the transport it ships, not a separate harness; where T-W8 put four defect
+  transports in their own file, a fifth file per Epic B ticket would be three more for T-K6 to
+  move. Worth knowing while planning that move: a **wrong-shaped reply** costs 72 seconds here —
+  10 s of retry ladder plus the teardown that waits it out — which is why §7.2.2's reply-shape
+  falsification is driven through the adapter rather than through the bridge.
 - **KBR-144:** `tests/bridge/test_responses_string_input.py` starts a real `BridgeServer` on an
   ephemeral port in four of its classes, following the existing convention of
   `tests/bridge/test_crash_resilience.py` rather than inventing a second one. The whole module
