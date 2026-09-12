@@ -18217,9 +18217,12 @@ class StatusMatrixTests(unittest.TestCase):
 
         🔴 **Every cell, not the moved rows, and code review is why.** The first version
         looped over :data:`STATUS_MATRIX_MOVED`, and a cell whose STATUS does not move is
-        never in that table -- so reading the quota group below `CREDENTIAL_PATTERNS`
-        survived the whole suite: `402` beside a named `authentication_error` kept
-        `exhausted`, changed its reason to credentials, and still printed the top-up.
+        never in that table -- so a MUTANT reading the quota group below
+        `CREDENTIAL_PATTERNS` survived the whole suite. Under that mutant, `402` beside a
+        named `authentication_error` kept `exhausted`, changed its reason to credentials,
+        and still printed the top-up. The shipped order reads the 402 first, so today that
+        cell is a quota verdict with a top-up paragraph -- agreeing, which is what this row
+        holds.
 
         Read together with the positive control above -- `_quota_diagnostic` keys on
         evidence, so without it an `assertFalse` could be satisfied by silence.
