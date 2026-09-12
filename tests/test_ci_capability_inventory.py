@@ -95,8 +95,14 @@ _SEPARATOR_ROW = re.compile(r"^\|[\s:|-]+\|\s*$")
 _KITTY_BINDING = re.compile(r"\b(?:secrets|vars)\.(KITTY_[A-Z0-9_]+)\b")
 
 #: How the review workflow pins the Claude Code CLI: the installer script is
-#: handed the exact version as its one positional argument.
-_CLI_PIN = re.compile(r"install\.sh\s*\|\s*bash\s+-s\s+--\s+(?P<version>[0-9][0-9A-Za-z.\-+]*)")
+#: handed the exact version as its one positional argument. Scoped to Claude's
+#: own installer URL -- unscoped, any other project's `install.sh | bash -s --
+#: 1.2.3` reports as "CI installs Claude Code 1.2.3", a red gate naming the
+#: wrong tool, which is the mis-diagnosis class this repository's guards exist
+#: to prevent.
+_CLI_PIN = re.compile(
+    r"claude\.ai/install\.sh\s*\|\s*bash\s+-s\s+--\s+(?P<version>[0-9][0-9A-Za-z.\-+]*)"
+)
 
 #: A bare version token in the document, so `2.1.23` cannot satisfy a row
 #: quoting `2.1.238`. Whole-token, never substring.
@@ -295,6 +301,22 @@ def inventory_discrepancies(markdown: str, artifacts: dict[str, str]) -> list[tu
     return problems
 
 
+def job_conditions(text: str) -> list[str]:
+    """Return the ``if:`` expressions the workflow's jobs declare.
+
+    Args:
+        text: The full text of one workflow file.
+
+    Returns:
+        Each job-level condition as a string, in document order.
+    """
+    document = yaml.safe_load(text)
+    jobs = document.get("jobs") if isinstance(document, dict) else None
+    if not isinstance(jobs, dict):
+        return []
+    return [str(job["if"]) for job in jobs.values() if isinstance(job, dict) and "if" in job]
+
+
 def workflow_triggers(text: str) -> set[str]:
     """Return the event names a workflow's ``on:`` block declares.
 
@@ -342,9 +364,20 @@ def fork_guard_discrepancies(markdown: str, review_workflow: str) -> list[str]:
 
     problems: list[str] = []
 
-    # The workflow must still refuse a fork run, and §8.6 must quote the same line.
-    if _FORK_GUARD not in review_workflow:
-        problems.append(f"the review workflow no longer carries the guard {_FORK_GUARD!r}")
+    # Read the job's own condition, not the 124 KB of mostly-comment around it:
+    # commenting the line out leaves it in the file and out of the `if:`.
+    guarded = [condition for condition in job_conditions(review_workflow) if _FORK_GUARD in condition]
+    if not guarded:
+        problems.append(f"no job's `if:` carries the guard {_FORK_GUARD!r}")
+
+    # A disjunct re-admits the fork runs the conjunction excludes.
+    for condition in guarded:
+        if "||" in condition:
+            problems.append(
+                f"the guard is weakened by a disjunct: {condition!r} — an `||` re-admits the "
+                "fork runs §8.6 says are excluded"
+            )
+
     if _FORK_GUARD not in markdown:
         problems.append(f"{_INVENTORY_HEADING} no longer quotes the guard {_FORK_GUARD!r}")
 
@@ -613,6 +646,25 @@ class TestTheGuardCanFail:
             f"the version arm missed a bumped CLI pin; it reported {version}"
         )
 
+    def test_a_document_quoting_a_version_ci_does_not_install_is_reported(
+        self, suite_markdown: str, ci_artifacts: dict[str, str]
+    ) -> None:
+        """Version arm, the other direction — and the one that pins whole tokens.
+
+        The forward arm cannot catch this: ``bash -s -- 2.1.238`` *contains*
+        ``bash -s -- 2.1.23``, so a document quoting the shorter version passes
+        it.  Only the ``quoted - installed`` direction reports it, and without
+        this case that direction could be deleted with the suite green.
+        """
+        truncated = suite_markdown.replace("bash -s -- 2.1.238", "bash -s -- 2.1.23")
+        assert truncated != suite_markdown, "the mutant did not change the quoted pin"
+
+        version = arm(inventory_discrepancies(truncated, ci_artifacts), "version")
+
+        assert any("2.1.23," in message or "2.1.23 " in message for message in version), (
+            f"a document quoting a version CI does not install reported {version}"
+        )
+
     def test_a_binding_absorbed_by_a_longer_documented_name_is_reported(
         self, suite_markdown: str, ci_artifacts: dict[str, str]
     ) -> None:
@@ -677,8 +729,40 @@ class TestTheGuardCanFail:
             REVIEW_WORKFLOW.read_text(encoding="utf-8").replace(_FORK_GUARD, "true"),
         )
 
-        assert any("no longer carries the guard" in problem for problem in problems), (
+        assert any("no job's `if:` carries the guard" in problem for problem in problems), (
             f"a removed fork guard reported {problems}"
+        )
+
+    def test_a_fork_guard_weakened_by_a_disjunct_is_reported(self, suite_markdown: str) -> None:
+        """Fork arm: the condition is still there, and no longer excludes forks.
+
+        The shape a substring scan over the workflow cannot see — the literal is
+        present, so the arm stays green while the guard admits what §8.6 says it
+        excludes.
+        """
+        weakened = REVIEW_WORKFLOW.read_text(encoding="utf-8").replace(
+            _FORK_GUARD, f"{_FORK_GUARD} || github.actor == 'someone'"
+        )
+
+        problems = fork_guard_discrepancies(suite_markdown, weakened)
+
+        assert any("weakened by a disjunct" in problem for problem in problems), (
+            f"a guard re-admitting forks reported {problems}"
+        )
+
+    def test_a_document_that_stops_quoting_the_fork_guard_is_reported(self) -> None:
+        """Fork arm, the other direction: the claim leaves §8.6.
+
+        Every other fork case doctors the *workflow*; without this one the
+        ``markdown`` half of the check could be deleted with the suite green.
+        """
+        problems = fork_guard_discrepancies(
+            "# A design document that makes no fork claim\n",
+            REVIEW_WORKFLOW.read_text(encoding="utf-8"),
+        )
+
+        assert any("no longer quotes the guard" in problem for problem in problems), (
+            f"a document that dropped the fork claim reported {problems}"
         )
 
     def test_a_pull_request_target_trigger_is_reported(self, suite_markdown: str) -> None:
