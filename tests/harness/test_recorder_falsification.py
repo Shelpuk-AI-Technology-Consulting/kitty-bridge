@@ -282,7 +282,11 @@ class LateClockRecorder(RecordingUpstream):
         Returns:
             The deliberately wrong capture.
         """
-        return _replace(super().capture(request, body, arrival), arrival=time.monotonic())
+        # Must be the *same* clock the recorder stamps with (KBR-208).
+        # `monotonic()` and `perf_counter()` have unrelated reference points, so
+        # mixing them would make this falsification pass or fail by accident
+        # rather than because the timestamp was taken late.
+        return _replace(super().capture(request, body, arrival), arrival=time.perf_counter())
 
 
 class TextRoundTripRecorder(RecordingUpstream):
