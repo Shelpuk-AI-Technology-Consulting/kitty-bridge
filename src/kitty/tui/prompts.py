@@ -63,7 +63,7 @@ def prompt_text(label: str) -> str:
         The user's input string (may be empty if cancelled; callers should validate).
 
     Raises:
-        NonTTYError: If stdin is not a TTY.
+        NonTTYError: If stdin or stdout is not a TTY (see :func:`can_interact`).
     """
     check_tty()
     result = questionary.text(label).ask()
@@ -82,7 +82,7 @@ def prompt_secret(label: str) -> str:
         The user's secret input string.
 
     Raises:
-        NonTTYError: If stdin is not a TTY.
+        NonTTYError: If stdin or stdout is not a TTY (see :func:`can_interact`).
     """
     check_tty()
     try:
@@ -102,7 +102,7 @@ def prompt_confirm(label: str, default: bool = True) -> bool:
         True for yes, False for no.
 
     Raises:
-        NonTTYError: If stdin is not a TTY.
+        NonTTYError: If stdin or stdout is not a TTY (see :func:`can_interact`).
     """
     check_tty()
     result = questionary.confirm(label, default=default).ask()
