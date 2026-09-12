@@ -2865,9 +2865,14 @@ What ships is `time.monotonic()` around each driven request, asserted against a 
 `_EMPTY_RETRY_DELAYS[0]`, so any ladder that sleeps trips it", and that is wrong twice over. Any
 ladder that fires leaves an **extra capture**, so the one-capture assertion sees it first and sees
 it deterministically, with no dependence on a runner's speed. And there are **two ladders, not
-one**: `_EMPTY_RETRY_DELAYS` is read at exactly one site, `_request_with_retry_single` — the
-*non-streaming* helper — while every streaming path sleeps `_BACKOFF_BASE * 2 ** (attempt % 4)`,
-i.e. 1, 2, 4, 8 s, reaching `_EMPTY_FINAL_DELAYS` only on its last two attempts. A streaming
+one**: `_request_with_retry_single` — the *non-streaming* helper — is the only site that
+**sleeps** `_EMPTY_RETRY_DELAYS`, while every streaming path sleeps
+`_BACKOFF_BASE * 2 ** (attempt % 4)`, i.e. 1, 2, 4, 8 s, reaching `_EMPTY_FINAL_DELAYS` only on
+its last two attempts. (Say *sleeps*, not *reads*: one other site reads the list's **length**, to
+report an attempt total. An earlier draft of this paragraph said "read at exactly one site",
+which is simply false about the source tree — and a docstring citing another module's internals
+as an invariant is a failure mode this repo has already been bitten by. It is also why T-W9's
+monkeypatch changes those values and leaves the lengths alone.) A streaming
 ladder can therefore fire **twice inside a 4-second budget**. That fact is recorded here because
 it is non-obvious and the next author will otherwise repeat the mistake.
 
@@ -2918,9 +2923,18 @@ three lines above it. Recorded so the divergence reads as a decision and not as 
 what is worth recording is its result. Each of the recorder's capture fields was mutated in turn
 and the module re-run:
 
-- Ten of eleven mutations were caught by **exactly one** case each — wrong method, scheme, host,
-  headers, body, arrival, a wrong or absent peer port, a dropped query, a percent-decoded query,
-  and a duplicate-collapsing query.
+- **Every** mutation is caught: wrong method, scheme, host, headers, body, arrival, a wrong or
+  absent peer port, and a dropped, percent-decoded or duplicate-collapsing query. Most red
+  exactly one case; a corrupted body reds three, and each query mutation reds two, because the
+  field-completeness case asserts the query alongside the six other fields and the dedicated
+  query case asserts it alone. That overlap is deliberate — one case is "the capture is
+  complete", the other is "routing survives" — but it means the sweep shows *caught*, not
+  *uniquely attributed*. An earlier draft of this paragraph claimed the stronger property, which
+  the sweep's own output contradicts.
+- Mutating `host` to aiohttp's `request.host` kills nothing, and that is an **equivalent
+  mutant** rather than a hole: aiohttp returns the Host header whenever one is present and the
+  bridge always sends one. Simulating the real §7.2.1 defect — the `socket.getfqdn()` fallback —
+  reds exactly one case, which is what makes the `host` row honest.
 - **`path` read percent-decoded killed nothing.** The adapter's own path is `/v1/messages`, which
   contains nothing encoded, so `request.path` and `rel_url.raw_path` are identical on this route
   and §7.2.1's trap was untestable here. The fix was to carry `%20` in the base URL's path

@@ -103,13 +103,15 @@ from harness.recorder import RecordingUpstream, Reply
 #: **slow with a single capture**: a connect grace period, a wedged handler, a
 #: non-ladder regression. That is a narrow band and it is a real one.
 #:
-#: **There are two ladders, not one, and only one of them uses the named
-#: delays.** ``_EMPTY_RETRY_DELAYS`` is read at exactly one site,
-#: ``_request_with_retry_single`` — the *non-streaming* helper. Every streaming
-#: path sleeps ``_BACKOFF_BASE * 2 ** (attempt % 4)``, i.e. 1, 2, 4, 8 s, and
-#: reaches ``_EMPTY_FINAL_DELAYS`` only on its last two attempts. So a streaming
-#: ladder can fire twice inside this budget. The capture count is what catches
-#: that, which is the whole reason both assertions are kept.
+#: **There are two ladders, not one, and only one of them sleeps the named
+#: delays.** ``_request_with_retry_single`` — the *non-streaming* helper — is the
+#: only site that **sleeps** ``_EMPTY_RETRY_DELAYS``. (One other site reads its
+#: *length*, to report an attempt total; that is why R7.2's monkeypatch changes
+#: the values and leaves the lengths alone.) Every streaming path sleeps
+#: ``_BACKOFF_BASE * 2 ** (attempt % 4)``, i.e. 1, 2, 4, 8 s, and reaches
+#: ``_EMPTY_FINAL_DELAYS`` only on its last two attempts. So a streaming ladder
+#: can fire twice inside this budget. The capture count is what catches that,
+#: which is the whole reason both assertions are kept.
 #:
 #: **Above ten seconds this never fires**, because ``BridgeFixture.post``'s own
 #: ``DEFAULT_TIMEOUT`` raises :class:`~harness.bridge.TransportTimeout` first —
@@ -225,7 +227,13 @@ class _QueryDroppingTransport(_EncodedRouteTransport):
     name = "slice-query-dropping"
 
     def __post_init__(self) -> None:
-        """Use the query-dropping recorder instead of the real one."""
+        """Use the query-dropping recorder instead of the real one.
+
+        Deliberately **replaces** the base's construction rather than extending
+        it — calling ``super()`` first would build a correct recorder and throw
+        it away. The arguments are the base's, so anything
+        ``AiohttpTransport.__post_init__`` gains later must be mirrored here.
+        """
         self._recorder = _QueryDroppingRecorder(default_format=self.format, responder=self.responder)
 
 
@@ -323,7 +331,6 @@ class _Slice:
 
     Attributes:
         status: The status the bridge answered the agent with.
-        text: The raw reply body.
         captures: What reached the upstream, in arrival order.
         sent: The marker this request carried, so a caller cannot assert against
             a different one than it sent.
@@ -333,7 +340,6 @@ class _Slice:
     """
 
     status: int
-    text: str
     captures: list[CapturedRequest]
     sent: str
     authority: str
@@ -372,7 +378,7 @@ async def _drive(
         # once it has stopped, and the connection log is the transport's.
         authority = f"{subject.recorder.host}:{subject.recorder.port}"
         started = time.monotonic()
-        status, text = await fixture.post(
+        status, _text = await fixture.post(
             inbound_path(route, stream=stream),
             minimal_inbound_body(route, sent, stream=stream),
         )
@@ -396,7 +402,6 @@ async def _drive(
     )
     return _Slice(
         status=status,
-        text=text,
         captures=captures,
         sent=sent,
         authority=authority,
