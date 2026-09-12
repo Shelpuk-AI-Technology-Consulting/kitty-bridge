@@ -606,7 +606,8 @@ agree on a canonical form. They are six separate tasks, so the agreement is part
   move — and because paths are index-based the invented delta would land on every part of that
   turn and every turn after it. The rule gives a run of results one home; it does not reorder
   history. Clause 3 is not thereby idle: it governs the formats that carry text and results inside
-  **one message**, where the run has no natural boundary.
+  **one message**, where the run has no natural boundary — Anthropic Messages is that case, and
+  §7.4.1 records what each format's reader does with the pipeline.
 
   A lift rule ("into the user turn that follows the assistant turn") does **not** work: the standard
   Chat Completions exchange ends `assistant(tool_calls) → tool → tool`, with no following user
@@ -2322,6 +2323,184 @@ declaration was unreliable (F5, KBR-7, since fixed) — but the decision does no
 oracle must not ask the code under test what it did, and a **boolean** declaration cannot
 select among the six projections listed above in any case. A new corpus entry, adapter, model
 route or transport costs one parametrisation, not a new test.
+
+#### 7.4.1 What every reader does with a field the grammar cannot carry
+
+Six request readers and one reply task — seven authors — are written against §3.3.1's grammar,
+and the grammar is deliberately narrower than the six wire formats. §3.3.1 fixes the *shapes*;
+§3.3.1b fixes the *normalisation*. This section fixes the remaining ten decisions, each of which was reached
+writing **T-A1** and each of which six later authors would otherwise answer differently. A
+disagreement here is not a style difference: paths are index-based, so two readers that disagree
+about a part boundary report a delta on every subsequent part.
+
+**Where a projection lives.** `tests/harness/reader_<format>.py`, one module per `WireFormat`
+member — **six**, not seven — with `test_reader_<format>.py` beside it. Flat, next to
+`contract.py`, which is what §3.3.1 already says of every harness module: "each in its own module
+beside it". An earlier draft of this section put them in a `projections/` package; two readers
+were written against the two conventions within a day of each other, which is the coordination
+failure this section exists to prevent, so the design's own existing wording wins.
+
+`WireFormat` has six members and Epic A has seven tasks because T-A7 is the *reply* direction
+across formats, not a seventh format: each format's `ReplyProjection` lands in that format's
+existing module, beside its `Projection`. One module per format, both directions, because the two
+share that format's vocabulary and nothing else does.
+
+**Which of these rules are request-side only.** The turn merge and the tool-result-string rule
+address `Conversation`, which `Reply` does not have. Everything else below binds both directions.
+
+**Fail closed at every depth.** §3.3.1's "unknown fields fail closed" is not a top-level rule. A
+key the mapping does not consume residualises under its path, whatever its depth. `verify_total`
+cannot see past the top level (§3.3.1 records that boundary and why closing it would make the
+contract a second reader), so this is the rule that closes it, and it is each reader's own L1
+tests that hold it.
+
+**Residual *keys* are the body's own path, indexed, and never the delta spelling.** Two rules,
+and the second is the one that surprises:
+
+1. A wholly-unclassified **top-level** key is keyed by its bare name — `x-kitty-trace`, never
+   `residual[x-kitty-trace]`. `verify_total` computes `set(consumed) | set(residual)` against
+   `set(source)`, so the wrapped form misses `source` and raises `DroppedFieldsError`, naming the
+   wrong defect. `residual_path()` renders a *delta path* for the oracle to report; it never
+   builds this mapping.
+2. A nested key is keyed by its path from the body root with **array positions as indices** —
+   `tools[0].type`, `messages[2].content[0].cache_control`, `system[0].cache_control`. It does
+   **not** inherit §3.3.1a's by-name tool addressing. That convention exists because "translators
+   reorder and filter declarations", which is a property of a *comparison*; a residual key is
+   never matched against a register pattern, so the reason does not apply and one rule is better
+   than two. T-D8 diffs residual key sets across all six readers and index-here/name-there is
+   exactly the drift this section exists to stop.
+
+**`Opaque` consumes its block, and carries a payload digest.** A block type the grammar does not
+model projects as `Opaque(kind=…, digest=…)` where:
+
+- `kind` is the wire `type` converted to snake_case. Anthropic's spellings (`document`,
+  `search_result`, `redacted_thinking`, `server_tool_use`) are already canonical; Converse writes
+  `searchResult` for the same thing, so **the cross-vendor alias table lands in this section with
+  the first reader that needs one** (T-A5), rather than being invented twice.
+- `digest` is exactly
+  `hashlib.sha256(json.dumps(rest, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")).hexdigest()`,
+  where `rest` is the block without `type` and without `cache_control`.
+- the block's every other key is **consumed** — nothing beneath it residualises — while
+  `cache_control` residualises under its path exactly as it does on a modelled block.
+
+Each clause is load-bearing. A bare `Opaque("document")` makes two different documents project
+identically, so a swapped or truncated document produces no delta at all — and §3.3.1 put
+`digest` on `Opaque` precisely to keep unmodelled content "detectable". Residualising every
+payload key instead would fail the run on every `document` block, which is not a defect signal but
+the grammar's known limit. **Canonical JSON rather than the raw wire slice**, because a translator
+that reorders keys must not change the digest; that is the whole reason the recipe is not
+`sha256(raw_block_bytes)`. **`ensure_ascii` is pinned** because its default is `True` while the
+surrounding prose says UTF-8: an author who "helpfully" passes `False` gets a different digest for
+the same block, and it would surface only on non-ASCII content. **`cache_control` is excluded**
+so that one field behaves the same way everywhere — inside the digest it would produce a delta
+with no named cause, on a path where the same field on a modelled block produces a diagnosis.
+
+> **The cost, recorded so it is not discovered later.** The digest is over *that format's* JSON, so
+> one document carried from Messages to Converse digests differently and shows a cross-format
+> delta no mutation caused. Modelling six vendors' block zoos is what §3.3.1 declined to do, so
+> the alternative is not on offer. **T-D9's cross-format matrix is where this will first bite**,
+> and the fix, when it is needed, is a per-kind payload rule here — not six readers each
+> inventing one.
+
+**A wrongly-typed leaf residualises — it is neither coerced nor raised on — and the rule is
+general.** It binds *every* optional leaf, not the ones a bug happened to be found in: the
+contract validates only `Turn.role`, `Conversation.sampling` and `extra["tool_choice"]`, so an
+unguarded leaf declared `str | None` carries a dict silently with an empty residual. A reader
+should apply it through one helper, so the next field added inherits it. `str(7)` and
+`dict(["ab", "cd"])` invent a value the agent never sent, and a silently nulled tool description is
+indistinguishable from the deletion §3.3.1's own falsification set injects. Raising is the other
+wrong answer: it blinds the oracle to everything else in a request it could otherwise diff, and
+`verify_total` cannot see a nested coercion because `consumed` is top-level only. So the field
+residualises at its own path, the projection carries the grammar's absent value in its place, and
+the run fails with the field named.
+
+Structural failures are the exception and still raise `UnreadableBodyError` — a role outside
+`user`/`assistant`, a content block with no type — because there is no partial projection to
+salvage: the turn cannot be built at all.
+
+**A tool-result string is always `Text`, never `Json`.** `Json` is for a format that carries a
+structured value natively — Converse's `toolResult.content.json`, Gemini's
+`functionResponse.response`. A Messages or Chat Completions tool result whose content is the
+*string* `'{"price": 259.75}'` is text that happens to parse. Without this fixed once, one reader
+parses and another does not, and every JSON-shaped tool result shows an unclaimed delta on the
+Messages ↔ Chat Completions comparison the oracle rests on.
+
+**§3.3.1b's merge rule is an ordered pipeline, and the last step is never a re-sort.** Its four
+clauses run in order: a maximal run of consecutive tool results forms one turn; an immediately
+following non-tool user message merges into it; `ToolResult` parts come first **within the turn
+those first two clauses build**; then consecutive same-role turns merge. Read as four independent
+rules — "merge everything, then hoist every result in every user turn" — it produces a different
+conversation, and a wrong one:
+
+> `tool_result → user(text) → tool_result` must project as `[ToolResult, Text, ToolResult]`. A
+> re-sort after the merge gives `[ToolResult, ToolResult, Text]`, hoisting a result ahead of text
+> the agent sent **before** it — moving history the bridge did not move. Because paths are
+> index-based, that invented delta lands on every part of the turn and on every turn after it.
+> **Two readers were written against the two readings within a day of each other**, which is why
+> the ordering is now stated here rather than inferred from the bullet's sentence order.
+
+**Where each clause does its work depends on the format, and clause 3 is the one that moves.**
+Chat Completions and Responses deliver results contiguously in their own messages or input items,
+so a run is delimited by the wire itself and clause 3 is satisfied *vacuously* — every member of
+the run is already a result. Anthropic Messages carries text and results inside **one message**, so
+the run has no natural boundary and clause 1 cannot do the work by splitting; clause 3 does it
+instead, **per message and for a `user` message only**.
+
+That scoping is the whole distinction. Per message, `tool_result → user(text) → tool_result`
+keeps three groups and concatenates to `[ToolResult, Text, ToolResult]`. Applied to the *merged*
+turn it gives `[ToolResult, ToolResult, Text]` — the defect above. And omitting it entirely is
+also wrong: a single Anthropic message of `[text, tool_result]` would project `[Text, ToolResult]`
+where the Chat Completions and Responses readers both produce `[ToolResult, Text]` for the same
+content, which is a delta no mutation caused.
+
+> **What the merge hides**, stated because §3.3.1 requires a projection's blind spots to be on the
+> record: a mutation whose only effect is to split or join two consecutive same-role turns
+> produces no delta, which weakens §3.3.2 assertion 2 for M5, M6 and M7, whose complement case
+> must show the mutation *absent*. Accepted, because without the merge the Messages and Chat
+> Completions readers disagree about turn boundaries on the standard
+> `assistant(tool_calls) → tool → tool` exchange, and that disagreement reports a false delta on
+> every subsequent turn.
+
+**A key outside the published schema is recognised only on stated evidence, and there are two
+kinds.** The default is the published schema: §3.3.1's independent-oracle rule means a reader is
+written against the format's own documentation, not against what kitty happens to emit. Two narrow
+exceptions, and they are not interchangeable:
+
+1. **The client demonstrably sends it.** Then it is a recognised control field and maps to
+   `envelope.extra[<wire key>]`, with a comment naming the evidence. Residualising it would fail
+   the run on every real request, which is a harness defect and not a finding.
+
+   The worked example is Anthropic Messages' top-level **`effort`**. Claude Code sends it and
+   `MessagesTranslator` reads it straight off the inbound body
+   (`src/kitty/bridge/messages/translator.py`: `if "effort" in messages_request`), so it is the
+   *agent's* field, not kitty's. Anthropic's API reference does not list it — the feature page
+   spells the concept `output_config.effort` — which is why the rule is about evidence rather than
+   about the reference table.
+
+2. **Only kitty emits it, and a register row names it.** Then it maps the same way, because
+   residualising it would fail the run *before* register matching happens and the row could never
+   be claimed — the under-claiming direction §3.3.1a calls unrecoverable.
+
+   **No key currently exercises this branch**, and that is worth saying: an earlier draft of this
+   section presented it as the general case using `effort` as its example, which is wrong twice
+   — `effort` is client-sent, and generalising from it would have told six authors to ask "does a
+   register row name this?" about fields no row names, such as `context_management` and
+   `output_config`, and to residualise them.
+
+A key kitty emits that **no** register row names is an *unregistered* mutation. That is the defect
+the oracle exists to find, and it must residualise.
+
+**The third outcome §3.3.1 promises does not exist yet.** §3.3.1 says adding a field to a wire
+format "forces a deliberate decision: map it, or declare it ignored with a reason". The contract
+implements the first and the residual; there is **no reader-side declared-ignored mechanism** —
+`NOT_PROJECTABLE` is a sentinel for a register row's `paths` tuple, not something a reader can
+say. Until T-W2 adds one, a field the grammar cannot carry has only the residual, and the residual
+fails the run.
+
+That is the correct signal and it is also a deadline. Claude Code sets a block-level
+`cache_control` on nearly every request and the grammar has no slot for it, so **T-C2's corpus
+entry — `system` with `cache_control` — fails the first oracle run.** Tracked as a blocking edge
+onto T-D1, not as a note here.
 
 ### 7.5 The bridge fixture
 
