@@ -104,13 +104,12 @@ _CLI_PIN = re.compile(
     r"claude\.ai/install\.sh\s*\|\s*bash\s+-s\s+--\s+(?P<version>[0-9][0-9A-Za-z.\-+]*)"
 )
 
-#: A bare version token in the document, so `2.1.23` cannot satisfy a row
-#: quoting `2.1.238`. Whole-token, never substring.
-_VERSION_TOKEN = re.compile(r"\b[0-9]+(?:\.[0-9A-Za-z\-+]+)+\b")
-
 #: The shape of the row binding that quotes the CLI pin. The version arm reads
 #: only rows of this shape: a future row binding `python-version: "3.12"` would
 #: otherwise report as "§8.6 quotes Claude Code 3.12", naming the wrong tool.
+#: It is also what keeps the comparison whole-token: the capture runs greedily
+#: to the end of the version and the two sides are compared as strings, so a
+#: document quoting `2.1.23` never satisfies a workflow installing `2.1.238`.
 _PIN_BINDING = re.compile(r"\bbash\s+-s\s+--\s+(?P<version>[0-9][0-9A-Za-z.\-+]*)")
 
 #: The condition that keeps a fork's pull request from ever starting the review
