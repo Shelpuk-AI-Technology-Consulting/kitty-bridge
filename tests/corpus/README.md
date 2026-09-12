@@ -202,7 +202,7 @@ Removed automatically, each replaced by a class-named placeholder:
 | `aws_key_id` | `AKIA…`, `ASIA…`, `A3T…`, `ABIA…`, `ACCA…` |
 | `github_token` | `ghp_…`, `gho_…`, `ghu_…`, `ghs_…`, `ghr_…`, `github_pat_…` |
 | `jwt` | `eyJ….….…` |
-| `private_key` | A PEM block — `-----BEGIN … PRIVATE KEY-----` |
+| `private_key` | The **whole** private-key block — header, key material and footer, including `OPENSSH`, `ENCRYPTED` and PGP's `PRIVATE KEY BLOCK`. A key truncated when the agent read it (no END line) is redacted to the end of the field. Public `CERTIFICATE` blocks are kept |
 | `bearer_token` | `Bearer <opaque>` appearing in a **body** (a curl command in a prompt, an HAR file, a log the agent read) |
 | `assigned_secret` | An `api_key`/`secret`/`token`/`password` assignment with a long value |
 | `email` | An e-mail address. Excludes the retina-asset shape `name@2x.png` — by that **shape**, deliberately, not by extension: `.py` is Paraguay's ccTLD and `.md` is Moldova's, so an extension list stops scrubbing `admin@empresa.py` |
@@ -230,11 +230,17 @@ where the value is quoted or newline-terminated — which is what a real transcr
 - a secret this project has never seen — a provider whose key format is not in the table above;
 - anything sensitive that is not a secret at all: an unreleased product discussed in a prompt, a
   file path that reveals a client, a code comment naming a person;
-- a secret with **no separator at all** in front of it whose neighbour is not itself a known shape.
-  Every pattern is anchored on a word boundary — without that anchor the rules match inside ordinary
-  words, and `disk-usage-monitoring-service.py` gets redacted. The scan redacts what it finds and
-  then runs again, so a boundary *created* by a redaction is used; a boundary that never appears is
-  not. A real transcript separates values with quotes, commas or newlines.
+- **two token-shaped credentials concatenated with no separator at all** — `AKIA…34AKIA…34`, or an
+  API key immediately followed by `Bearer …`. Every token pattern is anchored on a word boundary, and
+  there is no boundary between the two, so neither rule's anchor holds; where a rule's tail runs on,
+  the first swallows the start of the second and the remainder has no shape. The anchors are not
+  negotiable — without them `disk-usage-monitoring-service.py` is redacted as an OpenAI key. A real
+  capture is JSON with delimited strings, so this shape does not arise from one; if you ever see two
+  credentials run together in a body, split them by hand before `write_entry`.
+
+  The limitation is exactly that and no wider, and a test holds it there: any secret separated from
+  its neighbour by a single space or comma is removed, and **a private key is removed at any
+  separation, including none** — its rule runs first and anchors on its own delimiters.
 
 The scrubber is a net under the review, not a replacement for it. A fixture file is as public as
 the repository.

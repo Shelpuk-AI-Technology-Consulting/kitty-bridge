@@ -85,7 +85,10 @@ REDACTION = "<redacted:{name}>"
 
 #: Credential and identifier shapes, applied **in order**.
 #:
-#: Order is load-bearing twice.  ``anthropic_key`` precedes ``openai_key``
+#: Order is load-bearing three times.  ``private_key`` comes first, because
+#: every token-shaped rule accepts ``-`` and would otherwise eat the leading
+#: dashes of a block written flush after a secret — its comment has the detail.
+#: ``anthropic_key`` precedes ``openai_key``
 #: because ``sk-ant-…`` satisfies both and the more specific class is the more
 #: useful thing to write into the fixture.  Every shaped class precedes
 #: ``assigned_secret`` because an already-redacted value no longer looks like a
@@ -99,6 +102,52 @@ REDACTION = "<redacted:{name}>"
 #: year must not walk through the net because its length changed — so the tail
 #: here is ``{20,}`` and the prefix carries the specificity.
 PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    # A private key is redacted as a WHOLE BLOCK -- header, key material and
+    # footer -- and this rule runs FIRST. Both halves were learned the hard way.
+    #
+    # The first version matched the `-----BEGIN ... PRIVATE KEY-----` line alone,
+    # on the reasoning that "the header is enough". It is enough to DETECT a key
+    # and useless for REDACTING one: `pattern.sub` replaces exactly the span
+    # matched, so the scrubber wrote `<redacted:private_key>` followed by the
+    # entire base64 key and its END line -- and reported nothing, because key
+    # material has no shape any other rule keys on. `findings(scrub(x)) == ()`
+    # held while the key leaked, since the scrubber considered the region
+    # handled. Deleting the BEGIN marker also removed the one token GitHub's
+    # own secret scanning keys on, which the README names as the last net.
+    #
+    # The tail runs to the matching END line, lazily, never to a generic
+    # base64 run: a generic tail stops wherever the alphabet does, which can be
+    # partway into a secret written flush after the block -- consuming the
+    # delimiter the next rule anchors on and leaking the rest with no finding.
+    # With no END line (a key truncated when the agent read it) the tail runs to
+    # the end of the field. That over-removes rather than guesses where the key
+    # stops, and over-removal is the only safe direction for a scrubber.
+    #
+    # It runs first because every token-shaped rule below accepts `-`. A secret
+    # written flush BEFORE a block -- `sk-ant-...AA-----BEGIN` -- would have its
+    # tail eat the header's leading dashes, after which this rule never matches
+    # at all and the whole key survives. Claiming the block first leaves the
+    # preceding secret intact for its own rule.
+    #
+    # The label is words separated by single spaces -- `RSA`, `OPENSSH`,
+    # `ENCRYPTED`, PGP's `PRIVATE KEY BLOCK` -- and deliberately NOT gitleaks'
+    # `[ A-Z0-9_-]{0,100}`. That class admits spaces and dashes, and for a
+    # detector that costs nothing. For a rewriter it leaked a key: two blocks
+    # separated by a space, the lazy tail stopped at the first END, and the END
+    # label then matched straight through ` -----BEGIN RSA ` into the NEXT
+    # block's header -- consuming it, so the second key's material survived with
+    # its anchor gone. A label that cannot contain a dash cannot cross a block.
+    #
+    # A public `CERTIFICATE` block is deliberately not matched: it is not a
+    # secret, and a TLS capture's certificate chain is evidence.
+    (
+        "private_key",
+        re.compile(
+            r"-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY(?: BLOCK)?-----"
+            r"(?:[\s\S]*?-----END (?:[A-Z0-9]+ )*PRIVATE KEY(?: BLOCK)?-----|[\s\S]*\Z)",
+            re.IGNORECASE,
+        ),
+    ),
     # `\b` is load-bearing, not tidiness. Unanchored, `sk-...` matches inside
     # ordinary words: `disk-usage-monitoring-service.py` becomes
     # `di<redacted:openai_key>.py`. File paths are the commonest payload in a
@@ -113,10 +162,6 @@ PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("aws_key_id", re.compile(r"\b(?:A3T[A-Z0-9]|AKIA|ASIA|ABIA|ACCA)[A-Z2-7]{16}\b")),
     ("github_token", re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{36}|github_pat_\w{82})\b")),
     ("jwt", re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}")),
-    # A PEM block is the one credential shape that belongs to no provider, and
-    # a developer tree is full of them. The header alone is enough: a body
-    # containing it is a body carrying a key, whatever follows.
-    ("private_key", re.compile(r"-----BEGIN (?:[A-Z]+ )?PRIVATE KEY-----")),
     # `Bearer` inside a BODY -- a curl command in a prompt, an HAR file, a log
     # the agent read. The header vocabulary in `contract` covers the header;
     # nothing covered this.
@@ -892,7 +937,10 @@ def _triggers(names: object, field_name: str, entry_id: str) -> frozenset[Trigge
     known = {t.value: t for t in Trigger}
     resolved = set()
     for name in names:
-        if name not in known:
+        # Type before membership: `known` is a dict, so testing a list or an
+        # object against it hashes the element and raises `TypeError` instead of
+        # the refusal this function documents.
+        if not isinstance(name, str) or name not in known:
             raise CorpusEntryError(f"{entry_id}: {field_name} names unknown trigger {name!r}")
         if known[name] in NOT_CORPUS_DECIDABLE:
             raise CorpusEntryError(
@@ -1056,7 +1104,10 @@ def _entry_from_manifest(manifest: object, stem: str, body: bytes | None) -> Cor
 
     fmt_name = manifest["wire_format"]
     formats = {f.value: f for f in WireFormat}
-    if fmt_name is not None and fmt_name not in formats:
+    # Same hazard as `_triggers`: dict membership hashes its operand, so a list
+    # or object here raised `TypeError`. Found by fuzzing every manifest field
+    # after review reported the trigger case, not by review itself.
+    if fmt_name is not None and (not isinstance(fmt_name, str) or fmt_name not in formats):
         raise CorpusEntryError(f"{stem}: wire_format {fmt_name!r} is not a WireFormat")
 
     headers = manifest["headers"]

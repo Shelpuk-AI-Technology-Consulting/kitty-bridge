@@ -100,35 +100,91 @@ DIRTY_BODY = json.dumps(
 #: carries it. The repository's existing fixtures follow the same convention.
 PLANTED_KEY = "sk-ant-" + "api03-" + "x" * 93 + "AA"
 
-#: One example of every shape the table knows, for the adjacency sweep.
+#: Base64 key material, assembled so no pushed file carries a PEM block verbatim.
+PEM_MATERIAL = "MIIEowIBAAKCAQEA" + "Q" * 48
+
+#: A complete private-key block: header, material, footer.
+PEM_BLOCK = (
+    "-----BEGIN " + "RSA PRIVATE KEY-----\n" + PEM_MATERIAL + "\n" + "A" * 64 + "\n-----END " + "RSA PRIVATE KEY-----"
+)
+
+#: One example of every shape the table knows, paired with the part that must
+#: not survive scrubbing.
+#:
+#: **The core is the point.** The sweep used to assert only that nothing was
+#: *reported* after scrubbing, and that property held while a private key leaked
+#: in full: the old rule redacted the PEM header alone, the key material has no
+#: shape any rule keys on, so the detector agreed with the scrubber that the
+#: region was handled. Agreement between two halves is not the same claim as
+#: "the secret is gone" — so each shape now names the substring whose absence is
+#: the actual requirement.
 #:
 #: Assembled rather than spelled for :data:`PLANTED_KEY`'s reason — GitHub push
 #: protection blocks a pushed file containing a partner-pattern key literal.
-SECRET_SHAPES: tuple[str, ...] = (
-    "sk-ant-" + "api03-" + "x" * 93 + "AA",
-    "sk-proj-" + "y" * 74 + "T3BlbkFJ" + "z" * 74,
-    "AIza" + "b" * 35,
-    "AKIA" + "234567ABCDEFGH34",
-    "ghp_" + "a" * 36,
-    "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dBjftJeZ4CVPmB92K27uh",
-    "-----BEGIN RSA PRIVATE KEY-----",
-    "Bearer abcdefghij0123456789xyz",
-    'SECRET="9f8a7b6c5d4e3f2a1b0c9d8e"',
-    "someone@example.com",
-    "/home/someuser/x",
+SECRET_SHAPES: tuple[tuple[str, str], ...] = (
+    ("sk-ant-" + "api03-" + "x" * 93 + "AA", "x" * 93),
+    ("sk-proj-" + "y" * 74 + "T3BlbkFJ" + "z" * 74, "T3BlbkFJ"),
+    ("AIza" + "b" * 35, "b" * 35),
+    ("AKIA" + "234567ABCDEFGH34", "234567ABCDEFGH34"),
+    ("ghp_" + "a" * 36, "a" * 36),
+    ("eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dBjftJeZ4CVPmB92K27uh", "dBjftJeZ4CVPmB92K27uh"),
+    (PEM_BLOCK, PEM_MATERIAL),
+    # A key truncated when the agent read it: no END line.
+    ("-----BEGIN " + "OPENSSH PRIVATE KEY-----\n" + PEM_MATERIAL, PEM_MATERIAL),
+    ("Bearer abcdefghij0123456789xyz", "abcdefghij0123456789xyz"),
+    ('SECRET="9f8a7b6c5d4e3f2a1b0c9d8e"', "9f8a7b6c5d4e3f2a1b0c9d8e"),
+    ("someone@example.com", "someone@example.com"),
+    ("/home/someuser/x", "someuser"),
 )
 
-#: Every ordered pair of :data:`SECRET_SHAPES` at three separations.
+#: Every ordered pair of :data:`SECRET_SHAPES` at three separations, with the
+#: cores that must be absent after scrubbing.
 #:
 #: The empty separator is the one that matters and the one no hand-written
 #: fixture contains: it is where a word-boundary anchor on the second secret has
-#: nothing to anchor against until the first is redacted.
-ADJACENT_PAIRS: tuple[bytes, ...] = tuple(
-    f"{first}{separator}{second}".encode()
-    for first in SECRET_SHAPES
-    for second in SECRET_SHAPES
+#: nothing to anchor against until the first is redacted — and where a rule
+#: whose tail accepts `-` can eat the delimiter of a PEM header written after it.
+ADJACENT_CASES: tuple[tuple[bytes, tuple[str, str], str, bool], ...] = tuple(
+    (
+        f"{first}{separator}{second}".encode(),
+        (first_core, second_core),
+        separator,
+        "PRIVATE KEY" in first or "PRIVATE KEY" in second,
+    )
+    for first, first_core in SECRET_SHAPES
+    for second, second_core in SECRET_SHAPES
     for separator in ("", " ", ",")
 )
+
+#: The bodies alone, for the tests that need no cores.
+ADJACENT_PAIRS: tuple[bytes, ...] = tuple(case[0] for case in ADJACENT_CASES)
+
+
+def _is_accepted_ambiguity(separator: str, involves_private_key: bool) -> bool:
+    """Report whether a pair falls in the one documented scrubbing limitation.
+
+    Two token-shaped credentials concatenated with **no separator at all** —
+    ``AKIA…34AKIA…34`` — cannot be split by a word-boundary-anchored table:
+    there is no boundary between them, so neither rule's anchor holds and, for
+    rules whose tail runs on, the first swallows the start of the second. The
+    anchors are not negotiable: without them ``disk-usage-monitoring-service.py``
+    is redacted as an OpenAI key, which an earlier review round rightly refused.
+    Captured bodies are JSON with delimited strings, so this shape does not arise
+    from a real capture; it is recorded as a limitation, not amnestied as a
+    defect, and ``tests/corpus/README.md`` names it.
+
+    A private key is **never** inside the limitation, at any separation: its rule
+    runs first and is anchored on its own delimiters, so a key flush against
+    anything must still be fully removed. That is the case review found leaking.
+
+    Args:
+        separator: What sat between the two secrets.
+        involves_private_key: Whether either secret is a private-key block.
+
+    Returns:
+        ``True`` only for a zero-separator pair of two token-shaped credentials.
+    """
+    return separator == "" and not involves_private_key
 
 #: A body carrying :data:`PLANTED_KEY`, for the lint's falsification cases.
 PLANTED_BODY = json.dumps({"messages": [{"role": "user", "content": PLANTED_KEY}]}).encode()
@@ -349,6 +405,50 @@ class TestTheFormatIsClosed:
         with pytest.raises(k.CorpusEntryError, match=f"{field_name} must be a string"):
             k.load_entry(path)
 
+    @pytest.mark.parametrize(
+        ("field_name", "value"),
+        [
+            ("triggers_met", [["orphan_tool_result"]]),
+            ("triggers_absent", [{"a": 1}]),
+            ("wire_format", ["anthropic_messages"]),
+            ("wire_format", {"a": 1}),
+        ],
+    )
+    def test_an_unhashable_value_is_refused_not_raised(
+        self, tmp_path: Path, field_name: str, value: object
+    ) -> None:
+        """Dict membership hashes its operand, so a list here raised `TypeError`.
+
+        Review reported the trigger lists; `wire_format` was found beside them by
+        the fuzz below, not by review — the same crash one field over.
+        """
+        path = manifest_for(tmp_path, **{field_name: value})
+
+        with pytest.raises(k.CorpusEntryError):
+            k.load_entry(path)
+
+    def test_no_wrong_typed_manifest_value_escapes_as_anything_else(self, tmp_path: Path) -> None:
+        """Every field, every wrong type: only `CorpusEntryError` may escape.
+
+        The crash-on-malformed-input class was reported one field at a time across
+        four review rounds — `query`, then `description`, then the trigger lists.
+        This asks the question once for the whole manifest instead, which is how
+        `wire_format` was found. A new field inherits the guarantee, or fails here.
+        """
+        wrong = [5, 1.5, True, None, [], ["x"], [["x"]], [5], [None], {}, {"a": 1}, [{"a": 1}], [[5, 6]]]
+        escaped = []
+        for field_name in k.MANIFEST_KEYS:
+            for value in wrong:
+                path = manifest_for(tmp_path, **{field_name: value})
+                try:
+                    k.load_entry(path)
+                except k.CorpusEntryError:
+                    pass
+                except Exception as exc:  # noqa: BLE001 -- the point is to catch anything else
+                    escaped.append(f"{field_name}={value!r}: {type(exc).__name__}")
+
+        assert escaped == []
+
     def test_a_manifest_that_is_not_json_is_rejected(self, tmp_path: Path) -> None:
         """Named explicitly so the failure says so, rather than escaping as a `JSONDecodeError`."""
         path = manifest_for(tmp_path)
@@ -465,7 +565,7 @@ class TestTheScrubberRemovesSecrets:
             ("aws_key_id", "AKIA" + "234567ABCDEFGH34"),
             ("github_token", "ghp_" + "a" * 36),
             ("jwt", "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dBjftJeZ4CVPmB92K27uhbUJU1p1r"),
-            ("private_key", "-----BEGIN RSA PRIVATE KEY-----"),
+            ("private_key", PEM_BLOCK),
             ("bearer_token", "Bearer abcdefghij0123456789xyz"),
             ("assigned_secret", 'SERVICE_SECRET="9f8a7b6c5d4e3f2a1b0c9d8e"'),
             ("email", "someone@example.com"),
@@ -487,6 +587,48 @@ class TestTheScrubberRemovesSecrets:
         scrubbed = k.scrub(capture(headers=[("X-Api-Key", "a-key-of-no-known-shape")]))
 
         assert dict(scrubbed.headers)["X-Api-Key"] == k.REDACTION.format(name="credential_header")
+
+    @pytest.mark.parametrize(
+        ("label", "text"),
+        [
+            ("a terminated block", PEM_BLOCK),
+            ("a key truncated when the agent read it", "-----BEGIN " + "OPENSSH PRIVATE KEY-----\n" + PEM_MATERIAL),
+            ("a secret written flush before the block", PLANTED_KEY + PEM_BLOCK),
+            ("a secret written flush after the block", PEM_BLOCK + PLANTED_KEY),
+            ("two blocks separated by a space", PEM_BLOCK + " " + PEM_BLOCK),
+            (
+                "PGP's PRIVATE KEY BLOCK",
+                "-----BEGIN " + "PGP PRIVATE KEY BLOCK-----\n" + PEM_MATERIAL + "\n-----END PGP PRIVATE KEY BLOCK-----",
+            ),
+            ("a block inside a JSON string", json.dumps({"tool_result": PEM_BLOCK})),
+        ],
+    )
+    def test_no_private_key_material_survives(self, label: str, text: str) -> None:
+        """The whole block goes — header, material and footer — in every placement.
+
+        The first version redacted the header line alone. `pattern.sub` replaces
+        exactly the span matched, so it wrote a placeholder followed by the
+        entire base64 key, and reported nothing: key material has no shape any
+        other rule keys on, so `findings(scrub(x)) == ()` held while the key
+        leaked. Each placement here broke a different version of the fix:
+        a truncated key has no END line; a secret flush before the block had its
+        tail eat the header's dashes until the rule moved first; two blocks one
+        space apart leaked because the END label could cross into the next header.
+        """
+        scrubbed = k.scrub(capture(text.encode())).body
+
+        assert PEM_MATERIAL.encode() not in scrubbed, label
+        assert PLANTED_KEY.encode() not in scrubbed, label
+
+    def test_a_public_certificate_is_not_redacted(self) -> None:
+        """Only private keys are secrets; a certificate chain is evidence.
+
+        A TLS capture's certificates are part of what the corpus exists to
+        preserve, and the widened rule must not start claiming them.
+        """
+        certificate = "-----BEGIN CERTIFICATE-----\nMIIDdzCCAl+gAwIBAgIE" + "B" * 60 + "\n-----END CERTIFICATE-----"
+
+        assert k.scrub(capture(certificate.encode())).body == certificate.encode()
 
     def test_a_credential_in_the_path_is_scrubbed(self) -> None:
         """The routing fields were exempt, and the gap was real.
@@ -696,14 +838,50 @@ class TestScrubbingIsConsistentWithDetection:
         invariant three documents call load-bearing, false in practice.
 
         Every ordered pair at three separations, which is the shape of the bug.
-        """
-        unclean = [
-            body
-            for body in ADJACENT_PAIRS
-            if k.findings(k.scrub(capture(body))) or k.scrub(k.scrub(capture(body))) != k.scrub(capture(body))
-        ]
 
+        Three properties per body, and the third is the one that matters. No
+        finding survives and a second scrub is a no-op — both of which held
+        while a private key leaked in full, because the old rule redacted only
+        the PEM header and the detector agreed the region was handled. So each
+        body also asserts its secret *cores* are absent from the output: the
+        claim is that the secret is gone, not that two halves agree about it.
+
+        Adding that third assertion exposed zero-separator token pairs as a
+        limitation of word-boundary anchoring; they are excused by
+        :func:`_is_accepted_ambiguity`, and the next test holds that excuse to
+        its boundary.
+        """
+        leaked, unclean = [], []
+        for body, cores, separator, involves_private_key in ADJACENT_CASES:
+            once = k.scrub(capture(body))
+            if k.findings(once) or k.scrub(once) != once:
+                unclean.append(body[:60])
+            if _is_accepted_ambiguity(separator, involves_private_key):
+                continue
+            text = once.body.decode("utf-8", errors="surrogateescape")
+            leaked += [(body[:60], core[:20]) for core in cores if core in text]
+
+        assert leaked == [], f"secret material survived scrubbing: {leaked[:5]}"
         assert unclean == []
+
+    def test_the_adjacency_limitation_does_not_widen(self) -> None:
+        """Every leak that does occur sits inside the one documented limitation.
+
+        The sweep above excuses zero-separator pairs of token credentials, and
+        an excuse with no boundary is how a gap grows unnoticed. So this asserts
+        the boundary itself: run the excused cases too, and require that anything
+        leaking is a zero-separator token pair — never a separated pair, never a
+        private key. Verified against a real regression: restoring the
+        block-crossing END label, under which two keys separated by a SPACE
+        leaked, fails this test as well as the sweep.
+        """
+        outside = []
+        for body, cores, separator, involves_private_key in ADJACENT_CASES:
+            text = k.scrub(capture(body)).body.decode("utf-8", errors="surrogateescape")
+            if any(core in text for core in cores) and not _is_accepted_ambiguity(separator, involves_private_key):
+                outside.append((body[:40], repr(separator)))
+
+        assert outside == []
 
     def test_both_secrets_of_a_flush_pair_are_reported(self) -> None:
         """`_find` must iterate, not merely `_rewrite`.
