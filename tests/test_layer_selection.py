@@ -429,6 +429,13 @@ class TestTheWholeSuiteIsCoherent:
             # pin), and that both legs present one identity from one source.
             "tests/test_curl_cffi_transport_contract.py",
             "tests/test_oauth_leg_identity.py",
+            # T-W6 (KBR-29). The corpus's *lint* reads three real artifacts --
+            # the committed entries, the capture procedure in
+            # `tests/corpus/README.md`, and the AST of `harness/corpus.py` --
+            # so it is a contract guard in the §6.2.3 sense. Its *format* tests
+            # read none of them and stay at the l1 default in
+            # `tests/harness/test_corpus.py`, the same split T-W3 made.
+            "tests/harness/test_corpus_lint.py",
         }
 
         actual = {

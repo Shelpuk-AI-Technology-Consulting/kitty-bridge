@@ -2126,6 +2126,110 @@ as public as the repository. The corpus needs a refresh cadence tied to Claude C
 a recorded capture procedure — an un-refreshable corpus becomes a museum of a protocol nobody
 speaks any more.
 
+#### 7.1.1 What T-W6 settled — the format, the scrubber and the loader
+
+Delivered as `tests/harness/corpus.py`, `tests/corpus/` and `tests/corpus/README.md`, which carries
+the capture procedure in full. **An entry is one request** — not a session and not a transcript, and
+§3.2.4's "indexes captured sessions" should be read as "entries". The unit matters: M8's trigger
+case is a *pair* (a request, an upstream rejection, the repaired retry), which a single-request
+entry cannot express and which therefore belongs to the test that scripts the recorder.
+
+**Owner and cadence, answered by the product owner (2026-09-12).** Owner: the repository
+maintainer. Cadence: **re-capture when the pinned Claude Code version changes.** A version bump is
+the only event that can invalidate a capture, so a calendar cadence is both too late (a release
+lands the week after it runs) and wasted work (nothing changed), and refresh-on-demand is the
+museum this section warns about. This is why the format **requires** `captured_from` on a captured
+entry: a cadence tied to a version bump is unactionable if the entries do not say which version
+they are.
+
+**Scrub scope, answered by the product owner (2026-09-12).** Credentials **and** personal
+identifiers — keys, tokens, auth headers and query parameters, plus home-directory paths,
+usernames, e-mail addresses and hostnames. File contents and prompts are *not* synthesised; that
+would destroy this section's own rationale. Human review before commit stays mandatory.
+
+**Manifest plus sidecar body, not one file.** Byte-exactness is the obvious argument and the
+weakest — JSON escaping is reversible. The two that decide it are **reviewability** (this section
+makes human review mandatory, and a 50,000-character escaped one-liner is not reviewable in a
+diff) and **greppability** (the lint reads the body as text, and so does GitHub's push protection,
+which is the last line of defence when the scrubber misses). Base64 is byte-exact and removes that
+second net entirely — which is the answer to any later proposal to "simplify" to one file.
+
+**The committed body is byte-exact as committed, not as sent.** Scrubbing is the one bounded
+departure from the wire bytes. It is free for I1, because the oracle diffs two projections of the
+same scrubbed input. It is not free in two places, both recorded in the README: the **size-derived
+triggers** (M3 and M5 are decided by length, and scrubbing shortens a body, so a declaration is
+made against the committed artifact and never the capture), and **`content-length`**, the single
+header the corpus does not preserve as captured — it is recomputed, because the alternative is a
+manifest internally inconsistent with its own body. Nothing downstream reads the original value:
+§4.3 C1 asserts on the headers the bridge *builds*, and C1b compares names.
+
+**Captures carrying `content-encoding` or `transfer-encoding` are refused at write time.** The
+corpus stores entity bodies, not wire octets. A compressed body is one the scrubber reads as noise
+and reports clean — a false clean that no plaintext falsification case can ever detect, and the
+worst failure available to this component.
+
+**Triggers have three states: met, explicitly absent, and silent.** Silence is not absence. §3.3.2
+assertion 2 is only as good as the complement it runs against, so a complement must be *claimed*;
+if absence were inferred, every entry whose author never considered a trigger would be silently
+offered as its complement and the assertion would run over entries nobody vetted.
+
+**§3.2.4's binary is incomplete.** A trigger is described there as "a route property or a request
+property", but four conditional rows are decided by neither: M6 fires on an upstream 400, M8 on a
+rejected thinking round-trip, M9 on an upstream tool-use format error, M12 on an empty upstream
+response — all properties of the **upstream response**, arranged by a scripted recorder. The
+loader refuses those four and `ALWAYS` in a manifest, which closes gap **G21**'s over-declaration
+hazard for the cases the repository already proves in text. Classifying the whole 25-trigger
+vocabulary is **KBR-186**, filed rather than guessed, for the reason T-W3 gave for deferring
+trigger predicates: data nothing in the change could prove wrong is what plan §1.4 forbids. Until
+it lands, **T-D8 cannot read corpus coverage for M6, M8, M9 and M12**; those are discharged by a
+scripted-recorder test instead.
+
+**T-C7's connection-pattern baseline is a different artifact.** This format carries the *header*
+half — a single request whose `host` is the real one. C5 counts distinct TCP connections across an
+N-turn session, which needs session grouping, ordering and `CapturedRequest`'s `arrival` and
+`peer_port`; the manifest carries none of those, deliberately. T-C7 defines that artifact. Do not
+stretch this format to hold it.
+
+**The lint fails on an empty corpus.** "No secrets found" is satisfied perfectly by having looked
+at nothing (the rule §8's marker guard is built on). It also turns a quieter mistake into a loud
+one: `load_corpus` takes a root, so a caller pointed at the wrong directory would otherwise report
+the corpus clean forever. This is why one synthetic `format_example` entry ships with T-W6 — as a
+worked example reviewable in one screen, excluded from every evidence query by `captured_only()`.
+
+**No finding, message or `repr` ever carries a matched value, not even a prefix** — class and byte
+offset only. A message that quoted what it matched would turn a contained authoring mistake into a
+published one the moment CI logged it, and the remedy for a published credential is rotation, not
+a better diff. The README carries that incident step.
+
+**Every pattern is anchored, and the scan runs to a fixed point.** The two are one decision. An
+unanchored rule matches inside ordinary words — `disk-usage-monitoring-service.py` redacts to
+`di<redacted:openai_key>.py`, and file paths are the commonest payload in a Claude Code body, so an
+unanchored table mangles legitimate content at scale. Anchoring alone then creates the opposite
+defect: two secrets flush against each other leave the second with no boundary in front of it,
+until the first is redacted — and by then a single-pass scan has moved on. That shipped briefly as
+a live key left in a scrubbed body, with the fixed-point invariant asserted as load-bearing in
+three documents and false in practice. Both halves therefore iterate, and both claim exactly the
+span the rewriter replaces; dropping either rule made them disagree on 216 and 23 of 4,000
+adversarial bodies. What is guaranteed is that no secret survives and a second scrub is a no-op,
+asserted over every ordered pair of known shapes at three separations. What is *not* guaranteed is
+that the finding count equals the placeholder count: one redaction can subsume a neighbour, which
+names more than it needs to rather than less.
+
+**The scrubber matches shapes, never entropy.** A general high-entropy rule is the tempting
+addition and was rejected on measurement: a real Claude Code body is full of long opaque strings
+that are not secrets — thinking-block signatures, `toolu_` identifiers, base64 images — and §3.3.3
+requires `Please explain how kitty-bridge works` to survive byte-identically. A scrubber that
+mangles legitimate content breaks I1 in the act of defending the repository. The residue is the
+review step's, and a per-entry `known_non_secrets` allow-list (each pair carrying a reason, each
+failing the lint when it stops matching, per §6.2.3's rule for a stale exclusion) covers the case
+this repository creates for itself: captures are taken while working on kitty-bridge, so a tool
+result quotes this tree — and `tests/test_integration.py` alone contains `api_key = "sk-test-…"`.
+
+**Entry size is left open.** T-C3's over-budget transcript is ~2.8 MB, which nobody reviews by
+eye. The format imposes no ceiling, because the choice between committing the real thing and
+synthesising a padded construction belongs to T-C3 and T-C4 — plan §6 already blesses synthesis
+for those two — along with saying what replaces the review step either way.
+
 ### 7.2 Recording upstreams — one per transport
 
 The bridge reaches upstream through **five** distinct client configurations (§3.2.3, §5.5), and
