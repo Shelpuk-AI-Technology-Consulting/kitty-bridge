@@ -1148,6 +1148,73 @@ class TestCacheBreakpoints:
         with pytest.raises(c.ResidualFieldsError):
             c.verify_total(projected)
 
+    def test_a_breakpoint_nested_inside_a_tool_result_residualises(self) -> None:
+        """R5 — the vendor caches a sub-content block through its top-level block.
+
+        Two reasons, and the second is the one that bites. Anthropic directs a
+        sub-content block to be cached via the block above it, so a breakpoint
+        here is not a thing the API does. And §3.3.1a defines **no path form**
+        reaching inside a `ToolResult`, so a breakpoint mapped onto a nested part
+        would be a delta M16 could never claim — §3.3.1a's under-claiming
+        direction, which manufactures a false I1 breach.
+        """
+        body = _minimal(
+            messages=[
+                {"role": "assistant", "content": [PUBLISHED_TOOL_USE]},
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": PUBLISHED_TOOL_USE["id"],
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": "inner",
+                                    "cache_control": {"type": "ephemeral"},
+                                }
+                            ],
+                        }
+                    ],
+                },
+            ]
+        )
+        projected = _read(body)
+
+        assert projected.residual == {
+            "messages[1].content[0].content[0].cache_control": {"type": "ephemeral"}
+        }
+        assert projected.conversation.turns[1].parts[0].content[0].cache_control is None
+        with pytest.raises(c.ResidualFieldsError):
+            c.verify_total(projected)
+
+    def test_a_breakpoint_on_the_tool_result_itself_still_maps(self) -> None:
+        """The control for the rule above: the *top-level* block is cacheable.
+
+        Without this, a reader that residualised every breakpoint anywhere near a
+        tool result would pass the test above for the wrong reason.
+        """
+        body = _minimal(
+            messages=[
+                {"role": "assistant", "content": [PUBLISHED_TOOL_USE]},
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": PUBLISHED_TOOL_USE["id"],
+                            "content": [{"type": "text", "text": "inner"}],
+                            "cache_control": {"type": "ephemeral"},
+                        }
+                    ],
+                },
+            ]
+        )
+        projected = _read(body)
+
+        assert projected.residual == {}
+        assert dict(projected.conversation.turns[1].parts[0].cache_control) == {"type": "ephemeral"}
+
     def test_a_wrongly_typed_breakpoint_residualises_rather_than_being_kept(self) -> None:
         """R5 — §7.4.1's wrongly-typed-leaf rule binds this field like any other.
 

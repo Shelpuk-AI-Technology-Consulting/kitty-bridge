@@ -237,7 +237,10 @@ range: `P9a–c` names three rows in one token, and §3.2.4's guard has to eithe
 expansion or drop two rows from the comparison. It refuses the notation instead.
 
 **Register maintenance.** The register is the specification. A pull request that adds a mutation
-site without adding a row fails the L2 register guards (§6.2.3).
+site without adding a row fails the L2 register guards (§6.2.3). **A row's table entry here and its
+`MutationRow` in `register.py` are one change**, not two: the guard parses this document, so a
+commit carrying only one half red-lines the suite — at that commit and at every later bisect
+through it.
 
 #### 3.2.3 Serialization paths — where the register must actually be checked
 
@@ -433,21 +436,51 @@ rather than ours.** Claude Code sets a cache breakpoint on nearly every request,
 the field could only residualise, and a non-empty residual fails the run — the grammar would reject
 essentially every real body (KBR-167). Anthropic's published "what can be cached" list permits a
 breakpoint on tool declarations, on system blocks, on text, image and document blocks, and on
-`tool_use` and `tool_result` blocks; it forbids one on a **thinking block**, and it directs a
-sub-content block such as a citation to be cached via its top-level block instead. `Thinking` and
-`Json` are exactly those two cases, so a `cache_control` reaching either is a body the API itself
-rejects, and residualising it — failing the run with the field named — is the correct signal.
+`tool_use` and `tool_result` blocks. The two exclusions have **different** reasons, and conflating
+them is how a later reader talks themselves into "fixing" the asymmetry:
+
+- **`Thinking`** — Anthropic states a thinking block "cannot be cached directly with
+  `cache_control`". Note what that does *not* say: thinking blocks **can** be cached alongside
+  other content when they appear in earlier assistant turns, so the exclusion is about the
+  breakpoint, not about cacheability. Anthropic does not document *rejecting* such a body, and its
+  nearest analogue goes the other way — a below-minimum prompt "will be processed without caching,
+  and no error is returned". So the honest statement is that the vendor does not support a
+  breakpoint there. The consequence is on the record: such a body **fails the run**, with the field
+  named, and the fix at that point is a slot or the third outcome, decided then.
+- **`Json`** — not a sub-content rule, despite the neighbouring one about citations. §7.4.1 fixes
+  `Json` as the part for a format carrying a structured value *natively* — Converse's
+  `toolResult.content.json`, Gemini's `functionResponse.response`. **Neither format has a
+  `cache_control` concept at all**, and the Anthropic reader can never emit a `Json` part. A slot
+  there could not be filled by any reader.
+
+**A breakpoint nested inside a `ToolResult` residualises**, on the same two-reason pattern.
+Anthropic directs a sub-content block to be cached through its top-level block, and — the half
+that binds regardless — §3.3.1a defines **no path form reaching inside a `ToolResult`**, so a
+breakpoint mapped onto a nested part would be a delta **M16** could never claim. That is
+§3.3.1a's under-claiming direction, which manufactures a false I1 breach. The `ToolResult` itself
+is cacheable and carries its breakpoint normally.
 
 **The wire mapping is carried whole, not reduced to a boolean.** `{"type": "ephemeral"}` and
 `{"type": "ephemeral", "ttl": "1h"}` are different products at different prices (a 1-hour write
 costs 2x base input against 1.25x for the default five-minute one), so a boolean would make a
 silently downgraded TTL invisible — the same class of loss the slot exists to expose.
 
+**Only one reader can ever fill it.** `cache_control` is Anthropic's spelling. Converse has
+`cachePoint` — a *separate block* in the content list, not a field on one — Gemini has a top-level
+`cachedContent` reference, and OpenAI caches prefixes implicitly with no per-block marker at all
+(its GPT-5.6 `prompt_cache_breakpoint` is a Responses-API construct with no Chat Completions
+equivalent). So on every cross-format comparison this field is present on one side only, which is
+exactly what M16 needs, and an author of the Converse or Gemini reader should not go looking for an
+equivalent to map. A normalisation, if one is ever wanted, lands here with the first reader that
+needs it — the same rule §7.4.1 already applies to `Opaque`'s cross-vendor alias table.
+
 **Why a slot rather than §3.3.1's other outcome.** §3.3.1 offers "map it, or declare it ignored
 with a reason", and a reader-side declared-ignored mechanism would also have stopped the run
 failing. It was rejected deliberately: kitty's translated path **strips every breakpoint**, so
 under a declared-ignored rule the oracle would be blind, by construction, to a mutation that
-re-bills the user's cached prefix at roughly ten times its cached rate. Register row **M16** claims
+re-bills the user's cached prefix at **at least** ten times its cached rate — a cache read is
+0.1x base input on most models and 0.025x on Claude Fable 5.1 and Mythos 5.1, where the multiple
+is forty. Register row **M16** claims
 the strip instead, which keeps the cost visible and attributable. The declared-ignored mechanism
 therefore still does not exist; §7.4.1 records that, and no field currently needs it.
 
@@ -501,7 +534,10 @@ wire format therefore forces a deliberate decision: map it, or declare it ignore
 
 **Every register row names the field it touches.** M1 is `envelope.model`; P17 is
 `envelope.stream` and `envelope.store`; P15 is `conversation.tools[*].strict`; P13 is
-`conversation.sampling`. Without that, "claimed by a register row" is a judgement call rather
+`conversation.sampling`. **M16 is the sharpest case** — three paths at once, each naming
+`.cache_control` rather than the block it sits on, because `conversation.turns[*].parts[*]` would
+also claim a *deleted part* and `conversation.tools[*]` a *deleted tool description*, which are two
+of §3.3.1's own five oracle falsification cases. Without that, "claimed by a register row" is a judgement call rather
 than a lookup.
 
 #### 3.3.1a The path vocabulary
@@ -519,7 +555,7 @@ only the second consumer; §3.2.2 says why.
 | `conversation.turns[<i>].role` · `.parts[<j>]` | A turn, or one part of it |
 | `conversation.tools[<name>].description` · `.schema` · `.strict` | A tool declaration, **by name** |
 | `conversation.sampling[<key>]` | One sampling parameter |
-| `conversation.system[<i>].cache_control` · `conversation.turns[<i>].parts[<j>].cache_control` · `conversation.tools[<name>].cache_control` | One cache breakpoint — **M16**. The field addresses the same three carriers the grammar gives it a slot on; `system_path` and `part_path` take an optional field name for it, as `tool_path` already did for P15's `.strict` |
+| `conversation.system[<i>].cache_control` · `conversation.turns[<i>].parts[<j>].cache_control` · `conversation.tools[<name>].cache_control` | One cache breakpoint — **M16**. ⚠️ **A coarser row can claim these first**: a pattern is a prefix, so P5b's bare `conversation.system` and M5/M6/M7's bare `conversation.turns` subsume the breakpoint paths beneath them whenever their own triggers are met — and P5b's `MULTIPLE_SYSTEM_BLOCKS` is met by most Claude Code bodies. M16 is therefore the row that fires only where no collection-level row does; on the system blocks that means the single-block case, since P5b changes the collection's length and no `system[i]` path survives it. The field addresses the same three carriers the grammar gives it a slot on; `system_path` and `part_path` take an optional field name for it, as `tool_path` already did for P15's `.strict` |
 | `conversation.turns` · `.system` · `.tools` · `.sampling` | A **whole collection** — M5, M6 and M7 rewrite the turns, P5b joins the system blocks, §3.3.1 pins P13/P14 to the bare `sampling` |
 | `headers[<name>]` | A header — P9a, P9b, P9c, and §4.3 C1. **Not produced by the projection diff**: `Request` carries no headers and no inbound header is forwarded, so this form addresses a per-adapter *deviation from the base header set* (§3.2.2), never a delta between two projections |
 | `residual[<path>]` | An unclassified value |
@@ -2380,7 +2416,7 @@ and the second is the one that surprises:
    wrong defect. `residual_path()` renders a *delta path* for the oracle to report; it never
    builds this mapping.
 2. A nested key is keyed by its path from the body root with **array positions as indices** —
-   `tools[0].type`, `messages[2].content[0].citations`, `system[0].unknown_marker`. It does
+   `tools[0].type`, `messages[2].content[0].x_vendor_marker`, `system[0].x_vendor_marker`. It does
    **not** inherit §3.3.1a's by-name tool addressing. That convention exists because "translators
    reorder and filter declarations", which is a property of a *comparison*; a residual key is
    never matched against a register pattern, so the reason does not apply and one rule is better

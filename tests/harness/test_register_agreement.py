@@ -130,7 +130,11 @@ class TestTheParserReadsTheDesignDocument:
         """
         defective = markdown.replace(
             "| M14 |",
-            "| **M17** | A new mutation | `X.y` | Always | because |\n| M14 |",
+            # M99, not the next free id: this fixture used `M16` until KBR-167
+            # published a real M16, and the duplicate-id check then raised
+            # before the assertion could run. An id no row will ever take is the
+            # only spelling that cannot rot.
+            "| **M99** | A new mutation | `X.y` | Always | because |\n| M14 |",
             1,
         )
 
@@ -146,13 +150,14 @@ class TestTheParserReadsTheDesignDocument:
         """
         defective = markdown.replace(
             "| M14 |",
-            "| M17 | A new mutation | `X.y` | Always | because |\n| M14 |",
+            # M99 for the reason given on the bolded-id case above.
+            "| M99 | A new mutation | `X.y` | Always | because |\n| M14 |",
             1,
         )
 
         problems = r.register_disagreements(r.REGISTER, defective)
 
-        assert any("M17" in problem for problem in problems), problems
+        assert any("M99" in problem for problem in problems), problems
 
     def test_an_id_published_twice_is_refused(self, markdown: str) -> None:
         """An id is the register's addressing scheme, so a repeat makes it ambiguous.

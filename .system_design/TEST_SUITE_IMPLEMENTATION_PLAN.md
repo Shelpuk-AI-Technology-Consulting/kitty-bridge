@@ -136,7 +136,7 @@ once. Both are exactly the coordination problem Milestone 0 exists to remove.
 
 **T-W3 inherits two acceptance criteria from this work.**
 
-1. Every one of the 42 live rows carries either a path in T-W2's vocabulary or `not projectable`
+1. Every one of the 43 live rows carries either a path in T-W2's vocabulary or `not projectable`
    **with a reason**, asserted against the register data so a new row cannot escape it. T-W2 proves
    the vocabulary is *expressive*; the row-by-row assignment is T-W3's, because a copy of that
    table inside T-W2 would be a second source of truth that stays green while the register moves.
@@ -152,9 +152,9 @@ once. Both are exactly the coordination problem Milestone 0 exists to remove.
 Includes the **totality rule**: every key classifies into envelope, conversation or residual, and a
 non-empty residual raises. *Falsification:* a stub reader that drops an unknown key fails it.
 
-**T-W3 — register.** One entry per live row of §3.2.1 and §3.2.2. The families are M1–M14 and
+**T-W3 — register.** One entry per live row of §3.2.1 and §3.2.2. The families are M1–M16 and
 P1–P21, but the **sub-lettered rows are separate rows with separate triggers**, so the count is
-**42 published, 41 live** — M13 is withdrawn (KBR-5) and excluded from the data, with the parser
+**44 published, 43 live** — M13 is withdrawn (KBR-5) and excluded from the data, with the parser
 asserting the struck set is exactly `{M13}` so a new strike-through is a deliberate decision.
 
 Per row: id, site symbols, trigger, the projection paths it touches, conditional or not, design
