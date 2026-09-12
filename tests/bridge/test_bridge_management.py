@@ -7,6 +7,7 @@ import json
 import os
 import signal
 import socket
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -798,12 +799,30 @@ class TestBridgeReachable:
         assert bridge_reachable("kitty-bridge.invalid", 9, timeout=0.2) is False
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="the POSIX errno mapping of os.kill(pid, 0); Windows never calls it (KBR-180)",
+)
 class TestProbePidErrorMapping:
-    """Cross-platform mapping of os.kill(pid, 0) outcomes to liveness.
+    """Mapping of ``os.kill(pid, 0)`` errno outcomes to liveness, on POSIX.
 
-    Signal 0 performs no action and only probes the process — on Windows as
-    well as POSIX. The platforms differ in how they report a missing PID, and
-    that difference previously crashed every stale-state code path on Windows.
+    🔴 This class used to call itself *cross-platform* and open with "Signal 0
+    performs no action and only probes the process — on Windows as well as
+    POSIX". That claim was false, and it is the one KBR-180 was filed against:
+    ``signal.CTRL_C_EVENT`` **is** ``0`` on Windows, so the call broadcasts a
+    Ctrl+C to the console instead of probing. The tests below patch
+    ``manage.os.kill`` and assert the errno mapping around it, which is a POSIX
+    claim about a POSIX call.
+
+    Skipped on Windows because the behaviour under test **does not exist**
+    there — §8's one permitted kind of skip — not because the product is
+    broken there. :func:`probe_pid` dispatches to ``_probe_pid_windows``
+    before reaching ``os.kill``, and that path is covered by
+    :meth:`TestBridgeManagementHelpers.test_probe_pid_for_current_process` and
+    ``test_probe_pid_for_dead_pid``, which exercise the real implementation on
+    the Windows leg, plus
+    ``test_probe_pid_never_signals_zero_on_windows``, which holds the dispatch
+    itself on every platform.
     """
 
     def test_signallable_process_is_alive(self):
