@@ -131,10 +131,15 @@ class ToolUse:
     """A tool call the assistant made.
 
     Attributes:
-        id: The call id, or ``None`` where the format carries none. Gemini's
-            ``functionCall`` is ``{name, args}`` with no id, so a required id
-            would force T-A4 to synthesise one and show a delta on every tool
-            turn.
+        id: The call id, or ``None`` where the format carries none — a
+            required id would force such a reader to synthesise one and show a
+            delta on every tool turn. **Not Gemini**, contrary to this
+            docstring's original wording: `v1beta`'s ``FunctionCall`` publishes
+            an optional ``id`` and ``FunctionResponse`` an optional ``id`` the
+            client populates to match it (discovery document, revision
+            ``20260910``; corrected by T-A4/KBR-36, which was asked to confirm
+            rather than assume it). Optional either way, so the decision this
+            sentence justifies is unchanged.
         name: The tool's name.
         arguments: The parsed arguments. Chat Completions encodes these as a
             JSON *string* and Messages as an object; normalising here stops a

@@ -539,6 +539,25 @@ OUTCOME_FIELDS = (
 #: Per-field cap, so one oversized field cannot reintroduce the problem above.
 OUTCOME_FIELD_CHARS = 4000
 
+#: 🔴 KBR-172. The one outcome field the MODEL writes. On a structured-output failure
+#: `result` carries the review it was trying to return, so every status code in it is the
+#: model describing code rather than a provider reporting a status -- and a reviewer of
+#: THIS repository writes about status codes constantly.
+#:
+#: Scoping this field is the fix rather than tightening the patterns, and that choice was
+#: measured: five candidate anchors were scored against the two verbatim provider bodies
+#: and eleven prose shapes, and none matched every real body while leaking no prose.
+#: "status 400 means bad request" and "error 400 is fatal here" defeat any proximity rule,
+#: and tightening far enough to exclude them starts missing `HTTP 400 Bad Request`. The
+#: discriminator is a property of the RECORD, which this module already stated in the
+#: `402` comment above, so it is applied as a condition instead.
+#:
+#: ⚠️ Conditional on purpose. With no structured-output marker, `result` holds the CLI's
+#: own error text -- the only verbatim provider body here,
+#: `API Error: 402 {"error":{"message":"Insufficient Balance"}}`, arrives that way. Scoping
+#: it out unconditionally would trade this defect for a silent miss on a spent account.
+MODEL_AUTHORED_FIELD = "result"
+
 
 def _parse_events(execution_text: str) -> list | None:
     """Decode the execution record into events, accepting both shapes it comes in.
@@ -581,6 +600,12 @@ def _parse_events(execution_text: str) -> list | None:
 def _outcome_text(execution_text: str) -> str | None:
     """Return only the outcome-bearing fields of the record.
 
+    Two narrowings, and they answer two different leaks. The field list keeps out anything
+    the reviewer merely **read** — tool results live under ``message``/``content``, which are
+    not outcome fields. :data:`MODEL_AUTHORED_FIELD` keeps out what the reviewer **wrote**,
+    but only on a structured-output failure, because that is the sole condition under which
+    ``result`` holds the model's review rather than the CLI's error text.
+
     Args:
         execution_text: Raw execution record text.
 
@@ -588,19 +613,36 @@ def _outcome_text(execution_text: str) -> str | None:
         The joined outcome fields, or ``None`` when the record is not JSON — in which case it
         is a CLI-level failure message with no tool results in it, and searching it whole is
         both safe and necessary (a rejected ``--json-schema`` arrives exactly that way).
+        On a structured-output failure ``result`` is omitted from the join; on every other
+        record it is included.
     """
 
     events = _parse_events(execution_text)
     if events is None:
         return None
 
-    parts: list[str] = []
+    # Split by who WROTE the field, not by what it says. `result` is the only outcome
+    # field the model can author, and on a schema failure that is exactly what it holds.
+    provider_parts: list[str] = []
+    model_parts: list[str] = []
     for event in events:
         if not isinstance(event, dict):
             continue
         for field in OUTCOME_FIELDS:
-            parts.extend(_strings_in(event.get(field)))
-    return "\n".join(parts)
+            target = model_parts if field == MODEL_AUTHORED_FIELD else provider_parts
+            target.extend(_strings_in(event.get(field)))
+
+    # The marker is read only from fields the model does not author. Reading it from
+    # `result` too would let a review that merely MENTIONS the subtype scope out its own
+    # field, and any real provider error sharing that record would stop being read.
+    provider_text = "\n".join(provider_parts)
+    schema_failure = any(
+        re.search(pattern, provider_text, re.I)
+        for pattern in STRUCTURED_OUTPUT_PATTERNS
+    )
+    if schema_failure:
+        return provider_text
+    return "\n".join(provider_parts + model_parts)
 
 
 def _strings_in(value: object, depth: int = 0) -> list[str]:

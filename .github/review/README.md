@@ -101,9 +101,13 @@ To enable the workflow on this repository:
    settings → Secrets and variables → Actions → each item → repository access).
    All three were already granted when this workflow landed.
 2. Nothing to do for runners — every job uses a GitHub-hosted label
-   (`ubuntu-latest` for the review, the aggregate, the metadata refresh and the
-   test matrix; `ubuntu-slim` for the two review-system jobs), so no runner group
-   has to be granted.
+   (`ubuntu-latest` for the review, the aggregate and the metadata refresh;
+   `ubuntu-slim` for the two review-system jobs; and `ubuntu-latest`,
+   `windows-latest` and `macos-latest` for the test matrix, which has run on all
+   three platforms since KBR-164 — see `.system_design/TEST_SUITE.md` §8.4), so
+   no runner group has to be granted. All three platform labels are GitHub's own
+   standard public ones, and standard hosted runners are free and unmetered on a
+   public repository, so the Windows and macOS legs cost nothing to run.
 
    ⚠️ **Why not a self-hosted fleet:** a runner group carries an *"Allow public
    repositories"* setting that is **off by default**, and this repository is
@@ -205,7 +209,7 @@ step 2 above.
 ## Changing the review system
 
 `.github/workflows/ci.yml` runs `tests/test_review_scripts.py` on every pull
-request — 642 tests over the selector, the classifier, the notices, the redactor,
+request — 648 tests over the selector, the classifier, the notices, the redactor,
 the schema and the workflow's own wiring, plus the workflow parser, the
 runner-ceiling table and the `ci-required` aggregation. Run them locally the same
 way:

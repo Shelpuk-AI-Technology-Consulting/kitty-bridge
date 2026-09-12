@@ -93,6 +93,15 @@ RUNNER_JOB_CEILING_MINUTES = {
     # execution time. If a job reaches this limit, the job is terminated and
     # fails."*
     "windows-latest": 360,
+    # Added with the platform legs (KBR-164, TEST_SUITE.md §8.4). Also an
+    # ordinary GitHub-hosted runner -- 3 CPUs on the arm64 tier rather than 4,
+    # which changes its speed and not its ceiling: the 6-hour rule is stated per
+    # job, not per core, and only the single-CPU tier carries a special one.
+    # ⚠️ A missing row here is not a soft failure. `_lowest_ceiling` takes the
+    # minimum over a job's producible labels, so an unrecorded label fails the
+    # review-scripts job outright rather than being skipped -- which is the
+    # point, since the alternative is a cap nothing can honour.
+    "macos-latest": 360,
     "ubuntu-24.04": 360,
     "ubuntu-22.04": 360,
     "[self-hosted, cap-main, noble]": 7200,
@@ -576,6 +585,14 @@ DEEPSEEK_NO_BALANCE = (
 DEEPSEEK_NO_BALANCE_ABRIDGED = (
     'API Error: 402 {"error":{"message":"Insufficient Balance"}}'
 )
+
+#: The header `_write_diagnostic` writes above the record tail.
+#:
+#: Named because a test that splits the diagnostic on the WRONG delimiter does not
+#: fail — `str.split` returns the whole document, so the guidance and the record tail
+#: are asserted together and the isolation the test claims never happens. KBR-172
+#: shipped exactly that bug, carrying a sibling repository's wording.
+RECORD_TAIL_HEADER = "--- execution record (tail) ---"
 
 #: The one refusal this configuration is documented to be able to hit, lifted to a
 #: module constant by KBR-145 so that `classify` and `_write_diagnostic` are judged
@@ -2018,6 +2035,236 @@ class TestClassify(unittest.TestCase):
             guidance,
             "a file the reviewer read produced billing advice for a transient 5xx",
         )
+
+    #: Prose a reviewer **of this repository** plainly writes. Every row names a status
+    #: code as its subject, which is exactly what no proximity rule can separate from a
+    #: provider reporting one — "status 400 means bad request" reads identically either
+    #: way. Five candidate anchors were measured against these and the two verbatim
+    #: provider bodies; none matched every real body while leaking no prose, which is why
+    #: KBR-172 scopes the FIELD rather than tightening the patterns.
+    PROSE_NAMING_A_STATUS_CODE = (
+        (400, "The redactor truncates the prompt at 400 characters."),
+        (400, "The guard at interpret_claude_result.py:400 rejects that."),
+        (400, "A 400 from the endpoint would mean the schema is bad."),
+        (400, "status 400 means bad request, so the verdict is fatal."),
+        (401, "See interpret_claude_result.py:401 for the credential set."),
+        (403, "Compare with interpret_claude_result.py:403 above."),
+        (429, "The retry ladder at line 429 caps it."),
+        (500, "The redactor caps each field at 500 characters."),
+        (502, "A 502 from the gateway would be transient."),
+        (503, "A 503 would be transient, so the verdict should be exhausted."),
+        (1308, "Issue 1308 tracks the ladder rewrite."),
+        (1310, "Ticket 1310 covers the reset window."),
+        (1113, "The retry table at line 1113 lists each tier."),
+    )
+
+    @staticmethod
+    def _schema_failure(prose):
+        """Build the record shape in which ``result`` is the model's own writing.
+
+        The marker lives in ``subtype``, which the model does not author. That is the
+        condition under which ``result`` holds the review the model was trying to return
+        rather than anything the provider said.
+
+        Args:
+            prose: The model's review text, as it lands in ``result``.
+
+        Returns:
+            A JSON execution record carrying a structured-output failure.
+        """
+
+        return json.dumps(
+            [
+                {
+                    "type": "result",
+                    "is_error": True,
+                    "subtype": "error_max_structured_output_retries",
+                    "result": prose,
+                }
+            ]
+        )
+
+    def test_the_models_own_prose_cannot_decide_why_the_run_failed(self):
+        """🔴 KBR-172. The half of the PR #237 scoping that was left open.
+
+        That fix stopped a file the reviewer **read** from voting, by scoping the haystack
+        to the record's outcome fields. But ``result`` is an outcome field, and on a schema
+        failure it carries the model's OWN prose — which this module already says, in the
+        comment that excludes ``402`` from :data:`QUOTA_PATTERNS`.
+
+        **That exclusion was applied to one code and eight others were left.** ``400``,
+        ``401``, ``403``, ``429``, ``50[023]``, ``1308``, ``1310`` and ``1113`` all remained
+        matchable from the model's writing. Reproduced before the fix — a reviewer
+        describing this very classifier tripped every one of them.
+
+        The verdict asserted here is the structured-output one, because that is what the
+        record actually says: the marker is in ``subtype``, and with the prose no longer
+        voting, the tier that names the real failure is the one that wins.
+        """
+
+        for code, prose in self.PROSE_NAMING_A_STATUS_CODE:
+            with self.subTest(code=code, prose=prose[:40]):
+                status, reason = interpret.classify(self._schema_failure(prose))
+                self.assertNotIn(
+                    str(code),
+                    reason,
+                    f"the model's own prose voted {code} into the verdict",
+                )
+                self.assertIn("structured_output", reason)
+
+    def test_every_bare_status_code_the_classifier_matches_has_a_prose_row(self):
+        """The corpus above is read from the module, not restated beside it.
+
+        A hand-written list of codes is the drift this suite keeps paying for: the sweep
+        passes while a pattern added later has no row, and nothing says so. This derives
+        the population from :mod:`interpret`'s own tuples, so adding a bare-number pattern
+        without a prose row fails here rather than going unnoticed.
+
+        `BRIDGE_*` sets are excluded deliberately — they read the wrapper's stderr, which
+        the model does not write, and their `403` is already context-anchored.
+        """
+
+        bare_number = re.compile(r"^\\b[0-9\[\]]+\\b$")
+        covered = {code for code, _ in self.PROSE_NAMING_A_STATUS_CODE}
+        checked = 0
+
+        for name in dir(interpret):
+            if not name.endswith("_PATTERNS") or name.startswith("BRIDGE_"):
+                continue
+            for pattern in getattr(interpret, name):
+                if not isinstance(pattern, str) or not bare_number.match(pattern):
+                    continue
+                checked += 1
+                with self.subTest(pattern=pattern, tier=name):
+                    self.assertTrue(
+                        any(re.search(pattern, str(code)) for code in covered),
+                        f"{name} matches {pattern!r} and no row in "
+                        "PROSE_NAMING_A_STATUS_CODE exercises it",
+                    )
+
+        # Without this the test passes by finding nothing — the vacuity that makes a
+        # containment guard look green while it reads an empty set.
+        self.assertGreater(checked, 0, "no bare-number pattern was found to check")
+
+    def test_a_400_in_the_models_prose_does_not_abandon_the_review(self):
+        """🔴 KBR-172. The one code whose false match changes the DECISION, not the wording.
+
+        ``\\b400\\b`` sits in :data:`FATAL_PATTERNS`, which is consulted first, and ``fatal``
+        means *"re-running will not fix this"* — so the run is abandoned and the operator is
+        told the workflow is wrong when it is not. Every other code lands on ``exhausted``,
+        which is the status the fallthrough would have given anyway; they corrupt the reason
+        and leave the retry decision intact.
+
+        Asserted separately from the sweep above because it is a different failure: that one
+        is about a misleading message, this one is about work not being retried.
+        """
+
+        status, _ = interpret.classify(
+            self._schema_failure("The redactor truncates the prompt at 400 characters.")
+        )
+        self.assertEqual(status, "exhausted")
+
+    def test_a_provider_error_in_result_is_still_read(self):
+        """The scoping must not blind the classifier to the field it is narrowing.
+
+        ``result`` is **not** always the model's prose. With no structured-output marker it
+        carries the CLI's own error text, and the only verbatim provider body this
+        repository has — ``API Error: 402 {"error":{"message":"Insufficient Balance"}}`` —
+        arrives exactly that way. Scoping ``result`` out unconditionally would trade this
+        defect for a silent miss on a genuinely spent account, which is the more expensive
+        of the two.
+
+        The reason is asserted, not just the status, because every path here returns
+        ``exhausted`` — including the fallthrough. A status-only assertion would pass with
+        ``result`` scoped out entirely and prove nothing.
+
+        ``_record``'s own ``"API Error: Connection closed mid-response."`` is deliberately
+        **not** a row: it matches nothing today either, because
+        :data:`EXHAUSTED_PATTERNS` carries ``connection (reset|refused|error)`` and not
+        *closed*. That is a pre-existing gap unrelated to this ticket, and a body that is
+        unrecognised before the change cannot witness that the change preserved anything.
+        """
+
+        for body, expected in (
+            (DEEPSEEK_NO_BALANCE, "insufficient balance"),
+            (
+                "API Error: Request rejected (429) - [1308][Usage limit reached]",
+                "usage limit reached",
+            ),
+        ):
+            with self.subTest(body=body[:40]):
+                record = json.dumps(
+                    [{"type": "result", "is_error": True, "result": body}]
+                )
+                status, reason = interpret.classify(record)
+                self.assertEqual(status, "exhausted")
+                self.assertIn(expected, reason)
+
+    def test_the_schema_marker_is_not_taken_from_the_models_own_prose(self):
+        """The model must not be able to switch the scoping on by quoting the marker.
+
+        If the marker were read from ``result`` too, a review whose prose happens to contain
+        ``error_max_structured_output_retries`` — this file does, and so does any review of
+        it — would scope out its own field, and a real provider error sharing that record
+        would stop being read. The marker is therefore taken only from fields the model does
+        not author, and this asserts the conservative half: marker in ``result`` alone leaves
+        the field in the haystack exactly as before.
+        """
+
+        record = json.dumps(
+            [
+                {
+                    "type": "result",
+                    "is_error": True,
+                    "result": (
+                        "The subtype error_max_structured_output_retries is handled "
+                        "at the tier below. " + DEEPSEEK_NO_BALANCE
+                    ),
+                }
+            ]
+        )
+        status, reason = interpret.classify(record)
+        self.assertEqual(status, "exhausted")
+        self.assertIn("quota", reason)
+
+    def test_the_DIAGNOSTIC_is_scoped_to_the_model_s_prose_too(self):
+        """🔴 KBR-172, and the shape of the mistake this repository already made once.
+
+        `test_the_DIAGNOSTIC_is_scoped_too_not_just_the_verdict` records that the PR #237 fix
+        scoped ``classify`` and missed ``_write_diagnostic``, so a run still printed "top up
+        the balance" under a corrected heading. The same split applies here: the guidance is
+        keyed off :data:`QUOTA_PATTERNS` against its own haystack, so a ``1308`` in the
+        model's prose would send someone to a payment page even with the verdict fixed.
+
+        A wrong verdict is confusing. A wrong instruction costs money.
+        """
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "diagnostic.txt"
+            interpret._write_diagnostic(
+                str(path),
+                retryable=True,
+                tier="deepseek-v4-flash",
+                status="exhausted",
+                reason="ran but returned no payload and no recognisable error",
+                execution_text=self._schema_failure(
+                    "Issue 1308 tracks the ladder rewrite."
+                ),
+                record_present=True,
+            )
+            written = path.read_text(encoding="utf-8")
+
+        # ⚠️ The delimiter is asserted before it is used, and that is the whole point.
+        # A split on a string the file never contains does not fail — it silently
+        # returns the WHOLE document, so the test still passes and the scoping it
+        # claims to check is never isolated. Measured: reverting this line to the
+        # wrong delimiter leaves the assertion below green, so nothing but this
+        # assertion can catch it. The first version of this test had exactly that
+        # bug, carrying a sibling repository's wording.
+        self.assertIn(RECORD_TAIL_HEADER, written)
+        guidance = written.split(RECORD_TAIL_HEADER)[0]
+
+        self.assertNotIn("Top up the balance", guidance)
 
     def test_a_real_quota_failure_still_gets_its_guidance(self):
         """The scoping must not silence the branch on the failure it exists for."""
@@ -13214,9 +13461,18 @@ class MatrixRunnerResolutionTests(unittest.TestCase):
         job that also runs somewhere nobody recorded. The unrecorded label
         already fails its own check; this returns ``None`` so the cap check does
         not additionally report a verdict it cannot support.
+
+        🔴 **The example label must be one the table will never record**, and
+        this test is the reason that matters. It used to pass ``macos-latest``,
+        which was unrecorded only until somebody needed a macOS runner --
+        KBR-164 added that row and this test went green while proving nothing
+        about unrecorded labels, because both of its labels had ceilings. A
+        fabricated label cannot be adopted by a future ticket, so the case stays
+        a case. Adding a real runner row must never be what disarms it.
         """
 
-        self.assertIsNone(_lowest_ceiling(("ubuntu-latest", "macos-latest")))
+        self.assertNotIn("plan9-latest", RUNNER_JOB_CEILING_MINUTES)
+        self.assertIsNone(_lowest_ceiling(("ubuntu-latest", "plan9-latest")))
 
     def test_a_trailing_comment_is_not_part_of_a_matrix_value(self):
         """The tolerance `runs-on:` and `timeout-minutes:` already carry.

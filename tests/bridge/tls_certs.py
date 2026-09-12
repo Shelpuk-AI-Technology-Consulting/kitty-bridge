@@ -39,7 +39,9 @@ import pytest
 
 # Generous enough that a loaded CI runner never trips it, short enough that a
 # genuinely wedged `openssl` is reported as a failure rather than eating the
-# job's 30-minute ceiling. RSA-2048 keygen is milliseconds when it works at all.
+# job's cap (60 minutes since KBR-164 widened it for the platform legs; the
+# argument is unchanged by the number, which is why this reads "the cap" and
+# names it only in passing). RSA-2048 keygen is milliseconds when it works.
 _OPENSSL_TIMEOUT_SECONDS = 60
 
 # Repeated in every failure message so a CI log says why the run did not simply
