@@ -597,6 +597,17 @@ class TestContentBlocks:
                 ),
                 "messages[0].content[0].source.url",
             ),
+            (
+                _minimal(
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": [{"type": "image", "source": {"type": "file", "file_id": 7}}],
+                        }
+                    ]
+                ),
+                "messages[0].content[0].source.file_id",
+            ),
         ],
     )
     def test_every_optional_leaf_residualises_when_the_wire_type_is_wrong(
