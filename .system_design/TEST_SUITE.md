@@ -2211,7 +2211,7 @@ transport (below).
 
 | Piece | What it is |
 |---|---|
-| `UpstreamTransport` | The **extension interface**: `name`, `format`, `start`, `stop`, `bind`, `captures`, `connections`, `assert_teardown_clean` |
+| `UpstreamTransport` | The **extension interface**: `name`, `format`, `start`, `stop`, `bind`, `captures`, `connections`, `assert_teardown_clean`. **Open question for T-B1:** `format` is typed `WireFormat`, which §3.3.1 closes at six — and the `openai_subscription` **OAuth token leg** §7.2 assigns it is none of them. T-B1 decides whether that leg is a separate transport, a recorder outside this interface, or a seventh format; named here so the decision is deliberate |
 | The registry | `register_transport` / `transport(name, fmt, *, responder)` / `registered_transports` |
 | `AiohttpTransport` | The **only** transport registered here, over §7.2's `RecordingUpstream` |
 | `redirected(adapter, origin, provider_config)` | Re-hosts any **default-transport** adapter onto a recorder, keeping path and query |
@@ -2219,7 +2219,9 @@ transport (below).
 | `pin_backend_order` | The determinism seam for balancing mode |
 | `InboundProtocol`, `inbound_path`, `minimal_inbound_body` | The agent-facing side: route and smallest body per inbound protocol |
 | `BridgeFixture` | An async context manager: a real `BridgeServer`, single-backend or balancing, against a started transport |
-| `assert_transport_reaches_its_recorder` | The **integration conformance check**, run over every registered transport by a meta-test |
+| `assert_transport_reaches_its_recorder(transport, *, protocol=None)` | The **integration conformance check**, run over every registered transport by a meta-test. Takes a transport **instance**, not a registry name — so the falsification defects need never be registered, and an author whose format has no matching inbound route names one |
+| `marker()`, `protocol_for()` | The per-request marker, and the inbound route matching an upstream format |
+| `MisdeclaredFormatError`, `TransportTimeout` | What a teardown check and a timed-out request raise |
 
 **Naming.** One list of captured requests, spelled `captures` on a transport and `requests` on
 `RecordingUpstream` (§7.2's own name, unchanged). `CapturedRequest` is the element type.
@@ -2285,6 +2287,11 @@ Vertex raises `ProviderError("Vertex AI requires 'project_id' …")` from inside
 adapter raises that at redirect time and no longer raises it per request. A test meaning to
 exercise pre-flight validation must call the adapter, not the redirected copy.
 
+**The default transport never uses `redirected()`.** It binds `custom_anthropic` or
+`custom_openai` precisely because those two honour the product's own channel, so the default path
+exercises that channel and the helper is exercised separately — it exists for the ~14 adapters
+that honour no key.
+
 **This applies to default-transport adapters.** The three custom-transport adapters never call
 `build_base_url` at all: `ollama_cloud` resolves the key inside its own request path,
 `openai_subscription` uses a module constant, and `bedrock` takes a botocore endpoint override.
@@ -2297,6 +2304,13 @@ not a base-URL helper, is the interface.
 a loopback recorder serving `http://` cannot satisfy. The fixture also encapsulates the
 constructor's `adapter=None` positional and its `# type: ignore[arg-type]`, which 38 modules
 currently repeat.
+
+**No pytest fixture, and not in `pytest_plugins`.** T-W5's proxy is published that way because
+a test asks for `connect_proxy` by name and cannot construct one. This module is different on
+both counts: a test must choose a wire format and a bridge shape anyway, so
+`BridgeFixture(transport("aiohttp", fmt))` says more than a fixture name would — and importing it
+pulls in `server.py`, measured at **0.72 s**, which a global plugin charges to every pytest
+invocation including those that never start a bridge.
 
 **No `host=` on the factory.** An earlier draft added one "so T-E1 can rebind to §5.3's
 non-loopback name". It cannot be justified: §7.3 gives T-E1 non-loopback addressing by
@@ -2318,7 +2332,16 @@ a seam may never try the backend it is about to assert on. That is not hypotheti
 with the refusal handler deleted, **which is how this was found**". `pin_backend_order` ships the
 round-robin seam once, rather than four Epic I tickets re-deriving the same monkeypatch. It takes
 a `monkeypatch` and is therefore callable only from a test; the conformance check below is
-single-backend and never needs it.
+single-backend and never needs it. It patches `random.choices` on the **stdlib module object**
+reached through `kitty.bridge.server.random`, so for the duration every caller in the process gets
+round-robin, not only the bridge; `monkeypatch` reverting it is what contains that.
+
+**All members share the fixture's one transport, and therefore one recorder.** Distinct models per
+member are what make the selection observable. A test needing members on *separate* recorders
+builds its own `backends` list from `backend_for`; per-backend upstream *behaviour* — T-I8's
+blip-then-success, T-I11's mid-stream failover — is scripted through a stateful `responder` under
+`pin_backend_order`, not through separate transports. Stated here so four Epic I tickets inherit
+the shape rather than each rediscovering its limit.
 
 #### 7.5.4 Why the fixture carries its own conformance check
 
@@ -2341,21 +2364,33 @@ a promise.
 
 `assert_transport_reaches_its_recorder` drives one request and asserts four things. Each is
 paired with a defect the **other three pass** — the only argument that establishes
-non-redundancy — and each defect is a **registered transport**, running in the suite:
+non-redundancy — and each defect is a **real transport instance**, driven through the real check
+and running in the suite. They are deliberately **not** registered: the check takes an instance,
+so a shared registry never holds four things that are wrong on purpose — which would otherwise
+force the completeness meta-test below to carry a skip-list, the one mechanism it exists to
+forbid:
 
 | # | Assertion | The defect only it catches |
 |---|---|---|
 | 1 | Exactly one capture | **The decoy**: `bind()` points the bridge at a different live recorder. Status 200, teardown clean, and this transport's capture list is empty |
 | 2 | The marker is in the capture's body | **The blind capture**: a recorder that counts the request and stores no body — §1.4's "projection that could not see the model name" |
 | 3 | The inbound status is 200 | **The refusal**: upstream answers 400. Measured at one capture, marker present, teardown clean, downstream 400 — the request arrived correctly and the client was still failed |
-| 4 | `assert_teardown_clean()` | **The mis-declared format**: a transport declaring one format while binding an adapter that posts to the other. The recorder dispatches by path **suffix**, so it replies in the format the *path* named, the adapter parses it, `unmatched` stays empty — one correct capture, marker present, 200, and the declared `format` was never under test |
+| 4 | `assert_teardown_clean()`, run by the **fixture's** `__aexit__` | **The mis-declared format**: a transport declaring one format while binding an adapter that posts to the other. The recorder dispatches by path **suffix**, so it replies in the format the *path* named, the adapter parses it, `unmatched` stays empty — one correct capture, marker present, 200, and the declared `format` was never under test |
 
 Row 4 is why the fourth defect is a transport and not a unit test on
-`assert_teardown_clean()`. A unit test proves that function raises; it does not prove the
-conformance check **calls** it — and plan §1.4's own list of past harness failures includes "a
-guard proving a function was *called* when the enforcement was the branch after it". Row 1 and
-row 4 are as far apart as row 1 and row 2: one fails with an **empty** capture list, the other
-with a **complete and correct** one.
+`assert_teardown_clean()`. A unit test proves that function raises; it does not prove anything
+**calls** it — and plan §1.4's own list of past harness failures includes "a guard proving a
+function was *called* when the enforcement was the branch after it". Row 1 and row 4 are as far
+apart as row 1 and row 2: one fails with an **empty** capture list, the other with a **complete
+and correct** one.
+
+**Row 4 is asserted once, by the fixture, and deliberately not repeated inside the conformance
+check.** An earlier draft did both. Running the falsification procedure on it — delete each
+assertion, confirm exactly its own case goes red — showed the repeat was an assertion **no defect
+could falsify**: `__aexit__` raises first either way, so removing it changed nothing. An
+assertion nothing can kill is the thing §1.4 objects to, so it went. The teardown call is
+falsified instead by `_MisdeclaredTransport`, and a separate case asserts the fixture makes that
+call on the clean path.
 
 **An upstream 500 is deliberately not one of the defects.** Measured at four captures and seven
 seconds, it also trips assertion 1, so it would not be orthogonal. A 400 is the clean one.
@@ -2375,9 +2410,17 @@ the check over every registered transport**, so an Epic B author gets the confor
 registering rather than by remembering. But "iterate whatever is registered" is not enough:
 under a selective run or a per-file invocation the registering module may never be imported in
 that process, and the meta-test would pass over a set of one while reporting success for a
-category it never ran — the failure `--require-category` exists to prevent. So the meta-test
-imports an explicit `TRANSPORT_MODULES` tuple, one line per Epic B ticket, and asserts the
-registered set **equals** the expected one. T-W8's structural guard is separate and pins what
+category it never ran — the failure `--require-category` exists to prevent. So the meta-test iterates an explicit
+`CONFORMANCE_CASES` table — one row per Epic B ticket, carrying the registering module, the
+registry name, **the upstream format to construct with, and the inbound route that exercises
+it** — imports every row's module, and asserts the registered set **equals** the expected one.
+
+The last two fields are not decoration. The bridge *translates*, so the inbound route cannot be
+derived from the upstream format: `BEDROCK_CONVERSE` (T-B3) and `OLLAMA_CHAT` (half of T-B1) have
+no inbound route at all. And a single hardcoded format — the first draft — raises `ValueError` at
+construction for **all three** Epic B transports, since none of them serves Anthropic Messages.
+"Inherits the check by registering" was false for every author it was written for until the row
+carried both. T-W8's structural guard is separate and pins what
 *this module* registers, against a module-local constant and an AST scan, never against global
 registry state.
 
@@ -2399,7 +2442,9 @@ the transport, the elapsed time, the captures so far and the 30 s / 80 s referen
 `wait_closed` split §7.3 handles for the proxy, and the reason the support matrix is
 3.10–3.13. `assert_teardown_clean()` runs only on the clean path: raised from `__aexit__` over a
 failing body it would replace the assertion the test was making, and the falsification cases
-assert on message content. The conformance check therefore calls it **inside** the block.
+assert on message content. The conformance check does **not** call it as well: `__aexit__` runs
+before the check returns either way, so a repeat inside the block would be an assertion no defect
+could falsify — which is how the repeat was found and removed.
 
 **`assert_teardown_clean()` is stated for every transport, not just this one.** Its obligation is
 "every request I received was answered in the format I declare"; how a transport knows that is its
@@ -2588,8 +2633,11 @@ business, together with the job that runs them; doing it earlier would remove th
 gate. T-H1 must take that reclassification into account before it measures a mutation
 baseline, because it selects on `l1`.
 
-**Four modules have been added to that set since, and they are named here so T-K6 inherits a
-list rather than a search** — the count is what T-K6 and T-H1 plan against.
+**Six modules are bulleted below, and `tests/cli/test_stream_encoding.py` (KBR-10) is described
+after them — seven in all, named here so T-K6 inherits a list rather than a search** — the count
+is what T-K6 and T-H1 plan against. (The bullet count and the KBR-10 paragraph were already
+drifting apart before T-W8 added two; spelling out both is what stops the next addition
+guessing which set it joins.)
 
 - **KBR-132:** `tests/bridge/test_tls_certs.py` spawns a real `openssl` in one of its five cases.
   KBR-132 deliberately did **not** move it — the rule above applies to a test fixing a skip defect
@@ -2599,6 +2647,13 @@ list rather than a search** — the count is what T-K6 and T-H1 plan against.
   `tests/harness/test_recorder_conformance.py` is genuinely `l1` — its checks are pure functions
   over data and it opens nothing. The two socket-binding modules together run in **~1 second**,
   measured, which is the number the fast-gate budget should carry until T-K6 moves them.
+- **T-W8 (KBR-31):** `tests/harness/test_bridge.py` and
+  `tests/harness/test_bridge_falsification.py` each start a real `BridgeServer` **and** a
+  recorder, most cases one of each. Together they run in **~1.6 seconds**, measured (1.1 s and
+  0.5 s), which is the number the fast-gate budget should carry until T-K6 moves them. Worth
+  knowing while planning that move: the timeout case cost **30 seconds** until its responder was
+  released explicitly, because `stop_async` waits for in-flight upstream handlers rather than
+  aborting them — the same property §7.3 handles deliberately for the proxy.
 - **KBR-144:** `tests/bridge/test_responses_string_input.py` starts a real `BridgeServer` on an
   ephemeral port in four of its classes, following the existing convention of
   `tests/bridge/test_crash_resilience.py` rather than inventing a second one. The whole module
