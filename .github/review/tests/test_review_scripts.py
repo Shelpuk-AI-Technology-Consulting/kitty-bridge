@@ -16846,6 +16846,19 @@ class OperatorSurfacesAgreeTests(unittest.TestCase):
             A ``(interpret outputs, resolve outputs)`` pair.
         """
 
+        # ⚠️ KBR-182 AC4. `api_error_status` is now READ, and on this record it still
+        # contributes NOTHING -- deliberately, and recorded rather than quietly left.
+        # `\b402\b` is absent from every provider-scoped tuple, so the verdict comes
+        # entirely from `result`. `test_the_status_field_is_inert_on_this_record_and_
+        # that_is_recorded` demonstrates that by mutating the status and observing an
+        # identical verdict.
+        #
+        # ⚠️ That row is NOT the guard for KBR-207, and an earlier version of this
+        # comment claimed it was. Code review falsified the claim: `QUOTA_PATTERNS`
+        # matches `DEEPSEEK_NO_BALANCE` at tier 2, above anything a status can reach, so
+        # adding `\b402\b` leaves this record untouched and the row still passes. The
+        # guard that actually fails when KBR-207 lands is
+        # `StatusMatrixTests.test_a_status_that_matches_no_pattern_changes_nothing`.
         record = json.dumps(
             [
                 {
@@ -16919,6 +16932,53 @@ class OperatorSurfacesAgreeTests(unittest.TestCase):
 
         self.assertIn("Top up or wait, then re-run", printed)
         self.assertNotIn("the workflow", printed.split("::error::")[-1].lower())
+
+
+class ResolvedRecordStatusIsInertTests(unittest.TestCase):
+    """KBR-182 AC4, kept OUT of :class:`OperatorSurfacesAgreeTests` on purpose.
+
+    🔴 That class is `skipIf(BASH is None)` because its other rows execute workflow
+    steps through bash. This one never shells out, and inheriting the skip would let
+    AC4's evidence vanish silently on a runner without bash -- which `TEST_SUITE.md` 8
+    calls a failure, not an absence.
+    """
+
+    def test_the_status_field_is_inert_on_this_record_and_that_is_recorded(self):
+        """KBR-182 AC4, answered in the negative and proved rather than asserted.
+
+        The ticket asks that this fixture gain an assertion depending on its status
+        field, OR a comment saying it deliberately does not. It is the second: `402` is
+        not in any tier this record can reach, so the honest thing is to demonstrate the
+        inertness by MUTATING the input, not to claim it in prose.
+
+        🔴 The mutation is the control rather than an inspection of the code, which
+        would pass under any implementation.
+
+        ⚠️ **It is a weak control, and saying so is better than implying otherwise.**
+        `QUOTA_PATTERNS` claims this record at tier 2, above every tier a status can
+        reach, so no change to the status tiers can move it -- which is exactly what
+        "inert" means here, and also why this row survives mutants that a stronger
+        guard would kill. An earlier docstring called it "the only form of this claim
+        that can fail"; code review measured it failing under none of eleven.
+        """
+
+        baseline = interpret.classify(
+            status_record(402, subtype="success", terminal_reason="api_error",
+                          result=DEEPSEEK_NO_BALANCE)
+        )
+
+        for mutated in (418, 599, None):
+            with self.subTest(status=mutated):
+                self.assertEqual(
+                    interpret.classify(
+                        status_record(mutated, subtype="success",
+                                      terminal_reason="api_error",
+                                      result=DEEPSEEK_NO_BALANCE)
+                    ),
+                    baseline,
+                    "the status is recorded as inert here; it no longer is",
+                )
+
 
 
 class QuotaAdviceNamesNoRetiredProviderTests(unittest.TestCase):
@@ -17419,9 +17479,15 @@ class CredentialCarrierTests(unittest.TestCase):
     def test_a_named_cause_carries_a_body_that_has_no_number(self):
         """The reason the named types exist beside the status tier at all.
 
-        A body can name its cause and carry no status code anywhere the classifier can
-        see it, because a numeric ``api_error_status`` never reaches the haystack
-        (KBR-182). Without this fixture that rationale is prose nothing exercises.
+        A body can name its cause and carry no status code anywhere, so the named types
+        are the only thing identifying it.
+
+        🔴 **The fixture carried `api_error_status: 403` until KBR-182, and relied on a
+        DEFECT to make it invisible.** The status was dropped before any pattern saw it,
+        so a record with a number in it satisfied a test named "has no number". Once the
+        field reaches the classifier the fixture has to actually have no number, or it
+        proves nothing -- so the status is gone from here and lives in the ordering test
+        below, which is what that pairing is really evidence for.
         """
 
         record = json.dumps(
@@ -17429,7 +17495,6 @@ class CredentialCarrierTests(unittest.TestCase):
                 {
                     "type": "result",
                     "subtype": "error",
-                    "api_error_status": 403,
                     "error": {
                         "type": "permission_error",
                         "message": "not permitted to use this resource",
@@ -17438,14 +17503,47 @@ class CredentialCarrierTests(unittest.TestCase):
             ]
         )
 
-        self.assertNotIn(
-            "403",
-            interpret._outcome_text(record),
-            "the numeric status must stay invisible, or this fixture proves nothing",
+        self.assertIsNone(
+            re.search(r"\d", interpret._provider_outcome_text(record)),
+            "the fixture must carry no number AT ALL, or it proves nothing -- "
+            "`assertNotIn('403', ...)` was the first version and re-adding a 401 "
+            "would have passed it",
         )
         status, reason = interpret.classify(record)
         self.assertEqual(status, "exhausted")
         self.assertIn("permission_error", reason)
+
+    def test_a_named_type_still_outranks_the_status_that_arrives_beside_it(self):
+        """🔴 KBR-182 made this ordering live, and nothing else exercises it.
+
+        `CREDENTIAL_PATTERNS` is consulted before `CREDENTIAL_STATUS_PATTERNS` so that an
+        operator reads `permission_error` rather than `403` -- both true, one more
+        useful. Until this ticket the ordering could not be tested with a real record:
+        the numeric status never reached any haystack, so the named type won by default
+        and deleting the whole status tier would not have failed a single row.
+
+        Now that the status IS read, the pairing is the common production shape and the
+        order decides what the operator sees.
+        """
+
+        record = status_record(
+            403,
+            error={
+                "type": "permission_error",
+                "message": "not permitted to use this resource",
+            },
+        )
+
+        self.assertIn(
+            "403",
+            interpret._provider_outcome_text(record),
+            "the status must be visible, or the ordering is untested again",
+        )
+        status, reason = interpret.classify(record)
+
+        self.assertEqual(status, "exhausted")
+        self.assertIn("permission_error", reason)
+        self.assertNotIn("403", reason)
 
 
 class QuotaWordingTests(unittest.TestCase):
@@ -17574,6 +17672,627 @@ class ProsePatternGuardTests(unittest.TestCase):
                     matched,
                     f"{prose!r} no longer trips a grandfathered pattern -- if KBR-181 "
                     "fixed it, delete the entry and this row together",
+                )
+
+
+# ---------------------------------------------------------------------------
+# KBR-182 -- the provider's numeric status must reach the classifier
+# ---------------------------------------------------------------------------
+
+#: Anthropic's own spent-balance body, which arrives as HTTP **400**, not 402.
+#:
+#: 🔴 **This fixture is the one that killed the obvious fix.** KBR-182's ticket text
+#: proposes coercing numbers inside `_strings_in`, which puts the status in the FULL
+#: haystack -- and `FATAL_PATTERNS` is tier 1 and carries `\b400\b`. Measured, that
+#: turns this record from `exhausted`/quota into `fatal`/"workflow-level failure",
+#: with `retryable` flipped to false: KBR-145's filed defect, reintroduced through a
+#: new door. It is the reason the status is admitted to the provider-scoped text only.
+#:
+#: ⚠️ **Vendor-documented rather than run-observed, and the file's verbatim rule is
+#: suspended for it deliberately.** The wording is Anthropic's own
+#: (`platform.claude.com/docs/en/api/errors`, and reproduced in
+#: `anthropics/claude-code` bug reports); the status is what matters here and
+#: inventing a 400 body would have proved nothing about a real provider.
+ANTHROPIC_400_LOW_CREDIT = (
+    'API Error: 400 {"type":"error","error":{"type":"invalid_request_error",'
+    '"message":"Your credit balance is too low to access the Anthropic API. '
+    'Please go to Plans & Billing to upgrade or purchase credits."}}'
+)
+
+#: The same condition with the status in the FIELD instead of the text.
+#:
+#: 🔴 **This is the carrier that decides the design, and the one above is not.** With
+#: the CLI's `API Error: 400` prefix present, `\b400\b` matches the TEXT and tier 1
+#: claims the record whatever this ticket does -- a pre-existing defect of the same
+#: family as KBR-145, filed separately rather than fixed here. Strip the prefix and the
+#: only 400 left is the structured field, which is precisely the shape
+#: `api_error_status` exists for: measured, admitting it to the full haystack turns
+#: this record from `exhausted`/quota into `fatal` with the re-run refused.
+ANTHROPIC_LOW_CREDIT_NO_NUMBER = {
+    "type": "invalid_request_error",
+    "message": (
+        "Your credit balance is too low to access the Anthropic API. "
+        "Please go to Plans & Billing to upgrade or purchase credits."
+    ),
+}
+
+
+def status_record(status=None, **fields):
+    """Build a one-event execution record carrying a numeric status.
+
+    Args:
+        status: The value of ``api_error_status``, or None to omit the field.
+        **fields: Any other outcome fields to place on the event.
+
+    Returns:
+        The execution record as a JSON string.
+    """
+
+    event = {"type": "result", "subtype": "error"}
+    event.update(fields)
+    if status is not None:
+        event["api_error_status"] = status
+    return json.dumps([event])
+
+
+class NumericOutcomeFieldTests(unittest.TestCase):
+    """KBR-182. `OUTCOME_FIELDS` lists a numeric field; it must actually be read.
+
+    `_strings_in` collects string leaves only, so `api_error_status` -- a JSON NUMBER
+    in every record production writes -- was discarded before any pattern saw it. The
+    field was dead weight while looking live, and every numeric pattern in the module
+    could only ever match the CLI's `API Error: NNN` text.
+    """
+
+    def test_a_top_level_integer_is_collected_as_its_decimal_string(self):
+        """The defect, at the function that caused it."""
+
+        self.assertEqual(interpret._numbers_in(402), ["402"])
+
+    def test_zero_is_collected_rather_than_treated_as_absent(self):
+        """🔴 A falsy int is still an int, and `if value` would drop it.
+
+        `_strings_in` guards its string branch with `if value` -- correctly, an empty
+        string carries nothing. Copying that guard here would silently drop `0`, so the
+        distinction is pinned rather than left to the next reader's care.
+        """
+
+        self.assertEqual(interpret._numbers_in(0), ["0"])
+
+    def test_a_bool_is_not_collected_even_though_it_is_an_int(self):
+        """🔴 The trap this function is most likely to be 'simplified' into.
+
+        `isinstance(True, int)` is True in Python -- `bool` is an `int` subclass -- so a
+        bare `isinstance(value, int)` check turns `True` into the string `"True"` and
+        puts it in a haystack the module searches with regular expressions.
+        """
+
+        self.assertEqual(interpret._numbers_in(True), [])
+
+    def test_a_float_is_not_collected(self):
+        r"""Excluded on measured grounds, not by omission.
+
+        No status is fractional, and both `402.0` and `0.402` match `\b402\b`. The
+        module already records a live defect of exactly that shape -- `"billed $0.402"`
+        classifying as a spent balance -- so admitting floats reintroduces it.
+        """
+
+        self.assertEqual(interpret._numbers_in(402.0), [])
+
+    def test_a_missing_status_is_not_collected(self):
+        """A missing status is not a status; `"None"` is noise in the haystack."""
+
+        self.assertEqual(interpret._numbers_in(None), [])
+
+    def test_a_negative_number_is_not_a_status(self):
+        r"""🔴 Decided explicitly, because the default was wrong in a surprising way.
+
+        `-401` stringifies to `"-401"`, and `\b40[13]\b` **matches inside it** -- `-` is a
+        non-word character, so the word boundary falls right before the digits. An
+        unbounded coercion therefore routed a negative number through the credential
+        tier, which no provider ever sends and nothing had decided.
+
+        ⚠️ A PR review raised this and asserted the opposite -- that the leading minus
+        made such a value inert. Measured before acting on it: it routed. The finding
+        was right that the behaviour was unpinned; its reasoning was backwards, and
+        pinning the claim rather than the measurement would have frozen a fiction.
+        """
+
+        self.assertEqual(interpret._numbers_in(-401), [])
+        self.assertEqual(interpret._numbers_in(-1), [])
+
+        status, reason = interpret.classify(status_record(-401))
+
+        self.assertEqual(status, "exhausted")
+        self.assertNotIn("401", reason)
+
+    def test_an_absurd_integer_is_bounded_rather_than_flooding_the_haystack(self):
+        """The numeric twin of :data:`OUTCOME_FIELD_CHARS`, which cannot express it.
+
+        🔴 `_strings_in` caps each field at 4,000 characters so one oversized field
+        cannot flood the haystack. A number has the same exposure through a different
+        door -- the CONVERSION is what grows -- and `_numbers_in` shipped without the
+        cap until code review measured a 4,000-digit status becoming 4,000 characters
+        of searchable text.
+
+        ⚠️ This does not claim to stop the related crash. `json.loads` refuses an
+        integer over 4,300 digits before this function is ever reached, on `main`
+        exactly as here; that is filed separately and is not what the bound is for.
+        """
+
+        self.assertEqual(interpret._numbers_in(999999999), ["999999999"])
+        self.assertEqual(interpret._numbers_in(interpret.OUTCOME_NUMBER_BOUND), [])
+
+        # End to end, on the carrier a provider would actually send: a long-but-legal
+        # integer must not reach the haystack the tiers search.
+        record = '[{"type":"result","subtype":"error","api_error_status":' + "4" * 4000 + "}]"
+
+        self.assertNotIn("4444", interpret._provider_outcome_text(record))
+
+    def test_a_number_the_model_wrote_is_not_collected_as_a_status(self):
+        """🔴 KBR-166's authorship boundary, extended to the numeric bucket.
+
+        `result` is the one outcome field the MODEL writes, and `_outcome_parts` must not
+        route numbers from it into the status bucket -- a review that returned a bare
+        number would otherwise vote on why the run failed, which is the whole defect
+        KBR-172 and KBR-166 were filed over.
+
+        Code review found this boundary held by nothing: a mutant that collected numbers
+        under `result` too survived the entire suite.
+        """
+
+        record = json.dumps([{"type": "result", "result": 401}])
+
+        self.assertEqual(interpret._provider_outcome_text(record), "")
+        self.assertNotIn("401", interpret._outcome_text(record))
+
+    def test_a_nested_integer_is_not_collected(self):
+        """The bound that keeps a provider's PARAMETERS from being read as statuses.
+
+        🔴 Measured: without it, `{"error": {"type": "rate_limit_error",
+        "retry_after": 401}}` starts reporting "provider rejected the credentials".
+        The bound is the vendor's own carrier rather than a guess -- the Agent SDK
+        reference puts `api_error_status` at the TOP LEVEL of the result message,
+        beside `subtype`, defined as "the HTTP status code of the API error that
+        terminated the conversation".
+        """
+
+        self.assertEqual(
+            interpret._numbers_in({"type": "rate_limit_error", "retry_after": 400}), []
+        )
+        self.assertEqual(interpret._numbers_in([400, 401]), [])
+
+
+class StatusReachesTheCredentialTierTests(unittest.TestCase):
+    """KBR-182. A status the provider reported structurally must route like one.
+
+    Before this ticket `\\b40[13]\\b` could only match the CLI's `API Error: NNN` text,
+    so a rejected key that arrived with its status in the structured field and an
+    unrecognised message fell through to the generic tier and was called a workflow
+    fault -- with the re-run refused.
+    """
+
+    def test_a_401_that_is_the_only_signal_reaches_the_credential_tier(self):
+        """The ticket's headline case, with nothing else in the record to carry it."""
+
+        status, reason = interpret.classify(status_record(401))
+
+        self.assertEqual(status, "exhausted")
+        self.assertTrue(
+            reason.startswith("provider rejected the credentials or model"), reason
+        )
+        self.assertIn("401", reason)
+
+    def test_a_403_that_is_the_only_signal_reaches_the_credential_tier(self):
+        """The other half of `\\b40[13]\\b`, which no fixture exercised structurally."""
+
+        status, reason = interpret.classify(status_record(403))
+
+        self.assertEqual(status, "exhausted")
+        self.assertTrue(
+            reason.startswith("provider rejected the credentials or model"), reason
+        )
+        self.assertIn("403", reason)
+
+    def test_a_dead_key_behind_a_generic_code_is_no_longer_a_workflow_fault(self):
+        """🔴 The defect, in the shape that costs an operator the most.
+
+        `OPENAI_401_MESSAGE_ONLY` carries no credential vocabulary at all, so when the
+        CLI puts it in `result` -- model-authored, and scoped out by KBR-166 -- the only
+        thing left identifying it is the status field. Measured on `origin/main`: this
+        record was `fatal` "workflow-level failure: 'invalid_request'" with
+        `retryable` false, so an operator was sent to debug a correct workflow while
+        their key was dead, and the free re-run was refused.
+        """
+
+        record = status_record(401, result=OPENAI_401_MESSAGE_ONLY)
+
+        status, reason = interpret.classify(record)
+
+        self.assertEqual(status, "exhausted")
+        self.assertIn("401", reason)
+        self.assertTrue(
+            interpret.retry_verdict(
+                status, record_present=True, cause_named=False, elapsed_seconds=600
+            ),
+            "a rejected credential bills nothing, so the one free re-run must survive",
+        )
+
+    def test_the_string_form_still_routes_as_it_always_did(self):
+        """The route that DID work must not be disturbed by the one that did not.
+
+        A provider that sends the status as a JSON string reached the haystack through
+        `_strings_in` before this ticket. That path is untouched, and saying so here is
+        cheaper than discovering it moved.
+        """
+
+        status, reason = interpret.classify(status_record("401"))
+
+        self.assertEqual(status, "exhausted")
+        self.assertIn("401", reason)
+
+
+class StatusNeverReachesTheFatalTierTests(unittest.TestCase):
+    """KBR-182. The bound that makes the fix safe, asserted rather than described.
+
+    🔴 **`FATAL_PATTERNS` is tier 1 and carries `\\b400\\b`.** A bare status in the full
+    haystack lets any 400 pre-empt every quota and credential tier below it -- and
+    Anthropic reports a SPENT BALANCE as HTTP 400, so that is not a hypothetical
+    ordering argument but KBR-145's filed defect arriving through a new door. These
+    rows fail the moment the coercion is moved into `_strings_in`, which is the fix
+    KBR-182's own ticket text proposes.
+    """
+
+    def test_the_numeric_status_is_absent_from_the_tier_one_haystack(self):
+        """The structural claim, at the function that decides it."""
+
+        self.assertNotIn("400", interpret._outcome_text(status_record(400)))
+
+    def test_the_numeric_status_is_present_in_the_provider_scoped_haystack(self):
+        """🔴 The other half, without which the test above passes on a no-op.
+
+        A fix that simply dropped the field would satisfy the exclusion and deliver
+        nothing. Both halves together are what pin the design.
+        """
+
+        self.assertIn("400", interpret._provider_outcome_text(status_record(400)))
+
+    def test_a_spent_balance_reported_as_a_400_is_still_a_spent_balance(self):
+        """🔴 KBR-145's defect, in the one body that would reintroduce it.
+
+        Anthropic's spent-balance response is HTTP 400 `invalid_request_error`, not
+        402, and here the 400 is ONLY in the structured field -- the shape the field
+        exists for. Measured: with the status in the full haystack this record becomes
+        `fatal` "workflow-level failure: '400'" and `retryable` false -- an operator
+        with an empty balance sent to debug a correct workflow, and the re-run refused.
+        """
+
+        record = status_record(400, error=ANTHROPIC_LOW_CREDIT_NO_NUMBER)
+
+        status, reason = interpret.classify(record)
+
+        self.assertEqual(status, "exhausted")
+        self.assertTrue(reason.startswith("provider quota exhausted"), reason)
+        self.assertTrue(
+            interpret.retry_verdict(
+                status, record_present=True, cause_named=False, elapsed_seconds=600
+            ),
+            "a spent balance must keep the re-run this module already grants it",
+        )
+
+    def test_the_cli_prefixed_form_is_claimed_by_tier_one_and_that_is_pre_existing(self):
+        """⚠️ Pinned as UNCHANGED, not endorsed -- and it is a real defect.
+
+        With the CLI's `API Error: 400` prefix in the text, `\\b400\\b` matches prose and
+        tier 1 claims the record before the quota tier is ever consulted, so Anthropic's
+        spent balance reads as a broken workflow. That is live on `main`, is the same
+        family as KBR-145, and is filed separately: distinguishing it from the
+        context-management refusal -- also a 400, also carrying a billing word -- needs
+        the body, and tier 1 never gives the body a turn.
+
+        The row is here so the pre-existing verdict is visible rather than implied, and
+        so the follow-up ticket has something that fails when it lands.
+        """
+
+        status, _ = interpret.classify(status_record(400, result=ANTHROPIC_400_LOW_CREDIT))
+
+        self.assertEqual(status, "fatal")
+
+    def test_a_bare_400_is_not_promoted_to_a_workflow_fault(self):
+        """The same bound with no body at all to rescue the verdict.
+
+        A transport 400 says the request was rejected; it does not say BY WHAT, and
+        Anthropic's balance response proves the two are not the same question.
+        """
+
+        status, _ = interpret.classify(status_record(400))
+
+        self.assertEqual(status, "exhausted")
+
+    def test_every_quota_fixture_is_unchanged_by_every_status(self):
+        """The quota set, carried with every status. None may leave the quota tier.
+
+        🔴 Swept across all of :data:`STATUS_MATRIX_STATUSES` rather than the three each
+        body names. Code review found the narrow version left ~56 of the measured rows
+        unpinned, and the whole risk of this ticket is a status arriving beside a body
+        that does not name it.
+        """
+
+        for name, body in QUOTA_FIXTURES:
+            for code in STATUS_MATRIX_STATUSES:
+                with self.subTest(fixture=name, status=code):
+                    status, reason = interpret.classify(status_record(code, result=body))
+
+                    self.assertEqual(status, "exhausted", name)
+                    self.assertTrue(
+                        reason.startswith("provider quota exhausted"),
+                        f"{name} at {code}: resolved by {reason!r}, not by the quota tier",
+                    )
+
+
+#: Every status this repository can produce, and the bodies each may arrive with.
+#:
+#: 🔴 **Incoherent pairs are deliberate, and excluding them is how the first version of
+#: this measurement missed a regression.** Revision 1 of the design measured only
+#: "coherent" rows -- each body paired with the status its own text names -- which is
+#: constructed so it cannot see the hazard: a body whose text names NO status, carried
+#: beside a numeric one, is the only shape `api_error_status` exists for. A gateway's
+#: status need not match a passed-through upstream body either.
+STATUS_MATRIX_STATUSES = (None, 400, 401, 402, 403, 404, 429, 500, 502, 503, 529)
+
+STATUS_MATRIX_BODIES = (
+    ("no body", {}),
+    ("anthropic low credit, no number", {"error": ANTHROPIC_LOW_CREDIT_NO_NUMBER}),
+    ("deepseek no balance", {"result": DEEPSEEK_NO_BALANCE}),
+    ("openrouter no credits", {"result": OPENROUTER_NO_CREDITS}),
+    ("anthropic named 401", {"result": ANTHROPIC_401_AUTHENTICATION_ERROR}),
+    ("anthropic named 403", {"result": ANTHROPIC_403_PERMISSION_ERROR}),
+    ("openai 401 message only", {"result": OPENAI_401_MESSAGE_ONLY}),
+    ("billed generic invalid_request", {"error": {
+        "type": "invalid_request_error", "message": "the request was rejected"}}),
+    ("coding plan 1308", {"result": CODING_PLAN_5H_QUOTA}),
+    ("transient server error", {"error": {
+        "type": "server_error", "message": "Overloaded"}}),
+    ("nested retry_after 401", {"error": {
+        "type": "rate_limit_error", "message": "slow down", "retry_after": 401}}),
+    # 🔴 Both added after code review found the recorded "10 reason-only moves"
+    # irreproducible from this file: the matrix yielded 6, and the missing 4 came from
+    # shapes no row carried. The second also carries the INCOHERENT row the design
+    # records -- a status beside a structured-output subtype -- which the design claimed
+    # was "pinned in the table" while the table could not express it, because
+    # `status_record` fixes `subtype` unless a row overrides it.
+    ("model not found prose", {"result": "There's an issue with the selected model "
+                                         "(nonexistent-model)"}),
+    ("structured output give up", {"subtype": "error_max_structured_output_retries"}),
+)
+
+#: The rows KBR-182 MOVES, measured on `origin/main` @ `11a5c88` before the change.
+#:
+#: Each is the same defect: the provider rejected the credentials, said so only in the
+#: structured status, and was reported as a broken workflow with the free re-run
+#: refused. Every other cell of the matrix keeps the verdict it already had, which is
+#: what :meth:`StatusMatrixTests.test_no_row_becomes_a_workflow_fault` holds it to.
+STATUS_MATRIX_MOVED = {
+    (401, "openai 401 message only"): ("fatal", "exhausted"),
+    (401, "billed generic invalid_request"): ("fatal", "exhausted"),
+    (403, "openai 401 message only"): ("fatal", "exhausted"),
+    (403, "billed generic invalid_request"): ("fatal", "exhausted"),
+}
+
+
+class StatusMatrixTests(unittest.TestCase):
+    """KBR-182 AC3. The before/after verdict, for every status against every body.
+
+    🔴 **The ticket asks for this measurement because the fix is behaviour-changing.**
+    Turning a dormant field on wakes every numeric pattern that reads the haystack it
+    joins, so the question is not "does the fix work" but "what else moved". The answer
+    must be a table a reader can check, not a claim in a commit message.
+    """
+
+    def _classify(self, status, fields):
+        """Classify one cell of the matrix.
+
+        Args:
+            status: The ``api_error_status`` value, or None to omit it.
+            fields: The other outcome fields on the event.
+
+        Returns:
+            The ``(status, reason)`` pair :func:`classify` returned.
+        """
+
+        return interpret.classify(status_record(status, **fields))
+
+    def test_no_status_turns_a_record_into_a_workflow_fault(self):
+        """🔴 The invariant the design exists to hold: nothing moves INTO `fatal`.
+
+        A row that gains a `fatal` verdict also loses its re-run -- `retry_verdict`
+        refuses one whenever a record is present -- so an operator is both misdirected
+        and denied the retry that would have proved the misdirection wrong. That is
+        KBR-145's defect, and `\\b400\\b` in tier 1 is the loaded gun.
+
+        🔴 **The control is the SAME BODY with the status removed, not a table of
+        expected verdicts.** A hardcoded table was the first version and it was
+        vacuous: rows it did not list compared against `None` and passed whatever the
+        code did, so the rejected full-haystack design -- which turns a bodyless 400
+        into a workflow fault -- walked straight through the guard that existed to stop
+        it. Classifying the body alone asks the question directly: adding a status may
+        sharpen a verdict, and may rescue one from `fatal`, but may never create one.
+        """
+
+        checked = 0
+        for name, fields in STATUS_MATRIX_BODIES:
+            without, _ = self._classify(None, fields)
+            if without == "fatal":
+                # The body is a workflow fault on its own; the status cannot make that
+                # worse, and rows it RESCUES are asserted elsewhere.
+                continue
+            for status in STATUS_MATRIX_STATUSES:
+                with self.subTest(status=status, body=name):
+                    verdict, reason = self._classify(status, fields)
+
+                    self.assertNotEqual(
+                        verdict,
+                        "fatal",
+                        f"body {name!r} alone is {without}; adding "
+                        f"api_error_status={status} made it fatal ({reason!r})",
+                    )
+                    checked += 1
+
+        # 🔴 The guard skips bodies that are already `fatal`, so a change making more
+        # of them fatal would shrink it toward vacuity in silence. Code review caught
+        # the same shape once already in this class. The skipped direction -- a status
+        # RESCUING a fatal body -- is asserted by
+        # `test_every_recorded_move_actually_happened`, which is the other half.
+        self.assertGreater(
+            checked, 90, "the fatal-alone skip has eaten most of this guard"
+        )
+
+    def test_every_recorded_move_actually_happened(self):
+        """The other direction: a claimed move that did not happen is a stale record.
+
+        Without this, :data:`STATUS_MATRIX_MOVED` could name rows the code no longer
+        touches and the guard above would quietly weaken -- it reads the table as a
+        list of permitted exceptions.
+
+        🔴 **This is also the RESCUE half of the invariant, and the pairing is easy to
+        break by halves.** `test_no_status_turns_a_record_into_a_workflow_fault` skips
+        any body that is already `fatal` alone, so the direction it cannot see -- a
+        status rescuing a fatal body into `exhausted` -- is asserted only here. Reduce
+        one of these two and check the other first.
+        """
+
+        for (status, name), (before, after) in STATUS_MATRIX_MOVED.items():
+            fields = dict(STATUS_MATRIX_BODIES)[name]
+            with self.subTest(status=status, body=name):
+                verdict, reason = self._classify(status, fields)
+
+                self.assertEqual(
+                    verdict,
+                    after,
+                    f"status {status} with {name!r} was {before} on main and is "
+                    f"recorded as moving to {after}; it is {verdict} ({reason!r})",
+                )
+
+    def test_every_moved_row_regains_the_free_re_run(self):
+        """AC3's cost half. A verdict that moves must move `retryable` with it.
+
+        🔴 Asserted through `retry_verdict` rather than read off the status name: the
+        module's own header says reading one off the other is the mistake upstream was
+        filed over.
+        """
+
+        for (status, name), (_, after) in STATUS_MATRIX_MOVED.items():
+            fields = dict(STATUS_MATRIX_BODIES)[name]
+            with self.subTest(status=status, body=name):
+                verdict, _ = self._classify(status, fields)
+
+                self.assertEqual(verdict, after)
+                self.assertTrue(
+                    interpret.retry_verdict(
+                        verdict,
+                        record_present=True,
+                        cause_named=False,
+                        elapsed_seconds=600,
+                    )
+                )
+
+    def test_the_top_up_paragraph_fires_on_a_spent_balance(self):
+        """🔴 The POSITIVE CONTROL, without which the row below cannot fail.
+
+        Code review found the agreement assertion vacuous: `_write_diagnostic`'s quota
+        branch keys on the RECORD's evidence and never on the verdict it is handed, so
+        for a record carrying no quota vocabulary `_quota_diagnostic` returns False
+        whatever it is told -- under the fix, under `main`, and under every mutant. An
+        `assertFalse` alone therefore asserted the fixture's vocabulary, not the
+        classifier's behaviour.
+
+        This row establishes that the helper CAN say True, so the one below is a
+        statement about agreement rather than about silence.
+        """
+
+        record = status_record(402, result=DEEPSEEK_NO_BALANCE)
+        verdict, reason = interpret.classify(record)
+
+        self.assertEqual(verdict, "exhausted")
+        self.assertTrue(
+            _quota_diagnostic(record, verdict, reason),
+            "the top-up paragraph must fire on a spent balance, or the agreement "
+            "assertion below is asserting nothing",
+        )
+
+    def test_the_advice_still_agrees_with_the_verdict_on_every_moved_row(self):
+        """KBR-145's invariant, re-checked on the rows this ticket disturbs.
+
+        `_write_diagnostic` reads the EVIDENCE while `classify` reads pattern order, so
+        the two can disagree without either being obviously wrong. A credential verdict
+        must not be handed a top-up paragraph: the operator would be told to spend money
+        on a key that needs replacing.
+
+        Read together with the positive control above -- alone this row is satisfied by
+        a fixture that simply has no billing words in it.
+        """
+
+        for (status, name), _ in STATUS_MATRIX_MOVED.items():
+            fields = dict(STATUS_MATRIX_BODIES)[name]
+            record = status_record(status, **fields)
+            with self.subTest(status=status, body=name):
+                verdict, reason = interpret.classify(record)
+
+                self.assertTrue(verdict.startswith("exhausted"))
+                self.assertIn("credentials", reason)
+                self.assertFalse(
+                    _quota_diagnostic(record, verdict, reason),
+                    f"status {status} with {name!r}: verdict says credentials, "
+                    "advice says top up a balance",
+                )
+
+    def test_the_cli_prefixed_spent_balance_disagrees_with_its_own_advice(self):
+        """⚠️ KBR-206, pinned rather than fixed -- and it is an I-C4 violation.
+
+        Anthropic's spent balance arrives with the CLI's `API Error: 400` prefix, so
+        `\\b400\\b` matches PROSE and tier 1 calls it a workflow fault. The diagnostic,
+        which reads the evidence rather than the verdict, prints the top-up paragraph
+        anyway. The operator is told the workflow is broken and, a paragraph later, to
+        top up a balance -- the exact disagreement `TEST_SUITE.md` I-C4 forbids and
+        KBR-145 was filed over.
+
+        🔴 Pre-existing and identical on `main`, and pinned HERE because this ticket's
+        own matrix is what surfaced it. Recording only half of it -- the `fatal` verdict
+        without the contradicting advice -- would hide the part that costs an operator
+        their afternoon. KBR-206 deletes or inverts this row.
+        """
+
+        record = (
+            'API Error: 400 {"type":"error","error":{"type":"invalid_request_error",'
+            '"message":"Your credit balance is too low to access the Anthropic API. '
+            'Please go to Plans & Billing to upgrade or purchase credits."}}'
+        )
+        verdict, reason = interpret.classify(record)
+
+        self.assertEqual(verdict, "fatal")
+        self.assertTrue(
+            _quota_diagnostic(record, verdict, reason),
+            "if the advice stopped contradicting the verdict here, KBR-206 landed "
+            "and this row should have gone with it",
+        )
+
+    def test_a_status_that_matches_no_pattern_changes_nothing(self):
+        """The statuses this repository can produce but does not yet READ.
+
+        402, 404 and 529 reach the generic fallthrough on a bodyless record: `\\b402\\b`
+        is deliberately absent from the quota set, `\\b40[13]\\b` excludes 404, and
+        `\\b50[023]\\b` does not cover 529. Pinned so a reader of the matrix does not
+        assume every status improved, and so the follow-up ticket that adds 402 and 404
+        has a row that fails when it lands.
+        """
+
+        for code in (402, 404, 529):
+            with self.subTest(status=code):
+                verdict, reason = self._classify(code, {})
+
+                self.assertEqual(verdict, "exhausted")
+                self.assertEqual(
+                    reason, "ran but returned no payload and no recognisable error"
                 )
 
 

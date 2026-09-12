@@ -3829,6 +3829,64 @@ Running `mypy src/kitty` on the Windows leg is therefore not redundant with the 
 a **new detector over code no check has ever read**. That is also why the platform legs run the
 whole step list rather than pytest alone.
 
+### 8.5 The review classifier's tier order
+
+The gate is not the only thing that decides whether a pull request is reviewed.
+`.github/review/scripts/interpret_claude_result.py` reads the wreckage of a failed review
+attempt and answers a question no test in `tests/` asks: **who fixes this** — top up a
+balance, or edit a workflow. It also decides whether the one automatic retry is spent. Its
+entire rationale has lived in module comments, which is why three tickets (KBR-145, KBR-172,
+KBR-166) each re-derived the same reasoning from scratch. The invariants are recorded here so
+the next change to it has something to contradict.
+
+**I-C1 — Tier order is a cost ordering, not a specificity ordering.** `FATAL_PATTERNS` is
+consulted first, then quota, then credentials, then the generic-code tier, then transients.
+"Generic loses to everything more specific" reads well and is wrong: `EXHAUSTED_PATTERNS`
+carries the bare words `timeout` and `capacity`, which a model can write in its own prose, so
+yielding to them would let a billed rejection be retried at full price. The order is justified
+by what each misclassification costs, and each entry's position is measured rather than
+argued.
+
+**I-C2 — A pattern weak enough to appear in ordinary prose is scoped by AUTHORSHIP, never by
+a tighter regex.** KBR-172 and KBR-166 each measured anchoring — on vendor vocabulary, on the
+CLI's line shape, on proximity to a spending verb — and every version lost a real provider
+body while still leaking model prose. The separable question is not what the text says but who
+wrote it, and the execution record already answers it: `_provider_outcome_text` is the
+narrower haystack, and the weak patterns read only that.
+
+**I-C3 — A numeric outcome field is admitted to the provider-scoped haystack only.** KBR-182.
+`api_error_status` is a JSON number and was discarded before any pattern saw it, so the field
+whose purpose is to report the provider's status was dead weight while looking live. It is now
+read — but it must never reach the haystack `_outcome_text` returns, because that one is read
+first by `FATAL_PATTERNS`, which carries `\b400\b`. Anthropic reports a spent balance as HTTP
+400, so a bare status in the tier-1 haystack turns an empty account into a "broken workflow"
+verdict with the re-run refused. The bound is at the field's own value: a number nested inside
+a provider's error object is a parameter, not a status.
+
+⚠️ Two qualifications, because the rule is easy to state more absolutely than it holds. It
+governs **parseable** records: when `_parse_events` fails, `classify` searches the raw text
+whole and always has, status text included. And `_provider_outcome_text` has a **second
+consumer** — `_write_diagnostic`'s quota branch — so a numeric pattern added to
+`QUOTA_WORD_PATTERNS` would fire the top-up paragraph off a bare status, including under a
+`fatal` verdict. That is the door KBR-207 has to walk through carefully.
+
+**I-C4 — The verdict, the `retryable` flag and the diagnostic's advice must agree.** They are
+computed by three different functions from three different inputs — pattern order, cost, and
+the evidence text — so they can disagree without any one of them being obviously wrong.
+KBR-145 was filed because they did: an operator was told to top up a balance and, one
+paragraph up, that the workflow was broken. Any change to the tier order re-checks all three.
+
+**How it is proven.** `.github/review/tests/test_review_scripts.py`, run directly by `ci.yml`
+rather than through `pytest`, so it is outside §8.1's marker matrix and carries no layer
+marker. That is deliberate: the suite must stay runnable with a bare interpreter and no
+installed dependencies, because a broken review workflow has to be diagnosable before an
+environment is provisioned. Its content is L1 in kind. Behaviour-changing edits to the tier
+order carry a before/after table over the full cross product of statuses and body fixtures —
+incoherent pairs included, since a gateway's status need not match a passed-through upstream
+body — and `StatusMatrixTests` is the pattern to copy.
+
+---
+
 ## 9. Gap register
 
 ### 9.1 What the current suite already does well
