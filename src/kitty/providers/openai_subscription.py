@@ -482,12 +482,20 @@ class OpenAISubscriptionAdapter(OpenAIAdapter):
 
         ``.get`` with a default, not ``or``, and the difference is deliberate:
         ``.get`` substitutes only for an **absent** key, so a present-but-falsy
-        model would pass straight through rather than become ``"gpt-5.4"``. That
-        is unreachable — ``Profile.model`` is required and rejects empty and
-        whitespace-only values, and ``ResponsesTranslator`` subscripts ``model``
-        — and the two spellings are therefore equivalent for every input that can
-        occur.  Written down because the equivalence rests on those two
-        invariants, not on anything local to this function.
+        model would pass straight through rather than become ``"gpt-5.4"``.
+        Neither state is reachable, so the two spellings agree — but only
+        because of an invariant held elsewhere:
+        :meth:`~kitty.bridge.server.BridgeServer._normalize_model` overwrites
+        ``cc_request["model"]`` whenever the profile sets one, and
+        ``Profile.model`` is a required field that rejects empty and
+        whitespace-only values.  The key is therefore always present and always
+        truthy here, and both the default and the falsy branch are dead.
+
+        The inbound translator is **not** what guarantees this:
+        ``ResponsesTranslator.translate_request`` reads
+        ``responses_request.get("model", "")``, so a body with no ``model``
+        reaches this method as ``""`` and would ship as ``""`` if the profile
+        invariant were ever removed.  Measured, not assumed.
 
         Args:
             cc_request: The normalized request.  Only its ``model`` is read;
