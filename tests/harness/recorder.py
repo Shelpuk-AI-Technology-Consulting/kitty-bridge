@@ -534,7 +534,16 @@ class RecordingUpstream:
         # Stamp arrival and reserve the slot before anything can await. Reading
         # the body first would let a short later request overtake a long earlier
         # one, and the recorded order would stop being the arrival order.
-        arrival = time.monotonic()
+        #
+        # `perf_counter`, NOT `monotonic` (KBR-208). On Windows with Python 3.12
+        # -- which the CI matrix runs -- `monotonic()` is `GetTickCount64()` at
+        # 15.625ms resolution, so two probe requests in one tick get the *same*
+        # timestamp and `check_arrival_increases` fails on a recorder that is
+        # working correctly. `perf_counter()` is `QueryPerformanceCounter` on
+        # every supported version. Invisible on Linux and macOS, where both
+        # clocks are nanosecond-resolution, which is why it went unnoticed until
+        # the Windows leg ran this file for the first time.
+        arrival = time.perf_counter()
         index = len(self._slots)
         self._slots.append(_PENDING)
 

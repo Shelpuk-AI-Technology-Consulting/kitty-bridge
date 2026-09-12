@@ -154,13 +154,13 @@ once. Both are exactly the coordination problem Milestone 0 exists to remove.
 Includes the **totality rule**: every key classifies into envelope, conversation or residual, and a
 non-empty residual raises. *Falsification:* a stub reader that drops an unknown key fails it.
 
-**T-W3 — register.** One entry per live row of §3.2.1 and §3.2.2. The families are M1–M15 and
+**T-W3 — register.** One entry per live row of §3.2.1 and §3.2.2. The families are M1–M16 and
 P1–P23, but the **sub-lettered rows are separate rows with separate triggers**, and the P family
-has gaps — P22 is reserved by §9.2's G23 — so the count is **44 published, 43 live**: M13 is
+has gaps — P22 is reserved by §9.2's G23 — so the count is **45 published, 44 live**: M13 is
 withdrawn (KBR-5) and excluded from the data, with the parser asserting the struck set is exactly
 `{M13}` so a new strike-through is a deliberate decision. **Read the count off the register, not
-off the ranges**; it has moved twice (M15 with KBR-144, P23 with KBR-171) and nothing parses this
-sentence.
+off the ranges**; it has moved three times (M15 with KBR-144, P23 with KBR-171, M16 with KBR-167)
+and nothing parses this sentence.
 
 Per row: id, site symbols, trigger, the projection paths it touches, conditional or not, design
 reference — plus `not_projectable_reason`, required exactly when the row takes §3.3.1a's escape.
