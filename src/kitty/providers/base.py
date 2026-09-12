@@ -14,8 +14,11 @@ _MASK = "****"
 class ProviderAdapter(ABC):
     """Interface for upstream Chat Completions API providers.
 
-    Implementations are stateless: they build request payloads and parse
-    response payloads but do not perform HTTP calls themselves.
+    Most implementations are stateless: they build request payloads and parse
+    response payloads but do not perform HTTP calls themselves.  The adapters
+    that set ``use_custom_transport`` are the exception — each owns an HTTP
+    client of its own, and :meth:`aclose` is how the bridge releases it at
+    teardown (KBR-190).
     """
 
     # Internal metadata keys that must never be sent upstream.
@@ -639,6 +642,29 @@ class ProviderAdapter(ABC):
             NotImplementedError: If not overridden by a custom-transport provider.
         """
         raise NotImplementedError("Custom transport provider must implement stream_request()")
+
+    async def aclose(self) -> None:
+        """Release any HTTP transport this adapter owns.
+
+        A no-op by default, because an adapter driven through the bridge's own
+        aiohttp session owns nothing to release.  An adapter with
+        ``use_custom_transport`` true builds and caches its own client, and
+        :meth:`~kitty.bridge.server.BridgeServer.stop_async` awaits this at
+        teardown to close it.
+
+        An override must set the cached attribute back to ``None`` **before**
+        awaiting the close, not after.  The ``curl_cffi`` builders test only for
+        absence, so a session left in place would be handed back for ever — and
+        ``stop_async`` logs and contains a failing close, which would make that
+        silent as well as permanent.
+
+        Safe to call more than once, and on an adapter that never served a
+        request — ``start_async``'s F49 path can reach ``stop_async`` before the
+        caller does.
+        """
+        # An explicit no-op rather than an empty body: this is a hook with a
+        # default, not an abstract method every adapter has to answer.
+        return None
 
 
 class ProviderError(Exception):

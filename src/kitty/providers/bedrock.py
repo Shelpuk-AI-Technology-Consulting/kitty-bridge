@@ -36,6 +36,13 @@ class BedrockAdapter(ProviderAdapter):
     Supports two auth modes via provider_config:
     - AWS credentials stored in Kitty (access_key:secret_key)
     - AWS SSO / named profile (boto3 credential chain)
+
+    **No** :meth:`~kitty.providers.base.ProviderAdapter.aclose` override, unlike
+    the other two custom-transport adapters: :meth:`_get_boto3_client` builds a
+    client per request and caches nothing on the instance, so a stopping bridge
+    has nothing here to release (KBR-190).  ``tests/test_provider_bedrock.py``
+    pins that property, and the registry sweep in
+    ``tests/test_wire_shape_honesty.py`` names this adapter as the one exemption.
     """
 
     @property
