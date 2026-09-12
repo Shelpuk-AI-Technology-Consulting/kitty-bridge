@@ -282,6 +282,57 @@ class TestBedrockTranslateToUpstream:
 # ── Bedrock → CC response translation ────────────────────────────────────
 
 
+class TestBedrockStopSequences:
+    """KBR-178: the CC `stop` reaches Converse as `inferenceConfig.stopSequences`."""
+
+    def setup_method(self):
+        self.adapter = BedrockAdapter()
+
+    def _cc(self, **extra):
+        """Build a minimal CC request, plus whatever the case under test adds."""
+        cc = {
+            "model": "anthropic.claude-sonnet-4-20250514",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream": False,
+        }
+        cc.update(extra)
+        return cc
+
+    def test_stop_mapped_to_inference_config_stop_sequences(self):
+        """Converse spells it `stopSequences`, inside `inferenceConfig`."""
+        result = self.adapter.translate_to_upstream(self._cc(stop=["A"]))
+        assert result["inferenceConfig"]["stopSequences"] == ["A"]
+        assert "stop" not in result
+
+    def test_no_stop_means_no_stop_sequences(self):
+        """No `stop` invents no `stopSequences`."""
+        result = self.adapter.translate_to_upstream(self._cc())
+        assert "stopSequences" not in result["inferenceConfig"]
+
+    def test_null_stop_is_omitted(self):
+        """`stop: null` is a legal CC value and must not be forwarded — see D6."""
+        result = self.adapter.translate_to_upstream(self._cc(stop=None))
+        assert "stopSequences" not in result["inferenceConfig"]
+
+    def test_empty_stop_is_omitted(self):
+        """An empty stop list is semantically void — see D6."""
+        result = self.adapter.translate_to_upstream(self._cc(stop=[]))
+        assert "stopSequences" not in result["inferenceConfig"]
+
+    def test_top_k_never_reaches_the_converse_body(self):
+        """Converse's InferenceConfiguration has no `topK` member — see D4.
+
+        The botocore service model declares exactly ``maxTokens``,
+        ``temperature``, ``topP`` and ``stopSequences``.  Converse accepts
+        ``top_k`` only under ``additionalModelRequestFields``, which this
+        change does not open.
+        """
+        result = self.adapter.translate_to_upstream(self._cc(top_k=40, _top_k=40))
+        assert "topK" not in result["inferenceConfig"]
+        assert "top_k" not in result
+        assert "_top_k" not in result
+
+
 class TestBedrockTranslateFromUpstream:
     def setup_method(self):
         self.adapter = BedrockAdapter()

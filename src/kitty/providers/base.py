@@ -33,6 +33,12 @@ class ProviderAdapter(ABC):
             "_provider_config",
             "_original_body",
             "_native_messages_request",
+            # KBR-178: written by MessagesTranslator.translate_request and by
+            # server._convert_native_to_cc_format to carry the agent's top_k,
+            # which Chat Completions has no field for. AnthropicAdapter reads it
+            # back before rebuilding its own body, so stripping it here keeps it
+            # off the wire of the twenty-two providers that would reject it.
+            "_top_k",
             "base_url",  # F15 defense-in-depth — URL override goes through build_base_url(),
             # not the CC request body.  Stripping it here protects
             # adapters that rely on the default translate_to_upstream().

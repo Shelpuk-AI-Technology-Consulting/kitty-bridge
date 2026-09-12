@@ -157,6 +157,14 @@ class BedrockAdapter(ProviderAdapter):
         if "top_p" in cc_request and cc_request["top_p"] is not None:
             bedrock["inferenceConfig"]["topP"] = cc_request["top_p"]
 
+        # KBR-178: Converse nests stop sequences under inferenceConfig and
+        # spells them `stopSequences`.  This adapter rebuilds the body from an
+        # allowlist, so it drops a top-level `stop` unless it is mapped here.
+        # No `top_k` counterpart: InferenceConfiguration has no topK member --
+        # Converse takes it only under additionalModelRequestFields.
+        if cc_request.get("stop"):
+            bedrock["inferenceConfig"]["stopSequences"] = cc_request["stop"]
+
         # Extract system messages
         system_parts: list[str] = []
         for msg in cc_request.get("messages", []):

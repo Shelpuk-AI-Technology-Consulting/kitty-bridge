@@ -208,20 +208,86 @@ class TestTranslateRequest:
         self.t.translate_request(req)
         assert self.t.thinking_warned
 
-    def test_unsupported_fields_stripped(self):
+    def test_stop_sequences_mapped_to_stop(self):
+        """KBR-178: the Messages `stop_sequences` becomes the CC `stop`."""
+        req = {
+            "model": "m",
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 10,
+            "stop_sequences": ["\n\nHuman:", "END"],
+        }
+        result = self.t.translate_request(req)
+        assert result["stop"] == ["\n\nHuman:", "END"]
+        assert "stop_sequences" not in result
+
+    def test_no_stop_sequences_means_no_stop(self):
+        """A client that sends no stop sequences gets no `stop` key invented."""
+        req = {"model": "m", "messages": [{"role": "user", "content": "hi"}], "max_tokens": 10}
+        result = self.t.translate_request(req)
+        assert "stop" not in result
+
+    def test_empty_stop_sequences_is_omitted(self):
+        """An empty list carries no instruction, and `stop: []` is schema-invalid.
+
+        ``StopConfiguration`` in the OpenAI schema declares ``minItems: 1``, so
+        forwarding ``[]`` would put an invalid body on fifteen passthrough
+        adapters.  Omitting it is behaviourally identical.  See D6.
+        """
+        req = {
+            "model": "m",
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 10,
+            "stop_sequences": [],
+        }
+        result = self.t.translate_request(req)
+        assert "stop" not in result
+
+    def test_top_k_carried_as_internal_key(self):
+        """KBR-178: Chat Completions has no `top_k`, so it travels as `_top_k`."""
+        req = {
+            "model": "m",
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 10,
+            "top_k": 40,
+        }
+        result = self.t.translate_request(req)
+        assert result["_top_k"] == 40
+        assert "top_k" not in result
+
+    def test_top_k_zero_is_carried(self):
+        """`top_k: 0` is a value the user sent, not an absent field."""
+        req = {
+            "model": "m",
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 10,
+            "top_k": 0,
+        }
+        result = self.t.translate_request(req)
+        assert result["_top_k"] == 0
+
+    def test_no_top_k_means_no_internal_key(self):
+        """No inbound `top_k` means no `_top_k` is invented."""
+        req = {"model": "m", "messages": [{"role": "user", "content": "hi"}], "max_tokens": 10}
+        result = self.t.translate_request(req)
+        assert "_top_k" not in result
+
+    def test_unmapped_fields_stripped(self):
+        """Fields the translator has no mapping for do not reach the CC body.
+
+        ``stop_sequences`` and ``top_k`` were listed here until KBR-178 gave
+        them mappings; they are now asserted positively by the cases above.
+        Both fields left here are still genuinely dropped and each has its own
+        ticket.
+        """
         req = {
             "model": "m",
             "messages": [{"role": "user", "content": "hi"}],
             "max_tokens": 10,
             "metadata": {"user_id": "123"},
-            "stop_sequences": ["\n"],
-            "top_k": 50,
             "tool_choice": "auto",
         }
         result = self.t.translate_request(req)
         assert "metadata" not in result
-        assert "stop_sequences" not in result
-        assert "top_k" not in result
         assert "tool_choice" not in result
 
     def test_thinking_block_mapped_to_reasoning_content(self):

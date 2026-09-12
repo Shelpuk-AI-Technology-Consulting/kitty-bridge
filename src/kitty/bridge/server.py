@@ -486,6 +486,7 @@ def _convert_native_to_cc_format(body: dict) -> dict:
     - ``tool_result`` → ``{"role": "tool", ...}``
     - Anthropic ``tools`` → CC-format tools
     - Preserves model, stream, max_tokens, temperature, top_p
+    - ``stop_sequences`` → ``stop``, and ``top_k`` → the internal ``_top_k``
 
     This is a subset of what ``MessagesTranslator.translate_request`` does.
     A standalone function is used here so the fallback path has no dependency
@@ -604,6 +605,17 @@ def _convert_native_to_cc_format(body: dict) -> dict:
     for key in ("temperature", "top_p"):
         if key in body:
             result[key] = body[key]
+
+    # KBR-178: this converter is a second Messages -> CC hop, so it owes the
+    # same two mappings as MessagesTranslator.translate_request.  Without them
+    # the tool_use retry re-drops the stop sequences the first hop carried --
+    # on exactly the Anthropic-family adapters that fix exists to serve.
+    stop_sequences = body.get("stop_sequences")
+    if stop_sequences:
+        result["stop"] = stop_sequences
+
+    if body.get("top_k") is not None:
+        result["_top_k"] = body["top_k"]
 
     return result
 

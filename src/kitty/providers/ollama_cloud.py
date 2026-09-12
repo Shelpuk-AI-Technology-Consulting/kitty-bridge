@@ -113,7 +113,7 @@ class OllamaCloudAdapter(ProviderAdapter):
         Handles:
         - System messages (forwarded as-is; Ollama supports system role)
         - Tool result messages (CC ``tool_call_id``/``name`` → Ollama ``tool_name``)
-        - Options (CC ``temperature``/``top_p`` → Ollama ``options``)
+        - Options (CC ``temperature``/``top_p``/``stop`` → Ollama ``options``)
         - Strips internal metadata keys
         """
         result: dict = {
@@ -132,6 +132,12 @@ class OllamaCloudAdapter(ProviderAdapter):
         for key in ("temperature", "top_p", "top_k"):
             if key in cc_request and cc_request[key] is not None:
                 options[key] = cc_request[key]
+        # KBR-178: Ollama carries stop sequences inside `options` too.  Tested
+        # for truth rather than presence so a null or empty `stop` does not
+        # attach an `options` container that would otherwise not exist.
+        if cc_request.get("stop"):
+            options["stop"] = cc_request["stop"]
+
         if options:
             result["options"] = options
 

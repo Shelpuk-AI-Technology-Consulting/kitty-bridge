@@ -12,6 +12,7 @@ from kitty.bridge.server import (
     _has_tool_use_blocks,
     _is_tool_use_format_error,
 )
+from kitty.providers.anthropic import AnthropicAdapter
 
 # ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -300,6 +301,66 @@ class TestConvertNativeToCCFormat:
 
         assert result["temperature"] == 0.7
         assert result["top_p"] == 0.9
+
+
+    def test_stop_sequences_and_top_k_preserved(self):
+        """KBR-178: the fallback converter must not re-drop what hop 1 carries.
+
+        ``_convert_native_to_cc_format`` is a second, partial Messages -> CC
+        converter.  Without this mapping the ``tool_use`` retry loses the
+        user's stop sequences on exactly the Anthropic-family adapters the
+        first-hop fix exists to serve.
+        """
+        body = _anthropic_body_with_tool_use()
+        body["stop_sequences"] = ["A", "B"]
+        body["top_k"] = 40
+        result = _convert_native_to_cc_format(body)
+
+        assert result["stop"] == ["A", "B"]
+        assert result["_top_k"] == 40
+        assert "stop_sequences" not in result
+        assert "top_k" not in result
+
+        # Two of the four call sites pass the already-normalised `cc_request`
+        # rather than the pristine `body` (server.py:4390, 5306), so the same
+        # mapping is exercised against a body carrying the guard flag.
+        mutated = _anthropic_body_with_tool_use()
+        mutated["stop_sequences"] = ["A", "B"]
+        mutated["top_k"] = 40
+        mutated["_native_messages_request"] = True
+        from_mutated = _convert_native_to_cc_format(mutated)
+        assert from_mutated["stop"] == ["A", "B"]
+        assert from_mutated["_top_k"] == 40
+
+    def test_no_stop_sequences_or_top_k_invents_nothing(self):
+        """Neither field inbound means neither key outbound."""
+        body = _anthropic_body_with_tool_use()
+        result = _convert_native_to_cc_format(body)
+
+        assert "stop" not in result
+        assert "_top_k" not in result
+
+    def test_empty_stop_sequences_is_omitted(self):
+        """The empty-list rule holds at this converter too — see D6."""
+        body = _anthropic_body_with_tool_use()
+        body["stop_sequences"] = []
+        result = _convert_native_to_cc_format(body)
+
+        assert "stop" not in result
+
+    def test_fallback_body_reaches_anthropic_upstream_with_stop_sequences(self):
+        """End to end over the seam: fallback body -> Anthropic Messages body.
+
+        This is the assertion that fails if either half of the pair is missing,
+        and it is the one that names the defect in user terms — a stop sequence
+        survives the ``tool_use`` retry.
+        """
+        body = _anthropic_body_with_tool_use()
+        body["stop_sequences"] = ["A", "B"]
+        cc = _convert_native_to_cc_format(body)
+        upstream = AnthropicAdapter().translate_to_upstream(cc)
+
+        assert upstream["stop_sequences"] == ["A", "B"]
 
 
 # ── Integration test — full round-trip with server ────────────────────────

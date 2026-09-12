@@ -175,6 +175,19 @@ class TestTranslateToUpstreamDefault:
         assert "_native_messages_request" not in result
         assert result["model"] == "gpt-4o"
 
+    def test_strips_internal_top_k(self):
+        """KBR-178: `_top_k` is internal metadata and must never reach a provider.
+
+        Chat Completions declares no ``top_k``, so the key exists only to carry
+        the value to an Anthropic-family adapter.  Registering it here is what
+        keeps it off the wire of the other twenty-two.
+        """
+        adapter = _stub_adapter()
+        cc = {"model": "gpt-4o", "messages": [], "_top_k": 40}
+        result = adapter.translate_to_upstream(cc)
+        assert "_top_k" not in result
+        assert result["model"] == "gpt-4o"
+
     def test_strips_base_url_defense_in_depth(self):
         """F15: base_url must never leak into the upstream body.
 

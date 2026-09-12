@@ -50,6 +50,9 @@ _EXPECTED_KEYS: dict[str, set[str]] = {
         "_reasoning_effort",
         "_thinking_adaptive",
         "_thinking_enabled",
+        # KBR-178: Chat Completions has no `top_k`, so the inbound value rides
+        # an internal key to the Anthropic-family adapters that accept it.
+        "_top_k",
     },
     "bridge/responses/translator.py": {"_reasoning_effort", "_thinking_enabled"},
     "bridge/server.py": {
@@ -57,6 +60,9 @@ _EXPECTED_KEYS: dict[str, set[str]] = {
         "_original_body",
         "_provider_config",
         "_resolved_key",
+        # KBR-178: `_convert_native_to_cc_format` is a second Messages -> CC
+        # converter and mints the same internal key the translator does.
+        "_top_k",
     },
     "providers/kimi.py": {"_thinking_enabled"},
 }
