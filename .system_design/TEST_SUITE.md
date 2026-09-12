@@ -3125,8 +3125,9 @@ business, together with the job that runs them; doing it earlier would remove th
 gate. T-H1 must take that reclassification into account before it measures a mutation
 baseline, because it selects on `l1`.
 
-**Seven modules are bulleted below, and `tests/cli/test_stream_encoding.py` (KBR-10) is described
-after them — eight in all, named here so T-K6 inherits a list rather than a search** — the count
+**Seven modules are bulleted below — in five bullets, since the T-W4 and T-W8 rows name two
+modules each — and `tests/cli/test_stream_encoding.py` (KBR-10) is described after them, eight in
+all, named here so T-K6 inherits a list rather than a search** — the count
 is what T-K6 and T-H1 plan against. (The bullet count and the KBR-10 paragraph were already
 drifting apart before T-W8 added two; spelling out both is what stops the next addition
 guessing which set it joins. T-W9 joins the **bulleted** set, not the paragraph above it, which

@@ -279,6 +279,12 @@ class MessagesReader:
         """
         body: dict[str, Any] = json.loads(captured.body)
 
+        # Scope: `content` is read as a plain string, which is what
+        # `minimal_inbound_body` sends and all this module drives. Anthropic
+        # Messages also allows a list of content blocks, and this does not read
+        # that shape — deliberately, since handling it is T-A1's job and adding
+        # it here would make this a second projection rather than evidence.
+
         # One turn per message, each carrying its text. The minimal inbound body
         # sends a plain string, which is the only content shape this must read.
         turns = tuple(Turn(role=m["role"], parts=(Text(m["content"]),)) for m in body["messages"])
@@ -316,8 +322,16 @@ async def _empty_reply(captured: CapturedRequest, reply: Reply) -> None:
             "stop_reason": "end_turn",
         }
     ).encode()
-    await reply.begin(200, {"content-type": "application/json", "content-length": str(len(payload))})
+    # Shaped exactly like `RecordingUpstream._default_responder`'s non-streaming
+    # reply — content length through the attribute, and an explicit `write_eof`.
+    # Chunked encoding is that responder's *streaming* branch, not this one. The
+    # explicit finish is the point: leaving aiohttp to end a prepared response
+    # implicitly is an implementation detail, and a version bump that flipped it
+    # off would turn this falsification case into a hang instead of a red.
+    reply.content_length = len(payload)
+    await reply.begin(200, {"content-type": "application/json"})
     await reply.write(payload)
+    await reply.write_eof()
 
 
 @dataclass(frozen=True)
@@ -639,7 +653,12 @@ class TestTheWallClockBound:
 
         message = str(excinfo.value)
         assert "budget" in message
+
+        # Both reference costs, not one: the message promises them as the
+        # diagnostic that tells a fired ladder from a slow runner, and asserting
+        # only the first would let the other be dropped silently.
         assert str(_EMPTY_LADDER_SECONDS) in message
+        assert str(_CONNECT_LADDER_SECONDS) in message
 
 
 # -- R7 — falsification (plan §1.4) ------------------------------------------
