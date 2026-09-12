@@ -533,6 +533,26 @@ class TestThePlatformLegsExist:
                 f"pyproject.toml does not claim to support ({sorted(claimed)})"
             )
 
+    def test_the_matrix_declares_exactly_the_legs_the_design_records(self, test_job: dict):
+        """Six combinations: 4 Linux versions, plus one Windows and one macOS.
+
+        The coverage tests above prove every platform is *present* and would
+        all still pass if somebody added a second `windows-latest` entry on
+        another Python -- the matrix would widen while §8.4's "one Python
+        version per platform" quietly stopped being true. This counts what is
+        DECLARED, deliberately not what GitHub expands it to: the expansion is
+        GitHub's behaviour and the live run is its only honest oracle.
+        """
+        matrix = test_job.get("strategy", {}).get("matrix", {})
+        base = len(matrix.get("os", [])) * len(matrix.get("python-version", []))
+        include = len(matrix.get("include", []))
+
+        assert (base, include) == (4, 2), (
+            f"the matrix declares {base} base combinations and {include} include "
+            f"entries; §8.4 records 4 Linux legs plus one Windows and one macOS. "
+            f"Update the design doc with it, or this count is the wrong one."
+        )
+
 
 # ── R6: metadata refresh must work under branch protection ────────────────
 
@@ -789,6 +809,24 @@ class TestEveryJobVerifiesTheCategoriesItClaims:
             assert "A" in reported or {"f", "E"} <= set(reported), (
                 f"this run passes -r{reported}, which REPLACES pytest's default "
                 f"`fE` and drops the FAILED summary: {command}"
+            )
+
+    def test_the_gate_reports_why_each_test_was_skipped(self):
+        """§8.4's skip visibility, asserted rather than trusted to a comment.
+
+        §8 permits exactly one kind of skip in a gating job -- a platform or
+        interpreter skip -- and the platform legs are what produce them. A
+        silent skip count is how such a leg goes green by running nothing, so
+        the reasons are printed. Without this, a tidy-up dropping ``s`` would
+        degrade the diagnostic without failing anything: the hollow-guard
+        shape this whole class is written against.
+        """
+        for command in _pytest_invocations():
+            reported = "".join(re.findall(r"(?<!-)-r([A-Za-z]+)", command))
+            assert reported, f"this run reports no skip reasons at all: {command}"
+            assert "A" in reported or "s" in reported, (
+                f"this run passes -r{reported}, which never lists a skipped "
+                f"test or its reason: {command}"
             )
 
     def test_each_job_requires_every_layer_its_expression_selects(self):
