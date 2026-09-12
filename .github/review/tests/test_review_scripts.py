@@ -18118,7 +18118,9 @@ class StatusMatrixTests(unittest.TestCase):
 
         # 🔴 The guard skips bodies that are already `fatal`, so a change making more
         # of them fatal would shrink it toward vacuity in silence. Code review caught
-        # the same shape once already in this class.
+        # the same shape once already in this class. The skipped direction -- a status
+        # RESCUING a fatal body -- is asserted by
+        # `test_every_recorded_move_actually_happened`, which is the other half.
         self.assertGreater(
             checked, 90, "the fatal-alone skip has eaten most of this guard"
         )
@@ -18129,6 +18131,12 @@ class StatusMatrixTests(unittest.TestCase):
         Without this, :data:`STATUS_MATRIX_MOVED` could name rows the code no longer
         touches and the guard above would quietly weaken -- it reads the table as a
         list of permitted exceptions.
+
+        🔴 **This is also the RESCUE half of the invariant, and the pairing is easy to
+        break by halves.** `test_no_status_turns_a_record_into_a_workflow_fault` skips
+        any body that is already `fatal` alone, so the direction it cannot see -- a
+        status rescuing a fatal body into `exhausted` -- is asserted only here. Reduce
+        one of these two and check the other first.
         """
 
         for (status, name), (before, after) in STATUS_MATRIX_MOVED.items():

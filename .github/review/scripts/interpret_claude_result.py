@@ -606,19 +606,14 @@ def _extract_structured_output(raw_output: str, execution_text: str) -> dict | N
 #: ⚠️ **The rule that replaced the defect, and the one to preserve: a numeric outcome
 #: field is admitted to the PROVIDER-SCOPED text only** -- what
 #: :func:`_provider_outcome_text` returns -- **and must never reach the haystack
-#: :func:`_outcome_text` returns.** That haystack is read first by
-#: :data:`FATAL_PATTERNS`, which carries ``\b400\b``, so a bare status in it would let
-#: any 400 pre-empt every quota and credential tier below. Anthropic reports a spent
-#: balance as HTTP 400, so that is KBR-145's defect rather than a theoretical ordering
-#: concern. The measurement is in :class:`StatusMatrixTests`.
+#: :func:`_outcome_text` returns**, which is read first by :data:`FATAL_PATTERNS`.
+#: :func:`_numbers_in` carries the argument and the measurement; it is not repeated
+#: here, because a third copy is the one that goes stale.
 #:
-#: ⚠️ **The rule governs PARSEABLE records, and the exception is pre-existing rather
-#: than introduced here.** When :func:`_parse_events` fails, :func:`_outcome_text`
-#: returns None and :func:`classify` searches the raw text whole -- so a record that is
-#: not JSON reaches tier 1 carrying whatever its text says, ``"api_error_status": 400``
-#: included, as it always has. That is the fallback family
-#: :func:`_provider_outcome_text` documents at length, and it is unchanged: this rule
-#: is about where the COERCED number is admitted, not about the raw-text path.
+#: ⚠️ The rule governs **parseable** records. An unparseable one is searched whole by
+#: :func:`classify` and always has been, ``"api_error_status": 400`` in its text
+#: included -- that is the fallback family :func:`_provider_outcome_text` documents,
+#: unchanged here.
 OUTCOME_FIELDS = (
     "error",
     "result",
@@ -914,7 +909,9 @@ def _numbers_in(value: object) -> list[str]:
     """
 
     # `bool` FIRST: it is an `int` subclass, so the check below would otherwise
-    # collect `True` as the string "True".
+    # collect `True` as the string "True". Deleting this branch as a tidy-up is a
+    # MUTATION, not a simplification --
+    # `test_a_bool_is_not_collected_even_though_it_is_an_int` is the row that dies.
     if isinstance(value, bool):
         return []
     if not isinstance(value, int):
