@@ -409,6 +409,11 @@ class TestTheWholeSuiteIsCoherent:
             "tests/test_upstream_identity_consistency.py",
             "tests/test_upstream_route_source_of_truth.py",
             "tests/test_github_actions.py",
+            # KBR-216. A §6.2.3 docs-vs-code guard: TEST_SUITE.md §8.6 states
+            # what the CI environment supplies, and the workflow tree is where
+            # it is actually supplied -- two artifacts edited separately, held
+            # against each other in both directions.
+            "tests/test_ci_capability_inventory.py",
             "tests/test_layer_markers.py",
             "tests/test_layer_selection.py",
             "tests/test_custom_url_docs.py",
