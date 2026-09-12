@@ -368,10 +368,25 @@ class TestTransportGrace:
         assert TransportGrace(budget=0.0).next_delay() is None
 
     def test_budget_is_spent_by_elapsed_time_not_retry_count(self):
-        """The window is wall-clock, so a slow retry can end it on its own."""
+        """The window is wall-clock, so a slow retry can end it on its own.
+
+        The sleep clears the budget by more than one clock tick (KBR-215).
+        ``next_delay`` reads ``time.monotonic()``, which on Windows is backed by
+        ``GetTickCount64`` at ~15.6 ms resolution, so measured elapsed is
+        quantised and can understate the real interval by up to a whole tick.
+        With the original 10 ms margin a real 60 ms sleep was reported as three
+        ticks -- 46.8 ms -- and the window had not closed: ``0.05 - 0.0468`` is
+        the ``0.003`` the failure printed. Whether it spanned three ticks or four
+        depended on where in the current tick it started, so the test passed or
+        failed by phase and red-lined the merge gate at random.
+
+        The margin is widened rather than the assertion relaxed. ``None`` is the
+        claim -- the window closed on wall-clock grounds -- and a fake clock
+        would remove the very thing the docstring says is under test.
+        """
         grace = TransportGrace(budget=0.05)
         assert grace.next_delay() is not None
-        time.sleep(0.06)
+        time.sleep(0.09)
         assert grace.next_delay() is None
 
     def test_default_budget_follows_the_module_setting(self, monkeypatch):

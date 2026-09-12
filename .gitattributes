@@ -1,0 +1,19 @@
+# Corpus fixtures are byte-exact evidence, not text.
+#
+# `.system_design/TEST_SUITE.md` §7.1 · plan task T-W6 (KBR-29). A `.body` file
+# holds the request body as it arrived; §3.3.2 asserts byte-level key order over
+# it, and two register triggers (M3, M5) are decided by its length. A contributor
+# with `core.autocrlf=true` would rewrite LF to CRLF on checkout and commit the
+# result back, changing both -- and CI runs on `ubuntu-latest` only, so the gate
+# would consume the corrupted bytes rather than notice them.
+#
+# `-text` disables all end-of-line conversion for these paths. The manifest is
+# covered too: it carries the body's SHA-256, and a rewritten manifest is a
+# rewritten digest. That digest is the second line of defence, checked by
+# `harness.corpus.load_entry` in case this file is ever removed.
+#
+# Deliberately scoped to the corpus. The repository has no other `.gitattributes`
+# and carries mixed CRLF/LF endings by history; declaring a repository-wide
+# policy here would renormalise files this task has no business touching.
+tests/corpus/*.body -text
+tests/corpus/*.json -text
