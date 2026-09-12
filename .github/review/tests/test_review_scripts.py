@@ -93,6 +93,15 @@ RUNNER_JOB_CEILING_MINUTES = {
     # execution time. If a job reaches this limit, the job is terminated and
     # fails."*
     "windows-latest": 360,
+    # Added with the platform legs (KBR-164, TEST_SUITE.md §8.4). Also an
+    # ordinary GitHub-hosted runner -- 3 CPUs on the arm64 tier rather than 4,
+    # which changes its speed and not its ceiling: the 6-hour rule is stated per
+    # job, not per core, and only the single-CPU tier carries a special one.
+    # ⚠️ A missing row here is not a soft failure. `_lowest_ceiling` takes the
+    # minimum over a job's producible labels, so an unrecorded label fails the
+    # review-scripts job outright rather than being skipped -- which is the
+    # point, since the alternative is a cap nothing can honour.
+    "macos-latest": 360,
     "ubuntu-24.04": 360,
     "ubuntu-22.04": 360,
     "[self-hosted, cap-main, noble]": 7200,
@@ -13452,9 +13461,18 @@ class MatrixRunnerResolutionTests(unittest.TestCase):
         job that also runs somewhere nobody recorded. The unrecorded label
         already fails its own check; this returns ``None`` so the cap check does
         not additionally report a verdict it cannot support.
+
+        🔴 **The example label must be one the table will never record**, and
+        this test is the reason that matters. It used to pass ``macos-latest``,
+        which was unrecorded only until somebody needed a macOS runner --
+        KBR-164 added that row and this test went green while proving nothing
+        about unrecorded labels, because both of its labels had ceilings. A
+        fabricated label cannot be adopted by a future ticket, so the case stays
+        a case. Adding a real runner row must never be what disarms it.
         """
 
-        self.assertIsNone(_lowest_ceiling(("ubuntu-latest", "macos-latest")))
+        self.assertNotIn("plan9-latest", RUNNER_JOB_CEILING_MINUTES)
+        self.assertIsNone(_lowest_ceiling(("ubuntu-latest", "plan9-latest")))
 
     def test_a_trailing_comment_is_not_part_of_a_matrix_value(self):
         """The tolerance `runs-on:` and `timeout-minutes:` already carry.

@@ -2606,7 +2606,7 @@ defined by its marker expression and no test can fall between two jobs or into b
 
 | Job | Selection | Trigger | Gates a PR? | Gates a release? |
 |---|---|---|---|---|
-| **Fast** | `ruff`, `lint-imports`, `mypy src/kitty`, then `pytest -m "l1 or l2" -q` on Python 3.10–3.13 | push, PR | **Yes** | **Yes** |
+| **Fast** | `ruff`, `lint-imports`, `mypy src/kitty`, then `pytest -m "l1 or l2" -q` on Python 3.10–3.13 on Linux, and on one pinned version on Windows and macOS (§8.4) | push, PR | **Yes** | **Yes** |
 | **Subsystem** | `pytest -m l3 -q` | PR | **Yes** | **Yes** |
 | **Acceptance** | `pytest -m "acceptance or agent_smoke" -q` | PR | **Yes** | **Yes** |
 | **Deep** | mutation testing (§6.1), schemathesis at high `--max-examples`, extended property runs | nightly | No | No |
@@ -2950,6 +2950,103 @@ That makes the registry-shape check itself vulnerable to §8's own "green becaus
 looking": a validator run over zero rows passes perfectly. So `registry_violations` is proved
 against a **fabricated malformed registry** rather than against the production one, and the
 production registry is asserted clean as a separate, weaker claim.
+
+### 8.4 The platform matrix
+
+Delivered by [KBR-164](https://shelpuk.atlassian.net/browse/KBR-164). Until it landed, every
+job in the repository ran on Linux, so **every Windows-only and macOS-only defect in the product
+was reachable only by a user reporting it** — which is how all three platform bugs on epic
+KBR-123 (KBR-1, KBR-4, KBR-10) were in fact found.
+
+The Fast gate therefore runs on three platforms:
+
+| Leg | Runner label | Python | Selection |
+|---|---|---|---|
+| Linux | `ubuntu-latest` | 3.10, 3.11, 3.12, 3.13 | the whole Fast gate |
+| Windows | `windows-latest` | 3.12 | **identical** |
+| macOS | `macos-latest` | 3.12 | **identical** |
+
+**One job with an `os` matrix dimension, not a second job.** A separate platform job would
+duplicate the five-step list, and the day the two copies differ the platform leg stops being
+evidence about the gate and becomes evidence about a *similar* gate. This is the same argument
+`tests.yml`'s header already makes for the release path — *"there is no second, weaker
+definition to drift out of sync"* — applied across platforms instead of across events. It also
+means the legs gate a pull request through `ci-required`'s existing `needs: [test, …]` with **no
+change to `ci.yml`**, and gate a release through `publish.yml`, for free.
+
+**The same tests, not a platform-dependent subset.** The ticket floated scoping the leg "to the
+tests whose behaviour is actually platform-dependent". Rejected: that set is precisely what
+nobody knows — a latent POSIX assumption is invisible until the test runs somewhere else — and
+naming it would need a second marker axis, which collides with §8.1's exactly-one-layer-marker
+rule. The whole `l1 or l2` expression runs on every leg.
+
+**GitHub-hosted, and this is not a new decision.** `.github/review/rules/ci.md` § "Runner and
+caps" already fixed it for every job in the repository: a self-hosted runner group carries an
+*"Allow public repositories"* setting that is **off by default**, and this repository is public,
+so a `[self-hosted, …]` label reaches no group at all and the job **queues for ever — no error,
+no annotation, no timeout**. The platform legs inherit that unchanged.
+
+**The cost objection in the ticket does not apply here, and the reason is worth recording
+because it is the whole reason this was cheap.** KBR-164 was written expecting a large bill
+("`windows-latest` minutes bill at 2×"). That multiplier is a **private**-repository rule.
+`kitty-bridge` is public, and GitHub's runner reference states the case in one sentence: *"Use of
+the standard GitHub-hosted runners is free and unlimited on public repositories."* `windows-latest`
+and `macos-latest` are both in that table. **Confirmed 2026-09-12.** If this repository is ever
+made private, this subsection is the one to revisit first — the legs keep working and start
+billing at 2× and 10× respectively.
+
+**One Python version per platform, and it is 3.12.** The suite is mostly platform-independent, so
+a four-version Windows matrix would quadruple wall-clock and quadruple the first-run triage
+surface to re-prove interpreter-version facts the Linux legs already prove. 3.12 rather than the
+newest because `ci.yml`'s two review-system jobs already pin 3.12, so the repository names one
+version in one place; and because a Windows-only defect is likelier to reach a user on a
+mainstream version than on the newest. Interpreter-version questions stay the Linux matrix's job.
+
+**`include:` entries, not an `os` × `python-version` product with `exclude:`.** The product form
+needs six `exclude:` entries to remove six of twelve combinations, and `_matrix_values` in
+`.github/review/tests/test_review_scripts.py` deliberately does **not** honour `exclude:` — it
+over-approximates on purpose, which is the safe direction for a ceiling check but the wrong one
+for a matrix that would then be mostly holes. ⚠️ The `include:` form carries its own subtlety and
+it is where this construct is misread: an include object whose keys would **overwrite** a base
+matrix value is not merged into the existing combinations — it becomes a **new** combination.
+That is what produces the two platform legs, and a comment in `tests.yml` says so beside them.
+
+**One integer `timeout-minutes` for the whole matrix job.** `DeclaredJobCapIsEnforceableTests`
+parses the cap with `(\d+)`, so a `${{ matrix.… }}` expression there reads as **absent** and the
+guard reports "declares no job-level `timeout-minutes:`" about a line that is plainly present. A
+matrix job is held to the **lowest** platform ceiling among the labels its matrix can produce;
+all three labels here are ordinary GitHub-hosted 4-CPU runners at **360 minutes**, so the cap is
+bounded by measurement rather than by the platform.
+
+**The measurement, because the number beside it used to be fiction.** The Linux legs take
+**19–20 minutes** (six successful jobs on 2026-09-12, e.g. 01:17:37Z → 01:36:34Z) — the comment
+that stood beside `timeout-minutes: 30` claimed *"the suite runs in a couple of minutes"* and was
+stale by an order of magnitude, leaving the backstop only ~50% headroom on a leg nobody had
+timed. The cap is **60**, sized to clear the slowest platform leg with headroom. The cost of that
+choice, stated rather than hidden: a **hung Linux leg is now noticed 30 minutes later than it
+was**. On a free runner that is cheap, and a cap too low is worse — it kills a healthy Windows
+leg and reads as a product failure.
+
+**Skips are named, not counted in silence.** §8's rule — a gating job that goes green because it
+ran nothing is the most expensive false confidence — is what a new platform leg is most likely to
+breach, because a **platform** skip is the one kind §8 permits. So the gate's pytest invocation
+carries **`-rs`**: every skipped test is listed in the log *with its reason*, on all six legs. The
+flag is on the one shared invocation rather than on the platform legs alone, because a second
+invocation in the file is exactly the second definition this subsection's first decision rejects.
+
+**A consequence that is a product win, not a side effect.** Two things in the repository have
+never executed even once:
+
+- `tests/test_launcher_discovery.py`'s two `skipif(sys.platform != "win32")` cases — written for
+  a leg that did not exist, skipped in every run that has ever happened;
+- **every `if sys.platform == "win32"` branch in `src/kitty`, as far as `mypy` is concerned.**
+  mypy resolves `sys.platform` against the platform it runs on, so the Windows bodies were
+  invisible to the only type check we run — and §8's table credits mypy with four user-visible
+  defects the suite could not find, one of them explicitly *"on a non-Linux OS"*.
+
+Running `mypy src/kitty` on the Windows leg is therefore not redundant with the Linux legs; it is
+a **new detector over code no check has ever read**. That is also why the platform legs run the
+whole step list rather than pytest alone.
 
 ## 9. Gap register
 

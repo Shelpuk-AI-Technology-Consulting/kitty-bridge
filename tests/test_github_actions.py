@@ -116,11 +116,21 @@ class TestCIWorkflow:
         branches = trigger.get("pull_request", {}).get("branches", [])
         assert "main" in branches, "CI must trigger on PRs targeting main"
 
-    def test_runs_on_ubuntu(self, workflow: dict):
-        jobs = _resolve_jobs(workflow)
-        for job_name, job in jobs.items():
-            runs_on = job.get("runs-on", "")
-            assert "ubuntu" in str(runs_on), f"Job '{job_name}' must run on ubuntu"
+    def test_the_workflows_own_jobs_run_on_linux(self, workflow: dict):
+        """Every job `ci.yml` declares itself runs on Linux.
+
+        ⚠️ Narrowed from an assertion over every *resolved* job, which swept in
+        the delegated test matrix and so forbade the Windows and macOS legs
+        `.system_design/TEST_SUITE.md` §8.4 requires. A job whose `runs-on:`
+        defers to a matrix is left to :class:`TestThePlatformLegsExist`, which
+        reads the matrix the expression points at; the exact labels are held by
+        `RUNNER_JOB_CEILING_MINUTES` in the review-scripts suite.
+        """
+        for job_name, job in _resolve_jobs(workflow).items():
+            runs_on = str(job.get("runs-on", ""))
+            if runs_on.startswith("${{"):
+                continue
+            assert "ubuntu" in runs_on, f"Job '{job_name}' must run on ubuntu"
 
     def test_checks_out_code(self, workflow: dict):
         steps = _get_all_steps(workflow)
@@ -371,6 +381,145 @@ class TestReleaseIsGatedOnTests:
 
         assert claimed, "expected Python version classifiers in pyproject.toml"
         assert claimed <= tested, f"classifiers claim {sorted(claimed - tested)} but CI never tests them"
+
+
+# ── R5b: the gate runs on every platform the product ships to ─────────────
+
+
+#: The platform families the Fast gate must cover, as substrings of a runner
+#: label. Substrings rather than exact labels deliberately: `ubuntu-latest` and
+#: `ubuntu-24.04` are the same platform for this file's question, and pinning
+#: exact labels here would make a routine runner-image bump read as a lost leg.
+#: The exact labels are pinned elsewhere and for a different reason, by
+#: `RUNNER_JOB_CEILING_MINUTES` in `.github/review/tests/test_review_scripts.py`.
+REQUIRED_PLATFORMS = ("ubuntu", "windows", "macos")
+
+
+def _matrix_platforms(job: dict) -> set[str]:
+    """Collect every ``os`` value a job's matrix can produce.
+
+    Reads the top-level ``os`` list **and** every ``include:`` entry's ``os``.
+    An include entry whose value would overwrite a base matrix value does not
+    modify an existing combination -- GitHub creates a **new** one from it, and
+    that is precisely how the Windows and macOS legs come to exist. An include
+    entry read as a mere annotation would leave both legs invisible here.
+
+    ``exclude:`` is deliberately not honoured: it only removes combinations, so
+    ignoring it over-approximates, which is the safe direction for a question
+    about whether a platform is *present*.
+
+    Args:
+        job: A parsed job mapping, as `tests.yml` declares it.
+
+    Returns:
+        The ``os`` values the matrix can produce. Empty when the job declares no
+        matrix, or none this function can read -- see
+        :meth:`TestThePlatformLegsExist.test_the_reader_reports_an_unreadable_matrix_as_empty`.
+    """
+    matrix = job.get("strategy", {}).get("matrix", {})
+    platforms = {str(value) for value in matrix.get("os", [])}
+    # An include entry without an `os` key annotates a combination rather than
+    # naming a runner, so it contributes no platform.
+    for entry in matrix.get("include", []):
+        if "os" in entry:
+            platforms.add(str(entry["os"]))
+    return platforms
+
+
+class TestThePlatformLegsExist:
+    """The Fast gate must run on Linux, Windows and macOS.
+
+    Until KBR-164 every job in the repository ran on Linux, so a Windows-only or
+    macOS-only defect was reachable only by a user reporting one -- which is how
+    all three platform bugs on epic KBR-123 were in fact found.
+    ``.system_design/TEST_SUITE.md`` §8.4 records the matrix and its reasoning;
+    this class is what stops a later edit quietly removing a leg.
+    """
+
+    @pytest.fixture()
+    def test_job(self) -> dict:
+        jobs = _load_workflow("tests.yml").get("jobs", {})
+        assert "test" in jobs, "tests.yml must declare the `test` job"
+        return jobs["test"]
+
+    def test_the_reader_reports_an_unreadable_matrix_as_empty(self):
+        """A matrix this reader cannot understand must read as no platforms.
+
+        🔴 Fabricated input, not the production workflow, for the reason
+        TEST_SUITE.md §8.3 gives about its own registry validator: a reader
+        proved only against a matrix that works cannot show it fails *safe*. If
+        an unreadable matrix returned something non-empty, the coverage
+        assertions below would report on platforms nobody declared.
+        """
+        assert _matrix_platforms({}) == set()
+        assert _matrix_platforms({"strategy": {"matrix": {"python-version": ["3.12"]}}}) == set()
+
+    def test_the_reader_sees_a_leg_that_exists_only_as_an_include_entry(self):
+        """The `include:` path is the one that produces both platform legs.
+
+        Fabricated for the same reason as above, and pointed at the specific
+        shape `tests.yml` uses: a reader that returned only the top-level `os`
+        list would report a Linux-only matrix while two platform legs ran.
+        """
+        fabricated = {
+            "strategy": {
+                "matrix": {
+                    "os": ["ubuntu-latest"],
+                    "include": [{"os": "windows-latest", "python-version": "3.12"}],
+                }
+            }
+        }
+        assert _matrix_platforms(fabricated) == {"ubuntu-latest", "windows-latest"}
+
+    def test_the_matrix_names_a_platform_at_all(self, test_job: dict):
+        """Guard the guard: an empty read makes every assertion below vacuous."""
+        assert _matrix_platforms(test_job), (
+            "no `os` value could be read from the test matrix, so every platform "
+            "assertion in this class would pass by asking nothing"
+        )
+
+    @pytest.mark.parametrize("platform", REQUIRED_PLATFORMS)
+    def test_the_gate_runs_on_every_supported_platform(self, test_job: dict, platform: str):
+        produced = _matrix_platforms(test_job)
+        assert any(platform in label for label in produced), (
+            f"the Fast gate never runs on {platform}; the matrix produces "
+            f"{sorted(produced)}. Dropping a platform leg makes every "
+            f"{platform}-only defect invisible until a user reports one -- see "
+            f"`.system_design/TEST_SUITE.md` §8.4."
+        )
+
+    def test_runs_on_reads_the_matrix(self, test_job: dict):
+        """A matrix of platforms is inert unless `runs-on:` defers to it.
+
+        Named separately because the two halves fail independently: a matrix
+        naming three platforms under a hard-coded `runs-on: ubuntu-latest` runs
+        the Linux suite six times and reports three platforms' worth of green.
+        """
+        assert test_job.get("runs-on") == "${{ matrix.os }}", (
+            f"the matrix names platforms but `runs-on:` is "
+            f"{test_job.get('runs-on')!r}, so every leg runs on one machine"
+        )
+
+    def test_every_platform_leg_pins_a_supported_python(self, test_job: dict):
+        """An `include:` leg pins its own version, and it must be one we claim.
+
+        The base matrix is checked against the classifiers by
+        :meth:`TestReleaseIsGatedOnTests.test_matrix_covers_every_supported_python`,
+        which reads the `python-version` list and never sees an include entry.
+        """
+        # Explicitly UTF-8, for the reason `_load_workflow` gives: TOML is
+        # defined as UTF-8, and the platform locale would differ on the very
+        # Windows leg this class exists to add.
+        pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+        claimed = set(re.findall(r"Programming Language :: Python :: (\d+\.\d+)", pyproject))
+        include = test_job.get("strategy", {}).get("matrix", {}).get("include", [])
+        assert include, "the platform legs are include entries; none were found"
+        for entry in include:
+            pinned = str(entry.get("python-version", ""))
+            assert pinned in claimed, (
+                f"platform leg {entry.get('os')!r} pins Python {pinned!r}, which "
+                f"pyproject.toml does not claim to support ({sorted(claimed)})"
+            )
 
 
 # ── R6: metadata refresh must work under branch protection ────────────────
