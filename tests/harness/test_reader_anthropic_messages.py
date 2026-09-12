@@ -1065,6 +1065,12 @@ class TestCacheBreakpoints:
         assert conversation.tools[0].cache_control is None
         assert dict(conversation.tools[1].cache_control) == {"type": "ephemeral"}
 
+        # The turn parts, asserted here too rather than left to the sibling
+        # tests: R4's criterion names all four sites, and a body that satisfied
+        # it only in aggregate would not show which site regressed.
+        assert dict(conversation.turns[0].parts[0].cache_control) == {"type": "ephemeral"}
+        assert dict(conversation.turns[2].parts[0].cache_control) == {"type": "ephemeral"}
+
     def test_a_tool_declaration_carries_its_breakpoint(self) -> None:
         """R4 — Anthropic caches tool definitions, and Claude Code marks the last one."""
         tool = {

@@ -451,14 +451,22 @@ class TestCacheControlSlot:
         for carrier in carriers:
             assert dict(carrier.cache_control) == self.EPHEMERAL
 
-    def test_thinking_and_json_have_no_slot_because_the_vendor_forbids_one(self) -> None:
-        """Not an asymmetry to tidy away — it is Anthropic's rule.
+    def test_thinking_and_json_have_no_slot_for_two_different_reasons(self) -> None:
+        """Not an asymmetry to tidy away — and the two halves are not one rule.
 
-        A thinking block "cannot be cached directly with ``cache_control``", and a
-        sub-content block such as a citation is cached via its top-level block. A
-        body putting a breakpoint on either is one the API itself rejects, so the
-        reader must residualise it and fail the run with the field named, rather
-        than accept a request that cannot work.
+        ``Thinking``: Anthropic states a thinking block "cannot be cached
+        directly with ``cache_control``". Note the limit of that claim — thinking
+        blocks *can* be cached alongside other content in earlier assistant
+        turns, and no rejection is documented, so the honest statement is that
+        the vendor does not support a breakpoint there. A body carrying one
+        residualises and fails the run with the field named.
+
+        ``Json``: nothing to do with the sub-content rule. §7.4.1 fixes ``Json``
+        as the part for a format carrying a structured value *natively* —
+        Converse's ``toolResult.content.json``, Gemini's
+        ``functionResponse.response``. **Neither format has a ``cache_control``
+        concept**, and the Anthropic reader never emits a ``Json`` part, so no
+        reader could ever fill the slot.
         """
         for part_type in (c.Thinking, c.Json):
             assert "cache_control" not in {f.name for f in dataclasses.fields(part_type)}

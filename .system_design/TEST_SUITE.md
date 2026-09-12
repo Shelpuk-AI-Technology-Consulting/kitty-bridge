@@ -447,6 +447,10 @@ them is how a later reader talks themselves into "fixing" the asymmetry:
   and no error is returned". So the honest statement is that the vendor does not support a
   breakpoint there. The consequence is on the record: such a body **fails the run**, with the field
   named, and the fix at that point is a slot or the third outcome, decided then.
+  **The exclusion is the `thinking` *type*, not thinking generally**: a
+  `redacted_thinking` block is `Opaque`, so it carries the slot like any other unmodelled block,
+  even though Anthropic gives it no `cache_control` field either. Left as is deliberately —
+  `Opaque` is the catch-all, and a per-kind exclusion table would be an abstraction with one user.
 - **`Json`** — not a sub-content rule, despite the neighbouring one about citations. §7.4.1 fixes
   `Json` as the part for a format carrying a structured value *natively* — Converse's
   `toolResult.content.json`, Gemini's `functionResponse.response`. **Neither format has a

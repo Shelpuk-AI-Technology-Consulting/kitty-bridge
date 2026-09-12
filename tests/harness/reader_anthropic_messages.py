@@ -556,7 +556,10 @@ def _read_block(block: Any, path: str, residual: dict[str, Any], *, nested: bool
             cache_control=_read_cache_control(block, path, residual),
         )
 
-    return _read_opaque(block, kind, path, residual)
+    # `nested` forwarded although `_read_result_content` routes only `text` and
+    # `image` back through here, so this tail is unreachable from a nested block
+    # today. Dropping it would be a silent trap the day that routing widens.
+    return _read_opaque(block, kind, path, residual, nested=nested)
 
 
 def _read_image(
@@ -568,6 +571,8 @@ def _read_image(
         block: The image block.
         path: The block's path from the body root.
         residual: The residual mapping.
+        nested: Whether the block sits inside a ``tool_result``. A nested block
+            may not carry a cache breakpoint -- see :func:`_read_cache_control`.
 
     Returns:
         The image part.
@@ -699,8 +704,11 @@ def _read_opaque(
         block: The block.
         kind: The block's wire type, which becomes :attr:`~harness.contract.Opaque.kind`.
         path: The block's path from the body root.
-        residual: The residual mapping, extended only when ``cache_control``
-            carries something that is not an object.
+        residual: The residual mapping, extended when ``cache_control`` carries
+            something that is not an object, and when the block is ``nested``
+            and so may carry no breakpoint at all.
+        nested: Whether the block sits inside a ``tool_result``. A nested block
+            may not carry a cache breakpoint -- see :func:`_read_cache_control`.
 
     Returns:
         The opaque part, carrying a digest of its payload.
@@ -731,7 +739,11 @@ def _payload_digest(block: Mapping[str, Any]) -> str:
     Args:
         block: The block, whose ``type`` and ``cache_control`` are excluded —
             ``type`` because it is already :attr:`~harness.contract.Opaque.kind`,
-            ``cache_control`` because it residualises instead.
+            and ``cache_control`` because it is carried on
+            :attr:`~harness.contract.Opaque.cache_control` instead. **Keep it
+            out.** Inside the digest, **M16**'s strip would surface as an opaque
+            digest change that no register row could name, on a path where the
+            same field on a modelled block yields a diagnosis (§7.4.1).
 
     Returns:
         Lowercase hex SHA-256 of the canonical payload.
