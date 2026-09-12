@@ -443,10 +443,21 @@ because Gemini puts every sampling parameter under `generationConfig` and Conver
 > empty across the whole corpus" for all seven readers. T-W2 pins this boundary with its own test,
 > so it stays a decision rather than an assumption.
 
-**Optional ids, because two formats have none.** Gemini's `functionCall`/`functionResponse` carry
-no id; pairing there is by tool name and the k-th unanswered call of that name in the most recent
-assistant turn. A required id would force those readers to synthesise one and show a delta on every
-tool turn.
+**Optional ids, because a format may carry none.** Where an id is absent, pairing is by tool name
+and the k-th unanswered call of that name in the most recent assistant turn. A required id would
+force such a reader to synthesise one and show a delta on every tool turn.
+
+> ⚠️ **Corrected by T-A4 (KBR-36).** This section previously read "two formats have none" and named
+> Gemini as one of them, on the strength of Google's Cloud / Agent-Platform reference. The
+> **Developer API** surface kitty actually serves differs: `v1beta`'s `FunctionCall` publishes an
+> optional `id` ("If populated, the client to execute the `function_call` and return the response
+> with the matching `id`") and `FunctionResponse` an optional `id` the client populates to match —
+> verified against the discovery document at revision `20260910`. Optional either way, so the
+> *decision* to make `ToolUse.id` and `ToolResult.tool_use_id` optional is unchanged and still
+> right; only its stated reason was wrong. The Gemini reader therefore **reads the wire id when one
+> is sent** and falls back to the name-and-position rule when it is not. KBR-36's own acceptance
+> asked for this to be confirmed rather than assumed, which is why it is recorded here rather than
+> left as a reader's private finding.
 
 **`ToolResult.content` is wider than text and images**, because Converse's `toolResult.content`
 carries `json` (the common case), `document`, `video` and `searchResult`, Anthropic's carries
@@ -784,7 +795,8 @@ the request went. Three providers carry routing outside the body:
 |---|---|---|
 | Azure | The deployment id, which **is** the request's normalized model (P20) — and P6 deliberately removes `model` from the body | Two requests to two different deployments have **byte-identical bodies**. A body-only oracle cannot tell them apart, so a misrouted request is invisible. |
 | Vertex | `project_id` and `location` (P21) | The account being billed is a URL component |
-| Gemini | Model and operation (`:generateContent` vs `:streamGenerateContent`) in the inbound path | M10 lifts the model into the body precisely because it is not there to begin with |
+| Gemini | Model and operation (`:generateContent` vs `:streamGenerateContent`) in the inbound path | M10 lifts the model into the **outbound Chat Completions** body precisely because it is not in
+the inbound one to begin with |
 
 So the oracle takes the **whole captured request** — method, scheme, host, path, query, headers,
 body — and asserts routing separately from content.
@@ -2493,6 +2505,147 @@ That is the correct signal and it is also a deadline. Claude Code sets a block-l
 `cache_control` on nearly every request and the grammar has no slot for it, so **T-C2's corpus
 entry — `system` with `cache_control` — fails the first oracle run.** Tracked as a blocking edge
 onto T-D1, not as a note here.
+
+#### 7.4.2 What T-A4 settled — seven more rules, and which readers each one binds
+
+§7.4.1 fixed ten decisions writing T-A1. Writing **T-A4** (Gemini, [KBR-36]) reached seven more, each
+of which the remaining authors would otherwise answer differently, and each recorded here for the
+same reason: paths are index-based and `envelope.extra` is keyed, so two readers that disagree
+report a delta on content nobody changed.
+
+**Two of the seven are Google-specific and five are not**, which matters because only the five are a
+standing obligation on the rest of Epic A. **Rule 7 is different in kind from the other six**: it is
+not a new question this format raised but one the three shipped readers have already answered three
+different ways, which makes it the only rule here that is also a correction.
+
+| Rule | Binds |
+|---|---|
+| 1 — the route as a reader input | Gemini alone; no other format puts routing in the inbound URL (§3.3.5) |
+| 2 — a nested control field flattens to its leaf published key | **T-A5**, whose `inferenceConfig` and `toolConfig` nest the same way |
+| 3 — ProtoJSON's two spellings, and case-insensitive enum values | Google formats; a **Vertex** reader, if one is ever added, inherits it |
+| 4 — `envelope.extra` keyed by the *published* spelling | every reader of a format with more than one legal spelling, so today rule 3's set |
+| 5 — a capability toggle the wire does not name is control, not a `ToolDecl` | **T-A5** and **T-A6** |
+| 6 — digest the payload, not the carrier, where the field name discriminates | any format whose content union is discriminated by field name rather than by a `type` member |
+| 7 — a union member's own value is wrong: raise, residualise, or drop? | **every** reader; three answers are already shipped |
+
+**1. The route is a reader input, and only for what the body cannot show.** Gemini alone puts the
+model and the operation in the URL (§3.3.5), so its reader derives `envelope.model` from the path
+segment and `envelope.stream` from the operation suffix — `:streamGenerateContent` versus
+`:generateContent`, and **never** from `?alt=sse`, which selects SSE framing over JSON-array framing
+for a method that streams either way. The **query string is not read at all**: `verify_total`
+compares `consumed | residual` against the *body*, so a query key in either account would be
+reported as a claim on a key the body does not have. Asserting the route is T-D2's.
+
+A path that is not a published generate route raises `UnreadableBodyError`. That widens a type §7.4
+describes as "a body that cannot be read" to cover a *route* problem, which is defensible only on
+the inbound direction, where the path is the client's — and it is stated here because T-D1 uses that
+one exception type to tell a malformed corpus entry from an I1 breach.
+
+**2. A nested control field is addressed by its leaf published key.** Gemini puts sampling under
+`generationConfig` and the tool choice under `toolConfig.functionCallingConfig`; Converse nests
+`inferenceConfig` and `toolConfig` the same way, so T-A5 inherits this. `extra_path()` **raises** on
+a dotted key, which leaves exactly two dotless candidates, and the container loses:
+`envelope.extra[generationConfig]` cannot collide and survives a schema revision, but §3.3.1a
+compares an `extra` value **whole**, so it would collapse fourteen independently registrable fields
+into one address and make any row anchored there claim all of them — the coarse-anchor failure
+§3.3.1a warns about by name. The leaf key wins on the narrowest-anchor rule.
+
+The cost is a flat namespace assembled from several nested objects, so **each reader that flattens
+owes a test that its `extra` key sets are pairwise disjoint.** The namespace is not naturally
+disjoint — Gemini publishes `mediaResolution` on both `GenerationConfig` and `Part`, and the only
+reason there is no clash is that the `Part` one residualises. A collision would be introduced by a
+*schema revision*, not by a request, and the loser would overwrite the winner with no residual and
+no delta.
+
+**3. Google's JSON has two legal spellings of every field, and both must read.** Gemini's wire
+format is ProtoJSON, whose parsers "accept both the lowerCamelCase name … and the original proto
+field name" (`protobuf.dev/programming-guides/json/`). This is not theoretical: Google's own
+published examples mix them freely — `system_instruction`, `function_declarations`, `tool_config`,
+`file_data` and `response_mime_type` in snake_case, beside `generationConfig`, `stopSequences`,
+`maxOutputTokens` and `topP` in camelCase. A reader that knew only the schema's spelling would
+residualise the other and **fail the run on Google's own published example**, which §7.4.1 already
+calls "a harness defect and not a finding". Enum *values* are matched case-insensitively for the
+same reason: the published `FunctionCallingConfig.mode` enumeration is upper case and Google's
+`function_calling.sh` sends `"mode": "auto"`.
+
+Where one object carries both spellings of one field, the **published** spelling is read and the
+other residualises. Not "the first wins": §7.4.1 designs key order out of the projection elsewhere —
+"canonical JSON rather than the raw wire slice, because a translator that reorders keys must not
+change the digest" — and resolving by position would put it back, projecting one semantic body two
+ways depending on which alias a serialiser emitted first.
+
+**4. `envelope.extra` is keyed by the *published* wire key.** §3.3.1b says "keyed by the wire key",
+which named one thing until rule 3; it now names two. A register row can name only one, and T-D9's
+matrix needs one, so the published lowerCamelCase name is the address and the snake_case original
+resolves onto it. This is the one place where `extra` and the residual diverge deliberately:
+`consumed` and residual keys stay in the **wire** spelling, because `verify_total` compares them
+against the body's own keys.
+
+**5. A server-side capability toggle in the tools array is control, not a tool declaration.**
+Gemini's `Tool` message carries eight of them beside `functionDeclarations` — `googleSearch`,
+`codeExecution`, `urlContext`, `fileSearch`, `computerUse`, `googleMaps`, `googleSearchRetrieval`,
+`mcpServers` — each an unnamed toggle object such as `{"googleSearch": {}}`. They map to
+`envelope.extra[<key>]`.
+
+**This departs from T-A3**, which makes a non-`function` Responses tool a `ToolDecl` whose name is
+the tool type, and the departure is the point: a Responses built-in tool *has* a name to be
+addressed by, and §3.3.1a's tool paths are by name. Gemini's has none, so a `ToolDecl` would have to
+invent one — putting a vendor spelling into a form whose purpose is wire independence — while
+residualising would fail the run on every request that enables Google Search. The distinguishing
+question is therefore **"does the wire name this tool?"**, not "is it built in".
+
+**6. Digest the payload, not the carrier, where the field name is the discriminator.** §7.4.1's
+recipe says `rest` is "the block without `type` and without `cache_control`", which assumes a block
+discriminated by a `type` member. A Gemini `Part` is a union discriminated by **field name** and
+defines no `cache_control`, so the digest is taken over the *payload object* — `part["executableCode"]`
+— and neither exclusion has anything to remove. Sibling members on the same part residualise, which
+is exactly the role `cache_control` plays on a `type`-discriminated block. The recipe itself is
+unchanged, `ensure_ascii` included.
+
+**7. When a union member's own value is wrong: raise, residualise, or drop — and never drop.** Three
+readers have shipped and all three answer differently, which is the coordination failure §7.4.1
+exists to prevent, so it is settled here rather than left to T-A5 and T-A6 to pick a precedent from.
+The distinction is **what the bad value is a value *of***:
+
+| The wrong value is… | Outcome | Because |
+|---|---|---|
+| the value that **is** the part — `Part.text`, a `Thinking`'s text, `Opaque.kind` | **raise** `UnreadableBodyError` | the grammar has no absent value to fall back to, and `Text("")` fabricates an empty part — which is *meaningful* here, since P5e and P8 both inject one |
+| a **required field** of a part — a tool `name` | **residualise**, project the part with `""` | §3.3.1b settles it in those words: "an absent `name` *does* residualise … a call nobody can name cannot be paired or addressed" |
+| a **payload** the reader cannot canonicalise — base64 that does not decode | **residualise the leaf**, project the part with the grammar's absent value | `Image.digest` is `str \| None`, so an absent value exists, and §7.4.1: "raising is the other wrong answer: it blinds the oracle to everything else in a request it could otherwise diff" |
+| the **member itself**, where the schema declares an object and the wire sent a scalar — `{"functionCall": 7}` | **raise** | there is no value to put in the position, and the position cannot be vacated |
+
+**The line between the last two rows is where the member sits, not how bad the value is.** A
+container under the **envelope** — `generationConfig`, `toolConfig` — residualises whole when it is
+not an object, because every envelope field has an absent value and the rest of the request still
+projects. A container that **is a part or a turn** raises, because a part must occupy its index and
+the grammar offers nothing to put there: residualising it would leave the position empty, which is
+the drop this rule forbids. State the question as *"can the projection still fill this position?"*
+and every case above falls out of it.
+
+**No branch ever returns *no part*.** That is the load-bearing half, and it is where two of the three
+shipped readers are wrong: `reader_responses.py` returns `None` for both a wrongly-typed `input_text`
+and an undecodable data URL, which drops the part and shifts every later part's index — §7.4.1's own
+warning that "that invented delta lands on every part of the turn and on every turn after it". A
+reader that cannot read a part must still *occupy its position*.
+
+> **Reconciliation owed.** `reader_anthropic_messages.py` raises on undecodable base64 where this
+> rule residualises, and `reader_responses.py` drops a part where this rule keeps it. Both predate
+> this section. T-A4 is the reference implementation; the two landed readers need conforming, and
+> that is a change to shipped code rather than a note, so it is tracked as its own ticket.
+
+> **What this reader leaves on the record.** Six fields the format publishes, real clients send, and
+> the grammar cannot carry now residualise and so **fail the first oracle run** — the same shape as
+> the `cache_control` deadline above, and tracked as its own defect rather than as a note here. The
+> sharpest is `thoughtSignature` on a `functionCall` part, which Gemini 3 *requires* clients to echo
+> back verbatim. Unlike `cache_control` the grammar nearly has the slot — `contract.py` already says
+> `Thinking.signature` carries "Anthropic's `signature` or Gemini's `thoughtSignature`" — so the fix
+> is small and specific rather than open-ended.
+>
+> A second consequence, on the oracle rather than the reader: `GeminiTranslator` **discards** the
+> inbound tool-call id and synthesises one per call (`_make_tool_call_id`). Now that the §3.3.1 correction above
+> projects the wire id, every tool turn from a client that populates one shows a delta with no
+> register row to claim it. That is a correct oracle finding, not a reader defect, and it needs a
+> row or a ticket before T-D9 runs.
 
 ### 7.5 The bridge fixture
 
