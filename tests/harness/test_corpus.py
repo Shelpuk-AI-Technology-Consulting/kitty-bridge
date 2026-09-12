@@ -319,6 +319,21 @@ class TestTheFormatIsClosed:
         with pytest.raises(k.CorpusEntryError, match="it must be"):
             k.load_entry(path)
 
+    def test_a_hand_written_dotfile_entry_is_rejected(self, tmp_path: Path) -> None:
+        """The load side validates the stem too, and that is not belt-and-braces.
+
+        `Path.glob("*.json")` **does** match a leading dot — verified, because
+        shell globbing does not and the difference is the whole point. So a
+        hand-written `.hidden.json` is loaded by `load_corpus`, and an entry the
+        writer would refuse to create must not be one the reader accepts.
+        """
+        path = manifest_for(tmp_path, id=".hidden")
+        path.rename(tmp_path / ".hidden.json")
+        (tmp_path / "sample.body").rename(tmp_path / ".hidden.body")
+
+        with pytest.raises(k.CorpusEntryError, match="legal entry id"):
+            k.load_entry(tmp_path / ".hidden.json")
+
     def test_a_manifest_that_is_not_json_is_rejected(self, tmp_path: Path) -> None:
         """Named explicitly so the failure says so, rather than escaping as a `JSONDecodeError`."""
         path = manifest_for(tmp_path)
@@ -834,6 +849,47 @@ class TestTheRoundTrip:
         k.write_entry(tmp_path, entry(request=capture(DIRTY_BODY)))
 
         assert b"AKIA" + b"234567ABCDEFGH34" not in (tmp_path / "sample.body").read_bytes()
+
+    @pytest.mark.parametrize("bad", ["../escaped", "a/b", "a\\b", ".hidden", "-flag", "", "wrong.dot"])
+    def test_writing_refuses_an_id_that_is_not_a_bare_name(self, tmp_path: Path, bad: str) -> None:
+        """An id is interpolated into two paths, so it must be a file name and nothing else.
+
+        The load side already refused these — a manifest's id must equal its
+        filename stem, and a filename cannot contain a separator — and that is
+        what made the gap easy to miss: the asymmetry looked like a check that
+        existed. It did not. `write_entry` with `id="../escaped"` wrote both
+        files into the corpus directory's **parent**.
+
+        The leading dot and dash are refused for their own reasons: a dotfile is
+        invisible to the corpus glob and therefore to the lint, and a leading
+        dash is an option to every command a maintainer runs over these files.
+        """
+        with pytest.raises(k.CorpusEntryError, match="legal entry id"):
+            k.write_entry(tmp_path, entry(id=bad))
+
+    def test_writing_refuses_a_short_operator_literal(self, tmp_path: Path) -> None:
+        """The floor must hold at the procedure's last step, not only inside the scan."""
+        with pytest.raises(ValueError, match="extra literals"):
+            k.write_entry(tmp_path, entry(), extra=("tas",))
+
+    def test_writing_refuses_a_short_cleared_literal(self, tmp_path: Path) -> None:
+        """`write_entry` reads `known_non_secrets` straight into `allow`.
+
+        A short one there disables the lint on the entry being written, which is
+        the worst moment for it to happen.
+        """
+        short = entry(known_non_secrets=(("key", "looks fine, disables the lint"),))
+
+        with pytest.raises(ValueError, match="allow literals"):
+            k.write_entry(tmp_path, short)
+
+    def test_nothing_is_written_when_the_id_is_refused(self, tmp_path: Path) -> None:
+        """A refusal that half-wrote would leave an orphan body the lint never opens."""
+        with pytest.raises(k.CorpusEntryError):
+            k.write_entry(tmp_path, entry(id="../escaped"))
+
+        assert list(tmp_path.parent.glob("escaped.*")) == []
+        assert list(tmp_path.glob("*")) == []
 
     def test_entries_come_back_in_id_order(self, tmp_path: Path) -> None:
         """A stable order keeps a failure message the same across runs."""

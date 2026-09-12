@@ -200,6 +200,20 @@ RULE_SPECS: tuple[RuleSpec, ...] = (
             # mean the file guarding this very selector is reviewed without the
             # test rules applied.
             ".github/review/tests/**/*.py",
+            # 🔴 `.gitattributes` is here rather than beside `.gitignore` in
+            # `packaging`, and the reason is what it contains, not where it sits.
+            # Every line of it governs `tests/corpus/*`: it marks the committed
+            # captures `-text` so that `core.autocrlf` cannot rewrite a `.body`
+            # on checkout, which would change both the bytes §3.3.2 asserts on
+            # and the length two register triggers are decided by -- and the CI
+            # matrix now includes a Windows leg, so that is a live path and not a
+            # hypothetical one. A change here therefore has to be read against
+            # the corpus's rules, not the packaging ones.
+            #
+            # If it ever governs a path outside `tests/`, it belongs in
+            # `packaging` with `.gitignore` instead: both are then repository-level
+            # git configuration deciding what a checkout contains.
+            ".gitattributes",
         ),
     ),
     # How the package is built, typed, linted and installed. `pyproject.toml` is

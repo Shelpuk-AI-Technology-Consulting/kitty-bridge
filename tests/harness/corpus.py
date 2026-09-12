@@ -699,6 +699,45 @@ MANIFEST_KEYS: frozenset[str] = frozenset(
 CAPTURED = "captured"
 SYNTHETIC = "synthetic"
 
+#: What an entry id may be.
+#:
+#: An id is a **file name component and nothing else**. It is interpolated into
+#: two paths, so `../escaped` makes :func:`write_entry` write outside the corpus
+#: directory entirely — measured, not theorised. The load side already refused
+#: such an entry (the manifest's id must equal the filename stem, and a filename
+#: cannot contain a separator), which is exactly what made the gap easy to miss:
+#: the asymmetry looked like a check that existed.
+#:
+#: Deliberately narrower than "no separators". A leading dot makes a file the
+#: corpus glob does not see, and a leading dash is an option to every command a
+#: maintainer will run over these files.
+ENTRY_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*\Z")
+
+
+def _checked_id(entry_id: str) -> str:
+    """Return ``entry_id`` if it is a legal entry id.
+
+    Shared by :func:`load_entry` and :func:`write_entry` so the two sides cannot
+    disagree about what an id is — the disagreement that let the writer escape
+    the directory the reader polices.
+
+    Args:
+        entry_id: The candidate id.
+
+    Returns:
+        The id, unchanged.
+
+    Raises:
+        CorpusEntryError: When it is not a bare name of letters, digits,
+            underscores and dashes.
+    """
+    if not ENTRY_ID.match(entry_id):
+        raise CorpusEntryError(
+            f"{entry_id!r} is not a legal entry id: an id is a file name component, so it must "
+            "start with a letter or digit and hold only letters, digits, underscores and dashes"
+        )
+    return entry_id
+
 #: Triggers a corpus entry may not declare in either direction.
 #:
 #: :mod:`harness.register` states the model as a binary — "a trigger is a *route*
@@ -849,7 +888,7 @@ def load_entry(manifest_path: Path) -> CorpusEntry:
         CorpusEntryError: When the manifest is malformed, contradictory, or
             names a body file that does not exist.
     """
-    stem = manifest_path.stem
+    stem = _checked_id(manifest_path.stem)
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
@@ -1000,9 +1039,12 @@ def write_entry(root: Path, entry: CorpusEntry, *, extra: Sequence[str] = ()) ->
         The manifest's path.
 
     Raises:
+        CorpusEntryError: When ``entry.id`` is not a bare file name component.
         EncodedCaptureError: When the capture carries a ``content-encoding`` or
             ``transfer-encoding`` header.
     """
+    _checked_id(entry.id)
+
     encoded = sorted({n for n, _ in entry.request.headers if n.lower() in REFUSED_ENCODINGS})
     if encoded:
         raise EncodedCaptureError(
