@@ -434,6 +434,12 @@ class TestTheWholeSuiteIsCoherent:
             # pin), and that both legs present one identity from one source.
             "tests/test_curl_cffi_transport_contract.py",
             "tests/test_oauth_leg_identity.py",
+            # KBR-178. A §6.2.3 structural guard: it holds the shipped call site
+            # of `_normalize_cc_stop` against R11's placement rule, which M15
+            # states and KBR-144 is the cost of breaking. Its own file because a
+            # module-level `pytestmark` cannot be overridden per test, and the
+            # behavioural cases for the same helper are L1.
+            "tests/test_cc_ingress_normalises_stop.py",
         }
 
         actual = {

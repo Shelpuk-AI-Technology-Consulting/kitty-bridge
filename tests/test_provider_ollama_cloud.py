@@ -194,6 +194,30 @@ class TestOllamaCloudTranslateToUpstream:
         result = self.adapter.translate_to_upstream(cc)
         assert result["options"]["temperature"] == 0.7
 
+    def test_stop_mapped_to_options_stop(self):
+        """KBR-178: the CC `stop` reaches Ollama as `options.stop`."""
+        cc = {"model": "gpt-oss:120b", "messages": [], "stop": ["A", "B"]}
+        result = self.adapter.translate_to_upstream(cc)
+        assert result["options"]["stop"] == ["A", "B"]
+        assert "stop" not in result
+
+    def test_null_stop_creates_no_options_entry(self):
+        """`stop: null` must not attach an `options` container carrying None.
+
+        ``options`` is attached only when non-empty, so an unconditional write
+        would put ``{"stop": None}`` on every request without stop sequences.
+        See D6.
+        """
+        cc = {"model": "gpt-oss:120b", "messages": [], "stop": None}
+        result = self.adapter.translate_to_upstream(cc)
+        assert "options" not in result
+
+    def test_empty_stop_creates_no_options_entry(self):
+        """`stop: []` must not attach an `options` container either — see D6."""
+        cc = {"model": "gpt-oss:120b", "messages": [], "stop": []}
+        result = self.adapter.translate_to_upstream(cc)
+        assert "options" not in result
+
     def test_options_empty_when_no_extras(self):
         cc = {"model": "gpt-oss:120b", "messages": []}
         result = self.adapter.translate_to_upstream(cc)

@@ -192,6 +192,22 @@ class MessagesTranslator:
             if key in messages_request:
                 result[key] = messages_request[key]
 
+        # KBR-178: Chat Completions calls this `stop`.  Without the rename the
+        # user's stop sequences die here and nothing downstream can restore
+        # them.  An empty list is omitted deliberately: it asks for no stop
+        # behaviour, and `stop: []` violates the published CC schema
+        # (`StopConfiguration` declares `minItems: 1`).
+        stop_sequences = messages_request.get("stop_sequences")
+        if stop_sequences:
+            result["stop"] = stop_sequences
+
+        # KBR-178: Chat Completions declares no `top_k` at all, so carrying it
+        # as a bare key would be a field no CC provider accepts.  It travels as
+        # internal metadata instead and only Anthropic-family adapters restore
+        # it; `_INTERNAL_KEYS` keeps it off every other provider's wire.
+        if messages_request.get("top_k") is not None:
+            result["_top_k"] = messages_request["top_k"]
+
         # Preserve the effort parameter for Anthropic-compatible upstreams.
         # Claude Code sends this to control reasoning depth (e.g. "low",
         # "medium", "high", "xhigh").  The Anthropic Messages API accepts

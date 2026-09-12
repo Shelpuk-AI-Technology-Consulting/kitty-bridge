@@ -2,6 +2,7 @@
 
 import json
 
+from kitty.bridge.messages.translator import MessagesTranslator
 from kitty.providers.anthropic import AnthropicAdapter
 
 # ── CC format samples (what the bridge produces internally) ─────────────────
@@ -298,6 +299,78 @@ class TestAnthropicTranslateToUpstream:
         }
         result = self.adapter.translate_to_upstream(cc)
         assert result["top_p"] == 0.9
+
+
+class TestAnthropicStopSequencesAndTopK:
+    """KBR-178: the CC `stop` and `_top_k` reach the Anthropic Messages body."""
+
+    def setup_method(self):
+        self.adapter = AnthropicAdapter()
+
+    def _cc(self, **extra):
+        """Build a minimal CC request, plus whatever the case under test adds."""
+        cc = {
+            "model": "claude-sonnet-4-6",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream": False,
+        }
+        cc.update(extra)
+        return cc
+
+    def test_stop_mapped_to_stop_sequences(self):
+        """The CC `stop` is renamed back to the Messages `stop_sequences`."""
+        result = self.adapter.translate_to_upstream(self._cc(stop=["A", "B"]))
+        assert result["stop_sequences"] == ["A", "B"]
+        assert "stop" not in result
+
+    def test_no_stop_means_no_stop_sequences(self):
+        """No `stop` in the CC request invents no `stop_sequences`."""
+        result = self.adapter.translate_to_upstream(self._cc())
+        assert "stop_sequences" not in result
+
+    def test_null_stop_is_omitted(self):
+        """`stop` is nullable in Chat Completions; Anthropic rejects a null list.
+
+        The bridge serves ``/v1/chat/completions`` directly, so a CC request can
+        legally arrive carrying ``stop: null``.  See D6.
+        """
+        result = self.adapter.translate_to_upstream(self._cc(stop=None))
+        assert "stop_sequences" not in result
+
+    def test_empty_stop_is_omitted(self):
+        """An empty stop list is semantically void — see D6."""
+        result = self.adapter.translate_to_upstream(self._cc(stop=[]))
+        assert "stop_sequences" not in result
+
+    def test_internal_top_k_restored(self):
+        """`_top_k` is restored as the Messages `top_k`, and does not leak."""
+        result = self.adapter.translate_to_upstream(self._cc(_top_k=40))
+        assert result["top_k"] == 40
+        assert "_top_k" not in result
+
+    def test_no_internal_top_k_means_no_top_k(self):
+        """No `_top_k` invents no `top_k`."""
+        result = self.adapter.translate_to_upstream(self._cc())
+        assert "top_k" not in result
+
+    def test_round_trip_preserves_five_stop_sequences(self):
+        """The ticket's own reproduction: Messages -> CC -> Messages, verbatim.
+
+        Five sequences exceed the Chat Completions cap of four.  Kitty forwards
+        them unchanged and lets the provider answer, rather than truncating a
+        user's instruction silently.  See D3.
+        """
+        body = {
+            "model": "claude-opus-5",
+            "max_tokens": 64,
+            "messages": [{"role": "user", "content": "hi"}],
+            "stop_sequences": ["one", "two", "three", "four", "five"],
+            "top_k": 40,
+        }
+        cc = MessagesTranslator().translate_request(body)
+        result = self.adapter.translate_to_upstream(cc)
+        assert result["stop_sequences"] == ["one", "two", "three", "four", "five"]
+        assert result["top_k"] == 40
 
 
 class TestAnthropicTranslateFromUpstream:
