@@ -216,7 +216,8 @@ partial today — see gap G22.
 | P11 | Translate CC → Bedrock Converse | `BedrockAdapter.translate_to_upstream` | Always, on `bedrock` | A third upstream wire format M2 does not name. Custom transport — see §3.3.4. |
 | P12 | Translate CC → Ollama `/api/chat` | `OllamaCloudAdapter.translate_to_upstream` | Always, on `ollama_cloud` | A fourth wire format. Custom transport. |
 | P13 | **Drop fourteen Chat-Completions-only parameters** — `temperature`, `top_p`, `max_tokens`, `max_completion_tokens`, `frequency_penalty`, `presence_penalty`, `logprobs`, `top_logprobs`, `response_format`, `stop`, `n`, `stream_options`, `seed`, `logit_bias` | `OpenAISubscriptionAdapter._cc_to_responses` | Always, on the **CC-origin** path | The Codex backend applies strict allowlist validation and rejects them with 400. **User-visible**: `max_tokens` and `temperature` silently do nothing on this provider. Logged at DEBUG. |
-| P14 | **Drop every parameter outside the Codex allowlist**, notably `max_output_tokens` | `OpenAISubscriptionAdapter._prepare_responses_body` | Always, on the **Responses-origin** path | Same backend restriction, different input shape — this path receives a Responses body, so the parameter is spelled `max_output_tokens`, not `max_tokens`. A single row cannot cover both paths; the sets differ. |
+| P14 | **Drop every *sampling* parameter outside the Codex allowlist**, notably `max_output_tokens` | `OpenAISubscriptionAdapter._prepare_responses_body` | Always, on the **Responses-origin** path | Same backend restriction, different input shape — this path receives a Responses body, so the parameter is spelled `max_output_tokens`, not `max_tokens`. A single row cannot cover both paths; the sets differ. **The non-sampling half of the same drop is P23**, which lands at `envelope.extra[<wire key>]` rather than here: one mutation site, two rows, because the register addresses effects and not sites. |
+| P23 | **Drop every non-sampling control field outside the Codex allowlist** — `background`, `context_management`, `conversation`, `max_tool_calls`, `metadata`, `moderation`, `previous_response_id`, `prompt`, `prompt_cache_key`, `prompt_cache_options`, `prompt_cache_retention`, `safety_identifier`, `service_tier`, `text`, `truncation`, `user` | `OpenAISubscriptionAdapter._prepare_responses_body` | Always, on the **Responses-origin** path | **P14's other half, and its own row because the two land at different addresses.** `CreateResponse` (`openai/openai-openapi` v2.3.0) defines 31 top-level request fields and `_ALLOWED_RESPONSES_PARAMS` keeps ten, so 21 are dropped: five are sampling parameters P14 claims at the bare `conversation.sampling`, and these **sixteen** are declared control fields, which §3.3.1b sends to `envelope.extra[<wire key>]` — an address no row reached. Under-claiming is the direction §3.3.1a calls unrecoverable, so the first T-D5 corpus entry carrying, say, `text` or `truncation` would have failed the run on a deliberate, legitimate mutation. **KBR-171.** The row **enumerates** its sixteen addresses instead of anchoring at a bare `envelope.extra`; §3.3.1a records why, and what enumerating costs. ⚠️ **"Dropped" here means *never copied*.** The allowlist literal is read only by the DEBUG log; the shipped body is an explicit `if` chain, and five of its branches test truthiness rather than presence — so an *allowlisted* field with a falsy value (`include: []`, `reasoning: {}`) is dropped too, and this row does **not** claim it. That residue is **G27**, because it is a conditional mutation with a trigger of its own and because claiming `envelope.extra[reasoning]` here would swallow G23. **User-visible**: `truncation`, `text` and `previous_response_id` silently do nothing on this provider. |
 | P15 | **Strip `strict` from every tool declaration** | `_prepare_responses_body` | Always, on the Responses-origin path | The Codex backend rejects it. A change to the **tool schema** the agent declared, not to a sampling parameter — a different kind of fidelity mutation and worth its own row. |
 | P16 | Rewrite content types `input_text` → `output_text` | `_convert_content_types`, called from `_prepare_responses_body` | Always, on the Responses-origin path | The Codex backend validates content types strictly. **Message-content mutation.** |
 | P17 | Inject `stream: True` and `store: False` | `_cc_to_responses` and the Responses-origin body builder | **Unconditionally**, both subscription paths | The Codex backend is streaming-only; kitty reassembles a non-streaming reply from the SSE. Note `stream: True` **overrides a non-streaming client request** — the subscription-path analogue of M11. |
@@ -226,8 +227,8 @@ partial today — see gap G22.
 **Conditional rows are the point.** Every row whose trigger is a condition must be provably
 *inert* when that condition is absent — the sharpest form of "unless absolutely necessary", and
 what §3.3.2 assertion 2 tests, with the trigger complements §3.3.4 requires. M1, M2, M10, M14, M15, P1,
-P6, P9a, P9b, P9c, P10, P11, P12, P13, P14, P15, P16, P17, P18, P19, P20 and P21 are unconditional
-by design and are exempt from that assertion.
+P6, P9a, P9b, P9c, P10, P11, P12, P13, P14, P15, P16, P17, P18, P19, P20, P21 and P23 are
+unconditional by design and are exempt from that assertion.
 
 **M14, P20 and P21 were missing from that list until KBR-26**, while their own trigger cells read
 `Always`. A row that always fires has no complement, so assertion 2 would have demanded a corpus
@@ -269,10 +270,22 @@ T-D8), and the corpus loader (T-W6, which indexes captured sessions **by trigger
 **Authority is split, deliberately.** The markdown remains the reviewed record of *why* each
 mutation is necessary — a reviewer reads a table, not a tuple. The data is what tests execute.
 Ids and the conditional/unconditional classification are **mechanically reconciled** between the
-two by an L2 guard. Paths and sites are **not**, because the tables have no path column and their
-Site cells are prose (M4's reads "step 1", P17's "and the Responses-origin body builder", P2b's
-simply "same"). Sites are checked against the **source tree** instead, which is the stronger
-check: it catches a renamed mutation site, which no comparison against a prose cell could.
+two by an L2 guard. Paths and sites are **not reconciled against the markdown**, because the
+tables have no path column and their Site cells are prose (M4's reads "step 1", P17's "and the
+Responses-origin body builder", P2b's simply "same"). Sites are checked against the **source
+tree** instead, which is the stronger check: it catches a renamed mutation site, which no
+comparison against a prose cell could.
+
+**One row's paths *are* reconciled against the source, and it is the exception that states its own
+limit.** P23's sixteen addresses are the published control fields the Codex allowlist does not
+keep, and an L2 guard recomputes that difference from the adapter's allowlist literal and T-A3's
+control-field table, failing on any disagreement. This buys less than it appears to and the
+difference matters: a bidirectional set-equality makes widening the allowlist a **deliberate**
+edit to the row rather than a silent one — it does **not** make the row independent of the code,
+because after the code changes the only route back to green is to edit the row to match. It is
+the posture G24 records for the OpenCode endpoint snapshot: a green run proves self-consistency,
+not agreement with the vendor. Every other row's paths stay reviewed rather than derived, and
+P23 is enumerated rather than computed at import so that a reviewer still reads a list.
 
 **The Trigger column is reconciled by nothing, and that is the third state.** Editing a Trigger
 cell produces no disagreement. Those cells are prose of the same kind as Site — "Always, on the
@@ -330,17 +343,23 @@ plan §1.4's harness rule forbids. It is filed as **KBR-139** rather than guesse
 |---|---|---|---|
 | Data ⇄ §3.2 markdown — ids and conditionality | L2 | **T-W3** | Two files. No sockets |
 | Data ⇄ source tree — every site resolves | L2 | **T-W3** | The AST of `src/kitty`. No sockets |
+| Data ⇄ the adapter's own drop set — P23's sixteen paths | L2 | **T-W3** | One module's AST plus T-A3's control-field table. No sockets |
 | Register completeness — projected delta at the wire equals the triggered rows | **L3** | T-G2 | Captures from T-D4–T-D9 |
 
-The first two are what make the register *well-formed*. Only the third makes it *true*, and it
-cannot run until a recorder and an oracle exist.
+The first three are what make the register *well-formed*. Only the last makes it *true*, and it
+cannot run until a recorder and an oracle exist. The third is narrower than the other two — it
+checks one row, for the reason §3.2.4 gives — and it is the only one that reads a value out of
+`src/kitty` rather than a name.
 
-**None of the three proves the register is *complete*.** They prove the data and the document say
-the same thing, and that every site named still exists. A mutation the product performs and
+**None of the well-formedness guards proves the register is *complete*.** They prove the data and
+the document say the same thing, that every site named still exists, and that one row's paths
+match one allowlist. A mutation the product performs and
 *neither* artifact records is invisible to all of them — only the wire-level guard can catch that,
-and it needs a recorder and an oracle. Two such omissions are already known and filed: G22
-(headers) and G23 (`openai_subscription`'s `reasoning` injection), the second found by walking the
-subscription request path by hand while writing the data.
+and it needs a recorder and an oracle. Four such omissions are already known and filed: G22
+(headers), G23 (`openai_subscription`'s `reasoning` injection), G26 (P13's CC-origin twin) and
+G27 (an allowlisted field dropped for being falsy). The last three were each found by walking the
+subscription request path by hand rather than by any guard — which is the evidence for the
+sentence above, not a decoration on it.
 
 **A header row's `paths` are checked by none of the three.** Under §3.2.2's header rule they are
 consumed by §4.3 C1's exact-set assertion, which does not exist yet — so for P9a, P9b and P9c only
@@ -490,7 +509,7 @@ only the second consumer; §3.2.2 says why.
 | Path form | Names |
 |---|---|
 | `envelope.model` · `envelope.stream` · `envelope.store` | The named control fields |
-| `envelope.extra[<wire key>]` | A format-specific control field — P2a `thinking`, P3 `reasoning`, P4 `reasoning_effort`, P10 `reasoning_split` |
+| `envelope.extra[<wire key>]` | A format-specific control field — P2a `thinking`, P3 `reasoning`, P4 `reasoning_effort`, P10 `reasoning_split`, and P23's sixteen dropped Responses control fields. **The bare `envelope.extra` is not a legal anchor** — see below |
 | `conversation.system[<i>]` | One system text part |
 | `conversation.turns[<i>].role` · `.parts[<j>]` | A turn, or one part of it |
 | `conversation.tools[<name>].description` · `.schema` · `.strict` | A tool declaration, **by name** |
@@ -574,6 +593,38 @@ the natural anchor. It is the opposite. A bare collection claims its members, P1
 (§3.3.1). Such a row could therefore only ever claim a delta the oracle was supposed to stop at:
 the injected `x-kitty-trace` field that is one of §3.3.1's five mandatory falsification cases, and
 a real internal-key leak — the defect P1 exists to prevent. P1 takes the escape instead.
+
+⚠️ **`envelope.extra` is not a legal register anchor either**, which is why the table above lists
+it only in its keyed form. `path_matches` would accept the bare spelling — a bracket-free pattern
+segment claims a bracketed member of itself, so `envelope.extra` names `envelope.extra[text]` —
+and that is exactly the problem: this is the one prohibition nothing else in the suite would
+notice. **P23 (KBR-171) is the row that wanted it**, and the reason it may not have it is a
+collision, not an aesthetic:
+
+> `extra` is where the *injections* live — P2a, P2b, P3, P4, P10, and the `reasoning` injection
+> G23 registers at `envelope.extra[reasoning]`. A P23 anchored at the bare collection and
+> triggered on `RESPONSES_ORIGIN_PATH` would claim that delta too, **on the same route**, so
+> G23's row could be deleted and nothing would go red. One row silently absorbing another is the
+> unrecoverable half of the asymmetry this section opens with.
+
+**P13/P14's bare `conversation.sampling` is not a precedent for it**, and not for the reason a
+first reading suggests. It is *not* that the bare anchor and an enumeration claim the same thing
+there — `SAMPLING_KEYS` has fifteen members and P13 drops fourteen, so the bare anchor
+additionally claims `conversation.sampling[top_k]`. Those rows anchor bare **deliberately**, so
+that a fifteenth key added upstream is claimed by the same row (`register.py` says so at P13).
+The difference is what the over-claim can swallow: `conversation.sampling` is a closed set that
+`Conversation` enforces and that no row injects into, so the widest thing the bare anchor can
+absorb is another sampling key. `envelope.extra` is open, and absorbs whole rows.
+
+**The cost of enumerating is real, and it is not "already paid for".** A thirty-second published
+field that the allowlist drops would be unclaimed, and the oracle would report a false breach on
+it. Nothing in the suite detects a vendor revision — no test reads the published schema, by §8's
+determinism rules, which is G24's shape rather than a solved problem. What the enumeration buys
+is that the failure is **loud, local and one line to fix**, where the bare anchor's over-claim is
+silent and costs a row. A bare anchor would not have detected the revision either; it would only
+have hidden it. What *is* pinned is the harness side: T-A3's control-field table is asserted
+against the published key count, so editing it goes red there and again in P23's derivation
+guard.
 
 **The index builders accept the wildcard (KBR-26).** `system_path`, `turn_path`, `part_path` and
 `reply_part_path` take `WILDCARD` where they take a position, because a register row writes a
@@ -2476,8 +2527,9 @@ exceptions, and they are not interchangeable:
    **No key currently exercises this branch**, and that is worth saying: an earlier draft of this
    section presented it as the general case using `effort` as its example, which is wrong twice
    — `effort` is client-sent, and generalising from it would have told six authors to ask "does a
-   register row name this?" about fields no row names, such as `context_management` and
-   `output_config`, and to residualise them.
+   register row name this?" about fields no row names, such as `output_config`, and to residualise
+   them. (`context_management` stood beside it until **P23** claimed it — which is the point:
+   membership of that set is a fact about the register on the day you read it.)
 
 A key kitty emits that **no** register row names is an *unregistered* mutation. That is the defect
 the oracle exists to find, and it must residualise.
@@ -3160,6 +3212,8 @@ does not surface work that is done. `TEST_SUITE_IMPLEMENTATION_PLAN.md` §16 mir
 | **G15** | **F4 — `_effort` / `_thinking_adaptive` reach the wire** — KBR-6 | Live I1+I2 breach on every CC-wire provider | Add both to `_INTERNAL_KEYS`; internal-key completeness guard (§6.2.3); regression test at `BridgeServer._upstream_body_for`. Residual: `openai_subscription` alone builds its body independently of that boundary (allowlisted, hence never leaked); `bedrock` and `ollama_cloud` call `translate_to_upstream` inside their transports, so the assertion reaches their wire. Carried by T-G2 over T-D4–T-D9's captures | **0** |
 | **G16** | **F5 — `OpenCodeGoAdapter` misdeclared its wire shape** — KBR-7 · **CLOSED** | Was a latent defect in the M8 path and a trap for the oracle | Done: the declaration is per-model, both repair sites branch on it, and the **hook-level** honesty guard landed with the fix. The **wire-level** guard remains T-G4 / KBR-80 | — |
 | **G24** | **No staleness alarm on the provider endpoint snapshot** | KBR-126 checked in `tests/data/opencode_go_endpoints.json` as the routing oracle. Nothing detects that the provider has since changed its table: §8's determinism rules exclude both mechanisms that could — a networked check and a clock. Refreshing it is a human act | Accepted trade-off, recorded rather than fixed: a networked alarm makes CI depend on a third party's uptime and turns green into a statement about today's weather. Revisit only if the provider publishes a machine-readable endpoint table — today's `/v1/models` carries ids only, no endpoints, and still lists retired aliases | **3** |
+| **G26** | **P13's CC-origin twin — the Codex body builder drops 17 non-sampling control fields, unregistered** — KBR-184 | Found while closing KBR-171, which closed the identical defect on the Responses-origin path with P23. `_cc_to_responses` carries `model`, `messages`→`input`, `stream`, `store`, `tools`, `tool_choice` and an injected `reasoning`; against `CreateChatCompletionRequest`'s 37 published fields that leaves **17** which are neither carried nor sampling — `parallel_tool_calls`, `metadata`, `user`, `service_tier` and the agent's own `reasoning_effort` among them. P13 is anchored at the bare `conversation.sampling` and reaches none of them, so T-D5 reports a false I1 breach on the CC-origin route exactly as it would have on the Responses-origin one | Row **P24**, enumerating one `envelope.extra[<wire key>]` per dropped control field, with the derivation guard P23 carries. **Blocked on T-A2 (KBR-34)**: the enumeration is the Chat Completions reader's control-field table minus what the builder carries, and that table does not exist yet — authoring it now is the guesswork §3.2.4 refuses for `scope`. **Before T-D5** | **1** |
+| **G27** | **An allowlisted Codex control field is dropped when its value is falsy, unregistered** — KBR-185 | Found by the design review of KBR-171 and confirmed by running the builder. `_ALLOWED_RESPONSES_PARAMS` is read only by `_prepare_responses_body`'s DEBUG log; the shipped body is an explicit `if` chain testing **truthiness**, so `include: []` and `reasoning: {}` are permitted by the allowlist and dropped anyway. The reader projects by presence, so each is an unclaimed `envelope.extra[...]` delta. P23 excludes both by construction (they are inside the allowlist), P14 reaches no `extra` path, and G23's planned P22 is conditional on `REASONING_EFFORT_PRESENT`, which this case does not meet | A row of its own — **conditional**, so it also owes §3.3.2 assertion 2 a complement, which P23 did not. Two decisions first: whether the truthiness tests are themselves the defect (`parallel_tool_calls` already uses `is not None`), and how the row's `envelope.extra[reasoning]` claim is to coexist with P22's. **Before T-D5** | **1** |
 | **G23** | **`openai_subscription` injects `reasoning` from `_reasoning_effort`, unregistered** — KBR-149 | Three sites in `providers/openai_subscription.py` set `reasoning: {"effort": …}` from kitty's internal key. Structurally identical to P3 and P4, and **P4 cannot cover it**: §3.2.3 records that `translate_to_upstream` never runs on this adapter's request path. Unlike G22 this is a **request-body** row feeding §3.3.2 assertion 1, so the moment T-D5 drives a corpus entry carrying a reasoning effort the oracle reports a *false* I1 breach on a deliberate mutation — the under-claiming direction §3.3.1a calls unrecoverable | Add P22: trigger `REASONING_EFFORT_PRESENT`, conditional, anchored at `envelope.extra[reasoning]`. Needs a trigger case and a complement in the corpus. **Before T-D5** | **1** |
 | **G22** | **Register header coverage is partial and inconsistent** — KBR-148 | Rows exist for four adapters (P9a ×3, P9b, P9c). At least six more deviate from the base header set with none: `AnthropicAdapter` and its three subclasses plus `ZaiAnthropicAdapter` (`x-api-key` / `anthropic-version` / lowercase `content-type`), `AzureOpenAIAdapter` (`api-key` on the non-Entra credential), and `OllamaAdapter`, which drops `Authorization` entirely — the same shape as P9b, which *does* have a row. `openai_subscription` additionally sets a conditional `ChatGPT-Account-Id` no row names | One row per deviation; `ChatGPT-Account-Id` becomes P9d, conditional, with a claimless-`id_token` fixture for its assertion-2 complement. Then §4.3 C1's per-adapter expectation is *reviewable against the register* instead of written from scratch — which is what stops C1 reproducing the ad-hockery F1 names | **2** |
 | **G21** | **A declared trigger is never verified** — KBR-140 | §7.4 hands the oracle `triggers_met` as an argument and §3.3.2 asserts only that a row is **absent** when its trigger is not met. Nothing asserts a trigger declared met actually fired, so a corpus entry that over-declares makes assertion 1 claim every delta — the oracle reports green on a bridge that is rewriting messages. The same author writes the entry and its trigger index (T-W6), so the mechanism has no second reader | Roughly fifteen triggers are decidable from the inbound request; give those an optional predicate and have T-D8 require the declaration to agree with it. M6, M8, M9 and M12 depend on an upstream response and stay declaration-only — the stated residual risk. Blocked on T-A1/T-A2, since a predicate needs a projected request to read | **1** |

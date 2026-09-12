@@ -27,12 +27,15 @@ under test are pure — they take the markdown text and the row tuple as argumen
 
 from __future__ import annotations
 
+import ast
 import dataclasses
 import re
 from pathlib import Path
 
 import pytest
 
+from harness import contract as c
+from harness import reader_responses as reader
 from harness import register as r
 
 pytestmark = pytest.mark.l2
@@ -45,6 +48,14 @@ _DESIGN = _REPO_ROOT / ".system_design" / "TEST_SUITE.md"
 
 #: The import roots the register's sites are addressed under.
 _SRC = _REPO_ROOT / "src"
+
+#: The adapter whose allowlist decides what P23 claims, and the name it spells it
+#: under.  Read as **text**: §3.2.4's independence rule is why
+#: :func:`~harness.register.defined_symbols` parses ``src/kitty`` with :mod:`ast`
+#: rather than importing it, and a guard that imported this adapter to read its
+#: allowlist would agree with the code instead of checking it.
+_ALLOWLIST_MODULE = _SRC / "kitty" / "providers" / "openai_subscription.py"
+_ALLOWLIST_NAME = "_ALLOWED_RESPONSES_PARAMS"
 
 
 @pytest.fixture(scope="module")
@@ -70,6 +81,58 @@ def markdown() -> str:
     return _DESIGN.read_text(encoding="utf-8")
 
 
+def _allowlisted_responses_params(source: str) -> frozenset[str]:
+    """Read the Codex allowlist out of the adapter's source text.
+
+    Takes the text rather than a path so the parse is pure and a deliberately
+    damaged module can be handed to it, which is what plan §1.4 requires of a new
+    guard.  It differs from :func:`~harness.register.defined_symbols` only in
+    needing the assignment's *value* as well as its name.
+
+    Args:
+        source: The text of ``src/kitty/providers/openai_subscription.py``.
+
+    Returns:
+        The parameter names ``_ALLOWED_RESPONSES_PARAMS`` keeps.
+
+    Raises:
+        AssertionError: When the module no longer defines the allowlist, or
+            spells it as something other than a ``frozenset`` of a literal.
+            Returning an empty set instead would make every control field look
+            dropped and leave this guard green for the wrong reason — the silent
+            no-op §6.2 forbids.
+    """
+    # Walked rather than read off the class, so the guard survives the allowlist
+    # moving to module level; the name is what identifies it.
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, ast.Assign):
+            continue
+        if not any(isinstance(target, ast.Name) and target.id == _ALLOWLIST_NAME for target in node.targets):
+            continue
+        if isinstance(node.value, ast.Call) and node.value.args:
+            return frozenset(ast.literal_eval(node.value.args[0]))
+        raise AssertionError(f"{_ALLOWLIST_NAME} is no longer a frozenset built from a literal")
+
+    raise AssertionError(f"{_ALLOWLIST_MODULE.name} no longer defines {_ALLOWLIST_NAME}")
+
+
+def _claimable_paths(control_fields: frozenset[str], allowlist: frozenset[str]) -> frozenset[str]:
+    """Return the projection paths a row must claim for the allowlist's drops.
+
+    The rule P23 encodes, as a function of the two artifacts that decide it, so
+    the falsification cases can hand it a doctored one.
+
+    Args:
+        control_fields: The wire keys the Responses reader sends to
+            ``envelope.extra`` — :data:`harness.reader_responses._EXTRA_KEYS`.
+        allowlist: The parameters the Codex backend accepts.
+
+    Returns:
+        One ``envelope.extra[<wire key>]`` path per dropped control field.
+    """
+    return frozenset(c.extra_path(key) for key in control_fields - allowlist)
+
+
 class TestTheParserReadsTheDesignDocument:
     """The scan must find what it claims to find, or it is a no-op (§6.2)."""
 
@@ -87,13 +150,13 @@ class TestTheParserReadsTheDesignDocument:
     def test_the_parser_reads_both_tables(self, markdown: str) -> None:
         """A parser that read only §3.2.1 would still look healthy on the M rows."""
         assert len([i for i in r.parse_register_markdown(markdown).live_ids if i.startswith("M")]) == 14
-        assert len([i for i in r.parse_register_markdown(markdown).live_ids if i.startswith("P")]) == 28
+        assert len([i for i in r.parse_register_markdown(markdown).live_ids if i.startswith("P")]) == 29
 
     def test_the_parser_reads_the_unconditional_list(self, markdown: str) -> None:
         """§3.2.2's closing paragraph is the only place the exemption is written down."""
         parsed = r.parse_register_markdown(markdown)
 
-        assert len(parsed.unconditional_ids) == 22
+        assert len(parsed.unconditional_ids) == 23
         assert {"M14", "P20", "P21"} <= set(parsed.unconditional_ids)
 
     def test_a_document_with_no_register_tables_is_an_error_not_an_empty_result(self) -> None:
@@ -353,3 +416,104 @@ class TestEverySiteResolvesInTheSource:
         problems = r.unresolved_sites(moved, symbols)
 
         assert any("P9b" in problem for problem in problems), problems
+
+
+class TestP23ClaimsTheControlFieldsOutsideTheCodexAllowlist:
+    """KBR-171 — P23's sixteen paths are recomputed here, never transcribed.
+
+    §3.2.2's P23 enumerates sixteen ``envelope.extra[<wire key>]`` addresses
+    rather than anchoring at a bare ``envelope.extra``, for the reason §3.3.1a
+    gives.  An enumeration transcribed from a ticket would be a list nobody
+    re-reads; recomputing it from the two artifacts that decide the set — T-A3's
+    published control-field table and the adapter's allowlist — makes widening
+    either a **deliberate** edit to the row rather than a silent divergence.
+
+    ⚠️ **What this does not prove**, said here because the class name invites the
+    stronger reading.  It does not make P23 independent of the code: once the
+    code changes, the only route back to green is to edit the row to match, which
+    is the trade §3.2.4 records.  And "dropped" means **never copied** —
+    membership of the allowlist is *not* what carries a field through, since the
+    literal feeds only a DEBUG log while the shipped body is an explicit ``if``
+    chain testing truthiness.  An allowlisted field with a falsy value is dropped
+    as well, sits outside P23 by construction, and is `KBR-185` / G27.
+
+    The reader's table is a sound left-hand side because it is itself pinned:
+    ``test_reader_responses`` asserts it covers the published schema's 31 keys
+    exactly, and that each key lands at the path the table claims.  Nothing here
+    or there reads the vendor schema — §8's determinism rules forbid it — so a
+    revision by OpenAI goes undetected, which is G24's shape rather than a solved
+    problem.
+    """
+
+    def test_the_row_claims_every_control_field_outside_the_allowlist_and_nothing_else(self) -> None:
+        """AC R4 — set equality, so over-claiming fails as loudly as under-claiming."""
+        rows = [row for row in r.REGISTER if row.id == "P23"]
+        assert rows, "P23 is not in the register data — the Codex allowlist's drops are unclaimed (KBR-171)"
+
+        allowlist = _allowlisted_responses_params(_ALLOWLIST_MODULE.read_text(encoding="utf-8"))
+
+        assert set(rows[0].paths) == _claimable_paths(reader._EXTRA_KEYS, allowlist)
+
+    def test_widening_the_allowlist_would_unclaim_a_field(self) -> None:
+        """The allowlist half of the derivation is live, not decoration.
+
+        A guard that ignored its allowlist argument would pass the test above and
+        go on passing after the adapter started shipping ``text`` upstream.
+        """
+        allowlist = _allowlisted_responses_params(_ALLOWLIST_MODULE.read_text(encoding="utf-8"))
+
+        widened = _claimable_paths(reader._EXTRA_KEYS, allowlist | {"text"})
+
+        assert c.extra_path("text") not in widened
+        assert widened != _claimable_paths(reader._EXTRA_KEYS, allowlist)
+
+    def test_dropping_a_control_field_from_the_reader_would_unclaim_it(self) -> None:
+        """The other half: the reader's table decides which keys are addressable at all."""
+        allowlist = _allowlisted_responses_params(_ALLOWLIST_MODULE.read_text(encoding="utf-8"))
+
+        narrowed = _claimable_paths(reader._EXTRA_KEYS - {"truncation"}, allowlist)
+
+        assert c.extra_path("truncation") not in narrowed
+        assert narrowed != _claimable_paths(reader._EXTRA_KEYS, allowlist)
+
+    def test_a_source_that_does_not_define_the_allowlist_is_an_error(self) -> None:
+        """Plan §1.4's deliberate defect: an empty read must not pass for an empty allowlist.
+
+        An allowlist read as ``frozenset()`` makes every control field look
+        dropped, which is a state the set-equality test above would report as a
+        *register* problem while the real fault was the parse.
+        """
+        with pytest.raises(AssertionError, match=_ALLOWLIST_NAME):
+            _allowlisted_responses_params("UNRELATED = frozenset({'model'})\n")
+
+    def test_the_allowlist_read_finds_the_real_one(self, symbols: frozenset[str]) -> None:
+        """The positive control §6.2 requires beside the negative one above."""
+        assert f"kitty/providers/openai_subscription.py:OpenAISubscriptionAdapter.{_ALLOWLIST_NAME}" in symbols
+
+        allowlist = _allowlisted_responses_params(_ALLOWLIST_MODULE.read_text(encoding="utf-8"))
+
+        assert {"model", "reasoning", "tool_choice"} <= allowlist
+        assert "truncation" not in allowlist
+
+    def test_an_allowlisted_field_dropped_for_being_falsy_is_outside_this_row(self) -> None:
+        """The boundary G27 / `KBR-185` owns, pinned so widening P23 cannot be accidental.
+
+        ``_prepare_responses_body`` copies ``include`` only when it is truthy, so
+        ``include: []`` — a legal ``CreateResponse`` body — is dropped while
+        sitting *inside* the allowlist.  The delta is real and P23 does not claim
+        it, which is deliberate: the mutation is conditional on the value, and
+        the same shape at ``reasoning`` would swallow G23's address.  Asserted
+        rather than left to a comment, because the cheapest wrong fix to that
+        report is to add the key here.
+
+        Reads the row only; the projection evidence lives in `KBR-185`, whose
+        reproduction is two bodies through
+        :meth:`~kitty.providers.openai_subscription.OpenAISubscriptionAdapter._prepare_responses_body`.
+        """
+        allowlist = _allowlisted_responses_params(_ALLOWLIST_MODULE.read_text(encoding="utf-8"))
+        p23 = next(row for row in r.REGISTER if row.id == "P23")
+
+        # Inside the allowlist, and therefore outside this row -- both halves, or
+        # the test passes for a key the reader never classified in the first place.
+        assert {"include", "reasoning"} <= allowlist & reader._EXTRA_KEYS
+        assert not any(c.path_matches(path, c.extra_path("include")) for path in p23.paths)
