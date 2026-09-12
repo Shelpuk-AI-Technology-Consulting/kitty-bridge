@@ -171,6 +171,14 @@ _UPSTREAM_PATH = f"{_PATH_PREFIX}/v1/messages"
 _EMPTY_LADDER_SECONDS = 80
 _CONNECT_LADDER_SECONDS = 30
 
+#: A budget no measurement can satisfy, for the case that proves :func:`_drive`
+#: applies one at all. **Negative, not zero.** Windows' clock cannot resolve a
+#: fast loopback request, so ``elapsed`` there measures exactly ``0.0`` and a
+#: zero budget is met rather than exceeded — which is how this was found, as a
+#: "DID NOT RAISE" on the Windows leg with every other leg green. An elapsed
+#: time cannot be negative on any platform, so this holds at any resolution.
+_IMPOSSIBLE_BUDGET = -1.0
+
 
 @dataclass
 class _EncodedRouteTransport(AiohttpTransport):
@@ -655,13 +663,25 @@ class TestTheWallClockBound:
 
         This is the §7.5.4 pattern rather than a unit test on a comparison: plan
         §1.4's own list of past harness failures includes "a guard proving a
-        function was *called* when the enforcement was the branch after it". A
-        budget of zero is over-budget for any real request, so what this proves
-        is that :func:`_drive` — the one path every case in this module takes —
-        actually applies it.
+        function was *called* when the enforcement was the branch after it".
+        What this proves is that :func:`_drive` — the one path every case in
+        this module takes — actually applies the budget.
+
+        **The impossible budget is negative, not zero, and that is the Windows
+        leg's doing.** An earlier version passed ``0.0`` and reasoned that zero
+        is over-budget for any real request. It is not: Windows' clock is too
+        coarse to resolve a fast loopback request, so ``elapsed`` measures
+        exactly ``0.0``, ``0.0 <= 0.0`` holds, and the case failed there with
+        "DID NOT RAISE" while every Linux and macOS leg passed. This is the same
+        coarse clock §8.3 carries arrival-ordering exemptions for (KBR-188).
+
+        A negative budget is unsatisfiable at **any** clock resolution, because
+        an elapsed time cannot be below zero. That is what makes this
+        deterministic rather than a bet on the granularity of whichever runner
+        picks it up.
         """
         with pytest.raises(AssertionError) as excinfo:
-            await _drive(AiohttpTransport(WireFormat.ANTHROPIC_MESSAGES), budget=0.0)
+            await _drive(AiohttpTransport(WireFormat.ANTHROPIC_MESSAGES), budget=_IMPOSSIBLE_BUDGET)
 
         message = str(excinfo.value)
         assert "budget" in message
