@@ -364,9 +364,13 @@ class TestPrepareResponsesBody:
     ) -> None:
         """Fall back to the documented default when the request carries no model
 
-        Unreachable through ``/v1/responses`` — ``ResponsesTranslator`` subscripts
-        ``model``, so a body without one is rejected upstream of here — but pinned
-        anyway, because the two builders' defaults must not be free to diverge.
+        Unreachable through ``/v1/responses``: ``_normalize_model`` overwrites
+        ``cc_request["model"]`` whenever the profile sets one, and
+        ``Profile.model`` is required.  Not the inbound translator's doing — it
+        reads ``.get("model", "")`` and would hand this builder an empty string,
+        which is a *present* key and so would not reach this default at all.
+        Pinned anyway, because the two builders' defaults must not be free to
+        diverge.
         """
         from_responses = OpenAISubscriptionAdapter._prepare_responses_body(
             {},
