@@ -137,3 +137,129 @@ class TestPackagedCatalogPriority:
 
         result = get_model_context_tokens("openai", "totally-unknown-model-xyz", None)
         assert result == DEFAULT_CONTEXT_TOKENS
+
+
+def _metadata_window(catalog_id: str) -> int:
+    """Return the packaged metadata table's context length for an exact id.
+
+    Expectations are read from the catalog rather than hardcoded: the table is
+    regenerated from OpenRouter, so a pinned literal would turn a routine
+    refresh into a failure that reads as "the KBR-151 fix broke".
+
+    Args:
+        catalog_id: An exact, lowercase id in ``model_metadata.json``.
+
+    Returns:
+        The context length in tokens.
+    """
+    import json
+
+    from kitty.providers.model_context import _METADATA_PATH
+
+    models = json.loads(_METADATA_PATH.read_text(encoding="utf-8"))
+    return next(m["context_length"] for m in models if m["id"].lower() == catalog_id)
+
+
+class TestProviderPrefixedProfileModels:
+    """KBR-151: a profile model carrying a provider prefix resolves normally.
+
+    ``OpenCodeGoAdapter`` and ``AzureOpenAIAdapter`` both define
+    ``normalize_model_name`` precisely because users write their models that
+    way, and OpenCode Go's own documentation names its models with the prefix.
+    Before the fix these fell through to ``DEFAULT_CONTEXT_TOKENS``: on Azure
+    that is 200,000 assumed against 128,000 real, so the bridge does not
+    compact when it should and the upstream rejects the oversized request.
+    """
+
+    @pytest.mark.parametrize(
+        ("provider", "prefixed", "bare"),
+        [
+            ("opencode_go", "opencode/minimax-m2.5", "minimax-m2.5"),
+            ("opencode_go", "opencode/glm-5", "glm-5"),
+            ("azure", "azure/gpt-4o", "gpt-4o"),
+            ("azure", "Azure/GPT-4o", "gpt-4o"),
+        ],
+    )
+    def test_prefixed_and_bare_resolve_alike(self, provider, prefixed, bare):
+        from kitty.providers.model_context import DEFAULT_CONTEXT_TOKENS, get_model_context_tokens
+
+        resolved = get_model_context_tokens(provider, prefixed, None)
+        assert resolved == get_model_context_tokens(provider, bare, None)
+        # Equality alone would pass with both sides sitting on the default,
+        # which is the bug. The point is that a real window was found.
+        assert resolved != DEFAULT_CONTEXT_TOKENS
+
+    def test_balancing_minimum_sees_the_real_azure_window(self):
+        """The pool's budget is its smallest member's, prefix or not.
+
+        ``get_balancing_min_context_tokens`` takes a ``min()``, so a member
+        that silently resolved the 200,000 default hid the Azure member's real
+        128,000 and let the whole pool over-send.
+        """
+        from kitty.providers.model_context import get_balancing_min_context_tokens
+
+        backends = [
+            ("azure", "azure/gpt-4o", None),
+            ("opencode_go", "opencode/minimax-m2.5", None),
+        ]
+        assert get_balancing_min_context_tokens(backends) == _metadata_window("openai/gpt-4o")
+
+
+class TestNormalizeModelNameIsNotTheRightTransform:
+    """KBR-151 rejected routing this lookup through ``normalize_model_name``.
+
+    That method translates a model name into the **provider's** dialect; the
+    catalogs are keyed in OpenRouter's. Measured over all 23 providers, doing
+    so would have fixed 5,336 lookups and broken 754 — 395 on ``anthropic``,
+    whose ``normalize_model_name`` replaces dots with hyphens, and 359 on
+    ``vertex``, whose version prepends ``google/``.
+
+    These two tests pin the windows that change would have destroyed, so it
+    cannot be reintroduced silently.
+    """
+
+    def test_dotted_anthropic_model_keeps_its_window(self):
+        """``claude-sonnet-4-5`` is absent from the catalog; the dotted id is not."""
+        from kitty.providers.model_context import DEFAULT_CONTEXT_TOKENS, get_model_context_tokens
+
+        resolved = get_model_context_tokens("anthropic", "claude-sonnet-4.5", None)
+        assert resolved == _metadata_window("anthropic/claude-sonnet-4.5")
+        assert resolved != DEFAULT_CONTEXT_TOKENS
+
+    def test_bare_vertex_model_keeps_its_window(self):
+        """Prepending ``google/`` would miss the exact id and the suffix rule."""
+        from kitty.providers.model_context import DEFAULT_CONTEXT_TOKENS, get_model_context_tokens
+
+        resolved = get_model_context_tokens("vertex", "gemini-2.5-pro", None)
+        assert resolved == _metadata_window("google/gemini-2.5-pro")
+        assert resolved != DEFAULT_CONTEXT_TOKENS
+
+
+class TestCatalogTailsAreUnique:
+    """Tail-uniqueness is what makes the KBR-151 matcher unambiguous.
+
+    Two keys sharing a final segment both match one query, so every lookup for
+    that name would go ambiguous and fall to the default. The metadata table is
+    regenerated from OpenRouter, so a collision would arrive through a data
+    refresh with nothing else red.
+    """
+
+    def test_no_two_metadata_ids_share_a_final_segment(self):
+        import json
+
+        from kitty.providers.model_context import _METADATA_PATH, _colliding_keys
+
+        models = json.loads(_METADATA_PATH.read_text(encoding="utf-8"))
+        ids = [m["id"].lower() for m in models if isinstance(m, dict) and "id" in m]
+        assert _colliding_keys(ids) == [], (
+            "two catalog ids share a final segment; every lookup for that model name "
+            "will now resolve DEFAULT_CONTEXT_TOKENS"
+        )
+
+    def test_no_two_override_keys_share_a_final_segment(self):
+        import json
+
+        from kitty.providers.model_context import _OVERRIDES_PATH, _colliding_keys
+
+        keys = [k.lower() for k in json.loads(_OVERRIDES_PATH.read_text(encoding="utf-8"))]
+        assert _colliding_keys(keys) == []

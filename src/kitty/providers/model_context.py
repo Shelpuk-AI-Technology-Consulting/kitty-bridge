@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import json
 import logging
-from functools import lru_cache
+from collections.abc import Collection, Iterable
+from functools import cache, lru_cache
 from pathlib import Path
 
 from platformdirs import user_cache_dir
@@ -79,6 +80,82 @@ def _coerce_context_tokens(value: object) -> int | None:
         return None
 
 
+def _match_catalog(query: str, keys: Collection[str]) -> tuple[str | None, bool]:
+    """Match a model name against a set of catalog keys.
+
+    Tries, in order: an exact match; the query as a ``"/"``-delimited suffix of
+    a key (``gpt-4o`` finds ``openai/gpt-4o``); a key as a ``"/"``-delimited
+    suffix of the query (``z-ai/glm-5.2`` finds ``glm-5.2``). The second rule is
+    the metadata table's, the third the overrides catalog's; both catalogs get
+    both so that a name resolves the same window whichever dialect spells it.
+
+    Args:
+        query: The model name to look up, already lowercased.
+        keys: The catalog's keys, already lowercased. The caller passes the
+            cached catalog mapping itself, so no copy is built per request.
+
+    Returns:
+        A ``(key, ambiguous)`` pair. ``key`` is the match, or ``None`` when
+        nothing matched. ``ambiguous`` reports that a step matched more than
+        one key — which must not collapse into "no match", because a miss
+        falls through to the tail retry while an ambiguous match stops the
+        lookup for this catalog entirely (see :func:`_resolve_catalog`).
+    """
+    if query in keys:
+        return query, False
+
+    # Each step is decisive: a step that matches several keys cannot be
+    # narrowed by trying the next one, it can only be reported.
+    for candidates in (
+        [k for k in keys if k.endswith("/" + query)],
+        [k for k in keys if query.endswith("/" + k)],
+    ):
+        if len(candidates) == 1:
+            return candidates[0], False
+        if len(candidates) > 1:
+            logger.warning(
+                "Ambiguous context entry for %s: %d matches (%s)",
+                query,
+                len(candidates),
+                sorted(candidates),
+            )
+            return None, True
+    return None, False
+
+
+def _resolve_catalog(model: str, keys: Collection[str]) -> str | None:
+    """Resolve a model name against a catalog, retrying once without its prefix.
+
+    A profile may name a model in its provider's dialect (``azure/gpt-4o``)
+    while the catalog is keyed in another (``openai/gpt-4o``). When the name as
+    given matches nothing, it is retried with its leading segment removed —
+    once, at the first separator. Stripping further would reduce a Fireworks
+    full path such as ``accounts/fireworks/routers/kimi`` to a bare name and
+    could match an unrelated model (KBR-151).
+
+    An ambiguous match is terminal: retrying the tail after the matcher has
+    said it cannot identify the entry would log "ambiguous" and answer anyway.
+
+    Args:
+        model: The model name as configured, in any case.
+        keys: The catalog's keys, already lowercased.
+
+    Returns:
+        The matching key, or ``None`` when the catalog cannot resolve the name.
+    """
+    query = model.lower()
+    hit, ambiguous = _match_catalog(query, keys)
+    if ambiguous:
+        return None
+    if hit is None:
+        _, sep, tail = query.partition("/")
+        if sep and tail:
+            hit, ambiguous = _match_catalog(tail, keys)
+            if ambiguous:
+                return None
+    return hit
+
+
 def _parse_overrides(raw: str, source: str) -> dict[str, int] | None:
     """Parse overrides catalog JSON text into a validated mapping.
 
@@ -115,6 +192,33 @@ def _parse_overrides(raw: str, source: str) -> dict[str, int] | None:
     return overrides
 
 
+def _colliding_keys(keys: Iterable[str]) -> list[str]:
+    """Return catalog keys that share a final segment with another key.
+
+    Final-segment uniqueness is what makes :func:`_match_catalog` unambiguous,
+    and it is the weakest condition that does. Verified exhaustively over every
+    one-, two- and three-segment key pair: zero ambiguous lookups survive it,
+    where the looser "unique after the first separator" admits 640.
+
+    The two rules coincide only while every key has at most two segments, which
+    both shipped catalogs satisfy today. They part company on a key such as
+    ``a/b/x``, whose tail is ``b/x`` but whose final segment is ``x`` — it
+    collides with a key ``x`` that the looser rule would wave through, and the
+    query ``x`` would then match both.
+
+    Args:
+        keys: A catalog's keys, already lowercased.
+
+    Returns:
+        The colliding keys, sorted, or an empty list when every final segment
+        is unique.
+    """
+    by_segment: dict[str, list[str]] = {}
+    for key in keys:
+        by_segment.setdefault(key.rsplit("/", 1)[-1], []).append(key)
+    return sorted(k for group in by_segment.values() if len(group) > 1 for k in group)
+
+
 @lru_cache(maxsize=1)
 def _load_overrides() -> dict[str, int]:
     """Load the overrides catalog, preferring the remote-synced cache.
@@ -142,6 +246,19 @@ def _load_overrides() -> dict[str, int]:
         raw = None
     if raw is not None:
         parsed = _parse_overrides(raw, source=str(REMOTE_OVERRIDES_CACHE_PATH))
+        # Two keys sharing a tail make every lookup for that tail ambiguous, and
+        # an ambiguous overrides catalog hands the decision to the metadata
+        # table it exists to overrule. Reject such a revision wholesale rather
+        # than load it, as with a body that is not a JSON object.
+        collisions = _colliding_keys(parsed) if parsed is not None else []
+        if collisions:
+            logger.warning(
+                "Model context overrides from %s hold keys that differ only by prefix (%s); "
+                "keeping the packaged catalog",
+                REMOTE_OVERRIDES_CACHE_PATH,
+                collisions,
+            )
+            parsed = None
         if parsed is not None:
             return parsed
 
@@ -155,17 +272,13 @@ def _load_overrides() -> dict[str, int]:
 
 
 def _lookup_override(model: str) -> int | None:
-    """Return the context length from the local overrides file, or None.
+    """Return the context length from the overrides catalog, or None.
 
-    Matching is case-insensitive and reuses the single-direction suffix
-    convention of the metadata lookup (the query may carry a vendor prefix
-    that a later normalize step strips; the override key is bare):
-
-    1. Exact: ``model.lower()`` is an override key.
-    2. Suffix: the query ``model.lower()`` ends with ``"/" + key`` for exactly
-       one override key (e.g. ``"z-ai/glm-5.2"`` matches the key ``"glm-5.2"``).
-       More than one suffix match is ambiguous: log a warning and return None
-       so the caller falls through, matching the metadata ambiguity behavior.
+    Uses the shared :func:`_resolve_catalog` matcher, so a pinned model
+    resolves however the query and the key are spelled — bare or vendor-
+    prefixed, in either dialect. Before KBR-151 this carried a prefixed query
+    up to a bare key but not the reverse, so an overrides catalog holding a
+    prefixed key was silently out-ranked by the lower-priority metadata table.
 
     Args:
         model: The raw model name as seen by the resolver (may be
@@ -179,23 +292,36 @@ def _lookup_override(model: str) -> int | None:
     if not overrides:
         return None
 
-    model_lower = model.lower()
-    # 1. Exact match.
-    if model_lower in overrides:
-        return overrides[model_lower]
+    key = _resolve_catalog(model, overrides)
+    return overrides[key] if key is not None else None
 
-    # 2. Single-direction suffix match: "z-ai/glm-5.2" matches key "glm-5.2".
-    suffix_matches = [k for k in overrides if model_lower.endswith("/" + k)]
-    if len(suffix_matches) == 1:
-        return overrides[suffix_matches[0]]
-    if len(suffix_matches) > 1:
-        logger.warning(
-            "Ambiguous context override for %s: %d matches (%s)",
-            model_lower,
-            len(suffix_matches),
-            suffix_matches,
-        )
-    return None
+
+@cache
+def _log_default_fallback(provider: str, model: str) -> None:
+    """Report once that a model's context window could not be resolved.
+
+    Deduplicated per ``(provider, model)`` because the compaction budget is
+    recomputed on every request, so an unconditional line would be one per
+    turn. ``INFO`` rather than ``WARNING``: an unknown model is routine and
+    correct for a profile pointing at a local or private model, and a warning
+    that fires routinely is one that gets filtered.
+
+    ``functools.cache`` rather than a bounded LRU: the keys come from profiles,
+    never from the wire, and a bounded cache would re-emit after eviction and
+    so would not deliver the once-per-model guarantee this exists for.
+
+    Args:
+        provider: The provider type, for identifying which profile is affected.
+        model: The model name **as configured** — never the prefix-stripped
+            tail, which is a string the operator never wrote.
+    """
+    logger.info(
+        "No context window found for %s/%s; assuming %d tokens. "
+        "Set context_window in the profile's provider_config to override.",
+        provider,
+        model,
+        DEFAULT_CONTEXT_TOKENS,
+    )
 
 
 def get_model_context_tokens(
@@ -209,15 +335,18 @@ def get_model_context_tokens(
     1. Overrides catalog — the remote-synced cache when valid, else the
        packaged model_context_overrides.json — highest priority.
     2. provider_config["context_window"] — per-profile manual override.
-    3. Exact match on model name in metadata table.
-    4. Suffix match: bare model name (e.g. "gpt-4o") matches metadata
-       entries with a provider prefix (e.g. "openai/gpt-4o").
-    5. DEFAULT_CONTEXT_TOKENS fallback.
+    3. Metadata table.
 
-    WARNING: a packaged entry in the local overrides file silently trumps a
-    per-profile ``provider_config["context_window"]``. To make a profile's
-    context_window take effect for a model, omit that model from the overrides
-    file.
+    Both catalogs are searched by :func:`_resolve_catalog`, so a model resolves
+    the same window however it is spelled: bare, or carrying any single vendor
+    or provider prefix (KBR-151).
+
+    WARNING: an entry in the overrides catalog silently trumps a per-profile
+    ``provider_config["context_window"]``. To make a profile's context_window
+    take effect, omit that model from the overrides file — noting that since
+    KBR-151 one key captures **every** prefixed spelling of its model, so
+    ``openai/gpt-4o``, ``gpt-4o`` and ``azure/gpt-4o`` are one entry to omit,
+    not three. A key's own prefix does not scope it to that vendor.
     """
     override = _lookup_override(model)
     if override is not None:
@@ -230,27 +359,17 @@ def get_model_context_tokens(
         logger.warning("Invalid provider_config context_window for %s/%s", provider, model)
 
     metadata = _load_metadata()
-    model_lower = model.lower()
-
-    # 3. Exact match (model as-is, e.g. "openai/gpt-4o" or a bare name)
-    if model_lower in metadata:
-        value = _coerce_context_tokens(metadata[model_lower].get("context_length"))
+    matched_id = _resolve_catalog(model, metadata)
+    if matched_id is not None:
+        value = _coerce_context_tokens(metadata[matched_id].get("context_length"))
         if value is not None:
             return value
-        logger.warning("Invalid context_length in metadata for %s", model_lower)
+        logger.warning("Invalid context_length in metadata for %s", matched_id)
 
-    # 4. Suffix match: "gpt-4o" matches "openai/gpt-4o", "gpt-4o-mini", etc.
-    suffix = "/" + model_lower
-    matches = [entry for mid, entry in metadata.items() if mid.endswith(suffix)]
-    if len(matches) == 1:
-        value = _coerce_context_tokens(matches[0].get("context_length"))
-        if value is not None:
-            return value
-        logger.warning("Invalid context_length in metadata suffix match for %s", model_lower)
-    elif len(matches) > 1:
-        match_ids = [mid for mid in metadata if mid.endswith(suffix)]
-        logger.warning("Ambiguous context metadata for %s: %d matches (%s)", model_lower, len(matches), match_ids)
-
+    # Nothing knows this model. Say so once per model rather than per request:
+    # the budget is recomputed on every turn, and silence here is what let
+    # KBR-151 size a conversation from a window the model does not have.
+    _log_default_fallback(provider, model)
     return DEFAULT_CONTEXT_TOKENS
 
 
