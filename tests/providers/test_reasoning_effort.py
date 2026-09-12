@@ -25,7 +25,7 @@ class TestOpenAISubscriptionReasoning:
             "input": [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]}],
             "reasoning": {"effort": "high"},
         }
-        result = OpenAISubscriptionAdapter._prepare_responses_body(original)
+        result = OpenAISubscriptionAdapter._prepare_responses_body({}, original)
         assert result["reasoning"] == {"effort": "high"}
 
     def test_prepare_responses_body_injects_reasoning_from_cc_request(self) -> None:
@@ -34,7 +34,7 @@ class TestOpenAISubscriptionReasoning:
             "input": [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]}],
             "_reasoning_effort": "high",
         }
-        result = OpenAISubscriptionAdapter._prepare_responses_body(original)
+        result = OpenAISubscriptionAdapter._prepare_responses_body({}, original)
         assert result["reasoning"] == {"effort": "high"}
 
     def test_cc_to_responses_injects_reasoning(self) -> None:
@@ -71,7 +71,7 @@ class TestOpenAISubscriptionReasoning:
             "model": "gpt-5.4",
             "input": [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]}],
         }
-        result = OpenAISubscriptionAdapter._prepare_responses_body(original)
+        result = OpenAISubscriptionAdapter._prepare_responses_body({}, original)
         assert "reasoning" not in result
 
 

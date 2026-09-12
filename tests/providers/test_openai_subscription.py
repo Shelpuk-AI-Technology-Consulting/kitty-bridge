@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import logging
 import os
 import time
 import unittest.mock
@@ -276,6 +277,17 @@ class TestExtractAccountId:
         assert OpenAISubscriptionAdapter._extract_account_id("not-a-jwt") is None
 
 
+#: A minimal, well-formed Responses ``input`` — the array form, so these cases
+#: do not also depend on the string-shorthand handling KBR-144 covers.
+_USER_INPUT = [
+    {
+        "type": "message",
+        "role": "user",
+        "content": [{"type": "input_text", "text": "Hello"}],
+    }
+]
+
+
 class TestPrepareResponsesBody:
     def test_strips_strict_from_tools(self) -> None:
         body = {
@@ -283,18 +295,163 @@ class TestPrepareResponsesBody:
                 {"type": "function", "name": "bash", "strict": True, "parameters": {}},
             ],
         }
-        result = OpenAISubscriptionAdapter._prepare_responses_body(body)
+        result = OpenAISubscriptionAdapter._prepare_responses_body({}, body)
         assert "strict" not in result["tools"][0]
 
     def test_sets_store_false(self) -> None:
         body = {}
-        result = OpenAISubscriptionAdapter._prepare_responses_body(body)
+        result = OpenAISubscriptionAdapter._prepare_responses_body({}, body)
         assert result["store"] is False
 
     def test_sets_stream_true(self) -> None:
         body = {}
-        result = OpenAISubscriptionAdapter._prepare_responses_body(body)
+        result = OpenAISubscriptionAdapter._prepare_responses_body({}, body)
         assert result["stream"] is True
+
+    def test_ships_the_requests_normalized_model_not_the_clients(self) -> None:
+        """Ship the model the bridge normalised, not the one the client asked for
+
+        Register row M1 replaces the agent's model with the profile's before
+        this adapter is reached.  Building the shipped body out of the client's
+        raw body discarded that (KBR-160), so the profile's model never left the
+        machine on this route.
+        """
+        result = OpenAISubscriptionAdapter._prepare_responses_body(
+            {"model": "profile-model-XYZ"},
+            {"model": "client-model-ABC", "input": _USER_INPUT},
+        )
+        assert result["model"] == "profile-model-XYZ"
+
+    def test_ships_the_normalized_form_when_the_client_sent_a_prefixed_model(self) -> None:
+        """Ship the prefix-stripped model, because that is what M1 produces
+
+        A profile of ``openai/gpt-5.3-codex`` normalises to ``gpt-5.3-codex``,
+        while ``CodexAdapter`` hands the CLI the raw profile string.  The two
+        therefore differ by exactly the prefix, which is the divergence a real
+        user hits first.
+        """
+        normalized = OpenAISubscriptionAdapter().normalize_model_name("openai/gpt-5.3-codex")
+        result = OpenAISubscriptionAdapter._prepare_responses_body(
+            {"model": normalized},
+            {"model": "openai/gpt-5.3-codex", "input": _USER_INPUT},
+        )
+        assert result["model"] == "gpt-5.3-codex"
+
+    def test_agrees_with_cc_to_responses_on_where_the_model_comes_from(
+        self,
+        adapter: OpenAISubscriptionAdapter,
+    ) -> None:
+        """Resolve the model from the same place as the class's other body builder
+
+        :meth:`~kitty.providers.openai_subscription.OpenAISubscriptionAdapter._prepare_responses_body`
+        serves the Responses route and ``_cc_to_responses`` serves the others.
+        They drifted apart once; pinning them together is what stops a future
+        edit to one from silently re-opening KBR-160 on the other.
+        """
+        cc_request = {
+            "model": "profile-model-XYZ",
+            "messages": [{"role": "user", "content": "hi"}],
+        }
+        from_responses = OpenAISubscriptionAdapter._prepare_responses_body(
+            cc_request,
+            {"model": "client-model-ABC", "input": _USER_INPUT},
+        )
+        from_cc = adapter._cc_to_responses(cc_request)
+        assert from_responses["model"] == from_cc["model"] == "profile-model-XYZ"
+
+    def test_falls_back_to_the_same_default_as_cc_to_responses(
+        self,
+        adapter: OpenAISubscriptionAdapter,
+    ) -> None:
+        """Fall back to the documented default when the request carries no model
+
+        Unreachable through ``/v1/responses``: ``_normalize_model`` overwrites
+        ``cc_request["model"]`` whenever the profile sets one, and
+        ``Profile.model`` is required.  Not the inbound translator's doing — it
+        reads ``.get("model", "")`` and would hand this builder an empty string,
+        which is a *present* key and so would not reach this default at all.
+        Pinned anyway, because the two builders' defaults must not be free to
+        diverge.
+        """
+        from_responses = OpenAISubscriptionAdapter._prepare_responses_body(
+            {},
+            {"model": "client-model-ABC", "input": _USER_INPUT},
+        )
+        from_cc = adapter._cc_to_responses({"messages": []})
+        assert from_responses["model"] == from_cc["model"] == "gpt-5.4"
+
+    def test_the_model_is_the_only_field_the_request_can_change(self) -> None:
+        """Let the request decide the model and nothing else
+
+        A differential over one implementation rather than an expected body:
+        ``.system_design/TEST_SUITE.md`` §3.1 rejects golden files because they
+        get regenerated reflexively and stop meaning anything.
+        """
+        original_body = {
+            "model": "client-model-ABC",
+            "instructions": "You are helpful.",
+            "input": _USER_INPUT,
+            "tools": [{"type": "function", "name": "bash", "parameters": {}}],
+            "tool_choice": "auto",
+            "parallel_tool_calls": False,
+            "include": ["reasoning.encrypted_content"],
+            "reasoning": {"effort": "high"},
+        }
+        with_model = OpenAISubscriptionAdapter._prepare_responses_body(
+            {"model": "profile-model-XYZ"},
+            original_body,
+        )
+        without_model = OpenAISubscriptionAdapter._prepare_responses_body({}, original_body)
+        differing = {
+            key for key in set(with_model) | set(without_model) if with_model.get(key) != without_model.get(key)
+        }
+        assert differing == {"model"}
+
+    def test_no_field_of_the_request_but_the_model_reaches_the_shipped_body(self) -> None:
+        """Take only the model from the request; every other field is the client's
+
+        The request carries kitty's own internal keys and its CC-shaped
+        conversation.  A two-argument signature makes reading the wrong dict a
+        one-word mistake, and forwarding those keys would breach the containment
+        invariant as well as the fidelity one.
+        """
+        result = OpenAISubscriptionAdapter._prepare_responses_body(
+            {
+                "model": "profile-model-XYZ",
+                "messages": [{"role": "user", "content": "hi"}],
+                "instructions": "leak me",
+                "_resolved_key": "secret-key",
+                "_provider_config": {"base_url": "http://example.invalid"},
+            },
+            {"model": "client-model-ABC", "input": _USER_INPUT},
+        )
+        assert "messages" not in result
+        assert "_resolved_key" not in result
+        assert "_provider_config" not in result
+        assert "instructions" not in result
+        assert result["model"] == "profile-model-XYZ"
+
+    def test_dropped_parameters_are_still_counted_from_the_client_body(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Count the unsupported parameters against the client's body, not the request
+
+        This is the computation register row **P14** is anchored on, and its only
+        observable is the log line, so that is where it has to be asserted.  The
+        request always carries keys the Codex allowlist does not name; counting
+        them would tell a user their own settings were dropped when they never
+        sent them.
+        """
+        caplog.set_level(logging.DEBUG, logger="kitty.providers.openai_subscription")
+        OpenAISubscriptionAdapter._prepare_responses_body(
+            {"model": "profile-model-XYZ", "only_on_the_request": 1},
+            {"model": "client-model-ABC", "input": _USER_INPUT, "only_on_the_client_body": 2},
+        )
+        dropped = [r.getMessage() for r in caplog.records if "unsupported parameters" in r.getMessage()]
+        assert len(dropped) == 1, dropped
+        assert "only_on_the_client_body" in dropped[0]
+        assert "only_on_the_request" not in dropped[0]
 
 
 class TestCcToResponses:
