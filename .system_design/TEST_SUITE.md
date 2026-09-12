@@ -3666,12 +3666,21 @@ returns, and a worst case of **~1.2 s** on the Windows leg, whose step is ~15.6 
 the number of raw-socket probes, so a future recorder adds to it in proportion to the probes it
 drives, not to its test count.
 
-KBR-10 added the largest one: `tests/cli/test_stream_encoding.py` spawns **35 child interpreters**
-per run, ×4 Python versions. It has no choice — the behaviour it proves is that kitty survives a
+KBR-10 added the largest one: `tests/cli/test_stream_encoding.py` spawns **38 child interpreters**
+per run, on each of the gate's six legs (four Linux interpreters, plus the Windows and macOS legs
+§8.4 added). It has no choice — the behaviour it proves is that kitty survives a
 hostile *interpreter start-up encoding*, and `PYTHONIOENCODING` is read before any in-process test
-exists, so a real child is the only oracle. Each spawn is short (the whole file runs in ~14s), but
+exists, so a real child is the only oracle. Each spawn is short (the whole file runs in ~13s,
+measured on Linux), but
 T-H1 should note that mutation testing over `l1` will re-pay that cost per mutant, and may want to
 deselect this file from the mutation baseline rather than from the gate.
+
+**KBR-204 added three of the 38**, for the same Windows family by another route: an interactive
+command whose stdin reports as a terminal while its stdout is a pipe. The children get a
+pseudo-terminal as stdin on POSIX and `NUL` on Windows, so all six legs build the real asymmetry.
+One cost to know about: a child that gets past **both** guards — the prompts' and the menus' —
+with that stdin **blocks** waiting for keys nothing will type, so a regression there shows up as
+the runner's 60-second `TimeoutExpired`, not as a fast assertion.
 
 **The load gate has to be wired, not merely declared.** The table above marks Load as gating a
 release, but `publish.yml` currently depends only on the reusable `tests.yml`. Putting the load
