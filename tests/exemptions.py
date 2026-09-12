@@ -87,9 +87,12 @@ class Exemption:
 # 🔴 The registry of ACKNOWLEDGED DEBT. One row per exempt assertion, and the
 # list is supposed to trend towards zero.
 #
-# It shipped EMPTY until KBR-164, which added the five rows below -- the Windows
-# cells of assertions the platform legs found false on Windows and true on the
-# other five legs (TEST_SUITE.md §8.3, §8.4).
+# It shipped EMPTY until KBR-164. Every row below is the WINDOWS CELL of an
+# assertion the platform legs found false on Windows and true on the other
+# legs (TEST_SUITE.md §8.3, §8.4). Deliberately not counted in this comment:
+# a count in prose is wrong the moment the next row lands, and nothing checks
+# it -- the rule §8's own header states about naming things rather than
+# counting them.
 #
 # Still unwritten, and still for the stated reason: TEST_SUITE.md §8 names
 # TR-1c's header-subset assertion, pending G3's policy half (Q1) and keyed to
@@ -103,14 +106,12 @@ class Exemption:
 # from a guard would otherwise pass `mypy` and register a row nobody can find by
 # reading this file -- the one-registry invariant defeated by one line. Rows are
 # added by editing the literal below.
-#: 🔴 The first rows this registry has ever carried, added by KBR-164 when the
-#: Windows leg went in. Every one of them is a **Windows cell** of an assertion
-#: that gates normally on the four Linux legs and on macOS — the parametrised
+#: Each row gates normally on the Linux and macOS legs — the parametrised-cell
 #: shape §8.3 describes, not a blanket amnesty — so each fails the job the day
 #: its own platform starts passing.
 #:
 #: They are exemptions rather than skips on purpose. A `skipif` here would hide
-#: two real defects behind a green leg, and §8 permits a platform skip only for
+#: real defects behind a green leg, and §8 permits a platform skip only for
 #: behaviour that *does not exist* on the platform. These assertions are not
 #: inapplicable on Windows; they are **false** there, and that is a debt with a
 #: ticket, not a platform difference.
@@ -120,6 +121,12 @@ EXEMPTIONS: Mapping[str, Exemption] = MappingProxyType(
             assertion="request arrival times increase across a recorded session",
             condition="on Windows the clock is too coarse to separate two adjacent "
             "requests, so two sends share one timestamp and strict increase fails",
+            issue="KBR-188",
+        ),
+        "recorder-arrival-increases-across-requests": Exemption(
+            assertion="arrival moves forward from one request to the next",
+            condition="on Windows the clock is too coarse to separate two sequential "
+            "requests, so both are stamped with the same instant",
             issue="KBR-188",
         ),
         "recorder-falsification-reordering-only-order-check": Exemption(
