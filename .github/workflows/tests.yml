@@ -12,18 +12,51 @@ permissions:
 
 jobs:
   test:
-    name: Python ${{ matrix.python-version }}
-    runs-on: ubuntu-latest
-    # A backstop, not a budget: the suite runs in a couple of minutes. Sized to
-    # notice a hang. ⚠️ A matrix job is held to the LOWEST platform ceiling among
-    # the labels its matrix can produce, so adding an `ubuntu-slim` entry here
-    # would make this cap a fiction — see `.github/review/rules/ci.md`.
-    timeout-minutes: 30
+    name: Python ${{ matrix.python-version }} on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    # A backstop, not a budget. ⚠️ The number below used to be 30 beside a comment
+    # claiming "the suite runs in a couple of minutes" — stale by an order of
+    # magnitude: the Linux legs measure 19–20 minutes on GitHub-hosted runners,
+    # so that cap had ~50% headroom on a leg nobody had timed. 60 clears the
+    # slowest platform leg. The cost, stated rather than hidden: a hung Linux leg
+    # is noticed 30 minutes later than before — cheap on a free runner, and far
+    # cheaper than a cap that kills a healthy Windows leg and reads as a product
+    # failure.
+    #
+    # ⚠️ A matrix job is held to the LOWEST platform ceiling among the labels its
+    # matrix can produce. All three labels here are ordinary GitHub-hosted
+    # runners at 360 minutes; an `ubuntu-slim` entry would drop that to 15 and
+    # make this cap a fiction — see `.github/review/rules/ci.md`. It must stay an
+    # integer: `DeclaredJobCapIsEnforceableTests` parses it with `(\d+)`, so an
+    # `${{ }}` expression reads as ABSENT and the guard reports a missing cap
+    # about a line that is plainly here.
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-latest]
         # Must track requires-python and the classifiers in pyproject.toml.
         python-version: ["3.10", "3.11", "3.12", "3.13"]
+        # 🔴 These two entries are what produce the Windows and macOS legs, and
+        # the rule that makes them work is the one this construct is misread
+        # over: an `include:` object is merged into an existing combination ONLY
+        # if it overwrites none of the base matrix values. `os` here would
+        # overwrite `ubuntu-latest`, so neither object can be merged and GitHub
+        # creates a NEW combination from each — six jobs, not four.
+        #
+        # Written as `include:` rather than a full os × python-version product
+        # with `exclude:` because the product form needs six excludes to remove
+        # six of twelve combinations, and `_matrix_values` in the review-scripts
+        # guard deliberately does not honour `exclude:` — it over-approximates on
+        # purpose, which is safe for a ceiling check and wrong for a matrix that
+        # would then be mostly holes.
+        #
+        # One Python version per platform, and why, in `TEST_SUITE.md` §8.4.
+        include:
+          - os: windows-latest
+            python-version: "3.12"
+          - os: macos-latest
+            python-version: "3.12"
     steps:
       - uses: actions/checkout@v4
 
@@ -59,8 +92,21 @@ jobs:
       # silently ignores it there and 9.1 does not, so a config-file placement
       # would mean the gate behaves differently on two contributors' machines.
       # `pyproject.toml` carries the reasoning in full.
+      # 🔴 `-rsfE`, and the `fE` half is NOT decoration. `-r` STORES reportchars,
+      # it does not append to them: a bare `-rs` REPLACES pytest's default `fE`
+      # and deletes the `FAILED …` summary from the end of the log. Measured on
+      # pytest 9.1.1 with this exact command — `-q -rs` printed the skip list and
+      # no FAILED line at all. On a ~3,600-item suite that summary is how a red
+      # leg is read, and the first red Windows leg is exactly when it is needed.
+      #
+      # `s` is what this change added. §8 makes a skip a failure in a gating job
+      # and permits one exception — a platform or interpreter skip — which is
+      # precisely what the Windows and macOS legs produce. A silent skip count is
+      # how such a leg goes green by running nothing, so every skip is printed
+      # with its reason. One invocation shared by all six legs: a second one here
+      # would be the "second, weaker definition" this file's header rules out.
       - name: Test
         run: >-
-          pytest -m "l1 or l2" -q --strict-markers
+          pytest -m "l1 or l2" -q -rsfE --strict-markers
           --require-category=l1 --require-category=l2
 

@@ -35,7 +35,9 @@ Give each shared file a named integration owner. Give each stream its own module
 ### 1.3 Definition of done
 
 1. The deliverable satisfies the acceptance criteria in its row.
-2. `ruff`, `lint-imports`, `mypy src/kitty` and the full suite pass on Python 3.10–3.13.
+2. `ruff`, `lint-imports`, `mypy src/kitty` and the full suite pass on Python 3.10–3.13 on Linux,
+   **and on the Windows and macOS legs** the Fast gate has run since KBR-164 (TEST_SUITE.md §8.4).
+   A change that is green only on Linux is not done.
 3. Every new test carries exactly one layer marker (**T-W1**).
 4. Google-style docstrings throughout; block comments explaining *why*. Test code is code.
 5. **It lands on `main` alone**, without leaving the suite red waiting for a sibling.
