@@ -110,7 +110,13 @@ def _allowlisted_responses_params(source: str) -> frozenset[str]:
         if not any(isinstance(target, ast.Name) and target.id == _ALLOWLIST_NAME for target in node.targets):
             continue
         if isinstance(node.value, ast.Call) and node.value.args:
-            return frozenset(ast.literal_eval(node.value.args[0]))
+            # `literal_eval` raises on a computed argument -- `frozenset(_BASE | {...})`
+            # parses as a Call with one arg and is not a literal. Re-raised as the
+            # documented failure so both malformed spellings report alike.
+            try:
+                return frozenset(ast.literal_eval(node.value.args[0]))
+            except ValueError as exc:
+                raise AssertionError(f"{_ALLOWLIST_NAME} is no longer a frozenset built from a literal") from exc
         raise AssertionError(f"{_ALLOWLIST_NAME} is no longer a frozenset built from a literal")
 
     raise AssertionError(f"{_ALLOWLIST_MODULE.name} no longer defines {_ALLOWLIST_NAME}")
@@ -494,6 +500,31 @@ class TestP23ClaimsTheControlFieldsOutsideTheCodexAllowlist:
 
         assert {"model", "reasoning", "tool_choice"} <= allowlist
         assert "truncation" not in allowlist
+
+    def test_the_published_row_names_the_same_sixteen_keys(self, markdown: str) -> None:
+        """§3.2.2's P23 cell is a path list in all but spelling, so it is reconciled too.
+
+        §3.2.4 declines to reconcile paths against the markdown because "the tables
+        have no path column".  That stops being true for this one row: its Mutation
+        cell enumerates the sixteen wire keys in backticks, which is a second copy
+        of the data.  Measured during review — deleting ``truncation`` from the
+        published cell, and changing "sixteen" to "fifteen", each left the whole
+        suite green.
+        """
+        cell = next(line for line in markdown.splitlines() if line.startswith("| P23 |")).split("|")[2]
+
+        assert set(re.findall(r"`(\w+)`", cell)) == set(r._CODEX_DROPPED_CONTROL_FIELDS)
+        assert "**sixteen**" in markdown, "§3.2.2's P23 cell no longer states the count it enumerates"
+
+    def test_a_malformed_allowlist_spelling_reports_as_a_parse_fault(self) -> None:
+        """The second half of the deliberate defect above: present, but not a literal.
+
+        ``frozenset(_BASE | {"model"})`` parses as a ``Call`` with one argument and
+        reaches ``literal_eval``, which raises ``ValueError``.  Undressed, that
+        surfaces as a stack trace rather than the documented failure.
+        """
+        with pytest.raises(AssertionError, match="frozenset built from a literal"):
+            _allowlisted_responses_params('_ALLOWED_RESPONSES_PARAMS = frozenset(_BASE | {"model"})\n')
 
     def test_an_allowlisted_field_dropped_for_being_falsy_is_outside_this_row(self) -> None:
         """The boundary G27 / `KBR-185` owns, pinned so widening P23 cannot be accidental.

@@ -47,6 +47,27 @@ _COLLECTION_ANCHORS = (
 #: does, so a rule naming only the bare one has a one-character bypass.
 _WHOLE_EXTRA = ("envelope.extra", "envelope.extra[*]", "envelope.extra[]")
 
+def whole_extra_anchors(rows: tuple[r.MutationRow, ...]) -> tuple[str, ...]:
+    """Report every row anchored at the whole ``envelope.extra`` collection.
+
+    Pure, and separate from the assertion that applies it, for
+    :func:`~harness.register.row_shape_problems`'s reason: plan §1.4 requires the
+    falsification case to run in the suite, and a rule written inline in a ``for``
+    over :data:`~harness.register.REGISTER` cannot be handed a deliberately bad
+    row.  That matters more here than elsewhere — §3.3.1a's bare-``extra``
+    prohibition is the one rule nothing else in the suite would notice, so an
+    inline ``assert`` is one ``pass`` away from silent.
+
+    Args:
+        rows: The register data, normally :data:`~harness.register.REGISTER`.
+
+    Returns:
+        One ``<row id>:<path>`` entry per offending anchor, in register order.
+        Empty when no row claims the collection.
+    """
+    return tuple(f"{row.id}:{path}" for row in rows for path in row.paths if path in _WHOLE_EXTRA)
+
+
 #: Every register path whose *pattern* form differs from its concrete form,
 #: paired with a concrete path built from the same helper. Module-level so the
 #: parametrised test and the coverage check below read one list rather than two
@@ -317,19 +338,33 @@ class TestThePathsEachRowTouches:
 
         The bare form *matches* — a bracket-free pattern segment claims a
         bracketed member of itself — so nothing else in this suite would notice a
-        row using it. P13/P14's bare `conversation.sampling` is not a precedent:
-        sampling is a closed, enforced set, so there the bare anchor claims
-        exactly its members, while `extra` is open and holds the injections P2a,
-        P2b, P3, P4, P10 and G23's `reasoning` row. A bare anchor would claim a
-        registered *injection* on the same route as a registered *drop*.
+        row using it. `extra` is where the injections live (P2a, P2b, P3, P4, P10
+        and G23's `reasoning` row), so a bare anchor would claim a registered
+        *injection* on the same route as a registered *drop*.
+
+        P13/P14's bare `conversation.sampling` is not a precedent, and §3.3.1a
+        says why at length: not because bare and enumerated agree there — they do
+        not — but because a closed set nothing injects into absorbs at worst
+        another sampling key, while `envelope.extra` absorbs whole rows.
 
         All three spellings, because they claim the same thing: the wildcard and
         its legacy `[]` form over-claim exactly as the bare collection does, and
         a rule naming only the bare one is a rule with a one-character bypass.
         """
-        for row in r.REGISTER:
-            for path in row.paths:
-                assert path not in _WHOLE_EXTRA, f"{row.id} claims the whole extra collection: {path!r}"
+        assert whole_extra_anchors(r.REGISTER) == ()
+
+    @pytest.mark.parametrize("spelling", _WHOLE_EXTRA)
+    def test_a_doctored_row_claiming_the_whole_collection_is_reported(self, spelling: str) -> None:
+        """Plan §1.4's deliberate defect for the rule above.
+
+        Measured during review: with the rule written inline, replacing its
+        `assert` with `pass` left the whole suite green — because the rule's own
+        docstring is right that nothing else notices. A prohibition whose
+        negative control is missing is a prohibition on the honour system.
+        """
+        doctored = dataclasses.replace(next(row for row in r.REGISTER if row.id == "P23"), paths=(spelling,))
+
+        assert whole_extra_anchors((doctored,)) == (f"P23:{spelling}",)
 
     @pytest.mark.parametrize("spelling", _WHOLE_EXTRA)
     def test_every_whole_extra_spelling_really_claims_a_wire_key(self, spelling: str) -> None:
@@ -351,7 +386,8 @@ class TestThePathsEachRowTouches:
         """
         p23 = next(row for row in r.REGISTER if row.id == "P23")
 
-        assert len(p23.paths) == 16
+        # `==` on both, because set equality elsewhere cannot see a duplicated key.
+        assert len(p23.paths) == len(set(p23.paths)) == 16
         assert all(path.startswith("envelope.extra[") for path in p23.paths)
         assert not any(c.path_matches(path, c.extra_path("reasoning")) for path in p23.paths)
 

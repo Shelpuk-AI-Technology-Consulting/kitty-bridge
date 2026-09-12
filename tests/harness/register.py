@@ -251,8 +251,9 @@ _ALWAYS = Trigger.ALWAYS
 
 #: The wire keys P23 claims: the declared `CreateResponse` control fields the
 #: Codex allowlist never copies -- every published top-level field except the ten
-#: it keeps, the five sampling parameters P14 claims, and the three that carry
-#: conversation content.
+#: the allowlist keeps and the five sampling parameters P14 claims, which is
+#: 31 - 10 - 5 = 16. (The three conversation-carrying keys are *inside* the ten,
+#: so they are not a third subtraction.)
 #:
 #: Enumerated rather than computed at import so a reviewer reads a list, not an
 #: expression. Be honest about what that buys: `test_register_agreement`
