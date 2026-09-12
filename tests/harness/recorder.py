@@ -30,6 +30,10 @@ recorder must do are unreachable from the high-level route:
 
 Routing is not needed — a recorder answers every path — so the low-level server
 costs nothing else.
+
+It also exports :func:`format_for_path`, the **pure** half of the reply-format
+lookup, split out for T-W8's bridge fixture: that fixture judges captured paths
+at teardown and must not use the method, which records a miss as a side effect.
 """
 
 from __future__ import annotations

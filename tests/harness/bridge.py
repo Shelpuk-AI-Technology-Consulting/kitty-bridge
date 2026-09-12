@@ -461,6 +461,12 @@ class AiohttpTransport:
     def assert_teardown_clean(self) -> None:
         """Assert every request was answered in the format this transport declares.
 
+        Named ``assert_*`` and **not** ``check_*``: ``recorder_conformance.py``
+        owns the ``check_*`` family for "the contract every recorder is judged
+        against" (§7.2.1), which is a different subject. A transport author
+        adding a sibling here should keep the ``assert_`` prefix rather than
+        reach for symmetry with that module.
+
         Raises:
             UnmatchedPathError: When a request took the recorder's fallback.
             MisdeclaredFormatError: When a request's path selected some *other*
@@ -710,7 +716,16 @@ class BridgeFixture:
                 allocation would notice. Reachable: a profile validation error in
                 :func:`backend_for`, or a bind failure.
         """
-        await self.transport.start()
+        # Two guards, not one. `RecordingUpstream.start` assigns its runner,
+        # awaits `setup()`, and only then binds the site — so a failure in the
+        # bind leaves a runner that still needs `cleanup()`, and it happens
+        # before there is any bridge for the second guard to unwind.
+        try:
+            await self.transport.start()
+        except BaseException:
+            await self.transport.stop()
+            raise
+
         try:
             await self._start_bridge()
         except BaseException:

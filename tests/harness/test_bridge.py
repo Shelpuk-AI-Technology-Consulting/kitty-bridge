@@ -19,6 +19,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import json
+import socket
 import uuid
 from pathlib import Path
 
@@ -126,8 +127,6 @@ def _closed(port: int) -> bool:
     Returns:
         ``True`` when a connection is refused.
     """
-    import socket
-
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
         probe.settimeout(0.5)
         return probe.connect_ex(("127.0.0.1", port)) != 0
@@ -213,8 +212,18 @@ class TestTheRegistry:
         source = Path(__import__("harness.bridge", fromlist=["__file__"]).__file__).read_text(encoding="utf-8")
         assert len(source) > 1000, "read no meaningful source; the guard would pass vacuously"
 
-        imported = {node.module or "" for node in ast.walk(ast.parse(source)) if isinstance(node, ast.ImportFrom)} | {
-            alias.name for node in ast.walk(ast.parse(source)) if isinstance(node, ast.Import) for alias in node.names
+        tree = ast.parse(source)
+        from_imports = [node for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)]
+
+        # A *relative* import would slip past the name check entirely: its target
+        # lives in `node.level`, and `node.module` is the tail or None — so
+        # `from .epic_b import X` presents as "epic_b" and matches no prefix.
+        # This package has an `__init__.py`, so the form is available.
+        relative = [f".{node.module or ''}" for node in from_imports if node.level]
+        assert relative == [], f"the core uses relative imports, which the name check cannot see: {relative}"
+
+        imported = {node.module or "" for node in from_imports} | {
+            alias.name for node in ast.walk(tree) if isinstance(node, ast.Import) for alias in node.names
         }
         epic_b = {name for name in imported if name.startswith("harness.") and name != "harness.contract"}
 
@@ -678,6 +687,52 @@ class TestTeardown:
 
         assert excinfo.value is boom
         assert _closed(ports[0]), "the recorder outlived a bridge that never started"
+
+    async def test_a_transport_that_fails_to_start_is_released_too(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The other half of the failure ``__aexit__`` never sees.
+
+        ``RecordingUpstream.start`` assigns its runner, awaits ``setup()`` and
+        only then binds the site — so a failure in the bind leaves a runner that
+        still needs ``cleanup()``, and it happens before there is any bridge for
+        the second guard to unwind. Two guards, because one cannot cover both.
+
+        Args:
+            monkeypatch: Used to fail the transport's own start.
+        """
+        fixture = _fixture()
+        boom = RuntimeError("the recorder could not bind")
+        stopped: list[bool] = []
+
+        original_stop = type(fixture.transport).stop
+
+        async def spy_stop(transport_self: AiohttpTransport) -> None:
+            """Record that the transport was released, then release it.
+
+            Args:
+                transport_self: The transport being stopped.
+            """
+            stopped.append(True)
+            await original_stop(transport_self)
+
+        async def explode(_self: AiohttpTransport) -> None:
+            """Fail the way a bind failure inside the recorder would.
+
+            Args:
+                _self: The transport, unused.
+
+            Raises:
+                RuntimeError: Always.
+            """
+            raise boom
+
+        monkeypatch.setattr(AiohttpTransport, "stop", spy_stop)
+        monkeypatch.setattr(AiohttpTransport, "start", explode)
+
+        with pytest.raises(RuntimeError) as excinfo:
+            await fixture.start()
+
+        assert excinfo.value is boom
+        assert stopped == [True], "a transport that failed part-way through start was never released"
 
     async def test_a_stopped_fixture_forgets_its_port(self) -> None:
         """A dead port is worse than no port.

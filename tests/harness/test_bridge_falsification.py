@@ -53,6 +53,7 @@ from harness.bridge import (
 )
 from harness.contract import CapturedRequest, WireFormat
 from harness.recorder import RecordingUpstream, Reply
+from kitty.providers.custom_openai import CustomOpenAIAdapter
 
 #: The format every defect below declares, so the one thing that differs between
 #: them is the defect itself.
@@ -168,8 +169,6 @@ class _MisdeclaredTransport(AiohttpTransport):
             A Chat Completions adapter, while :attr:`format` says Anthropic
             Messages.
         """
-        from kitty.providers.custom_openai import CustomOpenAIAdapter
-
         _adapter, config = super().bind()
         return CustomOpenAIAdapter(), config
 
