@@ -933,6 +933,24 @@ class TestUnreadableBodies:
             ("tools entry not an object", _minimal(tools=["x"])),
             ("block not an object", _minimal(messages=[{"role": "user", "content": ["raw"]}])),
             ("block lacks type", _minimal(messages=[{"role": "user", "content": [{"text": "hi"}]}])),
+            (
+                "tool_result content member type not a string",
+                _minimal(
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "tool_result", "tool_use_id": "t", "content": [{"type": {"a": 1}, "b": 2}]}
+                            ],
+                        }
+                    ]
+                ),
+            ),
+            ("system block text not a string", _minimal(system=[{"type": "text", "text": {"a": 1}}])),
+            (
+                "thinking text not a string",
+                _minimal(messages=[{"role": "assistant", "content": [{"type": "thinking", "thinking": 7}]}]),
+            ),
             ("tool_choice unrecognised", _minimal(tool_choice={"type": "magic"})),
             ("tool_choice tool without name", _minimal(tool_choice={"type": "tool"})),
             ("system member not an object", _minimal(system=["hello"])),

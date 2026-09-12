@@ -304,7 +304,11 @@ def _read_system(value: Any, residual: dict[str, Any]) -> tuple[c.Text, ...]:
         if block.get("type") != "text":
             raise c.UnreadableBodyError(f"system[{index}] must be a text block, got {block.get('type')!r}")
 
-        parts.append(c.Text(block["text"]))
+        text = block["text"]
+        if not isinstance(text, str):
+            raise c.UnreadableBodyError(f"system[{index}] text must be a string, got {type(text).__name__}")
+
+        parts.append(c.Text(text))
         _residualise(block, {"type", "text"}, f"system[{index}]", residual)
 
     return tuple(parts)
@@ -485,8 +489,12 @@ def _read_block(block: Any, path: str, residual: dict[str, Any]) -> c.Part:
         # manipulates exactly this field, and its register row claims
         # `conversation.turns[*].parts[*]`. Residualising it would fail the run
         # on every real thinking block and leave M8 unclaimable.
+        thinking = block["thinking"]
+        if not isinstance(thinking, str):
+            raise c.UnreadableBodyError(f"{path} thinking must be a string, got {type(thinking).__name__}")
+
         _residualise(block, {"type", "thinking", "signature"}, path, residual)
-        return c.Thinking(text=block["thinking"], signature=block.get("signature"))
+        return c.Thinking(text=thinking, signature=block.get("signature"))
 
     if kind == "image":
         return _read_image(block, path, residual)
@@ -609,17 +617,26 @@ def _read_result_content(
         if "type" not in block:
             raise c.UnreadableBodyError(f"{member_path} carries no type")
 
+        # Repeated here, not delegated: deciding on the wire type below creates a
+        # second `_read_opaque` call site that does not pass through
+        # `_read_block`, so without this a non-string type reaches `Opaque.kind`,
+        # which is declared `str` and which §7.4.1 makes the wire type in
+        # snake_case.
+        kind = block["type"]
+        if not isinstance(kind, str):
+            raise c.UnreadableBodyError(f"{member_path} type must be a string, got {type(kind).__name__}")
+
         # Decided on the wire type *before* reading, not by reading and then
         # re-reading: nothing nests a tool call inside a tool result, so a block
         # outside the narrower union is content the grammar cannot place — and
         # reading it first would residualise its keys and then digest them too,
         # accounting for one key twice.
-        if block["type"] in ("text", "image"):
+        if kind in ("text", "image"):
             part = _read_block(block, member_path, residual)
             assert isinstance(part, c.RESULT_PART_TYPES)  # noqa: S101 - narrowing for mypy
             parts.append(part)
         else:
-            parts.append(_read_opaque(block, block["type"], member_path, residual))
+            parts.append(_read_opaque(block, kind, member_path, residual))
 
     return tuple(parts)
 
