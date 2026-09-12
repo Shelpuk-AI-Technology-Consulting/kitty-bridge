@@ -629,7 +629,8 @@ OUTCOME_FIELD_CHARS = 4000
 #: The same cap for numbers, which :data:`OUTCOME_FIELD_CHARS` cannot express because
 #: the conversion is what overflows. Nine digits is far beyond any HTTP status and beyond
 #: this module's largest real code (``1310``); the point is only that a number arriving
-#: from a provider cannot be large enough to raise on `str()`. See :func:`_numbers_in`.
+#: from a provider cannot become an unbounded amount of haystack. :func:`_numbers_in`
+#: applies it as a half-open range from zero, because a negative number is not a status.
 OUTCOME_NUMBER_BOUND = 10**9
 
 #: 🔴 KBR-172. The one outcome field the MODEL writes. On a structured-output failure
@@ -897,6 +898,8 @@ def _numbers_in(value: object) -> list[str]:
     -- the defect this module already documents beside :data:`QUOTA_PATTERNS`. Nesting
     is excluded because a number inside a provider's error object is a parameter, not a
     status: a ``retry_after`` of 401 would otherwise be read as a rejected credential.
+    Negative values are excluded for the same reason a ``float`` is -- ``-401`` matches
+    ``\b40[13]\b``, because the word boundary falls between the sign and the digits.
     The Agent SDK reference puts ``api_error_status`` at the top level of the ``result``
     message, so the bound is the production carrier rather than a guess.
 
@@ -916,16 +919,23 @@ def _numbers_in(value: object) -> list[str]:
         return []
     if not isinstance(value, int):
         return []
-    # 🔴 The numeric twin of `OUTCOME_FIELD_CHARS`, which cannot express this because
-    # the CONVERSION is what grows: without it a 4,000-digit status becomes 4,000
-    # characters of haystack, which is the problem that cap exists to prevent.
+    # 🔴 Negative is excluded because a status is not negative, and the exclusion is a
+    # DECISION rather than an inherited accident: `-401` stringifies to "-401", and
+    # `\b40[13]\b` matches inside it -- `-` is a non-word character, so the word
+    # boundary falls right before the digits. Left unbounded, a negative number would
+    # route through the credential tier. Measured; a PR review asserted the opposite.
+    #
+    # 🔴 The upper bound is the numeric twin of `OUTCOME_FIELD_CHARS`, which cannot
+    # express this because the CONVERSION is what grows: without it a 4,000-digit
+    # status becomes 4,000 characters of haystack.
     #
     # ⚠️ It does NOT stop the related crash, and claiming otherwise would be worse than
-    # not bounding at all. Python 3.11+ refuses `str()` on an integer over 4,300
-    # digits -- but `json.loads` hits that limit FIRST, inside `_parse_events`, which
-    # catches only `JSONDecodeError`. So an absurd status still raises there, on `main`
-    # exactly as here. Filed separately; this bound is about size, not about that.
-    if not -OUTCOME_NUMBER_BOUND < value < OUTCOME_NUMBER_BOUND:
+    # not bounding at all. The 4,300-digit ceiling belongs to `int()`, which `json`'s
+    # integer parser calls, so `json.loads` raises inside `_parse_events` -- which
+    # catches only `JSONDecodeError` -- before this function is ever reached. An absurd
+    # status still raises there, on `main` exactly as here. Filed as KBR-209; this
+    # bound is about size, and about the band below that ceiling where it does the work.
+    if not 0 <= value < OUTCOME_NUMBER_BOUND:
         return []
     return [str(value)]
 

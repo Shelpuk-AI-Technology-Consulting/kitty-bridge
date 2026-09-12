@@ -125,7 +125,7 @@ target-version = "py310"
 # next carried-across fix would arrive as a conflict. `.github/review/rules/ci.md`
 # records the same rule for anyone reviewing a change there.
 #
-# NOTE: this is not "that code is unchecked". `ci.yml` runs its 691-case suite
+# NOTE: this is not "that code is unchecked". `ci.yml` runs its 692-case suite
 # on every pull request, and that suite carries guards this linter could not
 # express - the private-reference sweep, the runner-ceiling pairing, the
 # aggregate's dependency set.

@@ -17784,6 +17784,28 @@ class NumericOutcomeFieldTests(unittest.TestCase):
 
         self.assertEqual(interpret._numbers_in(None), [])
 
+    def test_a_negative_number_is_not_a_status(self):
+        r"""🔴 Decided explicitly, because the default was wrong in a surprising way.
+
+        `-401` stringifies to `"-401"`, and `\b40[13]\b` **matches inside it** -- `-` is a
+        non-word character, so the word boundary falls right before the digits. An
+        unbounded coercion therefore routed a negative number through the credential
+        tier, which no provider ever sends and nothing had decided.
+
+        ⚠️ A PR review raised this and asserted the opposite -- that the leading minus
+        made such a value inert. Measured before acting on it: it routed. The finding
+        was right that the behaviour was unpinned; its reasoning was backwards, and
+        pinning the claim rather than the measurement would have frozen a fiction.
+        """
+
+        self.assertEqual(interpret._numbers_in(-401), [])
+        self.assertEqual(interpret._numbers_in(-1), [])
+
+        status, reason = interpret.classify(status_record(-401))
+
+        self.assertEqual(status, "exhausted")
+        self.assertNotIn("401", reason)
+
     def test_an_absurd_integer_is_bounded_rather_than_flooding_the_haystack(self):
         """The numeric twin of :data:`OUTCOME_FIELD_CHARS`, which cannot express it.
 
