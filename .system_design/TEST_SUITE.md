@@ -143,10 +143,10 @@ body. Established by reading `src/kitty/bridge/server.py` and all 23 adapters in
 
 #### 3.2.1 Bridge-level
 
-Twelve request-path rows (M1–M11 and M15), one response-path row (M12), and the routing row **M14**
-(§3.3.5), which is listed here because the destination is a mutation surface the body cannot show.
-Fifteen rows in all. The former substitution row M13 is **withdrawn** — KBR-5 replaced it with a
-downstream error, so it mutates nothing — leaving **fourteen live** bridge-level rows.
+Thirteen request-path rows (M1–M11, M15 and M16), one response-path row (M12), and the routing row
+**M14** (§3.3.5), which is listed here because the destination is a mutation surface the body cannot
+show. Sixteen rows in all. The former substitution row M13 is **withdrawn** — KBR-5 replaced it with
+a downstream error, so it mutates nothing — leaving **fifteen live** bridge-level rows.
 
 | # | Mutation | Site | Trigger | Why it is necessary |
 |---|---|---|---|---|
@@ -165,6 +165,7 @@ downstream error, so it mutates nothing — leaving **fourteen live** bridge-lev
 | ~~M13~~ | **Withdrawn — no longer a mutation.** Was: discard the conversation and substitute a `[Kitty Bridge: …]` user message. | `_compact_messages` / `_apply_compaction` post-condition | No non-system message survives | **Closed by KBR-5.** The post-condition now raises `CompactionFailedError` and the handler returns a protocol-native 400 downstream; nothing is substituted, so there is no mutation left to register. The row is kept struck through rather than deleted so a reader of finding F3 can still find it. **The trigger recorded here was wrong** — see F3. |
 | M14 | **Replace the destination entirely** — scheme and host are built from the profile by `build_base_url()`; the path by `get_upstream_path(_route_model(cc_request))` — the **request's normalized model**, which is the normalized profile model when there is one and the agent's model when there is not. `_route_model` is the single place that answers this; the auth scheme (P9/P20) and the thinking carrier read it too, and the adapter reads the same key for the body (KBR-127 — it was the raw profile model, so path and body could route differently; and on `openai_subscription`'s Responses path the adapter read the *inbound* body's model instead until KBR-160, which was harmless for routing only because that provider posts to a fixed URL and derives no header from the model). Base and path are then **composed** by `ProviderAdapter.compose_upstream_url`, not concatenated (KBR-143). | `BridgeServer._build_upstream_url` | Always | The agent addressed a loopback bridge; the request has to reach the real provider. Listed because **the destination is a mutation surface the body cannot show**: on Azure an identical body sent to the wrong deployment path is a different request entirely (§3.3.5). **The query is part of the mutation, not a passenger** (KBR-143): the endpoint joins the *path* component and the two queries merge, the endpoint's parameters winning a name clash and the base URL's others surviving unaltered. A row naming only "path" would let an oracle derive `route.query` and still not know which side owns a clash. The base URL's fragment is carried through and never sent, since no HTTP client puts one on the wire — so an oracle deriving `route.*` from the profile must expect it on the composed URL and absent from the request line. **The composed URL is redacted before it is echoed** into the 404 diagnostic or a pre-flight failure (`redact_url_for_display`): query values and the fragment are masked, which is an I2-adjacent containment property, not a fidelity one — nothing about the request changes. The composition helper is shared with `kitty.validation.validate_api_key` and `OllamaCloudAdapter._build_url`, but **this row's site is the bridge alone**: pre-flight's probe is not a request the agent made, and the register describes what happens to the agent's request. |
 | M15 | Rewrite a string `input` into the single-item list form `[{"type": "message", "role": "user", "content": [{"type": "input_text", "text": <s>}]}]` | `normalize_responses_request` (`bridge/responses/translator.py`), called from `_handle_responses` before the body forks | Always | OpenAI's `CreateResponse` defines the two forms as the **same request**: `input` is `oneOf` a string (*"a text input to the model, equivalent to a text input with the `user` role"*) or an array, and everything downstream reads the array. Fires on every request reaching the handler; a body already in the array form meets the row with a **no-op** rather than avoiding it, so there is no complement state for §3.3.2 assertion 2 to arrange, which is why it is unconditional. Listed rather than omitted because the rewrite is real bytes at the `curl_cffi` boundary of §3.2.3, where `_original_body` **is** this body; the projection cannot express the difference, so the row takes §3.3.1a's escape for P16's reason. **KBR-144.** |
+| M16 | **Strip every `cache_control` cache breakpoint** — from tool declarations, from system blocks and from message content blocks | `MessagesTranslator.translate_request` (`bridge/messages/translator.py`) | The upstream wire is not native Messages — i.e. the provider does not declare `use_native_messages` | The translator rebuilds the body for Chat Completions, which has no slot for a breakpoint: system blocks are joined into one string, tools are rebuilt as `{name, description, parameters}`, and content blocks are rebuilt. **This is the row whose cost is largest and least visible.** Anthropic prices a cache read at 0.1x base input, so a stripped breakpoint re-bills the agent's stable prefix — system prompt, tool definitions, history — at roughly ten times its cached rate, on every turn, with nothing in the product saying so. Registered rather than left to the residual precisely so the oracle reports it as a *claimed* delta attributable to this site; §3.3.1 records why the declared-ignored alternative was rejected. **The trigger is not `Always`, and the row is still exempt from §3.3.2 assertion 2** — the same shape as **M2**, which carries this identical trigger. The native passthrough branch (`BridgeServer`, `use_native_messages`) shallow-copies the inbound body, so breakpoints do survive there; but that complement is a property of the **route**, chosen by the profile, not of the request, and assertion 2 asks for an *input* that fails the trigger. A corpus entry cannot arrange a different provider. The native route's guarantee is therefore proven where it belongs — as product behaviour, in epic KBR-197 — rather than by a corpus complement nobody could author. Top-level `cache_control` (Anthropic's automatic caching) is **not** this row's: it lands in `envelope.extra[cache_control]` and P1's internal-key strip does not touch it. **KBR-167**; the product-behaviour suite for the same defect is epic KBR-197. |
 
 #### 3.2.2 Provider-level
 
@@ -226,7 +227,7 @@ partial today — see gap G22.
 
 **Conditional rows are the point.** Every row whose trigger is a condition must be provably
 *inert* when that condition is absent — the sharpest form of "unless absolutely necessary", and
-what §3.3.2 assertion 2 tests, with the trigger complements §3.3.4 requires. M1, M2, M10, M14, M15, P1,
+what §3.3.2 assertion 2 tests, with the trigger complements §3.3.4 requires. M1, M2, M10, M14, M15, M16, P1,
 P6, P9a, P9b, P9c, P10, P11, P12, P13, P14, P15, P16, P17, P18, P19, P20, P21 and P23 are
 unconditional by design and are exempt from that assertion.
 
@@ -243,7 +244,10 @@ ordered by **document position**, not numerically — §3.2.2 already interleave
 between P6 and P7 — so a row arriving out of numeric order costs nothing.
 
 **Register maintenance.** The register is the specification. A pull request that adds a mutation
-site without adding a row fails the L2 register guards (§6.2.3).
+site without adding a row fails the L2 register guards (§6.2.3). **A row's table entry here and its
+`MutationRow` in `register.py` are one change**, not two: the guard parses this document, so a
+commit carrying only one half red-lines the suite — at that commit and at every later bisect
+through it.
 
 #### 3.2.3 Serialization paths — where the register must actually be checked
 
@@ -456,17 +460,74 @@ Envelope
 Conversation
   system:   ordered text parts
   turns:    ordered [ Turn(role, parts) ]        -- role is `user` or `assistant`, only
-  tools:    ordered [ ToolDecl(name, description, schema, strict) ]
+  tools:    ordered [ ToolDecl(name, description, schema, strict, cache_control?) ]
   sampling: a CLOSED set of fifteen canonical keys (§3.3.1b) -- declared, may be absent
 
-Part = Text(str)
-     | ToolUse(name, arguments, id?)
-     | ToolResult(content, tool_use_id?, is_error)   -- content: [ Text | Image | Json | Opaque ]
-     | Thinking(text, signature?)
-     | Image(digest?, media_type?, ref?)
-     | Json(value)
-     | Opaque(kind, digest?)
+Part = Text(str, cache_control?)
+     | ToolUse(name, arguments, id?, cache_control?)
+     | ToolResult(content, tool_use_id?, is_error, cache_control?)
+     | Thinking(text, signature?)                     -- no cache_control: see below
+     | Image(digest?, media_type?, ref?, cache_control?)
+     | Json(value)                                    -- no cache_control: see below
+     | Opaque(kind, digest?, cache_control?)
 ```
+
+**`cache_control` is a slot on six of the eight, and the two exclusions are the vendor's rule
+rather than ours.** Claude Code sets a cache breakpoint on nearly every request, so without a slot
+the field could only residualise, and a non-empty residual fails the run — the grammar would reject
+essentially every real body (KBR-167). Anthropic's published "what can be cached" list permits a
+breakpoint on tool declarations, on system blocks, on text, image and document blocks, and on
+`tool_use` and `tool_result` blocks. The two exclusions have **different** reasons, and conflating
+them is how a later reader talks themselves into "fixing" the asymmetry:
+
+- **`Thinking`** — Anthropic states a thinking block "cannot be cached directly with
+  `cache_control`". Note what that does *not* say: thinking blocks **can** be cached alongside
+  other content when they appear in earlier assistant turns, so the exclusion is about the
+  breakpoint, not about cacheability. Anthropic does not document *rejecting* such a body, and its
+  nearest analogue goes the other way — a below-minimum prompt "will be processed without caching,
+  and no error is returned". So the honest statement is that the vendor does not support a
+  breakpoint there. The consequence is on the record: such a body **fails the run**, with the field
+  named, and the fix at that point is a slot or the third outcome, decided then.
+  **The exclusion is the `thinking` *type*, not thinking generally**: a
+  `redacted_thinking` block is `Opaque`, so it carries the slot like any other unmodelled block,
+  even though Anthropic gives it no `cache_control` field either. Left as is deliberately —
+  `Opaque` is the catch-all, and a per-kind exclusion table would be an abstraction with one user.
+- **`Json`** — not a sub-content rule, despite the neighbouring one about citations. §7.4.1 fixes
+  `Json` as the part for a format carrying a structured value *natively* — Converse's
+  `toolResult.content.json`, Gemini's `functionResponse.response`. **Neither format has a
+  `cache_control` concept at all**, and the Anthropic reader can never emit a `Json` part. A slot
+  there could not be filled by any reader.
+
+**A breakpoint nested inside a `ToolResult` residualises**, on the same two-reason pattern.
+Anthropic directs a sub-content block to be cached through its top-level block, and — the half
+that binds regardless — §3.3.1a defines **no path form reaching inside a `ToolResult`**, so a
+breakpoint mapped onto a nested part would be a delta **M16** could never claim. That is
+§3.3.1a's under-claiming direction, which manufactures a false I1 breach. The `ToolResult` itself
+is cacheable and carries its breakpoint normally.
+
+**The wire mapping is carried whole, not reduced to a boolean.** `{"type": "ephemeral"}` and
+`{"type": "ephemeral", "ttl": "1h"}` are different products at different prices (a 1-hour write
+costs 2x base input against 1.25x for the default five-minute one), so a boolean would make a
+silently downgraded TTL invisible — the same class of loss the slot exists to expose.
+
+**Only one reader can ever fill it.** `cache_control` is Anthropic's spelling. Converse has
+`cachePoint` — a *separate block* in the content list, not a field on one — Gemini has a top-level
+`cachedContent` reference, and OpenAI caches prefixes implicitly with no per-block marker at all
+(its GPT-5.6 `prompt_cache_breakpoint` is a Responses-API construct with no Chat Completions
+equivalent). So on every cross-format comparison this field is present on one side only, which is
+exactly what M16 needs, and an author of the Converse or Gemini reader should not go looking for an
+equivalent to map. A normalisation, if one is ever wanted, lands here with the first reader that
+needs it — the same rule §7.4.1 already applies to `Opaque`'s cross-vendor alias table.
+
+**Why a slot rather than §3.3.1's other outcome.** §3.3.1 offers "map it, or declare it ignored
+with a reason", and a reader-side declared-ignored mechanism would also have stopped the run
+failing. It was rejected deliberately: kitty's translated path **strips every breakpoint**, so
+under a declared-ignored rule the oracle would be blind, by construction, to a mutation that
+re-bills the user's cached prefix at **at least** ten times its cached rate — a cache read is
+0.1x base input on most models and 0.025x on Claude Fable 5.1 and Mythos 5.1, where the multiple
+is forty. Register row **M16** claims
+the strip instead, which keeps the cost visible and attributable. The declared-ignored mechanism
+therefore still does not exist; §7.4.1 records that, and no field currently needs it.
 
 **`consumed` is why a dropped key is detectable.** A reader that *drops* an unknown key produces
 an **empty** residual, so "the residual must be empty" would pass it — and T-W2's own falsification
@@ -529,7 +590,10 @@ wire format therefore forces a deliberate decision: map it, or declare it ignore
 
 **Every register row names the field it touches.** M1 is `envelope.model`; P17 is
 `envelope.stream` and `envelope.store`; P15 is `conversation.tools[*].strict`; P13 is
-`conversation.sampling`. Without that, "claimed by a register row" is a judgement call rather
+`conversation.sampling`. **M16 is the sharpest case** — three paths at once, each naming
+`.cache_control` rather than the block it sits on, because `conversation.turns[*].parts[*]` would
+also claim a *deleted part* and `conversation.tools[*]` a *deleted tool description*, which are two
+of §3.3.1's own five oracle falsification cases. Without that, "claimed by a register row" is a judgement call rather
 than a lookup.
 
 #### 3.3.1a The path vocabulary
@@ -547,6 +611,7 @@ only the second consumer; §3.2.2 says why.
 | `conversation.turns[<i>].role` · `.parts[<j>]` | A turn, or one part of it |
 | `conversation.tools[<name>].description` · `.schema` · `.strict` | A tool declaration, **by name** |
 | `conversation.sampling[<key>]` | One sampling parameter |
+| `conversation.system[<i>].cache_control` · `conversation.turns[<i>].parts[<j>].cache_control` · `conversation.tools[<name>].cache_control` | One cache breakpoint — **M16**. ⚠️ **A coarser row can claim these first**: a pattern is a prefix, so P5b's bare `conversation.system` and M5/M6/M7's bare `conversation.turns` subsume the breakpoint paths beneath them whenever their own triggers are met — and P5b's `MULTIPLE_SYSTEM_BLOCKS` is met by most Claude Code bodies. M16 is therefore the row that fires only where no collection-level row does; on the system blocks that means the single-block case, since P5b changes the collection's length and no `system[i]` path survives it. The field addresses the same three carriers the grammar gives it a slot on; `system_path` and `part_path` take an optional field name for it, as `tool_path` already did for P15's `.strict` |
 | `conversation.turns` · `.system` · `.tools` · `.sampling` | A **whole collection** — M5, M6 and M7 rewrite the turns, P5b joins the system blocks, §3.3.1 pins P13/P14 to the bare `sampling` |
 | `headers[<name>]` | A header — P9a, P9b, P9c, and §4.3 C1. **Not produced by the projection diff**: `Request` carries no headers and no inbound header is forwarded, so this form addresses a per-adapter *deviation from the base header set* (§3.2.2), never a delta between two projections |
 | `residual[<path>]` | An unclassified value |
@@ -2523,7 +2588,7 @@ and the second is the one that surprises:
    wrong defect. `residual_path()` renders a *delta path* for the oracle to report; it never
    builds this mapping.
 2. A nested key is keyed by its path from the body root with **array positions as indices** —
-   `tools[0].type`, `messages[2].content[0].cache_control`, `system[0].cache_control`. It does
+   `tools[0].type`, `messages[2].content[0].x_vendor_marker`, `system[0].x_vendor_marker`. It does
    **not** inherit §3.3.1a's by-name tool addressing. That convention exists because "translators
    reorder and filter declarations", which is a property of a *comparison*; a residual key is
    never matched against a register pattern, so the reason does not apply and one rule is better
@@ -2576,7 +2641,8 @@ model projects as `Opaque(kind=…, digest=…)` where:
   the first one: in T-A1 all three wrong spellings survived mutation testing until a test pinned a
   digest to an external literal.
 - the block's every other key is **consumed** — nothing beneath it residualises — while
-  `cache_control` residualises under its path exactly as it does on a modelled block.
+  `cache_control` maps to `Opaque.cache_control` exactly as it does on a modelled block (KBR-167;
+  it residualised until the grammar gained the slot).
 
 Each clause is load-bearing. A bare `Opaque("document")` makes two different documents project
 identically, so a swapped or truncated document produces no delta at all — and §3.3.1 put
@@ -2586,9 +2652,12 @@ the grammar's known limit. **Canonical JSON rather than the raw wire slice**, be
 that reorders keys must not change the digest; that is the whole reason the recipe is not
 `sha256(raw_block_bytes)`. **`ensure_ascii` is pinned** because its default is `True` while the
 surrounding prose says UTF-8: an author who "helpfully" passes `False` gets a different digest for
-the same block, and it would surface only on non-ASCII content. **`cache_control` is excluded**
-so that one field behaves the same way everywhere — inside the digest it would produce a delta
-with no named cause, on a path where the same field on a modelled block produces a diagnosis.
+the same block, and it would surface only on non-ASCII content. **`cache_control` is excluded from
+the digest** so that one field behaves the same way everywhere — inside the digest it would produce
+a delta with no named cause, on a path where the same field on a modelled block produces a
+diagnosis. That exclusion is unchanged now the field has a slot, and it is what lets **M16** claim
+a stripped breakpoint on an unmodelled block by path: were it inside the digest, the strip would
+show as an opaque digest change no row could name.
 
 > **The cost, recorded so it is not discovered later.** The digest is over *that format's* JSON, so
 > one document carried from Messages to Converse digests differently and shows a cross-format
@@ -2693,10 +2762,15 @@ implements the first and the residual; there is **no reader-side declared-ignore
 say. Until T-W2 adds one, a field the grammar cannot carry has only the residual, and the residual
 fails the run.
 
-That is the correct signal and it is also a deadline. Claude Code sets a block-level
-`cache_control` on nearly every request and the grammar has no slot for it, so **T-C2's corpus
-entry — `system` with `cache_control` — fails the first oracle run.** Tracked as a blocking edge
-onto T-D1, not as a note here.
+That deadline **has been met, and not by building the mechanism.** Claude Code sets a block-level
+`cache_control` on nearly every request, so T-C2's corpus entry — `system` with `cache_control` —
+would have failed the first oracle run. KBR-167 resolved it by giving the field a **slot** in the
+grammar (§3.3.1) and a register row (**M16**), because kitty strips every breakpoint and the
+declared-ignored route would have made that loss invisible to the oracle by construction. So the
+third outcome is still unbuilt, and **no field currently needs it** — which is the reason not to
+build it yet rather than an oversight. The next field the grammar cannot carry is the one that
+should settle whether a slot or a mechanism is the right answer; §3.3.1 records the trade-off that
+decision turns on.
 
 #### 7.4.2 What T-A4 settled — seven more rules, and which readers each one binds
 

@@ -114,12 +114,7 @@ class TestTheRecorderPassesEveryConformanceCheck:
             await send(recorder.host, recorder.port, probe(marker), marker=marker)
             for marker in ("first", "second")
         ]
-        # KBR-188/189: exempt the WINDOWS CELL only -- this assertion gates
-        # normally on the Linux and macOS legs, and fails the job the day
-        # Windows starts passing. §8.3's parametrised-cell shape.
-        exempt = sys.platform == "win32" and check.__name__ == "check_arrival_increases"
-        with ratchet("recorder-arrival-increases-per-session") if exempt else nullcontext():
-            check(recording_of(recorder), sent, [s.source_port for s in sent])
+        check(recording_of(recorder), sent, [s.source_port for s in sent])
 
 
 class TestCaptureFidelity:
@@ -311,12 +306,7 @@ class TestCaptureFidelity:
         first, second = recorder.requests
         assert first.arrival is not None and second.arrival is not None
 
-        # KBR-188: the Windows cell only. Gates normally on the four Linux legs
-        # and on macOS, and fails the job the day Windows starts passing. The
-        # block holds this one assertion and nothing else, per §8.3.
-        exempt = sys.platform == "win32"
-        with ratchet("recorder-arrival-increases-across-requests") if exempt else nullcontext():
-            assert second.arrival > first.arrival
+        assert second.arrival > first.arrival
 
     async def test_a_request_that_never_completes_is_not_published(
         self, recorder: RecordingUpstream

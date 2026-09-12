@@ -508,6 +508,31 @@ _BRIDGE_ROWS: tuple[MutationRow, ...] = (
             "ever does, M15 needs a projectable anchor."
         ),
     ),
+    MutationRow(
+        id="M16",
+        site=("kitty/bridge/messages/translator.py:MessagesTranslator.translate_request",),
+        # Unconditional for M2's reason, not M1's, and they share this trigger.
+        # The complement is real -- the native passthrough branch shallow-copies
+        # the inbound body, so breakpoints survive it -- but it is a property of
+        # the *route*, chosen by the profile, and §3.3.2 assertion 2 asks for an
+        # *input* that fails the trigger. No corpus entry can pick a provider.
+        # The native route's guarantee is proven as product behaviour instead
+        # (epic KBR-197), not by a complement nobody could author.
+        trigger=Trigger.NON_NATIVE_UPSTREAM_WIRE,
+        # Three anchors because Anthropic permits a breakpoint at three carriers
+        # and Claude Code uses all three. Each names the **field**, never the
+        # block: `conversation.turns[*].parts[*]` would also claim a deleted
+        # part, and `conversation.tools[*]` a deleted tool description -- two of
+        # §3.3.1's five oracle falsification cases. That is §3.3.1a's P15 lesson
+        # applied to a second row.
+        paths=(
+            c.system_path(c.WILDCARD, "cache_control"),
+            c.part_path(c.WILDCARD, c.WILDCARD, "cache_control"),
+            c.tool_path(c.WILDCARD, "cache_control"),
+        ),
+        conditional=False,
+        design_ref="§3.2.1 · §3.3.1 · §3.3.1a",
+    ),
 )
 
 # --------------------------------------------------------------------------

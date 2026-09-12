@@ -379,15 +379,20 @@ class TestSystem:
 
         assert projected.conversation.system == (c.Text("first"), c.Text("second"))
 
-    def test_a_system_block_with_cache_control_residualises_and_fails_the_run(self) -> None:
-        """R3.2 — the grammar has no slot for it, so it fails closed (KBR-167)."""
+    def test_a_system_block_carries_its_cache_control_onto_the_projected_part(self) -> None:
+        """R4 — the grammar gained the slot, so the run no longer fails (KBR-167).
+
+        This test was the inverse until KBR-167: it asserted the field
+        residualised and the run failed. Inverted rather than deleted, because
+        the old assertion is exactly what a regression would restore.
+        """
         projected = _read(
             _minimal(system=[{"type": "text", "text": "hi", "cache_control": {"type": "ephemeral"}}])
         )
 
-        assert projected.residual == {"system[0].cache_control": {"type": "ephemeral"}}
-        with pytest.raises(c.ResidualFieldsError):
-            c.verify_total(projected)
+        assert projected.residual == {}
+        assert dict(projected.conversation.system[0].cache_control) == {"type": "ephemeral"}
+        c.verify_total(projected)
 
     def test_the_control_for_that_case_passes(self) -> None:
         """R3.2 — the paired control: without the injected key the same body is clean."""
@@ -642,14 +647,14 @@ class TestContentBlocks:
         with pytest.raises(c.ResidualFieldsError):
             c.verify_total(projected)
 
-    def test_cache_control_on_a_tool_use_block_residualises(self) -> None:
-        """R4.10 — Claude Code sets a breakpoint on tool blocks too, not only on text (KBR-167)."""
+    def test_cache_control_on_a_tool_use_block_maps_onto_the_slot(self) -> None:
+        """R4 — Claude Code sets a breakpoint on tool blocks too, not only on text (KBR-167)."""
         block = dict(PUBLISHED_TOOL_USE, cache_control={"type": "ephemeral"})
         projected = _read(_minimal(messages=[{"role": "assistant", "content": [block]}]))
 
-        assert projected.residual == {"messages[0].content[0].cache_control": {"type": "ephemeral"}}
-        with pytest.raises(c.ResidualFieldsError):
-            c.verify_total(projected)
+        assert projected.residual == {}
+        assert dict(projected.conversation.turns[0].parts[0].cache_control) == {"type": "ephemeral"}
+        c.verify_total(projected)
 
     def test_a_json_shaped_tool_result_string_is_text_and_never_json(self) -> None:
         """R4.5 — §7.4.1: `Json` is for a format carrying a structured value natively.
@@ -780,27 +785,34 @@ class TestContentBlocks:
         with pytest.raises(c.UnreadableBodyError, match="myCustomBlock"):
             _read(body)
 
-    def test_cache_control_on_an_opaque_block_residualises_and_leaves_the_digest_alone(self) -> None:
-        """R4.6 — one field must not behave two ways: it residualises on modelled blocks too."""
+    def test_cache_control_on_an_opaque_block_maps_and_leaves_the_digest_alone(self) -> None:
+        """R6 — one field behaves one way everywhere, and stays out of the digest.
+
+        The digest exclusion is what lets M16 claim a stripped breakpoint on an
+        unmodelled block *by path*. Inside the digest, the strip would surface as
+        an opaque digest change that no register row could name.
+        """
         bare = {"type": "document", "title": "t"}
         marked = {"type": "document", "title": "t", "cache_control": {"type": "ephemeral"}}
 
         plain = _read(_minimal(messages=[{"role": "user", "content": [bare]}]))
         cached = _read(_minimal(messages=[{"role": "user", "content": [marked]}]))
 
-        assert cached.residual == {"messages[0].content[0].cache_control": {"type": "ephemeral"}}
+        assert cached.residual == {}
+        assert dict(cached.conversation.turns[0].parts[0].cache_control) == {"type": "ephemeral"}
+        assert plain.conversation.turns[0].parts[0].cache_control is None
         assert (
             cached.conversation.turns[0].parts[0].digest == plain.conversation.turns[0].parts[0].digest
         )
 
-    def test_cache_control_on_a_text_block_residualises_and_fails_the_run(self) -> None:
-        """R4.10 — fail closed at depth; KBR-167 is the contract decision that would close it."""
+    def test_cache_control_on_a_text_block_maps_onto_the_slot(self) -> None:
+        """R4 — the commonest site of all: Claude Code caches its system and text blocks."""
         block = {"type": "text", "text": "hi", "cache_control": {"type": "ephemeral"}}
         projected = _read(_minimal(messages=[{"role": "user", "content": [block]}]))
 
-        assert projected.residual == {"messages[0].content[0].cache_control": {"type": "ephemeral"}}
-        with pytest.raises(c.ResidualFieldsError):
-            c.verify_total(projected)
+        assert projected.residual == {}
+        assert dict(projected.conversation.turns[0].parts[0].cache_control) == {"type": "ephemeral"}
+        c.verify_total(projected)
 
     def test_the_control_for_that_case_passes(self) -> None:
         """R4.10 — the paired control, without which a reader that always residualised would pass."""
@@ -1038,6 +1050,261 @@ class TestToolsAndSampling:
 # --------------------------------------------------------------------------
 # R6 — totality
 # --------------------------------------------------------------------------
+
+
+class TestCacheBreakpoints:
+    """R4-R6 — the cache breakpoint Claude Code sets on nearly every request (KBR-167).
+
+    Before the grammar had a slot, each of these residualised and failed the run,
+    so the fidelity oracle could not have run against a single real Claude Code
+    body. §3.3.1 records why this is a slot rather than a declared-ignored rule:
+    kitty's translated path strips every breakpoint, and the oracle has to be
+    able to say so.
+    """
+
+    def test_a_realistic_claude_code_body_projects_with_an_empty_residual(self) -> None:
+        """R4 — the ticket's symptom, asserted end to end.
+
+        Four breakpoints at the three carriers the grammar now models: a system
+        block, a tool declaration, a text block and a tool result. This is the
+        shape KBR-167 reported as failing the run on "nearly every real request".
+        """
+        body = _minimal(
+            system=[
+                {"type": "text", "text": "You are Claude Code."},
+                {"type": "text", "text": "<env>...</env>", "cache_control": {"type": "ephemeral"}},
+            ],
+            tools=[
+                {"name": "Bash", "description": "Run a command", "input_schema": {"type": "object"}},
+                {
+                    "name": "Read",
+                    "description": "Read a file",
+                    "input_schema": {"type": "object"},
+                    "cache_control": {"type": "ephemeral"},
+                },
+            ],
+            messages=[
+                {
+                    "role": "user",
+                    "content": [{"type": "text", "text": "hi", "cache_control": {"type": "ephemeral"}}],
+                },
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "tool_use", "id": "tu_1", "name": "Bash", "input": {"command": "ls"}}
+                    ],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "tu_1",
+                            "content": "ok",
+                            "cache_control": {"type": "ephemeral"},
+                        }
+                    ],
+                },
+            ],
+        )
+
+        projected = _read(body)
+
+        assert projected.residual == {}
+        c.verify_total(projected)
+
+        conversation = projected.conversation
+        assert conversation.system[0].cache_control is None
+        assert dict(conversation.system[1].cache_control) == {"type": "ephemeral"}
+        assert conversation.tools[0].cache_control is None
+        assert dict(conversation.tools[1].cache_control) == {"type": "ephemeral"}
+
+        # The turn parts, asserted here too rather than left to the sibling
+        # tests: R4's criterion names all four sites, and a body that satisfied
+        # it only in aggregate would not show which site regressed.
+        assert dict(conversation.turns[0].parts[0].cache_control) == {"type": "ephemeral"}
+        assert dict(conversation.turns[2].parts[0].cache_control) == {"type": "ephemeral"}
+
+    def test_a_tool_declaration_carries_its_breakpoint(self) -> None:
+        """R4 — Anthropic caches tool definitions, and Claude Code marks the last one."""
+        tool = {
+            "name": "Bash",
+            "description": "Run a command",
+            "input_schema": {"type": "object"},
+            "cache_control": {"type": "ephemeral"},
+        }
+        projected = _read(_minimal(tools=[tool]))
+
+        assert projected.residual == {}
+        assert dict(projected.conversation.tools[0].cache_control) == {"type": "ephemeral"}
+
+    def test_a_tool_result_and_an_image_block_carry_theirs(self) -> None:
+        """R4 — both are on Anthropic's published cacheable list."""
+        result = _read(
+            _minimal(
+                messages=[
+                    {"role": "assistant", "content": [PUBLISHED_TOOL_USE]},
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": PUBLISHED_TOOL_USE["id"],
+                                "content": "ok",
+                                "cache_control": {"type": "ephemeral"},
+                            }
+                        ],
+                    },
+                ]
+            )
+        )
+
+        assert result.residual == {}
+        assert dict(result.conversation.turns[1].parts[0].cache_control) == {"type": "ephemeral"}
+
+        image_block = {
+            "type": "image",
+            "source": {"type": "base64", "media_type": "image/png", "data": "aGk="},
+            "cache_control": {"type": "ephemeral"},
+        }
+        image = _read(_minimal(messages=[{"role": "user", "content": [image_block]}]))
+
+        assert image.residual == {}
+        assert dict(image.conversation.turns[0].parts[0].cache_control) == {"type": "ephemeral"}
+
+    def test_the_extended_lifetime_survives_rather_than_flattening(self) -> None:
+        """R2 — a one-hour write costs 2x base input against 1.25x for five minutes.
+
+        A boolean slot would carry "cached" for both, so a translator that
+        downgraded the TTL would produce no delta at all.
+        """
+        block = {"type": "text", "text": "hi", "cache_control": {"type": "ephemeral", "ttl": "1h"}}
+        projected = _read(_minimal(messages=[{"role": "user", "content": [block]}]))
+
+        assert dict(projected.conversation.turns[0].parts[0].cache_control) == {
+            "type": "ephemeral",
+            "ttl": "1h",
+        }
+
+    def test_a_breakpoint_on_a_thinking_block_still_residualises(self) -> None:
+        """R5 — Anthropic forbids it, so the body is one the API itself rejects.
+
+        The exclusion is the vendor's rule, not a gap in the grammar: "thinking
+        blocks cannot be cached directly with `cache_control`". Failing the run
+        with the field named is the correct signal, and a future author who
+        "tidies up" the asymmetry by giving `Thinking` a slot breaks this test.
+        """
+        block = {
+            "type": "thinking",
+            "thinking": "hmm",
+            "signature": "sig",
+            "cache_control": {"type": "ephemeral"},
+        }
+        projected = _read(_minimal(messages=[{"role": "assistant", "content": [block]}]))
+
+        assert projected.residual == {
+            "messages[0].content[0].cache_control": {"type": "ephemeral"}
+        }
+        with pytest.raises(c.ResidualFieldsError):
+            c.verify_total(projected)
+
+    def test_a_breakpoint_nested_inside_a_tool_result_residualises(self) -> None:
+        """R5 — the vendor caches a sub-content block through its top-level block.
+
+        Two reasons, and the second is the one that bites. Anthropic directs a
+        sub-content block to be cached via the block above it, so a breakpoint
+        here is not a thing the API does. And §3.3.1a defines **no path form**
+        reaching inside a `ToolResult`, so a breakpoint mapped onto a nested part
+        would be a delta M16 could never claim — §3.3.1a's under-claiming
+        direction, which manufactures a false I1 breach.
+        """
+        body = _minimal(
+            messages=[
+                {"role": "assistant", "content": [PUBLISHED_TOOL_USE]},
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": PUBLISHED_TOOL_USE["id"],
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": "inner",
+                                    "cache_control": {"type": "ephemeral"},
+                                }
+                            ],
+                        }
+                    ],
+                },
+            ]
+        )
+        projected = _read(body)
+
+        assert projected.residual == {
+            "messages[1].content[0].content[0].cache_control": {"type": "ephemeral"}
+        }
+        assert projected.conversation.turns[1].parts[0].content[0].cache_control is None
+        with pytest.raises(c.ResidualFieldsError):
+            c.verify_total(projected)
+
+    def test_a_breakpoint_on_the_tool_result_itself_still_maps(self) -> None:
+        """The control for the rule above: the *top-level* block is cacheable.
+
+        Without this, a reader that residualised every breakpoint anywhere near a
+        tool result would pass the test above for the wrong reason.
+        """
+        body = _minimal(
+            messages=[
+                {"role": "assistant", "content": [PUBLISHED_TOOL_USE]},
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": PUBLISHED_TOOL_USE["id"],
+                            "content": [{"type": "text", "text": "inner"}],
+                            "cache_control": {"type": "ephemeral"},
+                        }
+                    ],
+                },
+            ]
+        )
+        projected = _read(body)
+
+        assert projected.residual == {}
+        assert dict(projected.conversation.turns[1].parts[0].cache_control) == {"type": "ephemeral"}
+
+    def test_a_wrongly_typed_breakpoint_residualises_rather_than_being_kept(self) -> None:
+        """R5 — §7.4.1's wrongly-typed-leaf rule binds this field like any other.
+
+        A bare string is not a breakpoint. Keeping it would put a value in the
+        slot that no comparison could interpret; coercing it would invent one.
+        """
+        block = {"type": "text", "text": "hi", "cache_control": "ephemeral"}
+        projected = _read(_minimal(messages=[{"role": "user", "content": [block]}]))
+
+        assert projected.residual == {"messages[0].content[0].cache_control": "ephemeral"}
+        assert projected.conversation.turns[0].parts[0].cache_control is None
+        with pytest.raises(c.ResidualFieldsError):
+            c.verify_total(projected)
+
+    def test_an_unmarked_body_leaves_every_slot_absent(self) -> None:
+        """The control, without which a reader that stamped every block would pass.
+
+        Plan §1.4: absence must be observable, or M16 cannot show a *stripped*
+        breakpoint as a delta — the two sides would agree on a default.
+        """
+        projected = _read(
+            _minimal(
+                system=[{"type": "text", "text": "hi"}],
+                tools=[{"name": "Bash", "description": "d", "input_schema": {}}],
+            )
+        )
+
+        assert projected.conversation.system[0].cache_control is None
+        assert projected.conversation.tools[0].cache_control is None
+        assert projected.conversation.turns[0].parts[0].cache_control is None
 
 
 class TestTotality:

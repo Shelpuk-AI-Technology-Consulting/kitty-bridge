@@ -93,6 +93,23 @@ def _freeze_mapping(value: Mapping[str, Any] | None) -> Mapping[str, Any]:
     return MappingProxyType(dict(value or {}))
 
 
+def _freeze_optional(value: Mapping[str, Any] | None) -> Mapping[str, Any] | None:
+    """Return a frozen view over ``value``, preserving its absence.
+
+    The counterpart of :func:`_freeze_mapping` for a field whose *absence* is
+    meaningful.  ``cache_control`` is the case: ``None`` is "no cache breakpoint"
+    and ``{}`` is a malformed one, and collapsing the two would stop **M16**
+    distinguishing a stripped breakpoint from a block that never carried one.
+
+    Args:
+        value: The mapping to freeze, or ``None`` when the field is absent.
+
+    Returns:
+        A read-only mapping proxy over a shallow copy, or ``None``.
+    """
+    return None if value is None else _freeze_mapping(value)
+
+
 def _frozen_field() -> Any:
     """Return a dataclass field defaulting to an empty frozen mapping.
 
@@ -120,15 +137,26 @@ class Text:
 
     Attributes:
         text: The text content, empty string included.
+        cache_control: The cache breakpoint the agent set on this block, as the
+            wire mapping — ``{"type": "ephemeral"}``, or the extended form
+            carrying a ``ttl``. ``None`` means no breakpoint. Carried whole
+            rather than as a boolean because a one-hour write and a five-minute
+            one are different prices, so a flattened form would hide a silently
+            downgraded lifetime. **M16** claims its removal.
     """
 
     text: str
+    cache_control: Mapping[str, Any] | None = None
 
     # Every projection type sets this, so unhashability is total rather than
     # data-dependent — see the module note on multiset matching. It survives
     # `@dataclass` only because none of these classes defines `__eq__` in its
     # own body; adding one would silently restore a working `__hash__`.
     __hash__ = None  # type: ignore[assignment]
+
+    def __post_init__(self) -> None:
+        """Freeze the cache breakpoint in place."""
+        object.__setattr__(self, "cache_control", _freeze_optional(self.cache_control))
 
 
 @dataclass(frozen=True)
@@ -149,17 +177,25 @@ class ToolUse:
         arguments: The parsed arguments. Chat Completions encodes these as a
             JSON *string* and Messages as an object; normalising here stops a
             spurious delta on every cross-format comparison.
+        cache_control: The cache breakpoint the agent set on this block, as the
+            wire mapping — ``{"type": "ephemeral"}``, or the extended form
+            carrying a ``ttl``. ``None`` means no breakpoint. Carried whole
+            rather than as a boolean because a one-hour write and a five-minute
+            one are different prices, so a flattened form would hide a silently
+            downgraded lifetime. **M16** claims its removal.
     """
 
     name: str
     arguments: Mapping[str, Any] = _frozen_field()
     id: str | None = None
+    cache_control: Mapping[str, Any] | None = None
 
     __hash__ = None  # type: ignore[assignment]
 
     def __post_init__(self) -> None:
-        """Freeze the arguments mapping in place."""
+        """Freeze the arguments mapping and the cache breakpoint in place."""
         object.__setattr__(self, "arguments", _freeze_mapping(self.arguments))
+        object.__setattr__(self, "cache_control", _freeze_optional(self.cache_control))
 
 
 @dataclass(frozen=True)
@@ -200,15 +236,25 @@ class Opaque:
         digest: A content digest.  Two recipes, and §7.4.1 states which applies:
             :func:`opaque_digest` for a block the grammar cannot model,
             :func:`text_digest` for content whose identity is a run of text.
+            ``cache_control`` is excluded from **both**, so a stripped breakpoint
+            on an unmodelled block shows at its own path rather than as an
+            unexplained digest change no register row could name.
+        cache_control: The cache breakpoint the agent set on this block, as the
+            wire mapping — ``{"type": "ephemeral"}``, or the extended form
+            carrying a ``ttl``. ``None`` means no breakpoint. Carried whole
+            rather than as a boolean because a one-hour write and a five-minute
+            one are different prices, so a flattened form would hide a silently
+            downgraded lifetime. **M16** claims its removal.
     """
 
     kind: str
     digest: str | None = None
+    cache_control: Mapping[str, Any] | None = None
 
     __hash__ = None  # type: ignore[assignment]
 
     def __post_init__(self) -> None:
-        """Validate the kind against the canonical vocabulary.
+        """Validate the kind against the canonical vocabulary, and freeze the breakpoint.
 
         Checked rather than merely declared, for the reason this module applies
         to every other closed vocabulary: *a vocabulary declared closed but
@@ -244,6 +290,8 @@ class Opaque:
                 "A camelCase wire type needs a canonical name in OPAQUE_ALIASES first."
             )
 
+        object.__setattr__(self, "cache_control", _freeze_optional(self.cache_control))
+
 
 @dataclass(frozen=True)
 class Image:
@@ -256,13 +304,24 @@ class Image:
             its own delta rather than an unexplained digest change.
         media_type: The declared media type, when the format states one.
         ref: The URI, for Gemini's ``fileData.fileUri`` which carries no bytes.
+        cache_control: The cache breakpoint the agent set on this block, as the
+            wire mapping — ``{"type": "ephemeral"}``, or the extended form
+            carrying a ``ttl``. ``None`` means no breakpoint. Carried whole
+            rather than as a boolean because a one-hour write and a five-minute
+            one are different prices, so a flattened form would hide a silently
+            downgraded lifetime. **M16** claims its removal.
     """
 
     digest: str | None = None
     media_type: str | None = None
     ref: str | None = None
+    cache_control: Mapping[str, Any] | None = None
 
     __hash__ = None  # type: ignore[assignment]
+
+    def __post_init__(self) -> None:
+        """Freeze the cache breakpoint in place."""
+        object.__setattr__(self, "cache_control", _freeze_optional(self.cache_control))
 
 
 @dataclass(frozen=True)
@@ -297,19 +356,27 @@ class ToolResult:
         content: Ordered content. Not recursive: no format nests a tool call
             inside a tool result.
         is_error: Whether the tool reported failure.
+        cache_control: The cache breakpoint the agent set on this block, as the
+            wire mapping — ``{"type": "ephemeral"}``, or the extended form
+            carrying a ``ttl``. ``None`` means no breakpoint. Carried whole
+            rather than as a boolean because a one-hour write and a five-minute
+            one are different prices, so a flattened form would hide a silently
+            downgraded lifetime. **M16** claims its removal.
     """
 
     content: Sequence[Text | Image | Json | Opaque] = ()
     tool_use_id: str | None = None
     is_error: bool = False
+    cache_control: Mapping[str, Any] | None = None
 
     __hash__ = None  # type: ignore[assignment]
 
     def __post_init__(self) -> None:
-        """Freeze the content sequence in place."""
+        """Freeze the content sequence and the cache breakpoint in place."""
         object.__setattr__(
             self, "content", _checked_members(self.content, RESULT_PART_TYPES, "ToolResult.content")
         )
+        object.__setattr__(self, "cache_control", _freeze_optional(self.cache_control))
 
 
 #: Every :data:`Part` variant, as a tuple for ``isinstance`` and for the guard
@@ -932,19 +999,27 @@ class ToolDecl:
         strict: P15 strips this on the Responses-origin path. ``None`` means
             absent, which must stay distinct from ``False`` or that row's
             presence and absence would be indistinguishable.
+        cache_control: The cache breakpoint the agent set on this block, as the
+            wire mapping — ``{"type": "ephemeral"}``, or the extended form
+            carrying a ``ttl``. ``None`` means no breakpoint. Carried whole
+            rather than as a boolean because a one-hour write and a five-minute
+            one are different prices, so a flattened form would hide a silently
+            downgraded lifetime. **M16** claims its removal.
     """
 
     name: str
     description: str | None = None
     schema: Mapping[str, Any] | None = None
     strict: bool | None = None
+    cache_control: Mapping[str, Any] | None = None
 
     __hash__ = None  # type: ignore[assignment]
 
     def __post_init__(self) -> None:
-        """Freeze the schema mapping when one is present."""
+        """Freeze the schema mapping and the cache breakpoint in place."""
         if self.schema is not None:
             object.__setattr__(self, "schema", _freeze_mapping(self.schema))
+        object.__setattr__(self, "cache_control", _freeze_optional(self.cache_control))
 
 
 @dataclass(frozen=True)
@@ -1426,17 +1501,20 @@ def sampling_path(key: str) -> str:
     return f"conversation.sampling[{key}]"
 
 
-def system_path(index: int | str) -> str:
-    """Return the path naming one system text part.
+def system_path(index: int | str, field_name: str | None = None) -> str:
+    """Return the path naming one system text part, or a field of it.
 
     Args:
         index: Position in :attr:`Conversation.system`, or :data:`WILDCARD`
             when a register row names every one of them.
+        field_name: An optional field, e.g. ``cache_control`` for M16.
 
     Returns:
-        A path of the form ``conversation.system[<i>]``.
+        A path of the form ``conversation.system[<i>]``, with ``.<field>``
+        appended when one is given.
     """
-    return f"conversation.system[{_index(index)}]"
+    base = f"conversation.system[{_index(index)}]"
+    return f"{base}.{field_name}" if field_name else base
 
 
 def turn_path(index: int | str, field_name: str | None = None) -> str:
@@ -1455,8 +1533,8 @@ def turn_path(index: int | str, field_name: str | None = None) -> str:
     return f"{base}.{field_name}" if field_name else base
 
 
-def part_path(turn_index: int | str, part_index: int | str) -> str:
-    """Return the path naming one part of one turn.
+def part_path(turn_index: int | str, part_index: int | str, field_name: str | None = None) -> str:
+    """Return the path naming one part of one turn, or a field of it.
 
     §3.3.4 requires a failure to name the exact turn and part.
 
@@ -1465,14 +1543,21 @@ def part_path(turn_index: int | str, part_index: int | str) -> str:
     writes concrete indices, and both must come from this one builder or the
     spelling drifts between T-W3 and T-D1.
 
+    ``field_name`` exists for **M16**, and naming the field matters for the
+    reason §3.3.1a gives for P15: the bare part path would also claim a *deleted
+    part*, which is one of §3.3.1's five oracle falsification cases.
+
     Args:
         turn_index: Position in :attr:`Conversation.turns`, or :data:`WILDCARD`.
         part_index: Position in that turn's parts, or :data:`WILDCARD`.
+        field_name: An optional field of the part, e.g. ``cache_control``.
 
     Returns:
-        A path of the form ``conversation.turns[<i>].parts[<j>]``.
+        A path of the form ``conversation.turns[<i>].parts[<j>]``, with
+        ``.<field>`` appended when one is given.
     """
-    return f"conversation.turns[{_index(turn_index)}].parts[{_index(part_index)}]"
+    base = f"conversation.turns[{_index(turn_index)}].parts[{_index(part_index)}]"
+    return f"{base}.{field_name}" if field_name else base
 
 
 def tool_path(name: str, field_name: str | None = None) -> str:
