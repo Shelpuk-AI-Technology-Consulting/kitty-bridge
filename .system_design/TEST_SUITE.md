@@ -443,10 +443,21 @@ because Gemini puts every sampling parameter under `generationConfig` and Conver
 > empty across the whole corpus" for all seven readers. T-W2 pins this boundary with its own test,
 > so it stays a decision rather than an assumption.
 
-**Optional ids, because two formats have none.** Gemini's `functionCall`/`functionResponse` carry
-no id; pairing there is by tool name and the k-th unanswered call of that name in the most recent
-assistant turn. A required id would force those readers to synthesise one and show a delta on every
-tool turn.
+**Optional ids, because a format may carry none.** Where an id is absent, pairing is by tool name
+and the k-th unanswered call of that name in the most recent assistant turn. A required id would
+force such a reader to synthesise one and show a delta on every tool turn.
+
+> ⚠️ **Corrected by T-A4 (KBR-36).** This section previously read "two formats have none" and named
+> Gemini as one of them, on the strength of Google's Cloud / Agent-Platform reference. The
+> **Developer API** surface kitty actually serves differs: `v1beta`'s `FunctionCall` publishes an
+> optional `id` ("If populated, the client to execute the `function_call` and return the response
+> with the matching `id`") and `FunctionResponse` an optional `id` the client populates to match —
+> verified against the discovery document at revision `20260910`. Optional either way, so the
+> *decision* to make `ToolUse.id` and `ToolResult.tool_use_id` optional is unchanged and still
+> right; only its stated reason was wrong. The Gemini reader therefore **reads the wire id when one
+> is sent** and falls back to the name-and-position rule when it is not. KBR-36's own acceptance
+> asked for this to be confirmed rather than assumed, which is why it is recorded here rather than
+> left as a reader's private finding.
 
 **`ToolResult.content` is wider than text and images**, because Converse's `toolResult.content`
 carries `json` (the common case), `document`, `video` and `searchResult`, Anthropic's carries
@@ -784,7 +795,8 @@ the request went. Three providers carry routing outside the body:
 |---|---|---|
 | Azure | The deployment id, which **is** the request's normalized model (P20) — and P6 deliberately removes `model` from the body | Two requests to two different deployments have **byte-identical bodies**. A body-only oracle cannot tell them apart, so a misrouted request is invisible. |
 | Vertex | `project_id` and `location` (P21) | The account being billed is a URL component |
-| Gemini | Model and operation (`:generateContent` vs `:streamGenerateContent`) in the inbound path | M10 lifts the model into the body precisely because it is not there to begin with |
+| Gemini | Model and operation (`:generateContent` vs `:streamGenerateContent`) in the inbound path | M10 lifts the model into the **outbound Chat Completions** body precisely because it is not in
+the inbound one to begin with |
 
 So the oracle takes the **whole captured request** — method, scheme, host, path, query, headers,
 body — and asserts routing separately from content.
@@ -2136,7 +2148,7 @@ same interface to the tests:
 | Recorder | Serves | Observes |
 |---|---|---|
 | aiohttp server — bridge sessions | the 20 default-transport adapters | The primary; speaks Anthropic Messages and Chat Completions |
-| aiohttp server — provider sessions | `ollama_cloud`, and the `openai_subscription` **OAuth token legs** | Those adapters build their own sessions and never touch `_session_for`, so the bridge recorder never sees them. The OAuth leg runs at startup, before anything else has been proven (§5.5) |
+| aiohttp server — provider sessions | `ollama_cloud`, and the `openai_subscription` **OAuth login leg** | Those adapters build their own sessions and never touch `_session_for`, so the bridge recorder never sees them. The OAuth leg runs at startup, before anything else has been proven (§5.5). The **refresh** leg moved to `curl_cffi` in KBR-161 and is the row below's (§7.2.2) |
 | curl_cffi-reachable server | `openai_subscription` serving path | Must terminate TLS with the harness certificate; the only place `_cc_to_responses` output (P13, P17) can be seen |
 | botocore endpoint override | `bedrock` | Points the client at the local recorder rather than AWS; observes the Converse payload **after** the transport's `modelId`/`stream` pops (P18) |
 
@@ -2214,6 +2226,62 @@ A recorder's Anthropic SSE success is therefore guarded only by §6.2.2's gramma
 property of the product, not of the harness: an upstream returning a well-formed but
 contentless Anthropic stream reaches Claude Code with none of the retry the Chat Completions
 path has.
+
+#### 7.2.2 What T-B1 settled — the provider-session recorder
+
+**Delivered by T-B1 ([KBR-40]) in `tests/harness/provider_recorder.py` and
+`tests/harness/provider_aiohttp.py`**, registered as `provider_aiohttp` with a `CONFORMANCE_CASES`
+row naming `OLLAMA_CHAT` and the **Chat Completions** inbound route — named rather than derived,
+because `OLLAMA_CHAT` has no inbound route of its own (§7.5.1).
+
+**It subclasses T-W4's recorder rather than being a second server.** §7.2.1 catalogues six ways an
+aiohttp recorder can look correct and lie, and a second implementation is a second chance to get
+each of them wrong — §7.3's own argument, that "two proxy implementations is how two harnesses come
+to disagree". What differs between the two recorders is **vocabulary**: the format served, the
+suffix that selects a reply, and what a minimal success looks like. Those three are overridden and
+nothing else, so both recorders are judged by §7.2.1's fourteen checks over the same capture path.
+The claim that costs is `recorder_conformance`'s: running those checks against a subclass that
+overrides none of the capture path proves the overrides did not break it, not that a second
+implementation agrees. **What carries that weight instead is a falsification case against the
+overrides themselves** — a Chat Completions body and an SSE stream, each driven through the real
+adapter, which reads nothing out of either.
+
+**The OAuth token leg is served by this recorder and is *not* an `UpstreamTransport`** — §7.5's open
+question, decided. `bind()` must return `(adapter, provider_config)` and the conformance check drives
+a request through a real `BridgeServer`; the login leg has neither an adapter nor a bridge, so a
+transport for it could not satisfy the interface it joined. A seventh `WireFormat` was the other
+option and would mutate a contract six Epic A readers consume (T-W2, [KBR-25]) to add a value **no
+projection can read**: §3.3.1 pairs every format with a wire reader, and a form-encoded token grant
+is not an LLM request. So the recorder dispatches the leg by path suffix, `WireFormat` stays closed
+at six, and `oauth_token_endpoint()` is that leg's `bind()`.
+
+**Scope, after KBR-161: the login leg here, the refresh leg in T-B2.** §5.5's table records that the
+refresh leg now runs on the adapter's impersonating `curl_cffi` session, which an aiohttp recorder
+cannot observe. Note the consequence §5.5 already states from the other side: the `curl_cffi` leg
+"fires on every subsequent request, so that is the transport the harness must exercise first". T-B1
+therefore covers the **less** urgent of the two legs, deliberately — it is the one its stack can see
+— and T-B2 inherits the other. **Two constants named `OAUTH_TOKEN_URL` exist**, one per leg
+(`kitty.auth.openai_oauth` and `kitty.auth.oauth_session`); they are identical strings and unrelated
+variables, so a seam that swapped the wrong one would send a real request to `auth.openai.com`.
+
+**A one-format transport has one teardown check, and that is measured.** §7.5.4's row 4 — a declared
+format that was never under test — needs **two** served formats to stay silent: the recorder answers
+by path suffix, so the adapter parses the reply and the capture list comes out complete. With one
+served format the same mistake takes the fallback instead. Measured, against a transport whose
+adapter posted elsewhere and against one that posted at the OAuth endpoint: **4 captures and a
+10-second timeout each, 72 seconds including the teardown that waits out the retry ladder**. Both are
+caught loudly by the conformance check's first assertion, so a second teardown pass here would be an
+assertion no defect could falsify — which is what §7.5.4 found and removed in T-W8. The same
+measurement is why the reply-shape falsification cases are driven through the adapter and not
+through the bridge: the defect is caught either way, and one way costs milliseconds.
+
+**The OAuth endpoint is excluded from the declared-format claim by name, not by silence.** A token
+grant is answered before any format lookup — it has no `WireFormat` and must not be reported as a
+fallback — so `assert_teardown_clean()` passes over it, and a test pins that exclusion so it cannot
+be mistaken for a hole.
+
+[KBR-40]: https://shelpuk.atlassian.net/browse/KBR-40
+[KBR-25]: https://shelpuk.atlassian.net/browse/KBR-25
 
 ### 7.3 Recording CONNECT proxy
 
@@ -2494,6 +2562,147 @@ That is the correct signal and it is also a deadline. Claude Code sets a block-l
 entry — `system` with `cache_control` — fails the first oracle run.** Tracked as a blocking edge
 onto T-D1, not as a note here.
 
+#### 7.4.2 What T-A4 settled — seven more rules, and which readers each one binds
+
+§7.4.1 fixed ten decisions writing T-A1. Writing **T-A4** (Gemini, [KBR-36]) reached seven more, each
+of which the remaining authors would otherwise answer differently, and each recorded here for the
+same reason: paths are index-based and `envelope.extra` is keyed, so two readers that disagree
+report a delta on content nobody changed.
+
+**Two of the seven are Google-specific and five are not**, which matters because only the five are a
+standing obligation on the rest of Epic A. **Rule 7 is different in kind from the other six**: it is
+not a new question this format raised but one the three shipped readers have already answered three
+different ways, which makes it the only rule here that is also a correction.
+
+| Rule | Binds |
+|---|---|
+| 1 — the route as a reader input | Gemini alone; no other format puts routing in the inbound URL (§3.3.5) |
+| 2 — a nested control field flattens to its leaf published key | **T-A5**, whose `inferenceConfig` and `toolConfig` nest the same way |
+| 3 — ProtoJSON's two spellings, and case-insensitive enum values | Google formats; a **Vertex** reader, if one is ever added, inherits it |
+| 4 — `envelope.extra` keyed by the *published* spelling | every reader of a format with more than one legal spelling, so today rule 3's set |
+| 5 — a capability toggle the wire does not name is control, not a `ToolDecl` | **T-A5** and **T-A6** |
+| 6 — digest the payload, not the carrier, where the field name discriminates | any format whose content union is discriminated by field name rather than by a `type` member |
+| 7 — a union member's own value is wrong: raise, residualise, or drop? | **every** reader; three answers are already shipped |
+
+**1. The route is a reader input, and only for what the body cannot show.** Gemini alone puts the
+model and the operation in the URL (§3.3.5), so its reader derives `envelope.model` from the path
+segment and `envelope.stream` from the operation suffix — `:streamGenerateContent` versus
+`:generateContent`, and **never** from `?alt=sse`, which selects SSE framing over JSON-array framing
+for a method that streams either way. The **query string is not read at all**: `verify_total`
+compares `consumed | residual` against the *body*, so a query key in either account would be
+reported as a claim on a key the body does not have. Asserting the route is T-D2's.
+
+A path that is not a published generate route raises `UnreadableBodyError`. That widens a type §7.4
+describes as "a body that cannot be read" to cover a *route* problem, which is defensible only on
+the inbound direction, where the path is the client's — and it is stated here because T-D1 uses that
+one exception type to tell a malformed corpus entry from an I1 breach.
+
+**2. A nested control field is addressed by its leaf published key.** Gemini puts sampling under
+`generationConfig` and the tool choice under `toolConfig.functionCallingConfig`; Converse nests
+`inferenceConfig` and `toolConfig` the same way, so T-A5 inherits this. `extra_path()` **raises** on
+a dotted key, which leaves exactly two dotless candidates, and the container loses:
+`envelope.extra[generationConfig]` cannot collide and survives a schema revision, but §3.3.1a
+compares an `extra` value **whole**, so it would collapse fourteen independently registrable fields
+into one address and make any row anchored there claim all of them — the coarse-anchor failure
+§3.3.1a warns about by name. The leaf key wins on the narrowest-anchor rule.
+
+The cost is a flat namespace assembled from several nested objects, so **each reader that flattens
+owes a test that its `extra` key sets are pairwise disjoint.** The namespace is not naturally
+disjoint — Gemini publishes `mediaResolution` on both `GenerationConfig` and `Part`, and the only
+reason there is no clash is that the `Part` one residualises. A collision would be introduced by a
+*schema revision*, not by a request, and the loser would overwrite the winner with no residual and
+no delta.
+
+**3. Google's JSON has two legal spellings of every field, and both must read.** Gemini's wire
+format is ProtoJSON, whose parsers "accept both the lowerCamelCase name … and the original proto
+field name" (`protobuf.dev/programming-guides/json/`). This is not theoretical: Google's own
+published examples mix them freely — `system_instruction`, `function_declarations`, `tool_config`,
+`file_data` and `response_mime_type` in snake_case, beside `generationConfig`, `stopSequences`,
+`maxOutputTokens` and `topP` in camelCase. A reader that knew only the schema's spelling would
+residualise the other and **fail the run on Google's own published example**, which §7.4.1 already
+calls "a harness defect and not a finding". Enum *values* are matched case-insensitively for the
+same reason: the published `FunctionCallingConfig.mode` enumeration is upper case and Google's
+`function_calling.sh` sends `"mode": "auto"`.
+
+Where one object carries both spellings of one field, the **published** spelling is read and the
+other residualises. Not "the first wins": §7.4.1 designs key order out of the projection elsewhere —
+"canonical JSON rather than the raw wire slice, because a translator that reorders keys must not
+change the digest" — and resolving by position would put it back, projecting one semantic body two
+ways depending on which alias a serialiser emitted first.
+
+**4. `envelope.extra` is keyed by the *published* wire key.** §3.3.1b says "keyed by the wire key",
+which named one thing until rule 3; it now names two. A register row can name only one, and T-D9's
+matrix needs one, so the published lowerCamelCase name is the address and the snake_case original
+resolves onto it. This is the one place where `extra` and the residual diverge deliberately:
+`consumed` and residual keys stay in the **wire** spelling, because `verify_total` compares them
+against the body's own keys.
+
+**5. A server-side capability toggle in the tools array is control, not a tool declaration.**
+Gemini's `Tool` message carries eight of them beside `functionDeclarations` — `googleSearch`,
+`codeExecution`, `urlContext`, `fileSearch`, `computerUse`, `googleMaps`, `googleSearchRetrieval`,
+`mcpServers` — each an unnamed toggle object such as `{"googleSearch": {}}`. They map to
+`envelope.extra[<key>]`.
+
+**This departs from T-A3**, which makes a non-`function` Responses tool a `ToolDecl` whose name is
+the tool type, and the departure is the point: a Responses built-in tool *has* a name to be
+addressed by, and §3.3.1a's tool paths are by name. Gemini's has none, so a `ToolDecl` would have to
+invent one — putting a vendor spelling into a form whose purpose is wire independence — while
+residualising would fail the run on every request that enables Google Search. The distinguishing
+question is therefore **"does the wire name this tool?"**, not "is it built in".
+
+**6. Digest the payload, not the carrier, where the field name is the discriminator.** §7.4.1's
+recipe says `rest` is "the block without `type` and without `cache_control`", which assumes a block
+discriminated by a `type` member. A Gemini `Part` is a union discriminated by **field name** and
+defines no `cache_control`, so the digest is taken over the *payload object* — `part["executableCode"]`
+— and neither exclusion has anything to remove. Sibling members on the same part residualise, which
+is exactly the role `cache_control` plays on a `type`-discriminated block. The recipe itself is
+unchanged, `ensure_ascii` included.
+
+**7. When a union member's own value is wrong: raise, residualise, or drop — and never drop.** Three
+readers have shipped and all three answer differently, which is the coordination failure §7.4.1
+exists to prevent, so it is settled here rather than left to T-A5 and T-A6 to pick a precedent from.
+The distinction is **what the bad value is a value *of***:
+
+| The wrong value is… | Outcome | Because |
+|---|---|---|
+| the value that **is** the part — `Part.text`, a `Thinking`'s text, `Opaque.kind` | **raise** `UnreadableBodyError` | the grammar has no absent value to fall back to, and `Text("")` fabricates an empty part — which is *meaningful* here, since P5e and P8 both inject one |
+| a **required field** of a part — a tool `name` | **residualise**, project the part with `""` | §3.3.1b settles it in those words: "an absent `name` *does* residualise … a call nobody can name cannot be paired or addressed" |
+| a **payload** the reader cannot canonicalise — base64 that does not decode | **residualise the leaf**, project the part with the grammar's absent value | `Image.digest` is `str \| None`, so an absent value exists, and §7.4.1: "raising is the other wrong answer: it blinds the oracle to everything else in a request it could otherwise diff" |
+| the **member itself**, where the schema declares an object and the wire sent a scalar — `{"functionCall": 7}` | **raise** | there is no value to put in the position, and the position cannot be vacated |
+
+**The line between the last two rows is where the member sits, not how bad the value is.** A
+container under the **envelope** — `generationConfig`, `toolConfig` — residualises whole when it is
+not an object, because every envelope field has an absent value and the rest of the request still
+projects. A container that **is a part or a turn** raises, because a part must occupy its index and
+the grammar offers nothing to put there: residualising it would leave the position empty, which is
+the drop this rule forbids. State the question as *"can the projection still fill this position?"*
+and every case above falls out of it.
+
+**No branch ever returns *no part*.** That is the load-bearing half, and it is where two of the three
+shipped readers are wrong: `reader_responses.py` returns `None` for both a wrongly-typed `input_text`
+and an undecodable data URL, which drops the part and shifts every later part's index — §7.4.1's own
+warning that "that invented delta lands on every part of the turn and on every turn after it". A
+reader that cannot read a part must still *occupy its position*.
+
+> **Reconciliation owed.** `reader_anthropic_messages.py` raises on undecodable base64 where this
+> rule residualises, and `reader_responses.py` drops a part where this rule keeps it. Both predate
+> this section. T-A4 is the reference implementation; the two landed readers need conforming, and
+> that is a change to shipped code rather than a note, so it is tracked as its own ticket.
+
+> **What this reader leaves on the record.** Six fields the format publishes, real clients send, and
+> the grammar cannot carry now residualise and so **fail the first oracle run** — the same shape as
+> the `cache_control` deadline above, and tracked as its own defect rather than as a note here. The
+> sharpest is `thoughtSignature` on a `functionCall` part, which Gemini 3 *requires* clients to echo
+> back verbatim. Unlike `cache_control` the grammar nearly has the slot — `contract.py` already says
+> `Thinking.signature` carries "Anthropic's `signature` or Gemini's `thoughtSignature`" — so the fix
+> is small and specific rather than open-ended.
+>
+> A second consequence, on the oracle rather than the reader: `GeminiTranslator` **discards** the
+> inbound tool-call id and synthesises one per call (`_make_tool_call_id`). Now that the §3.3.1 correction above
+> projects the wire id, every tool turn from a client that populates one shows a delta with no
+> register row to claim it. That is a correct oracle finding, not a reader defect, and it needs a
+> row or a ticket before T-D9 runs.
+
 ### 7.5 The bridge fixture
 
 `tests/harness/bridge.py` — plan task **T-W8** ([KBR-31]). The counterpart of §7.2 on the
@@ -2504,7 +2713,9 @@ need it, and `tests/conftest.py` offers only `unused_tcp_port` today. Measured i
 their own stub adapter, fake upstream and `post()` helper; 25 of those *also* intercept the
 upstream with `aioresponses` rather than a real socket, and 24 start no server at all.
 
-**This is the one `tests/harness/` module that imports the product.** `contract.py` and
+**This was the one `tests/harness/` module that imports the product, and since T-B1 it is one of
+two** — an Epic B transport must build the adapter it binds, which is what `bind()` is for
+(§7.2.2). `contract.py` and
 `recorder.py` each carry a structural guard forbidding any `kitty` import, because §3.3.1's
 independent-oracle rule says a reader that asked kitty how to parse a body would inherit
 kitty's bugs. That rule governs what *judges* a request. This module *starts* the thing under
@@ -2886,8 +3097,17 @@ The honest division of labour, and the reason all three are kept:
 
 The budget's failure message reports the capture count **first** and says so in words, because the
 gate is ~18.5 minutes on runners this repo has already seen OOM-killed under parallel load: a
-contended runner and a fired ladder must be distinguishable without a rerun. CI across 3.10–3.13
-is the authority for the number; a version-dependent failure means raising it, never skipping.
+contended runner and a fired ladder must be distinguishable without a rerun. CI is the authority
+for the number, across every leg — 3.10–3.13 on Linux plus the pinned Windows and macOS legs
+§8.4 added after this module was written — and a platform- or version-dependent failure means
+raising it, never skipping.
+
+**The slice needs no Windows exemption row, and must not acquire one.** §8.3's registry is all
+arrival *ordering*: Windows' clock cannot separate two adjacent requests, so every "arrival
+increases" assertion is false there (KBR-188). This module asserts only that `arrival` is
+**populated and typed**, which a coarse clock satisfies — ordering is T-W4's claim, not the
+slice's. Tightening it into an ordering check here would add debt to §8.3 for a claim that is
+already made, and made better, one layer down.
 
 **The fired ladder is shown, and it is shown on the non-streaming path.** Plan §1.4 requires the
 one-capture assertion to be caught detecting a real ladder rather than passing by construction,
@@ -2972,7 +3192,7 @@ defined by its marker expression and no test can fall between two jobs or into b
 
 | Job | Selection | Trigger | Gates a PR? | Gates a release? |
 |---|---|---|---|---|
-| **Fast** | `ruff`, `lint-imports`, `mypy src/kitty`, then `pytest -m "l1 or l2" -q` on Python 3.10–3.13 | push, PR | **Yes** | **Yes** |
+| **Fast** | `ruff`, `lint-imports`, `mypy src/kitty`, then `pytest -m "l1 or l2" -q` on Python 3.10–3.13 on Linux, and on one pinned version on Windows and macOS (§8.4) | push, PR | **Yes** | **Yes** |
 | **Subsystem** | `pytest -m l3 -q` | PR | **Yes** | **Yes** |
 | **Acceptance** | `pytest -m "acceptance or agent_smoke" -q` | PR | **Yes** | **Yes** |
 | **Deep** | mutation testing (§6.1), schemathesis at high `--max-examples`, extended property runs | nightly | No | No |
@@ -3125,8 +3345,8 @@ business, together with the job that runs them; doing it earlier would remove th
 gate. T-H1 must take that reclassification into account before it measures a mutation
 baseline, because it selects on `l1`.
 
-**Seven modules are bulleted below — in five bullets, since the T-W4 and T-W8 rows name two
-modules each — and `tests/cli/test_stream_encoding.py` (KBR-10) is described after them, eight in
+**Eight modules are bulleted below — in six bullets, since the T-W4 and T-W8 rows name two
+modules each — and `tests/cli/test_stream_encoding.py` (KBR-10) is described after them, nine in
 all, named here so T-K6 inherits a list rather than a search** — the count
 is what T-K6 and T-H1 plan against. (The bullet count and the KBR-10 paragraph were already
 drifting apart before T-W8 added two; spelling out both is what stops the next addition
@@ -3157,6 +3377,17 @@ separately.)
   commit `691e974` fixed once already. Worth knowing while planning the move: when one of its
   cases goes red on a fired ladder, the *bound* catches the regression but does not bound the
   cost of catching it — teardown still waits out the in-flight handlers, measured at 62 seconds.
+  T-B1 below measures the same property at 72 s through the adapter; they are the same 62-second
+  teardown plus that path's own ladder, not two different findings.
+- **T-B1 (KBR-40):** `tests/harness/test_provider_aiohttp.py` binds a recorder in most of its
+  cases and a real `BridgeServer` in several, and drives the OpenAI login OAuth leg over loopback
+  in four more. It runs in **~0.6 seconds**, measured, which is the number the fast-gate budget
+  should carry until T-K6 moves it. It is one module rather than two because its falsification
+  cases are defects in the transport it ships, not a separate harness; where T-W8 put four defect
+  transports in their own file, a fifth file per Epic B ticket would be three more for T-K6 to
+  move. Worth knowing while planning that move: a **wrong-shaped reply** costs 72 seconds here —
+  10 s of retry ladder plus the teardown that waits it out — which is why §7.2.2's reply-shape
+  falsification is driven through the adapter rather than through the bridge.
 - **KBR-144:** `tests/bridge/test_responses_string_input.py` starts a real `BridgeServer` on an
   ephemeral port in four of its classes, following the existing convention of
   `tests/bridge/test_crash_resilience.py` rather than inventing a second one. The whole module
@@ -3315,18 +3546,192 @@ T-G5 and T-J2 land — is unchecked until that job is activated, so there the ex
 outlive its defect. The task that activates the job owns re-checking the rows on its layer, in
 the same way §8.2 makes each pending layer someone's named handoff.
 
-**The registry ships empty, today.** The row this section names — TR-1c's header-subset
-assertion, KBR-8 — belongs to an acceptance scenario that does not exist yet (§6.4.1, delivered
-by T-J2 downstream of T-J1). A registry row for an assertion no test contains documents a
-fiction, and the guard against a fiction cannot be the unexpected-pass rule, because nothing ever
-runs it. Whichever of T-G1, T-G4, T-G5, T-G9 or T-J2 lands first adds the first row. §6.4.1 and
-§6.2.3 are not amended to say so: this document states the To-Be state, in which those rows
-exist, and §8's row-count parenthetical now says which state it is counting.
+**The registry no longer ships empty — KBR-164 added the first five rows**, and they are not the
+row this section anticipated. TR-1c's header-subset assertion (KBR-8) still belongs to an
+acceptance scenario that does not exist yet (§6.4.1, delivered by T-J2 downstream of T-J1), and a
+registry row for an assertion no test contains documents a fiction — so it is still unwritten.
+What arrived first instead were the **Windows cells** of five assertions that the platform legs
+(§8.4) found to be false on Windows and true everywhere else: four over KBR-188 and one over
+KBR-189.
+
+They are the parametrised-cell shape above rather than whole-test exemptions, and the reason is
+the rule this section opens with. A `skipif` would have been the obvious move and is the wrong
+one: §8 permits a platform skip for behaviour that **does not exist** on a platform, and these
+assertions are not inapplicable on Windows — they are **false** there, which is a defect with a
+ticket. Exempting the cell keeps the assertion gating on the four Linux legs and on macOS, keeps
+the count of outstanding Windows defects readable in one file, and fails the job the day Windows
+starts passing. Skipping would have bought a green leg by not looking.
 
 That makes the registry-shape check itself vulnerable to §8's own "green because it stopped
 looking": a validator run over zero rows passes perfectly. So `registry_violations` is proved
 against a **fabricated malformed registry** rather than against the production one, and the
 production registry is asserted clean as a separate, weaker claim.
+
+### 8.4 The platform matrix
+
+Delivered by [KBR-164](https://shelpuk.atlassian.net/browse/KBR-164). Until it landed, every
+job in the repository ran on Linux, so **every Windows-only and macOS-only defect in the product
+was reachable only by a user reporting it** — which is how all three platform bugs on epic
+KBR-123 (KBR-1, KBR-4, KBR-10) were in fact found.
+
+The Fast gate therefore runs on three platforms:
+
+| Leg | Runner label | Python | Selection |
+|---|---|---|---|
+| Linux | `ubuntu-latest` | 3.10, 3.11, 3.12, 3.13 | the whole Fast gate |
+| Windows | `windows-latest` | 3.12 | **identical** |
+| macOS | `macos-latest` | 3.12 | **identical** |
+
+**One job with an `os` matrix dimension, not a second job.** A separate platform job would
+duplicate the five-step list, and the day the two copies differ the platform leg stops being
+evidence about the gate and becomes evidence about a *similar* gate. This is the same argument
+`tests.yml`'s header already makes for the release path — *"there is no second, weaker
+definition to drift out of sync"* — applied across platforms instead of across events. It also
+means the legs gate a pull request through `ci-required`'s existing `needs: [test, …]` with **no
+change to `ci.yml`**, and gate a release through `publish.yml`, for free.
+
+**The same tests, not a platform-dependent subset.** The ticket floated scoping the leg "to the
+tests whose behaviour is actually platform-dependent". Rejected: that set is precisely what
+nobody knows — a latent POSIX assumption is invisible until the test runs somewhere else — and
+naming it would need a second marker axis, which collides with §8.1's exactly-one-layer-marker
+rule. The whole `l1 or l2` expression runs on every leg.
+
+**GitHub-hosted, and this is not a new decision.** `.github/review/rules/ci.md` § "Runner and
+caps" already fixed it for every job in the repository: a self-hosted runner group carries an
+*"Allow public repositories"* setting that is **off by default**, and this repository is public,
+so a `[self-hosted, …]` label reaches no group at all and the job **queues for ever — no error,
+no annotation, no timeout**. The platform legs inherit that unchanged.
+
+**The cost objection in the ticket does not apply here, and the reason is worth recording
+because it is the whole reason this was cheap.** KBR-164 was written expecting a large bill
+("`windows-latest` minutes bill at 2×"). That multiplier is a **private**-repository rule.
+`kitty-bridge` is public, and GitHub's runner reference states the case in one sentence: *"Use of
+the standard GitHub-hosted runners is free and unlimited on public repositories."* `windows-latest`
+and `macos-latest` are both in that table. **Confirmed 2026-09-12.** If this repository is ever
+made private, this subsection is the one to revisit first — the legs keep working and start
+billing at 2× and 10× respectively.
+
+**One Python version per platform, and it is 3.12.** The suite is mostly platform-independent, so
+a four-version Windows matrix would quadruple wall-clock and quadruple the first-run triage
+surface to re-prove interpreter-version facts the Linux legs already prove. 3.12 rather than the
+newest because `ci.yml`'s two review-system jobs already pin 3.12, so the repository names one
+version in one place; and because a Windows-only defect is likelier to reach a user on a
+mainstream version than on the newest. Interpreter-version questions stay the Linux matrix's job.
+
+**`include:` entries, not an `os` × `python-version` product with `exclude:`.** The product form
+needs six `exclude:` entries to remove six of twelve combinations, and `_matrix_values` in
+`.github/review/tests/test_review_scripts.py` deliberately does **not** honour `exclude:` — it
+over-approximates on purpose, which is the safe direction for a ceiling check but the wrong one
+for a matrix that would then be mostly holes. ⚠️ The `include:` form carries its own subtlety and
+it is where this construct is misread: an include object whose keys would **overwrite** a base
+matrix value is not merged into the existing combinations — it becomes a **new** combination.
+That is what produces the two platform legs, and a comment in `tests.yml` says so beside them.
+
+**One integer `timeout-minutes` for the whole matrix job.** `DeclaredJobCapIsEnforceableTests`
+parses the cap with `(\d+)`, so a `${{ matrix.… }}` expression there reads as **absent** and the
+guard reports "declares no job-level `timeout-minutes:`" about a line that is plainly present. A
+matrix job is held to the **lowest** platform ceiling among the labels its matrix can produce;
+all three labels here are ordinary GitHub-hosted 4-CPU runners at **360 minutes**, so the cap is
+bounded by measurement rather than by the platform.
+
+**`openssl` is an environment prerequisite on all three images, and §8 already said so.** The
+paragraph above on the resource-availability rule states the duty in advance of this change: *"a
+non-Ubuntu matrix entry has to keep it, and the fix for a red gate is to install `openssl`, never
+to reinstate the skip."* `tests/bridge/tls_certs.py` calls `pytest.fail` — not `skip` — when the
+binary is absent, so a missing `openssl` is a red gating leg with no sanctioned recovery.
+Discharged, and recorded rather than assumed: **confirmed 2026-09-12** against the
+`actions/runner-images` image manifests — Windows Server 2025 ships **OpenSSL 3.6.4**, macOS 15
+arm64 ships **OpenSSL 1.1.1w**, Ubuntu 24.04 ships **3.0.13**. A future image bump inherits that
+duty. ⚠️ If the Windows TLS tests go red, check `-subj "/CN=localhost"` first: a leading-slash
+argument is mangled by MSYS2 path conversion if the resolved `openssl.exe` is the Git-for-Windows
+build rather than the native one.
+
+**`fail-fast: false` is load-bearing now, and was merely tidy before.** With six legs it is the
+only reason a Windows failure does not cancel the four Linux legs mid-run. Cancelling them would
+destroy the evidence needed to tell "Windows is broken" from "this change is broken" — which is
+the first question asked of every red platform leg. It predates this subsection; its importance
+does not.
+
+**A red platform leg blocks a release, deliberately.** `publish.yml` calls this same reusable
+workflow, so macOS and Windows have just joined the release gate — which is not free, and the
+cost is named rather than discovered later. `rules/ci.md` already notes that the release path
+carries blast radius beyond itself; after this change a red or flaky platform leg stops a PyPI
+release of a product whose platform behaviour was, until now, never exercised at all. That is the
+correct trade — shipping a release known to be broken on Windows is the worse outcome — and the
+break-glass is the same admin path `review/README.md` documents.
+
+**The measurement, because the number beside it used to be fiction.** The comment that stood
+beside `timeout-minutes: 30` claimed *"the suite runs in a couple of minutes"* — stale by an
+order of magnitude, leaving the backstop only ~50% headroom on a leg nobody had timed. Measured
+on the first six-leg run (2026-09-12, run 34689734864):
+
+| Leg | Wall clock | Outcome |
+|---|---|---|
+| Linux × 4 | 19.5 – 19.7 min | passed |
+| **macOS** | **20.6 min** | **passed, whole suite, first run** |
+| Windows | 2.3 min | **not a measurement** — aborted early on KBR-180 |
+
+The cap is **60**, which clears the slowest *completed* leg (macOS, 20.6) by ~3×. ⚠️ Windows is
+**not yet timed**: its first run aborted 227 tests in, so the figure above measures a failure, not
+the suite. Whoever next reads a green Windows leg should set this number from it. The cost of 60,
+stated rather than hidden: a **hung Linux leg is noticed 30 minutes later than it was**. On a free
+runner that is cheap, and a cap too low is worse — it kills a healthy leg and reads as a product
+failure. **A platform leg killed at the cap is a cap problem until proven otherwise**, never
+triaged as a hang; the platform ceiling is 360, so there is room to raise it.
+
+**What the legs found on their first run, recorded because it is the argument for the whole
+subsection.** macOS passed the entire suite immediately. Windows did not, and the failure was not
+a latent POSIX assumption in a test — it was a **user-facing product defect**
+([KBR-180](https://shelpuk.atlassian.net/browse/KBR-180)): `probe_pid` in `bridge/manage.py`
+probes liveness with `os.kill(pid, 0)`, and `signal.CTRL_C_EVENT` **is** `0` on Windows, so that
+call broadcasts a Ctrl+C to every process sharing the console instead of probing. It is reached by
+`kitty bridge status`, `stop`, `start` and `restart`, so each of those interrupted the user's own
+shell. Its docstring asserted the opposite — *"on Windows as well as POSIX — it does not terminate
+the target"* — and the `except OSError` branch beneath it explained a Windows code path that call
+never reaches. Both were written by reasoning about Windows rather than running there. **That is
+the failure mode a platform leg exists to end**, and it was caught within two minutes of the leg
+first existing.
+
+**Skips are named, not counted in silence.** §8's rule — a gating job that goes green because it
+ran nothing is the most expensive false confidence — is what a new platform leg is most likely to
+breach, because a **platform** skip is the one kind §8 permits. So the gate's pytest invocation
+carries **`-rsfE`**: every skipped test is listed in the log *with its reason*, on all six legs.
+The flag is on the one shared invocation rather than on the platform legs alone, because a second
+invocation in the file is exactly the second definition this subsection's first decision rejects.
+
+🔴 **`fE` is not decoration, and the obvious spelling is a trap this section fell into before it
+was corrected.** `-r` **stores** reportchars; it does not append to them. A bare `-rs` therefore
+*replaces* pytest's default `fE` and **deletes the `FAILED …` summary** from the end of the run —
+measured on pytest 9.1.1 with this exact command. On a suite of this size that summary is how a
+red leg is read, and the first red platform leg is precisely when it is needed. The skip letter
+must be **added** to the defaults, never substituted for them. An earlier draft of this paragraph
+claimed the visibility "costs one flag"; it costs one flag *only* when the defaults are restated
+alongside it. `tests/test_github_actions.py::…::test_the_gate_keeps_its_failure_summary_while_reporting_skips`
+is the check, because a claim about a flag that nothing verifies is how the first spelling
+survived review.
+
+⚠️ **A platform skip is not a licence to skip a platform's defects.** §8 permits a skip for
+behaviour that *does not exist* on a platform — no `SIGKILL`, no POSIX path semantics — and the
+distinction matters most here, where a leg is new and red. A test that fails because a tool is
+missing or behaves differently is a **resource-availability** skip in platform clothing: the
+shape §8 forbids and KBR-132 closed. The fix for that is to provision the runner or make the test
+platform-agnostic, never `skipif`. And a test that fails because the **product is broken on that
+platform** is neither: it is a defect, it gets a ticket, and the leg stays red until the defect is
+fixed. `tests/bridge/tls_certs.py` is the template for stating the difference in code.
+
+**A consequence that is a product win, not a side effect.** Two things in the repository have
+never executed even once:
+
+- `tests/test_launcher_discovery.py`'s two `skipif(sys.platform != "win32")` cases — written for
+  a leg that did not exist, skipped in every run that has ever happened;
+- **every `if sys.platform == "win32"` branch in `src/kitty`, as far as `mypy` is concerned.**
+  mypy resolves `sys.platform` against the platform it runs on, so the Windows bodies were
+  invisible to the only type check we run — and §8's table credits mypy with four user-visible
+  defects the suite could not find, one of them explicitly *"on a non-Linux OS"*.
+
+Running `mypy src/kitty` on the Windows leg is therefore not redundant with the Linux legs; it is
+a **new detector over code no check has ever read**. That is also why the platform legs run the
+whole step list rather than pytest alone.
 
 ## 9. Gap register
 

@@ -55,9 +55,19 @@ T-W4 and T-W8. The reason is §8.2's and only §8.2's: ``l3`` is in
 ``PENDING_ACTIVATION_LAYERS``, so an ``l3`` marker today would leave the slice
 checked by no job at all. §8.2 names this module so T-K6 inherits a list.
 
-**Evidence base.** Every number quoted here was measured on Python 3.12.3. CI
-across 3.10–3.13 is the authority; a version-dependent timing failure means
+**Evidence base.** Every number quoted here was measured on Linux, Python
+3.12.3. The gate is the authority and it is wider than that: 3.10–3.13 on Linux
+plus one pinned version on **Windows and macOS** (§8.4, added by KBR-164 after
+this module was written). A platform- or version-dependent timing failure means
 raising :data:`_SLICE_BUDGET_SECONDS`, never skipping a case.
+
+**Why ``arrival`` is asserted as a type and not as an ordering.** Windows'
+clock is too coarse to separate two adjacent requests, so every *increases*
+assertion about arrival is false there and carries an exemption (KBR-188,
+``tests/exemptions.py``). Ordering is T-W4's claim in any case; this module
+needs only that the field is populated, which a coarse clock still satisfies —
+so the slice needs no exemption row and must not grow one by tightening this
+into an ordering check.
 """
 
 from __future__ import annotations
@@ -120,9 +130,11 @@ from harness.recorder import RecordingUpstream, Reply
 #: budget message.
 #:
 #: Asserted with :func:`time.monotonic`: ``pytest-timeout`` is not in the dev
-#: extras and ``asyncio.timeout`` is 3.11+ against a 3.10–3.13 matrix. CI across
-#: all four versions is the authority for this number — a version-dependent
-#: failure means raising it, never skipping the case.
+#: extras and ``asyncio.timeout`` is 3.11+ against a 3.10–3.13 matrix. CI is the
+#: authority for this number, across every leg — the four Linux versions and the
+#: pinned Windows and macOS legs (§8.4) — and a platform- or version-dependent
+#: failure means raising it, never skipping the case. The healthy margin is
+#: ~200×, so a slower runner has a great deal of room before it matters.
 _SLICE_BUDGET_SECONDS = 4.0
 
 #: The query the driven request carries upstream. Both properties are load-bearing

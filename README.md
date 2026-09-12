@@ -86,6 +86,11 @@ pip install kitty-bridge
 
 Requires Python 3.10+.
 
+**Supported platforms.** Linux, Windows and macOS. Every change is tested on all three before it
+can be merged or released: Linux on Python 3.10–3.13, Windows and macOS on Python 3.12. What that
+covers is the full unit and contract suite plus type checking on each platform — not an
+end-to-end run against a live provider, which is exercised on Linux only.
+
 **2. Set up a profile**
 
 ```bash
