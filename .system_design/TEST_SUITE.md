@@ -2253,8 +2253,9 @@ can also download, so it is a per-PR gate without an asterisk.
 credentials, real providers. §8.6 is where those credentials come from, and it carries the two
 constraints this job inherits: the profile is a balancing pool, so no assertion may name a single
 model; and kitty's debug log carries whole request bodies, so it **may never be uploaded as an
-artifact** however convenient that would be for diagnosing a nightly failure. Keep it out of the default run — it needs four agent CLIs and live
-network, and a suite that cannot run on a laptop stops being trusted. Nightly with CI secrets,
+artifact** however convenient that would be for diagnosing a nightly failure. Keep it out of the
+default run — it needs four agent CLIs and live network, and a suite that cannot run on a laptop
+stops being trusted. Nightly with CI secrets,
 extended from two cases to cover, for Claude Code: a plain turn, a tool-using turn, a multi-turn
 session with tool results, an extended-thinking turn, and a session crossing the compaction
 threshold.
@@ -3391,9 +3392,11 @@ same tree, which is worse than not having it.
 
 The matrix above describes the finished state. Today only the Fast job exists, so `l3`,
 `acceptance`, `agent_smoke`, `agent_live`, `eval` and `load` are selected by **no job at all**.
-What each of those jobs would need from the runner is §8.6; for `agent_smoke`, `agent_live` and
-`eval`, the answer is that CI has had it all along, and the reason they are still pending is the
-tests, not the resources.
+What each of those jobs would need from the runner is §8.6; for `agent_smoke` and `agent_live`
+the answer is that CI has had it all along, so what they are still waiting on is the tests, not
+the resources. **`eval` is not in that sentence:** its runner needs are met too, but T-K12 waits
+on T-K3, which waits on Q4 and Q13 — both still open. A resource being available does not close a
+decision.
 
 That is a real hole and it is the one this mechanism could most easily hide: before the split,
 `pytest -q` ran everything, so a subsystem test written tomorrow ran in CI. After it, that test
@@ -3916,8 +3919,8 @@ this suite can afford to test.
 | Kitty profiles — a balancing pool by default | `.github/workflows/claude-code-review.yml` | `vars.KITTY_PROFILES_JSON` |
 | Kitty credentials | `.github/workflows/claude-code-review.yml` | `secrets.KITTY_CREDENTIALS_JSON` |
 | Kitty egress gateway | `.github/workflows/claude-code-review.yml` | `secrets.KITTY_EGRESS_JSON` |
-| Kitty bridge debug log | `.github/review/scripts/configure_kitty.py` | `--debug-file` |
-| Kitty launch stderr — a disjoint window | `.github/review/scripts/configure_kitty.py` | `BRIDGE_STDERR_LOG` |
+| Kitty bridge debug log | `.github/review/scripts/configure_kitty.py` | `kitty-bridge-debug.log` |
+| Kitty launch stderr — a disjoint window | `.github/review/scripts/configure_kitty.py` | `kitty-bridge-stderr.log` |
 
 `configure_kitty.py` materialises the three kitty documents at the paths kitty itself reads,
 and generates the launcher that puts `kitty` in front of `claude`.
@@ -3939,9 +3942,12 @@ rediscover:
   prompt. It must never be uploaded as an artifact.** The obvious way to use a debug log in a
   smoke or e2e job is `actions/upload-artifact`, and that is the one thing it may not do. The
   review workflow keeps the log on the runner and uploads a filtered timeline instead.
-- The logs are **per-runner, not per-run**: the workflow purges stale copies before launching,
-  so at most one failed run's evidence is ever on a machine. A job that expects to find its own
-  log by name, unqualified, is reading someone else's.
+- The logs are **per-runner, not per-run** — *on a persistent runner*. The workflow purges stale
+  copies before launching, so at most one failed run's evidence is ever on a machine. The review
+  job runs on `ubuntu-latest`, which is destroyed after the job, so the purge is a no-op there and
+  is kept for the half of the invariant that survives a move back to a self-hosted fleet. A job
+  that expects to find its own log by name, unqualified, is reading someone else's the moment the
+  runner persists.
 
 **Two limits, stated because a job planned without them will be wrong.**
 
@@ -3979,7 +3985,10 @@ does:
 probe for** — §8's `openssl` reasoning applies unchanged, and this is the shape that makes a
 per-PR `agent_smoke` gate compatible with "skips are failures in a gating job". The CLI arrives
 by a live download from a third party on every run, so the *install step* owns the retry ladder
-and the job fails when it cannot install. One non-obvious reason that ladder is shaped as it is,
+and the job must fail when it cannot install. That is **prescriptive for a future `agent_smoke`
+job, not a description of the review workflow**, whose install step carries `continue-on-error:
+true` on purpose: there an install failure composes into the review path and is classified, which
+is the right answer for a job whose output is a review and the wrong one for a gate. One non-obvious reason that ladder is shaped as it is,
 worth carrying into any job that copies it: without `set -o pipefail` inside the `bash -c`, a
 curl 429 or 403 feeds `bash -s` empty stdin, which exits 0 — the retry loop then breaks on the
 first attempt with **no CLI installed** and the transient download error reaches the classifier
@@ -3992,13 +4001,25 @@ the same job can assert I3 containment end to end, through a real gateway, rathe
 through the local CONNECT proxy of §5.2. Neither is specified here; both are named so that T-K11
 and T-I14 inherit them.
 
-**Three directions, because two would not have caught this.**
+**Five directions, because fewer would not have caught this.**
 `tests/test_ci_capability_inventory.py` checks forward, so the document cannot promise a
 capability CI does not have; reverse, so a capability cannot be added to CI and left out of the
-design; and the fork guard itself, because its removal changes no binding and would leave the
-paragraph above false with every other arm green. A forward-only check would have gone green
-through the entire period this section describes — the table would simply have been absent,
-which is what it was.
+design; the version pin, both ways, because that pairing is maintained by hand; the logs the
+generated launcher writes, because the two log rows bind neither a secret nor a version and a
+review round found that both could be deleted from the table with every other arm green; and the
+fork guard itself, whose removal changes no binding and would leave the paragraph above false.
+Every row is covered by at least one *reverse* direction — that is the property, not the count.
+A forward-only check would have gone green through the entire period this section describes —
+the table would simply have been absent, which is what it was.
+
+**One case is read rather than scanned, and the reason generalises.** The launcher's two log rows
+are checked against the text `configure_kitty.py` *generates*, not against its source: the module
+discusses `--debug-file` and both log names at length in its own docstring and comments, so a
+substring scan over the file is satisfied by the prose after the launcher stops emitting either
+flag — measured, in the same review round. It is the trap the fork arm was already built to avoid
+by reading the parsed `on:` block instead of a file whose comments argue about
+`pull_request_target`. When a matcher reads text the change under test does not control, scope it
+by what the artifact *declares*.
 
 ---
 

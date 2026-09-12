@@ -13,8 +13,9 @@ cannot be", while the answer sat in the workflow tree.  Three implementation
 tasks were flagged ``blocked Q12`` against a blocker that had already cleared.
 
 §8.6 now states the inventory, and this file is what stops the two drifting apart
-again.  Four arms, because fewer would not have caught what this file was written
-for:
+again.  Five arms, because fewer would not have caught what this file was written
+for — each of the six rows is covered by at least one *reverse* direction, so no
+row can be deleted from the table with every arm green:
 
 * **forward** — every binding §8.6 names is really used by the file §8.6 names it
   in, so the document cannot promise a capability CI does not have;
@@ -24,6 +25,10 @@ for:
 * **version** — the CLI pin §8.6 quotes is the one CI installs, in both
   directions, since that pairing is maintained by hand against a floating action
   tag and is the arm most likely to fire in anger;
+* **log** — every log the generated launcher writes is a row.  The two log rows
+  bind neither a secret nor a version, so the reverse and version arms are both
+  blind to them, and one of them carries the constraint that the debug log may
+  never be uploaded as an artifact;
 * **fork** — the guard §8.6's per-PR/nightly split rests on is still in place.
   Its removal changes no binding, so every other arm would stay green while the
   section's most load-bearing paragraph became false.
@@ -43,16 +48,20 @@ Two artifacts edited separately that must agree, both readable statically — th
 §6.2.3 "docs ⇄ code" case — so this file is ``l2`` and is named in
 ``tests/test_layer_selection.py``'s allowlist.
 
-**One stated limit.** The reverse arm scans the ``KITTY_``-prefixed namespace
-only.  ``secrets.ANTHROPIC_AUTH_TOKEN`` and ``secrets.OPENROUTER_API_KEY`` also
-appear in the tree and are deliberately not inventory rows: neither is a kitty
-capability, and widening the arm to every secret would make the table a mirror of
-the workflow's secret list rather than a design statement about what the test
-suite may rely on.
+**Two stated limits.**  The reverse arm scans the ``KITTY_``-prefixed namespace
+only: ``secrets.ANTHROPIC_AUTH_TOKEN`` and ``secrets.OPENROUTER_API_KEY`` also
+appear in the tree and are deliberately not inventory rows, because neither is a
+kitty capability and widening the arm to every secret would make the table a
+mirror of the workflow's secret list rather than a design statement about what
+the test suite may rely on.  And the forward arm is a substring scan for every
+artifact *except* the launcher, so a row naming a binding that appears only in a
+workflow's comments would pass — the launcher is special-cased because its own
+prose demonstrably does exactly that.
 """
 
 from __future__ import annotations
 
+import importlib.util
 import re
 from pathlib import Path
 
@@ -100,6 +109,13 @@ _FORK_GUARD = "github.event.pull_request.head.repo.full_name == github.repositor
 #: The trigger that would undo it by running a fork's code in the base branch's
 #: context, secrets included. The workflow refuses it in prose; this is the check.
 _PULL_REQUEST_TARGET = "pull_request_target"
+
+#: A log file name as the generated launcher spells it.
+_LOG_FILE = re.compile(r"\b[A-Za-z0-9][A-Za-z0-9.-]*\.log\b")
+
+#: The script that writes the launcher. Its *generated* text is the authority
+#: for the log rows, never its own source — see :func:`ci_artifacts`.
+CONFIGURE_KITTY = ROOT / ".github" / "review" / "scripts" / "configure_kitty.py"
 
 
 def _strip_cell(cell: str) -> str:
@@ -201,12 +217,16 @@ def inventory_discrepancies(markdown: str, artifacts: dict[str, str]) -> list[tu
     result means the two agree.  That is what lets the falsification cases drive
     this same function over a document carrying a planted defect.
 
-    Three arms, tagged rather than merely worded, so a caller can ask about one
+    Four arms, tagged rather than merely worded, so a caller can ask about one
     of them without matching on prose:
 
     * ``"section"`` — the section exists and has rows at all;
     * ``"forward"`` — each row's binding appears in the artifact the row names;
-    * ``"reverse"`` — each kitty binding any artifact uses appears in some row.
+    * ``"reverse"`` — each kitty binding any artifact uses appears in some row;
+    * ``"version"`` — the Claude Code pin agrees, in both directions.
+
+    The log and fork directions are :func:`launcher_log_discrepancies` and
+    :func:`fork_guard_discrepancies`, which read a different artifact each.
 
     Args:
         markdown: The full text of ``TEST_SUITE.md``.
@@ -339,6 +359,30 @@ def fork_guard_discrepancies(markdown: str, review_workflow: str) -> list[str]:
     return problems
 
 
+def launcher_log_discrepancies(markdown: str, launcher: str) -> list[str]:
+    """Report any log the CI launcher writes that §8.6 does not name.
+
+    The reverse direction for the two log rows, which nothing else covers.  A
+    row whose binding is not a ``secrets.``/``vars.`` reference is invisible to
+    the reverse arm and carries no version, so it could be deleted from the
+    table with every other arm green — taking §8.6's "never upload the debug
+    log" constraint out of the inventory with it.
+
+    Args:
+        markdown: The full text of ``TEST_SUITE.md``.
+        launcher: The launcher text ``configure_kitty.wrapper_body`` generates.
+
+    Returns:
+        Human-readable discrepancies.  Empty when every log written is named.
+    """
+    documented = {binding for _, _, binding in inventory_rows(markdown)}
+    return [
+        f"the CI launcher writes {log!r}, which no {_INVENTORY_HEADING} row names"
+        for log in sorted(set(_LOG_FILE.findall(launcher)))
+        if log not in documented
+    ]
+
+
 def arm(problems: list[tuple[str, str]], name: str) -> list[str]:
     """Return the messages one arm of the reporter produced.
 
@@ -347,7 +391,8 @@ def arm(problems: list[tuple[str, str]], name: str) -> list[str]:
 
     Args:
         problems: The reporter's full result.
-        name: The arm to select — ``"section"``, ``"forward"`` or ``"reverse"``.
+        name: The arm to select — ``"section"``, ``"forward"``, ``"reverse"``
+            or ``"version"``.
 
     Returns:
         That arm's messages, in the reporter's order.
@@ -366,21 +411,53 @@ def suite_markdown() -> str:
 
 
 @pytest.fixture(scope="module")
-def ci_artifacts() -> dict[str, str]:
+def ci_launcher() -> str:
+    """Return the launcher ``configure_kitty.py`` generates.
+
+    Imported and called rather than read, because what the module *says* and
+    what it *writes* are two different things and only the second reaches a
+    runner.  The script is import-safe: module level is constants and function
+    definitions, with ``main()`` behind an ``if __name__`` guard.
+
+    Returns:
+        The full text of the generated launcher script.
+    """
+    spec = importlib.util.spec_from_file_location("configure_kitty", CONFIGURE_KITTY)
+    assert spec is not None and spec.loader is not None, f"cannot import {CONFIGURE_KITTY}"
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.wrapper_body("kitty")
+
+
+@pytest.fixture(scope="module")
+def ci_artifacts(ci_launcher: str) -> dict[str, str]:
     """Return every CI artifact the inventory may name, keyed by relative path.
 
     Covers the whole workflow directory rather than only the review workflow, so
     the reverse arm sees a kitty binding introduced in a *new* workflow — which
-    is exactly how the next capability will arrive.
+    is exactly how the next capability will arrive.  Both YAML spellings, because
+    GitHub accepts either and a ``.yaml`` file added tomorrow would otherwise be
+    invisible; ``tests/test_github_actions.py`` sets the same precedent.
+
+    🔴 **`configure_kitty.py` maps to the launcher it generates, not to its own
+    source.** Its docstring and comments discuss ``--debug-file`` and the log
+    names at length, so a forward arm reading the module text is satisfied by
+    the prose even after ``wrapper_body`` stops emitting either flag — measured.
+    Scope by what the artifact *declares*, exactly as the fork arm reads the
+    parsed ``on:`` block instead of the file that argues about it.
+
+    Args:
+        ci_launcher: The generated launcher text.
 
     Returns:
-        Repository-relative POSIX path to file text.
+        Repository-relative POSIX path to the text that is authoritative for it.
     """
-    paths = sorted(WORKFLOWS_DIR.glob("*.yml"))
-    paths.append(ROOT / ".github" / "review" / "scripts" / "configure_kitty.py")
-    return {
+    paths = sorted(list(WORKFLOWS_DIR.glob("*.yml")) + list(WORKFLOWS_DIR.glob("*.yaml")))
+    artifacts = {
         path.relative_to(ROOT).as_posix(): path.read_text(encoding="utf-8") for path in paths
     }
+    artifacts[CONFIGURE_KITTY.relative_to(ROOT).as_posix()] = ci_launcher
+    return artifacts
 
 
 class TestTheInventoryIsReadable:
@@ -440,10 +517,24 @@ class TestTheInventoryAndTheWorkflowsAgree:
             version
         )
 
+    def test_every_log_the_launcher_writes_is_in_the_inventory(
+        self, suite_markdown: str, ci_launcher: str
+    ) -> None:
+        """The reverse direction for the two log rows, which nothing else covers.
+
+        Their bindings are not ``secrets.``/``vars.`` references and carry no
+        version, so the reverse and version arms are both blind to them.
+        """
+        problems = launcher_log_discrepancies(suite_markdown, ci_launcher)
+
+        assert problems == [], "the launcher writes a log §8.6 does not name:\n" + "\n".join(
+            problems
+        )
+
     def test_the_review_job_still_refuses_a_fork_pull_request(self, suite_markdown: str) -> None:
         """§8.6's per-PR/nightly split rests on this guard, so the guard is checked.
 
-        The third direction.  Neither the forward nor the reverse arm would
+        The fourth direction.  Neither the forward nor the reverse arm would
         notice the guard's removal — no ``KITTY_*`` binding changes — and the
         fork asymmetry is the most load-bearing sentence §8.6 adds.
         """
@@ -539,6 +630,44 @@ class TestTheGuardCanFail:
 
         assert any("KITTY_EGRESS'" in message for message in reverse), (
             f"the reverse arm absorbed a shorter name into a longer one; it reported {reverse}"
+        )
+
+    def test_a_log_row_deleted_from_the_inventory_is_reported(
+        self, suite_markdown: str, ci_launcher: str
+    ) -> None:
+        """Log arm: the row carrying the no-artifact constraint is removed.
+
+        Its binding is neither a secret reference nor a version, so before this
+        arm existed the deletion passed every other check — measured.
+        """
+        without = "\n".join(
+            line for line in suite_markdown.splitlines() if "kitty-bridge-debug.log" not in line
+        )
+
+        problems = launcher_log_discrepancies(without, ci_launcher)
+
+        assert any("kitty-bridge-debug.log" in problem for problem in problems), (
+            f"deleting the debug-log row reported {problems}"
+        )
+
+    def test_a_launcher_that_stops_writing_a_log_is_reported(
+        self, suite_markdown: str, ci_launcher: str
+    ) -> None:
+        """Forward arm over the launcher, not over the module that describes it.
+
+        ``configure_kitty.py`` mentions both log names in its own prose, so a
+        forward arm reading the module source stays green when ``wrapper_body``
+        stops emitting them.  This drives the real reporter over a launcher with
+        the flag removed.
+        """
+        crippled = re.sub(r'--debug-file\s+"[^"]*"', "", ci_launcher)
+        assert "kitty-bridge-debug.log" not in crippled, "the mutant did not remove the flag"
+        artifacts = {CONFIGURE_KITTY.relative_to(ROOT).as_posix(): crippled}
+
+        forward = arm(inventory_discrepancies(suite_markdown, artifacts), "forward")
+
+        assert any("kitty-bridge-debug.log" in message for message in forward), (
+            f"a launcher that stopped writing the debug log reported {forward}"
         )
 
     def test_a_removed_fork_guard_is_reported(self, suite_markdown: str) -> None:
