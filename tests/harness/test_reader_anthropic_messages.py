@@ -835,11 +835,12 @@ class TestTurnNormalisation:
         assert [type(part).__name__ for part in parts] == ["ToolResult", "Text", "ToolResult"]
         assert [parts[0].tool_use_id, parts[2].tool_use_id] == ["a", "b"]
 
-    def test_the_wire_order_of_parts_inside_one_turn_survives(self) -> None:
-        """R4.8 — in this format a tool result already arrives inside a user turn.
+    def test_results_come_first_within_one_user_message(self) -> None:
+        """R4.8 — §3.3.1b clause 3, in the case that section says is not idle.
 
-        §3.3.1b's first three clauses are satisfied by the wire order, so the
-        reader moves nothing; reordering here would manufacture a delta.
+        Anthropic carries text and results inside **one message**, so the run has
+        no natural boundary and clause 1 cannot do the work by splitting. The
+        partition is stable: both groups keep their internal order.
         """
         content = [
             {"type": "text", "text": "first text"},
@@ -851,10 +852,28 @@ class TestTurnNormalisation:
 
         parts = projected.conversation.turns[0].parts
 
-        assert [type(part).__name__ for part in parts] == ["Text", "ToolResult", "Text", "ToolResult"]
+        assert [type(part).__name__ for part in parts] == ["ToolResult", "ToolResult", "Text", "Text"]
+        assert [parts[0].tool_use_id, parts[1].tool_use_id] == ["a", "b"]
+        assert [parts[2].text, parts[3].text] == ["first text", "second text"]
 
-    def test_an_assistant_turn_keeps_its_order_too(self) -> None:
-        """R4.8 — the rule was never role-specific once the re-sort is gone."""
+    def test_one_message_of_text_then_result_matches_what_the_cc_shape_projects(self) -> None:
+        """R4.8 — the cross-format agreement clause 3 exists to buy.
+
+        Chat Completions and Responses deliver a run of tool results followed by
+        a user message, which merges to `[ToolResult, Text]`. An Anthropic
+        message carrying the same content as `[text, tool_result]` must project
+        the same way, or the oracle reports a delta no mutation caused.
+        """
+        content = [{"type": "text", "text": "and also"}, PUBLISHED_TOOL_RESULT]
+        projected = _read(_minimal(messages=[{"role": "user", "content": content}]))
+
+        assert [type(part).__name__ for part in projected.conversation.turns[0].parts] == [
+            "ToolResult",
+            "Text",
+        ]
+
+    def test_an_assistant_turn_keeps_its_order(self) -> None:
+        """R4.8 — §3.3.1b's clause is about a `user` turn, so an assistant message is left alone."""
         content = [{"type": "text", "text": "calling"}, {"type": "tool_result", "tool_use_id": "a", "content": "x"}]
         projected = _read(_minimal(messages=[{"role": "assistant", "content": content}]))
 

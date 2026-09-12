@@ -92,8 +92,9 @@ def _mock_curl_session(mock_response: object) -> unittest.mock.MagicMock:
     """Patch the provider's ``_curl_session`` property to return a mock.
 
     The mock session has a ``post()`` async method that returns the given
-    mock response.  Also patches ``aiohttp.ClientSession`` so the OAuth
-    token refresh path gets a no-op session (tokens are fresh in fixtures).
+    mock response.  The OAuth leg needs no stand-in here: it has its own
+    session (:attr:`_oauth_curl_session`) since KBR-161, and the fixtures'
+    tokens are fresh, so it is never reached.
     """
     mock_session = unittest.mock.AsyncMock()
     mock_session.post = unittest.mock.AsyncMock(return_value=mock_response)
@@ -105,42 +106,42 @@ def _mock_curl_session(mock_response: object) -> unittest.mock.MagicMock:
         new_callable=unittest.mock.PropertyMock,
         return_value=mock_session,
     ):
-        # aiohttp is imported locally inside the methods, so we must
-        # patch it at the module level.  Since test fixtures have
-        # non-expired tokens, get_valid_api_key() won't actually call
-        # the session — but we need it to be instantiable.
-        mock_aiohttp_session = unittest.mock.MagicMock()
-        mock_aiohttp_session.__aenter__ = unittest.mock.AsyncMock(return_value=mock_aiohttp_session)
-        mock_aiohttp_session.__aexit__ = unittest.mock.AsyncMock(return_value=False)
-        with unittest.mock.patch(
-            "aiohttp.ClientSession",
-            return_value=mock_aiohttp_session,
-        ):
-            yield mock_session
+        yield mock_session
 
 
-def _make_mock_oauth_http() -> unittest.mock.MagicMock:
-    """Create a mock aiohttp session that supports OAuth refresh calls."""
-    mock_aiohttp = unittest.mock.MagicMock()
-    mock_aiohttp.__aenter__ = unittest.mock.AsyncMock(return_value=mock_aiohttp)
-    mock_aiohttp.__aexit__ = unittest.mock.AsyncMock(return_value=False)
+def _make_mock_oauth_session(
+    *, status: int = 200, body: dict | None = None
+) -> unittest.mock.MagicMock:
+    """Create a mock curl_cffi session standing in for the OAuth token endpoint.
 
-    refresh_resp = unittest.mock.MagicMock()
-    refresh_resp.status = 200
-    refresh_resp.json = unittest.mock.AsyncMock(
-        return_value={
-            "access_token": "at_refreshed",
-            "refresh_token": "rt_refreshed",
-            "id_token": _make_id_token("acct-1234"),
-            "openai_api_key": "api_key_refreshed",
-            "expires_in": 3600,
-        },
+    KBR-161 moved the token leg off aiohttp and onto a dedicated impersonating
+    ``curl_cffi`` session, so the stand-in is a session whose ``post`` returns a
+    response carrying ``status_code`` and ``text``.  One response serves both
+    POSTs of a refresh: the payload below is a superset of what the
+    refresh-token grant and the token exchange each read.
+    """
+    payload = body if body is not None else {
+        "access_token": "at_refreshed",
+        "refresh_token": "rt_refreshed",
+        "id_token": _make_id_token("acct-1234"),
+        "openai_api_key": "api_key_refreshed",
+        "expires_in": 3600,
+    }
+    mock_oauth = unittest.mock.MagicMock()
+    mock_oauth.post = unittest.mock.AsyncMock(
+        return_value=_make_mock_codex_response(status_code=status, text=json.dumps(payload)),
     )
-    refresh_cm = unittest.mock.MagicMock()
-    refresh_cm.__aenter__ = unittest.mock.AsyncMock(return_value=refresh_resp)
-    refresh_cm.__aexit__ = unittest.mock.AsyncMock(return_value=False)
-    mock_aiohttp.post.return_value = refresh_cm
-    return mock_aiohttp
+    return mock_oauth
+
+
+def _patch_oauth_session(mock_oauth: unittest.mock.MagicMock):
+    """Patch the adapter's dedicated OAuth session with *mock_oauth*."""
+    return unittest.mock.patch.object(
+        OpenAISubscriptionAdapter,
+        "_oauth_curl_session",
+        new_callable=unittest.mock.PropertyMock,
+        return_value=mock_oauth,
+    )
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────
@@ -548,23 +549,23 @@ class TestCodexHeaders:
         headers = adapter._build_codex_headers("tok", _make_id_token())
         assert "version" in headers, "Missing version header"
         # Must match the Codex CLI release version, not Kitty's version
-        from kitty.providers.openai_subscription import _CODEX_CLI_VERSION
+        from kitty.codex_identity import CODEX_CLI_VERSION
 
-        assert headers["version"] == _CODEX_CLI_VERSION
+        assert headers["version"] == CODEX_CLI_VERSION
 
     def test_user_agent_version_is_the_codex_version(
         self, adapter: OpenAISubscriptionAdapter
     ) -> None:
         """The user-agent reports the impersonated Codex CLI version (KBR-8).
 
-        Both version fields come from ``_CODEX_CLI_VERSION``, so the assertion
+        Both version fields come from ``codex_identity.CODEX_CLI_VERSION``, so the assertion
         is against that constant rather than a literal: pinning the literal here
         would make bumping the impersonated version fail a test that has no
         opinion about which version it should be.
         """
-        from kitty.providers.openai_subscription import _CODEX_CLI_VERSION
+        from kitty.codex_identity import CODEX_CLI_VERSION
 
-        assert adapter._build_user_agent().startswith(f"codex_cli_rs/{_CODEX_CLI_VERSION} (")
+        assert adapter._build_user_agent().startswith(f"codex_cli_rs/{CODEX_CLI_VERSION} (")
 
     def test_user_agent_and_version_header_agree(
         self, adapter: OpenAISubscriptionAdapter
@@ -959,11 +960,7 @@ class TestStreamRequestBasic:
             new_callable=unittest.mock.PropertyMock,
             return_value=mock_session,
         ):
-            mock_aiohttp_session = unittest.mock.MagicMock()
-            mock_aiohttp_session.__aenter__ = unittest.mock.AsyncMock(return_value=mock_aiohttp_session)
-            mock_aiohttp_session.__aexit__ = unittest.mock.AsyncMock(return_value=False)
-            with unittest.mock.patch("aiohttp.ClientSession", return_value=mock_aiohttp_session):
-                await adapter.stream_request(cc_request, mock_write)
+            await adapter.stream_request(cc_request, mock_write)
 
         assert mock_session.post.await_count == 2
         assert any(b'"delta":"Hello"' in chunk for chunk in written)
@@ -1000,14 +997,10 @@ class TestStreamRequestBasic:
             new_callable=unittest.mock.PropertyMock,
             return_value=mock_session,
         ):
-            mock_aiohttp_session = unittest.mock.MagicMock()
-            mock_aiohttp_session.__aenter__ = unittest.mock.AsyncMock(return_value=mock_aiohttp_session)
-            mock_aiohttp_session.__aexit__ = unittest.mock.AsyncMock(return_value=False)
-            with unittest.mock.patch("aiohttp.ClientSession", return_value=mock_aiohttp_session):
-                from kitty.providers.base import ProviderError
+            from kitty.providers.base import ProviderError
 
-                with pytest.raises(ProviderError, match="connection failed|request failed"):
-                    await adapter.stream_request(cc_request, mock_write)
+            with pytest.raises(ProviderError, match="connection failed|request failed"):
+                await adapter.stream_request(cc_request, mock_write)
 
         assert mock_session.post.await_count == 3
         assert written == []
@@ -1501,11 +1494,7 @@ class TestMakeRequestCookieFilter:
             new_callable=unittest.mock.PropertyMock,
             return_value=real_session,
         ):
-            mock_aiohttp_session = unittest.mock.MagicMock()
-            mock_aiohttp_session.__aenter__ = unittest.mock.AsyncMock(return_value=mock_aiohttp_session)
-            mock_aiohttp_session.__aexit__ = unittest.mock.AsyncMock(return_value=False)
-            with unittest.mock.patch("aiohttp.ClientSession", return_value=mock_aiohttp_session):
-                await adapter.make_request(cc_request)
+            await adapter.make_request(cc_request)
 
         # After make_request, non-CF cookies should be gone
         names = {c.name for c in real_session.cookies.jar}
@@ -1551,11 +1540,7 @@ class TestStreamRequestCookieFilter:
             new_callable=unittest.mock.PropertyMock,
             return_value=real_session,
         ):
-            mock_aiohttp_session = unittest.mock.MagicMock()
-            mock_aiohttp_session.__aenter__ = unittest.mock.AsyncMock(return_value=mock_aiohttp_session)
-            mock_aiohttp_session.__aexit__ = unittest.mock.AsyncMock(return_value=False)
-            with unittest.mock.patch("aiohttp.ClientSession", return_value=mock_aiohttp_session):
-                await adapter.stream_request(cc_request, mock_write)
+            await adapter.stream_request(cc_request, mock_write)
 
         # After stream_request, non-CF cookies should be gone
         names = {c.name for c in real_session.cookies.jar}
@@ -1603,11 +1588,7 @@ class TestStreamRequestCfRetry:
             new_callable=unittest.mock.PropertyMock,
             return_value=mock_session,
         ):
-            mock_aiohttp_session = unittest.mock.MagicMock()
-            mock_aiohttp_session.__aenter__ = unittest.mock.AsyncMock(return_value=mock_aiohttp_session)
-            mock_aiohttp_session.__aexit__ = unittest.mock.AsyncMock(return_value=False)
-            with unittest.mock.patch("aiohttp.ClientSession", return_value=mock_aiohttp_session):
-                await adapter.stream_request(cc_request, mock_write)
+            await adapter.stream_request(cc_request, mock_write)
 
         assert mock_session.post.await_count == 2
         assert any(b'"delta":"Hi"' in chunk for chunk in written)
@@ -1642,14 +1623,10 @@ class TestStreamRequestCfRetry:
             new_callable=unittest.mock.PropertyMock,
             return_value=mock_session,
         ):
-            mock_aiohttp_session = unittest.mock.MagicMock()
-            mock_aiohttp_session.__aenter__ = unittest.mock.AsyncMock(return_value=mock_aiohttp_session)
-            mock_aiohttp_session.__aexit__ = unittest.mock.AsyncMock(return_value=False)
-            with unittest.mock.patch("aiohttp.ClientSession", return_value=mock_aiohttp_session):
-                from kitty.providers.base import ProviderError
+            from kitty.providers.base import ProviderError
 
-                with pytest.raises(ProviderError, match="[Cc]loudflare"):
-                    await adapter.stream_request(cc_request, mock_write)
+            with pytest.raises(ProviderError, match="[Cc]loudflare"):
+                await adapter.stream_request(cc_request, mock_write)
 
         from kitty.providers.openai_subscription import _CODEX_RETRY_MAX_ATTEMPTS
 
@@ -1685,14 +1662,10 @@ class TestStreamRequestCfRetry:
             new_callable=unittest.mock.PropertyMock,
             return_value=mock_session,
         ):
-            mock_aiohttp_session = unittest.mock.MagicMock()
-            mock_aiohttp_session.__aenter__ = unittest.mock.AsyncMock(return_value=mock_aiohttp_session)
-            mock_aiohttp_session.__aexit__ = unittest.mock.AsyncMock(return_value=False)
-            with unittest.mock.patch("aiohttp.ClientSession", return_value=mock_aiohttp_session):
-                from kitty.providers.base import ProviderError
+            from kitty.providers.base import ProviderError
 
-                with pytest.raises(ProviderError, match="access denied"):
-                    await adapter.stream_request(cc_request, mock_write)
+            with pytest.raises(ProviderError, match="access denied"):
+                await adapter.stream_request(cc_request, mock_write)
 
         # Non-CF error: only one attempt, no retry
         assert mock_session.post.await_count == 1
@@ -1767,11 +1740,7 @@ class TestMakeRequestCfRetry:
                 return_value=mock_session,
             ),
         ):
-            mock_aiohttp_session = unittest.mock.MagicMock()
-            mock_aiohttp_session.__aenter__ = unittest.mock.AsyncMock(return_value=mock_aiohttp_session)
-            mock_aiohttp_session.__aexit__ = unittest.mock.AsyncMock(return_value=False)
-            with unittest.mock.patch("aiohttp.ClientSession", return_value=mock_aiohttp_session):
-                result = await adapter.make_request(cc_request)
+            result = await adapter.make_request(cc_request)
 
         assert mock_session.post.await_count == 2
         assert len(reload_calls) >= 2
@@ -1809,11 +1778,7 @@ class TestMakeRequestCfRetry:
             new_callable=unittest.mock.PropertyMock,
             return_value=mock_session,
         ):
-            mock_aiohttp_session = unittest.mock.MagicMock()
-            mock_aiohttp_session.__aenter__ = unittest.mock.AsyncMock(return_value=mock_aiohttp_session)
-            mock_aiohttp_session.__aexit__ = unittest.mock.AsyncMock(return_value=False)
-            with unittest.mock.patch("aiohttp.ClientSession", return_value=mock_aiohttp_session):
-                result = await adapter.make_request(cc_request)
+            result = await adapter.make_request(cc_request)
 
         assert mock_session.post.await_count == 2
         assert result["model"] == "gpt-5.4"
@@ -1844,14 +1809,10 @@ class TestMakeRequestCfRetry:
             new_callable=unittest.mock.PropertyMock,
             return_value=mock_session,
         ):
-            mock_aiohttp_session = unittest.mock.MagicMock()
-            mock_aiohttp_session.__aenter__ = unittest.mock.AsyncMock(return_value=mock_aiohttp_session)
-            mock_aiohttp_session.__aexit__ = unittest.mock.AsyncMock(return_value=False)
-            with unittest.mock.patch("aiohttp.ClientSession", return_value=mock_aiohttp_session):
-                from kitty.providers.base import ProviderError
+            from kitty.providers.base import ProviderError
 
-                with pytest.raises(ProviderError, match="[Cc]loudflare"):
-                    await adapter.make_request(cc_request)
+            with pytest.raises(ProviderError, match="[Cc]loudflare"):
+                await adapter.make_request(cc_request)
 
         from kitty.providers.openai_subscription import _CODEX_RETRY_MAX_ATTEMPTS
 
@@ -1882,14 +1843,10 @@ class TestMakeRequestCfRetry:
             new_callable=unittest.mock.PropertyMock,
             return_value=mock_session,
         ):
-            mock_aiohttp_session = unittest.mock.MagicMock()
-            mock_aiohttp_session.__aenter__ = unittest.mock.AsyncMock(return_value=mock_aiohttp_session)
-            mock_aiohttp_session.__aexit__ = unittest.mock.AsyncMock(return_value=False)
-            with unittest.mock.patch("aiohttp.ClientSession", return_value=mock_aiohttp_session):
-                from kitty.providers.base import ProviderError
+            from kitty.providers.base import ProviderError
 
-                with pytest.raises(ProviderError, match="access denied"):
-                    await adapter.make_request(cc_request)
+            with pytest.raises(ProviderError, match="access denied"):
+                await adapter.make_request(cc_request)
 
         # Non-CF error: only one attempt, no retry
         assert mock_session.post.await_count == 1
@@ -1923,20 +1880,15 @@ class TestCodex5xxRetry:
 
         mock_session = unittest.mock.AsyncMock()
         mock_session.post = unittest.mock.AsyncMock(side_effect=[five_xx_resp, ok_resp])
-        with unittest.mock.patch.object(
+        with (
+            unittest.mock.patch.object(
             OpenAISubscriptionAdapter,
             "_curl_session",
             new_callable=unittest.mock.PropertyMock,
             return_value=mock_session,
+        ), unittest.mock.patch("asyncio.sleep", new_callable=unittest.mock.AsyncMock) as mock_sleep,
         ):
-            mock_aiohttp_session = unittest.mock.MagicMock()
-            mock_aiohttp_session.__aenter__ = unittest.mock.AsyncMock(return_value=mock_aiohttp_session)
-            mock_aiohttp_session.__aexit__ = unittest.mock.AsyncMock(return_value=False)
-            with (
-                unittest.mock.patch("aiohttp.ClientSession", return_value=mock_aiohttp_session),
-                unittest.mock.patch("asyncio.sleep", new_callable=unittest.mock.AsyncMock) as mock_sleep,
-            ):
-                result = await adapter.make_request(cc_request)
+            result = await adapter.make_request(cc_request)
 
         assert mock_session.post.await_count == 2
         mock_sleep.assert_awaited()
@@ -1972,20 +1924,15 @@ class TestCodex5xxRetry:
 
         mock_session = unittest.mock.AsyncMock()
         mock_session.post = unittest.mock.AsyncMock(side_effect=[five_xx_resp, ok_resp])
-        with unittest.mock.patch.object(
+        with (
+            unittest.mock.patch.object(
             OpenAISubscriptionAdapter,
             "_curl_session",
             new_callable=unittest.mock.PropertyMock,
             return_value=mock_session,
+        ), unittest.mock.patch("asyncio.sleep", new_callable=unittest.mock.AsyncMock) as mock_sleep,
         ):
-            mock_aiohttp_session = unittest.mock.MagicMock()
-            mock_aiohttp_session.__aenter__ = unittest.mock.AsyncMock(return_value=mock_aiohttp_session)
-            mock_aiohttp_session.__aexit__ = unittest.mock.AsyncMock(return_value=False)
-            with (
-                unittest.mock.patch("aiohttp.ClientSession", return_value=mock_aiohttp_session),
-                unittest.mock.patch("asyncio.sleep", new_callable=unittest.mock.AsyncMock) as mock_sleep,
-            ):
-                await adapter.stream_request(cc_request, mock_write)
+            await adapter.stream_request(cc_request, mock_write)
 
         assert mock_session.post.await_count == 2
         mock_sleep.assert_awaited()
@@ -2015,14 +1962,10 @@ class TestCodex5xxRetry:
             new_callable=unittest.mock.PropertyMock,
             return_value=mock_session,
         ):
-            mock_aiohttp_session = unittest.mock.MagicMock()
-            mock_aiohttp_session.__aenter__ = unittest.mock.AsyncMock(return_value=mock_aiohttp_session)
-            mock_aiohttp_session.__aexit__ = unittest.mock.AsyncMock(return_value=False)
-            with unittest.mock.patch("aiohttp.ClientSession", return_value=mock_aiohttp_session):
-                from kitty.providers.base import ProviderError
+            from kitty.providers.base import ProviderError
 
-                with pytest.raises(ProviderError, match="rate limited"):
-                    await adapter.make_request(cc_request)
+            with pytest.raises(ProviderError, match="rate limited"):
+                await adapter.make_request(cc_request)
 
         assert mock_session.post.await_count == 1
 
@@ -2052,20 +1995,15 @@ class TestCodex5xxRetry:
         mock_session.post = unittest.mock.AsyncMock(
             side_effect=[Exception("Connection timed out after 30s"), ok_resp],
         )
-        with unittest.mock.patch.object(
+        with (
+            unittest.mock.patch.object(
             OpenAISubscriptionAdapter,
             "_curl_session",
             new_callable=unittest.mock.PropertyMock,
             return_value=mock_session,
+        ), unittest.mock.patch("asyncio.sleep", new_callable=unittest.mock.AsyncMock) as mock_sleep,
         ):
-            mock_aiohttp_session = unittest.mock.MagicMock()
-            mock_aiohttp_session.__aenter__ = unittest.mock.AsyncMock(return_value=mock_aiohttp_session)
-            mock_aiohttp_session.__aexit__ = unittest.mock.AsyncMock(return_value=False)
-            with (
-                unittest.mock.patch("aiohttp.ClientSession", return_value=mock_aiohttp_session),
-                unittest.mock.patch("asyncio.sleep", new_callable=unittest.mock.AsyncMock) as mock_sleep,
-            ):
-                result = await adapter.make_request(cc_request)
+            result = await adapter.make_request(cc_request)
 
         assert mock_session.post.await_count == 2
         mock_sleep.assert_awaited()
@@ -2090,23 +2028,18 @@ class TestCodex5xxRetry:
         mock_session.post = unittest.mock.AsyncMock(
             side_effect=Exception("Connection refused: chatgpt.com"),
         )
-        with unittest.mock.patch.object(
+        with (
+            unittest.mock.patch.object(
             OpenAISubscriptionAdapter,
             "_curl_session",
             new_callable=unittest.mock.PropertyMock,
             return_value=mock_session,
+        ), unittest.mock.patch("asyncio.sleep", new_callable=unittest.mock.AsyncMock),
         ):
-            mock_aiohttp_session = unittest.mock.MagicMock()
-            mock_aiohttp_session.__aenter__ = unittest.mock.AsyncMock(return_value=mock_aiohttp_session)
-            mock_aiohttp_session.__aexit__ = unittest.mock.AsyncMock(return_value=False)
-            with (
-                unittest.mock.patch("aiohttp.ClientSession", return_value=mock_aiohttp_session),
-                unittest.mock.patch("asyncio.sleep", new_callable=unittest.mock.AsyncMock),
-            ):
-                from kitty.providers.base import ProviderError
+            from kitty.providers.base import ProviderError
 
-                with pytest.raises(ProviderError, match="connection failed"):
-                    await adapter.make_request(cc_request)
+            with pytest.raises(ProviderError, match="connection failed"):
+                await adapter.make_request(cc_request)
 
         # 5 total attempts (0..=4)
         assert mock_session.post.await_count == 5
@@ -2142,20 +2075,15 @@ class TestCodex5xxRetry:
         mock_session.post = unittest.mock.AsyncMock(
             side_effect=[Exception("Connection timed out after 30s"), ok_resp],
         )
-        with unittest.mock.patch.object(
+        with (
+            unittest.mock.patch.object(
             OpenAISubscriptionAdapter,
             "_curl_session",
             new_callable=unittest.mock.PropertyMock,
             return_value=mock_session,
+        ), unittest.mock.patch("asyncio.sleep", new_callable=unittest.mock.AsyncMock) as mock_sleep,
         ):
-            mock_aiohttp_session = unittest.mock.MagicMock()
-            mock_aiohttp_session.__aenter__ = unittest.mock.AsyncMock(return_value=mock_aiohttp_session)
-            mock_aiohttp_session.__aexit__ = unittest.mock.AsyncMock(return_value=False)
-            with (
-                unittest.mock.patch("aiohttp.ClientSession", return_value=mock_aiohttp_session),
-                unittest.mock.patch("asyncio.sleep", new_callable=unittest.mock.AsyncMock) as mock_sleep,
-            ):
-                await adapter.stream_request(cc_request, mock_write)
+            await adapter.stream_request(cc_request, mock_write)
 
         assert mock_session.post.await_count == 2
         mock_sleep.assert_awaited()
@@ -2340,8 +2268,8 @@ class TestAuthRefreshFilter:
                 return_value=0,
             ) as mock_filter,
         ):
-            mock_aiohttp = _make_mock_oauth_http()
-            with unittest.mock.patch("aiohttp.ClientSession", return_value=mock_aiohttp):
+            mock_oauth = _make_mock_oauth_session()
+            with _patch_oauth_session(mock_oauth):
                 await adapter.make_request(cc_request)
 
         # Filter should have been called (at least once — before the POST)
@@ -2387,8 +2315,8 @@ class TestAuthRefreshFilter:
                 return_value=0,
             ) as mock_filter,
         ):
-            mock_aiohttp = _make_mock_oauth_http()
-            with unittest.mock.patch("aiohttp.ClientSession", return_value=mock_aiohttp):
+            mock_oauth = _make_mock_oauth_session()
+            with _patch_oauth_session(mock_oauth):
                 await adapter.stream_request(cc_request, mock_write)
 
         # Filter should have been called (at least once — before the POST)
@@ -2443,8 +2371,8 @@ class TestMakeRequest401Recovery:
             new_callable=unittest.mock.PropertyMock,
             return_value=mock_session,
         ):
-            mock_aiohttp = _make_mock_oauth_http()
-            with unittest.mock.patch("aiohttp.ClientSession", return_value=mock_aiohttp):
+            mock_oauth = _make_mock_oauth_session()
+            with _patch_oauth_session(mock_oauth):
                 result = await adapter.make_request(cc_request)
 
         assert mock_session.post.await_count == 2
@@ -2486,8 +2414,8 @@ class TestMakeRequest401Recovery:
             new_callable=unittest.mock.PropertyMock,
             return_value=mock_session,
         ):
-            mock_aiohttp = _make_mock_oauth_http()
-            with unittest.mock.patch("aiohttp.ClientSession", return_value=mock_aiohttp):
+            mock_oauth = _make_mock_oauth_session()
+            with _patch_oauth_session(mock_oauth):
                 result = await adapter.make_request(cc_request)
 
         assert mock_session.post.await_count == 3
@@ -2523,8 +2451,8 @@ class TestMakeRequest401Recovery:
             new_callable=unittest.mock.PropertyMock,
             return_value=mock_session,
         ):
-            mock_aiohttp = _make_mock_oauth_http()
-            with unittest.mock.patch("aiohttp.ClientSession", return_value=mock_aiohttp):
+            mock_oauth = _make_mock_oauth_session()
+            with _patch_oauth_session(mock_oauth):
                 from kitty.providers.base import ProviderError
 
                 with pytest.raises(ProviderError, match="auth failed|re-authenticate"):
@@ -2569,9 +2497,9 @@ class TestMakeRequest401Recovery:
             new_callable=unittest.mock.PropertyMock,
             return_value=mock_session,
         ):
-            mock_aiohttp = _make_mock_oauth_http()
+            mock_oauth = _make_mock_oauth_session()
             with (
-                unittest.mock.patch("aiohttp.ClientSession", return_value=mock_aiohttp),
+                _patch_oauth_session(mock_oauth),
                 unittest.mock.patch("kitty.providers.openai_subscription.logger") as mock_logger,
             ):
                 await adapter.make_request(cc_request)
@@ -2627,8 +2555,8 @@ class TestStreamRequest401Recovery:
             new_callable=unittest.mock.PropertyMock,
             return_value=mock_session,
         ):
-            mock_aiohttp = _make_mock_oauth_http()
-            with unittest.mock.patch("aiohttp.ClientSession", return_value=mock_aiohttp):
+            mock_oauth = _make_mock_oauth_session()
+            with _patch_oauth_session(mock_oauth):
                 await adapter.stream_request(cc_request, mock_write)
 
         assert mock_session.post.await_count == 2
@@ -2668,8 +2596,8 @@ class TestStreamRequest401Recovery:
             new_callable=unittest.mock.PropertyMock,
             return_value=mock_session,
         ):
-            mock_aiohttp = _make_mock_oauth_http()
-            with unittest.mock.patch("aiohttp.ClientSession", return_value=mock_aiohttp):
+            mock_oauth = _make_mock_oauth_session()
+            with _patch_oauth_session(mock_oauth):
                 from kitty.providers.base import ProviderError
 
                 with pytest.raises(ProviderError, match="auth failed|re-authenticate"):
@@ -2825,26 +2753,18 @@ class TestOAuthRefreshErrorClassification:
             "_provider_config": {},
         }
 
-        # Mock aiohttp that returns refresh_token_reused error from OAuth endpoint
-        mock_aiohttp = unittest.mock.MagicMock()
-        mock_aiohttp.__aenter__ = unittest.mock.AsyncMock(return_value=mock_aiohttp)
-        mock_aiohttp.__aexit__ = unittest.mock.AsyncMock(return_value=False)
-
-        refresh_resp = unittest.mock.MagicMock()
-        refresh_resp.status = 400
-        refresh_resp.json = unittest.mock.AsyncMock(
-            return_value={
+        # The token endpoint rejects the grant, over the curl_cffi leg KBR-161
+        # moved it to.
+        mock_oauth = _make_mock_oauth_session(
+            status=400,
+            body={
                 "error": "refresh_token_reused",
                 "error_description": "Refresh token has already been used",
-            }
+            },
         )
-        refresh_cm = unittest.mock.MagicMock()
-        refresh_cm.__aenter__ = unittest.mock.AsyncMock(return_value=refresh_resp)
-        refresh_cm.__aexit__ = unittest.mock.AsyncMock(return_value=False)
-        mock_aiohttp.post.return_value = refresh_cm
 
         with (
-            unittest.mock.patch("aiohttp.ClientSession", return_value=mock_aiohttp),
+            _patch_oauth_session(mock_oauth),
             pytest.raises(ProviderError) as exc_info,
         ):
             await adapter.make_request(cc_req)
@@ -2885,22 +2805,13 @@ class TestOAuthRefreshErrorClassification:
             "_provider_config": {},
         }
 
-        mock_aiohttp = unittest.mock.MagicMock()
-        mock_aiohttp.__aenter__ = unittest.mock.AsyncMock(return_value=mock_aiohttp)
-        mock_aiohttp.__aexit__ = unittest.mock.AsyncMock(return_value=False)
-
-        refresh_resp = unittest.mock.MagicMock()
-        refresh_resp.status = 400
-        refresh_resp.json = unittest.mock.AsyncMock(
-            return_value={
+        mock_oauth = _make_mock_oauth_session(
+            status=400,
+            body={
                 "error": "refresh_token_reused",
                 "error_description": "Refresh token has already been used",
-            }
+            },
         )
-        refresh_cm = unittest.mock.MagicMock()
-        refresh_cm.__aenter__ = unittest.mock.AsyncMock(return_value=refresh_resp)
-        refresh_cm.__aexit__ = unittest.mock.AsyncMock(return_value=False)
-        mock_aiohttp.post.return_value = refresh_cm
 
         written: list[bytes] = []
 
@@ -2908,7 +2819,7 @@ class TestOAuthRefreshErrorClassification:
             written.append(data)
 
         with (
-            unittest.mock.patch("aiohttp.ClientSession", return_value=mock_aiohttp),
+            _patch_oauth_session(mock_oauth),
             pytest.raises(ProviderError) as exc_info,
         ):
             await adapter.stream_request(cc_req, mock_write)

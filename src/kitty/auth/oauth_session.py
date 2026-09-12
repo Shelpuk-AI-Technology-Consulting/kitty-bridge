@@ -1,4 +1,12 @@
-"""OpenAI OAuth session: token state, refresh, and file persistence."""
+"""OpenAI OAuth session: token state, refresh, and file persistence.
+
+The token endpoint is reached through a :class:`~kitty.auth.token_transport.TokenTransport`
+rather than an ``aiohttp`` session (KBR-161).  The OpenAI subscription provider
+supplies the same impersonating ``curl_cffi`` session it uses for the API leg,
+so a provider sees one client for one account instead of two -- an impersonated
+Codex CLI for prompts and an anonymous Python client, on a different TLS
+fingerprint, for the token refreshes interleaved with them.
+"""
 
 from __future__ import annotations
 
@@ -9,8 +17,12 @@ import logging
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-import aiohttp
+from kitty.codex_identity import build_codex_user_agent
+
+if TYPE_CHECKING:
+    from kitty.auth.token_transport import TokenTransport
 
 logger = logging.getLogger(__name__)
 
@@ -25,8 +37,30 @@ _DEFAULT_EXPIRES_IN = 3600
 # Proactive refresh margin (seconds before expiry)
 _REFRESH_MARGIN_SECONDS = 60
 
-# HTTP timeout for OAuth token operations
-_OAUTH_TIMEOUT = aiohttp.ClientTimeout(total=30)
+# HTTP timeout for OAuth token operations, in seconds.  Passed explicitly on
+# every POST rather than left to the transport's own default: `get_valid_api_key`
+# holds `_refresh_lock` across both requests, so an unbounded one stalls every
+# concurrent request on the session rather than just its own.
+_OAUTH_TIMEOUT_SECONDS = 30.0
+
+
+def token_request_headers() -> dict[str, str]:
+    """Build the headers every OAuth token POST carries.
+
+    Shared by both legs -- the recurring refresh in this module and the
+    interactive login in :mod:`kitty.auth.openai_oauth` -- so that the identity
+    the token endpoint sees is decided in exactly one place.
+
+    The impersonated Codex CLI ``User-Agent`` comes from
+    :mod:`kitty.codex_identity`, the same source the API leg's ``User-Agent``
+    and ``version`` header read (KBR-8, KBR-161).  A genuine Codex CLI refreshes
+    its token with the client it uses for the API; two clients for one account
+    is a shape no real installation produces.
+
+    Returns:
+        Headers to merge into a token-endpoint POST.
+    """
+    return {"User-Agent": build_codex_user_agent()}
 
 
 class OAuthError(Exception):
@@ -199,7 +233,7 @@ class OAuthSession:
 
     # ── Token refresh ─────────────────────────────────────────────────────
 
-    async def _refresh(self, http: aiohttp.ClientSession) -> None:
+    async def _refresh(self, http: TokenTransport) -> None:
         """Refresh tokens using the refresh_token grant.
 
         After successful refresh, updates access_token, refresh_token, id_token,
@@ -208,7 +242,7 @@ class OAuthSession:
         session to disk.
 
         Args:
-            http: aiohttp session for HTTP calls.
+            http: Transport used to reach the token endpoint.
 
         Raises:
             OAuthRefreshFailed: If the refresh grant fails.
@@ -219,16 +253,24 @@ class OAuthSession:
             "refresh_token": self.refresh_token,
             "client_id": self.client_id,
         }
-        async with http.post(OAUTH_TOKEN_URL, data=refresh_payload, timeout=_OAUTH_TIMEOUT) as resp:
-            if resp.status >= 400:
-                body = {}
-                with contextlib.suppress(Exception):
-                    body = await resp.json()
-                raise OAuthRefreshFailed(
-                    body.get("error", f"HTTP {resp.status}"),
-                    body.get("error_description"),
-                )
-            tokens = await resp.json()
+        status, body_text = await http.post_form(
+            OAUTH_TOKEN_URL,
+            refresh_payload,
+            headers=token_request_headers(),
+            timeout=_OAUTH_TIMEOUT_SECONDS,
+        )
+        if status >= 400:
+            # The endpoint's error bodies are not reliably JSON -- a proxy or
+            # gateway in front of it answers in HTML -- so an unparseable body
+            # degrades to the status rather than masking the failure.
+            body = {}
+            with contextlib.suppress(Exception):
+                body = json.loads(body_text)
+            raise OAuthRefreshFailed(
+                body.get("error", f"HTTP {status}"),
+                body.get("error_description"),
+            )
+        tokens = json.loads(body_text)
 
         self.access_token = tokens["access_token"]
         self.refresh_token = tokens.get("refresh_token", self.refresh_token)  # rotation
@@ -253,11 +295,11 @@ class OAuthSession:
 
         logger.info("OAuth tokens refreshed successfully")
 
-    async def _exchange_api_key(self, http: aiohttp.ClientSession) -> str:
+    async def _exchange_api_key(self, http: TokenTransport) -> str:
         """Exchange id_token for an API key via token-exchange grant.
 
         Args:
-            http: aiohttp session for HTTP calls.
+            http: Transport used to reach the token endpoint.
 
         Returns:
             The new API key string.
@@ -272,21 +314,26 @@ class OAuthSession:
             "subject_token_type": ID_TOKEN_TYPE,
             "client_id": self.client_id,
         }
-        async with http.post(OAUTH_TOKEN_URL, data=payload, timeout=_OAUTH_TIMEOUT) as resp:
-            if resp.status >= 400:
-                body = {}
-                with contextlib.suppress(Exception):
-                    body = await resp.json()
-                raise OAuthTokenExchangeFailed(
-                    body.get("error", "token_exchange_failed"),
-                    body.get("error_description"),
-                )
-            result = await resp.json()
+        status, body_text = await http.post_form(
+            OAUTH_TOKEN_URL,
+            payload,
+            headers=token_request_headers(),
+            timeout=_OAUTH_TIMEOUT_SECONDS,
+        )
+        if status >= 400:
+            body = {}
+            with contextlib.suppress(Exception):
+                body = json.loads(body_text)
+            raise OAuthTokenExchangeFailed(
+                body.get("error", "token_exchange_failed"),
+                body.get("error_description"),
+            )
+        result = json.loads(body_text)
         return str(result["openai_api_key"])
 
     # ── Public API ─────────────────────────────────────────────────────────
 
-    async def get_valid_api_key(self, http: aiohttp.ClientSession, *, force_refresh: bool = False) -> str:
+    async def get_valid_api_key(self, http: TokenTransport, *, force_refresh: bool = False) -> str:
         """Return a valid bearer token, refreshing if needed.
 
         Returns the exchanged API key if available; otherwise falls back to the
@@ -294,7 +341,7 @@ class OAuthSession:
         API-key exchange is not available).
 
         Args:
-            http: aiohttp session for HTTP calls.
+            http: Transport used to reach the token endpoint.
             force_refresh: If True, skip expiry checks and force a token refresh
                 (used when the API key has been rejected with 401).
 

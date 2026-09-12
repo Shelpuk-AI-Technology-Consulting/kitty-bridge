@@ -331,6 +331,62 @@ class TestExchangeIdTokenForApiKey:
         assert captured_headers.get("Authorization") == f"Bearer {access_token}"
 
 
+class TestTheLoginLegPresentsTheCodexIdentity:
+    """KBR-161: the login POSTs claim the same client as every other leg.
+
+    The recurring refresh leg moved onto the adapter's impersonating
+    ``curl_cffi`` transport.  These two POSTs stay on ``aiohttp`` -- they run
+    from ``kitty auth openai``, which has no adapter to borrow a session from,
+    and a regression here blocks sign-in.  So their TLS fingerprint is still
+    not Codex's, and that residual is recorded in ``TEST_SUITE.md`` 4.5.  Their
+    **identity** is, which is what these assert; the user-agent comes from the
+    same :mod:`kitty.codex_identity` constant as the API leg's.
+    """
+
+    @pytest.mark.asyncio
+    async def test_exchange_code_for_tokens_sends_the_codex_user_agent(self, code_verifier: str) -> None:
+        from kitty.codex_identity import build_codex_user_agent
+
+        captured_headers: dict[str, str] = {}
+
+        def capture(url, **kw):
+            captured_headers.update(kw.get("headers") or {})
+
+        with aioresponses() as m:
+            m.post(
+                OAUTH_TOKEN_URL,
+                callback=capture,
+                payload={
+                    "access_token": "at_test",
+                    "refresh_token": "rt_test",
+                    "id_token": "id_test",
+                    "expires_in": 3600,
+                },
+            )
+            async with aiohttp.ClientSession() as http:
+                await _exchange_code_for_tokens("code", code_verifier, CLIENT_ID, http)
+
+        assert captured_headers.get("User-Agent") == build_codex_user_agent()
+
+    @pytest.mark.asyncio
+    async def test_exchange_id_token_sends_the_codex_user_agent_and_keeps_authorization(self) -> None:
+        """The bearer header must survive: it is how this grant authenticates."""
+        from kitty.codex_identity import build_codex_user_agent
+
+        captured_headers: dict[str, str] = {}
+
+        def capture(url, **kw):
+            captured_headers.update(kw.get("headers") or {})
+
+        with aioresponses() as m:
+            m.post(OAUTH_TOKEN_URL, callback=capture, payload={"openai_api_key": "sk-test"})
+            async with aiohttp.ClientSession() as http:
+                await _exchange_id_token_for_api_key("id-tok", "acc-tok", CLIENT_ID, http)
+
+        assert captured_headers.get("User-Agent") == build_codex_user_agent()
+        assert captured_headers.get("Authorization") == "Bearer acc-tok"
+
+
 # ── run_oauth_flow integration ─────────────────────────────────────────────
 
 

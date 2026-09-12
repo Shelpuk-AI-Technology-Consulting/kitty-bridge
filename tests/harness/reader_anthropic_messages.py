@@ -416,7 +416,8 @@ def _read_turns(value: Any, residual: dict[str, Any]) -> tuple[c.Turn, ...]:
                 "the Messages format has no system role — a system prompt is the top-level field"
             )
 
-        turns.append(c.Turn(role=role, parts=_read_content(message["content"], index, residual)))
+        parts = _read_content(message["content"], index, residual)
+        turns.append(c.Turn(role=role, parts=_clause_three(role, parts)))
         _residualise(message, {"role", "content"}, f"messages[{index}]", residual)
 
     return _normalise_turns(turns)
@@ -762,19 +763,56 @@ def _residualise(
             residual[f"{prefix}.{key}"] = value
 
 
+def _clause_three(role: str, parts: Sequence[c.Part]) -> tuple[c.Part, ...]:
+    """Order one message's parts, results first, for a ``user`` message.
+
+    §3.3.1b's third clause, applied where that section says it is **not** idle:
+    "it governs the formats that carry text and results inside **one message**,
+    where the run has no natural boundary". Anthropic Messages is that case —
+    a single ``content`` array may hold text and ``tool_result`` blocks
+    together, so there is no message boundary to delimit a run and clause 1
+    cannot do the work by splitting.
+
+    Without this the reader disagrees with the Chat Completions and Responses
+    readers on the shape they *both* produce. Their wire form is a run of tool
+    messages followed by a user message, which merges to ``[ToolResult, Text]``;
+    an Anthropic message carrying the same content as ``[text, tool_result]``
+    would project ``[Text, ToolResult]`` and show a delta no mutation caused.
+
+    **Scoped to one message, and to ``user``.** Applying it to a *merged* turn
+    is the defect an earlier draft had: it projects
+    ``tool_result -> user(text) -> tool_result`` as
+    ``[ToolResult, ToolResult, Text]``, hoisting a result ahead of text the
+    agent sent *before* it. Per message, that sequence keeps its three separate
+    groups and concatenates to ``[ToolResult, Text, ToolResult]``, which is what
+    §3.3.1b requires. The clause is about a ``user`` turn, so an assistant
+    message is left alone.
+
+    Args:
+        role: The message's role.
+        parts: The message's parts, in wire order.
+
+    Returns:
+        The parts, results first for a ``user`` message, stable within each
+        group so a reader never sorts.
+    """
+    if role != "user":
+        return tuple(parts)
+
+    results = [part for part in parts if isinstance(part, c.ToolResult)]
+    others = [part for part in parts if not isinstance(part, c.ToolResult)]
+    return tuple(results) + tuple(others)
+
+
 def _normalise_turns(turns: Sequence[c.Turn]) -> tuple[c.Turn, ...]:
-    """Merge consecutive same-role turns, preserving part order.
+    """Merge consecutive same-role turns, preserving the order of their groups.
 
-    §3.3.1b's merge rule is an **ordered pipeline**, not a set of independent
-    clauses: a maximal run of tool results forms one turn, an immediately
-    following non-tool user message merges into it, results come first *within
-    the turn those clauses build*, and only then do consecutive same-role turns
-    merge. In the Messages format a tool result already arrives inside a user
-    turn, so the first three clauses are satisfied by the wire order and this
-    function is the fourth — which is why it moves nothing.
+    The fourth and last clause of §3.3.1b's ordered pipeline. Clause 3 has
+    already run, per message, in :func:`_clause_three`; this one only
+    concatenates, and **never re-sorts what it concatenates**.
 
-    **A re-sort after the merge would be a defect, not a simplification.** It
-    projects ``tool_result -> user(text) -> tool_result`` as
+    **A re-sort here would be a defect, not a simplification.** It projects
+    ``tool_result -> user(text) -> tool_result`` as
     ``[ToolResult, ToolResult, Text]``, hoisting a result ahead of text the
     agent sent *before* it — moving history the bridge did not move. Because
     paths are index-based, that invented delta lands on every part of the turn
