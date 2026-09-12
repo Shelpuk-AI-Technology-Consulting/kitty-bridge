@@ -764,9 +764,6 @@ def _provider_outcome_text(execution_text: str) -> str:
     direction -- it falls through to ``fatal``, which spends nothing on a record that
     cannot be read.
 
-    Args:
-        execution_text: Raw execution record text.
-
     ⚠️ **The first fallback branch is narrower than "nothing model-authored", and the
     difference is recorded rather than hidden.** A transcript truncated before its result
     event carries no ``result`` key, so its ``message``/``content`` -- which the model
