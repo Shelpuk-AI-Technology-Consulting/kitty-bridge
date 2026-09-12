@@ -3238,6 +3238,216 @@ saying so here stops a future reader reading it as an unpaid debt.
 
 [KBR-31]: https://shelpuk.atlassian.net/browse/KBR-31
 
+### 7.6 The proven vertical slice
+
+`tests/harness/test_vertical_slice.py` — plan task **T-W9** ([KBR-32]). §7.2 says what a
+recording upstream must observe, §7.5 how the product is put in front of one, and §3.3.1 what a
+projection reads. This is the first place all three are driven **together**: one request from a
+real `BridgeServer`, into the recorder, and out into T-W2's declared types. Small, and it is the
+moment the contracts become known to *compose* rather than merely to exist — six streams build
+on that afterwards.
+
+**Four claims, and the falsification that keeps each honest.**
+
+| Claim | Assertion | The defect it catches |
+|---|---|---|
+| One inbound request, one upstream request | Exactly one capture; inbound status 200 | A fired retry ladder. Scoped against §7.5.4's identical-looking assertion: T-W8's is about **one binding**, this is the product claim for a **driven request** |
+| The capture is complete | Each of T-W2's seven fields at its declared type and wire value; `arrival` and `peer_port` populated | A capture that silently stops carrying §5.2.1's join key, which nothing else would notice until T-E2 |
+| The capture is **readable** | A minimal reader satisfies `Projection`, and `verify_total` passes over what it produces | A capture that type-checks and that no projection can consume — the composition failure this task exists to rule out |
+| The query survives | The capture's `query` equals what the bridge sent, percent-encoding and duplicate names intact | A recorder that drops the query string, driven **end to end** |
+
+**The default binding carries no query, so the falsification had to be made non-vacuous.**
+Measured: `AiohttpTransport.bind()` returns `{"base_url": recorder.base_url}`, and the capture's
+`query` is then `""` — against which a query-dropping recorder passes perfectly. The slice
+therefore drives a binding whose `base_url` carries one, merged onto the adapter's endpoint path
+by `ProviderAdapter.compose_upstream_url` (the KBR-143 rule). That is the **product's own
+channel**, not a patch arranged for the test: a query the harness injected some other way would
+prove the recorder reads `raw_query_string` and nothing about whether the bridge preserves a
+query at all.
+
+**Both properties of the query literal are load-bearing, and an earlier draft had neither.** It is
+`kbr32=slice%20value&dup=1&dup=2`: the `%20` would become `+` under a `parse_qsl`/`urlencode`
+round trip, and `dup` appears **twice** so a recorder that collapses duplicates is
+distinguishable from one that preserves them. A first draft wrote `dup` once, which made the
+duplicate half of the claim untestable — §1.4's shape again, caught in review.
+
+**Byte-for-byte survival is specific to these two adapters.** `compose_upstream_url` *merges*
+when both sides carry a query and drops base parameters whose name the endpoint also uses;
+`custom_anthropic` and `custom_openai` contribute no endpoint query, so the base query survives
+verbatim. The same assertion against Azure would be false, which is why it is stated here rather
+than generalised.
+
+**The transports this module defines are never registered.** They are constructed directly and
+driven, following §7.5.4's rule that a shared registry must not hold things that are wrong on
+purpose. It is also load-bearing for the gate: `test_bridge.py`'s meta-test asserts
+`set(registered_transports()) == EXPECTED_TRANSPORTS`, and registration happens at **import
+time** on module-global state — so a stray `register_transport` here would leave this module
+green on its own and the full suite red. That is an order-dependent failure and a direct hit on
+plan §1.3(5), "it lands on `main` alone".
+
+**The `peer_port` assertion asserts the join, not the type.** §5.2.1 joins captures to tunnels on
+that key, and an `isinstance(..., int)` check passes for a port matching no connection — which is
+precisely the column T-E2 would then be joining against nothing. The slice asserts the capture's
+port is among the ports of the connections the upstream actually accepted.
+
+**§7.2.1's `has_content` claim is discharged here**, because it is the only place it can be. It is
+a local flag inside `BridgeServer._stream_chat_completions`, not a callable, so no unit test
+reaches it; T-W4's streams satisfy its precondition by construction. Driving one `stream: true`
+request end to end and asserting a single capture is the evidence that the flag was set and the
+empty-response retry never fired. Named by symbol, not by line: the plan's `server.py:5145`
+anchor is already stale, and §7.2.1 states this in prose rather than in a table.
+
+**That case asserts the capture count and nothing else, deliberately.** A downstream status
+assertion there would be unfalsifiable: `_stream_chat_completions` commits the 200 with
+`sr.prepare()` before it opens the upstream at all, so every outcome on that route is a 200 —
+measured, a bridge with `has_content` forced false does not answer non-200, it fails to complete.
+An assertion nothing can kill is what §7.5.4 removed from T-W8 and what §1.4 forbids, so it is
+not shipped. The non-streaming case **does** assert the status, where §7.5.4's measured row 3 (an
+upstream 400, one correct capture, a failed client) is reachable and T-W8's `_RefusingTransport`
+is the defect that proves the assertion bites.
+
+It is a claim about one **pair** of axes and not about either alone (§7.5.1): inbound
+`chat_completions` over upstream `CHAT_COMPLETIONS`, streaming.
+
+**A wall-clock bound, and why it is an assertion rather than a timeout.** `_EMPTY_RETRY_DELAYS`
++ `_EMPTY_FINAL_DELAYS` is 80 seconds of real `asyncio.sleep`, and a regression that reintroduces
+the ladder must make the suite **red**, not merely slow — the defect commit `691e974` fixed that
+once already. Three mechanisms were rejected before the one that ships:
+
+- `pytest-timeout` is **not** in the dev extras.
+- `asyncio.timeout` is **3.11+**, and the matrix is 3.10–3.13.
+- `BridgeFixture.post`'s own client timeout **does not bound the slice**. Measured: a `post()`
+  given 2 seconds against a still-sleeping ladder exited its block after **62 seconds**, because
+  `BridgeFixture.stop` waits for in-flight upstream handlers rather than aborting them — §7.5's
+  own documented property, and the reason §7.3 took the opposite decision for the proxy.
+
+What ships is `time.monotonic()` around each driven request, asserted against a **4.0 s** budget:
+200× the measured healthy time (0.01–0.02 s).
+
+**What that budget catches is not "a ladder".** An earlier draft justified it as "strictly below
+`_EMPTY_RETRY_DELAYS[0]`, so any ladder that sleeps trips it", and that is wrong twice over. Any
+ladder that fires leaves an **extra capture**, so the one-capture assertion sees it first and sees
+it deterministically, with no dependence on a runner's speed. And there are **two ladders, not
+one**: `_request_with_retry_single` — the *non-streaming* helper — is the only site that
+**sleeps** `_EMPTY_RETRY_DELAYS`, while every streaming path sleeps
+`_BACKOFF_BASE * 2 ** (attempt % 4)`, i.e. 1, 2, 4, 8 s, reaching `_EMPTY_FINAL_DELAYS` only on
+its last two attempts. (Say *sleeps*, not *reads*: one other site reads the list's **length**, to
+report an attempt total. An earlier draft of this paragraph said "read at exactly one site",
+which is simply false about the source tree — and a docstring citing another module's internals
+as an invariant is a failure mode this repo has already been bitten by. It is also why T-W9's
+monkeypatch changes those values and leaves the lengths alone.) A streaming
+ladder can therefore fire **twice inside a 4-second budget**. That fact is recorded here because
+it is non-obvious and the next author will otherwise repeat the mistake.
+
+The honest division of labour, and the reason all three are kept:
+
+| Mechanism | The band only it covers |
+|---|---|
+| The one-capture assertion | **Any** retry, at any sleep length, deterministically |
+| The 4.0 s budget | **Slow with a single capture** — a connect grace, a wedged handler, a non-ladder regression |
+| `post()`'s `DEFAULT_TIMEOUT` (10 s) | Everything above ten seconds, with a message naming the transport and both ladder costs |
+
+The budget's failure message reports the capture count **first** and says so in words, because the
+gate is ~18.5 minutes on runners this repo has already seen OOM-killed under parallel load: a
+contended runner and a fired ladder must be distinguishable without a rerun. CI is the authority
+for the number, across every leg — 3.10–3.13 on Linux plus the pinned Windows and macOS legs
+§8.4 added after this module was written — and a platform- or version-dependent failure means
+raising it, never skipping.
+
+**The coarse clock reached this module twice, and only one of them was foreseen.** The second was
+found by the Windows leg itself: `test_the_budget_is_enforced_on_every_driven_request` drove a
+request with an "impossible" budget of literal `0.0`, on the reasoning that zero is over-budget
+for any real request. On Windows `elapsed` measured **exactly** `0.0`, so `0.0 <= 0.0` held and
+the case failed with "DID NOT RAISE" while all five other legs were green. The impossible budget
+is **negative** now, which no measurement can satisfy at any resolution.
+
+Worth separating from the rule two paragraphs above, because the remedy was **not** that rule.
+"A platform-dependent failure means raising the budget, never skipping" governs the **4.0 s**
+budget, whose margin is a judgement about runner speed. This was a different defect: an assertion
+written so that it *could not fire* on a coarse clock. The fix was to make it
+resolution-independent, not to widen a margin — and no §8.3 row was added, because the platform
+dependence was removed rather than amnestied.
+
+**The slice needs no Windows exemption row, and must not acquire one.** §8.3's registry is all
+arrival *ordering*: Windows' clock cannot separate two adjacent requests, so every "arrival
+increases" assertion is false there (KBR-188). This module asserts only that `arrival` is
+**populated and typed**, which a coarse clock satisfies — ordering is T-W4's claim, not the
+slice's. Tightening it into an ordering check here would add debt to §8.3 for a claim that is
+already made, and made better, one layer down.
+
+**The fired ladder is shown, and it is shown on the non-streaming path.** Plan §1.4 requires the
+one-capture assertion to be caught detecting a real ladder rather than passing by construction,
+so the module ships an upstream reply the bridge judges *empty*, with the ladder's delays
+flattened to zero by `monkeypatch`: measured at **five captures in 0.008 s**, deterministic and
+free. It is deliberately **not** done on the streaming path: with `has_content` mutated to never
+become true, the driven request was measured **never completing at all**, so a streaming version
+of this defect would hang the gate rather than fail it. Flattening the delays rather than waiting
+them out is what keeps a falsification case affordable in a gate that already runs ~18.5 minutes
+per Python version.
+
+**The reader is local and minimal, and it is deliberately not T-A1's — which has now landed.**
+T-W9's declared dependencies are T-W1, T-W2, T-W4 and T-W8 and **no reader task** (§7.5.4), and
+that is worth keeping now that `reader_anthropic_messages.py` exists: a slice that went red
+because a reader had a bug would mis-attribute the failure, and the claim here is only that the
+recorder's output is readable **at all** by something shaped like a `Projection`. It is
+correspondingly **not** a `reader_<format>.py` module — §7.4.1 closes that set at six, one per
+`WireFormat` member, and this is evidence rather than a seventh projection. How a format *ought*
+to be projected stays T-A1–T-A6's question.
+
+**`consumed` is built from literal key names, and that is load-bearing.** `verify_total` computes
+`set(source) - (consumed | residual)`, so a reader deriving `consumed = frozenset(source)` passes
+unconditionally — the same shape §1.4 forbids. The deliberate consequence is that a product change
+adding a new top-level key to the upstream body turns the slice **red**, which is the signal worth
+having: an unregistered addition is exactly what §3.2's register exists to catch.
+
+**The falsification cases live in this module rather than a sibling.** T-W4 and T-W8 each split
+theirs out because each ships four or more deliberate defects. T-W9 ships two, and a separate
+60-line module would cost a reader a file hop to reach the defect that falsifies the assertion
+three lines above it. Recorded so the divergence reads as a decision and not as an oversight.
+
+**What the falsification sweep killed, and what it could not.** §1.4 asks for the procedure;
+what is worth recording is its result. Each of the recorder's capture fields was mutated in turn
+and the module re-run:
+
+- **Every** mutation is caught: wrong method, scheme, host, headers, body, arrival, a wrong or
+  absent peer port, and a dropped, percent-decoded or duplicate-collapsing query. Most red
+  exactly one case; a corrupted body reds three, and each query mutation reds two, because the
+  field-completeness case asserts the query alongside the six other fields and the dedicated
+  query case asserts it alone. That overlap is deliberate — one case is "the capture is
+  complete", the other is "routing survives" — but it means the sweep shows *caught*, not
+  *uniquely attributed*. An earlier draft of this paragraph claimed the stronger property, which
+  the sweep's own output contradicts.
+- Mutating `host` to aiohttp's `request.host` kills nothing, and that is an **equivalent
+  mutant** rather than a hole: aiohttp returns the Host header whenever one is present and the
+  bridge always sends one. Simulating the real §7.2.1 defect — the `socket.getfqdn()` fallback —
+  reds exactly one case, which is what makes the `host` row honest.
+- **`path` read percent-decoded killed nothing.** The adapter's own path is `/v1/messages`, which
+  contains nothing encoded, so `request.path` and `rel_url.raw_path` are identical on this route
+  and §7.2.1's trap was untestable here. The fix was to carry `%20` in the base URL's path
+  component too, exactly as the query already did; the mutation then fails the field case. This
+  is the second time in this task that a claim turned out to be vacuous because the *driven
+  request* did not carry the thing the claim was about — the first being the query itself — and
+  it is the argument for running the sweep rather than reasoning about it.
+- **One assertion survived on purpose.** The non-streaming case's `status == 200` is falsified by
+  nothing in this module. It is not redundant — §7.5.4's measured row 3 is an upstream 400, which
+  yields one correct capture and a failed client — and T-W8's `_RefusingTransport` is the defect
+  that proves it bites. Re-shipping that defect here would duplicate T-W8 rather than add
+  evidence, so the assertion is kept with the argument written beside it rather than deleted or
+  left unexplained.
+- **One assertion is weaker than it looks.** `scheme` is built from a recorder *constant*, not
+  from anything on the wire, so asserting `"http"` pins the recorder's own declaration. T-B2's
+  TLS transport is where the field starts carrying information.
+
+**What this task does not settle.** Corpus-wide quantification is **T-D1**'s ([KBR-51]); the
+other five wire formats and the three custom transports are **T-B1–T-B3**'s; non-loopback
+addressing stays with **T-E1**/**T-E2** (§5.3). Bounding fixture *teardown* against a fired
+ladder is real — the 62 seconds above — but aborting in-flight handlers is a change to §7.5's
+module and a decision §7.3 already took for the proxy; it is left to **T-K6** and **T-B4** rather
+than taken here as a side effect.
+
+[KBR-32]: https://shelpuk.atlassian.net/browse/KBR-32
+[KBR-51]: https://shelpuk.atlassian.net/browse/KBR-51
+
 ---
 
 ## 8. CI cadence
@@ -3401,11 +3611,14 @@ business, together with the job that runs them; doing it earlier would remove th
 gate. T-H1 must take that reclassification into account before it measures a mutation
 baseline, because it selects on `l1`.
 
-**Seven modules are bulleted below, and `tests/cli/test_stream_encoding.py` (KBR-10) is described
-after them — eight in all, named here so T-K6 inherits a list rather than a search** — the count
+**Eight modules are bulleted below — in six bullets, since the T-W4 and T-W8 rows name two
+modules each — and `tests/cli/test_stream_encoding.py` (KBR-10) is described after them, nine in
+all, named here so T-K6 inherits a list rather than a search** — the count
 is what T-K6 and T-H1 plan against. (The bullet count and the KBR-10 paragraph were already
 drifting apart before T-W8 added two; spelling out both is what stops the next addition
-guessing which set it joins.)
+guessing which set it joins. T-W9 joins the **bulleted** set, not the paragraph above it, which
+still names `tests/test_egress_https_proxy.py` and `tests/harness/test_connect_proxy.py`
+separately.)
 
 - **KBR-132:** `tests/bridge/test_tls_certs.py` spawns a real `openssl` in one of its five cases.
   KBR-132 deliberately did **not** move it — the rule above applies to a test fixing a skip defect
@@ -3422,6 +3635,16 @@ guessing which set it joins.)
   knowing while planning that move: the timeout case cost **30 seconds** until its responder was
   released explicitly, because `stop_async` waits for in-flight upstream handlers rather than
   aborting them — the same property §7.3 handles deliberately for the proxy.
+- **T-W9 (KBR-32):** `tests/harness/test_vertical_slice.py` starts a real `BridgeServer` and a
+  recorder in nine of its ten cases. The module runs in **~0.5 seconds**, measured (0.42–0.54 s
+  over three runs), which is the number the fast-gate budget should carry until T-K6 moves it.
+  Its falsification cases are deliberately cheap: the empty-response ladder is flattened with
+  `monkeypatch` rather than waited out, because an 80-second falsification case is the defect
+  commit `691e974` fixed once already. Worth knowing while planning the move: when one of its
+  cases goes red on a fired ladder, the *bound* catches the regression but does not bound the
+  cost of catching it — teardown still waits out the in-flight handlers, measured at 62 seconds.
+  T-B1 below measures the same property at 72 s through the adapter; they are the same 62-second
+  teardown plus that path's own ladder, not two different findings.
 - **T-B1 (KBR-40):** `tests/harness/test_provider_aiohttp.py` binds a recorder in most of its
   cases and a real `BridgeServer` in several, and drives the OpenAI login OAuth leg over loopback
   in four more. It runs in **~0.6 seconds**, measured, which is the number the fast-gate budget
