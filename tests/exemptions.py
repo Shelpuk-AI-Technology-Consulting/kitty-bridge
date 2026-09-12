@@ -87,9 +87,10 @@ class Exemption:
 # 🔴 The registry of ACKNOWLEDGED DEBT. One row per exempt assertion, and the
 # list is supposed to trend towards zero.
 #
-# It shipped EMPTY until KBR-164. Every row below is the WINDOWS CELL of an
-# assertion the platform legs found false on Windows and true on the other
-# legs (TEST_SUITE.md §8.3, §8.4). Deliberately not counted in this comment:
+# It shipped EMPTY until KBR-164, and is empty again. Every row KBR-164's
+# platform legs added was the WINDOWS CELL of an assertion found false on
+# Windows and true on the other legs (TEST_SUITE.md §8.3, §8.4), and each came
+# out with its defect's fix -- see below. Deliberately not counted in this comment:
 # a count in prose is wrong the moment the next row lands, and nothing checks
 # it -- the rule §8's own header states about naming things rather than
 # counting them.
@@ -106,15 +107,16 @@ class Exemption:
 # from a guard would otherwise pass `mypy` and register a row nobody can find by
 # reading this file -- the one-registry invariant defeated by one line. Rows are
 # added by editing the literal below.
-#: Each row gates normally on the Linux and macOS legs — the parametrised-cell
-#: shape §8.3 describes, not a blanket amnesty — so each fails the job the day
-#: its own platform starts passing.
+#: The shape a platform row takes, and every row here so far took: it gates
+#: normally on the other legs — the parametrised-cell shape §8.3 describes, not
+#: a blanket amnesty — so it fails the job the day its own platform starts
+#: passing.
 #:
-#: They are exemptions rather than skips on purpose. A `skipif` here would hide
-#: real defects behind a green leg, and §8 permits a platform skip only for
-#: behaviour that *does not exist* on the platform. These assertions are not
-#: inapplicable on Windows; they are **false** there, and that is a debt with a
-#: ticket, not a platform difference.
+#: Exemptions rather than skips on purpose. A `skipif` would hide real defects
+#: behind a green leg, and §8 permits a platform skip only for behaviour that
+#: *does not exist* on the platform. Such an assertion is not inapplicable on
+#: Windows; it is **false** there, and that is a debt with a ticket, not a
+#: platform difference.
 #:
 #: **The mechanism has now paid out once, which is worth recording.** KBR-188
 #: held five rows here, all naming one cause: the recorder stamped `arrival`
@@ -126,16 +128,14 @@ class Exemption:
 #: platform starts passing" contract above. That failure is the signal to
 #: **delete the row**, not to widen it; all five are gone, along with the
 #: `ratchet` plumbing at their call sites.
-EXEMPTIONS: Mapping[str, Exemption] = MappingProxyType(
-    {
-        "recorder-responder-abort-emits-before-dropping": Exemption(
-            assertion="a responder that aborts mid-stream still delivers a data frame first",
-            condition="on Windows the abort wins the race against the first chunk, so the "
-            "client sees response headers and no body",
-            issue="KBR-189",
-        ),
-    }
-)
+#:
+#: **KBR-189's row, the last one, was withdrawn together with its fix.**
+#: `Reply.abort()` used `transport.abort()`, which discards bytes still queued in
+#: the transport, and on Windows every write is still queued when the next
+#: statement runs, so a mid-stream abort sent headers and no body. It now uses
+#: `transport.close()`, which flushes first; the Windows leg of the PR that
+#: removed the row is the evidence. The registry is empty again.
+EXEMPTIONS: Mapping[str, Exemption] = MappingProxyType({})
 
 
 class UnknownExemption(Exception):

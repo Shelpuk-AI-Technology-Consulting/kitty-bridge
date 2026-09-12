@@ -2367,6 +2367,51 @@ the only difference between two otherwise identical requests. Each replays
 scripted responses: SSE streams, error statuses, Cloudflare blocks, empty responses,
 context-too-large rejections, and disconnects at each of §6.3.1's four injection points.
 
+**A disconnect delivers what was written before it, then drops — on every platform.** Three of
+§6.3.1's four points are *post-emission*: their oracle is what the client already received, so a
+recorder whose disconnect loses the bytes before it would turn "after text has been emitted" into
+"before any downstream byte" and test the wrong row. `Reply.abort()` therefore ends the connection
+with `transport.close()`, whose asyncio contract is that queued data is flushed first, and **not**
+`transport.abort()`, whose contract is that it is lost. The response is still left unfinished — no
+chunked terminator, no `[DONE]` — so the client reads a truncated stream and then end-of-connection.
+
+*Why this is not a POSIX detail.* The first version called `transport.abort()` and passed on Linux
+and macOS, where a write reaches the kernel immediately and the transport's queue is empty when
+the abort runs. Windows' Proactor loop sends each write as an overlapped operation completed on a
+later loop iteration, so the body was still queued and the client saw headers and nothing else —
+deterministically, on the Windows leg (KBR-189). The same loss is reproducible on Linux by queuing
+more than the socket accepts: of a 32 MiB body, 23,764,432 bytes were still queued at the abort
+and exactly that many never arrived. `test_an_abort_delivers_every_byte_written_before_it` builds
+that state on every leg — it holds its client back from reading until the abort has run, so the
+queue's size does not race a concurrent reader. *Why not "signal that the frame was written, then
+abort"*, which the ticket first suggested: `await write()` has already returned by then — written
+to the transport is not on the wire.
+
+*Two things `abort()` no longer does on its own, stated so nothing is built on them.*
+
+- **It does not refuse later writes.** After `close()` the selector loop still queues and delivers
+  a write made while its queue is non-empty; the Proactor loop drops it. What keeps the response
+  unfinished is aiohttp refusing to write to a closing transport — so a responder writes nothing,
+  through aiohttp or around it, after `abort()`. `test_a_responder_can_abort_mid_stream` asserts
+  the reply is incomplete as well as `[DONE]`-free, so a response aiohttp was allowed to finish
+  fails it — but on the selector loop that case's queue is empty at the abort, and the Proactor
+  loop drops later writes regardless, so both drop them without aiohttp's help: **aiohttp's
+  closing-transport check is not itself under test**.
+- **Its return is not the disconnect.** The drop completes when the reader has taken the queued
+  bytes. A scripted injection (T-B4) that releases a barrier on `abort()` returning must not make
+  the reader wait on end-of-connection before that barrier.
+
+*The cost, and why it is the opposite of §7.3's rule.* §7.3 aborts the proxy's connections
+because that is **teardown**, where a flush serves nothing and a TLS `close()` waits out
+`ssl_shutdown_timeout`. This is a **scripted disconnect inside a test**, where the flushed bytes are
+the evidence. The price is that a peer which is alive but has stopped reading holds the connection
+open — past `recorder.stop()`, whose force-close is a no-op on a transport already closing — until
+it reads or disconnects. No reader of this recorder does that: the bridge's HTTP client reads to
+the end, and the raw-socket probes close their socket, which fails the pending send and
+force-closes the transport. A TLS recorder (T-B2) that reuses `Reply` inherits the wait for the
+peer's `close_notify` on top — bounded at 30 s on 3.11+, unbounded on 3.10 — and should decide for
+itself.
+
 **Casing** is asserted by C1; **order** is recorded for the C1b baseline report only, not
 asserted — what reaches the wire is the client library's ordering, not the agent's. Peer
 *address* is deliberately not used for containment (§5.2.1).
@@ -3819,15 +3864,15 @@ T-G5 and T-J2 land — is unchecked until that job is activated, so there the ex
 outlive its defect. The task that activates the job owns re-checking the rows on its layer, in
 the same way §8.2 makes each pending layer someone's named handoff.
 
-**The registry no longer ships empty — KBR-164 added the first five rows**, and they are not the
-row this section anticipated. TR-1c's header-subset assertion (KBR-8) still belongs to an
+**KBR-164 gave the registry its first rows**, and they were not the row this section
+anticipated. TR-1c's header-subset assertion (KBR-8) still belongs to an
 acceptance scenario that does not exist yet (§6.4.1, delivered by T-J2 downstream of T-J1), and a
 registry row for an assertion no test contains documents a fiction — so it is still unwritten.
-What arrived first instead were the **Windows cells** of five assertions that the platform legs
-(§8.4) found to be false on Windows and true everywhere else: four over KBR-188 and one over
+What arrived first instead were the **Windows cells** of assertions that the platform legs
+(§8.4) found to be false on Windows and true everywhere else: several over KBR-188 and one over
 KBR-189.
 
-**Four of those five are gone again, and why they could not have worked is the lesson.** KBR-188
+**The KBR-188 rows are gone again, and why they could not have worked is the lesson.** KBR-188
 was one defect — Windows' `time.monotonic` advances in ~15.6 ms steps, so two probes sent back to
 back are stamped at the same instant and `check_arrival_increases` is false. Its four rows
 exempted the assertions that observed it. But **whether a given pair collides is a race**, not a
@@ -3870,16 +3915,20 @@ no real time passes and every run agrees. That clock is sound only away from the
 reads `time.monotonic` for its own timers, so the end-to-end cases keep the quantised clock and
 the placement case, which never opens a loop, uses the stepped one.
 
-Only KBR-189's row survives, over a different defect: a mid-stream abort that wins its race
-against the first chunk. That one is deterministic on Windows.
+KBR-189's row was over a different defect — a mid-stream abort that lost the body on Windows —
+and it was sound where KBR-188's were not, because that loss was deterministic there. It is gone
+too, withdrawn together with its fix: KBR-189 changed `Reply.abort()` (§7.2), and the Windows leg
+of the PR that removed the row is the evidence the assertion now holds there. **The registry is
+empty again.**
 
-They are the parametrised-cell shape above rather than whole-test exemptions, and the reason is
-the rule this section opens with. A `skipif` would have been the obvious move and is the wrong
-one: §8 permits a platform skip for behaviour that **does not exist** on a platform, and these
-assertions are not inapplicable on Windows — they are **false** there, which is a defect with a
-ticket. Exempting the cell keeps the assertion gating on the four Linux legs and on macOS, keeps
-the count of outstanding Windows defects readable in one file, and fails the job the day Windows
-starts passing. Skipping would have bought a green leg by not looking.
+All of those rows were the parametrised-cell shape above rather than whole-test exemptions, and the reason
+is the rule this section opens with — the reason the next platform row should take that shape too.
+A `skipif` would have been the obvious move and is the wrong one: §8 permits a platform skip for
+behaviour that **does not exist** on a platform, and these assertions were not inapplicable on
+Windows — they were **false** there, which is a defect with a ticket. Exempting the cell kept the
+assertion gating on the four Linux legs and on macOS, kept the count of outstanding Windows defects
+readable in one file, and failed the job the day Windows started passing. Skipping would have
+bought a green leg by not looking.
 
 That makes the registry-shape check itself vulnerable to §8's own "green because it stopped
 looking": a validator run over zero rows passes perfectly. So `registry_violations` is proved
