@@ -7,7 +7,7 @@ why; this one says who can build what, in what order, without waiting on each ot
 when the plan is accepted.
 
 > **Identifiers.** Every task id is prefixed `T-`. `TEST_SUITE.md` already uses bare `C1–C6` for
-> observable channels, `F1–F5` for findings, `G1–G19` for gaps and `I1–I3` for the invariants. An
+> observable channels, `F1–F5` for findings, `G1–G27` for gaps and `I1–I3` for the invariants. An
 > earlier draft collided with all of them. The **Design** column carries the reverse link.
 
 > **The epic tables in §4–§13 are the single source of truth for dependencies.** §14's tiers and
@@ -138,7 +138,7 @@ once. Both are exactly the coordination problem Milestone 0 exists to remove.
 
 **T-W3 inherits two acceptance criteria from this work.**
 
-1. Every one of the 42 live rows carries either a path in T-W2's vocabulary or `not projectable`
+1. Every one of the 43 live rows carries either a path in T-W2's vocabulary or `not projectable`
    **with a reason**, asserted against the register data so a new row cannot escape it. T-W2 proves
    the vocabulary is *expressive*; the row-by-row assignment is T-W3's, because a copy of that
    table inside T-W2 would be a second source of truth that stays green while the register moves.
@@ -154,10 +154,13 @@ once. Both are exactly the coordination problem Milestone 0 exists to remove.
 Includes the **totality rule**: every key classifies into envelope, conversation or residual, and a
 non-empty residual raises. *Falsification:* a stub reader that drops an unknown key fails it.
 
-**T-W3 — register.** One entry per live row of §3.2.1 and §3.2.2. The families are M1–M14 and
-P1–P21, but the **sub-lettered rows are separate rows with separate triggers**, so the count is
-**42 published, 41 live** — M13 is withdrawn (KBR-5) and excluded from the data, with the parser
-asserting the struck set is exactly `{M13}` so a new strike-through is a deliberate decision.
+**T-W3 — register.** One entry per live row of §3.2.1 and §3.2.2. The families are M1–M15 and
+P1–P23, but the **sub-lettered rows are separate rows with separate triggers**, and the P family
+has gaps — P22 is reserved by §9.2's G23 — so the count is **44 published, 43 live**: M13 is
+withdrawn (KBR-5) and excluded from the data, with the parser asserting the struck set is exactly
+`{M13}` so a new strike-through is a deliberate decision. **Read the count off the register, not
+off the ranges**; it has moved twice (M15 with KBR-144, P23 with KBR-171) and nothing parses this
+sentence.
 
 Per row: id, site symbols, trigger, the projection paths it touches, conditional or not, design
 reference — plus `not_projectable_reason`, required exactly when the row takes §3.3.1a's escape.

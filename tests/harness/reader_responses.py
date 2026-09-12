@@ -66,8 +66,9 @@ _CONVERSATION_KEYS = frozenset({"input", "instructions", "tools"})
 
 #: Every remaining published control field.  These project to
 #: ``envelope.extra[<wire key>]`` per §3.3.1b, which is what makes them
-#: addressable by a register row — see KBR-171, which records that sixteen of
-#: them are dropped by the Codex allowlist with no row claiming the delta.
+#: addressable by a register row — sixteen of them are dropped by the Codex
+#: allowlist and are claimed by **P23** (KBR-171), whose guard rebuilds its
+#: sixteen paths out of this table, so an edit here must reach that row.
 _EXTRA_KEYS = frozenset(
     {
         "background",
