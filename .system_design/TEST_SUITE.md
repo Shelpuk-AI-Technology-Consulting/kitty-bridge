@@ -3692,6 +3692,13 @@ first by `FATAL_PATTERNS`, which carries `\b400\b`. Anthropic reports a spent ba
 verdict with the re-run refused. The bound is at the field's own value: a number nested inside
 a provider's error object is a parameter, not a status.
 
+⚠️ Two qualifications, because the rule is easy to state more absolutely than it holds. It
+governs **parseable** records: when `_parse_events` fails, `classify` searches the raw text
+whole and always has, status text included. And `_provider_outcome_text` has a **second
+consumer** — `_write_diagnostic`'s quota branch — so a numeric pattern added to
+`QUOTA_WORD_PATTERNS` would fire the top-up paragraph off a bare status, including under a
+`fatal` verdict. That is the door KBR-207 has to walk through carefully.
+
 **I-C4 — The verdict, the `retryable` flag and the diagnostic's advice must agree.** They are
 computed by three different functions from three different inputs — pattern order, cost, and
 the evidence text — so they can disagree without any one of them being obviously wrong.

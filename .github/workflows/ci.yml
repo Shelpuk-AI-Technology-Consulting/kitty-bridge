@@ -40,7 +40,7 @@ jobs:
       contents: read
     uses: ./.github/workflows/tests.yml
 
-  # The review system's own suite: 687 tests over the rule selector, the result
+  # The review system's own suite: 691 tests over the rule selector, the result
   # classifier, the failure and superseded notices, the prompt redactor, the
   # findings schema, and the wiring of `claude-code-review.yml` and this file.
   #

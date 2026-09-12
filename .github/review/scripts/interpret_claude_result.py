@@ -598,7 +598,6 @@ def _extract_structured_output(raw_output: str, execution_text: str) -> dict | N
 #: ⚠️ ``message`` and ``content`` are deliberately absent: that is where tool results and model
 #: prose live, and both quote the code under review.
 #:
-#: 🔴 **One field in this tuple is never actually read, and knowing which one matters here.**
 #: 🔴 **KBR-182 fixed the field that was listed here and never read.**
 #: ``api_error_status`` arrives as a JSON NUMBER, and :func:`_strings_in` collects string
 #: leaves only, so it used to be discarded before any pattern saw it -- one of the six was
@@ -612,6 +611,14 @@ def _extract_structured_output(raw_output: str, execution_text: str) -> dict | N
 #: any 400 pre-empt every quota and credential tier below. Anthropic reports a spent
 #: balance as HTTP 400, so that is KBR-145's defect rather than a theoretical ordering
 #: concern. The measurement is in :class:`StatusMatrixTests`.
+#:
+#: ⚠️ **The rule governs PARSEABLE records, and the exception is pre-existing rather
+#: than introduced here.** When :func:`_parse_events` fails, :func:`_outcome_text`
+#: returns None and :func:`classify` searches the raw text whole -- so a record that is
+#: not JSON reaches tier 1 carrying whatever its text says, ``"api_error_status": 400``
+#: included, as it always has. That is the fallback family
+#: :func:`_provider_outcome_text` documents at length, and it is unchanged: this rule
+#: is about where the COERCED number is admitted, not about the raw-text path.
 OUTCOME_FIELDS = (
     "error",
     "result",
@@ -623,6 +630,12 @@ OUTCOME_FIELDS = (
 
 #: Per-field cap, so one oversized field cannot reintroduce the problem above.
 OUTCOME_FIELD_CHARS = 4000
+
+#: The same cap for numbers, which :data:`OUTCOME_FIELD_CHARS` cannot express because
+#: the conversion is what overflows. Nine digits is far beyond any HTTP status and beyond
+#: this module's largest real code (``1310``); the point is only that a number arriving
+#: from a provider cannot be large enough to raise on `str()`. See :func:`_numbers_in`.
+OUTCOME_NUMBER_BOUND = 10**9
 
 #: 🔴 KBR-172. The one outcome field the MODEL writes. On a structured-output failure
 #: `result` carries the review it was trying to return, so every status code in it is the
@@ -857,7 +870,7 @@ def _strings_in(value: object, depth: int = 0) -> list[str]:
 
 
 def _numbers_in(value: object) -> list[str]:
-    """Collect an outcome field that arrived as a number, as text.
+    r"""Collect an outcome field that arrived as a number, as text.
 
     🔴 **KBR-182. `api_error_status` is listed in :data:`OUTCOME_FIELDS` as one of the
     six fields describing a run's outcome, and it is the one whose whole purpose is to
@@ -868,8 +881,10 @@ def _numbers_in(value: object) -> list[str]:
     :data:`FATAL_UNLESS_PROVIDER_NAMED_PATTERNS` and was reported as a broken workflow,
     with the re-run refused.
 
-    ⚠️ **What this function returns is admitted to the PROVIDER-SCOPED text only, and
-    that is the load-bearing decision rather than an implementation detail.**
+    ⚠️ **What this function returns is admitted to the PROVIDER-SCOPED text only -- of
+    a record that PARSED -- and that is the load-bearing decision rather than an
+    implementation detail.** (An unparseable record is searched whole by
+    :func:`classify`, unchanged and pre-existing; see :data:`OUTCOME_FIELDS`.)
     :data:`FATAL_PATTERNS` is tier 1 and carries ``\b400\b``, so a bare status in the
     full haystack would let any 400 pre-empt every body-derived verdict below it.
     Measured, and not hypothetical: Anthropic reports a spent credit balance as HTTP
@@ -902,9 +917,20 @@ def _numbers_in(value: object) -> list[str]:
     # collect `True` as the string "True".
     if isinstance(value, bool):
         return []
-    if isinstance(value, int):
-        return [str(value)]
-    return []
+    if not isinstance(value, int):
+        return []
+    # 🔴 The numeric twin of `OUTCOME_FIELD_CHARS`, which cannot express this because
+    # the CONVERSION is what grows: without it a 4,000-digit status becomes 4,000
+    # characters of haystack, which is the problem that cap exists to prevent.
+    #
+    # ⚠️ It does NOT stop the related crash, and claiming otherwise would be worse than
+    # not bounding at all. Python 3.11+ refuses `str()` on an integer over 4,300
+    # digits -- but `json.loads` hits that limit FIRST, inside `_parse_events`, which
+    # catches only `JSONDecodeError`. So an absurd status still raises there, on `main`
+    # exactly as here. Filed separately; this bound is about size, not about that.
+    if not -OUTCOME_NUMBER_BOUND < value < OUTCOME_NUMBER_BOUND:
+        return []
+    return [str(value)]
 
 
 def _first_match(patterns: tuple[str, ...], haystack: str) -> str | None:
