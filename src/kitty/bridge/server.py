@@ -476,6 +476,40 @@ def _repair_thinking_roundtrip(body: dict, *, native: bool) -> bool:
     return changed
 
 
+def _normalize_cc_stop(cc_request: dict) -> None:
+    """Rewrite a string ``stop`` into the single-item list form, in place.
+
+    OpenAI's ``StopConfiguration`` declares ``stop`` as ``oneOf`` a string or an
+    array of one to four strings, which makes ``"END"`` and ``["END"]`` **the
+    same request**.  Every wire kitty writes downstream takes only the array
+    form: Anthropic declares ``Array<string>``, Converse a list, Ollama an
+    array.  Normalising here means those three never have to ask.
+
+    **Call this at the ingress, before the body forks.** The same field-form
+    question was answered late and partially once before, in the Responses
+    ``input`` family, and the second path then shipped the user's text as a list
+    of its own letters (KBR-144); ``normalize_responses_request`` exists for
+    that reason and this is its Chat Completions twin.  Three copies of the wrap
+    at the three rebuild seams would be the same drift that lost
+    ``stop_sequences`` in the first place -- see KBR-178.
+
+    An **empty** string is deliberately left alone: wrapping it yields ``[""]``,
+    which Bedrock rejects (``NonEmptyString``) and which could never match
+    anything.  It is falsy, so the seams omit it -- the same rule as ``[]``.
+
+    Args:
+        cc_request: A Chat Completions request dict, mutated in place.
+
+    Returns:
+        None. The dict is modified in place, matching ``_normalize_model``.
+    """
+    # Guarded on truth, not type alone: an empty string must stay a falsy value
+    # the seams drop, rather than become a stop sequence that cannot match.
+    stop = cc_request.get("stop")
+    if isinstance(stop, str) and stop:
+        cc_request["stop"] = [stop]
+
+
 def _convert_native_to_cc_format(body: dict) -> dict:
     """Convert an Anthropic Messages body to Chat Completions format.
 
@@ -5013,6 +5047,7 @@ class BridgeServer:
         logger.debug("Request body: %s", json.dumps(body, indent=2, ensure_ascii=False))
 
         cc_request = body
+        _normalize_cc_stop(cc_request)
         self._normalize_model(cc_request)
         self._active_provider.normalize_request(cc_request)
 

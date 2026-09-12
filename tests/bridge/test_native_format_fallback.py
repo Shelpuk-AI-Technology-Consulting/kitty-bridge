@@ -11,6 +11,7 @@ from kitty.bridge.server import (
     _convert_native_to_cc_format,
     _has_tool_use_blocks,
     _is_tool_use_format_error,
+    _normalize_cc_stop,
 )
 from kitty.providers.anthropic import AnthropicAdapter
 
@@ -302,7 +303,6 @@ class TestConvertNativeToCCFormat:
         assert result["temperature"] == 0.7
         assert result["top_p"] == 0.9
 
-
     def test_stop_sequences_and_top_k_preserved(self):
         """KBR-178: the fallback converter must not re-drop what hop 1 carries.
 
@@ -322,8 +322,10 @@ class TestConvertNativeToCCFormat:
         assert "top_k" not in result
 
         # Two of the four call sites pass the already-normalised `cc_request`
-        # rather than the pristine `body` (server.py:4390, 5306), so the same
-        # mapping is exercised against a body carrying the guard flag.
+        # rather than the pristine `body` (server.py:4402, 5318), so the mapping
+        # is exercised against a body carrying the guard flag too.  This is a
+        # shape check, not a pipeline check: it does not re-run _normalize_model,
+        # normalize_request, truncation or compaction.
         mutated = _anthropic_body_with_tool_use()
         mutated["stop_sequences"] = ["A", "B"]
         mutated["top_k"] = 40
@@ -361,6 +363,68 @@ class TestConvertNativeToCCFormat:
         upstream = AnthropicAdapter().translate_to_upstream(cc)
 
         assert upstream["stop_sequences"] == ["A", "B"]
+
+
+class TestNormalizeCCStop:
+    """KBR-178 R11: a string `stop` is the same request as a one-item list.
+
+    ``StopConfiguration`` declares ``stop`` as ``oneOf`` a string or an array, so
+    the bridge owes the two forms identical treatment.  Normalised once at the
+    Chat Completions ingress rather than at each rebuild seam, for the reason
+    ``normalize_responses_request`` exists (KBR-144).
+    """
+
+    def test_a_string_becomes_a_one_item_list(self):
+        """The load-bearing case: without this, Anthropic gets a 400."""
+        cc = {"model": "m", "messages": [], "stop": "END"}
+        _normalize_cc_stop(cc)
+        assert cc["stop"] == ["END"]
+
+    def test_a_list_is_left_unchanged(self):
+        """The array form meets the rewrite as a no-op — why it is unconditional."""
+        cc = {"model": "m", "messages": [], "stop": ["A", "B"]}
+        _normalize_cc_stop(cc)
+        assert cc["stop"] == ["A", "B"]
+
+    def test_no_stop_is_left_unchanged(self):
+        """No `stop` invents none."""
+        cc = {"model": "m", "messages": []}
+        _normalize_cc_stop(cc)
+        assert "stop" not in cc
+
+    def test_an_empty_string_is_not_wrapped(self):
+        """`[""]` is rejected by Bedrock's NonEmptyString and can never match.
+
+        Left falsy so the seams omit it, exactly as they omit ``[]``.
+        """
+        cc = {"model": "m", "messages": [], "stop": ""}
+        _normalize_cc_stop(cc)
+        assert cc["stop"] == ""
+
+    def test_a_null_stop_is_left_alone(self):
+        """`stop` is nullable in Chat Completions; null stays null for R8 to drop."""
+        cc = {"model": "m", "messages": [], "stop": None}
+        _normalize_cc_stop(cc)
+        assert cc["stop"] is None
+
+    def test_normalisation_is_idempotent(self):
+        """Running it twice must not nest the list."""
+        cc = {"model": "m", "messages": [], "stop": "END"}
+        _normalize_cc_stop(cc)
+        _normalize_cc_stop(cc)
+        assert cc["stop"] == ["END"]
+
+    def test_the_string_form_reaches_an_anthropic_upstream_as_a_list(self):
+        """End to end over the seam the finding was about.
+
+        Before R11 this produced ``stop_sequences: "END"``, which Anthropic
+        rejects — a hard failure where the field had previously been dropped
+        silently.
+        """
+        cc = {"model": "m", "messages": [{"role": "user", "content": "hi"}], "stop": "END"}
+        _normalize_cc_stop(cc)
+        upstream = AnthropicAdapter().translate_to_upstream(cc)
+        assert upstream["stop_sequences"] == ["END"]
 
 
 # ── Integration test — full round-trip with server ────────────────────────

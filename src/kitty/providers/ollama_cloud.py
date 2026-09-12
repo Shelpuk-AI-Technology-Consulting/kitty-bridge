@@ -127,7 +127,11 @@ class OllamaCloudAdapter(ProviderAdapter):
         if cc_request.get("tools"):
             result["tools"] = cc_request["tools"]
 
-        # Map CC sampling params → Ollama options
+        # Map CC sampling params → Ollama options.  `top_k` is a DEAD branch for
+        # all bridge traffic since KBR-178: the Messages route carries the
+        # agent's value on `_top_k` and only Anthropic-family adapters restore
+        # it, so a bare `top_k` never arrives here.  Ollama would accept one --
+        # gap G28 records the trade-off.  Do not "fix" this without reading it.
         options: dict = {}
         for key in ("temperature", "top_p", "top_k"):
             if key in cc_request and cc_request[key] is not None:
