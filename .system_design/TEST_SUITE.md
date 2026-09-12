@@ -282,16 +282,28 @@ Responses-origin body builder", P2b's simply "same"). Sites are checked against 
 tree** instead, which is the stronger check: it catches a renamed mutation site, which no
 comparison against a prose cell could.
 
-**One row's paths *are* reconciled against the source, and it is the exception that states its own
-limit.** P23's sixteen addresses are the published control fields the Codex allowlist does not
-keep, and an L2 guard recomputes that difference from the adapter's allowlist literal and T-A3's
-control-field table, failing on any disagreement. This buys less than it appears to and the
-difference matters: a bidirectional set-equality makes widening the allowlist a **deliberate**
-edit to the row rather than a silent one — it does **not** make the row independent of the code,
-because after the code changes the only route back to green is to edit the row to match. It is
-the posture G24 records for the OpenCode endpoint snapshot: a green run proves self-consistency,
-not agreement with the vendor. Every other row's paths stay reviewed rather than derived, and
-P23 is enumerated rather than computed at import so that a reviewer still reads a list.
+**One row's paths are reconciled, and they are reconciled twice — against the source *and*
+against the markdown.** Both exceptions belong to P23 and neither generalises:
+
+1. **Against the source.** P23's sixteen addresses are the published control fields the Codex
+   allowlist does not keep, and an L2 guard recomputes that difference from the adapter's
+   allowlist literal and T-A3's control-field table. This buys less than it appears to, and the
+   difference matters: a bidirectional set-equality makes widening the allowlist a **deliberate**
+   edit to the row rather than a silent one — it does **not** make the row independent of the
+   code, because once the code changes the only route back to green is to edit the row to match.
+   It is the posture G24 records for the OpenCode endpoint snapshot: a green run proves
+   self-consistency, not agreement with the vendor.
+2. **Against the markdown**, which is the exception to the paragraph above and exists because
+   P23's Mutation cell **enumerates its sixteen wire keys in prose**. "The tables have no path
+   column" is the reason paths are not reconciled, and for this one row it stops being true: the
+   cell is a path list in all but spelling, so it is a second copy, and a second copy nothing
+   compares is one nobody will notice going stale. Measured before the guard existed — deleting
+   one of the sixteen from the cell, and changing its count word, each left the whole suite green.
+
+Every other row's paths stay reviewed rather than derived, and P23 is enumerated rather than
+computed at import so that a reviewer still reads a list. **The obligation travels with the
+shape, not with the row**: a future row that also spells its keys out in the markdown inherits
+both exceptions, and one that does not inherits neither.
 
 **The Trigger column is reconciled by nothing, and that is the third state.** Editing a Trigger
 cell produces no disagreement. Those cells are prose of the same kind as Site — "Always, on the
@@ -350,16 +362,17 @@ plan §1.4's harness rule forbids. It is filed as **KBR-139** rather than guesse
 | Data ⇄ §3.2 markdown — ids and conditionality | L2 | **T-W3** | Two files. No sockets |
 | Data ⇄ source tree — every site resolves | L2 | **T-W3** | The AST of `src/kitty`. No sockets |
 | Data ⇄ the adapter's own drop set — P23's sixteen paths | L2 | **T-W3** | One module's AST plus T-A3's control-field table. No sockets |
+| Data ⇄ §3.2.2's P23 cell — the same sixteen, spelled in prose | L2 | **T-W3** | Two files. No sockets |
 | Register completeness — projected delta at the wire equals the triggered rows | **L3** | T-G2 | Captures from T-D4–T-D9 |
 
-The first three are what make the register *well-formed*. Only the last makes it *true*, and it
-cannot run until a recorder and an oracle exist. The third is narrower than the other two — it
-checks one row, for the reason §3.2.4 gives — and it is the only one that reads a value out of
-`src/kitty` rather than a name.
+The first four are what make the register *well-formed*. Only the last makes it *true*, and it
+cannot run until a recorder and an oracle exist. The third and fourth are narrower than the first
+two — they check **one row**, for the two reasons §3.2.4 gives — and the third is the only guard
+anywhere that reads a *value* out of `src/kitty` rather than a name.
 
 **None of the well-formedness guards proves the register is *complete*.** They prove the data and
 the document say the same thing, that every site named still exists, and that one row's paths
-match one allowlist. A mutation the product performs and
+match one allowlist and one published cell. A mutation the product performs and
 *neither* artifact records is invisible to all of them — only the wire-level guard can catch that,
 and it needs a recorder and an oracle. Four such omissions are already known and filed: G22
 (headers), G23 (`openai_subscription`'s `reasoning` injection), G26 (P13's CC-origin twin) and
