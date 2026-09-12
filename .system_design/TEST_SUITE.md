@@ -3310,6 +3310,20 @@ for the number, across every leg — 3.10–3.13 on Linux plus the pinned Window
 §8.4 added after this module was written — and a platform- or version-dependent failure means
 raising it, never skipping.
 
+**The coarse clock reached this module twice, and only one of them was foreseen.** The second was
+found by the Windows leg itself: `test_the_budget_is_enforced_on_every_driven_request` drove a
+request with an "impossible" budget of literal `0.0`, on the reasoning that zero is over-budget
+for any real request. On Windows `elapsed` measured **exactly** `0.0`, so `0.0 <= 0.0` held and
+the case failed with "DID NOT RAISE" while all five other legs were green. The impossible budget
+is **negative** now, which no measurement can satisfy at any resolution.
+
+Worth separating from the rule two paragraphs above, because the remedy was **not** that rule.
+"A platform-dependent failure means raising the budget, never skipping" governs the **4.0 s**
+budget, whose margin is a judgement about runner speed. This was a different defect: an assertion
+written so that it *could not fire* on a coarse clock. The fix was to make it
+resolution-independent, not to widen a margin — and no §8.3 row was added, because the platform
+dependence was removed rather than amnestied.
+
 **The slice needs no Windows exemption row, and must not acquire one.** §8.3's registry is all
 arrival *ordering*: Windows' clock cannot separate two adjacent requests, so every "arrival
 increases" assertion is false there (KBR-188). This module asserts only that `arrival` is

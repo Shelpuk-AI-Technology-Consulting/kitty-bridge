@@ -423,12 +423,24 @@ async def _drive(
     # The capture count is reported first and is the diagnosis, not decoration:
     # the gate runs ~18.5 minutes on contended runners, so "slow" must be
     # distinguishable from "a ladder fired" without a rerun.
-    diagnosis = (
-        "exactly one upstream request, so this is a slow runner and not a retry "
-        "ladder — raise the budget rather than hunting a regression"
-        if len(captures) == 1
-        else f"{len(captures)} upstream requests, so a retry ladder fired"
-    )
+    # Three arms, not two: a retry ladder cannot leave ZERO captures. Zero means
+    # the bridge reached some other upstream, which is §7.5.4's decoy — and a
+    # decoy pointed at a *slow* upstream lands in this assertion's own 4–10 s
+    # band, so the case is reachable rather than theoretical. Reporting it as a
+    # fired ladder would send the reader hunting the wrong regression, and would
+    # contradict `_assert_one_upstream_request`'s own words for the same state.
+    if not captures:
+        diagnosis = (
+            "zero upstream requests, so the bridge reached some other upstream "
+            "entirely and no retry ladder could have fired"
+        )
+    elif len(captures) == 1:
+        diagnosis = (
+            "exactly one upstream request, so this is a slow runner and not a retry "
+            "ladder — raise the budget rather than hunting a regression"
+        )
+    else:
+        diagnosis = f"{len(captures)} upstream requests, so a retry ladder fired"
     assert elapsed <= budget, (
         f"the driven slice took {elapsed:.2f}s, over its {budget}s budget, and the "
         f"upstream saw {diagnosis}. Reference costs: the empty-response ladder is "
