@@ -22,6 +22,7 @@ import gzip
 import json
 import socket
 import sys
+import time
 from collections.abc import Callable
 from contextlib import nullcontext
 from pathlib import Path
@@ -45,6 +46,7 @@ from harness.recorder_conformance import (
     PER_EXCHANGE_CHECKS,
     PER_SESSION_CHECKS,
     RICH_PROBE,
+    check_arrival_increases,
     check_connection_logged,
     correlate,
     probe,
@@ -87,6 +89,113 @@ _SETTLE_STEP = 0.005
 _REPLY_TIMEOUT = 5.0
 
 
+#: A clock step far coarser than a probe pair takes, so two back-to-back probes
+#: land in one bucket unless something waits. Windows' real step is ~15.6 ms and
+#: a probe pair is a couple of milliseconds, which is the same relationship; this
+#: widens the gap so the property is exercised rather than raced for. It must
+#: stay inside the driver's poll budget, or it would rightly give up waiting.
+_COARSE_CLOCK_STEP = 0.05
+
+
+class TestTheDriverSeparatesProbesOnACoarseClock:
+    """KBR-188 — the Windows failure, reproduced on every platform.
+
+    ``check_arrival_increases`` asserts arrival stamps *strictly* increase. Two
+    probes sent back to back are separated by far less than Windows'
+    ~15.6 ms clock step, so the recorder stamps both at the same instant there
+    and the assertion is false — while on Linux and macOS, which resolve to
+    nanoseconds, it is true. KBR-164 met that as a red leg and KBR-188 exempted
+    the cells; but an exemption fails when its assertion *passes*, and whether a
+    given pair collides is a race, so the leg went red in **both** directions on
+    alternate runs (measured on CI, 2026-09-12: one run failed the assertion,
+    the next failed the exemption for passing).
+
+    :func:`~harness.recorder_conformance._advance_clock` moves the fix into the
+    driver, where §7.2's four recorders share it. These cases pin it against a
+    **simulated** coarse clock, so the property is proven on the platform this
+    suite actually runs on rather than only by watching a Windows leg go green.
+    """
+
+    @staticmethod
+    def _coarse(monkeypatch: pytest.MonkeyPatch, step: float) -> None:
+        """Quantise ``time.monotonic`` to ``step``, process-wide.
+
+        Patching the stdlib module object is what makes this faithful: the
+        recorder stamps arrivals with the same clock the driver waits on, which
+        is exactly the situation on Windows.
+
+        Args:
+            monkeypatch: Reverts the patch, which is what contains a change this
+                broad.
+            step: The quantum. Zero freezes the clock outright.
+        """
+        real = time.monotonic
+        origin = real()
+
+        def quantised() -> float:
+            """Return the current instant, floored to ``step``.
+
+            Returns:
+                A non-decreasing time that changes only once per step.
+            """
+            if not step:
+                return origin
+            return (real() // step) * step
+
+        monkeypatch.setattr(time, "monotonic", quantised)
+
+    def test_it_waits_until_the_clock_reports_a_new_instant(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The guarantee the whole fix rests on, asserted directly.
+
+        Args:
+            monkeypatch: Installs the coarse clock.
+        """
+        self._coarse(monkeypatch, _COARSE_CLOCK_STEP)
+        before = time.monotonic()
+
+        conformance_module._advance_clock()
+
+        assert time.monotonic() > before
+
+    def test_a_stopped_clock_bounds_the_wait_instead_of_hanging(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A clock that never moves is a defect to report, not a reason to hang.
+
+        ``check_arrival_increases`` is the check that catches a constant clock,
+        and it can only do so if the driver returns and lets it run.
+
+        Args:
+            monkeypatch: Freezes the clock outright.
+        """
+        real = time.monotonic
+        self._coarse(monkeypatch, 0)
+        started = real()
+
+        conformance_module._advance_clock()
+
+        budget = conformance_module._CLOCK_TICK_POLLS * conformance_module._CLOCK_TICK_POLL
+        assert real() - started < budget * 5
+
+    async def test_two_probes_are_stamped_at_different_instants(
+        self, recorder: RecordingUpstream, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The end-to-end claim, on a clock too coarse to give it away.
+
+        Delete the wait and this fails: a probe pair takes a couple of
+        milliseconds against a 50 ms quantum, so the two share a bucket unless
+        the driver stands them apart. The two cases above are what pin the wait
+        deterministically; this is what proves it reaches the recorder's stamps.
+
+        Args:
+            recorder: The running recorder.
+            monkeypatch: Installs the coarse clock.
+        """
+        self._coarse(monkeypatch, _COARSE_CLOCK_STEP)
+
+        sent = [await send(recorder.host, recorder.port, probe(m), marker=m) for m in ("first", "second")]
+
+        check_arrival_increases(recording_of(recorder), sent, [s.source_port for s in sent])
+
+
 class TestTheRecorderPassesEveryConformanceCheck:
     """R3.3 — the primary recorder satisfies the contract Epic B inherits."""
 
@@ -114,12 +223,7 @@ class TestTheRecorderPassesEveryConformanceCheck:
             await send(recorder.host, recorder.port, probe(marker), marker=marker)
             for marker in ("first", "second")
         ]
-        # KBR-188/189: exempt the WINDOWS CELL only -- this assertion gates
-        # normally on the Linux and macOS legs, and fails the job the day
-        # Windows starts passing. §8.3's parametrised-cell shape.
-        exempt = sys.platform == "win32" and check.__name__ == "check_arrival_increases"
-        with ratchet("recorder-arrival-increases-per-session") if exempt else nullcontext():
-            check(recording_of(recorder), sent, [s.source_port for s in sent])
+        check(recording_of(recorder), sent, [s.source_port for s in sent])
 
 
 class TestCaptureFidelity:
@@ -311,12 +415,7 @@ class TestCaptureFidelity:
         first, second = recorder.requests
         assert first.arrival is not None and second.arrival is not None
 
-        # KBR-188: the Windows cell only. Gates normally on the four Linux legs
-        # and on macOS, and fails the job the day Windows starts passing. The
-        # block holds this one assertion and nothing else, per §8.3.
-        exempt = sys.platform == "win32"
-        with ratchet("recorder-arrival-increases-across-requests") if exempt else nullcontext():
-            assert second.arrival > first.arrival
+        assert second.arrival > first.arrival
 
     async def test_a_request_that_never_completes_is_not_published(
         self, recorder: RecordingUpstream

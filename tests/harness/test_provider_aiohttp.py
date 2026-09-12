@@ -24,15 +24,12 @@ remove them from every gate.
 from __future__ import annotations
 
 import json
-import sys
 import time
-from contextlib import nullcontext
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import aiohttp
 import pytest
-from exemptions import ratchet
 
 import harness.provider_recorder as provider_recorder_module
 from harness.bridge import (
@@ -160,13 +157,7 @@ class TestTheRecorderPassesEveryConformanceCheck:
             await send(recorder.host, recorder.port, probe(name, path=OLLAMA_CHAT_SUFFIX), marker=name)
             for name in ("first", "second")
         ]
-        # KBR-188: exempt the WINDOWS CELL only -- this assertion gates normally
-        # on the Linux and macOS legs, and fails the job the day Windows starts
-        # passing. §8.3's parametrised-cell shape, as `test_recorder.py` does for
-        # the same check against the primary recorder.
-        exempt = sys.platform == "win32" and check.__name__ == "check_arrival_increases"
-        with ratchet("provider-recorder-arrival-increases-per-session") if exempt else nullcontext():
-            check(recording_of(recorder), sent, [s.source_port for s in sent])
+        check(recording_of(recorder), sent, [s.source_port for s in sent])
 
 
 class TestTheRepliesItSends:
