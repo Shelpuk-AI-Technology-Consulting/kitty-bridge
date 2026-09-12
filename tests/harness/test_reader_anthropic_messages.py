@@ -726,6 +726,60 @@ class TestContentBlocks:
             canonical.encode("utf-8")
         ).hexdigest()
 
+    @pytest.mark.parametrize("kind", ["brand_new_block", "server_tool_use_2", "a_b_c"])
+    def test_a_vendor_type_nobody_has_seen_still_projects_when_it_is_snake_case(self, kind: str) -> None:
+        """The fallthrough stays open (KBR-174).
+
+        Anthropic adds block types, and a new *snake_case* one needs no decision:
+        it names a concept no other format has, so its own spelling is already
+        canonical. Failing the run on it would turn a vendor release into a
+        harness outage.
+        """
+        projected = _read(_minimal(messages=[{"role": "user", "content": [{"type": kind, "x": 1}]}]))
+
+        part = projected.conversation.turns[0].parts[0]
+
+        assert isinstance(part, c.Opaque)
+        assert part.kind == kind
+        c.verify_total(projected)
+
+    @pytest.mark.parametrize("kind", ["myCustomBlock", "guardContent", "toolAddition"])
+    def test_a_type_with_no_canonical_name_is_an_unreadable_body_not_a_reader_bug(self, kind: str) -> None:
+        """KBR-174 — the diagnosis must name the wire, not the harness.
+
+        `contract` defines a reader-raised `ValueError` as "the reader mis-routed
+        a field: a reader bug", and `Opaque` now raises exactly that on a
+        non-canonical kind. The body is untrusted input, so the reader translates
+        it — matching the branch above, which already raises `UnreadableBodyError`
+        for a non-string `type`. Left untranslated, a camelCase vendor type would
+        be reported as a defect in this harness.
+        """
+        body = _minimal(messages=[{"role": "user", "content": [{"type": kind, "x": 1}]}])
+
+        with pytest.raises(c.UnreadableBodyError, match=kind):
+            _read(body)
+
+    def test_a_wire_spelling_the_shared_table_reconciles_is_translated_not_rejected(self) -> None:
+        """KBR-174 — this is what proves the reader names kinds *through* the contract.
+
+        `searchResult` is Converse's spelling of Anthropic's `search_result`. No
+        Anthropic body carries it, but the reader must not be free to invent its
+        own answer either: routing every kind through `opaque_kind` is what stops
+        the next reader disagreeing, and a pass-through-only test could not tell
+        the wiring from its absence.
+        """
+        projected = _read(_minimal(messages=[{"role": "user", "content": [{"type": "searchResult"}]}]))
+
+        assert projected.conversation.turns[0].parts[0].kind == "search_result"
+
+    def test_the_translation_covers_a_tool_result_s_content_too(self) -> None:
+        """`_read_opaque` has two call sites and only one passes through `_read_block`."""
+        block = {"type": "tool_result", "tool_use_id": "t1", "content": [{"type": "myCustomBlock"}]}
+        body = _minimal(messages=[{"role": "user", "content": [block]}])
+
+        with pytest.raises(c.UnreadableBodyError, match="myCustomBlock"):
+            _read(body)
+
     def test_cache_control_on_an_opaque_block_residualises_and_leaves_the_digest_alone(self) -> None:
         """R4.6 — one field must not behave two ways: it residualises on modelled blocks too."""
         bare = {"type": "document", "title": "t"}

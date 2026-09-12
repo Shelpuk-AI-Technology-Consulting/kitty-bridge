@@ -7,7 +7,7 @@ why; this one says who can build what, in what order, without waiting on each ot
 when the plan is accepted.
 
 > **Identifiers.** Every task id is prefixed `T-`. `TEST_SUITE.md` already uses bare `C1–C6` for
-> observable channels, `F1–F5` for findings, `G1–G19` for gaps and `I1–I3` for the invariants. An
+> observable channels, `F1–F5` for findings, `G1–G27` for gaps and `I1–I3` for the invariants. An
 > earlier draft collided with all of them. The **Design** column carries the reverse link.
 
 > **The epic tables in §4–§13 are the single source of truth for dependencies.** §14's tiers and
@@ -138,7 +138,7 @@ once. Both are exactly the coordination problem Milestone 0 exists to remove.
 
 **T-W3 inherits two acceptance criteria from this work.**
 
-1. Every one of the 42 live rows carries either a path in T-W2's vocabulary or `not projectable`
+1. Every one of the 43 live rows carries either a path in T-W2's vocabulary or `not projectable`
    **with a reason**, asserted against the register data so a new row cannot escape it. T-W2 proves
    the vocabulary is *expressive*; the row-by-row assignment is T-W3's, because a copy of that
    table inside T-W2 would be a second source of truth that stays green while the register moves.
@@ -154,10 +154,13 @@ once. Both are exactly the coordination problem Milestone 0 exists to remove.
 Includes the **totality rule**: every key classifies into envelope, conversation or residual, and a
 non-empty residual raises. *Falsification:* a stub reader that drops an unknown key fails it.
 
-**T-W3 — register.** One entry per live row of §3.2.1 and §3.2.2. The families are M1–M14 and
-P1–P21, but the **sub-lettered rows are separate rows with separate triggers**, so the count is
-**42 published, 41 live** — M13 is withdrawn (KBR-5) and excluded from the data, with the parser
-asserting the struck set is exactly `{M13}` so a new strike-through is a deliberate decision.
+**T-W3 — register.** One entry per live row of §3.2.1 and §3.2.2. The families are M1–M15 and
+P1–P23, but the **sub-lettered rows are separate rows with separate triggers**, and the P family
+has gaps — P22 is reserved by §9.2's G23 — so the count is **44 published, 43 live**: M13 is
+withdrawn (KBR-5) and excluded from the data, with the parser asserting the struck set is exactly
+`{M13}` so a new strike-through is a deliberate decision. **Read the count off the register, not
+off the ranges**; it has moved twice (M15 with KBR-144, P23 with KBR-171) and nothing parses this
+sentence.
 
 Per row: id, site symbols, trigger, the projection paths it touches, conditional or not, design
 reference — plus `not_projectable_reason`, required exactly when the row takes §3.3.1a's escape.
@@ -423,7 +426,7 @@ that makes *its* bytes observable. Bundled, the Ollama half would have had no ev
 | **T-I4** | Background bridge ownership | | — | Not stopped, not restarted, no second bridge | §6.3.2 | S |
 | **T-I5** | Agent startup smoke | blocked Q12 | T-W8, T-W9, T-B4 | Pinned Claude Code binary, one turn, clean exit | §6.4.2 | M |
 | **T-I6** | Agent settings precedence | blocked Q12 | T-I5 | Three runs, three winners; every sentinel demonstrated live | §6.4.2 | M |
-| **T-I7** | Streaming recovery — content | partial Q14 | T-B4, T-G7, T-W8 | Four injection points; no duplicated text, no reused tool-call id, no spliced arguments. Positive oracle waits on Q14 | §6.3.1 | L |
+| **T-I7** | Streaming recovery — content | | T-B4, T-G7, T-W8 | Four injection points; no duplicated text, no reused tool-call id, no spliced arguments — and, per the answer in §11, the three post-emission points each close the block and terminate with one error rather than recovering | §6.3.1 | L |
 | **T-I8** | Cross-attempt content and cadence | | T-D1, T-W8, T-B4 | Blip and empty-response retries byte-identical; M6, M8, M9 and failover re-normalisation each fire only on trigger | §4.3 C3 | M |
 | **T-I9** | Connection lifecycle baseline | | T-W8, T-C7 | Distinct connections per session vs the native capture; ratcheted — a **reported baseline**, not `exemptions.ratchet`, which is the unrelated gating mechanism of §8.3 | §4.3 C5 | M |
 | **T-I10** | `_backend_context` isolation | | T-W8 | Deterministic; belongs here, not in load | §6.3.1 | S |
@@ -554,10 +557,10 @@ exist, and the plan should not offer it.
 | **Q10** | T-F2's exact bound, TR-3's wording, register rows M3–M7 | T-F2 lands with the observed-behaviour property and is revised **together with** TR-3 and the register. Narrowed by KBR-5: M13 is withdrawn, so "keep current behaviour" is no longer an option for that row |
 | **Q11** | Nothing — **T-H4 answers it** | T-H3 lands nightly-only |
 | **Q12** | T-I5, T-I6, T-K10 | The settings-precedence claim has no per-PR proof. **It no longer blocks Subsystem or Acceptance** — T-K10 is a separate category |
-| **Q14** | T-I7's positive assertions | T-I7 lands asserting only the negatives |
 
 **Q1** blocks no task but decides whether T-I12 and TR-1c ever gate. **Q5–Q7** affect register
-rows and wording, not delivery.
+rows and wording, not delivery. **Q14 left this table on 2026-09-12** (KBR-163): T-I7 now carries a
+full oracle, and the answer's second half is KBR-155's remedy.
 
 ---
 
@@ -593,6 +596,7 @@ merge.** So:
 | KBR-9 | G6 | T-G1 | Atomic fix + test now |
 | KBR-132 · **CLOSED** | G21 | — | Route taken: atomic fix + regression test, red at base, evidence in the PR. The broader guard is **KBR-138**, which has no plan-task ID because it was filed after this plan was written; G21 is its design gap. (Status convention: `TEST_SUITE.md` §9.2.) |
 | KBR-146 · **CLOSED** | G25 | — | Route taken: atomic fix + regression tests, red at base on both sides of the interpreter boundary, evidence in the PR. Landed the fifth §6.2.4 contract (`tests/test_ipaddress_contract.py`) ahead of all four planned ones; no plan-task ID, filed after this plan was written. G25 records what that contract still cannot prove. Duplicates KBR-141/142/150/162. (Status convention: `TEST_SUITE.md` §9.2.) |
+| KBR-183 | G26 | T-I7 | Found while answering **Q14** (KBR-163), by checking the claim that the answer merely ratified existing behaviour. It does not: `_is_transport_error` excludes `asyncio.TimeoutError` by design and the failover arm carries no emission test, so a post-emission timeout still writes a second attempt onto the client's open stream. Measured, not inferred. Product code, so the atomic-PR rule applies — the regression test must be red at the base revision |
 | KBR-175 | — | — | Found while writing **T-W8**. A **test fixture**, not product code: `tests/conftest.py::sample_profile_dict` carries a UUIDv7 `auth_ref` where `Profile` requires v4, so it cannot build the model it describes — and no test reads it. No regression-evidence rule applies, because nothing under `src/kitty` is wrong. The decision (delete it, or repair the id) is the owner's; T-W8 ships `profile_for()` and deliberately leaves it untouched |
 
 ---
