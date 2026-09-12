@@ -650,11 +650,22 @@ agree on a canonical form. They are six separate tasks, so the agreement is part
   `""` claims a tool *named* empty-string, and a call nobody can name cannot be paired or
   addressed. Apply that test to every required field, not only these two.
 
+  **A value that is not a string at all — including an already-decoded object — residualises
+  too.** Accepting the object form would make a bridge that emitted it where the schema demands a
+  string invisible to the oracle, which is the wire-format breach the readers exist to see. And
+  what residualises is the **raw wire value, unmodified** — `"[1,2]"` stores the *string*, never
+  the decoded list — because T-D8 diffs residual key sets across all six readers, and two
+  renderings of one unreadable value would report a delta neither reader caused.
+
   Six readers cannot quietly disagree about what `arguments: ""` means, and it is not
   hypothetical — `openai_subscription.py:OpenAISubscriptionAdapter._cc_to_responses` writes
   `func.get("arguments", "")`. The residual *path* is format-specific and stays each reader's own;
-  only the decode and the fail-closed policy are shared. Tracked for pinning as code beside
-  `image_digest` — KBR-174.
+  only the decode and the fail-closed policy are shared.
+
+  **Pinned as code: `contract.decode_arguments(raw, path, residual)`** (KBR-174), beside
+  `image_digest` and for the same reason. It takes the residual as a parameter rather than
+  reporting a flag the caller must act on: `mypy` covers `src/kitty` only, so a reader that
+  ignored such a flag would be caught by nothing.
 - **`tool_choice`** unifies four wire keys — CC/Messages `tool_choice`, Converse's
   `toolConfig.toolChoice`, Gemini's `functionCallingConfig.mode` — onto
   `envelope.extra["tool_choice"]`, with the **value** normalised to `auto` · `any` · `none` ·
@@ -2365,13 +2376,46 @@ and the second is the one that surprises:
 **`Opaque` consumes its block, and carries a payload digest.** A block type the grammar does not
 model projects as `Opaque(kind=…, digest=…)` where:
 
-- `kind` is the wire `type` converted to snake_case. Anthropic's spellings (`document`,
-  `search_result`, `redacted_thinking`, `server_tool_use`) are already canonical; Converse writes
-  `searchResult` for the same thing, so **the cross-vendor alias table lands in this section with
-  the first reader that needs one** (T-A5), rather than being invented twice.
-- `digest` is exactly
-  `hashlib.sha256(json.dumps(rest, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")).hexdigest()`,
-  where `rest` is the block without `type` and without `cache_control`.
+- `kind` is the wire `type` converted to snake_case, **through `contract.opaque_kind()`** — not
+  restated by each reader. Anthropic's spellings (`document`, `search_result`,
+  `redacted_thinking`, `server_tool_use`) are already canonical; a format-unique type keeps its own
+  spelling, which is the deliberate exception to "never the wire's spelling".
+
+  **The alias table arrived with T-A3, not T-A5.** This section deferred it to "the first reader
+  that needs one"; that was wrong, and the cost was paid before it was noticed. T-A1 and T-A3
+  landed first and named one concept two ways — Anthropic's `document` and Responses' `file` for
+  an attached file — which is the permanent unclaimed delta the deferral was meant to avoid.
+  `document` is canonical because Anthropic Messages **and** Bedrock Converse both spell it that
+  way on the wire, so exactly one reader moved. The table is `contract.OPAQUE_ALIASES` and it is
+  **enforced**: `Opaque` rejects any key of it, so a reader cannot quietly project a rival name.
+  The lesson generalises — a shared vocabulary deferred to the reader that first needs it is
+  deferred to the *second* reader, because the first has already answered it alone.
+
+  **A non-snake_case wire type with no alias raises.** `opaque_kind` does not convert it: a
+  camelCase splitter with no caller and no corpus is a second source of drift, not a cure for one,
+  so the conversion belongs to the author who first meets a real one. That is **T-A5, nine times**
+  — Converse's `ContentBlock` union is `text` `image` `document` `video` `audio` `toolUse`
+  `toolResult` `guardContent` `cachePoint` `reasoningContent` `citationsContent` `searchResult`
+  `toolAddition` `toolRemoval` (confirmed against the `bedrock-runtime` 2023-09-30 service model),
+  of which nine are camelCase. A **reader** meeting such a type translates the `ValueError` into
+  `UnreadableBodyError`: the body is not projectable, but the reader is not at fault, and
+  `contract` defines a reader-raised `ValueError` as a reader bug. A new *snake_case* vendor type
+  needs no decision and still projects, so a vendor release is not a harness outage.
+- `digest` has **two recipes**, and which applies is a property of the content, not of the format:
+
+  * `contract.opaque_digest(block)` for a block the grammar cannot model — exactly
+    `hashlib.sha256(json.dumps(rest, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")).hexdigest()`,
+    where `rest` is the block without `type` and without `cache_control`.
+  * `contract.text_digest(text)` for content whose identity is a run of text — a refusal is the
+    case. One recipe was considered and rejected on a checked fact: Chat Completions carries a
+    refusal as a **bare string** on the message (`ChatCompletionResponseMessage.refusal` is
+    `anyOf[string, null]`), so there is no block for T-A2 to hash and a single rule would force it
+    to invent a wrapper — and the wrapper's shape would be a new thing six readers could disagree
+    about, which is this rule's own defect one level down.
+
+  Both are pinned in `contract.py` rather than restated here (KBR-174), because prose did not hold
+  the first one: in T-A1 all three wrong spellings survived mutation testing until a test pinned a
+  digest to an external literal.
 - the block's every other key is **consumed** — nothing beneath it residualises — while
   `cache_control` residualises under its path exactly as it does on a modelled block.
 
