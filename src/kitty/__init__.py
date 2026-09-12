@@ -4,5 +4,5 @@ import logging
 
 logging.getLogger(__name__).addHandler(logging.NullHandler())
 
-__version__ = "1.9.2"
+__version__ = "1.10.0"
 __all__ = ["__version__"]
