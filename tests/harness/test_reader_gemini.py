@@ -1898,6 +1898,11 @@ class TestEveryOptionalLeafFailsClosed:
             "tools[0].functionDeclarations[0].description",
             lambda p: p.conversation.tools[0].description is None,
         ),
+        "functionDeclaration.name": (
+            {"tools": [{"functionDeclarations": [{"name": 7}]}]},
+            "tools[0].functionDeclarations[0].name",
+            lambda p: p.conversation.tools[0] == c.ToolDecl(name=""),
+        ),
         "functionDeclaration.parametersJsonSchema": (
             {"tools": [{"functionDeclarations": [{"name": "f", "parametersJsonSchema": ["ab", "cd"]}]}]},
             "tools[0].functionDeclarations[0].parametersJsonSchema",
@@ -1908,7 +1913,7 @@ class TestEveryOptionalLeafFailsClosed:
             "tools[0].functionDeclarations[0].parameters",
             lambda p: p.conversation.tools[0].schema is None,
         ),
-        "part.thoughtSignature-as-name-placeholder": (
+        "functionCall.name": (
             {"contents": [{"parts": [{"functionCall": {"name": 7}}]}]},
             "contents[0].parts[0].functionCall.name",
             lambda p: p.conversation.turns[0].parts[0] == c.ToolUse(name=""),

@@ -943,6 +943,15 @@ def _read_required_name(view: Mapping[str, tuple[str, Any]], path: str, residual
     because dropping or raising on it would blind the oracle to the rest of a
     request it could otherwise diff. T-A3 takes the same branch.
 
+    **Two call sites, and they are only interchangeable by coincidence.** This is
+    reached from a ``FunctionDeclaration`` view and from a ``FunctionCall`` view,
+    which today publish ``name`` alike. A future schema that gave one of them a
+    second name-shaped key would silently mis-route here, because the helper
+    takes the aliased view rather than the schema it came from. Named so that a
+    change to one call site is not made on the assumption that the other
+    followed; each has its own wrongly-typed case in
+    ``TestEveryOptionalLeafFailsClosed``.
+
     Args:
         view: The aliased view of the object carrying the name.
         path: That object's path from the body root.
