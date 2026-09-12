@@ -33,6 +33,7 @@ from kitty.auth.oauth_session import (
     ID_TOKEN_TYPE,
     TOKEN_EXCHANGE_GRANT,
     OAuthSession,
+    token_request_headers,
 )
 from kitty.auth.pkce import generate_code_challenge, generate_code_verifier
 from kitty.egress import aiohttp_session_kwargs
@@ -256,7 +257,7 @@ async def _exchange_code_for_tokens(
         "client_id": client_id,
         "code_verifier": code_verifier,
     }
-    async with http.post(OAUTH_TOKEN_URL, data=payload) as resp:
+    async with http.post(OAUTH_TOKEN_URL, data=payload, headers=token_request_headers()) as resp:
         if resp.status >= 400:
             body_text = await resp.text()
             raise OAuthAuthorizationError(
@@ -307,7 +308,10 @@ async def _exchange_id_token_for_api_key(
         "subject_token_type": ID_TOKEN_TYPE,
         "client_id": client_id,
     }
+    # The bearer header is how this grant authenticates; the Codex identity is
+    # merged on top so this POST claims the same client as every other leg.
     headers = {
+        **token_request_headers(),
         "Authorization": f"Bearer {access_token}",
     }
     async with http.post(OAUTH_TOKEN_URL, data=payload, headers=headers) as resp:

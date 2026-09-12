@@ -424,6 +424,11 @@ class TestTheWholeSuiteIsCoherent:
             # the interpreter does, which is an artifact upgraded separately
             # from this one and by someone else entirely.
             "tests/test_ipaddress_contract.py",
+            # KBR-161. Two dependency-and-agreement guards: what curl_cffi
+            # promises the OpenAI subscription legs (§6.2.4, an unbounded
+            # pin), and that both legs present one identity from one source.
+            "tests/test_curl_cffi_transport_contract.py",
+            "tests/test_oauth_leg_identity.py",
         }
 
         actual = {

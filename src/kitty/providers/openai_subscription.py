@@ -17,9 +17,13 @@ Transport: curl_cffi (AsyncSession) for Codex backend requests.  curl_cffi
 uses libcurl under the hood with HTTP/2 and a Chrome TLS fingerprint
 (impersonate="chrome136") that Cloudflare accepts, matching the legitimate-
 client behavior of the real Codex CLI (reqwest + rustls).  A long-lived
-session automatically persists Cloudflare cookies across requests.  OAuth
-token refresh uses a short-lived aiohttp session (auth.openai.com has no
-CF issues).
+session automatically persists Cloudflare cookies across requests.  The
+OAuth token refresh rides that same session (KBR-161): a provider that sees
+an impersonated Codex CLI fetching completions and an anonymous Python
+client refreshing the same account's token, on a different TLS fingerprint,
+has a one-line rule for bridge traffic.  The interactive login leg in
+`kitty.auth.openai_oauth` still uses aiohttp -- it has no adapter to borrow
+a session from; see TEST_SUITE.md 4.5.
 """
 
 from __future__ import annotations
@@ -29,7 +33,6 @@ import contextlib
 import json
 import logging
 import os
-import platform
 import random
 import time
 import uuid
@@ -38,10 +41,13 @@ from pathlib import Path
 from typing import Protocol
 
 import curl_cffi.requests
+from curl_cffi import CurlOpt
 
+from kitty import codex_identity
 from kitty.auth.oauth_session import OAuthRefreshFailed, OAuthSession
+from kitty.auth.token_transport import CurlTokenTransport
 from kitty.cloudflare import get_cloudflare_signature, is_cloudflare_block
-from kitty.egress import aiohttp_session_kwargs, get_egress
+from kitty.egress import get_egress
 from kitty.providers.base import ProviderError
 
 # Avoid circular import — only need the parent class methods
@@ -94,17 +100,6 @@ def _codex_backoff(attempt: int) -> float:
     jitter = random.uniform(0.9, 1.1)  # noqa: S311
     return float((millis * jitter) / 1000.0)
 
-
-# The impersonated Codex CLI version, and the single source for BOTH version
-# fields this adapter sends -- the `version` header and the user-agent's product
-# version -- because a client stating two different versions in one request is an
-# intermediary and nothing else (KBR-8).
-#
-# The value is the real released Codex CLI version, not kitty's.  (Codex's own
-# checked-in reference workspace carries 0.0.0, a dev placeholder; its release
-# builds carry the real one, which is what this impersonates.)  Nothing rewrites
-# this at build time -- it is edited here when the impersonated version moves.
-_CODEX_CLI_VERSION = "0.128.0"
 
 # curl_cffi TLS impersonation target — matches the browser-like TLS fingerprint
 # that Codex CLI's reqwest+rustls produces.  Without impersonate=, curl_cffi
@@ -216,6 +211,7 @@ class OpenAISubscriptionAdapter(OpenAIAdapter):
 
     def __init__(self) -> None:
         self._curl_session_instance: curl_cffi.requests.AsyncSession | None = None
+        self._oauth_curl_session_instance: curl_cffi.requests.AsyncSession | None = None
         self._oauth_session_cache: dict[str, tuple[int, int, OAuthSession]] = {}
 
     @property
@@ -243,16 +239,7 @@ class OpenAISubscriptionAdapter(OpenAIAdapter):
         """
         if self._curl_session_instance is None:
             ca_path = _resolve_ca_cert_path()
-            kwargs: dict = {"impersonate": _CODEX_IMPERSONATE}
-            if ca_path:
-                kwargs["verify"] = ca_path
-            # Egress must be applied here rather than after construction:
-            # _reset_curl_session() rebuilds this session mid-request when
-            # Cloudflare blocks us, and the rebuild goes through this path.
-            _egress = get_egress()
-            if _egress is not None:
-                kwargs["proxies"] = _egress.proxies_dict()
-            self._curl_session_instance = curl_cffi.requests.AsyncSession(**kwargs)
+            self._curl_session_instance = self._new_curl_session(ca_path)
             logger.debug(
                 "Created curl_cffi session with impersonate=%s, ca_path=%s",
                 _CODEX_IMPERSONATE,
@@ -261,6 +248,72 @@ class OpenAISubscriptionAdapter(OpenAIAdapter):
             # Defensive: strip any non-CF cookies at session init
             self._filter_cloudflare_cookies(self._curl_session_instance.cookies)
         return self._curl_session_instance
+
+    @staticmethod
+    def _new_curl_session(ca_path: str | None) -> curl_cffi.requests.AsyncSession:
+        """Build a session impersonating the Codex CLI, contained by egress.
+
+        Shared by the API leg and the OAuth token leg so the two cannot drift
+        apart on the properties that make them the same client (KBR-161): the
+        TLS impersonation target, the CA bundle, and the egress mapping.
+
+        Args:
+            ca_path: Custom CA bundle to verify against, or ``None`` for the
+                default.
+
+        Returns:
+            A new ``curl_cffi`` session. Not cached here -- each caller owns its
+            own, and :meth:`_reset_curl_session` rebuilds the API leg's through
+            this path when Cloudflare blocks it.
+        """
+        kwargs: dict = {"impersonate": _CODEX_IMPERSONATE}
+        if ca_path:
+            kwargs["verify"] = ca_path
+
+        # Egress must be applied at construction: _reset_curl_session() rebuilds
+        # the API session mid-request when Cloudflare blocks us, and the rebuild
+        # comes back through here.
+        _egress = get_egress()
+        if _egress is not None:
+            kwargs["proxies"] = _egress.proxies_dict()
+            # curl_cffi reads the ambient proxy environment; aiohttp does not.
+            # A user's NO_PROXY matching the upstream host silently defeats
+            # `proxies=` and sends provider traffic -- prompts on the API leg,
+            # refresh tokens and API keys on the OAuth leg -- straight past a
+            # configured gateway, with no error and no log line. Setting
+            # CURLOPT_NOPROXY explicitly wins over the environment, which is the
+            # only way to make the mapping mean what invariant I3 says it means.
+            # Measured against curl_cffi 0.16.3; pinned by the dependency
+            # contract in tests/test_curl_cffi_transport_contract.py.
+            kwargs["curl_options"] = {CurlOpt.NOPROXY: ""}
+
+        return curl_cffi.requests.AsyncSession(**kwargs)
+
+    @property
+    def _oauth_curl_session(self) -> curl_cffi.requests.AsyncSession:
+        """Long-lived curl_cffi session for OAuth token requests.
+
+        Separate from :attr:`_curl_session` even though both impersonate the
+        same client, for two reasons that have nothing to do with identity:
+
+        * an ``AsyncSession`` owns a bounded pool of curl handles, and a
+          streaming completion holds its handle for the life of the stream, so a
+          refresh sharing the pool would queue behind in-flight completions --
+          while holding the session's refresh lock, blocking every other request
+          for that account;
+        * cookies are host-scoped, and this leg addresses ``auth.openai.com``
+          while the API leg addresses ``chatgpt.com``, so one jar would hold
+          both hosts' cookies for the process lifetime and replay the auth
+          host's across every account the bridge serves.
+
+        Sharing would buy nothing observable: the two legs never share a
+        connection or a cookie, only a fingerprint, which they get from
+        :meth:`_new_curl_session` either way.
+        """
+        if self._oauth_curl_session_instance is None:
+            self._oauth_curl_session_instance = self._new_curl_session(_resolve_ca_cert_path())
+            logger.debug("Created curl_cffi OAuth session with impersonate=%s", _CODEX_IMPERSONATE)
+        return self._oauth_curl_session_instance
 
     # ── Helpers ────────────────────────────────────────────────────────────
 
@@ -289,21 +342,18 @@ class OpenAISubscriptionAdapter(OpenAIAdapter):
         ``codex-rs/login/src/auth/default_client.rs``.
 
         Returns:
-            The impersonated Codex CLI user-agent, versioned from
-            :data:`_CODEX_CLI_VERSION` -- the same constant
-            :meth:`_build_codex_headers` puts in the ``version`` header.
+            The impersonated Codex CLI user-agent, from
+            :func:`kitty.codex_identity.build_codex_user_agent` -- the same
+            source :meth:`_build_codex_headers` reads the ``version`` header
+            from, and the same one the OAuth token leg presents (KBR-161).
 
-        The version is deliberately **not** ``kitty.__version__`` (KBR-8).
-        Reading it from there made a single request claim to be two different
-        Codex CLI versions at once -- something no genuine client does, and so a
-        one-line detection rule for bridge traffic -- and tied the header to
-        kitty's release train, changing it on every kitty release and nothing
-        else.  See ``.system_design/TEST_SUITE.md`` finding F1 and 4.3 C1.
+        The version is deliberately **not** ``kitty.__version__`` (KBR-8), and
+        deliberately not a copy held here: it lives in
+        :mod:`kitty.codex_identity` because :mod:`kitty.auth` presents it too,
+        and two sources is the defect itself.  See
+        ``.system_design/TEST_SUITE.md`` finding F1 and 4.3 C1.
         """
-        os_type = platform.system()
-        os_version = platform.release()
-        arch = platform.machine()
-        return f"codex_cli_rs/{_CODEX_CLI_VERSION} ({os_type} {os_version}; {arch})"
+        return codex_identity.build_codex_user_agent()
 
     def _build_codex_headers(self, access_token: str, id_token: str) -> dict[str, str]:
         """Build headers matching the Codex CLI (reqwest + rustls).
@@ -323,7 +373,7 @@ class OpenAISubscriptionAdapter(OpenAIAdapter):
             "Accept": "text/event-stream",
             "Authorization": f"Bearer {access_token}",
             "User-Agent": self._build_user_agent(),
-            "version": _CODEX_CLI_VERSION,
+            "version": codex_identity.CODEX_CLI_VERSION,
         }
         account_id = self._extract_account_id(id_token)
         if account_id:
@@ -540,121 +590,118 @@ class OpenAISubscriptionAdapter(OpenAIAdapter):
 
         # Auth recovery loop (Codex CLI: UnauthorizedRecovery state machine).
         # Step 0: initial attempt, Step 1: reload from disk, Step 2: force-refresh.
-        import aiohttp
-
         resp: _CurlResponse | None = None
         got_401 = False
-        async with aiohttp.ClientSession(**aiohttp_session_kwargs()) as oauth_http:
-            for _auth_step in range(3):
-                resp = None
-                session = self._load_session(cc_request)
+        for _auth_step in range(3):
+            resp = None
+            session = self._load_session(cc_request)
 
-                force_refresh = _auth_step == 2
+            force_refresh = _auth_step == 2
+            try:
+                access_token = await session.get_valid_api_key(
+                    CurlTokenTransport(self._oauth_curl_session),
+                    force_refresh=force_refresh,
+                )
+            except OAuthRefreshFailed as exc:
+                err = ProviderError(
+                    f"Authentication refresh failed. "
+                    f"Please re-authenticate with 'kitty auth openai'. Details: {exc}"
+                )
+                err.http_status = 401
+                raise err from exc
+
+            self._update_session_cache_stat(session)
+            headers = self._build_codex_headers(access_token, session.id_token)
+            self._filter_cloudflare_cookies(self._curl_session.cookies)
+            self._log_cf_cookies(self._curl_session.cookies)
+
+            got_401 = False
+            # General retry loop (5xx, CF 403, transport errors)
+            for _attempt in range(_CODEX_RETRY_MAX_ATTEMPTS + 1):
                 try:
-                    access_token = await session.get_valid_api_key(
-                        oauth_http,
-                        force_refresh=force_refresh,
+                    resp = await self._curl_session.post(
+                        _CODEX_BACKEND_URL,
+                        json=resp_body,
+                        headers=headers,
+                        timeout=_CODEX_TIMEOUT,
                     )
-                except OAuthRefreshFailed as exc:
-                    err = ProviderError(
-                        f"Authentication refresh failed. "
-                        f"Please re-authenticate with 'kitty auth openai'. Details: {exc}"
-                    )
-                    err.http_status = 401
-                    raise err from exc
-
-                self._update_session_cache_stat(session)
-                headers = self._build_codex_headers(access_token, session.id_token)
-                self._filter_cloudflare_cookies(self._curl_session.cookies)
-                self._log_cf_cookies(self._curl_session.cookies)
-
-                got_401 = False
-                # General retry loop (5xx, CF 403, transport errors)
-                for _attempt in range(_CODEX_RETRY_MAX_ATTEMPTS + 1):
-                    try:
-                        resp = await self._curl_session.post(
-                            _CODEX_BACKEND_URL,
-                            json=resp_body,
-                            headers=headers,
-                            timeout=_CODEX_TIMEOUT,
+                except Exception as exc:
+                    if _attempt < _CODEX_RETRY_MAX_ATTEMPTS:
+                        logger.debug(
+                            "Codex backend transport error (attempt %d/%d): %s",
+                            _attempt + 1,
+                            _CODEX_RETRY_MAX_ATTEMPTS + 1,
+                            exc,
                         )
-                    except Exception as exc:
+                        await asyncio.sleep(_codex_backoff(_attempt + 1))
+                        continue
+                    raise self._handle_curl_error(exc) from exc
+
+                if resp.status_code >= 400:
+                    raw = resp.text
+
+                    # Cloudflare block — retry with specialized handling
+                    if self._is_cloudflare_block(resp.status_code, raw):
+                        cf_sig = get_cloudflare_signature(raw)
+                        logger.debug(
+                            "CF block detected in make_request: signature=%s, body_len=%d",
+                            cf_sig,
+                            len(raw),
+                        )
                         if _attempt < _CODEX_RETRY_MAX_ATTEMPTS:
-                            logger.debug(
-                                "Codex backend transport error (attempt %d/%d): %s",
-                                _attempt + 1,
-                                _CODEX_RETRY_MAX_ATTEMPTS + 1,
-                                exc,
-                            )
-                            await asyncio.sleep(_codex_backoff(_attempt + 1))
-                            continue
-                        raise self._handle_curl_error(exc) from exc
-
-                    if resp.status_code >= 400:
-                        raw = resp.text
-
-                        # Cloudflare block — retry with specialized handling
-                        if self._is_cloudflare_block(resp.status_code, raw):
-                            cf_sig = get_cloudflare_signature(raw)
-                            logger.debug(
-                                "CF block detected in make_request: signature=%s, body_len=%d",
-                                cf_sig,
-                                len(raw),
-                            )
-                            if _attempt < _CODEX_RETRY_MAX_ATTEMPTS:
-                                if _attempt == 0:
-                                    logger.info(
-                                        "CF block: refreshing session and curl connection before retry",
-                                    )
-                                    with contextlib.suppress(Exception):
-                                        self._invalidate_session_cache(cc_request)
-                                        self._reset_curl_session()
-                                        session = self._load_session(cc_request)
-                                        self._update_session_cache_stat(session)
-                                logger.warning(
-                                    "Codex backend blocked by Cloudflare challenge (signature=%s), retrying",
-                                    cf_sig,
+                            if _attempt == 0:
+                                logger.info(
+                                    "CF block: refreshing session and curl connection before retry",
                                 )
-                                await asyncio.sleep(_codex_backoff(_attempt + 1))
-                                continue
-                            logger.warning("Codex backend blocked by Cloudflare challenge after retries")
-                            raise self.map_error(resp.status_code, {"error": {"message": raw}})
-
-                        # 5xx server error — retry if attempts remain
-                        if resp.status_code >= 500 and _attempt < _CODEX_RETRY_MAX_ATTEMPTS:
-                            logger.debug(
-                                "Codex backend %d error (attempt %d/%d), retrying",
-                                resp.status_code,
-                                _attempt + 1,
-                                _CODEX_RETRY_MAX_ATTEMPTS + 1,
+                                with contextlib.suppress(Exception):
+                                    self._invalidate_session_cache(cc_request)
+                                    self._reset_curl_session()
+                                    session = self._load_session(cc_request)
+                                    self._update_session_cache_stat(session)
+                            logger.warning(
+                                "Codex backend blocked by Cloudflare challenge (signature=%s), retrying",
+                                cf_sig,
                             )
                             await asyncio.sleep(_codex_backoff(_attempt + 1))
                             continue
+                        logger.warning("Codex backend blocked by Cloudflare challenge after retries")
+                        raise self.map_error(resp.status_code, {"error": {"message": raw}})
 
-                        # 401 — auth recovery (break retry loop, advance recovery)
-                        if resp.status_code == 401:
-                            got_401 = True
-                            break
+                    # 5xx server error — retry if attempts remain
+                    if resp.status_code >= 500 and _attempt < _CODEX_RETRY_MAX_ATTEMPTS:
+                        logger.debug(
+                            "Codex backend %d error (attempt %d/%d), retrying",
+                            resp.status_code,
+                            _attempt + 1,
+                            _CODEX_RETRY_MAX_ATTEMPTS + 1,
+                        )
+                        await asyncio.sleep(_codex_backoff(_attempt + 1))
+                        continue
 
-                        # Non-retryable error (4xx except CF/401) — raise immediately
-                        body = {}
-                        with contextlib.suppress(Exception):
-                            body = json.loads(raw)
-                        if not body:
-                            body = {"error": {"message": raw}}
-                        err = self.map_error(resp.status_code, body)
-                        self._attach_retry_after(err, resp)
-                        raise err
-                    break  # success — exit retry loop
+                    # 401 — auth recovery (break retry loop, advance recovery)
+                    if resp.status_code == 401:
+                        got_401 = True
+                        break
 
-                if not got_401:
-                    break  # success or non-401 error already raised
+                    # Non-retryable error (4xx except CF/401) — raise immediately
+                    body = {}
+                    with contextlib.suppress(Exception):
+                        body = json.loads(raw)
+                    if not body:
+                        body = {"error": {"message": raw}}
+                    err = self.map_error(resp.status_code, body)
+                    self._attach_retry_after(err, resp)
+                    raise err
+                break  # success — exit retry loop
 
-                # Log recovery step
-                if _auth_step == 0:
-                    logger.warning("Codex backend 401: reloading session from disk")
-                elif _auth_step == 1:
-                    logger.warning("Codex backend 401: forcing token refresh")
+            if not got_401:
+                break  # success or non-401 error already raised
+
+            # Log recovery step
+            if _auth_step == 0:
+                logger.warning("Codex backend 401: reloading session from disk")
+            elif _auth_step == 1:
+                logger.warning("Codex backend 401: forcing token refresh")
 
         # Auth recovery exhausted — still 401
         if resp is None:
@@ -712,150 +759,147 @@ class OpenAISubscriptionAdapter(OpenAIAdapter):
 
         # Auth recovery loop (Codex CLI: UnauthorizedRecovery state machine).
         # Step 0: initial attempt, Step 1: reload from disk, Step 2: force-refresh.
-        import aiohttp
-
         got_401 = False
         resp: _CurlResponse | None = None
-        async with aiohttp.ClientSession(**aiohttp_session_kwargs()) as oauth_http:
-            for _auth_step in range(3):
-                resp = None
-                session = self._load_session(cc_request)
+        for _auth_step in range(3):
+            resp = None
+            session = self._load_session(cc_request)
 
-                force_refresh = _auth_step == 2
+            force_refresh = _auth_step == 2
+            try:
+                access_token = await session.get_valid_api_key(
+                    CurlTokenTransport(self._oauth_curl_session),
+                    force_refresh=force_refresh,
+                )
+            except OAuthRefreshFailed as exc:
+                err = ProviderError(
+                    f"Authentication refresh failed. "
+                    f"Please re-authenticate with 'kitty auth openai'. Details: {exc}"
+                )
+                err.http_status = 401
+                raise err from exc
+
+            self._update_session_cache_stat(session)
+            headers = self._build_codex_headers(access_token, session.id_token)
+            self._filter_cloudflare_cookies(self._curl_session.cookies)
+            self._log_cf_cookies(self._curl_session.cookies)
+
+            got_401 = False
+            last_exc: Exception | None = None
+            _stream_attempt = 0
+            # General retry loop (5xx, CF 403, transport errors)
+            for _attempt in range(_CODEX_RETRY_MAX_ATTEMPTS + 1):
                 try:
-                    access_token = await session.get_valid_api_key(
-                        oauth_http,
-                        force_refresh=force_refresh,
+                    resp = await self._curl_session.post(
+                        _CODEX_BACKEND_URL,
+                        json=resp_body,
+                        headers=headers,
+                        timeout=_CODEX_TIMEOUT,
+                        stream=True,
                     )
-                except OAuthRefreshFailed as exc:
-                    err = ProviderError(
-                        f"Authentication refresh failed. "
-                        f"Please re-authenticate with 'kitty auth openai'. Details: {exc}"
-                    )
-                    err.http_status = 401
-                    raise err from exc
-
-                self._update_session_cache_stat(session)
-                headers = self._build_codex_headers(access_token, session.id_token)
-                self._filter_cloudflare_cookies(self._curl_session.cookies)
-                self._log_cf_cookies(self._curl_session.cookies)
-
-                got_401 = False
-                last_exc: Exception | None = None
-                _stream_attempt = 0
-                # General retry loop (5xx, CF 403, transport errors)
-                for _attempt in range(_CODEX_RETRY_MAX_ATTEMPTS + 1):
-                    try:
-                        resp = await self._curl_session.post(
-                            _CODEX_BACKEND_URL,
-                            json=resp_body,
-                            headers=headers,
-                            timeout=_CODEX_TIMEOUT,
-                            stream=True,
+                except Exception as exc:
+                    if _attempt < _CODEX_RETRY_MAX_ATTEMPTS:
+                        logger.debug(
+                            "Codex backend transport error (attempt %d/%d): %s",
+                            _attempt + 1,
+                            _CODEX_RETRY_MAX_ATTEMPTS + 1,
+                            exc,
                         )
-                    except Exception as exc:
+                        await asyncio.sleep(_codex_backoff(_attempt + 1))
+                        continue
+                    raise self._handle_curl_error(exc) from exc
+
+                if resp.status_code >= 400:
+                    raw = resp.text
+
+                    # Cloudflare block — retry with specialized handling
+                    if self._is_cloudflare_block(resp.status_code, raw):
+                        cf_sig = get_cloudflare_signature(raw)
+                        logger.debug(
+                            "CF block detected in stream_request: signature=%s, body_len=%d",
+                            cf_sig,
+                            len(raw),
+                        )
                         if _attempt < _CODEX_RETRY_MAX_ATTEMPTS:
-                            logger.debug(
-                                "Codex backend transport error (attempt %d/%d): %s",
-                                _attempt + 1,
-                                _CODEX_RETRY_MAX_ATTEMPTS + 1,
-                                exc,
-                            )
-                            await asyncio.sleep(_codex_backoff(_attempt + 1))
-                            continue
-                        raise self._handle_curl_error(exc) from exc
-
-                    if resp.status_code >= 400:
-                        raw = resp.text
-
-                        # Cloudflare block — retry with specialized handling
-                        if self._is_cloudflare_block(resp.status_code, raw):
-                            cf_sig = get_cloudflare_signature(raw)
-                            logger.debug(
-                                "CF block detected in stream_request: signature=%s, body_len=%d",
-                                cf_sig,
-                                len(raw),
-                            )
-                            if _attempt < _CODEX_RETRY_MAX_ATTEMPTS:
-                                if _attempt == 0:
-                                    logger.info(
-                                        "CF block: refreshing session and curl connection before retry",
-                                    )
-                                    with contextlib.suppress(Exception):
-                                        self._invalidate_session_cache(cc_request)
-                                        self._reset_curl_session()
-                                        session = self._load_session(cc_request)
-                                        self._update_session_cache_stat(session)
-                                logger.warning(
-                                    "Codex backend blocked by Cloudflare challenge (signature=%s), retrying",
-                                    cf_sig,
+                            if _attempt == 0:
+                                logger.info(
+                                    "CF block: refreshing session and curl connection before retry",
                                 )
-                                await asyncio.sleep(_codex_backoff(_attempt + 1))
-                                continue
-                            logger.warning("Codex backend blocked by Cloudflare challenge after retries")
-                            raise self.map_error(resp.status_code, {"error": {"message": raw}})
-
-                        # 5xx server error — retry if attempts remain
-                        if resp.status_code >= 500 and _attempt < _CODEX_RETRY_MAX_ATTEMPTS:
-                            logger.debug(
-                                "Codex backend %d error (attempt %d/%d), retrying",
-                                resp.status_code,
-                                _attempt + 1,
-                                _CODEX_RETRY_MAX_ATTEMPTS + 1,
+                                with contextlib.suppress(Exception):
+                                    self._invalidate_session_cache(cc_request)
+                                    self._reset_curl_session()
+                                    session = self._load_session(cc_request)
+                                    self._update_session_cache_stat(session)
+                            logger.warning(
+                                "Codex backend blocked by Cloudflare challenge (signature=%s), retrying",
+                                cf_sig,
                             )
                             await asyncio.sleep(_codex_backoff(_attempt + 1))
                             continue
+                        logger.warning("Codex backend blocked by Cloudflare challenge after retries")
+                        raise self.map_error(resp.status_code, {"error": {"message": raw}})
 
-                        # 401 — auth recovery (break retry loop, advance recovery)
-                        if resp.status_code == 401:
-                            got_401 = True
-                            break
+                    # 5xx server error — retry if attempts remain
+                    if resp.status_code >= 500 and _attempt < _CODEX_RETRY_MAX_ATTEMPTS:
+                        logger.debug(
+                            "Codex backend %d error (attempt %d/%d), retrying",
+                            resp.status_code,
+                            _attempt + 1,
+                            _CODEX_RETRY_MAX_ATTEMPTS + 1,
+                        )
+                        await asyncio.sleep(_codex_backoff(_attempt + 1))
+                        continue
 
-                        # Non-retryable error — raise immediately
-                        body = {}
-                        with contextlib.suppress(Exception):
-                            body = json.loads(raw)
-                        logger.debug("Codex backend error %d: %s", resp.status_code, raw[:500])
-                        if not body:
-                            body = {"error": {"message": raw}}
-                        err = self.map_error(resp.status_code, body)
-                        self._attach_retry_after(err, resp)
-                        raise err
+                    # 401 — auth recovery (break retry loop, advance recovery)
+                    if resp.status_code == 401:
+                        got_401 = True
+                        break
 
-                    # Stream SSE chunks to the downstream client.  Do NOT call
-                    # resp.close() — curl_cffi's internal cleanup callback releases
-                    # the handle back to the session pool when the stream task completes.
-                    try:
-                        async for chunk in resp.aiter_content():
-                            if chunk:
-                                # Strip UTF-8 BOM that some responses include
-                                cleaned = chunk.replace(b"\xef\xbb\xbf", b"")
-                                if cleaned:
-                                    await write(cleaned)
-                        # Stream completed successfully
-                        return
-                    except Exception as exc:
-                        if self._is_transient_stream_error(exc) and _stream_attempt < _STREAM_RECV_ERROR_RETRIES:
-                            _stream_attempt += 1
-                            logger.info(
-                                "Codex backend stream reset (attempt %d/%d), retrying: %s",
-                                _stream_attempt,
-                                _STREAM_RECV_ERROR_RETRIES + 1,
-                                exc,
-                            )
-                            last_exc = exc
-                            continue
-                        # Non-transient or retries exhausted — surface the error
-                        raise self._handle_curl_error(exc) from exc
+                    # Non-retryable error — raise immediately
+                    body = {}
+                    with contextlib.suppress(Exception):
+                        body = json.loads(raw)
+                    logger.debug("Codex backend error %d: %s", resp.status_code, raw[:500])
+                    if not body:
+                        body = {"error": {"message": raw}}
+                    err = self.map_error(resp.status_code, body)
+                    self._attach_retry_after(err, resp)
+                    raise err
 
-                if not got_401:
-                    break  # success or non-401 error already raised
+                # Stream SSE chunks to the downstream client.  Do NOT call
+                # resp.close() — curl_cffi's internal cleanup callback releases
+                # the handle back to the session pool when the stream task completes.
+                try:
+                    async for chunk in resp.aiter_content():
+                        if chunk:
+                            # Strip UTF-8 BOM that some responses include
+                            cleaned = chunk.replace(b"\xef\xbb\xbf", b"")
+                            if cleaned:
+                                await write(cleaned)
+                    # Stream completed successfully
+                    return
+                except Exception as exc:
+                    if self._is_transient_stream_error(exc) and _stream_attempt < _STREAM_RECV_ERROR_RETRIES:
+                        _stream_attempt += 1
+                        logger.info(
+                            "Codex backend stream reset (attempt %d/%d), retrying: %s",
+                            _stream_attempt,
+                            _STREAM_RECV_ERROR_RETRIES + 1,
+                            exc,
+                        )
+                        last_exc = exc
+                        continue
+                    # Non-transient or retries exhausted — surface the error
+                    raise self._handle_curl_error(exc) from exc
 
-                # Log recovery step
-                if _auth_step == 0:
-                    logger.warning("Codex backend 401: reloading session from disk")
-                elif _auth_step == 1:
-                    logger.warning("Codex backend 401: forcing token refresh")
+            if not got_401:
+                break  # success or non-401 error already raised
+
+            # Log recovery step
+            if _auth_step == 0:
+                logger.warning("Codex backend 401: reloading session from disk")
+            elif _auth_step == 1:
+                logger.warning("Codex backend 401: forcing token refresh")
 
         # Auth recovery exhausted — still 401
         if resp is None:

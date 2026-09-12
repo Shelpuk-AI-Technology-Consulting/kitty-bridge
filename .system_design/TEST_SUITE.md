@@ -839,7 +839,7 @@ list of headers we happened to think of. That posture is what surfaced F3 and F4
 | **C1 — Request headers** | `build_upstream_headers()` constructs the set from scratch; no inbound agent header is forwarded. Four adapters supply a coding-agent `User-Agent` (P9a, P9c); every other provider — including `zai_coding`, whose set is exactly `Authorization`, `anthropic-version`, `content-type` — sends aiohttp's default. | **Gap, and inconsistent.** F1. |
 | **C2 — Request body** | The register's mutations (§3.2), JSON key ordering produced by kitty's serialisation, ~~the literal string `[Kitty Bridge: …]` (M13)~~ **— fixed, KBR-5** — and **`_effort` / `_thinking_adaptive`, which are kitty-internal and reach the wire**. With M13 gone the only bridge-introduced literal left in the body is `[Tool output truncated — original size: N chars]` (M3/M4): still a viable fingerprint, it simply does not name the product. | **Still breached by F4.** F3 closed. |
 | **C3 — Cross-attempt content and cadence** | Retries (`_MAX_RETRIES = 3`), failover, transport-blip re-connects, the empty-response ladder — and **four** paths that send a *different body* on a later attempt (M6, M8, M9, and failover re-normalisation). | §4.3 C3. Four declared exceptions. |
-| **C4 — Transport fingerprint** | TLS/ALPN/HTTP-2 signature of aiohttp, unlike the agent's own client. `curl_cffi` is already used for the OpenAI subscription provider precisely because that provider fingerprints TLS. | **Accepted residual risk.** §4.5. |
+| **C4 — Transport fingerprint** | TLS/ALPN/HTTP-2 signature of aiohttp, unlike the agent's own client. `curl_cffi` is already used for the OpenAI subscription provider precisely because that provider fingerprints TLS. | **Accepted residual risk.** §4.5 — including the narrower, *provider-specific* residual KBR-161 leaves on the OpenAI login leg, which the general argument does **not** cover. |
 | **C5 — Connection lifecycle** | `_build_client_session` uses `TCPConnector(limit=…, force_close=True)` — a fresh TCP and TLS connection for **every** upstream request, no keep-alive reuse. The agent's client does not behave that way. | **Gap.** A cheap, non-TLS fingerprint — arguably more detectable than C4. §4.3 C5. |
 
 ### 4.3 Test specifications
@@ -936,8 +936,11 @@ guard; see its entry below and §6.2.3. The rest remain open.
   one-line detection rule, and the user-agent tracked kitty's release train, changing with every
   kitty release and with nothing else. **The finding's own text demonstrates it:** the defect was
   filed reading `1.9.0` and measured reading `1.9.1`, moved by a kitty release and nothing else.
-  `_build_user_agent` now reads `_CODEX_CLI_VERSION`, the same constant the `version` header
-  carries, so the two agree by construction. The behavioural guard is
+  `_build_user_agent` now reads `codex_identity.CODEX_CLI_VERSION`, the same constant the
+  `version` header carries, so the two agree by construction. **KBR-161 moved that constant out of
+  the adapter** into the leaf `kitty.codex_identity`, because the OAuth token legs in `kitty.auth`
+  present the same identity and cannot import `kitty.providers` back; both consumers read it at
+  call time, never through a module-level alias, so patching one name moves all six fields. The behavioural guard is
   `tests/test_upstream_identity_consistency.py`, which sweeps every registered adapter through a
   mirror of `BridgeServer._build_upstream_headers` — plus the subscription adapter's
   `_build_codex_headers`, since it overrides no hook and would otherwise be invisible. It stands
@@ -1034,6 +1037,36 @@ runtime, and matching it would mean routing every provider through `curl_cffi` �
 change to the serving path for a threat no provider is currently known to apply to this traffic.
 Recorded so a future incident is a known gap rather than a surprise. The README's existing
 guidance ("use a CONNECT proxy, not a TLS-terminating one") already depends on this reasoning.
+
+**C4a — the OpenAI login leg, specifically (KBR-161).** The general C4 argument above does
+**not** apply to this provider: `curl_cffi` is already a dependency, already constructed, and
+already in use in this very adapter, so the cost that justifies accepting C4 elsewhere is absent.
+KBR-161 therefore moved the **recurring** OAuth traffic — `_refresh` and `_exchange_api_key`, which
+`get_valid_api_key` drives on every Codex request — onto an impersonating `curl_cffi` session, and
+all four token POSTs now carry the Codex `User-Agent` from `kitty.codex_identity`.
+
+The **interactive login** leg (`_exchange_code_for_tokens`, `_exchange_id_token_for_api_key`) stays
+on aiohttp. It is reached from `cli/auth_cmd.py`, which has no adapter and no curl session; giving
+it one means building an impersonating session inside the sign-in path, where a regression is
+user-visible and blocks login outright. **State the residual honestly:** this is not an absent
+exposure. Site 4 carries `Authorization: Bearer <access_token>`, so the request is bound to the
+account, and it leaves by the same egress IP as every later API call. A genuine Codex CLI has no
+non-Codex TLS handshake anywhere in its history (`codex-rs/login/src/auth/default_client.rs` builds
+one client and `server.rs` posts `/oauth/token` through it), so a kitty account carries exactly one,
+at signup, permanently associated with it. Weaker in frequency than the pre-KBR-161 pattern, not
+weaker in kind — accepted on sign-in-regression cost alone. `tests/test_oauth_leg_identity.py`
+guards the identity half and says explicitly that it asserts nothing about the fingerprint.
+
+**Ambient `NO_PROXY` on the curl transport — closed, not accepted (KBR-161).** Moving the refresh
+leg onto `curl_cffi` would have imported an egress exposure the aiohttp leg did not have: aiohttp
+ignores proxy environment variables without `trust_env=True`, `curl_cffi` reads them, and — measured
+against the resolved 0.16.3 — a `NO_PROXY` matching the upstream host **silently defeats an explicit
+`proxies=` mapping**, with no error and no log line. That already applied to the API leg, so the
+move would have put refresh tokens and exchanged API keys through a hole that previously leaked only
+prompt content. `CURLOPT_NOPROXY`, set explicitly at session construction, wins over the
+environment; `_new_curl_session` now sets it for **both** sessions, and
+`tests/test_curl_cffi_transport_contract.py` pins the exposure, the remedy, and the complement.
+The same hole remains open on the **botocore** (Bedrock) path, which is not this ticket's.
 
 **C5 — connection lifecycle,** until Q7 is decided. `force_close=True` is a deliberate defence
 against port exhaustion; removing it to gain keep-alive parity trades one operational risk for
@@ -1259,10 +1292,21 @@ other outbound paths exist, and each applies the proxy **unconditionally, withou
 
 | Path | Client | How the proxy is applied |
 |---|---|---|
-| `openai_subscription` — serving | `curl_cffi.AsyncSession` | `proxies=egress.proxies_dict()` |
-| `openai_subscription` — OAuth token legs | its own `aiohttp.ClientSession` | `aiohttp_session_kwargs()` |
+| `openai_subscription` — serving | `curl_cffi.AsyncSession` | `proxies=` + `CURLOPT_NOPROXY` |
+| `openai_subscription` — OAuth **refresh** leg | its own `curl_cffi.AsyncSession` | `proxies=` + `CURLOPT_NOPROXY` |
+| `openai_subscription` — OAuth **login** leg (`kitty.auth.openai_oauth`) | its own `aiohttp.ClientSession` | `aiohttp_session_kwargs()` |
 | `bedrock` | boto3 / botocore | `BotoConfig(proxies=egress.proxies_dict())` |
 | `ollama_cloud` | its own `aiohttp.ClientSession` | `aiohttp_session_kwargs()` |
+
+**Why the refresh leg has its own session rather than sharing the serving one (KBR-161).** Not for
+identity — both come from one builder, `_new_curl_session`, so they cannot drift apart on
+impersonation target, CA bundle or egress mapping. For two reasons that have nothing to do with what
+the provider sees: an `AsyncSession` owns a bounded pool of curl handles (`max_clients`, 10) and a
+streaming completion holds its handle for the life of the stream, so a refresh sharing that pool
+would queue behind in-flight completions **while holding `OAuthSession._refresh_lock`**, blocking
+every request for that account; and cookies are host-scoped, so one jar would hold
+`auth.openai.com`'s cookies for the process lifetime and replay them across every account the bridge
+serves. The two legs address different hosts, so sharing buys nothing observable and costs both.
 
 Three consequences the rest of §5 must not paper over:
 
@@ -1274,13 +1318,20 @@ Three consequences the rest of §5 must not paper over:
    session, botocore client}` — the shape `tests/test_egress_https_proxy.py` already uses, which
    is a further reason it was that module's proxy T-W5 extracted rather than a fresh one.
 3. **The OAuth leg runs at startup**, before anything else has been proven, and is the one most
-   likely to fire on a fresh machine. It must not be left out.
+   likely to fire on a fresh machine. It must not be left out. Since KBR-161 it is **two** paths on
+   two stacks: the login leg on aiohttp, and the refresh leg on `curl_cffi` — and the `curl_cffi`
+   one fires on every subsequent request, so that is the transport the harness must exercise first.
 
 **An untested interaction.** `kitty.egress`'s own docstring records that the three stacks
 disagree about `HTTP_PROXY`/`HTTPS_PROXY`: aiohttp ignores them unless `trust_env=True`, while
 curl_cffi and botocore honour them. Kitty never sets those variables — but the *user's shell*
-may have. Nothing tests what happens when an ambient `HTTP_PROXY` or `NO_PROXY` disagrees with
-the configured egress on the two stacks that read the environment. §6.2.4 pins it.
+may have. **For `curl_cffi` this is now measured and closed** (KBR-161): a matching `NO_PROXY` beat
+`proxies=` outright, and `_new_curl_session` now sets `CURLOPT_NOPROXY` so the mapping is the last
+word; `tests/test_curl_cffi_transport_contract.py` pins both directions. **`botocore` is untouched and
+unmeasured.** §6.2.4's row expects `Config(proxies=)` to take precedence over the environment — but
+that is exactly the shape of expectation the `curl_cffi` row carried until KBR-161 measured it and
+found the reverse. Until someone probes it, the Bedrock path's behaviour under an ambient
+`NO_PROXY` is unknown, not known-good. **KBR-173.**
 
 ---
 
@@ -1633,7 +1684,7 @@ a clear message rather than in production. The pin situation is worse than a gla
 | Dependency | Declared pin | What must be pinned by test |
 |---|---|---|
 | `aiohttp` | `>=3.11,<3.14` | A session built with `proxy=`/`proxy_auth=` proxies, and a per-request `proxy=None` cannot escape it. `_build_client_session` sets the proxy at session level precisely so no call site can forget it, and `_session_for` depends on a request being unable to opt out. |
-| `curl_cffi` | `>=0.7` — **unbounded** | `proxies=` is honoured; its precedence over ambient `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` (this stack *does* read the environment); the impersonation target still exists. |
+| `curl_cffi` | `>=0.7` — **unbounded** | **Landed (KBR-161): `tests/test_curl_cffi_transport_contract.py`.** `proxies=` is honoured; `data=dict` form-encodes (the token grants depend on it); an explicit `User-Agent` beats the one `impersonate=` injects (the whole of KBR-161's fix depends on it); the impersonation target still exists. On the environment, the measured answer is the *opposite* of what this row assumed: a matching ambient `NO_PROXY` **defeats** `proxies=`, and only `CURLOPT_NOPROXY` overrides it — both directions pinned, since a future release reversing either must turn red rather than silently change containment. |
 | `botocore` | **not declared at all** — arrives transitively via `boto3>=1.34` | `Config(proxies=)` is honoured and takes precedence over the environment. It is botocore, not boto3, that implements this. An undeclared dependency owning a containment guarantee is worse than an unbounded one. |
 | `keyring` | `>=23.0` | Backend resolution on each supported platform. |
 | CPython `ipaddress` | `requires-python = ">=3.10"` — **minor only, no patch floor** | Two consumers. **I3:** `should_bypass` reads `is_loopback or is_private or is_link_local`, so the disjunction's verdict on the IPv4-mapped form of each range must be pinned — see the masking note below. **Liveness:** `_connect_target` reads `IPv6Address.ipv4_mapped` (the mapped `IPv4Address` for `::ffff:x.x.x.x`, `None` otherwise) and `is_unspecified` for `0.0.0.0` and `::`. What must **not** be pinned is `IPv6Address("::ffff:0.0.0.0").is_unspecified`: CPython [gh-122792](https://github.com/python/cpython/issues/122792) changed it mid-branch, so its value is a property of the patch release, and the code is written not to read it. |
@@ -2624,7 +2675,7 @@ does not surface work that is done. `TEST_SUITE_IMPLEMENTATION_PLAN.md` §16 mir
 | **G3** | I2 partially breached (F1) — KBR-8 · **fix landed, gap open** | Identity is still ad hoc per adapter. The subscription adapter no longer reports two different versions in one request: **KBR-8 fixed that on 2026-09-11**, and `tests/test_upstream_identity_consistency.py` guards both halves of §4.3 C1's F1 assertions across every registered adapter | Remaining: the exact-set header contract (T-G9 / **KBR-78**) and the parity baseline (T-C7, T-I12), then a policy — Q1 | **2** |
 | **G4** | L1 strength unmeasured | Line coverage only | `mutmut` ≥ 85% **per target group** on the §6.1 scope | **2** |
 | **G8** | No corpus of real agent traffic | Synthetic fixtures encode our assumptions | Golden corpus (§7.1) | **2** |
-| **G10** | Custom-transport containment untested | Proven at transport level, never through the bridge; ambient `HTTP_PROXY`/`NO_PROXY` untested; the OAuth leg untested | §5.5 + §6.2.4 | **2** |
+| **G10** | Custom-transport containment untested | **Partly closed (KBR-161).** Ambient `NO_PROXY` on `curl_cffi` is now measured, closed with `CURLOPT_NOPROXY`, and pinned; the OAuth refresh leg is covered by the same builder and contract. **Still open:** containment is proven at transport level, never through the bridge; `botocore`'s behaviour under an ambient `NO_PROXY` is **unmeasured** (its §6.2.4 row expects precedence, which is the assumption measurement falsified for `curl_cffi` — KBR-173); the aiohttp login leg is unproven end to end | §5.5 + §6.2.4 | **2** |
 | **G5** | No contract layer | No published schema; SSE grammar unchecked | OpenAPI + `schemathesis` + grammar state machine | **3** |
 | **G6** | Docs drift undetected (F2) — KBR-9 | README endpoint table already wrong | README ⇄ code guards | **3** |
 | **G7** | No property-based tests | All example-based | `hypothesis` on the §6.1 list | **3** |

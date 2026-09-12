@@ -113,6 +113,15 @@ RULE_SPECS: tuple[RuleSpec, ...] = (
         name="providers",
         patterns=(
             f"{PKG}/providers/**",
+            # `codex_identity.py` holds the impersonated Codex CLI version and
+            # user-agent. It appears here AND under `credentials` -- deliberately,
+            # by the same reasoning as `io_encoding.py`: its two callers are this
+            # adapter's API leg and the OAuth token leg in `kitty.auth`, and a
+            # change to it changes what both present to the same vendor (KBR-161).
+            # It is not in `core`: it is imported by exactly two components, so
+            # putting it there would fan out to bridge, launcher and CLI rules
+            # that have nothing to say about it.
+            f"{PKG}/codex_identity.py",
             # The catalogue generator. It writes `providers/model_metadata.json`
             # and `model-metadata.yml` runs it weekly; a change to it is a
             # change to the provider component from the build side, and no other
@@ -160,6 +169,11 @@ RULE_SPECS: tuple[RuleSpec, ...] = (
             f"{PKG}/credentials/**/*.py",
             f"{PKG}/auth/**/*.py",
             f"{PKG}/profiles/**/*.py",
+            # The other half of the pair described under `providers`: the OAuth
+            # token POSTs in `auth/` read this to decide what client they claim
+            # to be, so a change here is a change to what the credential flow
+            # puts on the wire.
+            f"{PKG}/codex_identity.py",
         ),
     ),
     # The command surface: the router that decides what `kitty <word> ...` means,
