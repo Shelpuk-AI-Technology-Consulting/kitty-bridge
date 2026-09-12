@@ -3106,7 +3106,9 @@ class TestACloseReleasesBothCurlSessions:
         adapter = OpenAISubscriptionAdapter()
         with _patch_new_curl_session(adapter):
             serving = adapter._curl_session
-            oauth = adapter._oauth_curl_session
+            # Built so both attributes are non-None going in; what happens to
+            # this leg is the *next* test's claim, not this one's.
+            _oauth = adapter._oauth_curl_session
 
         async def _fail() -> None:
             raise RuntimeError("close failed")
@@ -3116,7 +3118,6 @@ class TestACloseReleasesBothCurlSessions:
         with pytest.raises(RuntimeError, match="close failed"):
             await adapter.aclose()
 
-        assert oauth.closed, "the second leg must still close when the first one fails"
         assert adapter._curl_session_instance is None
         assert adapter._oauth_curl_session_instance is None
 

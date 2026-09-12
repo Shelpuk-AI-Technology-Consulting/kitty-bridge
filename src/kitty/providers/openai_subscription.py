@@ -238,7 +238,12 @@ class OpenAISubscriptionAdapter(OpenAIAdapter):
         reported as a segfault.  Closing at teardown is a different moment:
         ``BridgeServer.stop_async`` closes adapters only after aiohttp's runner
         has drained the in-flight handlers, and #675 was closed upstream as no
-        longer reproducible on the 0.16.3 this project pins.
+        longer reproducible.  **Measured, not guaranteed:** that was read on
+        0.16.3, the version resolved here, and ``pyproject.toml`` declares
+        ``curl_cffi>=0.7`` with no upper bound — the weakest pin in the repo, as
+        ``tests/test_curl_cffi_transport_contract.py`` records.  A future
+        resolution could pick up a version where the lifecycle work still open
+        under #751 bites, which is why a failed drain skips the close entirely.
 
         Automatically persists Cloudflare cookies across requests.
         """

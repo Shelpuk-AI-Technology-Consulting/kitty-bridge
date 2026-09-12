@@ -1413,7 +1413,7 @@ whether to change it is Q3.
 
 ### 5.5 Per-transport containment
 
-`_session_for` and `should_bypass` govern **only** `BridgeServer`'s own aiohttp sessions. Four
+`_session_for` and `should_bypass` govern **only** `BridgeServer`'s own aiohttp sessions. Five
 other outbound paths exist, and each applies the proxy **unconditionally, without consulting
 `should_bypass`**:
 
@@ -1445,8 +1445,10 @@ custom-transport adapter has to decide about its client as well as its wire shap
 1. **Closing a `curl_cffi` session under a live SSE stream is the one shape that has crashed.**
    `_curl_session`'s docstring recorded that as the reason it was never closed, citing
    lexiforest/curl_cffi **#675**. That issue was filed against **0.13.0** on the *synchronous*
-   `Session` and was **closed 2026-07-18 as no longer reproducible**; this project pins
-   **0.16.3**. More to the point, `stop_async` closes adapters only **after**
+   `Session` and was **closed 2026-07-18 as no longer reproducible**. That was read on
+   **0.16.3**, the version resolved here — `pyproject.toml` declares `curl_cffi>=0.7` with no
+   upper bound, the weakest pin in the repo, so this is measured rather than guaranteed. More
+   to the point, `stop_async` closes adapters only **after**
    `_runner.cleanup()` has drained the in-flight handlers, so the precondition is not met on
    the ordinary path. Upstream **#845** still tracks **#751**, "active stream/session close
    lifecycle", so the risk is reduced, not zero — which is why a **failed drain deliberately
