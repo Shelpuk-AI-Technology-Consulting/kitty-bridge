@@ -38,8 +38,8 @@ workflow *and* from the table; the reverse arm is what makes the inventory a
 statement about CI rather than a statement about itself.
 
 **The comparison is a pure reporter, not an assertion.**
-:func:`inventory_discrepancies` returns a list of human-readable strings and an
-empty list means agreement.  That shape is what lets the falsification cases below
+:func:`inventory_discrepancies` returns ``(arm, message)`` pairs and an empty list
+means agreement; the two sibling reporters return bare messages.  That shape is what lets the falsification cases below
 drive the *real* scan over a doctored document — watching a rule fail by hand is
 not the same as shipping its negative control, and a matcher exercised only in
 isolation proves nothing about its assembly.
@@ -115,6 +115,10 @@ _FORK_GUARD = "github.event.pull_request.head.repo.full_name == github.repositor
 #: The trigger that would undo it by running a fork's code in the base branch's
 #: context, secrets included. The workflow refuses it in prose; this is the check.
 _PULL_REQUEST_TARGET = "pull_request_target"
+
+#: The action whose job the fork guard protects. Matched by prefix so a tag
+#: bump (`@v1` -> `@v2`) is not a discrepancy; the job's name is never pinned.
+_REVIEW_ACTION = "anthropics/claude-code-action"
 
 #: A log file name as the generated launcher spells it.
 _LOG_FILE = re.compile(r"\b[A-Za-z0-9][A-Za-z0-9.-]*\.log\b")
@@ -301,20 +305,39 @@ def inventory_discrepancies(markdown: str, artifacts: dict[str, str]) -> list[tu
     return problems
 
 
-def job_conditions(text: str) -> list[str]:
-    """Return the ``if:`` expressions the workflow's jobs declare.
+def review_job_conditions(text: str) -> list[str]:
+    """Return the ``if:`` of every job that runs the review action.
+
+    Scoped to the jobs whose steps use :data:`_REVIEW_ACTION`, not to every job:
+    otherwise a second job carrying the same comparison would satisfy the check
+    after the guard was removed from the job that actually runs the review.  A
+    review job with no ``if:`` contributes an empty string, so it is reported as
+    unguarded rather than skipped.
 
     Args:
         text: The full text of one workflow file.
 
     Returns:
-        Each job-level condition as a string, in document order.
+        One condition per review job, in document order.
+
+    Raises:
+        yaml.YAMLError: When ``text`` is not valid YAML.  Deliberately not caught:
+            a workflow that will not parse must fail the fork arm, never pass it
+            by having no conditions to check.
     """
     document = yaml.safe_load(text)
     jobs = document.get("jobs") if isinstance(document, dict) else None
     if not isinstance(jobs, dict):
         return []
-    return [str(job["if"]) for job in jobs.values() if isinstance(job, dict) and "if" in job]
+    return [
+        str(job.get("if", ""))
+        for job in jobs.values()
+        if isinstance(job, dict)
+        and any(
+            isinstance(step, dict) and str(step.get("uses", "")).startswith(_REVIEW_ACTION)
+            for step in job.get("steps") or []
+        )
+    ]
 
 
 def workflow_triggers(text: str) -> set[str]:
@@ -327,7 +350,15 @@ def workflow_triggers(text: str) -> set[str]:
         text: The full text of one workflow file.
 
     Returns:
-        The declared trigger names, empty when the block is absent or unparseable.
+        The declared trigger names.  Empty when the ``on:`` block is absent or is
+        not one of the three shapes GitHub accepts — a mapping, a list or a
+        single string.
+
+    Raises:
+        yaml.YAMLError: When ``text`` is not valid YAML.  Deliberately not caught,
+            and the reason is specific: an empty result here makes the
+            ``pull_request_target`` check pass, so swallowing a parse failure
+            would turn a broken workflow into a green fork arm.
     """
     document = yaml.safe_load(text)
     if not isinstance(document, dict):
@@ -366,13 +397,17 @@ def fork_guard_discrepancies(markdown: str, review_workflow: str) -> list[str]:
 
     # Read the job's own condition, not the 124 KB of mostly-comment around it:
     # commenting the line out leaves it in the file and out of the `if:`.
-    guarded = [condition for condition in job_conditions(review_workflow) if _FORK_GUARD in condition]
-    if not guarded:
-        problems.append(f"no job's `if:` carries the guard {_FORK_GUARD!r}")
+    conditions = review_job_conditions(review_workflow)
+    if not conditions:
+        problems.append(f"no job runs {_REVIEW_ACTION!r}, so there is no review job to guard")
 
-    # A disjunct re-admits the fork runs the conjunction excludes.
-    for condition in guarded:
-        if "||" in condition:
+    # Each review job must carry the guard itself; a disjunct re-admits forks.
+    for condition in conditions:
+        if _FORK_GUARD not in condition:
+            problems.append(
+                f"a job running {_REVIEW_ACTION!r} does not carry the guard {_FORK_GUARD!r}"
+            )
+        elif "||" in condition:
             problems.append(
                 f"the guard is weakened by a disjunct: {condition!r} — an `||` re-admits the "
                 "fork runs §8.6 says are excluded"
@@ -454,6 +489,10 @@ def ci_launcher() -> str:
 
     Returns:
         The full text of the generated launcher script.
+
+    Raises:
+        OSError: When ``configure_kitty.py`` is missing or unreadable.
+        AssertionError: When no import spec can be built for it.
     """
     spec = importlib.util.spec_from_file_location("configure_kitty", CONFIGURE_KITTY)
     assert spec is not None and spec.loader is not None, f"cannot import {CONFIGURE_KITTY}"
@@ -484,6 +523,9 @@ def ci_artifacts(ci_launcher: str) -> dict[str, str]:
 
     Returns:
         Repository-relative POSIX path to the text that is authoritative for it.
+
+    Raises:
+        OSError: When a workflow file cannot be read.
     """
     paths = sorted(list(WORKFLOWS_DIR.glob("*.yml")) + list(WORKFLOWS_DIR.glob("*.yaml")))
     artifacts = {
@@ -729,8 +771,87 @@ class TestTheGuardCanFail:
             REVIEW_WORKFLOW.read_text(encoding="utf-8").replace(_FORK_GUARD, "true"),
         )
 
-        assert any("no job's `if:` carries the guard" in problem for problem in problems), (
+        assert any("does not carry the guard" in problem for problem in problems), (
             f"a removed fork guard reported {problems}"
+        )
+
+    def test_a_guard_kept_only_on_another_job_is_reported(self, suite_markdown: str) -> None:
+        """Fork arm: the comparison survives, on a job that does not run the review.
+
+        The plausible drift is a second job — a retry or a notice — carrying the
+        same condition while the review job loses it.
+        """
+        workflow = """
+jobs:
+  notice:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - run: echo notice
+  review:
+    steps:
+      - uses: anthropics/claude-code-action@v1
+"""
+
+        problems = fork_guard_discrepancies(suite_markdown, workflow)
+
+        assert any("does not carry the guard" in problem for problem in problems), (
+            f"a guard moved off the review job reported {problems}"
+        )
+
+    def test_an_unguarded_second_review_job_is_reported(self, suite_markdown: str) -> None:
+        """Fork arm: a retry job runs the review too, and forgot the guard.
+
+        Every review job must carry it — not merely one of them.  A check that
+        passed when *any* review job was guarded would let this fork run through
+        the second job.
+        """
+        workflow = """
+jobs:
+  review:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - uses: anthropics/claude-code-action@v1
+  retry:
+    steps:
+      - uses: anthropics/claude-code-action@v1
+"""
+
+        problems = fork_guard_discrepancies(suite_markdown, workflow)
+
+        assert any("does not carry the guard" in problem for problem in problems), (
+            f"an unguarded retry job reported {problems}"
+        )
+
+    def test_an_unrelated_unguarded_job_is_not_reported(self, suite_markdown: str) -> None:
+        """Fork arm, the false-positive direction: only review jobs need the guard.
+
+        A ``build`` job that never runs the review has no reason to refuse forks.
+        Flagging it would turn the gate red and name the wrong job — the
+        mis-diagnosis this repository's guards exist to prevent.
+        """
+        workflow = """
+jobs:
+  build:
+    steps:
+      - run: make
+  review:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - uses: anthropics/claude-code-action@v1
+"""
+
+        assert fork_guard_discrepancies(suite_markdown, workflow) == []
+
+    def test_a_workflow_with_no_review_job_is_reported(self, suite_markdown: str) -> None:
+        """Fork arm: nothing runs the review, so nothing is guarded.
+
+        Without this, renaming or vendoring the action would leave zero review
+        jobs, zero conditions to check, and a green arm.
+        """
+        problems = fork_guard_discrepancies(suite_markdown, "jobs:\n  build:\n    steps: []\n")
+
+        assert any("no job runs" in problem for problem in problems), (
+            f"a workflow with no review job reported {problems}"
         )
 
     def test_a_fork_guard_weakened_by_a_disjunct_is_reported(self, suite_markdown: str) -> None:
