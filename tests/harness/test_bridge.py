@@ -74,6 +74,7 @@ from kitty.providers.vertex import VertexAIAdapter
 #: property of the suite, not of the core.
 CONFORMANCE_CASES: tuple[tuple[str, str, WireFormat, InboundProtocol], ...] = (
     ("harness.bridge", "aiohttp", WireFormat.ANTHROPIC_MESSAGES, InboundProtocol.MESSAGES),
+    ("harness.provider_aiohttp", "provider_aiohttp", WireFormat.OLLAMA_CHAT, InboundProtocol.CHAT_COMPLETIONS),
 )
 
 #: What the modules above are expected to have registered between them. Derived
@@ -1045,11 +1046,13 @@ class TestTheConformanceCheck:
         await assert_transport_reaches_its_recorder(transport("aiohttp", fmt))
 
     @pytest.mark.parametrize(
-        ("name", "fmt", "route"),
-        [(name, fmt, route) for _module, name, fmt, route in CONFORMANCE_CASES],
+        ("module", "name", "fmt", "route"),
+        list(CONFORMANCE_CASES),
         ids=[name for _module, name, _fmt, _route in CONFORMANCE_CASES],
     )
-    async def test_every_registered_transport_passes(self, name: str, fmt: WireFormat, route: InboundProtocol) -> None:
+    async def test_every_registered_transport_passes(
+        self, module: str, name: str, fmt: WireFormat, route: InboundProtocol
+    ) -> None:
         """The meta-test: a transport inherits the check by registering.
 
         Each row carries its own format and inbound route, so an Epic B author
@@ -1058,11 +1061,24 @@ class TestTheConformanceCheck:
         none of them serves Anthropic Messages — which would make "inherits by
         registering" false for all three transports it was written for.
 
+        The row's module is imported here, not assumed imported. A name enters
+        the registry only when something imports the module that registers it,
+        and this module imports only ``harness.bridge`` — so every row but the
+        core's own would fail with ``LookupError`` under a selective run, and
+        under a full run would depend on collection order. That is the same
+        reasoning the completeness test below states, applied to the test that
+        actually drives the check.
+
         Args:
+            module: The module that registers this transport.
             name: A registered transport name.
             fmt: The upstream format to construct it with.
             route: The inbound route that exercises it.
         """
+        import importlib
+
+        importlib.import_module(module)
+
         await assert_transport_reaches_its_recorder(transport(name, fmt), protocol=route)
 
     def test_the_meta_test_iterates_a_complete_set_not_whatever_was_imported(self) -> None:

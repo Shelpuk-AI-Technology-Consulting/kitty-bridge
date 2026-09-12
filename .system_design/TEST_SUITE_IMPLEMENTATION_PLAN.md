@@ -35,7 +35,9 @@ Give each shared file a named integration owner. Give each stream its own module
 ### 1.3 Definition of done
 
 1. The deliverable satisfies the acceptance criteria in its row.
-2. `ruff`, `lint-imports`, `mypy src/kitty` and the full suite pass on Python 3.10–3.13.
+2. `ruff`, `lint-imports`, `mypy src/kitty` and the full suite pass on Python 3.10–3.13 on Linux,
+   **and on the Windows and macOS legs** the Fast gate has run since KBR-164 (TEST_SUITE.md §8.4).
+   A change that is green only on Linux is not done.
 3. Every new test carries exactly one layer marker (**T-W1**).
 4. Google-style docstrings throughout; block comments explaining *why*. Test code is code.
 5. **It lands on `main` alone**, without leaving the suite red waiting for a sibling.
@@ -276,10 +278,16 @@ Each task delivers a recorder **and its bridge-fixture integration** through T-W
 interface, and must pass T-W4's conformance test — including peer-port capture, which T-E2's
 tunnel join needs from every recorder.
 
+**The two OAuth legs are split across T-B1 and T-B2, not both in T-B1.** These rows were written
+before KBR-161 moved the **refresh** leg onto the adapter's impersonating `curl_cffi` session
+(§5.5), which an aiohttp recorder cannot observe. §5.5 also notes that the refresh leg is the one
+that "fires on every subsequent request", so T-B1 necessarily takes the less urgent of the two —
+deliberately, and recorded in §7.2.2 so the order does not read as an oversight.
+
 | ID | Task | Depends on | Design | Size |
 |---|---|---|---|---|
-| **T-B1** | Provider-aiohttp recorder + integration — `ollama_cloud`, and the `openai_subscription` **OAuth legs** that run at startup | T-W4, T-W8 | §5.5, §7.2 | M |
-| **T-B2** | curl_cffi recorder + integration, harness TLS — the only place `_cc_to_responses` output is observable | T-W4, T-W8 | §7.2 | M |
+| **T-B1** | Provider-aiohttp recorder + integration — `ollama_cloud`, and the `openai_subscription` OAuth **login** leg that runs at startup | T-W4, T-W8 | §5.5, §7.2, §7.2.2 | M |
+| **T-B2** | curl_cffi recorder + integration, harness TLS — the only place `_cc_to_responses` output is observable, **and the OAuth refresh leg**, which KBR-161 moved onto this stack | T-W4, T-W8 | §7.2, §7.2.2 | M |
 | **T-B3** | botocore recorder + integration — captures the Converse payload **after** the transport's `modelId`/`stream` pops | T-W4, T-W8 | §3.2.3, §7.2 | M |
 | **T-B4** | Scripted failure library — SSE variants, errors, Cloudflare, empty responses, context-too-large, mid-stream disconnect at each of the four injection points | T-W4 | §6.3.1 | M |
 
