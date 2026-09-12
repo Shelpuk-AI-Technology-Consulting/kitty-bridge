@@ -482,7 +482,7 @@ class TestContentParts:
         answer = project({"input": [{"role": "assistant", "content": [{"type": "output_text", "text": "no"}]}]})
 
         assert refusal.conversation != answer.conversation
-        assert refusal.conversation.turns[0].parts == (c.Opaque("refusal", digest=c.image_digest(b"no")),)
+        assert refusal.conversation.turns[0].parts == (c.Opaque("refusal", digest=c.text_digest("no")),)
 
     def test_a_rewritten_refusal_is_visible(self) -> None:
         """`kind` alone would make a rewritten refusal invisible.
@@ -518,7 +518,7 @@ class TestContentParts:
             }
         )
 
-        assert projected.conversation.turns[0].parts == (c.Opaque("file"),)
+        assert projected.conversation.turns[0].parts == (c.Opaque("document"),)
 
     def test_a_data_url_image_is_digested(self) -> None:
         """`image_digest` is pinned so six readers agree on one image.
@@ -780,7 +780,7 @@ class TestFunctionCallOutput:
         assert result.content == (
             c.Text("see attached"),
             c.Image(digest=hashlib.sha256(raw).hexdigest(), media_type="image/png"),
-            c.Opaque("file"),
+            c.Opaque("document"),
         )
 
     def test_a_content_type_the_output_branch_does_not_publish_residualises(self) -> None:

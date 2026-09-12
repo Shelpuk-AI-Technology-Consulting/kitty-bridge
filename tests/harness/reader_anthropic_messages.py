@@ -28,7 +28,6 @@ from __future__ import annotations
 
 import base64
 import binascii
-import hashlib
 import json
 from collections.abc import Mapping, Sequence
 from typing import Any
@@ -678,35 +677,24 @@ def _read_opaque(block: Mapping[str, Any], kind: str, path: str, residual: dict[
 
     Returns:
         The opaque part, carrying a digest of its payload.
+
+    Raises:
+        UnreadableBodyError: When the wire type has no canonical name — a block
+            the projection cannot address, not a reader that mis-routed a field.
     """
     # `cache_control` residualises exactly as it does on a modelled block, so
     # one field does not behave two ways — inside the digest it would produce a
     # delta with no named cause (KBR-167).
     _residualise(block, set(block) - {"cache_control"}, path, residual)
-    return c.Opaque(kind=kind, digest=_payload_digest(block))
+    # `opaque_kind` raises when no canonical name can be derived. That is not a
+    # reader bug — the wire said it — so it is translated, per §7.4.1's rule that
+    # raising is right only when there is no partial projection to salvage.
+    try:
+        canonical = c.opaque_kind(kind)
+    except ValueError as exc:
+        raise c.UnreadableBodyError(f"{path}: {exc}") from exc
 
-
-def _payload_digest(block: Mapping[str, Any]) -> str:
-    """Return the digest of an unmodelled block's payload.
-
-    Over **canonical** JSON rather than the raw wire slice, so a translator that
-    reorders keys does not change the digest. ``ensure_ascii`` is pinned
-    alongside ``sort_keys`` and ``separators`` because its default is ``True``
-    while the surrounding prose says UTF-8: an author who passed ``False`` would
-    get a different digest for the same block, visible only on non-ASCII
-    content, which is the cross-reader disagreement §7.4.1 exists to prevent.
-
-    Args:
-        block: The block, whose ``type`` and ``cache_control`` are excluded —
-            ``type`` because it is already :attr:`~harness.contract.Opaque.kind`,
-            ``cache_control`` because it residualises instead.
-
-    Returns:
-        Lowercase hex SHA-256 of the canonical payload.
-    """
-    payload = {key: value for key, value in block.items() if key not in ("type", "cache_control")}
-    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return c.Opaque(kind=canonical, digest=c.opaque_digest(block))
 
 
 def _typed_leaf(

@@ -773,21 +773,24 @@ class ResponsesProjection:
         # answer would project identically, so a bridge that turned one into the
         # other would be invisible.
         #
-        # The digest carries the text's identity without the grammar having a
-        # refusal type: `kind` alone would make a *rewritten* refusal invisible,
-        # which is the same blindness one step down.
+        # `text_digest`, not `opaque_digest`: a refusal is identified by its
+        # text, and Chat Completions carries one as a bare string with no block
+        # to hash, so the two recipes are pinned separately (§7.4.1).
         if kind == "refusal":
             text = entry.get("refusal")
             if not isinstance(text, str):
                 residual[path] = entry
                 return None
-            return c.Opaque("refusal", digest=c.image_digest(text.encode("utf-8")))
+            return c.Opaque("refusal", digest=c.text_digest(text))
 
         if kind == "input_image":
             return self._read_image(entry, path, residual)
 
+        # Named through the shared table, not restated: Anthropic and Converse
+        # both spell this `document`, and T-A3 first shipped `file` for it —
+        # one concept under two names is the delta no register row can claim.
         if kind == "input_file":
-            return c.Opaque("file")
+            return c.Opaque(c.opaque_kind("input_file"))
 
         residual[path] = entry
         return None
@@ -873,65 +876,9 @@ class ResponsesProjection:
 
         return c.ToolUse(
             name=name,
-            arguments=self._read_arguments(item.get("arguments"), f"{path}.arguments", residual),
+            arguments=c.decode_arguments(item.get("arguments"), f"{path}.arguments", residual),
             id=call_id,
         )
-
-    @staticmethod
-    def _read_arguments(raw: Any, path: str, residual: dict[str, Any]) -> Mapping[str, Any]:
-        """Decode a tool call's JSON-string arguments.
-
-        Chat Completions and Responses both encode arguments as a *string*, while
-        Messages sends an object; normalising here stops a spurious delta on
-        every cross-format comparison.
-
-        Only an absent or blank value is silently empty — an absent ``arguments``
-        honestly means *no arguments*, which is why it does **not** residualise
-        the way an absent tool ``name`` does even though the schema requires
-        both: a name is unrecoverable, an empty argument set is not. And kitty
-        already emits the blank form: its Responses builder writes ``arguments`` as ``""`` whenever a
-        Chat Completions tool call carried none, so the empty string is real
-        corpus traffic rather than a hypothetical. Every other shape the schema
-        forbids residualises, because mapping it to ``{}`` would claim the agent
-        sent no arguments when it sent something — and would hide the breach
-        where kitty *drops* them.
-
-        Args:
-            raw: The wire value.
-            path: The residual path for this field.
-            residual: Accumulator of unclassifiable values, mutated here.
-
-        Returns:
-            The decoded arguments, empty when the wire value carried none.
-        """
-        if raw is None:
-            return {}
-
-        # `FunctionToolCall.arguments` is a string in the published schema. A
-        # decoded object is NOT accepted: it would make a bridge that emitted the
-        # object form instead of the string invisible to the oracle, which is the
-        # wire-format breach this reader exists to see.
-        if not isinstance(raw, str):
-            residual[path] = raw
-            return {}
-
-        if not raw.strip():
-            return {}
-
-        try:
-            decoded = json.loads(raw)
-        except json.JSONDecodeError:
-            # Never an exception: `contract` defines a reader-raised ValueError
-            # as "the reader mis-routed a field", so failing closed into the
-            # residual keeps the diagnosis honest.
-            residual[path] = raw
-            return {}
-
-        if not isinstance(decoded, dict):
-            residual[path] = raw
-            return {}
-
-        return decoded
 
     def _read_function_output(self, item: Mapping[str, Any], path: str, residual: dict[str, Any]) -> c.ToolResult:
         """Project a ``function_call_output`` item.

@@ -15,8 +15,11 @@ kitty's bugs and the whole of I1 would prove only self-consistency.
 
 **What lives here and what does not.**  This module defines *shapes and rules*.
 It reads no bodies — the six readers do that, each against its format's
-published examples.  It captures nothing — the recorders do that.  It asserts
-nothing about kitty — the oracle does that.
+published examples.  :func:`decode_arguments` is the edge case that proves
+the line rather than crossing it: it reads one *value* whose decoding six
+readers must agree on, and knows nothing of where in a body it was found.
+It captures nothing — the recorders do that.  It asserts nothing about kitty —
+the oracle does that.
 
 **The totality rule is the load-bearing part.**  §3.3.1 requires every key in a
 body to be classified into the envelope, the conversation, or the residual, and
@@ -31,6 +34,8 @@ exactly the falsification case plan §1.4 requires this harness to ship with.
 from __future__ import annotations
 
 import hashlib
+import json
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
@@ -192,13 +197,52 @@ class Opaque:
         kind: A canonical snake_case name, never the wire's spelling. Anthropic
             writes ``search_result`` and Converse ``searchResult`` for one
             thing; the wire spellings would be a permanent unclaimed delta.
-        digest: A content digest, as for :class:`Image`.
+        digest: A content digest.  Two recipes, and §7.4.1 states which applies:
+            :func:`opaque_digest` for a block the grammar cannot model,
+            :func:`text_digest` for content whose identity is a run of text.
     """
 
     kind: str
     digest: str | None = None
 
     __hash__ = None  # type: ignore[assignment]
+
+    def __post_init__(self) -> None:
+        """Validate the kind against the canonical vocabulary.
+
+        Checked rather than merely declared, for the reason this module applies
+        to every other closed vocabulary: *a vocabulary declared closed but
+        checked nowhere is a comment, not a rule*.  The docstring above has
+        required a canonical name since T-W2 and named none, so the two readers
+        written against it arrived at ``file`` and ``document`` for one concept
+        (KBR-174).
+
+        Raises:
+            TypeError: When ``kind`` is not a ``str`` — a wrong *type*, which is
+                this module's ``TypeError`` case throughout.
+            ValueError: When ``kind`` is a wire spelling :data:`OPAQUE_ALIASES`
+                reconciles, or is not snake_case.  Construction is not parsing —
+                T-D1 builds expected conversations by hand — so this is a
+                ``ValueError`` and not :class:`UnreadableBodyError`, exactly as
+                for :attr:`Turn.role`.  A reader meeting such a type on the wire
+                translates it (see :func:`opaque_kind`); a reader *constructing*
+                one has a bug.
+        """
+        if not isinstance(self.kind, str):
+            raise TypeError(f"Opaque.kind must be a str, got {type(self.kind).__name__}")
+
+        canonical = OPAQUE_ALIASES.get(self.kind)
+        if canonical is not None:
+            raise ValueError(
+                f"Opaque.kind {self.kind!r} is a wire spelling; the canonical name is {canonical!r} "
+                "(§7.4.1). Readers translate through opaque_kind()."
+            )
+
+        if not _SNAKE_CASE.fullmatch(self.kind):
+            raise ValueError(
+                f"Opaque.kind must be canonical snake_case, got {self.kind!r} (§7.4.1). "
+                "A camelCase wire type needs a canonical name in OPAQUE_ALIASES first."
+            )
 
 
 @dataclass(frozen=True)
@@ -550,6 +594,248 @@ def image_digest(raw: bytes) -> str:
         Lowercase hex SHA-256 of ``raw``.
     """
     return hashlib.sha256(raw).hexdigest()
+
+
+def text_digest(text: str) -> str:
+    """Return the canonical digest of content identified by a run of text.
+
+    The second of :attr:`Opaque.digest`'s two recipes.  A refusal is the case
+    that needs it: Responses carries one as a typed content part, Chat
+    Completions as a **bare string** on the message
+    (``ChatCompletionResponseMessage.refusal`` is ``anyOf[string, null]``), so
+    there is no block for :func:`opaque_digest` to hash.  Pinning one recipe for
+    both would force the Chat Completions reader to invent a block wrapper, and
+    the wrapper's shape would be a new thing six readers could disagree about.
+
+    The digest is what makes a *rewritten* refusal visible rather than only a
+    removed one — :attr:`Opaque.kind` alone would project every refusal alike.
+
+    Args:
+        text: The text whose identity the digest carries.
+
+    Returns:
+        Lowercase hex SHA-256 of ``text`` encoded as UTF-8.  The encoding is
+        pinned because ``latin-1`` raises and ``cp1252`` silently differs on the
+        same content.
+    """
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def opaque_digest(block: Mapping[str, Any]) -> str:
+    """Return the canonical digest of an unmodelled block's payload.
+
+    The first of :attr:`Opaque.digest`'s two recipes, for a block type the
+    grammar does not model.  Pinned here for the reason :func:`image_digest` is:
+    six independently written readers must produce one digest for one block, and
+    prose did not achieve it — in T-A1 **all three** wrong spellings of this
+    recipe survived mutation testing, because every assertion compared two
+    projections against each other and a recipe change that stays internally
+    consistent is invisible to that.
+
+    Three details are load-bearing:
+
+    * **Canonical JSON, not the raw wire slice** — a translator that reorders
+      keys must not change the digest, which is the whole reason this is not
+      ``sha256(raw_block_bytes)``.
+    * ``ensure_ascii`` **pinned** — its default is ``True`` while the surrounding
+      prose says UTF-8, so an author "fixing" it to ``False`` gets a different
+      digest for the same block, visible only on non-ASCII content.
+    * ``cache_control`` **excluded** — otherwise one field behaves two ways: a
+      diagnosed residual on a modelled block, an unexplained digest change on an
+      unmodelled one (KBR-167).
+
+    Args:
+        block: The block, whose ``type`` is excluded because it is already
+            :attr:`Opaque.kind`, and whose ``cache_control`` is excluded because
+            it residualises under its own path instead.
+
+    Returns:
+        Lowercase hex SHA-256 of the canonical payload.
+    """
+    payload = {key: value for key, value in block.items() if key not in ("type", "cache_control")}
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+#: What a canonical :attr:`Opaque.kind` may look like.  Four rules turn on this
+#: predicate, so it is spelled once rather than left to each author's intuition:
+#: lowercase segments of letters and digits, joined by single underscores, never
+#: leading with a digit.  Accepts every kind the shipped readers emit; rejects
+#: every camelCase member of Converse's ``ContentBlock`` union.
+_SNAKE_CASE = re.compile(r"[a-z][a-z0-9]*(_[a-z0-9]+)*")
+
+#: Wire spellings that name a concept another format already names differently,
+#: mapped to the canonical :attr:`Opaque.kind`.  **Enforced**, not merely
+#: declared: :class:`Opaque` rejects any key of this table, so a reader cannot
+#: quietly project a rival name.
+#:
+#: An attached file is the concept that forced the table early.  §7.4.1 deferred
+#: it to T-A5 "with the first reader that needs one", but T-A1 and T-A3 landed
+#: first and named one thing two ways — ``document`` and ``file`` — which is the
+#: permanent unclaimed delta the deferral was meant to avoid.  ``document`` wins
+#: because Anthropic Messages *and* Bedrock Converse both spell it that way on
+#: the wire, so exactly one reader moved (KBR-174).
+#:
+#: **The canonical kinds in use today, per format — NOT a closed set**, and not
+#: a checked one either.  It cannot be closed: a format-unique type keeps its own
+#: wire spelling by the stated exception.  So this list is *documentation* for
+#: the next reader's author, and it is the one thing here that is not enforced —
+#: only the Responses row has a test that derives its members from the reader's
+#: own frozensets rather than restating them.  Treat it as a starting point to
+#: check against the readers, never as an authority.
+#:
+#: * shared across formats — ``document``, ``search_result``
+#: * Anthropic Messages — ``redacted_thinking``, ``server_tool_use``
+#: * OpenAI Responses — ``refusal``, plus its 27 format-unique item types
+#:   (``web_search_call``, ``mcp_call``, ``apply_patch_call`` …)
+OPAQUE_ALIASES: Mapping[str, str] = MappingProxyType(
+    {
+        # OpenAI Responses' attachment, and the name T-A3 first shipped for it.
+        "input_file": "document",
+        "file": "document",
+        # Bedrock Converse, whose union is camelCase throughout (T-A5).
+        "searchResult": "search_result",
+    }
+)
+
+
+def opaque_kind(wire_type: str) -> str:
+    """Return the canonical :attr:`Opaque.kind` for a wire block type.
+
+    A format-unique type passes through unchanged: it names a concept no other
+    format has, so there is no second spelling to reconcile and the wire's own
+    word is already canonical.  That is the deliberate exception to
+    :attr:`Opaque.kind`'s "never the wire's spelling".
+
+    **A non-snake_case type raises rather than being converted.**  Converting
+    would mean shipping a camelCase splitter with no caller, no corpus and no
+    test — and a splitter whose edge cases nobody has exercised is a second
+    source of drift, not a cure for one.  Raising puts the next author at this
+    module at the moment they meet the first such type, with a real corpus in
+    hand.  That is **nine** types for Bedrock Converse, not one: its
+    ``ContentBlock`` union carries ``toolUse``, ``toolResult``, ``guardContent``,
+    ``cachePoint``, ``reasoningContent``, ``citationsContent``, ``searchResult``,
+    ``toolAddition`` and ``toolRemoval``.
+
+    Args:
+        wire_type: The block or item type as the format spells it.
+
+    Returns:
+        The canonical name — the alias when :data:`OPAQUE_ALIASES` reconciles the
+        spelling, and ``wire_type`` itself otherwise.
+
+    Raises:
+        TypeError: When ``wire_type`` is not a ``str`` — this module's split
+            between a wrong *type* and a wrong *value*, matching
+            :class:`Opaque`'s own check so the two cannot disagree.
+        ValueError: When no alias exists and ``wire_type`` is not snake_case, so
+            no canonical name can be derived without a decision.  A reader
+            meeting this on the wire translates it into
+            :class:`UnreadableBodyError`: the body is not projectable, but the
+            reader is not at fault.
+    """
+    # Checked before the lookup, not after: an unhashable value raises
+    # `TypeError: unhashable type` from `.get()` itself, which a reader's
+    # `except ValueError` cannot catch, so it would escape as a raw crash.
+    if not isinstance(wire_type, str):
+        raise TypeError(f"opaque_kind() wire_type must be a str, got {type(wire_type).__name__}")
+
+    canonical = OPAQUE_ALIASES.get(wire_type)
+    if canonical is not None:
+        return canonical
+
+    # Not an alias and not snake_case means nobody has decided what this is
+    # called; guessing here is how two readers end up with two names.
+    if not _SNAKE_CASE.fullmatch(wire_type):
+        raise ValueError(
+            f"no canonical Opaque.kind for wire type {wire_type!r} (§7.4.1): it is neither snake_case "
+            "nor listed in OPAQUE_ALIASES. Add it to OPAQUE_ALIASES with its canonical name."
+        )
+
+    return wire_type
+
+
+def decode_arguments(raw: Any, path: str, residual: dict[str, Any]) -> Mapping[str, Any]:
+    """Decode a tool call's JSON-string arguments, failing closed into the residual.
+
+    Chat Completions and Responses both encode arguments as a JSON *string*
+    while :attr:`ToolUse.arguments` is a mapping, so both readers decode and
+    §3.3.1b requires them to decode alike.  Pinned here (KBR-174) because the two
+    sit on opposite sides of register rows P13–P17: a disagreement on the
+    malformed path would surface as an unclaimed delta at
+    ``conversation.turns[*].parts[*]`` that no row claims, which §3.3.1a calls
+    the unrecoverable direction.
+
+    **Only an absent or blank value is silently empty.**  An absent ``arguments``
+    honestly means *no arguments*, which is why it does not residualise the way
+    an absent tool ``name`` does even though the schema requires both.  The test
+    generalises to every required field: *can the projection represent the
+    absence losslessly?*  ``{}`` is a true statement about a call — seen and
+    classified, the same ground on which :data:`STOP_REASONS` gives ``other`` its
+    escape instead of the residual.  ``""`` for a name is not: it claims a tool
+    *named* empty-string, and a call nobody can name cannot be paired with its
+    result or addressed by a register row.
+
+    The blank form is real corpus traffic, not a hypothesis — kitty's own
+    ``openai_subscription.py`` writes ``func.get("arguments", "")``.
+
+    **An already-decoded object is rejected, not accepted.**  Taking it would
+    make a bridge that emitted the object form where the schema demands a string
+    invisible to the oracle, which is the wire-format breach the readers exist to
+    see.
+
+    **Never raises on a value the wire can carry.**  This module defines a
+    reader-raised ``ValueError`` as "the reader mis-routed a field — a reader
+    bug", so failing closed into the residual keeps the diagnosis honest.  The
+    qualifier is literal: ``json.loads`` still raises ``RecursionError`` on
+    pathologically nested input, which every body-level parse in the harness
+    shares and no corpus produces.
+
+    Args:
+        raw: The wire value, of any type.
+        path: The residual key for this argument, which is **format-specific and
+            stays the caller's** — ``input[<i>].arguments`` for Responses,
+            ``messages[<i>].tool_calls[<j>].function.arguments`` for Chat
+            Completions.
+        residual: The reader's accumulator of unclassifiable values, mutated
+            here.  Taken as a parameter rather than reported through a return
+            flag so the fail-closed step cannot be skipped: ``mypy`` covers
+            ``src/kitty`` only, so a caller that ignored such a flag would be
+            caught by nothing.
+
+    Returns:
+        The decoded arguments, empty whenever the value did not carry a JSON
+        object.
+    """
+    # Absent is a true empty, and the only non-string that is.
+    if raw is None:
+        return {}
+
+    # Everything else that is not a string is a shape the schema forbids,
+    # including the decoded object form.
+    if not isinstance(raw, str):
+        residual[path] = raw
+        return {}
+
+    if not raw.strip():
+        return {}
+
+    try:
+        decoded = json.loads(raw)
+    # `ValueError` alone: `JSONDecodeError` subclasses it, and naming both reads
+    # as though two distinct cases existed.
+    except ValueError:
+        residual[path] = raw
+        return {}
+
+    # The raw string, never `decoded`: a residual key set is diffed across all
+    # six readers (T-D8), so storing two different renderings of one unreadable
+    # value would report a delta neither reader caused.
+    if not isinstance(decoded, dict):
+        residual[path] = raw
+        return {}
+
+    return decoded
 
 
 # --------------------------------------------------------------------------
