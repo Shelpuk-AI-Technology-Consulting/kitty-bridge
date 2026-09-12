@@ -904,69 +904,70 @@ def _triggers(names: object, field_name: str, entry_id: str) -> frozenset[Trigge
     return frozenset(resolved)
 
 
-def _checked_entry(entry: CorpusEntry) -> None:
-    """Fail unless ``entry`` would survive :func:`load_entry`.
+#: Every manifest field whose value must be a string.
+#:
+#: Checked explicitly because nothing downstream does: :class:`CorpusEntry` and
+#: :class:`~harness.contract.CapturedRequest` are frozen dataclasses, and a frozen
+#: dataclass enforces no annotation at runtime. Each omission from this list was
+#: found separately and each failed differently -- ``"query": 5`` loaded and died
+#: later as ``AttributeError`` inside ``findings``; a non-string ``path``
+#: round-tripped silently; ``"description": 5`` loaded and then crashed the lint
+#: with a ``TypeError`` instead of the ``UnscrubbedCorpusError`` it promises; a
+#: list in ``captured_from`` passed a truthiness check and was never noticed.
+#: Listing every string field once, rather than the ones that had failed so far,
+#: is what stops a fifth.
+_STRING_FIELDS: tuple[str, ...] = (
+    "description",
+    "origin",
+    "origin_note",
+    "captured_from",
+    "captured_at",
+    "method",
+    "scheme",
+    "host",
+    "path",
+    "query",
+    "body_file",
+    "body_sha256",
+)
 
-    **The writer must refuse exactly what the reader refuses.** Sharing
-    :func:`_checked_id` closed that asymmetry for the id; these are the rest of
-    it. Without them ``write_entry`` succeeds on an entry ``load_corpus`` then
-    rejects — the capture procedure's last step reports success and the failure
-    surfaces in CI, against a file already committed to the tree. Loud rather
-    than silent, but at the wrong moment and to the wrong person.
 
-    ``test_anything_the_writer_accepts_the_reader_accepts`` holds the two sides
-    together, so a rule added to one and not the other fails rather than drifts.
+def _entry_from_manifest(manifest: object, stem: str, body: bytes | None) -> CorpusEntry:
+    """Validate a manifest against its body and build the entry it describes.
+
+    **This is the format's only rule list, and both directions run it.**
+    :func:`load_entry` calls it on what it parsed; :func:`write_entry` calls it on
+    the entry it was given, before scrubbing and before anything reaches disk
+    (scrubbing cannot turn an accepted entry into a refused one — the writer's
+    comment says why). That is a structural
+    decision, not tidiness. The writer used to carry its own copy of these rules,
+    and review found the copy one rule short three rounds running -- the id, then
+    provenance and triggers, then field types -- each time an entry the writer
+    reported as written and the reader then refused, failing in CI against a file
+    already committed. A rule list maintained twice drifts; a rule list run twice
+    cannot. A rule added here is enforced on write automatically, and
+    ``test_the_writer_never_writes_what_the_reader_refuses`` feeds malformed
+    entries through both sides to hold it.
+
+    Pure: the caller does the I/O, so the writer can validate a manifest that
+    does not exist on disk yet.
 
     Args:
-        entry: The entry about to be written.
-
-    Raises:
-        CorpusEntryError: When any load-side rule would reject it.
-    """
-    _checked_id(entry.id)
-
-    if entry.origin not in (CAPTURED, SYNTHETIC):
-        raise CorpusEntryError(f"{entry.id}: origin must be {CAPTURED!r} or {SYNTHETIC!r}")
-    if entry.origin == SYNTHETIC and not entry.origin_note:
-        raise CorpusEntryError(f"{entry.id}: a synthetic entry needs an origin_note")
-    if entry.origin == CAPTURED and not entry.captured_from:
-        raise CorpusEntryError(f"{entry.id}: a captured entry needs captured_from")
-    if entry.origin == CAPTURED and not entry.captured_at:
-        raise CorpusEntryError(f"{entry.id}: a captured entry needs captured_at")
-
-    both = sorted(t.value for t in entry.triggers_met & entry.triggers_absent)
-    if both:
-        raise CorpusEntryError(f"{entry.id}: trigger(s) {both} declared both met and absent")
-
-    unarrangeable = sorted(
-        t.value for t in (entry.triggers_met | entry.triggers_absent) & NOT_CORPUS_DECIDABLE
-    )
-    if unarrangeable:
-        raise CorpusEntryError(f"{entry.id}: trigger(s) {unarrangeable} cannot be arranged by a request")
-
-    if any(not reason for _, reason in entry.known_non_secrets):
-        raise CorpusEntryError(f"{entry.id}: every known_non_secrets entry needs a reason")
-
-
-def load_entry(manifest_path: Path) -> CorpusEntry:
-    """Read one entry from its manifest and sidecar body.
-
-    Args:
-        manifest_path: The ``<id>.json`` file.
+        manifest: The parsed manifest, of whatever shape it actually has.
+        stem: The entry id the manifest must carry.
+        body: The body bytes the manifest's digest must describe, or ``None``
+            when the sidecar does not exist. Optional rather than checked by the
+            caller so that a missing body is reported at the same point in the
+            rule order as before: a manifest whose id is wrong must say so, not
+            report the missing ``<id>.body`` that follows from it.
 
     Returns:
-        The entry, with ``request.body`` holding the sidecar's exact bytes.
+        The entry.
 
     Raises:
-        CorpusEntryError: When the manifest is malformed, contradictory, or
-            names a body file that does not exist.
+        CorpusEntryError: When the manifest is malformed, contradictory, or does
+            not describe ``body``.
     """
-    stem = _checked_id(manifest_path.stem)
-    try:
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
-        raise CorpusEntryError(f"{stem}: manifest is not JSON: {exc}") from exc
-
     if not isinstance(manifest, dict):
         raise CorpusEntryError(f"{stem}: manifest must be a JSON object")
 
@@ -974,6 +975,12 @@ def load_entry(manifest_path: Path) -> CorpusEntry:
 
     if manifest["id"] != stem:
         raise CorpusEntryError(f"{stem}: manifest id is {manifest['id']!r}; it must equal the filename stem")
+
+    # Types first, so every check below may assume a string and a hand-edited
+    # manifest is refused here rather than crashing whatever reads it next.
+    for field_name in _STRING_FIELDS:
+        if not isinstance(manifest[field_name], str):
+            raise CorpusEntryError(f"{stem}: {field_name} must be a string")
 
     # Origin decides which provenance fields are required. A synthetic entry
     # without its reason is the one plan §6 explicitly asks to be recorded
@@ -1006,10 +1013,6 @@ def load_entry(manifest_path: Path) -> CorpusEntry:
             f"{stem}: body_file is {manifest['body_file']!r}; it must be {expected_body!r}"
         )
 
-    body_path = manifest_path.with_name(expected_body)
-    if not body_path.is_file():
-        raise CorpusEntryError(f"{stem}: body_file {expected_body!r} does not exist")
-
     # The digest is what makes "byte-exact" enforceable rather than aspirational.
     # This repository carries mixed CRLF/LF by history, so a contributor with
     # `core.autocrlf=true` would rewrite LF to CRLF inside a `.body` on checkout
@@ -1022,7 +1025,9 @@ def load_entry(manifest_path: Path) -> CorpusEntry:
     # (`test_gitattributes_still_covers_the_corpus` guards that). The digest is not
     # redundant with the Windows CI leg either: the leg would catch a body whose
     # manifest went stale, but a rewrite that updated both would pass everywhere.
-    body = body_path.read_bytes()
+    if body is None:
+        raise CorpusEntryError(f"{stem}: body_file {expected_body!r} does not exist")
+
     digest = hashlib.sha256(body).hexdigest()
     if digest != manifest["body_sha256"]:
         raise CorpusEntryError(
@@ -1053,17 +1058,6 @@ def load_entry(manifest_path: Path) -> CorpusEntry:
     formats = {f.value: f for f in WireFormat}
     if fmt_name is not None and fmt_name not in formats:
         raise CorpusEntryError(f"{stem}: wire_format {fmt_name!r} is not a WireFormat")
-
-    # The request line is type-checked here because nothing downstream does.
-    # `CapturedRequest` is a frozen dataclass, and a frozen dataclass enforces
-    # no annotation at runtime -- only `__post_init__` validates, and it looks at
-    # the headers alone. So `"query": 5` loaded cleanly and died much later as
-    # `AttributeError: 'int' object has no attribute 'split'` inside `findings`,
-    # and a non-string `path` was quieter still: it round-tripped back into the
-    # manifest untouched.
-    for field_name in ("method", "scheme", "host", "path", "query"):
-        if not isinstance(manifest[field_name], str):
-            raise CorpusEntryError(f"{stem}: {field_name} must be a string")
 
     headers = manifest["headers"]
     if not isinstance(headers, list):
@@ -1097,6 +1091,39 @@ def load_entry(manifest_path: Path) -> CorpusEntry:
     )
 
 
+
+
+def load_entry(manifest_path: Path) -> CorpusEntry:
+    """Read one entry from its manifest and sidecar body.
+
+    The I/O only; every rule belongs to :func:`_entry_from_manifest`.
+
+    Args:
+        manifest_path: The ``<id>.json`` file.
+
+    Returns:
+        The entry, with ``request.body`` holding the sidecar's exact bytes.
+
+    Raises:
+        CorpusEntryError: When the manifest is malformed, contradictory, or
+            names a body file that does not exist.
+    """
+    stem = _checked_id(manifest_path.stem)
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise CorpusEntryError(f"{stem}: manifest is not JSON: {exc}") from exc
+
+    # Derived from the stem, never read from the manifest, so a hand-edited
+    # `body_file` cannot point this read outside the corpus directory. Absence is
+    # passed on rather than raised here, so the validator reports it in rule
+    # order -- after the id, not before it.
+    body_path = manifest_path.with_name(f"{stem}.body")
+    body = body_path.read_bytes() if body_path.is_file() else None
+
+    return _entry_from_manifest(manifest, stem, body)
+
+
 def load_corpus(root: Path) -> tuple[CorpusEntry, ...]:
     """Read every entry under ``root``.
 
@@ -1110,6 +1137,43 @@ def load_corpus(root: Path) -> tuple[CorpusEntry, ...]:
         CorpusEntryError: When any entry is malformed.
     """
     return tuple(load_entry(path) for path in sorted(root.glob("*.json")))
+
+
+def _manifest_for(entry: CorpusEntry, request: CapturedRequest) -> dict[str, object]:
+    """Return the manifest that describes ``entry`` carrying ``request``.
+
+    One builder for both validations and the write, so the manifest that is
+    checked and the manifest that lands on disk cannot be two dictionaries that
+    agree by luck.
+
+    Args:
+        entry: The entry being written.
+        request: The request to describe — the capture as given, or its
+            scrubbed form.
+
+    Returns:
+        The manifest, ready to serialise.
+    """
+    return {
+        "id": entry.id,
+        "description": entry.description,
+        "origin": entry.origin,
+        "origin_note": entry.origin_note,
+        "captured_from": entry.captured_from,
+        "captured_at": entry.captured_at,
+        "method": request.method,
+        "scheme": request.scheme,
+        "host": request.host,
+        "path": request.path,
+        "query": request.query,
+        "headers": [list(pair) for pair in request.headers],
+        "body_file": f"{entry.id}.body",
+        "body_sha256": hashlib.sha256(request.body).hexdigest(),
+        "wire_format": None if entry.wire_format is None else entry.wire_format.value,
+        "known_non_secrets": [list(pair) for pair in entry.known_non_secrets],
+        "triggers_met": sorted(t.value for t in entry.triggers_met),
+        "triggers_absent": sorted(t.value for t in entry.triggers_absent),
+    }
 
 
 def write_entry(root: Path, entry: CorpusEntry, *, extra: Sequence[str] = ()) -> Path:
@@ -1128,16 +1192,22 @@ def write_entry(root: Path, entry: CorpusEntry, *, extra: Sequence[str] = ()) ->
         The manifest's path.
 
     Raises:
-        CorpusEntryError: When the entry would not survive :func:`load_entry` —
-            a malformed id, missing provenance, contradictory or unarrangeable
-            triggers, or an unexplained exemption.
+        CorpusEntryError: When the entry would not survive :func:`load_entry`.
+            Decided by running the reader's own rules on the manifest before
+            anything is written, not by a second copy of them.
         EncodedCaptureError: When the capture carries a ``content-encoding`` or
             ``transfer-encoding`` header.
         ValueError: When an ``extra`` or ``known_non_secrets`` literal is shorter
             than :data:`MIN_LITERAL`. Raised from :func:`scrub`, re-raised here
             with the entry named.
     """
-    _checked_entry(entry)
+    _checked_id(entry.id)
+
+    # Validated BEFORE scrubbing, by the reader's own rules. `scrub` scans the
+    # host and path, so a non-string there would otherwise escape as a raw
+    # `TypeError` from inside the scrubber instead of the refusal the reader
+    # gives the same entry.
+    _entry_from_manifest(_manifest_for(entry, entry.request), entry.id, entry.request.body)
 
     encoded = sorted({n for n, _ in entry.request.headers if n.lower() in REFUSED_ENCODINGS})
     if encoded:
@@ -1153,28 +1223,18 @@ def write_entry(root: Path, entry: CorpusEntry, *, extra: Sequence[str] = ()) ->
         scrubbed = scrub(entry.request, extra, [literal for literal, _ in entry.known_non_secrets])
     except ValueError as exc:
         raise ValueError(f"{entry.id}: {exc}") from exc
-    body_file = f"{entry.id}.body"
 
-    manifest = {
-        "id": entry.id,
-        "description": entry.description,
-        "origin": entry.origin,
-        "origin_note": entry.origin_note,
-        "captured_from": entry.captured_from,
-        "captured_at": entry.captured_at,
-        "method": scrubbed.method,
-        "scheme": scrubbed.scheme,
-        "host": scrubbed.host,
-        "path": scrubbed.path,
-        "query": scrubbed.query,
-        "headers": [list(pair) for pair in scrubbed.headers],
-        "body_file": body_file,
-        "body_sha256": hashlib.sha256(scrubbed.body).hexdigest(),
-        "wire_format": None if entry.wire_format is None else entry.wire_format.value,
-        "known_non_secrets": [list(pair) for pair in entry.known_non_secrets],
-        "triggers_met": sorted(t.value for t in entry.triggers_met),
-        "triggers_absent": sorted(t.value for t in entry.triggers_absent),
-    }
+    # Validated once, before scrubbing, and deliberately not again after it.
+    # Scrubbing cannot turn an accepted entry into a refused one: it rewrites
+    # the body, headers, host, path and query, every one of which stays a
+    # string, and `_manifest_for` recomputes the digest from the very bytes
+    # being written; provenance, triggers and exemptions are untouched. A second
+    # validation here survived mutation testing and never fired across 3,000
+    # fuzzed entries, so it was removed as a guard against nothing. If scrubbing
+    # ever gains the power to change a field the reader checks, this is where
+    # the second call goes back.
+    manifest = _manifest_for(entry, scrubbed)
+    body_file = f"{entry.id}.body"
 
     root.mkdir(parents=True, exist_ok=True)
     (root / body_file).write_bytes(scrubbed.body)

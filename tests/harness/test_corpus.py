@@ -967,11 +967,13 @@ class TestTheRoundTrip:
         """`write_entry` reads `known_non_secrets` straight into `allow`.
 
         A short one there disables the lint on the entry being written, which is
-        the worst moment for it to happen.
+        the worst moment for it to happen. Refused as `CorpusEntryError` naming
+        the entry — the reader's exception and the reader's message, because the
+        writer now runs the reader's rules rather than a copy of them.
         """
         short = entry(known_non_secrets=(("key", "looks fine, disables the lint"),))
 
-        with pytest.raises(ValueError, match="allow literals"):
+        with pytest.raises(k.CorpusEntryError, match="sample: known_non_secrets"):
             k.write_entry(tmp_path, short)
 
     def test_nothing_is_written_when_the_id_is_refused(self, tmp_path: Path) -> None:
@@ -996,7 +998,7 @@ class TestTheRoundTrip:
                 },
                 "both met and absent",
             ),
-            ({"triggers_met": frozenset({Trigger.UPSTREAM_EMPTY_RESPONSE})}, "cannot be arranged"),
+            ({"triggers_met": frozenset({Trigger.UPSTREAM_EMPTY_RESPONSE})}, "cannot arrange"),
             ({"known_non_secrets": (("a-literal", ""),)}, "needs a reason"),
         ],
     )
@@ -1012,12 +1014,8 @@ class TestTheRoundTrip:
         with pytest.raises(k.CorpusEntryError, match=expected):
             k.write_entry(tmp_path, entry(**overrides))
 
-    def test_anything_the_writer_accepts_the_reader_accepts(self, tmp_path: Path) -> None:
-        """The invariant behind the case list above, asserted directly.
-
-        A rule added to one side and not the other fails here rather than
-        drifting until someone writes an entry nothing can read.
-        """
+    def test_a_well_formed_entry_is_written_and_read_back(self, tmp_path: Path) -> None:
+        """The positive half: the writer must not refuse what the reader accepts."""
         accepted = [
             entry(id="synthetic-one"),
             entry(
@@ -1033,6 +1031,52 @@ class TestTheRoundTrip:
             k.write_entry(tmp_path, one)
 
         assert [e.id for e in k.load_corpus(tmp_path)] == ["captured-one", "synthetic-one", "with-triggers"]
+
+    @pytest.mark.parametrize(
+        "overrides",
+        [
+            # Every shape review found the writer accepting and the reader
+            # refusing, across four rounds. The earlier version of this test
+            # used only well-typed entries, so it could not fail on any of them.
+            {"request": capture(CLEAN_BODY, query=None)},
+            {"request": capture(CLEAN_BODY, host=None)},
+            {"request": capture(CLEAN_BODY, path=5)},
+            {"description": 5},
+            {"origin_note": ["a list"]},
+            {"origin": k.CAPTURED, "origin_note": "", "captured_from": ["v"], "captured_at": "d"},
+            {"origin": k.CAPTURED, "origin_note": "", "captured_from": "v", "captured_at": 7},
+            {"origin": k.CAPTURED, "origin_note": "", "captured_from": "", "captured_at": "d"},
+            {"origin": "recorded"},
+            {
+                "triggers_met": frozenset({Trigger.ORPHAN_TOOL_RESULT}),
+                "triggers_absent": frozenset({Trigger.ORPHAN_TOOL_RESULT}),
+            },
+            {"triggers_absent": frozenset({Trigger.ALWAYS})},
+            {"known_non_secrets": (("a-literal", ""),)},
+            {"known_non_secrets": (("key", "short"),)},
+        ],
+        ids=lambda overrides: ",".join(sorted(overrides)),
+    )
+    def test_the_writer_never_writes_what_the_reader_refuses(
+        self, tmp_path: Path, overrides: dict[str, object]
+    ) -> None:
+        """Each malformed entry is refused on write, with the reader's exception.
+
+        Two properties in one assertion, and both have failed before. The entry
+        must be refused **at write time** — review found `write_entry` reporting
+        success on entries `load_corpus` then refused, three rounds running,
+        because the writer carried its own copy of the rules and the copy was
+        always one rule short. And the refusal must be `CorpusEntryError`, never a
+        raw `TypeError`: `scrub` reads the host and path, so an unvalidated
+        `host=None` used to escape from inside the scrubber.
+
+        Nothing is written for any of them, so a refusal cannot leave half an
+        entry behind.
+        """
+        with pytest.raises(k.CorpusEntryError):
+            k.write_entry(tmp_path, entry(**overrides))
+
+        assert list(tmp_path.glob("*")) == []
 
     def test_a_short_literal_refusal_names_the_entry(self, tmp_path: Path) -> None:
         """Every rejection in `load_entry` names the entry; this one did not.

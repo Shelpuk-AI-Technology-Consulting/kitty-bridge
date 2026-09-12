@@ -2435,11 +2435,20 @@ asserted over every ordered pair of known shapes at three separations. What is *
 that the finding count equals the placeholder count: one redaction can subsume a neighbour, which
 names more than it needs to rather than less.
 
-**The writer refuses exactly what the reader refuses, and both scan every field.** Two asymmetries
-were found in review and closed, and both had the same shape — a rule enforced on one side only, so
-the gap looked like a check that existed. `write_entry` accepted entries `load_corpus` then
-rejected, which turns the capture procedure's last step into a success that fails later in CI
-against a file already committed. And `scrub` scanned the body, the headers and the query but left
+**The writer refuses exactly what the reader refuses — by running the reader's rules, not a copy.**
+`write_entry` accepted entries `load_corpus` then rejected, which turns the capture procedure's last
+step into a success that fails later in CI against a file already committed. It was closed one rule
+at a time for three review rounds — the id, then provenance and triggers, then field types — and
+each round found the writer's copy of the rules one short again. The fix that ended it was
+structural: there is now **one** validator, `_entry_from_manifest`, pure over a manifest and its
+body; the reader calls it on what it parsed and the writer calls it on the entry it was given, before
+anything is scrubbed or written. A rule list maintained twice drifts; a rule list run twice cannot.
+The test that holds it is adversarial — every malformed shape review found, fed through the writer —
+because the earlier version used only well-typed entries and so could not fail on the very defect it
+was named for.
+
+The second asymmetry had the same shape — a rule enforced on one side only, so the gap looked like a
+check that existed. And `scrub` scanned the body, the headers and the query but left
 **`host` and `path`** alone: a path of `/v1/key/<token>/messages` was committed and linted clean,
 and an internal hostname survived even when the operator named it in `extra` — while this document
 already claimed hostnames were removed. Scanning the routing fields costs nothing the oracle needs,
