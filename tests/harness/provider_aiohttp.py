@@ -104,26 +104,32 @@ class ProviderAiohttpTransport:
         await self._recorder.start()
 
     async def stop(self) -> None:
-        """Release the recorder's port, and close the adapter's own session.
+        """Close the adapter's transport, then release the recorder's port.
 
-        ``BridgeServer.stop_async`` closes the sessions **it** owns and knows
-        nothing about an adapter that built its own, so without this the
-        ``ollama_cloud`` session outlives every test that starts one — an
-        "Unclosed client session" warning per test, and a real leak in a gate
-        that runs thousands. Closing it here rather than in the product is
-        deliberate: the product's session is a per-process pool whose lifetime is
-        the process, and shortening it would be a change to the product to suit
-        a test.
+        **The private-attribute reach is gone (KBR-190).** This used to read
+        ``adapter._session`` and close it, arguing that the product's session was
+        a per-process pool whose lifetime was the process, so closing it at
+        bridge stop would be a change to the product to suit a test. That premise
+        was false: ``get_provider`` builds a fresh adapter per call and every
+        caller builds one immediately before the ``BridgeServer`` that receives
+        it, so the session's lifetime is the **bridge's**.
+        ``BridgeServer.stop_async`` closes it now, through
+        :meth:`~kitty.providers.base.ProviderAdapter.aclose`.
 
-        The recorder is stopped in a ``finally``: a session that fails to close
+        **The call remains, on the product's public hook.** Four tests in this
+        module drive the adapter directly — ``bind()`` then ``make_request()`` —
+        with no bridge in them to do it, and dropping the close outright would
+        leak a session per test, which is the symptom the original reach existed
+        to prevent. ``aclose`` is idempotent, so the ordinary path closes twice
+        and notices nothing.
+
+        The recorder is stopped in a ``finally``: a transport that fails to close
         must not leave a port bound, because the next test's ephemeral port
         allocation is the only thing that would notice.
         """
         try:
             if self._adapter is not None:
-                session = self._adapter._session
-                if session is not None and not session.closed:
-                    await session.close()
+                await self._adapter.aclose()
         finally:
             await self._recorder.stop()
 

@@ -1084,7 +1084,14 @@ _EMPTY_CTX: _BackendContext = {}  # Sentinel default for .get() — avoids per-a
 
 
 class BridgeServer:
-    """HTTP bridge that translates between agent protocols and upstream Chat Completions."""
+    """HTTP bridge that translates between agent protocols and upstream Chat Completions.
+
+    **Ownership of the adapters.**  The bridge owns the adapters handed to it as
+    ``provider`` and ``backends``: :meth:`stop_async` closes the HTTP transport
+    each one built (KBR-190).  Every caller constructs them immediately before
+    the server that receives them, and a caller must not give one adapter to two
+    bridges whose lifetimes overlap.
+    """
 
     def __init__(
         self,
@@ -2346,7 +2353,21 @@ class BridgeServer:
         return asyncio.get_event_loop().run_until_complete(self.start_async())
 
     async def stop_async(self) -> None:
-        """Gracefully stop the server and close the HTTP client session.
+        """Gracefully stop the server and close every HTTP client session.
+
+        The order is the safety argument, not an accident.  ``_runner.cleanup()``
+        runs first so in-flight handlers drain; the bridge's own sessions, log
+        file and state file follow; the adapters' transports come **last**, so a
+        provider that fails to close cannot cost the bridge its own cleanup or
+        leave a state file claiming a live bridge.
+
+        The containment runs both ways.  The adapters close from a ``finally``,
+        so a failure in the bridge's own teardown cannot skip them — that would
+        leak exactly what KBR-190 exists to fix.  A failed **drain** is the one
+        exception: it is deliberately fatal to the adapter close, because an
+        undrained handler may still hold a live stream, and closing a transport
+        under one is the single shape ``curl_cffi`` is known to have crashed on.
+        Leaking a pool beats crashing the process.
 
         The session summary is written in a ``finally``: a teardown step that
         raises must not cost a gracefully-shut-down bridge its only durable
@@ -2356,24 +2377,61 @@ class BridgeServer:
             if self._runner is not None:
                 await self._runner.cleanup()
                 self._runner = None
-            if self._session is not None and not self._session.closed:
-                await self._session.close()
-                self._session = None
-            if self._proxy_session is not None and not self._proxy_session.closed:
-                await self._proxy_session.close()
-                self._proxy_session = None
-            self._app = None
-            if self._access_log_file is not None:
-                self._access_log_file.close()
-                self._access_log_file = None
-            # Remove state file
-            if self._state_file:
-                from kitty.bridge.state import remove_state
+            # Past the drain, so no handler holds a live stream and a provider's
+            # transport is safe to close; the `finally` is what guarantees the
+            # adapters still close if the bridge's own teardown below fails.
+            try:
+                if self._session is not None and not self._session.closed:
+                    await self._session.close()
+                    self._session = None
+                if self._proxy_session is not None and not self._proxy_session.closed:
+                    await self._proxy_session.close()
+                    self._proxy_session = None
+                self._app = None
+                if self._access_log_file is not None:
+                    self._access_log_file.close()
+                    self._access_log_file = None
+                # Remove state file
+                if self._state_file:
+                    from kitty.bridge.state import remove_state
 
-                remove_state(self._state_file)
+                    remove_state(self._state_file)
+            finally:
+                await self._close_provider_transports()
         finally:
             self._write_session_summary()
         logger.info("Bridge server stopped")
+
+    async def _close_provider_transports(self) -> None:
+        """Close the HTTP transport owned by every adapter this bridge holds.
+
+        Adapters with ``use_custom_transport`` build a client of their own that
+        this server's sessions know nothing about, so before KBR-190 a bridge
+        started and stopped inside a living process leaked a connection pool per
+        cycle.
+
+        Read from the backing fields ``_provider`` and ``_backends``, never the
+        ``_active_*`` properties: those resolve through a request-scoped
+        ``ContextVar``, and teardown is not a request — reading it would close
+        whichever backend the last request happened to select.
+
+        Deduplicated by identity, because balancing mode is constructed with
+        ``provider=backends[0][0]`` and the same adapter is then reachable twice.
+
+        A failure is logged and contained rather than propagated: shutdown has no
+        caller positioned to act on a provider's teardown error, and one bad
+        adapter must not cost the others their close.  Same rule as
+        :meth:`_write_session_summary` below.
+        """
+        seen: set[int] = set()
+        for provider in [self._provider, *(backend[0] for backend in self._backends or [])]:
+            if id(provider) in seen:
+                continue
+            seen.add(id(provider))
+            try:
+                await provider.aclose()
+            except Exception as exc:
+                logger.warning("Failed to close transport for provider %s: %s", type(provider).__name__, exc)
 
     def stop(self) -> None:
         """Synchronous wrapper around stop_async."""

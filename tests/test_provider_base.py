@@ -1,5 +1,7 @@
 """Tests for providers/base.py — ProviderAdapter interface."""
 
+import inspect
+
 import pytest
 
 from kitty.providers.base import ProviderAdapter
@@ -270,3 +272,18 @@ class TestStreamRequestDefault:
         adapter = _stub_adapter()
         with pytest.raises(NotImplementedError):
             await adapter.stream_request({"model": "test", "messages": []}, lambda _: None)
+
+
+class TestACloseDefault:
+    """Default aclose is an awaitable no-op (KBR-190)."""
+
+    def test_it_is_a_coroutine_function(self):
+        """`stop_async` awaits this on every adapter, overridden or not."""
+        assert inspect.iscoroutinefunction(ProviderAdapter.aclose)
+
+    @pytest.mark.asyncio
+    async def test_default_returns_none_and_changes_nothing(self):
+        adapter = _stub_adapter()
+        before = dict(adapter.__dict__)
+        assert await adapter.aclose() is None
+        assert adapter.__dict__ == before

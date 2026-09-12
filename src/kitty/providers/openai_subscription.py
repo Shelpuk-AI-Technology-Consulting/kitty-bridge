@@ -232,10 +232,20 @@ class OpenAISubscriptionAdapter(OpenAIAdapter):
     def _curl_session(self) -> curl_cffi.requests.AsyncSession:
         """Long-lived curl_cffi session for Codex backend requests.
 
-        Lazily created, never explicitly closed during normal operation.
+        Lazily created, and closed by :meth:`aclose` when the bridge stops
+        (KBR-190).  Still not built with ``async with``, which would close it
+        while an SSE stream was still running — the shape curl_cffi issue #675
+        reported as a segfault.  Closing at teardown is a different moment:
+        ``BridgeServer.stop_async`` closes adapters only after aiohttp's runner
+        has drained the in-flight handlers, and #675 was closed upstream as no
+        longer reproducible.  **Measured, not guaranteed:** that was read on
+        0.16.3, the version resolved here, and ``pyproject.toml`` declares
+        ``curl_cffi>=0.7`` with no upper bound — the weakest pin in the repo, as
+        ``tests/test_curl_cffi_transport_contract.py`` records.  A future
+        resolution could pick up a version where the lifecycle work still open
+        under #751 bites, which is why a failed drain skips the close entirely.
+
         Automatically persists Cloudflare cookies across requests.
-        Not using ``async with`` avoids the curl_cffi segfault (issue #675)
-        that occurs when closing a session with an active SSE stream.
         """
         if self._curl_session_instance is None:
             ca_path = _resolve_ca_cert_path()
@@ -303,7 +313,7 @@ class OpenAISubscriptionAdapter(OpenAIAdapter):
           for that account;
         * cookies are host-scoped, and this leg addresses ``auth.openai.com``
           while the API leg addresses ``chatgpt.com``, so one jar would hold
-          both hosts' cookies for the process lifetime and replay the auth
+          both hosts' cookies for the bridge's lifetime and replay the auth
           host's across every account the bridge serves.
 
         Sharing would buy nothing observable: the two legs never share a
@@ -314,6 +324,41 @@ class OpenAISubscriptionAdapter(OpenAIAdapter):
             self._oauth_curl_session_instance = self._new_curl_session(_resolve_ca_cert_path())
             logger.debug("Created curl_cffi OAuth session with impersonate=%s", _CODEX_IMPERSONATE)
         return self._oauth_curl_session_instance
+
+    async def aclose(self) -> None:
+        """Close both curl sessions this adapter owns.
+
+        The serving leg and the OAuth refresh leg hold separate handle pools and
+        separate cookie jars (see :attr:`_oauth_curl_session`), so both are
+        released, and each is released independently of the other: a process
+        that only ever logged in has built the second and not the first.
+
+        Both attributes are detached **before** either session is closed.  The
+        builders above test for absence only and consult no ``closed`` flag, so a
+        session left in place after a failed close would be handed back for the
+        rest of the process's life — and ``stop_async`` contains that failure, so
+        it would be silent as well as permanent.
+
+        Raises:
+            Exception: Whatever a session's ``close()`` raises, after both have
+                been attempted.  Propagated rather than swallowed here: the
+                containment decision belongs to
+                :meth:`~kitty.bridge.server.BridgeServer.stop_async`, which owns
+                the shutdown, not to the adapter.
+        """
+        # Detached first, so neither a failure nor an early return can strand a
+        # dead session on the adapter.
+        serving, self._curl_session_instance = self._curl_session_instance, None
+        oauth, self._oauth_curl_session_instance = self._oauth_curl_session_instance, None
+        # The OAuth leg closes in a `finally`: the two legs own separate handle
+        # pools, so a serving-leg failure must not strand the other one detached
+        # and unclosed, which is unreachable by any later call.
+        try:
+            if serving is not None:
+                await serving.close()
+        finally:
+            if oauth is not None:
+                await oauth.close()
 
     # ── Helpers ────────────────────────────────────────────────────────────
 

@@ -325,6 +325,26 @@ class OllamaCloudAdapter(ProviderAdapter):
             self._session = aiohttp.ClientSession(timeout=timeout, **aiohttp_session_kwargs())
         return self._session
 
+    async def aclose(self) -> None:
+        """Close the session this adapter owns, so the bridge does not leak it.
+
+        ``BridgeServer.stop_async`` closes the sessions **it** built and knows
+        nothing about this one, so before KBR-190 a bridge started and stopped
+        inside a living process leaked a connection pool per cycle.
+
+        The attribute is cleared as well as closed — and cleared first, so that
+        a session whose ``close()`` raises still leaves the adapter usable.
+        :meth:`_get_session` then builds a fresh session if this adapter serves
+        another bridge.
+        """
+        # Detached BEFORE the await, not after: `stop_async` logs and contains a
+        # failing close, so an attribute still pointing at a half-closed session
+        # would be handed back for the rest of the process's life, with one
+        # WARNING as the only trace.
+        session, self._session = self._session, None
+        if session is not None and not session.closed:
+            await session.close()
+
     def _build_url(self, provider_config: dict) -> str:
         """Build the full upstream URL.
 

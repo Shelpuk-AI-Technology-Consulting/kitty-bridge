@@ -848,3 +848,37 @@ class TestBedrockStreamErrorEvents:
         event = {"unknownFutureEvent": {"data": "something"}}
         chunks = adapter._translate_stream_event(event, "id", {})
         assert chunks == []
+
+
+class TestItCachesNoTransport:
+    """KBR-190 — why bedrock needs no ``aclose`` override.
+
+    The other two custom-transport adapters cache a client on the instance and
+    leak it when the bridge stops.  This one does not, and that is the reason it
+    is exempt from the sweep rather than an oversight.  If caching is ever added,
+    this fails and sends the author to ``OpenAISubscriptionAdapter.aclose``.
+    """
+
+    def test_get_boto3_client_returns_a_new_client_each_call(self):
+        adapter = BedrockAdapter()
+        args = ("AKIAEXAMPLE:secret-key", {"region": "us-east-1"})
+
+        first = adapter._get_boto3_client(*args)
+        second = adapter._get_boto3_client(*args)
+
+        assert first is not second
+
+    def test_no_client_is_stored_on_the_instance(self):
+        """The identity check above cannot see a client kept but not reused.
+
+        Both calls pass identical arguments, so an argument-keyed cache fails
+        that one too.  This catches the other shape — a client assigned to the
+        adapter and returned fresh each time — which is still state a stopping
+        bridge would have to release.
+        """
+        adapter = BedrockAdapter()
+        before = set(vars(adapter))
+
+        adapter._get_boto3_client("AKIAEXAMPLE:secret-key", {"region": "us-east-1"})
+
+        assert set(vars(adapter)) == before

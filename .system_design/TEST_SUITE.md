@@ -1480,17 +1480,59 @@ whether to change it is Q3.
 
 ### 5.5 Per-transport containment
 
-`_session_for` and `should_bypass` govern **only** `BridgeServer`'s own aiohttp sessions. Four
+`_session_for` and `should_bypass` govern **only** `BridgeServer`'s own aiohttp sessions. Five
 other outbound paths exist, and each applies the proxy **unconditionally, without consulting
 `should_bypass`**:
 
-| Path | Client | How the proxy is applied |
-|---|---|---|
-| `openai_subscription` — serving | `curl_cffi.AsyncSession` | `proxies=` + `CURLOPT_NOPROXY` |
-| `openai_subscription` — OAuth **refresh** leg | its own `curl_cffi.AsyncSession` | `proxies=` + `CURLOPT_NOPROXY` |
-| `openai_subscription` — OAuth **login** leg (`kitty.auth.openai_oauth`) | its own `aiohttp.ClientSession` | `aiohttp_session_kwargs()` |
-| `bedrock` | boto3 / botocore | `BotoConfig(proxies=egress.proxies_dict())` |
-| `ollama_cloud` | its own `aiohttp.ClientSession` | `aiohttp_session_kwargs()` |
+| Path | Client | How the proxy is applied | Who closes it |
+|---|---|---|---|
+| `openai_subscription` — serving | `curl_cffi.AsyncSession` | `proxies=` + `CURLOPT_NOPROXY` | `aclose()`, from `stop_async` |
+| `openai_subscription` — OAuth **refresh** leg | its own `curl_cffi.AsyncSession` | `proxies=` + `CURLOPT_NOPROXY` | `aclose()`, from `stop_async` |
+| `openai_subscription` — OAuth **login** leg (`kitty.auth.openai_oauth`) | its own `aiohttp.ClientSession` | `aiohttp_session_kwargs()` | `run_oauth_flow`, in a `finally`, when it built the session itself |
+| `bedrock` | boto3 / botocore | `BotoConfig(proxies=egress.proxies_dict())` | nobody — nothing is cached; `_get_boto3_client` builds one per request |
+| `ollama_cloud` | its own `aiohttp.ClientSession` | `aiohttp_session_kwargs()` | `aclose()`, from `stop_async` |
+
+**The fourth column is new, and it was empty until KBR-190.** `BridgeServer.stop_async`
+closed the two sessions the bridge itself builds and nothing else, so a bridge started and
+stopped **inside a living process** leaked one connection pool per cycle per custom-transport
+adapter. Ordinary use never noticed — the bridge's lifetime is the process's and the OS
+reclaims the sockets — but the suite starts and stops bridges in-process thousands of times,
+and that is where it surfaced, as an `Unclosed client session` per test.
+
+**The bridge owns the adapters it is given.** `ProviderAdapter.aclose()` is the hook: a no-op
+by default, overridden by the adapters that own a client. The ownership is a contract rather
+than an observation about today's call sites — `get_provider()` returns a **fresh instance per
+call** and all five construction sites build their adapters immediately before the
+`BridgeServer` that receives them, so a caller must not hand one adapter to two bridges whose
+lifetimes overlap. `tests/test_wire_shape_honesty.py` sweeps the registry so a fourth
+custom-transport adapter has to decide about its client as well as its wire shape.
+
+**Three points where this could have gone wrong, and what settles each.**
+
+1. **Closing a `curl_cffi` session under a live SSE stream is the one shape that has crashed.**
+   `_curl_session`'s docstring recorded that as the reason it was never closed, citing
+   lexiforest/curl_cffi **#675**. That issue was filed against **0.13.0** on the *synchronous*
+   `Session` and was **closed 2026-07-18 as no longer reproducible**. That was read on
+   **0.16.3**, the version resolved here — `pyproject.toml` declares `curl_cffi>=0.7` with no
+   upper bound, the weakest pin in the repo, so this is measured rather than guaranteed. More
+   to the point, `stop_async` closes adapters only **after**
+   `_runner.cleanup()` has drained the in-flight handlers, so the precondition is not met on
+   the ordinary path. Upstream **#845** still tracks **#751**, "active stream/session close
+   lifecycle", so the risk is reduced, not zero — which is why a **failed drain deliberately
+   skips the adapter close**. Leaking a pool beats crashing the process.
+2. **A failure must not cascade, in either direction.** One adapter's `aclose()` failing is
+   logged and contained, so the others still close — shutdown has no caller positioned to act
+   on a provider's teardown error. Conversely the adapters close from a `finally`, so a failure
+   in the bridge's *own* teardown cannot skip them, which would leak exactly what this fixes.
+   And each adapter detaches its cached session **before** awaiting `close()`: the `curl_cffi`
+   builders test for absence only, so a session left in place after a failed close would be
+   handed back for the rest of the process's life — silent, under the containment above, and
+   permanent.
+3. **Teardown is not a request.** `_close_provider_transports` reads the backing fields
+   `_provider` and `_backends`, never the `_active_*` properties, which resolve through a
+   request-scoped `ContextVar`. Reading that at shutdown would close whichever backend the last
+   request happened to select. It deduplicates by identity, because balancing mode is
+   constructed with `provider=backends[0][0]`.
 
 **Why the refresh leg has its own session rather than sharing the serving one (KBR-161).** Not for
 identity — both come from one builder, `_new_curl_session`, so they cannot drift apart on
@@ -1499,7 +1541,7 @@ the provider sees: an `AsyncSession` owns a bounded pool of curl handles (`max_c
 streaming completion holds its handle for the life of the stream, so a refresh sharing that pool
 would queue behind in-flight completions **while holding `OAuthSession._refresh_lock`**, blocking
 every request for that account; and cookies are host-scoped, so one jar would hold
-`auth.openai.com`'s cookies for the process lifetime and replay them across every account the bridge
+`auth.openai.com`'s cookies for the bridge's lifetime and replay them across every account the bridge
 serves. The two legs address different hosts, so sharing buys nothing observable and costs both.
 
 Three consequences the rest of §5 must not paper over:

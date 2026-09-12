@@ -2983,3 +2983,161 @@ class TestOAuthRefreshErrorClassification:
 
         assert exc_info.value.http_status == 401
         assert "refresh_token_reused" in str(exc_info.value)
+
+
+# ── Session release (KBR-190) ────────────────────────────────────────────────
+
+
+class _FakeCurlSession:
+    """A stand-in for ``curl_cffi.AsyncSession`` that records its close.
+
+    Real sessions are cheap to build but closing one enters libcurl, and the
+    claim under test is only that the adapter awaits ``close()`` and clears the
+    attribute — which a fake proves exactly and a real session proves no better.
+    """
+
+    def __init__(self) -> None:
+        """Start with an empty cookie jar and no close recorded."""
+        self.cookies = curl_cffi.requests.Cookies()
+        self.closed = False
+
+    async def close(self) -> None:
+        """Record that the adapter closed this session."""
+        self.closed = True
+
+
+def _patch_new_curl_session(adapter: OpenAISubscriptionAdapter) -> unittest.mock._patch:
+    """Make both session builders hand out a fresh fake.
+
+    Args:
+        adapter: The adapter whose builder is replaced.
+
+    Returns:
+        The patcher, for use as a context manager.
+    """
+    return unittest.mock.patch.object(
+        adapter,
+        "_new_curl_session",
+        side_effect=lambda _ca_path: _FakeCurlSession(),
+    )
+
+
+class TestACloseReleasesBothCurlSessions:
+    """KBR-190 — the serving leg and the OAuth refresh leg are both released."""
+
+    async def test_it_closes_and_clears_both_legs(self):
+        adapter = OpenAISubscriptionAdapter()
+        with _patch_new_curl_session(adapter):
+            serving = adapter._curl_session
+            oauth = adapter._oauth_curl_session
+
+            await adapter.aclose()
+
+        assert serving.closed
+        assert oauth.closed
+        assert adapter._curl_session_instance is None
+        assert adapter._oauth_curl_session_instance is None
+
+    async def test_the_serving_leg_closes_when_the_oauth_leg_was_never_built(self):
+        """The legs are independent: one absent must not strand the other."""
+        adapter = OpenAISubscriptionAdapter()
+        with _patch_new_curl_session(adapter):
+            serving = adapter._curl_session
+
+            await adapter.aclose()
+
+        assert serving.closed
+        assert adapter._curl_session_instance is None
+        assert adapter._oauth_curl_session_instance is None
+
+    async def test_the_oauth_leg_closes_when_the_serving_leg_was_never_built(self):
+        """The mirror case — a login-only process never builds the serving leg."""
+        adapter = OpenAISubscriptionAdapter()
+        with _patch_new_curl_session(adapter):
+            oauth = adapter._oauth_curl_session
+
+            await adapter.aclose()
+
+        assert oauth.closed
+        assert adapter._oauth_curl_session_instance is None
+        assert adapter._curl_session_instance is None
+
+    async def test_it_is_a_no_op_when_neither_leg_was_built(self):
+        adapter = OpenAISubscriptionAdapter()
+
+        await adapter.aclose()
+
+        assert adapter._curl_session_instance is None
+        assert adapter._oauth_curl_session_instance is None
+
+    async def test_it_is_idempotent(self):
+        """`start_async`'s state-write failure path can reach `stop_async` twice."""
+        adapter = OpenAISubscriptionAdapter()
+        with _patch_new_curl_session(adapter):
+            serving = adapter._curl_session
+            oauth = adapter._oauth_curl_session
+
+            await adapter.aclose()
+            await adapter.aclose()
+
+        assert (serving.closed, oauth.closed) == (True, True)
+        assert adapter._curl_session_instance is None
+        assert adapter._oauth_curl_session_instance is None
+
+    async def test_the_next_request_builds_a_fresh_serving_session(self):
+        """Clearing the attribute is what allows this — the builder tests `is None`."""
+        adapter = OpenAISubscriptionAdapter()
+        with _patch_new_curl_session(adapter):
+            first = adapter._curl_session
+            await adapter.aclose()
+
+            second = adapter._curl_session
+
+        assert second is not first
+        assert not second.closed
+
+    async def test_both_attributes_are_cleared_even_when_a_close_fails(self):
+        """A failing close must not strand a dead session on the adapter.
+
+        ``stop_async`` logs and contains a provider's teardown failure, so an
+        attribute still pointing at a half-closed session would be handed back
+        for the rest of the process's life, with one WARNING as the only trace.
+        """
+        adapter = OpenAISubscriptionAdapter()
+        with _patch_new_curl_session(adapter):
+            serving = adapter._curl_session
+            # Built so both attributes are non-None going in; what happens to
+            # this leg is the *next* test's claim, not this one's.
+            _oauth = adapter._oauth_curl_session
+
+        async def _fail() -> None:
+            raise RuntimeError("close failed")
+
+        serving.close = _fail
+
+        with pytest.raises(RuntimeError, match="close failed"):
+            await adapter.aclose()
+
+        assert adapter._curl_session_instance is None
+        assert adapter._oauth_curl_session_instance is None
+
+    async def test_the_oauth_leg_still_closes_when_the_serving_leg_fails(self):
+        """The legs are independent in failure, not only in absence.
+
+        They own separate handle pools, so a serving-leg failure must not leave
+        the OAuth leg detached and unclosed — a state no later call can reach.
+        """
+        adapter = OpenAISubscriptionAdapter()
+        with _patch_new_curl_session(adapter):
+            serving = adapter._curl_session
+            oauth = adapter._oauth_curl_session
+
+        async def _fail() -> None:
+            raise RuntimeError("close failed")
+
+        serving.close = _fail
+
+        with pytest.raises(RuntimeError, match="close failed"):
+            await adapter.aclose()
+
+        assert oauth.closed
