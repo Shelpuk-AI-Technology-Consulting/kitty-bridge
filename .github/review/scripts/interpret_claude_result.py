@@ -165,9 +165,45 @@ QUOTA_PATTERNS = (
     # The wording alone catches the real 402 -- its body carries
     # "Insufficient credits" -- so the code bought nothing and cost that.
     r"insufficient credits",
-    # Generic quota and billing.
-    r"quota",
+    # upstream: Anthropic's documented 402 type. `\bbilling\b` could never match it --
+    # `_` is a word character -- so the one status that means "your balance is the
+    # problem" reached nothing in this set. See `platform.claude.com/docs/en/api/errors`.
+    r"billing_error",
     r"exceeded your current",
+)
+
+# 🔴 **KBR-166. The same words, searched ONLY over what the PROVIDER wrote.**
+#
+# `quota` and `\bbilling\b` lived in the set above until this ticket, where they were
+# searched over a haystack that includes `result` -- the model's own answer. So a
+# reviewer that merely WROTE "quota" turned a $1.79 billed rejection into `exhausted`,
+# and `retry_verdict`'s exhausted branch then spent the $1.79 again.
+#
+# ⚠️ **They are MOVED, not anchored, and three attempts to anchor them are the reason.**
+# Anchoring was measured three times -- on named vendor vocabulary, on the CLI's
+# `API Error: NNN {` line shape, and on the word beside a spending verb. Every version
+# lost a real body, and each loss landed in `FATAL_UNLESS_PROVIDER_NAMED_PATTERNS`: an
+# operator with a spent balance sent to debug a correct workflow, which is KBR-145's
+# filed defect one tier across. Measured: an anchored quota word missed four of ten real
+# wordings, and all four became `fatal` with no retry because the body also carried the
+# generic error code -- exactly what DeepSeek sends for a spent balance.
+#
+# That reproduces, a third time, what KBR-172 recorded for the eight bare status codes:
+# **no anchor matches every real body while leaking no prose.** The separable question is
+# not what the text says but WHO WROTE IT, and the record already answers it -- so the
+# fix is the condition KBR-172 built, applied unconditionally to the weak patterns only.
+#
+# ⚠️ Residual, stated so it cannot read as an oversight: a PROVIDER that writes "quota"
+# as prose in its own error message is still read as a quota failure. This module can say
+# who wrote a field; it cannot say whether a provider meant its own word.
+#
+# ⚠️ One self-match, recorded rather than discovered later: `classify` returns
+# "provider quota exhausted: ...", which `quota` matches. Not live -- that string goes to
+# `$GITHUB_OUTPUT` and the diagnostic, neither of which re-enters a haystack -- but
+# `OUTCOME_FIELDS` warns about exactly this class, so the next person measuring it should
+# find it written down.
+QUOTA_WORD_PATTERNS = (
+    r"quota",
     r"\bbilling\b",
 )
 
@@ -175,11 +211,32 @@ QUOTA_PATTERNS = (
 # key, or a different provider's model name, is exactly what may fix them.
 CREDENTIAL_PATTERNS = (
     r"\bauthentication_failed\b",
-    r"\b401\b",
-    r"\b403\b",
+    # upstream: Anthropic's documented 401 and 403 types, per
+    # `platform.claude.com/docs/en/api/errors`. They earn their place beside the status
+    # tier below rather than duplicating it: a body can name its cause and carry NO
+    # number, because a numeric `api_error_status` never reaches the haystack at all
+    # (KBR-182). They are also consulted FIRST, so an operator reads
+    # "authentication_error" rather than "401" -- both true, one more useful.
+    r"\bauthentication_error\b",
+    r"\bpermission_error\b",
     r"model_not_found",
     r"\bmodel not found\b",
 )
+
+# 🔴 **KBR-166. The bare status codes, searched ONLY over what the PROVIDER wrote.**
+#
+# `\b401\b` and `\b403\b` lived in the set above and are merged here unchanged. The
+# reasoning is the one beside `QUOTA_WORD_PATTERNS` and the evidence is sharper: a
+# reviewer of THIS repository writes status codes constantly, and KBR-172's own ticket
+# text quotes `API Error: 402 {"error"...}` verbatim.
+#
+# ⚠️ **Deleting them was tried and is wrong.** `OPENAI_401_MESSAGE_ONLY` --
+# `API Error: 401 {"error":{"message":"Incorrect API key provided",...}}` -- carries no
+# credential vocabulary whatsoever, so the status code is the ONLY thing identifying it.
+# So is `{"error":{"message":"HTTP 401 Unauthorized","type":"invalid_request_error"}}`,
+# the nested carrier `BILLED_INVALID_REQUEST` itself uses. Both were measured falling
+# through to the generic tier and being called workflow faults.
+CREDENTIAL_STATUS_PATTERNS = (r"\b40[13]\b",)
 
 # Universal: the workflow itself is wrong and any provider would reject it the
 # same way, so re-running is pure waste. Both failures seen on the first live
@@ -218,13 +275,20 @@ FATAL_PATTERNS = (
 # includes `result`. Yielding to those would let a $1.79 billed rejection be
 # called `exhausted` -- and `retry_verdict` then spends the $1.79 again.
 #
-# ⚠️ **The accepted exposure, stated so it cannot read as an oversight.** This
-# tier DOES yield to `quota`, `\bbilling\b`, `\b401\b` and `\b403\b`, all of
-# which are unanchored and can appear in prose. KBR-145 took that trade
-# knowingly: it fixes the two misclassifications anyone has observed -- the live
-# 402 and a 401 reported with this same generic code, which `map_error` fixtures
-# show OpenAI and Fireworks both do -- at the cost of four prose shapes nobody
-# has observed. Anchoring those four patterns is KBR-166.
+# 🔴 **KBR-166 CLOSED the exposure KBR-145 accepted here, and not by anchoring.**
+# This tier still yields to `quota`, `\bbilling\b`, `\b401\b` and `\b403\b`, but
+# those four now live in `QUOTA_WORD_PATTERNS` and `CREDENTIAL_STATUS_PATTERNS` and are
+# searched only over what the PROVIDER wrote. Three anchoring schemes were measured and
+# each lost a real body to this very tier; the reasoning is recorded beside those two
+# tuples.
+#
+# ⚠️ **`EXHAUSTED_PATTERNS` keeps its bare words, and that asymmetry is deliberate.**
+# `\btimeout\b`, `\bcapacity\b`, `\b429\b` and `\b50[023]\b` are every bit as
+# writable in prose, and they are safe for one reason only: that set is consulted
+# BELOW this tier, so a prose word in it cannot promote a billed rejection -- it can
+# only fail to rescue one. The sets above this line had the opposite exposure, which is
+# why KBR-166 moved those and left these alone. Do not "finish the job" here without
+# first moving this tier.
 FATAL_UNLESS_PROVIDER_NAMED_PATTERNS = (r"invalid[_ ]request",)
 
 # upstream. Anchored on the beta's own dated slug, or on the refusal's distinctive
@@ -527,6 +591,14 @@ def _extract_structured_output(raw_output: str, execution_text: str) -> dict | N
 #:
 #: ⚠️ ``message`` and ``content`` are deliberately absent: that is where tool results and model
 #: prose live, and both quote the code under review.
+#:
+#: 🔴 **One field in this tuple is never actually read, and knowing which one matters here.**
+#: ``api_error_status`` arrives as a JSON NUMBER, and :func:`_strings_in` collects string
+#: leaves only, so it is discarded before any pattern sees it. Every numeric pattern in this
+#: module therefore matches text -- the CLI's ``API Error: NNN`` line or a message body --
+#: and never the field that exists to report the status. Filed as KBR-182, deliberately not
+#: fixed here: making numbers visible would wake `\b400\b` in :data:`FATAL_PATTERNS`, which
+#: is consulted first, and that needs its own before/after measurement across the tier order.
 OUTCOME_FIELDS = (
     "error",
     "result",
@@ -597,6 +669,35 @@ def _parse_events(execution_text: str) -> list | None:
     return events or None
 
 
+def _outcome_parts(events: list) -> tuple[list[str], list[str]]:
+    """Split a record's outcome fields by who wrote them.
+
+    🔴 **Derived once and consumed twice, because two copies of this loop would have to
+    be edited together and nothing would say so.** :data:`MODEL_AUTHORED_FIELD` is a bare
+    string today; the day a second model-authored field is added it becomes a tuple, and
+    a duplicated split would keep one reader honest and silently leave the other wrong.
+    That is the rule :func:`retry_verdict` already states for ``timed_out_attempt`` --
+    one finding, derived once, consumed everywhere.
+
+    Args:
+        events: Decoded execution-record events, as :func:`_parse_events` returns them.
+
+    Returns:
+        A ``(provider_parts, model_parts)`` pair of string lists. ``model_parts`` holds
+        only :data:`MODEL_AUTHORED_FIELD`; everything else the provider wrote.
+    """
+
+    provider_parts: list[str] = []
+    model_parts: list[str] = []
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        for field in OUTCOME_FIELDS:
+            target = model_parts if field == MODEL_AUTHORED_FIELD else provider_parts
+            target.extend(_strings_in(event.get(field)))
+    return provider_parts, model_parts
+
+
 def _outcome_text(execution_text: str) -> str | None:
     """Return only the outcome-bearing fields of the record.
 
@@ -621,16 +722,7 @@ def _outcome_text(execution_text: str) -> str | None:
     if events is None:
         return None
 
-    # Split by who WROTE the field, not by what it says. `result` is the only outcome
-    # field the model can author, and on a schema failure that is exactly what it holds.
-    provider_parts: list[str] = []
-    model_parts: list[str] = []
-    for event in events:
-        if not isinstance(event, dict):
-            continue
-        for field in OUTCOME_FIELDS:
-            target = model_parts if field == MODEL_AUTHORED_FIELD else provider_parts
-            target.extend(_strings_in(event.get(field)))
+    provider_parts, model_parts = _outcome_parts(events)
 
     # The marker is read only from fields the model does not author. Reading it from
     # `result` too would let a review that merely MENTIONS the subtype scope out its own
@@ -643,6 +735,72 @@ def _outcome_text(execution_text: str) -> str | None:
     if schema_failure:
         return provider_text
     return "\n".join(provider_parts + model_parts)
+
+
+def _provider_outcome_text(execution_text: str) -> str:
+    """Return only the outcome fields the PROVIDER authored.
+
+    The same field split :func:`_outcome_text` performs, applied unconditionally:
+    :data:`MODEL_AUTHORED_FIELD` is always excluded, where :func:`_outcome_text` excludes
+    it only on a structured-output failure. Patterns weak enough to appear in ordinary
+    prose -- :data:`QUOTA_WORD_PATTERNS` and :data:`CREDENTIAL_STATUS_PATTERNS` -- are
+    searched over this rather than over the full haystack, so what the model wrote cannot
+    vote on why the run failed.
+
+    🔴 **Its fallback contract is its own, and inheriting :func:`_outcome_text`'s was a
+    defect design review caught.** That function searches an unparseable record whole,
+    justified as "a CLI-level failure message with no tool results in it" -- an argument
+    about ``message``/``content``, not about ``result``, which does not transfer to the
+    who-wrote-this question. Measured: a pretty-printed array with one line appended
+    fails :func:`_parse_events`, and the whole text including ``result`` then reached the
+    status tier, so a prose ``401`` was retried at full price.
+
+    ⚠️ **Returning "" unconditionally is equally wrong**, which is what makes this
+    narrow. The CLI-prefix carrier ``API Error: 401 {...}`` is ALSO unparseable, and it is
+    the only path by which a 401 whose message reads merely "Incorrect API key provided"
+    is recognised at all. So the two unparseable cases are separated by the fact that
+    distinguishes them: raw CLI output has no ``result`` key to exclude, while a record
+    that failed to parse does. Claiming nothing for the latter is the conservative
+    direction -- it falls through to ``fatal``, which spends nothing on a record that
+    cannot be read.
+
+    Args:
+        execution_text: Raw execution record text.
+
+    ⚠️ **The first fallback branch is narrower than "nothing model-authored", and the
+    difference is recorded rather than hidden.** A transcript truncated before its result
+    event carries no ``result`` key, so its ``message``/``content`` -- which the model
+    DID author -- is handed back. The leak is pre-existing and identical in
+    :func:`_outcome_text` on every branch, so this is not a regression; narrowing the
+    sentinel to those carriers is not available either, because a real CLI error body is
+    ``{"error":{"message": ...}}`` and would be refused with it. Read the contract as
+    "no ``result`` FIELD to exclude", not as "no model wrote this".
+
+    Args:
+        execution_text: Raw execution record text.
+
+    Returns:
+        The joined provider-authored outcome fields. For a record that is not JSON:
+        the whole text when it carries no ``result`` key, and ``""`` when it does.
+    """
+
+    events = _parse_events(execution_text)
+
+    # Not JSON. Either raw CLI output with no `result` field, or a record too broken to
+    # attribute -- and the presence of a `result` KEY is what tells them apart.
+    #
+    # 🔴 The `\s*:` is load-bearing and is NOT a tidy-up. Every CLI result event carries
+    # `"type": "result"`, so a sentinel of `"result"` alone matches the string as a
+    # VALUE and refuses records that have no `result` field at all -- measured, that
+    # turns a truncated 401 back into a workflow fault. `test_a_result_value_is_not_a_
+    # result_key` is the row that fails when the colon is dropped.
+    if events is None:
+        if re.search(r'"result"\s*:', execution_text):
+            return ""
+        return execution_text
+
+    provider_parts, _ = _outcome_parts(events)
+    return "\n".join(provider_parts)
 
 
 def _strings_in(value: object, depth: int = 0) -> list[str]:
@@ -761,11 +919,27 @@ def classify(
     if hit:
         return "fatal", f"workflow-level failure: {hit!r}"
 
+    # 🔴 KBR-166. The weak patterns read a NARROWER text than everything around them:
+    # only what the provider wrote. Derived once, here, and consulted by both tiers below
+    # -- one finding, derived once, is the only shape in which two readers cannot
+    # disagree, which is the rule `retry_verdict` already states about `timed_out_attempt`.
+    provider_scoped = _provider_outcome_text(execution_text).lower()
+
     hit = _first_match(QUOTA_PATTERNS, haystack)
     if hit:
         return "exhausted", f"provider quota exhausted: {hit!r}"
 
+    # Immediately after the anchored set and reported identically: this is the same
+    # verdict reached on narrower evidence, not a weaker one.
+    hit = _first_match(QUOTA_WORD_PATTERNS, provider_scoped)
+    if hit:
+        return "exhausted", f"provider quota exhausted: {hit!r}"
+
     hit = _first_match(CREDENTIAL_PATTERNS, haystack)
+    if hit:
+        return "exhausted", f"provider rejected the credentials or model: {hit!r}"
+
+    hit = _first_match(CREDENTIAL_STATUS_PATTERNS, provider_scoped)
     if hit:
         return "exhausted", f"provider rejected the credentials or model: {hit!r}"
 
@@ -1247,6 +1421,7 @@ def _write_diagnostic(
     # confusing; the wrong instruction costs money.
     scoped = _outcome_text(execution_text)
     evidence = execution_text if scoped is None else scoped
+    provider_evidence = _provider_outcome_text(execution_text)
 
     # A missing execution record is the least self-explanatory failure, so spell
     # out what to check rather than leaving an empty log.
@@ -1330,7 +1505,17 @@ def _write_diagnostic(
             "is the knob.",
             "",
         ]
-    elif any(re.search(p, evidence, re.I) for p in QUOTA_PATTERNS):
+    elif any(re.search(p, evidence, re.I) for p in QUOTA_PATTERNS) or any(
+        re.search(p, provider_evidence, re.I) for p in QUOTA_WORD_PATTERNS
+    ):
+        # 🔴 KBR-166: this branch must mirror `classify`'s split, and forgetting the
+        # second half strips the advice from the wordings the branch exists for.
+        # Measured while implementing: with `quota` moved out of `QUOTA_PATTERNS` and
+        # this condition left alone, "Quota limit exceeded" classified `exhausted` and
+        # printed no guidance at all -- the verdict-and-advice invariant KBR-145 was
+        # filed over, broken in the opposite direction. Each half reads the text its
+        # own tier reads, so the two cannot disagree.
+        #
         # Quota exhaustion is not a defect in the change under review, and it is
         # now the most likely reason this check is red. Spell out what to do
         # rather than leaving a reader to infer it from the record tail.
