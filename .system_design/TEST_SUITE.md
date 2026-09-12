@@ -2195,9 +2195,9 @@ route or transport costs one parametrisation, not a new test.
 
 #### 7.4.1 What every reader does with a field the grammar cannot carry
 
-Seven projections are written by seven authors against §3.3.1's grammar, and the grammar is
-deliberately narrower than the six wire formats. §3.3.1 fixes the *shapes*; §3.3.1b fixes the
-*normalisation*. This section fixes the remaining nine decisions, each of which was reached
+Six request readers and one reply task — seven authors — are written against §3.3.1's grammar,
+and the grammar is deliberately narrower than the six wire formats. §3.3.1 fixes the *shapes*;
+§3.3.1b fixes the *normalisation*. This section fixes the remaining ten decisions, each of which was reached
 writing **T-A1** and each of which six later authors would otherwise answer differently. A
 disagreement here is not a style difference: paths are index-based, so two readers that disagree
 about a part boundary report a delta on every subsequent part.
@@ -2271,7 +2271,11 @@ with no named cause, on a path where the same field on a modelled block produces
 > and the fix, when it is needed, is a per-kind payload rule here — not six readers each
 > inventing one.
 
-**A wrongly-typed leaf residualises — it is neither coerced nor raised on.** `str(7)` and
+**A wrongly-typed leaf residualises — it is neither coerced nor raised on — and the rule is
+general.** It binds *every* optional leaf, not the ones a bug happened to be found in: the
+contract validates only `Turn.role`, `Conversation.sampling` and `extra["tool_choice"]`, so an
+unguarded leaf declared `str | None` carries a dict silently with an empty residual. A reader
+should apply it through one helper, so the next field added inherits it. `str(7)` and
 `dict(["ab", "cd"])` invent a value the agent never sent, and a silently nulled tool description is
 indistinguishable from the deletion §3.3.1's own falsification set injects. Raising is the other
 wrong answer: it blinds the oracle to everything else in a request it could otherwise diff, and

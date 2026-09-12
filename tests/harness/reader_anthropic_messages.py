@@ -212,8 +212,8 @@ def _project(body: Mapping[str, Any]) -> c.Request:
     )
 
     envelope = c.Envelope(
-        model=body.get("model"),
-        stream=body.get("stream"),
+        model=_typed_leaf(body, "model", str, "", residual),
+        stream=_typed_leaf(body, "stream", bool, "", residual),
         store=None,  # The Messages format defines no `store`; P17 is Responses-only.
         extra=extra,
     )
@@ -359,7 +359,7 @@ def _read_tools(value: Any, residual: dict[str, Any]) -> tuple[c.ToolDecl, ...]:
         declared.append(
             c.ToolDecl(
                 name=tool["name"],
-                description=tool.get("description"),
+                description=_typed_leaf(tool, "description", str, f"tools[{index}]", residual),
                 schema=schema,
                 # Absent, not False: the Messages format defines no `strict`,
                 # and P15's presence and absence must stay distinguishable.
@@ -497,7 +497,7 @@ def _read_block(block: Any, path: str, residual: dict[str, Any]) -> c.Part:
             raise c.UnreadableBodyError(f"{path} thinking must be a string, got {type(thinking).__name__}")
 
         _residualise(block, {"type", "thinking", "signature"}, path, residual)
-        return c.Thinking(text=thinking, signature=block.get("signature"))
+        return c.Thinking(text=thinking, signature=_typed_leaf(block, "signature", str, path, residual))
 
     if kind == "image":
         return _read_image(block, path, residual)
@@ -516,7 +516,11 @@ def _read_block(block: Any, path: str, residual: dict[str, Any]) -> c.Part:
             arguments = None
 
         _residualise(block, {"type", "name", "input", "id"}, path, residual)
-        return c.ToolUse(name=block["name"], arguments=arguments or {}, id=block.get("id"))
+        return c.ToolUse(
+            name=block["name"],
+            arguments=arguments or {},
+            id=_typed_leaf(block, "id", str, path, residual),
+        )
 
     if kind == "tool_result":
         # A wrongly-typed `is_error` residualises rather than being coerced, for
@@ -536,7 +540,7 @@ def _read_block(block: Any, path: str, residual: dict[str, Any]) -> c.Part:
             # `tool_use_id` matching no call — still projects: M7 exists to drop
             # orphans, so a reader that raised on one would fail instead of
             # producing the delta that names it.
-            tool_use_id=block.get("tool_use_id"),
+            tool_use_id=_typed_leaf(block, "tool_use_id", str, path, residual),
             is_error=is_error,
         )
 
@@ -576,15 +580,18 @@ def _read_image(block: Mapping[str, Any], path: str, residual: dict[str, Any]) -
         # The media type is excluded from the digest and carried separately, so
         # a changed media type is its own delta rather than an unexplained
         # digest change.
-        return c.Image(digest=c.image_digest(decoded), media_type=source.get("media_type"))
+        return c.Image(
+            digest=c.image_digest(decoded),
+            media_type=_typed_leaf(source, "media_type", str, f"{path}.source", residual),
+        )
 
     if kind == "url":
         _residualise(source, {"type", "url"}, f"{path}.source", residual)
-        return c.Image(ref=source["url"])
+        return c.Image(ref=_typed_leaf(source, "url", str, f"{path}.source", residual))
 
     if kind == "file":
         _residualise(source, {"type", "file_id"}, f"{path}.source", residual)
-        return c.Image(ref=source["file_id"])
+        return c.Image(ref=_typed_leaf(source, "file_id", str, f"{path}.source", residual))
 
     raise c.UnreadableBodyError(f"{path} image source type {kind!r} is not one the format defines")
 
@@ -699,6 +706,40 @@ def _payload_digest(block: Mapping[str, Any]) -> str:
     payload = {key: value for key, value in block.items() if key not in ("type", "cache_control")}
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _typed_leaf(
+    source: Mapping[str, Any],
+    key: str,
+    expected: type | tuple[type, ...],
+    path: str,
+    residual: dict[str, Any],
+    default: Any = None,
+) -> Any:
+    """Return an optional leaf, residualising it when the wire carried the wrong type.
+
+    §7.4.1's wrongly-typed-leaf rule, applied wherever the grammar has an absent
+    value to fall back to. Without it these fields *fail open*: the contract
+    validates only roles, sampling keys and ``tool_choice``, so a dict in a field
+    declared ``str | None`` is carried silently and the residual stays empty.
+
+    Args:
+        source: The object being read.
+        key: The leaf's key.
+        expected: The type the format publishes for it.
+        path: The object's path from the body root, or ``""`` for a top-level
+            key, whose residual key is its bare name.
+        residual: The residual mapping, extended in place.
+        default: The grammar's absent value for this field.
+
+    Returns:
+        The leaf, or ``default`` when the wire value was the wrong type.
+    """
+    value = source.get(key, default)
+    if value is not None and not isinstance(value, expected):
+        residual[f"{path}.{key}" if path else key] = value
+        return default
+    return value
 
 
 def _residualise(

@@ -548,6 +548,74 @@ class TestContentBlocks:
 
         assert projected.conversation.turns[0].parts[0].is_error is True
 
+    @pytest.mark.parametrize(
+        "body, expected_key",
+        [
+            (_minimal(model={"a": 1}), "model"),
+            (_minimal(stream="yes"), "stream"),
+            (_minimal(tools=[dict(PUBLISHED_TOOL, description={"a": 1})]), "tools[0].description"),
+            (
+                _minimal(
+                    messages=[
+                        {
+                            "role": "assistant",
+                            "content": [{"type": "thinking", "thinking": "t", "signature": {"a": 1}}],
+                        }
+                    ]
+                ),
+                "messages[0].content[0].signature",
+            ),
+            (
+                _minimal(messages=[{"role": "assistant", "content": [dict(PUBLISHED_TOOL_USE, id=7)]}]),
+                "messages[0].content[0].id",
+            ),
+            (
+                _minimal(messages=[{"role": "user", "content": [dict(PUBLISHED_TOOL_RESULT, tool_use_id=7)]}]),
+                "messages[0].content[0].tool_use_id",
+            ),
+            (
+                _minimal(
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "image",
+                                    "source": {"type": "base64", "media_type": 9, "data": PNG_B64},
+                                }
+                            ],
+                        }
+                    ]
+                ),
+                "messages[0].content[0].source.media_type",
+            ),
+            (
+                _minimal(
+                    messages=[
+                        {"role": "user", "content": [{"type": "image", "source": {"type": "url", "url": {"a": 1}}}]}
+                    ]
+                ),
+                "messages[0].content[0].source.url",
+            ),
+        ],
+    )
+    def test_every_optional_leaf_residualises_when_the_wire_type_is_wrong(
+        self, body: dict[str, Any], expected_key: str
+    ) -> None:
+        """R7.3 — the rule is general, so it must hold for every leaf with an absent value.
+
+        Eight of these once failed open: the contract validates only roles,
+        sampling keys and `tool_choice`, so a dict in a field declared
+        `str | None` was carried silently with an empty residual.
+        `ToolDecl.description` is §7.4.1's own worked example, and `signature`
+        and `tool_use_id` are M8's and M7's fields.
+        """
+        projected = _read(body)
+
+        assert expected_key in projected.residual
+        with pytest.raises(c.ResidualFieldsError):
+            c.verify_total(projected)
+
     def test_a_wrongly_typed_error_flag_residualises_rather_than_being_coerced(self) -> None:
         """R7.3 — `bool("false")` is `True`, so the coercion invents the opposite of the body.
 
@@ -971,6 +1039,10 @@ class TestUnreadableBodies:
                 ),
             ),
             ("system block text not a string", _minimal(system=[{"type": "text", "text": {"a": 1}}])),
+            (
+                "content block text not a string",
+                _minimal(messages=[{"role": "user", "content": [{"type": "text", "text": {"a": 1}}]}]),
+            ),
             (
                 "thinking text not a string",
                 _minimal(messages=[{"role": "assistant", "content": [{"type": "thinking", "thinking": 7}]}]),
