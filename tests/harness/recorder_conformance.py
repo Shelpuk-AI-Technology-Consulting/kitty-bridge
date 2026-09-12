@@ -244,6 +244,11 @@ def send_raw(
     Returns:
         The :class:`SentRequest`, carrying the socket's own source port.
     """
+    # Stand this probe apart from whatever arrived before it, and do it *before*
+    # the request can reach the recorder: the earlier arrival may have been
+    # produced by hand rather than by this driver. See :func:`_advance_clock`.
+    _advance_clock()
+
     sock = socket.create_connection((host, port), timeout=PROBE_TIMEOUT)
     try:
         if ssl_context is not None:
@@ -258,10 +263,6 @@ def send_raw(
         _drain(sock)
     finally:
         sock.close()
-
-    # Leave the clock strictly past this request's arrival stamp, so the next
-    # probe cannot share it. See :func:`_advance_clock`.
-    _advance_clock()
 
     return _parse_sent(raw, source_port, marker)
 
@@ -282,6 +283,13 @@ def _advance_clock() -> None:
     Separating the probes is therefore the driver's job, not each test's, and not
     an exemption's. It is done here, once, so every recorder and every check
     inherits it: §7.2's four recorders are judged by one driver.
+
+    **Called before the exchange, not after it.** Waiting at the end of
+    :func:`send_raw` would separate a probe only from the driver's own previous
+    probe, leaving one that follows a hand-rolled request — §6.3's slow-body
+    pair sends its first request on a raw socket — sharing that request's
+    instant. Waiting at the start separates every probe from everything before
+    it, whoever sent it.
 
     **A condition, never a fixed sleep.** It returns as soon as the clock has
     moved, which on Linux and macOS is the first look and costs nothing

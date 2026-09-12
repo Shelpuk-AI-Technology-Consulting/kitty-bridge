@@ -3302,8 +3302,8 @@ guessing which set it joins.)
   `tests/bridge/test_crash_resilience.py` rather than inventing a second one. The whole module
   runs in **~0.6 seconds**, measured, of which the socket-binding cases are ~0.1.
 
-**One cross-cutting cost, added by KBR-188's fix.** Every conformance probe now ends by waiting
-for the clock to report a new instant (§8.3). Measured at **79 calls** across the harness suite:
+**One cross-cutting cost, added by KBR-188's fix.** Every conformance probe now begins by waiting
+for the clock to report a new instant (§8.3). Measured at **80 calls** across the harness suite:
 immeasurable on Linux and macOS, where the clock resolves in nanoseconds and the first look
 returns, and a worst case of **~1.2 s** on the Windows leg, whose step is ~15.6 ms. It scales with
 the number of raw-socket probes, so a future recorder adds to it in proportion to the probes it
@@ -3484,15 +3484,34 @@ assertion that is deterministically false on the exempt platform.** Over a racin
 a flaky assertion into a job that is red either way. A nondeterministic platform difference has to
 be removed, not exempted.
 
-Removed here by `recorder_conformance._advance_clock()`, which stands two probes apart by waiting
-— on a **condition**, that the clock has reported a new instant, never on a fixed sleep. It lives
-in the shared driver, so §7.2's four recorders inherit it rather than each carrying a row, and it
-costs nothing measurable where the clock is fine: 79 calls across the harness suite, a worst case
-of ~1.2 s on Windows and immeasurable on Linux and macOS. Its own bound is a **poll count, not a
-deadline**, because a deadline is computed from a clock and the case it exists for is a clock that
-has stopped — the frozen-clock defect `check_arrival_increases` is there to catch, and the first
-draft of the function hung the suite on it. `test_recorder.py` pins the whole property against a
-**simulated** coarse clock, so it is proven on every leg rather than only observed on Windows.
+Removed here by `recorder_conformance._advance_clock()`, which stands a probe apart from whatever
+arrived before it by waiting — on a **condition**, that the clock has reported a new instant,
+never on a fixed sleep. It lives in the shared driver, so §7.2's four recorders inherit it rather
+than each carrying a row, and it costs nothing measurable where the clock is fine: 80 calls across
+the harness suite, a worst case of ~1.2 s on Windows and immeasurable on Linux and macOS. Its own
+bound is a **poll count, not a deadline**, because a deadline is computed from a clock and the case
+it exists for is a clock that has stopped — the frozen-clock defect `check_arrival_increases` is
+there to catch, and the first draft of the function hung the suite on it. The case that pins that
+bound counts polls for the same reason: an earlier version asserted elapsed *wall time* and went
+red on the macOS leg, where `time.sleep(0.001)` takes about eleven milliseconds. Sleep accuracy is
+the platform's business; the count is the only part the driver promises.
+
+**The wait goes before the probe, not after it, and the first fix got that wrong.** Waiting after
+the reply separates a probe from the driver's own previous probe and from nothing else — so a
+probe following a request the driver did **not** send still shares that request's instant. §6.3's
+slow-body pair is exactly that shape: it hand-rolls its first request on a raw socket so that
+arrival order and completion order differ, and the driven probe behind it collided anyway. The
+Windows leg stayed red. Waiting at the *start* of `send_raw` is the general form — every probe is
+separated from everything before it, however the earlier request was produced.
+
+**A clock quantised from real time could not have caught that**, which is the sharper lesson. It
+reproduces the platform but keeps the race: whether a given pair collides still depends on how
+fast the runner is, so a case built on it passes against the defect most of the time. Measured:
+the slow-body pair collided in four runs out of eight at a 50 ms quantum. `test_recorder.py`
+therefore pins the *placement* against a clock that moves **only when something sleeps on it** —
+no real time passes and every run agrees. That clock is sound only away from the event loop, which
+reads `time.monotonic` for its own timers, so the end-to-end cases keep the quantised clock and
+the placement case, which never opens a loop, uses the stepped one.
 
 Only KBR-189's row survives, over a different defect: a mid-stream abort that wins its race
 against the first chunk. That one is deterministic on Windows.

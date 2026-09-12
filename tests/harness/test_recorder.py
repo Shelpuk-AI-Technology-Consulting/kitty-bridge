@@ -96,6 +96,15 @@ _REPLY_TIMEOUT = 5.0
 #: stay inside the driver's poll budget, or it would rightly give up waiting.
 _COARSE_CLOCK_STEP = 0.05
 
+#: Windows' real ``time.monotonic`` step, used by the *stepped* clock below
+#: rather than by the quantised one -- there the value only has to be visible,
+#: here it stands for the platform being modelled.
+_STEPPING_CLOCK_STEP = 0.0156
+
+
+class _ReachedTheSocket(Exception):
+    """Stop a probe at the socket boundary, where the placement case reads it."""
+
 
 class TestTheDriverSeparatesProbesOnACoarseClock:
     """KBR-188 — the Windows failure, reproduced on every platform.
@@ -144,6 +153,46 @@ class TestTheDriverSeparatesProbesOnACoarseClock:
 
         monkeypatch.setattr(time, "monotonic", quantised)
 
+    @staticmethod
+    def _stepping(monkeypatch: pytest.MonkeyPatch) -> None:
+        """Install a clock that moves only when something sleeps on it.
+
+        :meth:`_coarse` quantises *real* time, which leaves a collision a race:
+        a pair that straddles a step boundary does not collide, so a case built
+        on it can pass against the very defect it exists to catch. That is not
+        hypothetical -- it is how the placement defect below survived its first
+        fix. Here nothing but ``time.sleep`` moves the clock, so the claim is
+        settled by the code rather than by how fast the runner happened to be.
+
+        Sound only because the case using it never touches the event loop:
+        asyncio reads ``time.monotonic`` for its own timers, and a clock real
+        time cannot move would stall them.
+
+        Args:
+            monkeypatch: Reverts both patches.
+        """
+        now = 1000.0
+
+        def stepped() -> float:
+            """Return the current instant.
+
+            Returns:
+                The clock, which only :func:`slept` advances.
+            """
+            return now
+
+        def slept(_seconds: float) -> None:
+            """Advance the clock one step instead of waiting.
+
+            Args:
+                _seconds: The requested delay, unused; no real time passes.
+            """
+            nonlocal now
+            now += _STEPPING_CLOCK_STEP
+
+        monkeypatch.setattr(time, "monotonic", stepped)
+        monkeypatch.setattr(time, "sleep", slept)
+
     def test_it_waits_until_the_clock_reports_a_new_instant(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """The guarantee the whole fix rests on, asserted directly.
 
@@ -163,17 +212,80 @@ class TestTheDriverSeparatesProbesOnACoarseClock:
         ``check_arrival_increases`` is the check that catches a constant clock,
         and it can only do so if the driver returns and lets it run.
 
+        The bound is a poll count, so this counts polls. An earlier draft
+        asserted elapsed wall time instead and went red on the macOS leg, where
+        ``time.sleep(0.001)`` takes about eleven milliseconds: sleep accuracy is
+        the platform's business, and the count is the only part the driver
+        promises. Counting also turns the regression it guards against -- a
+        deadline computed from a clock that has stopped -- from a hung job into
+        a failed assertion.
+
         Args:
-            monkeypatch: Freezes the clock outright.
+            monkeypatch: Freezes the clock outright and counts the polls.
         """
-        real = time.monotonic
         self._coarse(monkeypatch, 0)
-        started = real()
+        polls = 0
+
+        def counted(_seconds: float) -> None:
+            """Count one poll, failing rather than hanging if the bound is gone.
+
+            Args:
+                _seconds: The requested delay, unused; no real time need pass
+                    for a clock that is frozen anyway.
+            """
+            nonlocal polls
+            polls += 1
+            assert polls <= conformance_module._CLOCK_TICK_POLLS, "the wait is unbounded"
+
+        monkeypatch.setattr(time, "sleep", counted)
 
         conformance_module._advance_clock()
 
-        budget = conformance_module._CLOCK_TICK_POLLS * conformance_module._CLOCK_TICK_POLL
-        assert real() - started < budget * 5
+        assert polls == conformance_module._CLOCK_TICK_POLLS
+
+    def test_the_clock_is_advanced_before_the_request_is_sent(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The wait has to precede the exchange, not follow it.
+
+        Waiting *after* the reply stands a probe apart from the driver's own
+        previous probe and from nothing else. A probe that follows a request the
+        driver did not send still shares that request's instant -- and that is
+        how the Windows leg stayed red after the first fix: §6.3's slow-body
+        pair hand-rolls its first request on a raw socket, so nothing separated
+        it from the driven probe that follows. Measured before the move, at a
+        50 ms quantum: the pair collided in four runs out of eight.
+
+        Read at the socket rather than at the recorder, because the connection
+        is opened before any arrival can be stamped -- if the clock has already
+        moved by then, no arrival of this probe can reuse an earlier instant.
+
+        Args:
+            monkeypatch: Installs the stepped clock and the stub connector.
+        """
+        reached: list[float] = []
+
+        def connector(*_args: object, **_kwargs: object) -> None:
+            """Record the instant the driver reached the socket, then stop it.
+
+            Args:
+                *_args: The address and timeout, unused.
+                **_kwargs: The same, unused.
+
+            Raises:
+                _ReachedTheSocket: Always. The probe has nothing left to prove
+                    once the connection would have been opened, and there is no
+                    server on the other end to answer it.
+            """
+            reached.append(time.monotonic())
+            raise _ReachedTheSocket
+
+        self._stepping(monkeypatch)
+        monkeypatch.setattr(conformance_module.socket, "create_connection", connector)
+        began = time.monotonic()
+
+        with pytest.raises(_ReachedTheSocket):
+            conformance_module.send_raw("h", 1, probe("placement"), marker="placement")
+
+        assert reached[0] > began, f"connection opened at {reached[0]}, call began at {began}"
 
     async def test_two_probes_are_stamped_at_different_instants(
         self, recorder: RecordingUpstream, monkeypatch: pytest.MonkeyPatch
