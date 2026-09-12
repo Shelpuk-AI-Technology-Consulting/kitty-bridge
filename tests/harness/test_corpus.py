@@ -817,6 +817,40 @@ class TestScrubbingIsConsistentWithDetection:
         assert located["home_path"] == body.index(b"someuser")
         assert located["email"] == body.index(b"someone@")
 
+    @pytest.mark.parametrize("prefix", [b"\xff\xfe", b"\x80", b"\xe2\x28"])
+    def test_a_secret_after_an_invalid_utf8_byte_is_still_found(self, prefix: bytes) -> None:
+        """Invalid bytes AND a secret — the combination no earlier test had.
+
+        Every producer decodes with `surrogateescape` so a non-UTF-8 capture
+        round-trips, but `_byte_offset` re-encoded the prefix strictly, and a
+        lone surrogate has no UTF-8 encoding. `scrub` and `findings` both raised
+        `UnicodeEncodeError`, so `write_entry` and `assert_corpus_clean` failed
+        with an undocumented exception on precisely the entry the format exists
+        to hold: T-C6's malformed body.
+
+        The surrogate round-trip was already covered — but by a body with no
+        secret in it, so the offending line never ran. That is why this needs
+        both halves, and the three prefixes cover a lone high byte, a bare
+        continuation byte and a truncated multi-byte sequence.
+        """
+        body = prefix + b" padding " + PLANTED_KEY.encode()
+
+        located = k.findings(capture(body))
+
+        assert [f.name for f in located] == ["anthropic_key"]
+        assert located[0].offset == body.index(b"sk-ant-")
+        assert PLANTED_KEY.encode() not in k.scrub(capture(body)).body
+
+    def test_a_non_utf8_body_round_trips_through_a_scrub(self) -> None:
+        """The bytes the scrubber does not touch must come back exactly.
+
+        `surrogateescape` is only a faithful round trip if both directions use
+        it; this pins the decode/encode pair that `_byte_offset` was missing.
+        """
+        body = b"\xff\xfe" + b'{"m": "nothing to redact"}' + b"\x80"
+
+        assert k.scrub(capture(body)).body == body
+
     def test_a_dirty_body_reports_one_finding_per_secret(self) -> None:
         """Five planted secrets, five findings — not four, and not fifteen.
 

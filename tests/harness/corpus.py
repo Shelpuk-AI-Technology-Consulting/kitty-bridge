@@ -430,6 +430,17 @@ def _byte_offset(text: str, position: int) -> int:
     is looking at bytes. A character index is the same number only while the
     body is ASCII, and a Claude Code transcript rarely is.
 
+    ``errors="surrogateescape"`` matches every producer in this module: a body is
+    decoded that way so a capture that is not valid UTF-8 round-trips, and
+    re-encoding the prefix **strictly** cannot represent the lone surrogate that
+    decoding produced. The trigger is any invalid byte followed by a shaped
+    secret, which is the one combination no earlier test had: the
+    surrogate round-trip case carried no secret, so this line never ran. Without
+    it both :func:`scrub` and :func:`findings` raise ``UnicodeEncodeError`` -- so
+    ``write_entry`` and ``assert_corpus_clean`` fail with an undocumented
+    exception on exactly the entry the format is meant to hold, T-C6's malformed
+    body.
+
     Args:
         text: The text the index refers to.
         position: The character index.
@@ -437,7 +448,7 @@ def _byte_offset(text: str, position: int) -> int:
     Returns:
         The corresponding UTF-8 byte offset.
     """
-    return len(text[:position].encode("utf-8"))
+    return len(text[:position].encode("utf-8", errors="surrogateescape"))
 
 
 def _rewrite(text: str, extra: Sequence[str], allow: Sequence[str]) -> str:
