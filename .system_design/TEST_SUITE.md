@@ -380,7 +380,8 @@ G27 (an allowlisted field dropped for being falsy). The last three were each fou
 subscription request path by hand rather than by any guard — which is the evidence for the
 sentence above, not a decoration on it.
 
-**A header row's `paths` are checked by none of the three.** Under §3.2.2's header rule they are
+**A header row's `paths` are checked by none of the four well-formedness guards**, and the two
+that do check paths check P23's alone. Under §3.2.2's header rule they are
 consumed by §4.3 C1's exact-set assertion, which does not exist yet — so for P9a, P9b and P9c only
 the id, the conditionality and the sites are under test today. `headers[user-agent]` is a reviewed
 claim, not yet a tested one.
