@@ -45,15 +45,85 @@ class ProcessLiveness(enum.Enum):
     UNKNOWN = "unknown"
 
 
+def _probe_pid_windows(pid: int) -> ProcessLiveness:
+    """Probe a PID on Windows without signalling anything.
+
+    Windows has no "signal 0" probe, so liveness is asked of the process object
+    directly: open a handle, then ask whether that handle is signalled.
+    ``WaitForSingleObject`` with a zero timeout answers immediately and never
+    touches the target.
+
+    Args:
+        pid: Process ID to probe. Assumed positive; :func:`probe_pid` screens it.
+
+    Returns:
+        :attr:`ProcessLiveness.ALIVE`, :attr:`ProcessLiveness.DEAD`, or
+        :attr:`ProcessLiveness.UNKNOWN`.
+    """
+    # Narrows the platform for mypy as well as for the reader: every name below
+    # exists only on Windows, and on a POSIX type-check run this makes the rest
+    # of the function unreachable rather than an error.
+    if sys.platform != "win32":  # pragma: no cover - guarded by probe_pid
+        raise RuntimeError("_probe_pid_windows is Windows-only")
+
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+
+    # 🔴 restype MUST be declared. ctypes defaults a return value to C `int`,
+    # which truncates a 64-bit HANDLE to 32 bits -- the handle then fails to
+    # close and, worse, a valid handle can truncate to zero and read as failure.
+    kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+    kernel32.WaitForSingleObject.restype = wintypes.DWORD
+    kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    kernel32.CloseHandle.restype = wintypes.BOOL
+
+    synchronize = 0x00100000
+    query_limited_information = 0x1000
+    error_access_denied = 5
+    wait_timeout = 0x102
+
+    handle = kernel32.OpenProcess(synchronize | query_limited_information, False, pid)
+    if not handle:
+        # ERROR_ACCESS_DENIED proves the process EXISTS and is not ours, which is
+        # the opposite conclusion from a missing PID; every other failure
+        # (ERROR_INVALID_PARAMETER 87 for a PID nothing holds) means dead.
+        if ctypes.get_last_error() == error_access_denied:
+            return ProcessLiveness.UNKNOWN
+        return ProcessLiveness.DEAD
+    try:
+        # A process handle is signalled once the process exits, so a zero-timeout
+        # wait that TIMES OUT is the liveness answer. Deliberately not
+        # GetExitCodeProcess, whose STILL_ACTIVE is the value 259 -- a process
+        # that genuinely exited with code 259 would read as running.
+        return (
+            ProcessLiveness.ALIVE
+            if kernel32.WaitForSingleObject(handle, 0) == wait_timeout
+            else ProcessLiveness.DEAD
+        )
+    finally:
+        kernel32.CloseHandle(handle)
+
+
 def probe_pid(pid: int) -> ProcessLiveness:
     """Probe whether a process exists and whether this user may signal it.
 
-    Signal ``0`` performs no action and only probes for the process, on Windows
-    as well as POSIX — it does not terminate the target. The three outcomes are
-    kept apart because they call for different handling: a permission-denied
-    probe proves the process is *running* under another account, which is the
-    opposite conclusion from a missing process, yet both raise from
-    :func:`os.kill`.
+    The three outcomes are kept apart because they call for different handling:
+    a permission-denied probe proves the process is *running* under another
+    account, which is the opposite conclusion from a missing process.
+
+    🔴 **The POSIX ``os.kill(pid, 0)`` idiom must never run on Windows.**
+    ``signal.CTRL_C_EVENT`` **is** ``0`` there, so that call does not probe — it
+    raises a **Ctrl+C console event** delivered to every process sharing the
+    console window, including the caller's own shell and whatever agent is
+    running in it. See KBR-180: this function is reached by ``kitty bridge
+    status``, ``stop``, ``start`` and ``restart``, so on Windows each of those
+    interrupted the session it was reporting on. The defect survived because
+    nothing had ever executed this line on Windows; the platform legs added by
+    KBR-164 found it on their first run.
 
     Args:
         pid: Process ID to probe.
@@ -68,22 +138,30 @@ def probe_pid(pid: int) -> ProcessLiveness:
     # SIGTERM/SIGKILL against the user's own shell session.
     if pid <= 0:
         return ProcessLiveness.DEAD
+    # Branch before the try, not inside it: the Windows path must be
+    # unreachable-by-construction rather than a fallback something could fall
+    # through to.
+    if sys.platform == "win32":
+        return _probe_pid_windows(pid)
     try:
         os.kill(pid, 0)
         return ProcessLiveness.ALIVE
     except ProcessLookupError:
         return ProcessLiveness.DEAD
     except PermissionError:
-        # EPERM (POSIX) / ERROR_ACCESS_DENIED (Windows) proves the process
-        # exists — we simply may not signal it. Reporting it as dead is what
-        # issue #3 is about; reporting it as alive would let stop_bridge()
-        # signal a stranger's process after PID recycling.
+        # EPERM proves the process exists — we simply may not signal it.
+        # Reporting it as dead is what issue #3 is about; reporting it as alive
+        # would let stop_bridge() signal a stranger's process after PID
+        # recycling.
         return ProcessLiveness.UNKNOWN
     except OSError:
-        # Windows has no ProcessLookupError for this: OpenProcess fails with
-        # ERROR_INVALID_PARAMETER (87) for a PID that does not exist, which
-        # surfaces as a plain OSError. Without this branch every stale-state
-        # code path (bridge status/stop/start/restart) crashes on Windows.
+        # Kept as a backstop, with its justification corrected. It used to read
+        # "Windows has no ProcessLookupError for this: OpenProcess fails with
+        # ERROR_INVALID_PARAMETER (87)" -- which was wrong twice over, since
+        # `os.kill(pid, 0)` never reaches OpenProcess on Windows and this line
+        # is now POSIX-only. It stays because removing it would change POSIX
+        # behaviour for an errno neither branch above names, which is not this
+        # fix's business.
         return ProcessLiveness.DEAD
 
 

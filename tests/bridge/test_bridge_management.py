@@ -34,6 +34,49 @@ class TestBridgeManagementHelpers:
         # Use a very high PID that's extremely unlikely to exist
         assert probe_pid(999999999) is ProcessLiveness.DEAD
 
+    def test_probe_pid_never_signals_zero_on_windows(self, monkeypatch):
+        """KBR-180: ``os.kill(pid, 0)`` is a Ctrl+C broadcast on Windows.
+
+        🔴 ``signal.CTRL_C_EVENT`` **is** ``0``, so on Windows that call does
+        not probe -- it raises a console Ctrl+C delivered to every process
+        sharing the console window, including the user's own shell. The
+        Windows CI leg caught it as a ``KeyboardInterrupt`` that aborted the
+        run 227 tests in.
+
+        This runs on **every** platform, deliberately: the defect is invisible
+        on the Linux legs that make up four of the six, so a Windows-only
+        regression test would be checked by one leg and could rot unnoticed
+        in between. Faking the platform is what makes the claim checkable
+        everywhere.
+        """
+        from kitty.bridge import manage
+
+        # Fails loudly rather than silently passing if the dispatch is ever
+        # removed: a test that asserts `os.kill` was not called would also
+        # pass if `probe_pid` did nothing at all.
+        def _explode(*args: object, **kwargs: object) -> None:
+            raise AssertionError(f"probe_pid reached os.kill{args!r} on Windows")
+
+        monkeypatch.setattr(manage.sys, "platform", "win32")
+        monkeypatch.setattr(manage.os, "kill", _explode)
+        monkeypatch.setattr(
+            manage, "_probe_pid_windows", lambda pid: manage.ProcessLiveness.ALIVE
+        )
+
+        assert manage.probe_pid(4321) is manage.ProcessLiveness.ALIVE
+
+    def test_probe_pid_screens_non_positive_pids_before_any_dispatch(self):
+        """A corrupt state file must not reach either platform path.
+
+        On POSIX a pid of 0 addresses the caller's whole process group; on
+        Windows it is CTRL_C_EVENT's own group broadcast. The screen is what
+        stops a corrupt ``bridge_state.json`` from reaching either.
+        """
+        from kitty.bridge.manage import ProcessLiveness, probe_pid
+
+        assert probe_pid(0) is ProcessLiveness.DEAD
+        assert probe_pid(-1) is ProcessLiveness.DEAD
+
     def test_stop_bridge_removes_state_file(self, tmp_path: Path):
         from kitty.bridge.manage import stop_bridge
 
