@@ -123,6 +123,15 @@ EXEMPTIONS: Mapping[str, Exemption] = MappingProxyType(
             "requests, so two sends share one timestamp and strict increase fails",
             issue="KBR-188",
         ),
+        "provider-recorder-arrival-increases-per-session": Exemption(
+            assertion="request arrival times increase across a session recorded by the "
+            "provider-session recorder",
+            condition="on Windows the clock is too coarse to separate two adjacent "
+            "requests, so two sends share one timestamp and strict increase fails. The "
+            "same defect as the row above, at a second site: T-B1's recorder is judged by "
+            "the same conformance checks, and it landed after KBR-164 measured them",
+            issue="KBR-188",
+        ),
         "recorder-arrival-increases-across-requests": Exemption(
             assertion="arrival moves forward from one request to the next",
             condition="on Windows the clock is too coarse to separate two sequential "
