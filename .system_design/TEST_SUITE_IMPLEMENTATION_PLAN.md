@@ -426,7 +426,7 @@ that makes *its* bytes observable. Bundled, the Ollama half would have had no ev
 | **T-I4** | Background bridge ownership | | — | Not stopped, not restarted, no second bridge | §6.3.2 | S |
 | **T-I5** | Agent startup smoke | blocked Q12 | T-W8, T-W9, T-B4 | Pinned Claude Code binary, one turn, clean exit | §6.4.2 | M |
 | **T-I6** | Agent settings precedence | blocked Q12 | T-I5 | Three runs, three winners; every sentinel demonstrated live | §6.4.2 | M |
-| **T-I7** | Streaming recovery — content | partial Q14 | T-B4, T-G7, T-W8 | Four injection points; no duplicated text, no reused tool-call id, no spliced arguments. Positive oracle waits on Q14 | §6.3.1 | L |
+| **T-I7** | Streaming recovery — content | | T-B4, T-G7, T-W8 | Four injection points; no duplicated text, no reused tool-call id, no spliced arguments — and, per the answer in §11, the three post-emission points each close the block and terminate with one error rather than recovering | §6.3.1 | L |
 | **T-I8** | Cross-attempt content and cadence | | T-D1, T-W8, T-B4 | Blip and empty-response retries byte-identical; M6, M8, M9 and failover re-normalisation each fire only on trigger | §4.3 C3 | M |
 | **T-I9** | Connection lifecycle baseline | | T-W8, T-C7 | Distinct connections per session vs the native capture; ratcheted — a **reported baseline**, not `exemptions.ratchet`, which is the unrelated gating mechanism of §8.3 | §4.3 C5 | M |
 | **T-I10** | `_backend_context` isolation | | T-W8 | Deterministic; belongs here, not in load | §6.3.1 | S |
@@ -557,10 +557,10 @@ exist, and the plan should not offer it.
 | **Q10** | T-F2's exact bound, TR-3's wording, register rows M3–M7 | T-F2 lands with the observed-behaviour property and is revised **together with** TR-3 and the register. Narrowed by KBR-5: M13 is withdrawn, so "keep current behaviour" is no longer an option for that row |
 | **Q11** | Nothing — **T-H4 answers it** | T-H3 lands nightly-only |
 | **Q12** | T-I5, T-I6, T-K10 | The settings-precedence claim has no per-PR proof. **It no longer blocks Subsystem or Acceptance** — T-K10 is a separate category |
-| **Q14** | T-I7's positive assertions | T-I7 lands asserting only the negatives |
 
 **Q1** blocks no task but decides whether T-I12 and TR-1c ever gate. **Q5–Q7** affect register
-rows and wording, not delivery.
+rows and wording, not delivery. **Q14 left this table on 2026-09-12** (KBR-163): T-I7 now carries a
+full oracle, and the answer's second half is KBR-155's remedy.
 
 ---
 
@@ -596,6 +596,7 @@ merge.** So:
 | KBR-9 | G6 | T-G1 | Atomic fix + test now |
 | KBR-132 · **CLOSED** | G21 | — | Route taken: atomic fix + regression test, red at base, evidence in the PR. The broader guard is **KBR-138**, which has no plan-task ID because it was filed after this plan was written; G21 is its design gap. (Status convention: `TEST_SUITE.md` §9.2.) |
 | KBR-146 · **CLOSED** | G25 | — | Route taken: atomic fix + regression tests, red at base on both sides of the interpreter boundary, evidence in the PR. Landed the fifth §6.2.4 contract (`tests/test_ipaddress_contract.py`) ahead of all four planned ones; no plan-task ID, filed after this plan was written. G25 records what that contract still cannot prove. Duplicates KBR-141/142/150/162. (Status convention: `TEST_SUITE.md` §9.2.) |
+| KBR-183 | G26 | T-I7 | Found while answering **Q14** (KBR-163), by checking the claim that the answer merely ratified existing behaviour. It does not: `_is_transport_error` excludes `asyncio.TimeoutError` by design and the failover arm carries no emission test, so a post-emission timeout still writes a second attempt onto the client's open stream. Measured, not inferred. Product code, so the atomic-PR rule applies — the regression test must be red at the base revision |
 | KBR-175 | — | — | Found while writing **T-W8**. A **test fixture**, not product code: `tests/conftest.py::sample_profile_dict` carries a UUIDv7 `auth_ref` where `Profile` requires v4, so it cannot build the model it describes — and no test reads it. No regression-evidence rule applies, because nothing under `src/kitty` is wrong. The decision (delete it, or repair the id) is the owner's; T-W8 ships `profile_for()` and deliberately leaves it untouched |
 
 ---
