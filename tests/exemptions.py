@@ -87,20 +87,67 @@ class Exemption:
 # 🔴 The registry of ACKNOWLEDGED DEBT. One row per exempt assertion, and the
 # list is supposed to trend towards zero.
 #
-# It ships EMPTY, deliberately. TEST_SUITE.md §8 names one row -- TR-1c's
-# header-subset assertion, pending G3's policy half (Q1); it was keyed to KBR-8
-# until that shipped without closing parity -- but TR-1c is an acceptance scenario that
-# does not exist yet (§6.4.1, plan task T-J2). A row for an assertion no test
-# contains documents a fiction, and the unexpected-pass rule cannot catch that
-# one, because nothing ever runs it. Whichever of T-G1, T-G4, T-G5, T-G9 or
-# T-J2 lands first adds the first row.
+# It shipped EMPTY until KBR-164, which added the five rows below -- the Windows
+# cells of assertions the platform legs found false on Windows and true on the
+# other five legs (TEST_SUITE.md §8.3, §8.4).
+#
+# Still unwritten, and still for the stated reason: TEST_SUITE.md §8 names
+# TR-1c's header-subset assertion, pending G3's policy half (Q1) and keyed to
+# KBR-8 until that shipped without closing parity -- but TR-1c is an acceptance
+# scenario that does not exist yet (§6.4.1, plan task T-J2). A row for an
+# assertion no test contains documents a fiction, and the unexpected-pass rule
+# cannot catch that one, because nothing ever runs it.
 #
 # A `MappingProxyType`, not a bare dict, so the value matches the read-only
 # annotation at runtime as well as to a type checker. `EXEMPTIONS[...] = ...`
 # from a guard would otherwise pass `mypy` and register a row nobody can find by
 # reading this file -- the one-registry invariant defeated by one line. Rows are
 # added by editing the literal below.
-EXEMPTIONS: Mapping[str, Exemption] = MappingProxyType({})
+#: 🔴 The first rows this registry has ever carried, added by KBR-164 when the
+#: Windows leg went in. Every one of them is a **Windows cell** of an assertion
+#: that gates normally on the four Linux legs and on macOS — the parametrised
+#: shape §8.3 describes, not a blanket amnesty — so each fails the job the day
+#: its own platform starts passing.
+#:
+#: They are exemptions rather than skips on purpose. A `skipif` here would hide
+#: two real defects behind a green leg, and §8 permits a platform skip only for
+#: behaviour that *does not exist* on the platform. These assertions are not
+#: inapplicable on Windows; they are **false** there, and that is a debt with a
+#: ticket, not a platform difference.
+EXEMPTIONS: Mapping[str, Exemption] = MappingProxyType(
+    {
+        "recorder-arrival-increases-per-session": Exemption(
+            assertion="request arrival times increase across a recorded session",
+            condition="on Windows the clock is too coarse to separate two adjacent "
+            "requests, so two sends share one timestamp and strict increase fails",
+            issue="KBR-188",
+        ),
+        "recorder-falsification-reordering-only-order-check": Exemption(
+            assertion="a reordering recorder is rejected by the order check alone",
+            condition="on Windows the coarse clock also trips check_arrival_increases, "
+            "so a second check fires and the defect is caught by two, not one",
+            issue="KBR-188",
+        ),
+        "recorder-falsification-miscount-only-connection-check": Exemption(
+            assertion="a miscounting connection log is rejected by the connection check alone",
+            condition="on Windows the coarse clock also trips check_arrival_increases, "
+            "so a second check fires and the defect is caught by two, not one",
+            issue="KBR-188",
+        ),
+        "recorder-falsification-probe-passes-real-recorder": Exemption(
+            assertion="the falsification probe passes cleanly against the real recorder",
+            condition="on Windows the coarse clock trips check_arrival_increases against "
+            "a recorder that has no defect at all",
+            issue="KBR-188",
+        ),
+        "recorder-responder-abort-emits-before-dropping": Exemption(
+            assertion="a responder that aborts mid-stream still delivers a data frame first",
+            condition="on Windows the abort wins the race against the first chunk, so the "
+            "client sees response headers and no body",
+            issue="KBR-189",
+        ),
+    }
+)
 
 
 class UnknownExemption(Exception):

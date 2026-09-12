@@ -21,10 +21,13 @@ import asyncio
 import gzip
 import json
 import socket
+import sys
 from collections.abc import Callable
+from contextlib import nullcontext
 from pathlib import Path
 
 import pytest
+from exemptions import ratchet
 
 import harness.recorder as recorder_module
 import harness.recorder_conformance as conformance_module
@@ -111,7 +114,12 @@ class TestTheRecorderPassesEveryConformanceCheck:
             await send(recorder.host, recorder.port, probe(marker), marker=marker)
             for marker in ("first", "second")
         ]
-        check(recording_of(recorder), sent, [s.source_port for s in sent])
+        # KBR-188/189: exempt the WINDOWS CELL only -- this assertion gates
+        # normally on the Linux and macOS legs, and fails the job the day
+        # Windows starts passing. §8.3's parametrised-cell shape.
+        exempt = sys.platform == "win32" and check.__name__ == "check_arrival_increases"
+        with ratchet("recorder-arrival-increases-per-session") if exempt else nullcontext():
+            check(recording_of(recorder), sent, [s.source_port for s in sent])
 
 
 class TestCaptureFidelity:
@@ -725,7 +733,13 @@ class TestTheResponderSeam:
         recorder.responder = truncate
         reply = await _exchange(recorder, probe("t", body=b'{"stream": true}'))
 
-        assert b"data: " in reply
+        # KBR-188/189: exempt the WINDOWS CELL only -- this assertion gates
+        # normally on the Linux and macOS legs, and fails the job the day
+        # Windows starts passing. §8.3's parametrised-cell shape.
+        exempt = sys.platform == "win32"
+        with ratchet("recorder-responder-abort-emits-before-dropping") if exempt else nullcontext():
+            assert b"data: " in reply
+
         assert b"[DONE]" not in reply, "the stream must have been cut before its terminator"
 
 

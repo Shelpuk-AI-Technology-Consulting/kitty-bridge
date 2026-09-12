@@ -45,6 +45,59 @@ class ProcessLiveness(enum.Enum):
     UNKNOWN = "unknown"
 
 
+#: Windows constants, named here rather than inline so the pure decisions below
+#: can be handed each value without a live handle. ``ERROR_ACCESS_DENIED`` proves
+#: a process exists; ``WAIT_TIMEOUT`` is the answer a zero-timeout wait gives for
+#: a handle that is NOT yet signalled, which is what "still running" looks like.
+_ERROR_ACCESS_DENIED = 5
+_WAIT_TIMEOUT = 0x102
+_SYNCHRONIZE = 0x00100000
+_PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+
+
+def liveness_from_open_failure(last_error: int) -> ProcessLiveness:
+    """Classify a failed ``OpenProcess`` by the error it set.
+
+    Pure, and separated from the ``ctypes`` call for the reason
+    ``TEST_SUITE.md`` §8.1 gives for every decision in this codebase: a decision
+    entangled with a system call cannot be handed a deliberate defect. This one
+    can be checked on any platform, which matters because the caller only ever
+    runs on one.
+
+    Args:
+        last_error: The Win32 error code ``GetLastError`` reported.
+
+    Returns:
+        :attr:`ProcessLiveness.UNKNOWN` for ``ERROR_ACCESS_DENIED``, which proves
+        the process **exists** and is not ours to signal;
+        :attr:`ProcessLiveness.DEAD` otherwise — ``ERROR_INVALID_PARAMETER``
+        (87) is what a PID nothing holds produces.
+    """
+    # Access denied is the opposite conclusion from a missing process, and
+    # collapsing the two is the defect issue #3 was about on POSIX.
+    if last_error == _ERROR_ACCESS_DENIED:
+        return ProcessLiveness.UNKNOWN
+    return ProcessLiveness.DEAD
+
+
+def liveness_from_wait(wait_result: int) -> ProcessLiveness:
+    """Classify a zero-timeout wait on a process handle.
+
+    Args:
+        wait_result: The value ``WaitForSingleObject`` returned.
+
+    Returns:
+        :attr:`ProcessLiveness.ALIVE` when the wait timed out, meaning the handle
+        is not signalled and the process is still running;
+        :attr:`ProcessLiveness.DEAD` otherwise.
+
+    Reading a **timeout** as "alive" is the inversion worth stating: a process
+    handle becomes signalled when the process *exits*, so the wait succeeding is
+    the death certificate and the wait timing out is the sign of life.
+    """
+    return ProcessLiveness.ALIVE if wait_result == _WAIT_TIMEOUT else ProcessLiveness.DEAD
+
+
 def _probe_pid_windows(pid: int) -> ProcessLiveness:
     """Probe a PID on Windows without signalling anything.
 
@@ -81,29 +134,14 @@ def _probe_pid_windows(pid: int) -> ProcessLiveness:
     kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
     kernel32.CloseHandle.restype = wintypes.BOOL
 
-    synchronize = 0x00100000
-    query_limited_information = 0x1000
-    error_access_denied = 5
-    wait_timeout = 0x102
-
-    handle = kernel32.OpenProcess(synchronize | query_limited_information, False, pid)
+    handle = kernel32.OpenProcess(_SYNCHRONIZE | _PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
     if not handle:
-        # ERROR_ACCESS_DENIED proves the process EXISTS and is not ours, which is
-        # the opposite conclusion from a missing PID; every other failure
-        # (ERROR_INVALID_PARAMETER 87 for a PID nothing holds) means dead.
-        if ctypes.get_last_error() == error_access_denied:
-            return ProcessLiveness.UNKNOWN
-        return ProcessLiveness.DEAD
+        return liveness_from_open_failure(ctypes.get_last_error())
     try:
-        # A process handle is signalled once the process exits, so a zero-timeout
-        # wait that TIMES OUT is the liveness answer. Deliberately not
-        # GetExitCodeProcess, whose STILL_ACTIVE is the value 259 -- a process
-        # that genuinely exited with code 259 would read as running.
-        return (
-            ProcessLiveness.ALIVE
-            if kernel32.WaitForSingleObject(handle, 0) == wait_timeout
-            else ProcessLiveness.DEAD
-        )
+        # Deliberately not GetExitCodeProcess, whose STILL_ACTIVE is the value
+        # 259 -- a process that genuinely exited with code 259 would read as
+        # running. :func:`liveness_from_wait` carries the rest of the reasoning.
+        return liveness_from_wait(kernel32.WaitForSingleObject(handle, 0))
     finally:
         kernel32.CloseHandle(handle)
 

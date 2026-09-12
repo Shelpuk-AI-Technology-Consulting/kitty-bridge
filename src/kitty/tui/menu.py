@@ -11,6 +11,30 @@ import questionary
 __all__ = ["CheckboxMenu", "SelectionMenu"]
 
 
+def _can_host_a_menu() -> bool:
+    """Report whether this process can host an interactive menu.
+
+    Both streams are checked, not just stdin, and the second one is the point:
+    a menu must **read keys and draw**, so a console on one side is not enough.
+
+    🔴 KBR-187. This guard read ``sys.stdin.isatty()`` alone, which is a POSIX
+    reading of the question. On Windows ``isatty()`` is true for any *character
+    device*, and that includes ``NUL`` -- so a child spawned with stdin
+    redirected to ``NUL`` reported an interactive stdin, passed this guard, and
+    died inside ``prompt_toolkit`` with ``NoConsoleScreenBufferError`` when it
+    tried to build a Win32 screen buffer over a **piped stdout**. On POSIX the
+    same child reads ``/dev/null`` as not-a-tty and returns here, which is why
+    no Linux run ever saw it.
+
+    That is the same user-facing failure as KBR-10 -- kitty crashing because its
+    output is redirected -- reached by a different route.
+
+    Returns:
+        ``True`` when both standard input and standard output are terminals.
+    """
+    return sys.stdin.isatty() and sys.stdout.isatty()
+
+
 class SelectionMenu:
     """Single-item arrow-key menu.
 
@@ -28,7 +52,7 @@ class SelectionMenu:
         Returns:
             The selected option string, or None if cancelled or non-interactive.
         """
-        if not sys.stdin.isatty():
+        if not _can_host_a_menu():
             return None
         if not self._options:
             return None
@@ -66,7 +90,7 @@ class CheckboxMenu:
             List of selected option strings (may be empty), or None if cancelled
             or non-interactive.
         """
-        if not sys.stdin.isatty():
+        if not _can_host_a_menu():
             return None
 
         choices: list[Any] = [

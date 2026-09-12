@@ -2938,13 +2938,21 @@ T-G5 and T-J2 land — is unchecked until that job is activated, so there the ex
 outlive its defect. The task that activates the job owns re-checking the rows on its layer, in
 the same way §8.2 makes each pending layer someone's named handoff.
 
-**The registry ships empty, today.** The row this section names — TR-1c's header-subset
-assertion, KBR-8 — belongs to an acceptance scenario that does not exist yet (§6.4.1, delivered
-by T-J2 downstream of T-J1). A registry row for an assertion no test contains documents a
-fiction, and the guard against a fiction cannot be the unexpected-pass rule, because nothing ever
-runs it. Whichever of T-G1, T-G4, T-G5, T-G9 or T-J2 lands first adds the first row. §6.4.1 and
-§6.2.3 are not amended to say so: this document states the To-Be state, in which those rows
-exist, and §8's row-count parenthetical now says which state it is counting.
+**The registry no longer ships empty — KBR-164 added the first five rows**, and they are not the
+row this section anticipated. TR-1c's header-subset assertion (KBR-8) still belongs to an
+acceptance scenario that does not exist yet (§6.4.1, delivered by T-J2 downstream of T-J1), and a
+registry row for an assertion no test contains documents a fiction — so it is still unwritten.
+What arrived first instead were the **Windows cells** of five assertions that the platform legs
+(§8.4) found to be false on Windows and true everywhere else: four over KBR-188 and one over
+KBR-189.
+
+They are the parametrised-cell shape above rather than whole-test exemptions, and the reason is
+the rule this section opens with. A `skipif` would have been the obvious move and is the wrong
+one: §8 permits a platform skip for behaviour that **does not exist** on a platform, and these
+assertions are not inapplicable on Windows — they are **false** there, which is a defect with a
+ticket. Exempting the cell keeps the assertion gating on the four Linux legs and on macOS, keeps
+the count of outstanding Windows defects readable in one file, and fails the job the day Windows
+starts passing. Skipping would have bought a green leg by not looking.
 
 That makes the registry-shape check itself vulnerable to §8's own "green because it stopped
 looking": a validator run over zero rows passes perfectly. So `registry_violations` is proved

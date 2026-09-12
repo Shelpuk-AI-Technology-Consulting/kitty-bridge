@@ -73,10 +73,21 @@ class TestBridgeManagementHelpers:
         Windows it is CTRL_C_EVENT's own group broadcast. The screen is what
         stops a corrupt ``bridge_state.json`` from reaching either.
         """
-        from kitty.bridge.manage import ProcessLiveness, probe_pid
+        from kitty.bridge import manage
 
-        assert probe_pid(0) is ProcessLiveness.DEAD
-        assert probe_pid(-1) is ProcessLiveness.DEAD
+        # Asserts the SCREEN, not just the answer. `probe_pid(0) is DEAD` would
+        # also hold if the pid reached a probe that happened to report dead --
+        # so the claim 'before any dispatch' would go unchecked. Both platform
+        # paths are blocked, because the screen protects both.
+        def _explode(*args: object, **kwargs: object) -> None:
+            raise AssertionError(f"a non-positive pid reached a probe: {args!r}")
+
+        with (
+            patch.object(manage.os, "kill", _explode),
+            patch.object(manage, "_probe_pid_windows", _explode),
+        ):
+            assert manage.probe_pid(0) is manage.ProcessLiveness.DEAD
+            assert manage.probe_pid(-1) is manage.ProcessLiveness.DEAD
 
     def test_stop_bridge_removes_state_file(self, tmp_path: Path):
         from kitty.bridge.manage import stop_bridge
@@ -797,6 +808,51 @@ class TestBridgeReachable:
         from kitty.bridge.manage import bridge_reachable
 
         assert bridge_reachable("kitty-bridge.invalid", 9, timeout=0.2) is False
+
+
+class TestTheWindowsLivenessDecisions:
+    """The Windows probe's decisions, checked on every platform.
+
+    🔴 Raised in PR review: the ``ctypes`` body of ``_probe_pid_windows`` runs
+    on one leg of six, so the mapping it implements was proved only where it
+    is hardest to run and impossible to provoke -- nothing can produce an
+    ``ERROR_ACCESS_DENIED`` process on demand in CI.
+
+    The decisions are therefore pure functions, the shape TEST_SUITE.md §8.1
+    requires of every decision in this codebase, and these cases hand each one
+    the values Windows would. What stays Windows-only is the ``ctypes`` call
+    itself, which is plumbing rather than a decision.
+    """
+
+    def test_access_denied_means_the_process_exists(self):
+        """ERROR_ACCESS_DENIED is the opposite conclusion from a missing PID."""
+        from kitty.bridge.manage import ProcessLiveness, liveness_from_open_failure
+
+        assert liveness_from_open_failure(5) is ProcessLiveness.UNKNOWN
+
+    def test_any_other_open_failure_means_dead(self):
+        """ERROR_INVALID_PARAMETER (87) is what a PID nothing holds produces."""
+        from kitty.bridge.manage import ProcessLiveness, liveness_from_open_failure
+
+        assert liveness_from_open_failure(87) is ProcessLiveness.DEAD
+        assert liveness_from_open_failure(0) is ProcessLiveness.DEAD
+
+    def test_a_wait_that_times_out_means_alive(self):
+        """🔴 The inversion: a process handle is signalled once it EXITS.
+
+        So the wait timing out (``WAIT_TIMEOUT``, 0x102) is the sign of life,
+        and the wait succeeding is the death certificate. Reading this the
+        natural way round is the mistake this case exists to catch.
+        """
+        from kitty.bridge.manage import ProcessLiveness, liveness_from_wait
+
+        assert liveness_from_wait(0x102) is ProcessLiveness.ALIVE
+
+    def test_a_wait_that_completes_means_dead(self):
+        """WAIT_OBJECT_0 (0) means the handle is signalled: the process exited."""
+        from kitty.bridge.manage import ProcessLiveness, liveness_from_wait
+
+        assert liveness_from_wait(0) is ProcessLiveness.DEAD
 
 
 @pytest.mark.skipif(

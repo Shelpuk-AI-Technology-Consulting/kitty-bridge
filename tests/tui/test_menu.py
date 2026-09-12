@@ -2,13 +2,38 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 
 from kitty.tui.menu import CheckboxMenu, SelectionMenu
 
 
-def _mock_tty(is_tty: bool = True):
-    return patch("sys.stdin.isatty", return_value=is_tty)
+def _mock_tty(is_tty: bool = True, *, stdout_is_tty: bool | None = None):
+    """Present both standard streams as terminals, or not.
+
+    🔴 Both, since KBR-187. A menu must read keys *and* draw, and patching only
+    stdin made this helper agree with the defect: the guard it exercised could
+    not see a redirected stdout, which is exactly how kitty came to die inside
+    ``prompt_toolkit`` on Windows.
+
+    Args:
+        is_tty: Whether standard input is a terminal.
+        stdout_is_tty: Whether standard output is one. Defaults to ``is_tty``;
+            pass it explicitly to build the asymmetric case that KBR-187 was.
+
+    Returns:
+        A context manager patching both ``isatty`` calls.
+    """
+    out = is_tty if stdout_is_tty is None else stdout_is_tty
+
+    @contextmanager
+    def _both():
+        with patch("sys.stdin.isatty", return_value=is_tty), patch(
+            "sys.stdout.isatty", return_value=out
+        ):
+            yield
+
+    return _both()
 
 
 class TestSelectionMenu:
@@ -36,6 +61,29 @@ class TestSelectionMenu:
         """Returns None immediately on non-TTY; questionary.select is never called."""
         with _mock_tty(False), patch("kitty.tui.menu.questionary") as mock_module:
             result = SelectionMenu("Pick", ["a", "b"]).show()
+        assert result is None
+        mock_module.select.assert_not_called()
+
+    def test_a_redirected_stdout_returns_none_even_when_stdin_looks_interactive(
+        self,
+    ) -> None:
+        """KBR-187: the asymmetric case that crashed kitty on Windows.
+
+        A child spawned with ``stdin=DEVNULL`` and a piped stdout reports an
+        interactive **stdin** on Windows, because ``isatty()`` is true there for
+        any character device and ``NUL`` is one. The old guard read stdin alone,
+        let the menu through, and ``prompt_toolkit`` then raised
+        ``NoConsoleScreenBufferError`` building a screen buffer over the pipe.
+
+        Runs on every platform: the asymmetry is simulated rather than waited
+        for, so the four Linux legs check it too instead of leaving the claim to
+        the one Windows leg.
+        """
+        with _mock_tty(True, stdout_is_tty=False), patch(
+            "kitty.tui.menu.questionary"
+        ) as mock_module:
+            result = SelectionMenu("Pick", ["a", "b"]).show()
+
         assert result is None
         mock_module.select.assert_not_called()
 
