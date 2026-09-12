@@ -78,6 +78,36 @@ class TestTheCommittedCorpus:
         assert {path.name for path in CORPUS.glob("*.body")} == claimed
 
 
+class TestTheCorpusIsProtectedFromLineEndingTranslation:
+    """`.gitattributes` is the first line of defence; the digest is the second."""
+
+    def test_gitattributes_still_covers_the_corpus(self) -> None:
+        """Nothing else notices a dropped pattern or a renamed directory.
+
+        The digest catches a body rewritten *without* its manifest — but a
+        checkout that rewrote both would pass everywhere, and a pattern silently
+        no longer matching is exactly how that happens. Every other artifact that
+        must agree with the corpus has a guard here; this one had none.
+
+        Asserted against the paths rather than the file's presence, because a
+        `.gitattributes` that exists and no longer names `tests/corpus` protects
+        nothing while looking like it does.
+        """
+        text = (ROOT / ".gitattributes").read_text(encoding="utf-8")
+
+        assert "tests/corpus/*.body -text" in text
+        assert "tests/corpus/*.json -text" in text
+
+    def test_the_patterns_name_the_directory_the_corpus_actually_uses(self) -> None:
+        """The pair above is a constant unless something anchors it to reality.
+
+        If the corpus ever moves, the patterns above still match themselves and
+        the guard stays green over a directory nothing writes to.
+        """
+        assert CORPUS == ROOT / "tests" / "corpus"
+        assert list(CORPUS.glob("*.body"))
+
+
 class TestTheProcedureDescribesTheTool:
     """A capture procedure that has stopped describing the scrubber is a trap."""
 

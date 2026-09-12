@@ -184,6 +184,13 @@ capture itself terminates TLS, which is also T-C7's problem.
 Scrub policy set by the product owner on 2026-09-12: **credentials and personal identifiers**.
 File contents and prompts are *not* synthesised — that would destroy the reason for capturing them.
 
+Scanned: the body, every header value, the query string, **and the host and path**. The routing
+fields are scanned like everything else — a path of `/v1/key/<token>/messages` would otherwise
+commit the token, and an internal hostname has no shape, so `extra` is the only thing that can
+reach it. The patterns are shape-anchored precisely so a real route survives: an Azure deployment
+segment and a Vertex `projects/…/locations/…` path are evidence §3.3.5 asserts on, and are pinned
+by test against this.
+
 Removed automatically, each replaced by a class-named placeholder:
 
 | Class | Shape |
@@ -204,6 +211,12 @@ Removed automatically, each replaced by a class-named placeholder:
 Credential **header** and **query-parameter** names are not listed again here: they come from
 `harness.contract.REDACTED_HEADERS` and `REDACTED_QUERY_KEYS`, which already own that vocabulary.
 A second spelling is a second thing to forget to update.
+
+**The manifest's prose is checked but never rewritten.** `description` and `origin_note` are
+scanned by the lint and reported — they are where a maintainer is most likely to write the thing
+this policy exists to keep out ("captured on *<internal host>*", "the customer's key was in this
+one"). They are not scrubbed automatically: silently mangling a description makes the entry harder
+to review rather than safer, and the person who wrote the sentence is the right person to fix it.
 
 **What it over-removes.** A credential's alphabet includes `/`, `.` and `=`, so a token written
 flush against a path takes the path with it: `token=ZZZ…/v1/messages` redacts the path segment too.

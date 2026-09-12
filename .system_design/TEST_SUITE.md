@@ -2435,6 +2435,22 @@ asserted over every ordered pair of known shapes at three separations. What is *
 that the finding count equals the placeholder count: one redaction can subsume a neighbour, which
 names more than it needs to rather than less.
 
+**The writer refuses exactly what the reader refuses, and both scan every field.** Two asymmetries
+were found in review and closed, and both had the same shape — a rule enforced on one side only, so
+the gap looked like a check that existed. `write_entry` accepted entries `load_corpus` then
+rejected, which turns the capture procedure's last step into a success that fails later in CI
+against a file already committed. And `scrub` scanned the body, the headers and the query but left
+**`host` and `path`** alone: a path of `/v1/key/<token>/messages` was committed and linted clean,
+and an internal hostname survived even when the operator named it in `extra` — while this document
+already claimed hostnames were removed. Scanning the routing fields costs nothing the oracle needs,
+because the patterns are shape-anchored and §3.3.5's evidence is structural: Azure's deployment
+segment and Vertex's `projects/…/locations/…` are pinned by test against exactly this change.
+
+**The manifest's prose is linted, not scrubbed.** `description` and `origin_note` are where a
+maintainer writes what the policy exists to exclude, and they sat outside both the scrubber and the
+lint. They are now reported and deliberately not rewritten: mangling a description makes an entry
+harder to review rather than safer, and the author of the sentence is the right person to fix it.
+
 **The scrubber matches shapes, never entropy.** A general high-entropy rule is the tempting
 addition and was rejected on measurement: a real Claude Code body is full of long opaque strings
 that are not secrets — thinking-block signatures, `toolu_` identifiers, base64 images — and §3.3.3

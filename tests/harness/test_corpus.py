@@ -334,6 +334,21 @@ class TestTheFormatIsClosed:
         with pytest.raises(k.CorpusEntryError, match="legal entry id"):
             k.load_entry(tmp_path / ".hidden.json")
 
+    @pytest.mark.parametrize("field_name", ["method", "scheme", "host", "path", "query"])
+    def test_a_non_string_request_field_is_rejected(self, tmp_path: Path, field_name: str) -> None:
+        """A frozen dataclass enforces no annotation at runtime.
+
+        `CapturedRequest.__post_init__` validates the headers and nothing else,
+        so `"query": 5` loaded cleanly and died much later as `AttributeError:
+        'int' object has no attribute 'split'` inside `findings` — and a
+        non-string `path` was quieter still, round-tripping back into the
+        manifest untouched.
+        """
+        path = manifest_for(tmp_path, **{field_name: 5})
+
+        with pytest.raises(k.CorpusEntryError, match=f"{field_name} must be a string"):
+            k.load_entry(path)
+
     def test_a_manifest_that_is_not_json_is_rejected(self, tmp_path: Path) -> None:
         """Named explicitly so the failure says so, rather than escaping as a `JSONDecodeError`."""
         path = manifest_for(tmp_path)
@@ -473,6 +488,28 @@ class TestTheScrubberRemovesSecrets:
 
         assert dict(scrubbed.headers)["X-Api-Key"] == k.REDACTION.format(name="credential_header")
 
+    def test_a_credential_in_the_path_is_scrubbed(self) -> None:
+        """The routing fields were exempt, and the gap was real.
+
+        A path of `/v1/key/<token>/messages` committed the token and linted
+        clean, while this module's docstring, the README's table and §7.1.1 all
+        claimed hostnames and credentials were removed.
+        """
+        capture_with_key = capture(path=f"/v1/key/{PLANTED_KEY}/messages")
+
+        assert PLANTED_KEY not in k.scrub(capture_with_key).path
+        assert [f.where for f in k.findings(capture_with_key)] == ["path"]
+
+    def test_an_operator_literal_reaches_the_host(self) -> None:
+        """An internal hostname has no shape, so `extra` is the only mechanism.
+
+        It reached the body, the headers and the query but not the host — so an
+        operator could not redact their own build box even by naming it.
+        """
+        internal = "internal-build-box.corp.example"
+
+        assert internal not in k.scrub(capture(host=internal), extra=(internal,)).host
+
     def test_a_credential_query_value_is_replaced_whole(self) -> None:
         """Gemini carries its credential in the URL, which `query` preserves verbatim."""
         scrubbed = k.scrub(capture(query="key=AnyValueAtAll&alt=sse"))
@@ -583,6 +620,26 @@ class TestTheScrubberLeavesEverythingElseAlone:
         body = b'{"max_tokens": 32000000000000000000000000}'
 
         assert k.scrub(capture(body)).body == body
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "/v1/messages",
+            "/openai/deployments/gpt-4o/chat/completions",
+            "/v1/projects/my-project-1234/locations/us-central1/publishers/google/models/gemini-2.0:generateContent",
+            "/v1beta/models/gemini-2.0-flash:streamGenerateContent",
+            "/model/anthropic.claude-3-5-sonnet-20241022-v2:0/converse",
+        ],
+    )
+    def test_a_real_route_survives_the_path_scan(self, path: str) -> None:
+        """Scanning the path must not cost the evidence the path *is*.
+
+        §3.3.5 asserts on routing because on Azure the deployment id is the only
+        thing separating two byte-identical requests, and on Vertex the project
+        and location are "the account being billed". A scrubber that rewrote any
+        of these would destroy the very difference the oracle exists to see.
+        """
+        assert k.scrub(capture(path=path)).path == path
 
     def test_an_empty_query_stays_empty(self) -> None:
         """Splitting an empty string on `&` yields one empty part, not none."""
@@ -891,6 +948,66 @@ class TestTheRoundTrip:
         assert list(tmp_path.parent.glob("escaped.*")) == []
         assert list(tmp_path.glob("*")) == []
 
+    @pytest.mark.parametrize(
+        ("overrides", "expected"),
+        [
+            ({"origin": k.CAPTURED, "origin_note": "", "captured_from": "", "captured_at": "d"}, "captured_from"),
+            ({"origin": k.CAPTURED, "origin_note": "", "captured_from": "v", "captured_at": ""}, "captured_at"),
+            ({"origin_note": ""}, "origin_note"),
+            ({"origin": "recorded"}, "origin must be"),
+            (
+                {
+                    "triggers_met": frozenset({Trigger.ORPHAN_TOOL_RESULT}),
+                    "triggers_absent": frozenset({Trigger.ORPHAN_TOOL_RESULT}),
+                },
+                "both met and absent",
+            ),
+            ({"triggers_met": frozenset({Trigger.UPSTREAM_EMPTY_RESPONSE})}, "cannot be arranged"),
+            ({"known_non_secrets": (("a-literal", ""),)}, "needs a reason"),
+        ],
+    )
+    def test_the_writer_refuses_what_the_reader_refuses(
+        self, tmp_path: Path, overrides: dict[str, object], expected: str
+    ) -> None:
+        """Sharing `_checked_id` closed this asymmetry for the id; these are the rest.
+
+        Without them `write_entry` succeeds on an entry `load_corpus` then
+        rejects: the capture procedure's last step reports success and the
+        failure surfaces in CI, against a file already committed.
+        """
+        with pytest.raises(k.CorpusEntryError, match=expected):
+            k.write_entry(tmp_path, entry(**overrides))
+
+    def test_anything_the_writer_accepts_the_reader_accepts(self, tmp_path: Path) -> None:
+        """The invariant behind the case list above, asserted directly.
+
+        A rule added to one side and not the other fails here rather than
+        drifting until someone writes an entry nothing can read.
+        """
+        accepted = [
+            entry(id="synthetic-one"),
+            entry(
+                id="captured-one",
+                origin=k.CAPTURED,
+                origin_note="",
+                captured_from="claude-code/1.2.3",
+                captured_at="2026-09-12",
+            ),
+            entry(id="with-triggers", triggers_met=frozenset({Trigger.TOOL_RESULT_OVER_LIMIT})),
+        ]
+        for one in accepted:
+            k.write_entry(tmp_path, one)
+
+        assert [e.id for e in k.load_corpus(tmp_path)] == ["captured-one", "synthetic-one", "with-triggers"]
+
+    def test_a_short_literal_refusal_names_the_entry(self, tmp_path: Path) -> None:
+        """Every rejection in `load_entry` names the entry; this one did not.
+
+        A corpus failure that does not say which entry is a corpus-wide search.
+        """
+        with pytest.raises(ValueError, match="sample: extra literals"):
+            k.write_entry(tmp_path, entry(), extra=("tas",))
+
     def test_entries_come_back_in_id_order(self, tmp_path: Path) -> None:
         """A stable order keeps a failure message the same across runs."""
         k.write_entry(tmp_path, entry(id="zebra"))
@@ -927,6 +1044,20 @@ class TestTheLint:
         manifest_for(tmp_path, body=PLANTED_BODY)
 
         with pytest.raises(k.UnscrubbedCorpusError, match="anthropic_key"):
+            k.assert_corpus_clean(k.load_corpus(tmp_path))
+
+    @pytest.mark.parametrize("field_name", ["description", "origin_note"])
+    def test_a_secret_in_the_manifests_prose_fails_the_lint(self, tmp_path: Path, field_name: str) -> None:
+        """Operator prose is the one part of an entry no pattern had seen.
+
+        It is where a maintainer is most likely to write the thing the policy
+        exists to keep out — "captured on <internal host>", "the customer's key
+        was in this one". Reported rather than rewritten: silently mangling a
+        description makes the entry harder to review, not safer.
+        """
+        manifest_for(tmp_path, **{field_name: f"note {PLANTED_KEY}"})
+
+        with pytest.raises(k.UnscrubbedCorpusError, match=f"anthropic_key in {field_name}"):
             k.assert_corpus_clean(k.load_corpus(tmp_path))
 
     def test_the_failure_message_does_not_print_the_secret(self, tmp_path: Path) -> None:

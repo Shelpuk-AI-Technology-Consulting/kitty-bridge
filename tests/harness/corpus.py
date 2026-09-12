@@ -599,8 +599,21 @@ def scrub(
     return CapturedRequest(
         method=captured.method,
         scheme=captured.scheme,
-        host=captured.host,
-        path=captured.path,
+        # The routing fields are scanned like everything else. They were
+        # exempt, and the gap was real rather than theoretical: a path of
+        # `/v1/key/<token>/messages` committed the token and linted clean, and
+        # an internal hostname survived even when the operator named it in
+        # `extra` -- while this module's docstring, the README's table and
+        # §7.1.1 all claimed hostnames were removed. `_scrub_query` already did
+        # this for the query, so the omission was an asymmetry, not a policy.
+        #
+        # The path is also evidence: §3.3.5 asserts on it, because on Azure the
+        # deployment id is the only thing distinguishing two identical requests.
+        # That is why the table is shape-anchored -- a real route survives it
+        # untouched, and `TestTheScrubberLeavesEverythingElseAlone` pins the
+        # Azure and Vertex shapes against exactly this change.
+        host=_scan(captured.host, extra, allow)[0],
+        path=_scan(captured.path, extra, allow)[0],
         query=_scrub_query(captured.query, extra, allow),
         headers=headers,
         body=body,
@@ -655,6 +668,11 @@ def findings(captured: CapturedRequest, allow: Sequence[str] = ()) -> tuple[Find
             found.append(Finding(CREDENTIAL_HEADER_CLASS, f"header:{name}", 0))
         elif name.lower() not in REDACTED_HEADERS:
             found.extend(Finding(f.name, f"header:{name}", f.offset) for f in _scan(value, (), allow)[1])
+
+    for field_name in ("host", "path"):
+        found.extend(
+            Finding(f.name, field_name, f.offset) for f in _scan(getattr(captured, field_name), (), allow)[1]
+        )
 
     for pair in captured.query.split("&") if captured.query else ():
         key, sep, value = pair.partition("=")
@@ -875,6 +893,50 @@ def _triggers(names: object, field_name: str, entry_id: str) -> frozenset[Trigge
     return frozenset(resolved)
 
 
+def _checked_entry(entry: CorpusEntry) -> None:
+    """Fail unless ``entry`` would survive :func:`load_entry`.
+
+    **The writer must refuse exactly what the reader refuses.** Sharing
+    :func:`_checked_id` closed that asymmetry for the id; these are the rest of
+    it. Without them ``write_entry`` succeeds on an entry ``load_corpus`` then
+    rejects — the capture procedure's last step reports success and the failure
+    surfaces in CI, against a file already committed to the tree. Loud rather
+    than silent, but at the wrong moment and to the wrong person.
+
+    ``test_anything_the_writer_accepts_the_reader_accepts`` holds the two sides
+    together, so a rule added to one and not the other fails rather than drifts.
+
+    Args:
+        entry: The entry about to be written.
+
+    Raises:
+        CorpusEntryError: When any load-side rule would reject it.
+    """
+    _checked_id(entry.id)
+
+    if entry.origin not in (CAPTURED, SYNTHETIC):
+        raise CorpusEntryError(f"{entry.id}: origin must be {CAPTURED!r} or {SYNTHETIC!r}")
+    if entry.origin == SYNTHETIC and not entry.origin_note:
+        raise CorpusEntryError(f"{entry.id}: a synthetic entry needs an origin_note")
+    if entry.origin == CAPTURED and not entry.captured_from:
+        raise CorpusEntryError(f"{entry.id}: a captured entry needs captured_from")
+    if entry.origin == CAPTURED and not entry.captured_at:
+        raise CorpusEntryError(f"{entry.id}: a captured entry needs captured_at")
+
+    both = sorted(t.value for t in entry.triggers_met & entry.triggers_absent)
+    if both:
+        raise CorpusEntryError(f"{entry.id}: trigger(s) {both} declared both met and absent")
+
+    unarrangeable = sorted(
+        t.value for t in (entry.triggers_met | entry.triggers_absent) & NOT_CORPUS_DECIDABLE
+    )
+    if unarrangeable:
+        raise CorpusEntryError(f"{entry.id}: trigger(s) {unarrangeable} cannot be arranged by a request")
+
+    if any(not reason for _, reason in entry.known_non_secrets):
+        raise CorpusEntryError(f"{entry.id}: every known_non_secrets entry needs a reason")
+
+
 def load_entry(manifest_path: Path) -> CorpusEntry:
     """Read one entry from its manifest and sidecar body.
 
@@ -938,12 +1000,17 @@ def load_entry(manifest_path: Path) -> CorpusEntry:
         raise CorpusEntryError(f"{stem}: body_file {expected_body!r} does not exist")
 
     # The digest is what makes "byte-exact" enforceable rather than aspirational.
-    # This repository has no `.gitattributes` and already carries mixed CRLF/LF,
-    # so a contributor with `core.autocrlf=true` rewrites LF to CRLF inside a
-    # `.body` on checkout and commits it back. CI is `ubuntu-latest` only, so the
-    # gate would consume the corrupted bytes rather than notice them -- and the
-    # damage lands on the byte-level key-order assertion and on every size-derived
-    # trigger. `.gitattributes` prevents it; this catches it if prevention fails.
+    # This repository carries mixed CRLF/LF by history, so a contributor with
+    # `core.autocrlf=true` would rewrite LF to CRLF inside a `.body` on checkout
+    # and commit it back -- and the damage lands on the byte-level key-order
+    # assertion and on every size-derived trigger.
+    #
+    # Two defences, in this order: the corpus-scoped `.gitattributes` this change
+    # adds marks these paths `-text` so the rewrite never happens, and this digest
+    # catches it if that file is ever dropped or its patterns stop matching
+    # (`test_gitattributes_still_covers_the_corpus` guards that). The digest is not
+    # redundant with the Windows CI leg either: the leg would catch a body whose
+    # manifest went stale, but a rewrite that updated both would pass everywhere.
     body = body_path.read_bytes()
     digest = hashlib.sha256(body).hexdigest()
     if digest != manifest["body_sha256"]:
@@ -975,6 +1042,17 @@ def load_entry(manifest_path: Path) -> CorpusEntry:
     formats = {f.value: f for f in WireFormat}
     if fmt_name is not None and fmt_name not in formats:
         raise CorpusEntryError(f"{stem}: wire_format {fmt_name!r} is not a WireFormat")
+
+    # The request line is type-checked here because nothing downstream does.
+    # `CapturedRequest` is a frozen dataclass, and a frozen dataclass enforces
+    # no annotation at runtime -- only `__post_init__` validates, and it looks at
+    # the headers alone. So `"query": 5` loaded cleanly and died much later as
+    # `AttributeError: 'int' object has no attribute 'split'` inside `findings`,
+    # and a non-string `path` was quieter still: it round-tripped back into the
+    # manifest untouched.
+    for field_name in ("method", "scheme", "host", "path", "query"):
+        if not isinstance(manifest[field_name], str):
+            raise CorpusEntryError(f"{stem}: {field_name} must be a string")
 
     headers = manifest["headers"]
     if not isinstance(headers, list):
@@ -1039,11 +1117,16 @@ def write_entry(root: Path, entry: CorpusEntry, *, extra: Sequence[str] = ()) ->
         The manifest's path.
 
     Raises:
-        CorpusEntryError: When ``entry.id`` is not a bare file name component.
+        CorpusEntryError: When the entry would not survive :func:`load_entry` —
+            a malformed id, missing provenance, contradictory or unarrangeable
+            triggers, or an unexplained exemption.
         EncodedCaptureError: When the capture carries a ``content-encoding`` or
             ``transfer-encoding`` header.
+        ValueError: When an ``extra`` or ``known_non_secrets`` literal is shorter
+            than :data:`MIN_LITERAL`. Raised from :func:`scrub`, re-raised here
+            with the entry named.
     """
-    _checked_id(entry.id)
+    _checked_entry(entry)
 
     encoded = sorted({n for n, _ in entry.request.headers if n.lower() in REFUSED_ENCODINGS})
     if encoded:
@@ -1052,7 +1135,13 @@ def write_entry(root: Path, entry: CorpusEntry, *, extra: Sequence[str] = ()) ->
             "octets: a compressed body is one the scrubber reads as noise and reports clean."
         )
 
-    scrubbed = scrub(entry.request, extra, [literal for literal, _ in entry.known_non_secrets])
+    # `_checked_literals` raises a bare `ValueError` naming the field and the
+    # literal but not the entry. Every rejection in `load_entry` names the entry,
+    # and a corpus failure that does not is a corpus-wide search.
+    try:
+        scrubbed = scrub(entry.request, extra, [literal for literal, _ in entry.known_non_secrets])
+    except ValueError as exc:
+        raise ValueError(f"{entry.id}: {exc}") from exc
     body_file = f"{entry.id}.body"
 
     manifest = {
@@ -1150,9 +1239,10 @@ def assert_corpus_clean(entries: Sequence[CorpusEntry]) -> None:
         entries: The corpus, normally :func:`load_corpus`'s output.
 
     Raises:
-        UnscrubbedCorpusError: When any entry has findings, when an entry's
-            ``known_non_secrets`` names a literal the body no longer contains,
-            **or** when ``entries`` is empty.
+        UnscrubbedCorpusError: When any entry has findings — in its request or
+            in the manifest's own prose — when an entry's ``known_non_secrets``
+            names a literal the body no longer contains, **or** when ``entries``
+            is empty.
 
     The empty case is an error rather than a pass.  "No secrets found" is
     satisfied perfectly by having looked at nothing, and a lint in that state is
@@ -1179,6 +1269,19 @@ def assert_corpus_clean(entries: Sequence[CorpusEntry]) -> None:
         allow = [literal for literal, _ in entry.known_non_secrets]
         problems += [
             f"{entry.id}: {f.name} at {f.where} offset {f.offset}" for f in findings(entry.request, allow)
+        ]
+        # The operator's own prose is the one part of a committed entry no
+        # pattern had seen, and it is where a maintainer is most likely to write
+        # the thing the policy exists to keep out -- "captured on <internal
+        # host>", "the customer's key was in this one". Reported rather than
+        # rewritten: `scrub` leaves these fields alone deliberately, because
+        # silently mangling a description would make the entry harder to review
+        # rather than safer, and the person who wrote the sentence is the right
+        # person to fix it.
+        problems += [
+            f"{entry.id}: {f.name} in {field_name} offset {f.offset}"
+            for field_name in ("description", "origin_note")
+            for f in _scan(getattr(entry, field_name), (), allow)[1]
         ]
         body = entry.request.body.decode("utf-8", errors="surrogateescape")
         problems += [
