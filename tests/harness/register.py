@@ -265,7 +265,8 @@ _ALWAYS = Trigger.ALWAYS
 #: proves self-consistency, not agreement with the vendor.
 #:
 #: ⚠️ "Never copies" is the precise claim. The allowlist literal feeds only a
-#: DEBUG log; the body is an explicit `if` chain whose branches test truthiness,
+#: DEBUG log; the body is an explicit `if` chain, and six of its branches test
+#: truthiness rather than presence (only `parallel_tool_calls` tests presence),
 #: so an *allowlisted* field with a falsy value is dropped as well and is **not**
 #: claimed here. That residue is G27 / `KBR-185`.
 _CODEX_DROPPED_CONTROL_FIELDS: tuple[str, ...] = (
