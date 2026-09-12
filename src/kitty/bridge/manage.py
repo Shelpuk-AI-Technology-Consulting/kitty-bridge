@@ -439,7 +439,12 @@ def start_bridge(
                 # Process already exited — read error
                 print(f"Error: Bridge failed to start (exit code {proc.returncode})", file=sys.stderr)
                 if proc.stderr:
-                    print(proc.stderr.read().decode(), file=sys.stderr)
+                    # A child that died before `kitty.bridge_runner:main` never ran
+                    # harden_output_streams, so its traceback carries the locale
+                    # codepage, not UTF-8. A strict decode killed this diagnostic
+                    # instead of printing it (KBR-154); backslashreplace keeps the
+                    # undecodable bytes readable rather than collapsing them to U+FFFD.
+                    print(proc.stderr.read().decode(errors="backslashreplace"), file=sys.stderr)
             else:
                 # Process is running but state file never appeared
                 print("Error: Bridge started but state file not found", file=sys.stderr)

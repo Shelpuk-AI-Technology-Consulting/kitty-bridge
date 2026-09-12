@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import ipaddress
 import json
 import os
@@ -946,3 +947,91 @@ class TestStopBridgeForceKillIsCrossPlatform:
             manage.stop_bridge(state_path)
 
         assert not state_path.exists()
+
+
+class TestStartBridgeReportingAChildThatDiedAtImport:
+    """Reporting a bridge child that exited before it wrote its state file.
+
+    The parent explains the failure by reading the dead child's stderr back. A child
+    that never reached :func:`kitty.bridge_runner.main` never ran
+    :func:`kitty.io_encoding.harden_output_streams`, so those bytes carry the machine's
+    locale codepage rather than UTF-8, and a strict decode of them killed the parent
+    mid-diagnostic (KBR-154). Every case here supplies the child's bytes as a literal,
+    never from the host locale, so the claim is proven on any runner.
+    """
+
+    # cp1251 for 'File "C:/Users/Пётр/boot.py", line 1', in the form CPython's default
+    # stderr emits it: `backslashreplace` escapes only what the codepage cannot encode,
+    # so an encodable non-ASCII name goes out as raw single bytes.
+    _CP1251_TRACEBACK = b'File "C:/Users/\xcf\xb8\xf2\xf0/boot.py", line 1'
+
+    @staticmethod
+    def _dead_child(stderr_bytes: bytes) -> SimpleNamespace:
+        """Build a stand-in for a child that exited before writing its state file.
+
+        Args:
+            stderr_bytes: The bytes the child is to have written to its stderr.
+
+        Returns:
+            An object exposing the three attributes ``start_bridge`` reads from a
+            :class:`subprocess.Popen`: ``poll``, ``returncode`` and ``stderr``.
+        """
+        return SimpleNamespace(poll=lambda: 1, returncode=1, stderr=io.BytesIO(stderr_bytes))
+
+    def _report(self, tmp_path: Path, stderr_bytes: bytes) -> SystemExit:
+        """Run ``start_bridge`` against a dead child and return the exit it raised.
+
+        Args:
+            tmp_path: Directory for the state file, which is never written, so
+                ``start_bridge`` takes its failure branch.
+            stderr_bytes: The bytes the stand-in child is to have written to stderr.
+
+        Returns:
+            The :exc:`SystemExit` raised by :func:`kitty.bridge.manage.start_bridge`.
+        """
+        from kitty.bridge.manage import start_bridge
+
+        with (
+            patch(
+                "kitty.bridge.manage.subprocess.Popen",
+                return_value=self._dead_child(stderr_bytes),
+            ),
+            pytest.raises(SystemExit) as excinfo,
+        ):
+            start_bridge(state_path=tmp_path / "state.json", host="127.0.0.1", port=0)
+
+        return excinfo.value
+
+    def test_a_child_whose_stderr_is_not_utf8_does_not_kill_the_parent(self, tmp_path: Path, capsys):
+        """Exit 1 rather than dying on the decode of the child's stderr.
+
+        That the child's own text survives is
+        :meth:`test_the_undecodable_bytes_are_rendered_beside_the_ascii`'s claim; this one
+        pins only that the parent reaches its exit instead of raising.
+        """
+        exit_exc = self._report(tmp_path, self._CP1251_TRACEBACK)
+
+        assert exit_exc.code == 1
+        assert "Bridge failed to start (exit code 1)" in capsys.readouterr().err
+
+    def test_the_undecodable_bytes_are_rendered_beside_the_ascii(self, tmp_path: Path, capsys):
+        """Render the bytes UTF-8 cannot decode instead of dropping them."""
+        self._report(tmp_path, self._CP1251_TRACEBACK)
+        err = capsys.readouterr().err
+
+        # The ASCII either side of the operator's account name is what makes the
+        # child's traceback readable at all, so it must survive untouched.
+        assert 'File "C:/Users/' in err
+        assert '/boot.py", line 1' in err
+
+        # Escapes, not U+FFFD: the byte values stay on screen, which is how a support
+        # engineer works out which codepage — and so which install — broke.
+        assert r"\xf2" in err
+        assert r"\xf0" in err
+        assert "\ufffd" not in err, "errors='replace' would satisfy neither KBR-154 AC2 nor this"
+
+    def test_a_child_whose_stderr_is_valid_utf8_is_reported_verbatim(self, tmp_path: Path, capsys):
+        """Leave a decodable diagnostic exactly as the child wrote it."""
+        self._report(tmp_path, "Ошибка импорта".encode())
+
+        assert "Ошибка импорта" in capsys.readouterr().err
