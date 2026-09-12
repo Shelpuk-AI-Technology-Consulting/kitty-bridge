@@ -31,16 +31,13 @@ from __future__ import annotations
 
 import asyncio
 import socket
-import sys
 import time
 from collections.abc import Sequence
-from contextlib import nullcontext
 from dataclasses import replace
 from typing import Any
 
 import pytest
 from aiohttp import web
-from exemptions import ratchet
 
 from harness.contract import CapturedRequest, WireFormat
 from harness.recorder import ConnectionRecord, RecordingUpstream, _ConnectionLoggingServer
@@ -646,12 +643,7 @@ class TestSessionDefectsAreCaughtByExactlyTheirOwnCheck:
         """Assert misordering is attributable to the ordering check alone."""
         failing = next(c for c in PER_SESSION_CHECKS if c.__name__ == "check_request_order")
         recording, sent, opened = await self._run_pair(ReorderingRecorder)
-        # KBR-188/189: exempt the WINDOWS CELL only -- this assertion gates
-        # normally on the Linux and macOS legs, and fails the job the day
-        # Windows starts passing. §8.3's parametrised-cell shape.
-        exempt = sys.platform == "win32"
-        with ratchet("recorder-falsification-reordering-only-order-check") if exempt else nullcontext():
-            self._assert_only(failing, recording, sent, opened, "request order")
+        self._assert_only(failing, recording, sent, opened, "request order")
 
     async def test_a_dropping_recorder_fails_only_the_coverage_check(self) -> None:
         """Assert a lost request is attributable to the coverage check alone."""
@@ -669,12 +661,7 @@ class TestSessionDefectsAreCaughtByExactlyTheirOwnCheck:
         """
         failing = next(c for c in PER_SESSION_CHECKS if c.__name__ == "check_connection_logged")
         recording, sent, opened = await self._run_pair(MiscountingConnectionRecorder)
-        # KBR-188/189: exempt the WINDOWS CELL only -- this assertion gates
-        # normally on the Linux and macOS legs, and fails the job the day
-        # Windows starts passing. §8.3's parametrised-cell shape.
-        exempt = sys.platform == "win32"
-        with ratchet("recorder-falsification-miscount-only-connection-check") if exempt else nullcontext():
-            self._assert_only(failing, recording, sent, opened, "accounts for 0 requests")
+        self._assert_only(failing, recording, sent, opened, "accounts for 0 requests")
 
     async def test_a_frozen_clock_fails_only_the_arrival_check(self) -> None:
         """Assert a constant clock is attributable to the arrival check alone."""
@@ -716,21 +703,8 @@ class TestSessionDefectsAreCaughtByExactlyTheirOwnCheck:
         finally:
             await upstream.stop()
 
-        # 🔴 The ratchet goes INSIDE the loop and names one check, not around it.
-        # Wrapping the loop would amnesty all four checks on Windows, so a check
-        # failing there for an unrelated reason would be suppressed by a row that
-        # names `check_arrival_increases` -- the blanket amnesty §8 rejects,
-        # rebuilt inside the mechanism meant to prevent it. §8.3 says the block
-        # holds exactly one assertion and that nothing detects a second; this is
-        # what heeding that looks like. Raised in PR review.
         for check in PER_SESSION_CHECKS:
-            exempt = sys.platform == "win32" and check.__name__ == "check_arrival_increases"
-            with (
-                ratchet("recorder-falsification-probe-passes-real-recorder")
-                if exempt
-                else nullcontext()
-            ):
-                check(recording, sent, opened)
+            check(recording, sent, opened)
 
     async def test_a_lazily_logged_connection_log_fails_the_connection_check(self) -> None:
         """Assert a log that only sees request-bearing connections is caught.

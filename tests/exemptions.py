@@ -115,38 +115,19 @@ class Exemption:
 #: behaviour that *does not exist* on the platform. These assertions are not
 #: inapplicable on Windows; they are **false** there, and that is a debt with a
 #: ticket, not a platform difference.
+#:
+#: **The mechanism has now paid out once, which is worth recording.** KBR-188
+#: held five rows here, all naming one cause: the recorder stamped `arrival`
+#: with `time.monotonic()`, which on Windows under Python 3.12 is
+#: `GetTickCount64()` at 15.625ms, so two adjacent requests shared a timestamp.
+#: KBR-208 moved the stamp to `time.perf_counter()`, the five assertions began
+#: passing on Windows, and every one of those rows failed the job through
+#: `UnexpectedExemptionPass` — exactly the "fails the job the day its own
+#: platform starts passing" contract above. That failure is the signal to
+#: **delete the row**, not to widen it; all five are gone, along with the
+#: `ratchet` plumbing at their call sites.
 EXEMPTIONS: Mapping[str, Exemption] = MappingProxyType(
     {
-        "recorder-arrival-increases-per-session": Exemption(
-            assertion="request arrival times increase across a recorded session",
-            condition="on Windows the clock is too coarse to separate two adjacent "
-            "requests, so two sends share one timestamp and strict increase fails",
-            issue="KBR-188",
-        ),
-        "recorder-arrival-increases-across-requests": Exemption(
-            assertion="arrival moves forward from one request to the next",
-            condition="on Windows the clock is too coarse to separate two sequential "
-            "requests, so both are stamped with the same instant",
-            issue="KBR-188",
-        ),
-        "recorder-falsification-reordering-only-order-check": Exemption(
-            assertion="a reordering recorder is rejected by the order check alone",
-            condition="on Windows the coarse clock also trips check_arrival_increases, "
-            "so a second check fires and the defect is caught by two, not one",
-            issue="KBR-188",
-        ),
-        "recorder-falsification-miscount-only-connection-check": Exemption(
-            assertion="a miscounting connection log is rejected by the connection check alone",
-            condition="on Windows the coarse clock also trips check_arrival_increases, "
-            "so a second check fires and the defect is caught by two, not one",
-            issue="KBR-188",
-        ),
-        "recorder-falsification-probe-passes-real-recorder": Exemption(
-            assertion="the falsification probe passes cleanly against the real recorder",
-            condition="on Windows the coarse clock trips check_arrival_increases against "
-            "a recorder that has no defect at all",
-            issue="KBR-188",
-        ),
         "recorder-responder-abort-emits-before-dropping": Exemption(
             assertion="a responder that aborts mid-stream still delivers a data frame first",
             condition="on Windows the abort wins the race against the first chunk, so the "
