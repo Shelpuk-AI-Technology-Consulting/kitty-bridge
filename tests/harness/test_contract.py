@@ -1251,11 +1251,14 @@ class TestArgumentsDecode:
         """
         c.decode_arguments(raw, "p", {})
 
-    def test_the_decoded_mapping_is_not_the_caller_s_object(self) -> None:
-        """A reader must not be able to mutate a projection's arguments through the body it read."""
-        residual: dict[str, object] = {}
+    def test_the_decoded_mapping_is_accepted_by_ToolUse(self) -> None:
+        """The decode's whole purpose is to feed `ToolUse.arguments`, so prove the pair composes.
 
-        decoded = c.decode_arguments('{"a": 1}', "p", residual)
+        Renamed from a claim about aliasing it did not test: `json.loads` always
+        returns a fresh object, so that claim was true for a reason the test
+        never exercised.
+        """
+        decoded = c.decode_arguments('{"a": 1}', "p", {})
 
         assert c.ToolUse(name="t", arguments=decoded).arguments == {"a": 1}
 
@@ -1396,6 +1399,19 @@ class TestOpaqueKindVocabulary:
         with pytest.raises(ValueError):
             c.opaque_kind(wire)
 
+    @pytest.mark.parametrize("wire", [7, None, ["a"], b"document", {"a": 1}])
+    def test_a_wire_type_that_is_not_a_string_is_a_TypeError_here_too(self, wire: object) -> None:
+        """`opaque_kind` and `Opaque` must agree on the split, or D12 holds in one place only.
+
+        The unhashable case is the sharp one: a list reached
+        `OPAQUE_ALIASES.get()` before any guard and raised `TypeError:
+        unhashable type`, which the readers' `except ValueError` cannot catch —
+        so it escaped as a raw crash instead of `UnreadableBodyError`. That is
+        the membership defect this harness has already shipped once.
+        """
+        with pytest.raises(TypeError, match="must be a str"):
+            c.opaque_kind(wire)  # type: ignore[arg-type]
+
     def test_a_digit_inside_a_segment_is_legal(self) -> None:
         """`sha256`-style names are snake_case; only a *leading* digit is not."""
         assert c.opaque_kind("mcp_call_2") == "mcp_call_2"
@@ -1431,8 +1447,17 @@ class TestOpaqueRejectsANonCanonicalKind:
 
     @pytest.mark.parametrize("kind", [7, None, b"document", ["document"]])
     def test_a_kind_that_is_not_a_string_is_a_TypeError(self, kind: object) -> None:
-        """`contract`'s split: `TypeError` for a wrong type, `ValueError` for a wrong value."""
-        with pytest.raises(TypeError):
+        """`contract`'s split: `TypeError` for a wrong type, `ValueError` for a wrong value.
+
+        **The message is pinned, and that is what makes this test able to fail.**
+        A bare `pytest.raises(TypeError)` passed with the guard deleted: every
+        parameter raises an *incidental* `TypeError` further down — `fullmatch`
+        rejects an int and a bytes pattern, and `OPAQUE_ALIASES.get` rejects an
+        unhashable list. Three tests in this change have now been caught proving
+        a guard by way of some other guard; when two checks raise the same type,
+        only the message tells them apart.
+        """
+        with pytest.raises(TypeError, match="must be a str"):
             c.Opaque(kind)  # type: ignore[arg-type]
 
     @pytest.mark.parametrize(

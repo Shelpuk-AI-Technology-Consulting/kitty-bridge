@@ -2376,8 +2376,10 @@ and the second is the one that surprises:
 **`Opaque` consumes its block, and carries a payload digest.** A block type the grammar does not
 model projects as `Opaque(kind=…, digest=…)` where:
 
-- `kind` is the wire `type` converted to snake_case, **through `contract.opaque_kind()`** — not
-  restated by each reader. Anthropic's spellings (`document`, `search_result`,
+- `kind` is **named through `contract.opaque_kind()`** — not restated by each reader. For most
+  types that is the wire `type` itself; where two vendors spell one concept differently the table
+  reconciles them, and where a type is not snake_case at all it raises rather than converting (see
+  below). Anthropic's spellings (`document`, `search_result`,
   `redacted_thinking`, `server_tool_use`) are already canonical; a format-unique type keeps its own
   spelling, which is the deliberate exception to "never the wire's spelling".
 

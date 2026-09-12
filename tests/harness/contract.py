@@ -671,10 +671,13 @@ _SNAKE_CASE = re.compile(r"[a-z][a-z0-9]*(_[a-z0-9]+)*")
 #: because Anthropic Messages *and* Bedrock Converse both spell it that way on
 #: the wire, so exactly one reader moved (KBR-174).
 #:
-#: **The canonical kinds in use today, per format — NOT a closed set.**  It
-#: cannot be closed: a format-unique type keeps its own wire spelling by the
-#: stated exception, so this list is documentation for the next reader's author,
-#: held honest by ``test_contract.py`` rather than by a membership check.
+#: **The canonical kinds in use today, per format — NOT a closed set**, and not
+#: a checked one either.  It cannot be closed: a format-unique type keeps its own
+#: wire spelling by the stated exception.  So this list is *documentation* for
+#: the next reader's author, and it is the one thing here that is not enforced —
+#: only the Responses row has a test that derives its members from the reader's
+#: own frozensets rather than restating them.  Treat it as a starting point to
+#: check against the readers, never as an authority.
 #:
 #: * shared across formats — ``document``, ``search_result``
 #: * Anthropic Messages — ``redacted_thinking``, ``server_tool_use``
@@ -717,19 +720,28 @@ def opaque_kind(wire_type: str) -> str:
         spelling, and ``wire_type`` itself otherwise.
 
     Raises:
+        TypeError: When ``wire_type`` is not a ``str`` — this module's split
+            between a wrong *type* and a wrong *value*, matching
+            :class:`Opaque`'s own check so the two cannot disagree.
         ValueError: When no alias exists and ``wire_type`` is not snake_case, so
             no canonical name can be derived without a decision.  A reader
             meeting this on the wire translates it into
             :class:`UnreadableBodyError`: the body is not projectable, but the
             reader is not at fault.
     """
+    # Checked before the lookup, not after: an unhashable value raises
+    # `TypeError: unhashable type` from `.get()` itself, which a reader's
+    # `except ValueError` cannot catch, so it would escape as a raw crash.
+    if not isinstance(wire_type, str):
+        raise TypeError(f"opaque_kind() wire_type must be a str, got {type(wire_type).__name__}")
+
     canonical = OPAQUE_ALIASES.get(wire_type)
     if canonical is not None:
         return canonical
 
     # Not an alias and not snake_case means nobody has decided what this is
     # called; guessing here is how two readers end up with two names.
-    if not isinstance(wire_type, str) or not _SNAKE_CASE.fullmatch(wire_type):
+    if not _SNAKE_CASE.fullmatch(wire_type):
         raise ValueError(
             f"no canonical Opaque.kind for wire type {wire_type!r} (§7.4.1): it is neither snake_case "
             "nor listed in OPAQUE_ALIASES. Add it to OPAQUE_ALIASES with its canonical name."
@@ -767,9 +779,12 @@ def decode_arguments(raw: Any, path: str, residual: dict[str, Any]) -> Mapping[s
     invisible to the oracle, which is the wire-format breach the readers exist to
     see.
 
-    **Never raises.**  This module defines a reader-raised ``ValueError`` as
-    "the reader mis-routed a field — a reader bug", so failing closed into the
-    residual keeps the diagnosis honest.
+    **Never raises on a value the wire can carry.**  This module defines a
+    reader-raised ``ValueError`` as "the reader mis-routed a field — a reader
+    bug", so failing closed into the residual keeps the diagnosis honest.  The
+    qualifier is literal: ``json.loads`` still raises ``RecursionError`` on
+    pathologically nested input, which every body-level parse in the harness
+    shares and no corpus produces.
 
     Args:
         raw: The wire value, of any type.
@@ -802,7 +817,9 @@ def decode_arguments(raw: Any, path: str, residual: dict[str, Any]) -> Mapping[s
 
     try:
         decoded = json.loads(raw)
-    except (json.JSONDecodeError, ValueError):
+    # `ValueError` alone: `JSONDecodeError` subclasses it, and naming both reads
+    # as though two distinct cases existed.
+    except ValueError:
         residual[path] = raw
         return {}
 
