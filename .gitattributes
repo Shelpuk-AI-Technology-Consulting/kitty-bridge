@@ -4,8 +4,10 @@
 # holds the request body as it arrived; §3.3.2 asserts byte-level key order over
 # it, and two register triggers (M3, M5) are decided by its length. A contributor
 # with `core.autocrlf=true` would rewrite LF to CRLF on checkout and commit the
-# result back, changing both -- and CI runs on `ubuntu-latest` only, so the gate
-# would consume the corrupted bytes rather than notice them.
+# result back, changing both. The Windows leg added by KBR-164 does not make this
+# unnecessary: it catches a body rewritten while its manifest digest stays put,
+# but a rewrite that updates BOTH passes on every platform. Prevention is what
+# closes that; the digest in `harness.corpus.load_entry` is the second line.
 #
 # `-text` disables all end-of-line conversion for these paths. The manifest is
 # covered too: it carries the body's SHA-256, and a rewritten manifest is a

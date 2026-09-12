@@ -84,9 +84,10 @@ must fail the load, not silently mean "declares nothing".
 `body_sha256` is checked on every load. The threat is not malice, it is
 `core.autocrlf=true`: a contributor on Windows rewrites LF to CRLF inside a `.body` on checkout
 and commits the result back, which changes both the bytes §3.3.2 asserts on and the length two
-register triggers are decided by. CI runs on `ubuntu-latest` only, so the gate would consume the
-corrupted bytes rather than notice them. `.gitattributes` marks these paths `-text` to prevent it;
-the digest catches it if that file is ever removed.
+register triggers are decided by. The Windows CI leg (KBR-164) is not a substitute: it catches a
+body rewritten while its manifest digest stays put, but a rewrite that updates **both** passes
+everywhere. `.gitattributes` marks these paths `-text` so the rewrite never happens; the digest
+catches it if that file is ever dropped or its patterns stop matching.
 
 ### Triggers have three states, not two
 

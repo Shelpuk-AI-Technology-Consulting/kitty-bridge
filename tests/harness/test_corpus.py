@@ -1125,9 +1125,11 @@ class TestTheBodyCannotBeModifiedUnnoticed:
     def test_a_modified_body_is_rejected(self, tmp_path: Path) -> None:
         """The realistic corruption is `core.autocrlf`, not malice.
 
-        CI runs on `ubuntu-latest` only, so a CRLF-rewritten body would be
-        consumed by the gate rather than noticed by it — and it lands on the
-        byte-level key-order assertion and on every size-derived trigger.
+        A CRLF rewrite lands on the byte-level key-order assertion and on every
+        size-derived trigger. The Windows CI leg does not make this test
+        redundant: it would notice a body rewritten while the manifest's digest
+        stayed put, but a rewrite that updated **both** passes on every platform,
+        and this is what refuses the mismatched pair in the first place.
         """
         path = manifest_for(tmp_path)
         (tmp_path / "sample.body").write_bytes(CLEAN_BODY.replace(b"\n", b"\r\n") + b" ")
