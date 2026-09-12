@@ -415,7 +415,7 @@ that makes *its* bytes observable. Bundled, the Ollama half would have had no ev
 | **T-I4** | Background bridge ownership | | — | Not stopped, not restarted, no second bridge | §6.3.2 | S |
 | **T-I5** | Agent startup smoke | blocked Q12 | T-W8, T-W9, T-B4 | Pinned Claude Code binary, one turn, clean exit | §6.4.2 | M |
 | **T-I6** | Agent settings precedence | blocked Q12 | T-I5 | Three runs, three winners; every sentinel demonstrated live | §6.4.2 | M |
-| **T-I7** | Streaming recovery — content | partial Q14 | T-B4, T-G7, T-W8 | Four injection points; no duplicated text, no reused tool-call id, no spliced arguments. Positive oracle waits on Q14 | §6.3.1 | L |
+| **T-I7** | Streaming recovery — content | | T-B4, T-G7, T-W8 | Four injection points; no duplicated text, no reused tool-call id, no spliced arguments — and, per the answer in §11, the three post-emission points each close the block and terminate with one error rather than recovering | §6.3.1 | L |
 | **T-I8** | Cross-attempt content and cadence | | T-D1, T-W8, T-B4 | Blip and empty-response retries byte-identical; M6, M8, M9 and failover re-normalisation each fire only on trigger | §4.3 C3 | M |
 | **T-I9** | Connection lifecycle baseline | | T-W8, T-C7 | Distinct connections per session vs the native capture; ratcheted — a **reported baseline**, not `exemptions.ratchet`, which is the unrelated gating mechanism of §8.3 | §4.3 C5 | M |
 | **T-I10** | `_backend_context` isolation | | T-W8 | Deterministic; belongs here, not in load | §6.3.1 | S |
@@ -546,10 +546,10 @@ exist, and the plan should not offer it.
 | **Q10** | T-F2's exact bound, TR-3's wording, register rows M3–M7 | T-F2 lands with the observed-behaviour property and is revised **together with** TR-3 and the register. Narrowed by KBR-5: M13 is withdrawn, so "keep current behaviour" is no longer an option for that row |
 | **Q11** | Nothing — **T-H4 answers it** | T-H3 lands nightly-only |
 | **Q12** | T-I5, T-I6, T-K10 | The settings-precedence claim has no per-PR proof. **It no longer blocks Subsystem or Acceptance** — T-K10 is a separate category |
-| **Q14** | T-I7's positive assertions | T-I7 lands asserting only the negatives |
 
 **Q1** blocks no task but decides whether T-I12 and TR-1c ever gate. **Q5–Q7** affect register
-rows and wording, not delivery.
+rows and wording, not delivery. **Q14 left this table on 2026-09-12** (KBR-163): T-I7 now carries a
+full oracle, and the answer's second half is KBR-155's remedy.
 
 ---
 

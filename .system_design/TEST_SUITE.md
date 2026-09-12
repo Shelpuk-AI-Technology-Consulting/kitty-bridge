@@ -1814,18 +1814,26 @@ sequence rather than timing:
 |---|---|
 | Before any downstream byte | Clean failover; the client sees one complete stream from the second backend |
 | After text has been emitted | No text the client already received is repeated; the transcript reads as one message |
-| Mid `input_json_delta`, tool arguments partly sent | Arguments are never a splice of two attempts. **The acceptance oracle here is undecided — Q14.** Until it is answered this row asserts only the negative (no silent merge, no reused id across attempts), which is weaker than the row needs to be |
+| Mid `input_json_delta`, tool arguments partly sent | Arguments are never a splice of two attempts, **and the turn ends there**: per Q14 the client receives no argument bytes from a second attempt, the partial `tool_use` block is closed, and one terminal error follows. The negatives still hold — no silent merge, no reused id across attempts — but they are no longer the whole oracle |
 | After content, before the terminal event | Exactly one terminal outcome reaches the client; `message_stop` is not duplicated or omitted |
 
 Each case asserts tool-call **identity** (ids stable within an attempt, never reused across
 attempts) and a single terminal outcome.
 
-**The post-emission semantics are a prerequisite, and they are not decided.** Once bytes have
-reached the client, what a correct recovery even *looks like* is a product decision, not a test
-detail: abandon and re-open, fail the turn, or something else. Writing "whichever the agreed
-semantics say" into a test specification leaves it without an acceptance oracle — the same defect
-this document objects to elsewhere. It is tracked as **Q14** rather than left as prose, so the
-gap is visible in the question list where decisions are collected, not buried in a table.
+**The post-emission semantics are settled — §11, Q14, answered 2026-09-12.** Once a byte has
+reached the client the bridge does not retry and does not fail over: it closes any half-open
+block, emits one terminal error, and lets the agent retry the turn. So every row above has a full
+acceptance oracle, and the four injection points divide cleanly — the first is pre-emission and
+recovers silently, the other three are post-emission and terminate.
+
+That is the same choice `bridge/server.py` already makes for a mid-stream transport drop, and the
+same one the real Anthropic API makes: its mid-stream failures arrive as an SSE `error` event on
+an already-`200` response and are raised to the caller, never resumed. **I2** is why that matters
+— a bridge that recovers where the provider gives up is observably not the provider.
+
+The empty-stream case does not reach these rows at all: per Q14(b) the native passthrough holds
+its leading events until the first content event, so a contentless reply is still pre-emission
+when it is detected. That is KBR-155's to implement; the rows here assume it.
 
 `/stats` remains authoritative for attribution after a mid-stream failover, per the README's own
 caveat that the headers name whoever produced the first byte.
@@ -3162,8 +3170,9 @@ memory does not grow is false on the paths that buffer a whole response.
 
 ## 11. Open questions for the product owner
 
-Answers belong in this document. They are not invented here. Q10-Q14 are prerequisites for the
-implementation work they name — each blocks a test whose acceptance oracle depends on it.
+Answers belong in this document. They are not invented here. Q10-Q13 are prerequisites for the
+implementation work they name — each blocks a test whose acceptance oracle depends on it. An
+answered question keeps its place in the list and carries its answer in the heading.
 
 **Q1 — How faithful should the agent's identity be (F1, G3, KBR-8)?** Three options, materially
 different: (a) forward a curated allowlist of the agent's real headers, uniformly, so every
@@ -3250,7 +3259,59 @@ input the direct-provider arm returns a 400, so there is no answer to compare ag
 Candidates: kitty against a larger-context model, or kitty with compaction relaxed. The choice
 determines what a regression in that arm actually means.
 
-**Q14 — What is a correct stream recovery after bytes have reached the client (§6.3.1)?** Failover
+**Q14 — ANSWERED by the product owner, 2026-09-12.** Two parts, and the second is what makes the
+first affordable.
+
+**(a) Post-emission, the bridge closes the turn and surfaces the error.** Once a byte has reached
+the client there is no retry and no failover. The bridge closes any half-open content block,
+emits one terminal error, and lets the agent retry the whole turn. The first candidate below —
+abandon the partial block and re-open under a new id — is **rejected**.
+
+**(b) An empty stream is kept out of that situation rather than recovered from inside it.** On
+the native passthrough the bridge holds back the stream's leading events until the first content
+event arrives, mirroring the buffer the translated path already keeps (*"Buffer finish events to
+detect empty responses before writing"*). A contentless reply is therefore still pre-emission when
+it is detected and keeps the ordinary retry ladder. This is the KBR-155 remedy; KBR-163 records
+it, KBR-155 implements it.
+
+**Why, and not the obvious alternative.** Three reasons, in decreasing order of how much they
+would cost to be wrong about.
+
+1. **It is what the provider being imitated does.** Verified against the official Anthropic Python
+   SDK, `src/anthropic/_streaming.py` (the `sse.event == "error"` branch, sync and async): a
+   mid-stream failure arrives as an SSE `error` event and is raised to the caller. No resumption,
+   no re-opened block, no second attempt — the HTTP status was already `200` and the stream simply
+   ends in an error. **I2** asks that nothing observable reveal the bridge is in the path; a bridge
+   that recovers where the real provider gives up is observably not the real provider.
+2. **It ratifies a policy already in force.** `bridge/server.py`'s streaming handler already makes
+   exactly this choice for a mid-stream transport drop — *"Bytes already reached the client, so a
+   restart on any backend would duplicate them. Close the message off instead"* — for exactly this
+   reason, and calls it the same choice FI-8.3 makes for a clean truncation. Answering the other
+   way would mean **changing working code to introduce a duplication hazard**.
+3. **The alternative is not soundly implementable.** Re-opening on a second backend lets the client
+   receive the same sentence twice, or tool-call arguments spliced from two attempts. §6.3.1 states
+   the consequence and it is not hypothetical: every SSE event stays syntactically valid while the
+   conversation is corrupt, and Claude Code will act on a duplicated tool call. De-duplicating
+   across attempts needs to know what the second backend was about to say.
+
+**One correction to the framing this question was filed under.** KBR-163 argued that buffering the
+passthrough "changes downstream latency and the observable timing that invariant **I2**
+constrains". It does not: every I2 channel in §4.2 — C1 headers, C2 body, C3 cross-attempt content
+and cadence, C4 transport fingerprint, C5 connection lifecycle — is **upstream-side**. What the
+downstream client is handed, and when, is invisible to the provider. The only coupling is TCP
+backpressure, and holding a bounded preamble makes the bridge read upstream *sooner*, not later,
+which is what any promptly-reading client does. The real cost of (b) is downstream
+time-to-first-token, which is a user-experience question and bounded by the preamble, not an I2
+breach. That is why (b) is affordable and full buffering — unbounded, and growing with stream
+length — still is not.
+
+**What this does not decide.** The wording of the terminal error the client receives follows Q9's
+precedent (downstream only, names the product) and is KBR-155's to settle. The *zero-chunk* case
+is untouched: if upstream yields no chunks at all the loop body never runs, `sr` stays `None`, and
+the ordinary pre-emission ladder already applies.
+
+*Original question:* what is a correct stream recovery after bytes have reached the client
+(§6.3.1)? Failover
 before the first downstream byte is unambiguous. After text has been emitted, or mid tool-call
 arguments, there is no obvious right answer: abandon the partial block and re-open under a new
 id, fail the turn and let the agent retry, or something else. Until this is decided the L3 row
