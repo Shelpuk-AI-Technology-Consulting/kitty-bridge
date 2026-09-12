@@ -1,4 +1,23 @@
-"""Contract guard — a provider adapter must declare the wire shape it actually emits.
+"""Contract guards over the adapter registry — wire shape, and transport lifetime.
+
+**Two contracts, not one.** The original and larger one is wire-shape honesty: a
+provider adapter must declare the wire shape it actually emits. The second, added
+by KBR-190, is that a custom-transport adapter must say what it does with the
+client it owns.
+
+They are chained rather than parallel. The wire-shape sweep runs over the whole
+``_registry``; the lifetime sweep runs over ``CUSTOM_TRANSPORT_ADAPTERS``, which
+:func:`test_custom_transport_adapters_are_the_known_exempt_set` pins **back** to
+the registry. So a fourth custom-transport adapter goes red there first, and red
+again here once it has been classified — one decision, in one file.
+
+**What the lifetime sweep does not prove.** Only that an override exists, never
+that it releases everything the adapter built. ``tests/test_provider_ollama_cloud.py``
+and ``tests/providers/test_openai_subscription.py`` prove the bodies; this pins
+that no adapter is silently exempt.
+
+---
+
 
 `.system_design/TEST_SUITE.md` §6.2.3, "Wire-shape honesty".  Catches finding
 **F5** (KBR-7): ``OpenCodeGoAdapter`` inherited ``upstream_wire_is_messages_api
@@ -347,6 +366,30 @@ def test_custom_transport_adapters_are_the_known_exempt_set():
     """
     observed = {name for name in _registry if get_provider(name).use_custom_transport}
     assert observed == CUSTOM_TRANSPORT_ADAPTERS
+
+
+def test_bedrock_is_the_only_custom_transport_adapter_inheriting_the_no_op_aclose():
+    """R10 (KBR-190) — a custom-transport adapter must decide about its client.
+
+    KBR-190: ``BridgeServer.stop_async`` releases the HTTP client a
+    custom-transport adapter builds, through
+    :meth:`~kitty.providers.base.ProviderAdapter.aclose`. Two of the three
+    override it. ``bedrock`` does not, and that is a decision rather than an
+    oversight: ``_get_boto3_client`` builds a client per request and caches
+    nothing on the instance, which ``tests/test_provider_bedrock.py`` pins
+    directly.
+
+    Derived from ``CUSTOM_TRANSPORT_ADAPTERS`` rather than a fourth literal of
+    the same set, so a new adapter is classified once — by the row above — and
+    arrives here already inside the sweep.
+    """
+    inherited = {
+        name for name in CUSTOM_TRANSPORT_ADAPTERS if type(get_provider(name)).aclose is ProviderAdapter.aclose
+    }
+    assert inherited == {"bedrock"}, (
+        "a custom-transport adapter owns a client the bridge must release at teardown: "
+        "override `aclose`, or prove it caches nothing and add it here"
+    )
 
 
 def test_messages_routing_table_is_unchanged():

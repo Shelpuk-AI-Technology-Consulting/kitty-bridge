@@ -116,6 +116,18 @@ class AnthropicAdapter(ProviderAdapter):
         if "top_p" in cc_request and cc_request["top_p"] is not None:
             anthropic["top_p"] = cc_request["top_p"]
 
+        # KBR-178: the CC `stop` is this wire's `stop_sequences` under another
+        # name.  Null and empty are both omitted -- `stop` is nullable in Chat
+        # Completions and the bridge serves /v1/chat/completions directly, and
+        # Anthropic rejects a null stop list.
+        if cc_request.get("stop"):
+            anthropic["stop_sequences"] = cc_request["stop"]
+
+        # KBR-178: restored from internal metadata, because Chat Completions has
+        # no `top_k` of its own in which to have carried it this far.
+        if cc_request.get("_top_k") is not None:
+            anthropic["top_k"] = cc_request["_top_k"]
+
         # Extract system messages → top-level system field
         system_parts: list[str] = []
         for msg in cc_request.get("messages", []):

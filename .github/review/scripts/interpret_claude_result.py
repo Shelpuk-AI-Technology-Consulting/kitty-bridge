@@ -213,10 +213,16 @@ CREDENTIAL_PATTERNS = (
     r"\bauthentication_failed\b",
     # upstream: Anthropic's documented 401 and 403 types, per
     # `platform.claude.com/docs/en/api/errors`. They earn their place beside the status
-    # tier below rather than duplicating it: a body can name its cause and carry NO
-    # number, because a numeric `api_error_status` never reaches the haystack at all
-    # (KBR-182). They are also consulted FIRST, so an operator reads
+    # tier below rather than duplicating it: a body can name its cause and carry no
+    # number anywhere. They are also consulted FIRST, so an operator reads
     # "authentication_error" rather than "401" -- both true, one more useful.
+    #
+    # 🔴 KBR-182 narrowed the first half of that reasoning and made the second half
+    # load-bearing. It used to read "a numeric `api_error_status` never reaches the
+    # haystack at all", which was a statement about the DEFECT, not about the design;
+    # the status now reaches the provider-scoped text, so this ordering decides what an
+    # operator actually reads rather than winning by default.
+    # `test_a_named_type_still_outranks_the_status_that_arrives_beside_it` is the row.
     r"\bauthentication_error\b",
     r"\bpermission_error\b",
     r"model_not_found",
@@ -592,13 +598,22 @@ def _extract_structured_output(raw_output: str, execution_text: str) -> dict | N
 #: ⚠️ ``message`` and ``content`` are deliberately absent: that is where tool results and model
 #: prose live, and both quote the code under review.
 #:
-#: 🔴 **One field in this tuple is never actually read, and knowing which one matters here.**
+#: 🔴 **KBR-182 fixed the field that was listed here and never read.**
 #: ``api_error_status`` arrives as a JSON NUMBER, and :func:`_strings_in` collects string
-#: leaves only, so it is discarded before any pattern sees it. Every numeric pattern in this
-#: module therefore matches text -- the CLI's ``API Error: NNN`` line or a message body --
-#: and never the field that exists to report the status. Filed as KBR-182, deliberately not
-#: fixed here: making numbers visible would wake `\b400\b` in :data:`FATAL_PATTERNS`, which
-#: is consulted first, and that needs its own before/after measurement across the tier order.
+#: leaves only, so it used to be discarded before any pattern saw it -- one of the six was
+#: dead weight while looking live. :func:`_numbers_in` now collects it.
+#:
+#: ⚠️ **The rule that replaced the defect, and the one to preserve: a numeric outcome
+#: field is admitted to the PROVIDER-SCOPED text only** -- what
+#: :func:`_provider_outcome_text` returns -- **and must never reach the haystack
+#: :func:`_outcome_text` returns**, which is read first by :data:`FATAL_PATTERNS`.
+#: :func:`_numbers_in` carries the argument and the measurement; it is not repeated
+#: here, because a third copy is the one that goes stale.
+#:
+#: ⚠️ The rule governs **parseable** records. An unparseable one is searched whole by
+#: :func:`classify` and always has been, ``"api_error_status": 400`` in its text
+#: included -- that is the fallback family :func:`_provider_outcome_text` documents,
+#: unchanged here.
 OUTCOME_FIELDS = (
     "error",
     "result",
@@ -610,6 +625,13 @@ OUTCOME_FIELDS = (
 
 #: Per-field cap, so one oversized field cannot reintroduce the problem above.
 OUTCOME_FIELD_CHARS = 4000
+
+#: The same cap for numbers, which :data:`OUTCOME_FIELD_CHARS` cannot express because
+#: the conversion is what overflows. Nine digits is far beyond any HTTP status and beyond
+#: this module's largest real code (``1310``); the point is only that a number arriving
+#: from a provider cannot become an unbounded amount of haystack. :func:`_numbers_in`
+#: applies it as a half-open range from zero, because a negative number is not a status.
+OUTCOME_NUMBER_BOUND = 10**9
 
 #: 🔴 KBR-172. The one outcome field the MODEL writes. On a structured-output failure
 #: `result` carries the review it was trying to return, so every status code in it is the
@@ -669,7 +691,7 @@ def _parse_events(execution_text: str) -> list | None:
     return events or None
 
 
-def _outcome_parts(events: list) -> tuple[list[str], list[str]]:
+def _outcome_parts(events: list) -> tuple[list[str], list[str], list[str]]:
     """Split a record's outcome fields by who wrote them.
 
     🔴 **Derived once and consumed twice, because two copies of this loop would have to
@@ -683,19 +705,31 @@ def _outcome_parts(events: list) -> tuple[list[str], list[str]]:
         events: Decoded execution-record events, as :func:`_parse_events` returns them.
 
     Returns:
-        A ``(provider_parts, model_parts)`` pair of string lists. ``model_parts`` holds
-        only :data:`MODEL_AUTHORED_FIELD`; everything else the provider wrote.
+        A ``(provider_parts, model_parts, status_parts)`` triple of string lists.
+        ``model_parts`` holds only :data:`MODEL_AUTHORED_FIELD`; ``status_parts`` holds
+        the provider-authored fields that arrived as numbers, coerced by
+        :func:`_numbers_in`; everything else the provider wrote is in
+        ``provider_parts``. The numbers are kept apart so that only the
+        provider-scoped haystack can join them -- KBR-182.
     """
 
     provider_parts: list[str] = []
     model_parts: list[str] = []
+    status_parts: list[str] = []
     for event in events:
         if not isinstance(event, dict):
             continue
         for field in OUTCOME_FIELDS:
-            target = model_parts if field == MODEL_AUTHORED_FIELD else provider_parts
-            target.extend(_strings_in(event.get(field)))
-    return provider_parts, model_parts
+            value = event.get(field)
+            if field == MODEL_AUTHORED_FIELD:
+                model_parts.extend(_strings_in(value))
+                continue
+            # Numbers are collected into their OWN bucket, never into `provider_parts`.
+            # Only `_provider_outcome_text` joins it, which is what keeps a bare status
+            # out of the tier-1 haystack -- see `_numbers_in` for why that matters.
+            provider_parts.extend(_strings_in(value))
+            status_parts.extend(_numbers_in(value))
+    return provider_parts, model_parts, status_parts
 
 
 def _outcome_text(execution_text: str) -> str | None:
@@ -722,7 +756,7 @@ def _outcome_text(execution_text: str) -> str | None:
     if events is None:
         return None
 
-    provider_parts, model_parts = _outcome_parts(events)
+    provider_parts, model_parts, _ = _outcome_parts(events)
 
     # The marker is read only from fields the model does not author. Reading it from
     # `result` too would let a review that merely MENTIONS the subtype scope out its own
@@ -796,8 +830,11 @@ def _provider_outcome_text(execution_text: str) -> str:
             return ""
         return execution_text
 
-    provider_parts, _ = _outcome_parts(events)
-    return "\n".join(provider_parts)
+    # 🔴 KBR-182. The numeric status joins HERE and nowhere else. `_outcome_text` --
+    # the tier-1 haystack -- must never see it; `_numbers_in` records what happens if
+    # it does.
+    provider_parts, _, status_parts = _outcome_parts(events)
+    return "\n".join(provider_parts + status_parts)
 
 
 def _strings_in(value: object, depth: int = 0) -> list[str]:
@@ -826,6 +863,81 @@ def _strings_in(value: object, depth: int = 0) -> list[str]:
     if isinstance(value, list):
         return [s for item in value for s in _strings_in(item, depth + 1)]
     return []
+
+
+def _numbers_in(value: object) -> list[str]:
+    r"""Collect an outcome field that arrived as a number, as text.
+
+    🔴 **KBR-182. `api_error_status` is listed in :data:`OUTCOME_FIELDS` as one of the
+    six fields describing a run's outcome, and it is the one whose whole purpose is to
+    carry the provider's HTTP status.** HTTP statuses are JSON numbers, and
+    :func:`_strings_in` collects string leaves only, so the integer form -- the one
+    production writes -- was discarded before any pattern saw it. A rejected key whose
+    message named no credential vocabulary reached
+    :data:`FATAL_UNLESS_PROVIDER_NAMED_PATTERNS` and was reported as a broken workflow,
+    with the re-run refused.
+
+    ⚠️ **What this function returns is admitted to the PROVIDER-SCOPED text only -- of
+    a record that PARSED -- and that is the load-bearing decision rather than an
+    implementation detail.** (An unparseable record is searched whole by
+    :func:`classify`, unchanged and pre-existing; see :data:`OUTCOME_FIELDS`.)
+    :data:`FATAL_PATTERNS` is tier 1 and carries ``\b400\b``, so a bare status in the
+    full haystack would let any 400 pre-empt every body-derived verdict below it.
+    Measured, and not hypothetical: Anthropic reports a spent credit balance as HTTP
+    **400** ``invalid_request_error`` -- *"Your credit balance is too low to access the
+    Anthropic API"* -- so the full-haystack form turns that record from
+    ``exhausted``/quota into ``fatal`` with ``retryable`` false. That is KBR-145's filed
+    defect arriving through a new door. KBR-166 already established that the separable
+    question is who WROTE a field; a numeric status is the most unambiguously
+    provider-authored value in the record, so this applies that mechanism once more
+    rather than widening what KBR-166 narrowed.
+
+    The bounds are measured too. ``bool`` is excluded because it is an ``int`` subclass
+    in Python and ``True`` would enter the haystack as ``"True"``. ``float`` is excluded
+    because no status is fractional and both ``402.0`` and ``0.402`` match ``\b402\b``
+    -- the defect this module already documents beside :data:`QUOTA_PATTERNS`. Nesting
+    is excluded because a number inside a provider's error object is a parameter, not a
+    status: a ``retry_after`` of 401 would otherwise be read as a rejected credential.
+    Negative values are excluded for the same reason a ``float`` is -- ``-401`` matches
+    ``\b40[13]\b``, because the word boundary falls between the sign and the digits.
+    The Agent SDK reference puts ``api_error_status`` at the top level of the ``result``
+    message, so the bound is the production carrier rather than a guess.
+
+    Args:
+        value: An outcome field's value, as the event carried it.
+
+    Returns:
+        A single-element list holding the decimal form of ``value`` when it is a
+        top-level integer, and an empty list otherwise.
+    """
+
+    # `bool` FIRST: it is an `int` subclass, so the check below would otherwise
+    # collect `True` as the string "True". Deleting this branch as a tidy-up is a
+    # MUTATION, not a simplification --
+    # `test_a_bool_is_not_collected_even_though_it_is_an_int` is the row that dies.
+    if isinstance(value, bool):
+        return []
+    if not isinstance(value, int):
+        return []
+    # 🔴 Negative is excluded because a status is not negative, and the exclusion is a
+    # DECISION rather than an inherited accident: `-401` stringifies to "-401", and
+    # `\b40[13]\b` matches inside it -- `-` is a non-word character, so the word
+    # boundary falls right before the digits. Left unbounded, a negative number would
+    # route through the credential tier. Measured; a PR review asserted the opposite.
+    #
+    # 🔴 The upper bound is the numeric twin of `OUTCOME_FIELD_CHARS`, which cannot
+    # express this because the CONVERSION is what grows: without it a 4,000-digit
+    # status becomes 4,000 characters of haystack.
+    #
+    # ⚠️ It does NOT stop the related crash, and claiming otherwise would be worse than
+    # not bounding at all. The 4,300-digit ceiling belongs to `int()`, which `json`'s
+    # integer parser calls, so `json.loads` raises inside `_parse_events` -- which
+    # catches only `JSONDecodeError` -- before this function is ever reached. An absurd
+    # status still raises there, on `main` exactly as here. Filed as KBR-209; this
+    # bound is about size, and about the band below that ceiling where it does the work.
+    if not 0 <= value < OUTCOME_NUMBER_BOUND:
+        return []
+    return [str(value)]
 
 
 def _first_match(patterns: tuple[str, ...], haystack: str) -> str | None:

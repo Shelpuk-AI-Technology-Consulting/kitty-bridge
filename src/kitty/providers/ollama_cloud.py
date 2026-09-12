@@ -113,7 +113,7 @@ class OllamaCloudAdapter(ProviderAdapter):
         Handles:
         - System messages (forwarded as-is; Ollama supports system role)
         - Tool result messages (CC ``tool_call_id``/``name`` → Ollama ``tool_name``)
-        - Options (CC ``temperature``/``top_p`` → Ollama ``options``)
+        - Options (CC ``temperature``/``top_p``/``stop`` → Ollama ``options``)
         - Strips internal metadata keys
         """
         result: dict = {
@@ -127,11 +127,21 @@ class OllamaCloudAdapter(ProviderAdapter):
         if cc_request.get("tools"):
             result["tools"] = cc_request["tools"]
 
-        # Map CC sampling params → Ollama options
+        # Map CC sampling params → Ollama options.  `top_k` is a DEAD branch for
+        # all bridge traffic since KBR-178: the Messages route carries the
+        # agent's value on `_top_k` and only Anthropic-family adapters restore
+        # it, so a bare `top_k` never arrives here.  Ollama would accept one --
+        # gap G28 records the trade-off.  Do not "fix" this without reading it.
         options: dict = {}
         for key in ("temperature", "top_p", "top_k"):
             if key in cc_request and cc_request[key] is not None:
                 options[key] = cc_request[key]
+        # KBR-178: Ollama carries stop sequences inside `options` too.  Tested
+        # for truth rather than presence so a null or empty `stop` does not
+        # attach an `options` container that would otherwise not exist.
+        if cc_request.get("stop"):
+            options["stop"] = cc_request["stop"]
+
         if options:
             result["options"] = options
 
@@ -314,6 +324,26 @@ class OllamaCloudAdapter(ProviderAdapter):
             timeout = aiohttp.ClientTimeout(total=None, sock_connect=30, sock_read=120)
             self._session = aiohttp.ClientSession(timeout=timeout, **aiohttp_session_kwargs())
         return self._session
+
+    async def aclose(self) -> None:
+        """Close the session this adapter owns, so the bridge does not leak it.
+
+        ``BridgeServer.stop_async`` closes the sessions **it** built and knows
+        nothing about this one, so before KBR-190 a bridge started and stopped
+        inside a living process leaked a connection pool per cycle.
+
+        The attribute is cleared as well as closed — and cleared first, so that
+        a session whose ``close()`` raises still leaves the adapter usable.
+        :meth:`_get_session` then builds a fresh session if this adapter serves
+        another bridge.
+        """
+        # Detached BEFORE the await, not after: `stop_async` logs and contains a
+        # failing close, so an attribute still pointing at a half-closed session
+        # would be handed back for the rest of the process's life, with one
+        # WARNING as the only trace.
+        session, self._session = self._session, None
+        if session is not None and not session.closed:
+            await session.close()
 
     def _build_url(self, provider_config: dict) -> str:
         """Build the full upstream URL.

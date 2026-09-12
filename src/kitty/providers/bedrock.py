@@ -36,6 +36,13 @@ class BedrockAdapter(ProviderAdapter):
     Supports two auth modes via provider_config:
     - AWS credentials stored in Kitty (access_key:secret_key)
     - AWS SSO / named profile (boto3 credential chain)
+
+    **No** :meth:`~kitty.providers.base.ProviderAdapter.aclose` override, unlike
+    the other two custom-transport adapters: :meth:`_get_boto3_client` builds a
+    client per request and caches nothing on the instance, so a stopping bridge
+    has nothing here to release (KBR-190).  ``tests/test_provider_bedrock.py``
+    pins that property, and the registry sweep in
+    ``tests/test_wire_shape_honesty.py`` names this adapter as the one exemption.
     """
 
     @property
@@ -156,6 +163,14 @@ class BedrockAdapter(ProviderAdapter):
             bedrock["inferenceConfig"]["temperature"] = cc_request["temperature"]
         if "top_p" in cc_request and cc_request["top_p"] is not None:
             bedrock["inferenceConfig"]["topP"] = cc_request["top_p"]
+
+        # KBR-178: Converse nests stop sequences under inferenceConfig and
+        # spells them `stopSequences`.  This adapter rebuilds the body from an
+        # allowlist, so it drops a top-level `stop` unless it is mapped here.
+        # No `top_k` counterpart: InferenceConfiguration has no topK member --
+        # Converse takes it only under additionalModelRequestFields.
+        if cc_request.get("stop"):
+            bedrock["inferenceConfig"]["stopSequences"] = cc_request["stop"]
 
         # Extract system messages
         system_parts: list[str] = []

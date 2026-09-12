@@ -1,5 +1,7 @@
 """Tests for providers/base.py — ProviderAdapter interface."""
 
+import inspect
+
 import pytest
 
 from kitty.providers.base import ProviderAdapter
@@ -175,6 +177,36 @@ class TestTranslateToUpstreamDefault:
         assert "_native_messages_request" not in result
         assert result["model"] == "gpt-4o"
 
+    def test_keeps_stop_so_the_passthrough_carries_it(self):
+        """KBR-178: the default passthrough must KEEP `stop`, not strip it.
+
+        Sixteen registry adapters deliver the agent's stop sequences purely by
+        letting this method copy the key through -- `stop` is Chat Completions'
+        own field name, so no per-adapter mapping was written for them.  That
+        makes this the positive control for the whole "fixed for free" half of
+        KBR-178: if `stop` ever joined ``_INTERNAL_KEYS`` or a provider
+        blocklist, those sixteen would silently start dropping it again with
+        every other test still green.
+        """
+        adapter = _stub_adapter()
+        cc = {"model": "gpt-4o", "messages": [], "stop": ["A", "B"]}
+        result = adapter.translate_to_upstream(cc)
+        assert result["stop"] == ["A", "B"]
+
+    def test_strips_internal_top_k(self):
+        """KBR-178: `_top_k` is internal metadata and must never reach a provider.
+
+        Chat Completions declares no ``top_k``, so the key exists only to carry
+        the value to an Anthropic-family adapter.  Five registry entries restore
+        it; registering the key here is what keeps it off the wire of the other
+        eighteen.
+        """
+        adapter = _stub_adapter()
+        cc = {"model": "gpt-4o", "messages": [], "_top_k": 40}
+        result = adapter.translate_to_upstream(cc)
+        assert "_top_k" not in result
+        assert result["model"] == "gpt-4o"
+
     def test_strips_base_url_defense_in_depth(self):
         """F15: base_url must never leak into the upstream body.
 
@@ -240,3 +272,18 @@ class TestStreamRequestDefault:
         adapter = _stub_adapter()
         with pytest.raises(NotImplementedError):
             await adapter.stream_request({"model": "test", "messages": []}, lambda _: None)
+
+
+class TestACloseDefault:
+    """Default aclose is an awaitable no-op (KBR-190)."""
+
+    def test_it_is_a_coroutine_function(self):
+        """`stop_async` awaits this on every adapter, overridden or not."""
+        assert inspect.iscoroutinefunction(ProviderAdapter.aclose)
+
+    @pytest.mark.asyncio
+    async def test_default_returns_none_and_changes_nothing(self):
+        adapter = _stub_adapter()
+        before = dict(adapter.__dict__)
+        assert await adapter.aclose() is None
+        assert adapter.__dict__ == before

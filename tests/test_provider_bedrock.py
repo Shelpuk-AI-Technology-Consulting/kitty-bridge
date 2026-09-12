@@ -282,6 +282,57 @@ class TestBedrockTranslateToUpstream:
 # ── Bedrock → CC response translation ────────────────────────────────────
 
 
+class TestBedrockStopSequences:
+    """KBR-178: the CC `stop` reaches Converse as `inferenceConfig.stopSequences`."""
+
+    def setup_method(self):
+        self.adapter = BedrockAdapter()
+
+    def _cc(self, **extra):
+        """Build a minimal CC request, plus whatever the case under test adds."""
+        cc = {
+            "model": "anthropic.claude-sonnet-4-20250514",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream": False,
+        }
+        cc.update(extra)
+        return cc
+
+    def test_stop_mapped_to_inference_config_stop_sequences(self):
+        """Converse spells it `stopSequences`, inside `inferenceConfig`."""
+        result = self.adapter.translate_to_upstream(self._cc(stop=["A"]))
+        assert result["inferenceConfig"]["stopSequences"] == ["A"]
+        assert "stop" not in result
+
+    def test_no_stop_means_no_stop_sequences(self):
+        """No `stop` invents no `stopSequences`."""
+        result = self.adapter.translate_to_upstream(self._cc())
+        assert "stopSequences" not in result["inferenceConfig"]
+
+    def test_null_stop_is_omitted(self):
+        """`stop: null` is a legal CC value and must not be forwarded — see D6."""
+        result = self.adapter.translate_to_upstream(self._cc(stop=None))
+        assert "stopSequences" not in result["inferenceConfig"]
+
+    def test_empty_stop_is_omitted(self):
+        """An empty stop list is semantically void — see D6."""
+        result = self.adapter.translate_to_upstream(self._cc(stop=[]))
+        assert "stopSequences" not in result["inferenceConfig"]
+
+    def test_top_k_never_reaches_the_converse_body(self):
+        """Converse's InferenceConfiguration has no `topK` member — see D4.
+
+        The botocore service model declares exactly ``maxTokens``,
+        ``temperature``, ``topP`` and ``stopSequences``.  Converse accepts
+        ``top_k`` only under ``additionalModelRequestFields``, which this
+        change does not open.
+        """
+        result = self.adapter.translate_to_upstream(self._cc(top_k=40, _top_k=40))
+        assert "topK" not in result["inferenceConfig"]
+        assert "top_k" not in result
+        assert "_top_k" not in result
+
+
 class TestBedrockTranslateFromUpstream:
     def setup_method(self):
         self.adapter = BedrockAdapter()
@@ -797,3 +848,37 @@ class TestBedrockStreamErrorEvents:
         event = {"unknownFutureEvent": {"data": "something"}}
         chunks = adapter._translate_stream_event(event, "id", {})
         assert chunks == []
+
+
+class TestItCachesNoTransport:
+    """KBR-190 — why bedrock needs no ``aclose`` override.
+
+    The other two custom-transport adapters cache a client on the instance and
+    leak it when the bridge stops.  This one does not, and that is the reason it
+    is exempt from the sweep rather than an oversight.  If caching is ever added,
+    this fails and sends the author to ``OpenAISubscriptionAdapter.aclose``.
+    """
+
+    def test_get_boto3_client_returns_a_new_client_each_call(self):
+        adapter = BedrockAdapter()
+        args = ("AKIAEXAMPLE:secret-key", {"region": "us-east-1"})
+
+        first = adapter._get_boto3_client(*args)
+        second = adapter._get_boto3_client(*args)
+
+        assert first is not second
+
+    def test_no_client_is_stored_on_the_instance(self):
+        """The identity check above cannot see a client kept but not reused.
+
+        Both calls pass identical arguments, so an argument-keyed cache fails
+        that one too.  This catches the other shape — a client assigned to the
+        adapter and returned fresh each time — which is still state a stopping
+        bridge would have to release.
+        """
+        adapter = BedrockAdapter()
+        before = set(vars(adapter))
+
+        adapter._get_boto3_client("AKIAEXAMPLE:secret-key", {"region": "us-east-1"})
+
+        assert set(vars(adapter)) == before

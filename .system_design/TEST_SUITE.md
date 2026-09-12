@@ -378,11 +378,13 @@ anywhere that reads a *value* out of `src/kitty` rather than a name.
 the document say the same thing, that every site named still exists, and that one row's paths
 match one allowlist and one published cell. A mutation the product performs and
 *neither* artifact records is invisible to all of them — only the wire-level guard can catch that,
-and it needs a recorder and an oracle. Four such omissions are already known and filed: G22
-(headers), G23 (`openai_subscription`'s `reasoning` injection), G26 (P13's CC-origin twin) and
-G27 (an allowlisted field dropped for being falsy). The last three were each found by walking the
-subscription request path by hand rather than by any guard — which is the evidence for the
-sentence above, not a decoration on it.
+and it needs a recorder and an oracle. Seven such omissions are already known and filed: G22
+(headers), G23 (`openai_subscription`'s `reasoning` injection), G26 (P13's CC-origin twin),
+G27 (an allowlisted field dropped for being falsy), G28 (`top_k` dropped off the
+Anthropic family), G29 (an empty `stop_sequences` omitted) and G30 (a string-form
+`stop` rewritten into a list). **None of the seven was found by a guard** — the earlier
+ones by walking the subscription request path by hand, G28-G30 by the design and code reviews of
+KBR-178. That is the evidence for the sentence above, not a decoration on it.
 
 **A header row's `paths` are checked by none of the four well-formedness guards**, and the two
 that do check paths check P23's alone. Under §3.2.2's header rule they are
@@ -1478,17 +1480,59 @@ whether to change it is Q3.
 
 ### 5.5 Per-transport containment
 
-`_session_for` and `should_bypass` govern **only** `BridgeServer`'s own aiohttp sessions. Four
+`_session_for` and `should_bypass` govern **only** `BridgeServer`'s own aiohttp sessions. Five
 other outbound paths exist, and each applies the proxy **unconditionally, without consulting
 `should_bypass`**:
 
-| Path | Client | How the proxy is applied |
-|---|---|---|
-| `openai_subscription` — serving | `curl_cffi.AsyncSession` | `proxies=` + `CURLOPT_NOPROXY` |
-| `openai_subscription` — OAuth **refresh** leg | its own `curl_cffi.AsyncSession` | `proxies=` + `CURLOPT_NOPROXY` |
-| `openai_subscription` — OAuth **login** leg (`kitty.auth.openai_oauth`) | its own `aiohttp.ClientSession` | `aiohttp_session_kwargs()` |
-| `bedrock` | boto3 / botocore | `BotoConfig(proxies=egress.proxies_dict())` |
-| `ollama_cloud` | its own `aiohttp.ClientSession` | `aiohttp_session_kwargs()` |
+| Path | Client | How the proxy is applied | Who closes it |
+|---|---|---|---|
+| `openai_subscription` — serving | `curl_cffi.AsyncSession` | `proxies=` + `CURLOPT_NOPROXY` | `aclose()`, from `stop_async` |
+| `openai_subscription` — OAuth **refresh** leg | its own `curl_cffi.AsyncSession` | `proxies=` + `CURLOPT_NOPROXY` | `aclose()`, from `stop_async` |
+| `openai_subscription` — OAuth **login** leg (`kitty.auth.openai_oauth`) | its own `aiohttp.ClientSession` | `aiohttp_session_kwargs()` | `run_oauth_flow`, in a `finally`, when it built the session itself |
+| `bedrock` | boto3 / botocore | `BotoConfig(proxies=egress.proxies_dict())` | nobody — nothing is cached; `_get_boto3_client` builds one per request |
+| `ollama_cloud` | its own `aiohttp.ClientSession` | `aiohttp_session_kwargs()` | `aclose()`, from `stop_async` |
+
+**The fourth column is new, and it was empty until KBR-190.** `BridgeServer.stop_async`
+closed the two sessions the bridge itself builds and nothing else, so a bridge started and
+stopped **inside a living process** leaked one connection pool per cycle per custom-transport
+adapter. Ordinary use never noticed — the bridge's lifetime is the process's and the OS
+reclaims the sockets — but the suite starts and stops bridges in-process thousands of times,
+and that is where it surfaced, as an `Unclosed client session` per test.
+
+**The bridge owns the adapters it is given.** `ProviderAdapter.aclose()` is the hook: a no-op
+by default, overridden by the adapters that own a client. The ownership is a contract rather
+than an observation about today's call sites — `get_provider()` returns a **fresh instance per
+call** and all five construction sites build their adapters immediately before the
+`BridgeServer` that receives them, so a caller must not hand one adapter to two bridges whose
+lifetimes overlap. `tests/test_wire_shape_honesty.py` sweeps the registry so a fourth
+custom-transport adapter has to decide about its client as well as its wire shape.
+
+**Three points where this could have gone wrong, and what settles each.**
+
+1. **Closing a `curl_cffi` session under a live SSE stream is the one shape that has crashed.**
+   `_curl_session`'s docstring recorded that as the reason it was never closed, citing
+   lexiforest/curl_cffi **#675**. That issue was filed against **0.13.0** on the *synchronous*
+   `Session` and was **closed 2026-07-18 as no longer reproducible**. That was read on
+   **0.16.3**, the version resolved here — `pyproject.toml` declares `curl_cffi>=0.7` with no
+   upper bound, the weakest pin in the repo, so this is measured rather than guaranteed. More
+   to the point, `stop_async` closes adapters only **after**
+   `_runner.cleanup()` has drained the in-flight handlers, so the precondition is not met on
+   the ordinary path. Upstream **#845** still tracks **#751**, "active stream/session close
+   lifecycle", so the risk is reduced, not zero — which is why a **failed drain deliberately
+   skips the adapter close**. Leaking a pool beats crashing the process.
+2. **A failure must not cascade, in either direction.** One adapter's `aclose()` failing is
+   logged and contained, so the others still close — shutdown has no caller positioned to act
+   on a provider's teardown error. Conversely the adapters close from a `finally`, so a failure
+   in the bridge's *own* teardown cannot skip them, which would leak exactly what this fixes.
+   And each adapter detaches its cached session **before** awaiting `close()`: the `curl_cffi`
+   builders test for absence only, so a session left in place after a failed close would be
+   handed back for the rest of the process's life — silent, under the containment above, and
+   permanent.
+3. **Teardown is not a request.** `_close_provider_transports` reads the backing fields
+   `_provider` and `_backends`, never the `_active_*` properties, which resolve through a
+   request-scoped `ContextVar`. Reading that at shutdown would close whichever backend the last
+   request happened to select. It deduplicates by identity, because balancing mode is
+   constructed with `provider=backends[0][0]`.
 
 **Why the refresh leg has its own session rather than sharing the serving one (KBR-161).** Not for
 identity — both come from one builder, `_new_curl_session`, so they cannot drift apart on
@@ -1497,7 +1541,7 @@ the provider sees: an `AsyncSession` owns a bounded pool of curl handles (`max_c
 streaming completion holds its handle for the life of the stream, so a refresh sharing that pool
 would queue behind in-flight completions **while holding `OAuthSession._refresh_lock`**, blocking
 every request for that account; and cookies are host-scoped, so one jar would hold
-`auth.openai.com`'s cookies for the process lifetime and replay them across every account the bridge
+`auth.openai.com`'s cookies for the bridge's lifetime and replay them across every account the bridge
 serves. The two legs address different hosts, so sharing buys nothing observable and costs both.
 
 Three consequences the rest of §5 must not paper over:
@@ -3889,6 +3933,64 @@ Running `mypy src/kitty` on the Windows leg is therefore not redundant with the 
 a **new detector over code no check has ever read**. That is also why the platform legs run the
 whole step list rather than pytest alone.
 
+### 8.5 The review classifier's tier order
+
+The gate is not the only thing that decides whether a pull request is reviewed.
+`.github/review/scripts/interpret_claude_result.py` reads the wreckage of a failed review
+attempt and answers a question no test in `tests/` asks: **who fixes this** — top up a
+balance, or edit a workflow. It also decides whether the one automatic retry is spent. Its
+entire rationale has lived in module comments, which is why three tickets (KBR-145, KBR-172,
+KBR-166) each re-derived the same reasoning from scratch. The invariants are recorded here so
+the next change to it has something to contradict.
+
+**I-C1 — Tier order is a cost ordering, not a specificity ordering.** `FATAL_PATTERNS` is
+consulted first, then quota, then credentials, then the generic-code tier, then transients.
+"Generic loses to everything more specific" reads well and is wrong: `EXHAUSTED_PATTERNS`
+carries the bare words `timeout` and `capacity`, which a model can write in its own prose, so
+yielding to them would let a billed rejection be retried at full price. The order is justified
+by what each misclassification costs, and each entry's position is measured rather than
+argued.
+
+**I-C2 — A pattern weak enough to appear in ordinary prose is scoped by AUTHORSHIP, never by
+a tighter regex.** KBR-172 and KBR-166 each measured anchoring — on vendor vocabulary, on the
+CLI's line shape, on proximity to a spending verb — and every version lost a real provider
+body while still leaking model prose. The separable question is not what the text says but who
+wrote it, and the execution record already answers it: `_provider_outcome_text` is the
+narrower haystack, and the weak patterns read only that.
+
+**I-C3 — A numeric outcome field is admitted to the provider-scoped haystack only.** KBR-182.
+`api_error_status` is a JSON number and was discarded before any pattern saw it, so the field
+whose purpose is to report the provider's status was dead weight while looking live. It is now
+read — but it must never reach the haystack `_outcome_text` returns, because that one is read
+first by `FATAL_PATTERNS`, which carries `\b400\b`. Anthropic reports a spent balance as HTTP
+400, so a bare status in the tier-1 haystack turns an empty account into a "broken workflow"
+verdict with the re-run refused. The bound is at the field's own value: a number nested inside
+a provider's error object is a parameter, not a status.
+
+⚠️ Two qualifications, because the rule is easy to state more absolutely than it holds. It
+governs **parseable** records: when `_parse_events` fails, `classify` searches the raw text
+whole and always has, status text included. And `_provider_outcome_text` has a **second
+consumer** — `_write_diagnostic`'s quota branch — so a numeric pattern added to
+`QUOTA_WORD_PATTERNS` would fire the top-up paragraph off a bare status, including under a
+`fatal` verdict. That is the door KBR-207 has to walk through carefully.
+
+**I-C4 — The verdict, the `retryable` flag and the diagnostic's advice must agree.** They are
+computed by three different functions from three different inputs — pattern order, cost, and
+the evidence text — so they can disagree without any one of them being obviously wrong.
+KBR-145 was filed because they did: an operator was told to top up a balance and, one
+paragraph up, that the workflow was broken. Any change to the tier order re-checks all three.
+
+**How it is proven.** `.github/review/tests/test_review_scripts.py`, run directly by `ci.yml`
+rather than through `pytest`, so it is outside §8.1's marker matrix and carries no layer
+marker. That is deliberate: the suite must stay runnable with a bare interpreter and no
+installed dependencies, because a broken review workflow has to be diagnosable before an
+environment is provisioned. Its content is L1 in kind. Behaviour-changing edits to the tier
+order carry a before/after table over the full cross product of statuses and body fixtures —
+incoherent pairs included, since a gateway's status need not match a passed-through upstream
+body — and `StatusMatrixTests` is the pattern to copy.
+
+---
+
 ## 9. Gap register
 
 ### 9.1 What the current suite already does well
@@ -3921,6 +4023,9 @@ does not surface work that is done. `TEST_SUITE_IMPLEMENTATION_PLAN.md` §16 mir
 | **G24** | **No staleness alarm on the provider endpoint snapshot** | KBR-126 checked in `tests/data/opencode_go_endpoints.json` as the routing oracle. Nothing detects that the provider has since changed its table: §8's determinism rules exclude both mechanisms that could — a networked check and a clock. Refreshing it is a human act | Accepted trade-off, recorded rather than fixed: a networked alarm makes CI depend on a third party's uptime and turns green into a statement about today's weather. Revisit only if the provider publishes a machine-readable endpoint table — today's `/v1/models` carries ids only, no endpoints, and still lists retired aliases | **3** |
 | **G26** | **P13's CC-origin twin — the Codex body builder drops 17 non-sampling control fields, unregistered** — KBR-184 | Found while closing KBR-171, which closed the identical defect on the Responses-origin path with P23. `_cc_to_responses` carries `model`, `messages`→`input`, `stream`, `store`, `tools`, `tool_choice` and an injected `reasoning`; against `CreateChatCompletionRequest`'s 37 published fields that leaves **17** which are neither carried nor sampling — `parallel_tool_calls`, `metadata`, `user`, `service_tier` and the agent's own `reasoning_effort` among them. P13 is anchored at the bare `conversation.sampling` and reaches none of them, so T-D5 reports a false I1 breach on the CC-origin route exactly as it would have on the Responses-origin one | Row **P24**, enumerating one `envelope.extra[<wire key>]` per dropped control field, with the derivation guard P23 carries. **Blocked on T-A2 (KBR-34)**: the enumeration is the Chat Completions reader's control-field table minus what the builder carries, and that table does not exist yet — authoring it now is the guesswork §3.2.4 refuses for `scope`. **Before T-D5** | **1** |
 | **G27** | **An allowlisted Codex control field is dropped when its value is falsy, unregistered** — KBR-185 | Found by the design review of KBR-171 and confirmed by running the builder. `_ALLOWED_RESPONSES_PARAMS` is read only by `_prepare_responses_body`'s DEBUG log; the shipped body is an explicit `if` chain and six of its branches test **truthiness** (only `parallel_tool_calls` tests presence), so `include: []` and `reasoning: {}` are permitted by the allowlist and dropped anyway. The reader projects by presence, so each is an unclaimed `envelope.extra[...]` delta. P23 excludes both by construction (they are inside the allowlist), P14 reaches no `extra` path, and G23's planned P22 is conditional on `REASONING_EFFORT_PRESENT`, which this case does not meet | A row of its own — **conditional**, so it also owes §3.3.2 assertion 2 a complement, which P23 did not. Two decisions first: whether the truthiness tests are themselves the defect (`parallel_tool_calls` already uses `is not None`), and how the row's `envelope.extra[reasoning]` claim is to coexist with P22's. **Before T-D5** | **1** |
+| **G28** | **`top_k` is dropped on every non-Anthropic-family route, unregistered** — KBR-178 | Found by the design review of KBR-178. Chat Completions declares no `top_k` (`CreateChatCompletionRequest` has zero occurrences), so KBR-178 carries the agent's value on the internal key `_top_k` and only `AnthropicAdapter` and its four delegates restore it — **five** registry entries, `opencode_go` only on its Messages-routed models. The other **eighteen** routes therefore drop it **by design and permanently** — including `ollama_cloud`, which is the one adapter that accepts `options.top_k` and is now guaranteed never to receive it, and `bedrock`, whose Converse `InferenceConfiguration` has no `topK` member at all. `reader_anthropic_messages.py:84` projects the field and `Conversation` enforces it as one of the closed fifteen `SAMPLING_KEYS`, and no register row claims `conversation.sampling[top_k]` outside `openai_subscription` (P13/P14 reach it there via the bare `CONVERSATION_SAMPLING` anchor). So the moment T-D5 drives a corpus entry carrying a `top_k`, the oracle reports a **false** I1 breach on a deliberate drop — the under-claiming direction §3.3.1a calls unrecoverable, and structurally the same defect as G26 and G27 | Either widen the restore to every destination that accepts the field, or add a bridge-level row anchored at `conversation.sampling[top_k]`. **Unconditional** in P13's sense — it fires wherever the field is present, so it owes no §3.3.2 assertion-2 complement, which is what separates it from G29. **Deferred deliberately, not overlooked:** KBR-178 chose the internal-key route on the product owner's decision. The row itself waits on T-D5 for its trigger case, as G26 and G27 do. Recording the residue here is what stops the trade-off being mistaken for an accident. **Before T-D5** | **1** |
+| **G29** | **An empty inbound `stop_sequences` is omitted rather than forwarded, unregistered** — KBR-178 | Found by the design review of KBR-178 and confirmed by running the reader. D6 omits an empty `stop_sequences` instead of forwarding it, because `StopConfiguration` in `openai/openai-openapi` declares **`minItems: 1`** — so `stop: []` is a schema-invalid Chat Completions body, and forwarding it would put one on the wire of the **sixteen** adapters that deliver a top-level `stop`. **The omission is correct and must not be "fixed" by forwarding `[]`.** But it is still an unclaimed delta: `reader_anthropic_messages.py:193-195` projects sampling **by presence with no emptiness guard** and `contract.py:1063` validates sampling **keys only**, so an inbound `stop_sequences: []` projects as `conversation.sampling[stop] = []` while the upstream projection has none. Measured: `_project({... 'stop_sequences': []})` yields `{'max_tokens': 8, 'stop': []}`. Claimed only by P13/P14's bare `CONVERSATION_SAMPLING` on `openai_subscription`; unclaimed on the other twenty-two routes, so §3.3.2 assertion 1 reports a **false** I1 breach on a deliberate, correct omission | A row of its own, and **conditional** — unlike G28 this depends on the *value*, not the route, so per G27's precedent it also owes §3.3.2 assertion 2 a **complement**: a corpus entry with a non-empty `stop_sequences` in which the omission is provably absent. Trigger `EMPTY_STOP_SEQUENCES`. Deferred with G28 and G30, for the reason G26/G27 are: the trigger case and the assertion-2 complement both need the T-D5 corpus. **Before T-D5** | **1** |
+| **G30** | **The Chat Completions string-form `stop` is rewritten into a list, unregistered** — KBR-178 | Found by the code review of KBR-178. `StopConfiguration` declares `stop` as `oneOf` a string or an array, so `"END"` and `["END"]` are the same request; every wire kitty writes downstream takes only the array form. `server._normalize_cc_stop`, called from `_handle_chat_completions` before the body forks, wraps a non-empty string. That is a real rewrite of the agent's bytes at the §3.2.3 boundary, and **no register row claims it** — the same class as G22/G23/G26-G29 | Row **M17**, modelled exactly on **M15**, which is this same decision already taken for the Responses `input` field: `site=("server._normalize_cc_stop",)`, trigger always, `paths=(NOT_PROJECTABLE,)`, **unconditional** — an array-form body meets the row as a no-op, so there is no complement state for §3.3.2 assertion 2 — and `NOT_PROJECTABLE` for P16's reason: both forms project to one `Conversation`, and a projection that told them apart would be reading a vendor's spelling into a wire-independent form. **This binds the future Chat Completions reader (T-A2 / KBR-34) to read `stop: "END"` and `stop: ["END"]` into the identical `Request`; if it ever does not, this row needs a projectable anchor instead.** Without that clause the escape is void, which is the failure M15's own text warns about. Deferred for the reason G26 and G27 are: a register row needs its trigger case and, when conditional, its §3.3.2 assertion-2 complement, and the corpus that supplies both arrives with T-D5. *(An earlier draft gave the reason as "`register.py` is held by a concurrent session"; KBR-167 merged as PR #87 mid-task, so that reason is void — and it was a scheduling reason masquerading as a design one, which the design review said at the time.)* **Before T-D5** | **1** |
 | **G23** | **`openai_subscription` injects `reasoning` from `_reasoning_effort`, unregistered** — KBR-149 | Three sites in `providers/openai_subscription.py` set `reasoning: {"effort": …}` from kitty's internal key. Structurally identical to P3 and P4, and **P4 cannot cover it**: §3.2.3 records that `translate_to_upstream` never runs on this adapter's request path. Unlike G22 this is a **request-body** row feeding §3.3.2 assertion 1, so the moment T-D5 drives a corpus entry carrying a reasoning effort the oracle reports a *false* I1 breach on a deliberate mutation — the under-claiming direction §3.3.1a calls unrecoverable | Add P22: trigger `REASONING_EFFORT_PRESENT`, conditional, anchored at `envelope.extra[reasoning]`. Needs a trigger case and a complement in the corpus. **Before T-D5** | **1** |
 | **G22** | **Register header coverage is partial and inconsistent** — KBR-148 | Rows exist for four adapters (P9a ×3, P9b, P9c). At least six more deviate from the base header set with none: `AnthropicAdapter` and its three subclasses plus `ZaiAnthropicAdapter` (`x-api-key` / `anthropic-version` / lowercase `content-type`), `AzureOpenAIAdapter` (`api-key` on the non-Entra credential), and `OllamaAdapter`, which drops `Authorization` entirely — the same shape as P9b, which *does* have a row. `openai_subscription` additionally sets a conditional `ChatGPT-Account-Id` no row names | One row per deviation; `ChatGPT-Account-Id` becomes P9d, conditional, with a claimless-`id_token` fixture for its assertion-2 complement. Then §4.3 C1's per-adapter expectation is *reviewable against the register* instead of written from scratch — which is what stops C1 reproducing the ad-hockery F1 names | **2** |
 | **G21** | **A declared trigger is never verified** — KBR-140 | §7.4 hands the oracle `triggers_met` as an argument and §3.3.2 asserts only that a row is **absent** when its trigger is not met. Nothing asserts a trigger declared met actually fired, so a corpus entry that over-declares makes assertion 1 claim every delta — the oracle reports green on a bridge that is rewriting messages. The same author writes the entry and its trigger index (T-W6), so the mechanism has no second reader | Roughly fifteen triggers are decidable from the inbound request; give those an optional predicate and have T-D8 require the declaration to agree with it. M6, M8, M9 and M12 depend on an upstream response and stay declaration-only — the stated residual risk. Blocked on T-A1/T-A2, since a predicate needs a projected request to read | **1** |

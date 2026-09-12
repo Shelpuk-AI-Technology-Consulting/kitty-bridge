@@ -194,6 +194,30 @@ class TestOllamaCloudTranslateToUpstream:
         result = self.adapter.translate_to_upstream(cc)
         assert result["options"]["temperature"] == 0.7
 
+    def test_stop_mapped_to_options_stop(self):
+        """KBR-178: the CC `stop` reaches Ollama as `options.stop`."""
+        cc = {"model": "gpt-oss:120b", "messages": [], "stop": ["A", "B"]}
+        result = self.adapter.translate_to_upstream(cc)
+        assert result["options"]["stop"] == ["A", "B"]
+        assert "stop" not in result
+
+    def test_null_stop_creates_no_options_entry(self):
+        """`stop: null` must not attach an `options` container carrying None.
+
+        ``options`` is attached only when non-empty, so an unconditional write
+        would put ``{"stop": None}`` on every request without stop sequences.
+        See D6.
+        """
+        cc = {"model": "gpt-oss:120b", "messages": [], "stop": None}
+        result = self.adapter.translate_to_upstream(cc)
+        assert "options" not in result
+
+    def test_empty_stop_creates_no_options_entry(self):
+        """`stop: []` must not attach an `options` container either — see D6."""
+        cc = {"model": "gpt-oss:120b", "messages": [], "stop": []}
+        result = self.adapter.translate_to_upstream(cc)
+        assert "options" not in result
+
     def test_options_empty_when_no_extras(self):
         cc = {"model": "gpt-oss:120b", "messages": []}
         result = self.adapter.translate_to_upstream(cc)
@@ -670,3 +694,69 @@ class TestOllamaCloudRegistry:
         from kitty.providers.registry import _registry
 
         assert "ollama_cloud" in _registry
+
+
+# ── Session release (KBR-190) ────────────────────────────────────────────────
+
+
+class TestACloseReleasesTheSession:
+    """KBR-190 — the bridge closes the session this adapter owns."""
+
+    async def test_it_closes_and_clears_a_built_session(self):
+        """Both halves matter: `closed` is the leak, `None` is the recovery."""
+        adapter = OllamaCloudAdapter()
+        session = await adapter._get_session()
+
+        await adapter.aclose()
+
+        assert session.closed
+        assert adapter._session is None
+
+    async def test_it_is_a_no_op_when_no_session_was_built(self):
+        """An adapter that never served a request is closed like any other."""
+        adapter = OllamaCloudAdapter()
+
+        await adapter.aclose()
+
+        assert adapter._session is None
+
+    async def test_it_is_idempotent(self):
+        """`start_async`'s state-write failure path can reach `stop_async` twice."""
+        adapter = OllamaCloudAdapter()
+        await adapter._get_session()
+
+        await adapter.aclose()
+        await adapter.aclose()
+
+        assert adapter._session is None
+
+    async def test_the_next_request_builds_a_fresh_session(self):
+        """A closed adapter still works — one instance can outlive one bridge."""
+        adapter = OllamaCloudAdapter()
+        first = await adapter._get_session()
+        await adapter.aclose()
+
+        second = await adapter._get_session()
+
+        assert second is not first
+        assert not second.closed
+        await adapter.aclose()
+
+    async def test_the_attribute_is_cleared_even_when_the_close_fails(self):
+        """A failing close must not strand a dead session on the adapter.
+
+        ``stop_async`` logs and contains a provider's teardown failure, so an
+        attribute still pointing at a half-closed session would be handed back
+        for the rest of the process's life, with one WARNING as the only trace.
+        """
+        adapter = OllamaCloudAdapter()
+        session = await adapter._get_session()
+
+        with (
+            patch.object(session, "close", new=AsyncMock(side_effect=RuntimeError("close failed"))),
+            pytest.raises(RuntimeError, match="close failed"),
+        ):
+            await adapter.aclose()
+
+        assert adapter._session is None
+        await session.close()

@@ -71,6 +71,7 @@ from harness.recorder_conformance import (
 from harness.test_contract import _KITTY_IMPORT
 from kitty.auth import openai_oauth
 from kitty.auth.oauth_session import OAuthSession
+from kitty.bridge.server import BridgeServer
 from kitty.providers.ollama_cloud import OllamaCloudAdapter
 
 #: The format this transport serves, named once so a case differs from its
@@ -336,10 +337,14 @@ class TestTheTransport:
         # precede, and record what the session looked like when it ran.
         closed_when_port_released: list[bool] = []
         original_stop = subject.recorder.stop
+        # Captured before `stop()`, because `aclose` detaches the attribute as
+        # well as closing the session — reading `adapter._session` inside the
+        # observer would find `None` and record False whatever the order was.
+        session = adapter._session
 
         async def _observe() -> None:
             """Record the session's state, then release the port."""
-            closed_when_port_released.append(adapter._session is not None and adapter._session.closed)
+            closed_when_port_released.append(session is not None and session.closed)
             await original_stop()
 
         subject.recorder.stop = _observe  # type: ignore[method-assign]
@@ -347,21 +352,41 @@ class TestTheTransport:
 
         assert closed_when_port_released == [True]
 
-    async def test_stopping_closes_the_session_the_adapter_owns(self) -> None:
-        """``BridgeServer.stop_async`` closes only the sessions it owns.
+    async def test_the_bridge_closes_the_session_the_adapter_owns(self) -> None:
+        """``BridgeServer.stop_async`` releases the adapter's own session (KBR-190).
 
-        Without this the ``ollama_cloud`` session outlives every test that
-        started one: an "Unclosed client session" per test, and a real leak in a
-        gate that runs thousands.
+        Without it the ``ollama_cloud`` session outlives every test that started
+        one: an "Unclosed client session" per test, and a real leak in a gate
+        that runs thousands. That used to be this transport's job, and closing it
+        here was argued for in ``stop``'s docstring; the product owns it now.
+
+        **Driven without a fixture, and without :meth:`ProviderAiohttpTransport.stop`
+        in between.** That method still closes the adapter, for the no-bridge
+        path — so through the fixture the two are indistinguishable and this
+        would pass against a ``stop_async`` that had never been changed. Reverting
+        the product change must fail this test, and only this shape makes it.
         """
         subject = ProviderAiohttpTransport(FORMAT)
-        async with BridgeFixture(subject) as fixture:
-            await fixture.post(inbound_path(ROUTE), minimal_inbound_body(ROUTE, marker()))
-            adapter, _config = subject.bind()
+        await subject.start()
+        try:
+            adapter, config = subject.bind()
+            await adapter.make_request(
+                {
+                    "model": MODEL,
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "_resolved_key": "harness-key",
+                    "_provider_config": config,
+                }
+            )
             session = adapter._session
+            server = BridgeServer(None, adapter, "harness-key", provider_config=config)
 
-        assert session is not None, "the request did not go through the adapter's own session"
-        assert session.closed
+            await server.stop_async()
+
+            assert session is not None, "the request did not go through the adapter's own session"
+            assert session.closed
+        finally:
+            await subject.stop()
 
 
 class TestThroughARealBridge:
