@@ -451,14 +451,20 @@ class TestTheUpstreamBodyOnTheCustomTransport:
         §3.2.3 puts this path's serialization boundary inside the transport:
         ``_prepare_responses_body`` is what turns ``_original_body`` into the
         request ``openai_subscription`` sends.
+
+        Both calls are handed the *same* request, because the builder takes the
+        model from there rather than from the inbound body (KBR-160).  Varying
+        it would make the two bodies differ for a reason that has nothing to do
+        with ``input``'s shape, which is the only thing this asserts.
         """
         from kitty.providers.openai_subscription import OpenAISubscriptionAdapter
 
+        cc_request = {"model": _MODEL}
         from_string = await self._original_body_for(_string_body(), stream=False)
         from_array = await self._original_body_for(_array_body(), stream=False)
         assert OpenAISubscriptionAdapter._prepare_responses_body(
-            from_string
-        ) == OpenAISubscriptionAdapter._prepare_responses_body(from_array)
+            cc_request, from_string
+        ) == OpenAISubscriptionAdapter._prepare_responses_body(cc_request, from_array)
 
 
 # ── R5 — the endpoint answers 400, never 500 ─────────────────────────────────
