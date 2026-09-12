@@ -4,7 +4,7 @@
 Kitty Bridge to review every same-repository pull request.  To do that the CI
 environment was given a complete kitty installation: a version-pinned Claude Code
 CLI, a profile store, a credential store, an egress gateway and two logs.  All of
-it has been there for weeks.
+it has been there since the automated reviewer landed (32d8f07, 2026-09-07).
 
 ``.system_design/TEST_SUITE.md`` did not know.  §11 carried **Q12** — *"How is a
 pinned Claude Code binary supplied to CI?"* — as an open question to the product
@@ -108,6 +108,11 @@ _CLI_PIN = re.compile(
 #: quoting `2.1.238`. Whole-token, never substring.
 _VERSION_TOKEN = re.compile(r"\b[0-9]+(?:\.[0-9A-Za-z\-+]+)+\b")
 
+#: The shape of the row binding that quotes the CLI pin. The version arm reads
+#: only rows of this shape: a future row binding `python-version: "3.12"` would
+#: otherwise report as "§8.6 quotes Claude Code 3.12", naming the wrong tool.
+_PIN_BINDING = re.compile(r"\bbash\s+-s\s+--\s+(?P<version>[0-9][0-9A-Za-z.\-+]*)")
+
 #: The condition that keeps a fork's pull request from ever starting the review
 #: job. §8.6's whole per-PR/nightly split rests on this one line.
 _FORK_GUARD = "github.event.pull_request.head.repo.full_name == github.repository"
@@ -116,8 +121,10 @@ _FORK_GUARD = "github.event.pull_request.head.repo.full_name == github.repositor
 #: context, secrets included. The workflow refuses it in prose; this is the check.
 _PULL_REQUEST_TARGET = "pull_request_target"
 
-#: The action whose job the fork guard protects. Matched by prefix so a tag
-#: bump (`@v1` -> `@v2`) is not a discrepancy; the job's name is never pinned.
+#: The action whose job the fork guard protects. Compared exactly once the tag is
+#: split off, so a bump (`@v1` -> `@v2`) is not a discrepancy but
+#: `anthropics/claude-code-action-fork` is not mistaken for it. The job's name is
+#: never pinned.
 _REVIEW_ACTION = "anthropics/claude-code-action"
 
 #: A log file name as the generated launcher spells it.
@@ -292,7 +299,11 @@ def inventory_discrepancies(markdown: str, artifacts: dict[str, str]) -> list[tu
     installed = {
         version for text in artifacts.values() if (version := pinned_cli_version(text))
     }
-    quoted = {token for _, _, binding in rows for token in _VERSION_TOKEN.findall(binding)}
+    quoted = {
+        match.group("version")
+        for _, _, binding in rows
+        if (match := _PIN_BINDING.search(binding))
+    }
     for version in sorted(installed - quoted):
         problems.append(
             ("version", f"CI installs Claude Code {version}, which no {_INVENTORY_HEADING} row quotes")
@@ -334,7 +345,8 @@ def review_job_conditions(text: str) -> list[str]:
         for job in jobs.values()
         if isinstance(job, dict)
         and any(
-            isinstance(step, dict) and str(step.get("uses", "")).startswith(_REVIEW_ACTION)
+            isinstance(step, dict)
+            and str(step.get("uses", "")).split("@", 1)[0] == _REVIEW_ACTION
             for step in job.get("steps") or []
         )
     ]
@@ -466,6 +478,43 @@ def arm(problems: list[tuple[str, str]], name: str) -> list[str]:
         That arm's messages, in the reporter's order.
     """
     return [message for tag, message in problems if tag == name]
+
+
+def unguarded_rows(markdown: str, artifacts: dict[str, str], launcher: str) -> list[str]:
+    """Return the §8.6 rows whose deletion no arm would report.
+
+    Drops each row from a copy of the document, one at a time, and asks every
+    reporter whether anything changed.  A row nothing reports is a row the table
+    can lose silently — which is how a capability, or a constraint attached to
+    one, leaves the design with the guard green.
+
+    Args:
+        markdown: The full text of ``TEST_SUITE.md``.
+        artifacts: Repository-relative path to authoritative text, as
+            :func:`ci_artifacts` builds it.
+        launcher: The launcher text ``configure_kitty.wrapper_body`` generates.
+
+    Returns:
+        The capability names of the unguarded rows, in document order.  Empty
+        when every row is covered by at least one reverse direction.
+    """
+    lines = markdown.splitlines()
+    unguarded: list[str] = []
+    for capability, _, binding in inventory_rows(markdown):
+        # Remove exactly this row's table line, never a prose mention of it.
+        kept = [
+            line
+            for line in lines
+            if not (line.startswith("|") and capability in line and f"`{binding}`" in line)
+        ]
+        assert len(kept) == len(lines) - 1, f"row {capability!r} did not match exactly one line"
+        without = "\n".join(kept)
+
+        if not inventory_discrepancies(without, artifacts) and not launcher_log_discrepancies(
+            without, launcher
+        ):
+            unguarded.append(capability)
+    return unguarded
 
 
 @pytest.fixture(scope="module")
@@ -606,6 +655,22 @@ class TestTheInventoryAndTheWorkflowsAgree:
             problems
         )
 
+    def test_no_row_can_be_deleted_with_every_arm_green(
+        self, suite_markdown: str, ci_artifacts: dict[str, str], ci_launcher: str
+    ) -> None:
+        """The property §8.6 and this module both claim, checked for every row.
+
+        It was stated three times and tested for one row.  Enumerating the rows
+        from the shipped table, rather than from the cases this file happened to
+        write, is what extends it to the row nobody has added yet.
+        """
+        unguarded = unguarded_rows(suite_markdown, ci_artifacts, ci_launcher)
+
+        assert unguarded == [], (
+            "these §8.6 rows could be deleted with every arm green — add a reverse "
+            f"direction that covers them: {unguarded}"
+        )
+
     def test_the_review_job_still_refuses_a_fork_pull_request(self, suite_markdown: str) -> None:
         """§8.6's per-PR/nightly split rests on this guard, so the guard is checked.
 
@@ -706,6 +771,41 @@ class TestTheGuardCanFail:
         assert any("2.1.23," in message or "2.1.23 " in message for message in version), (
             f"a document quoting a version CI does not install reported {version}"
         )
+
+    def test_a_row_no_arm_covers_is_reported_as_unguarded(
+        self, suite_markdown: str, ci_artifacts: dict[str, str], ci_launcher: str
+    ) -> None:
+        """Deletion arm: the arrival the property exists for.
+
+        A toolchain row binding ``python-version`` passes the forward arm — the
+        review workflow really does use it — but it is neither a ``KITTY_`` name,
+        a pin nor a launcher log, so nothing reports its deletion.
+        """
+        pin_row = next(line for line in suite_markdown.splitlines() if "`bash -s -- " in line)
+        extra = "| Python toolchain | `.github/workflows/claude-code-review.yml` | `python-version` |"
+        planted = suite_markdown.replace(pin_row, f"{pin_row}\n{extra}", 1)
+
+        unguarded = unguarded_rows(planted, ci_artifacts, ci_launcher)
+
+        assert unguarded == ["Python toolchain"], (
+            f"an uncovered row was not flagged as unguarded; the check reported {unguarded}"
+        )
+
+    def test_a_dotted_number_outside_the_pin_row_is_not_read_as_a_version(
+        self, suite_markdown: str, ci_artifacts: dict[str, str]
+    ) -> None:
+        """Version arm, the false-positive direction: only the pin row is a pin.
+
+        Reading every row's dotted numbers would report a toolchain version as a
+        Claude Code version and name the wrong tool.
+        """
+        pin_row = next(line for line in suite_markdown.splitlines() if "`bash -s -- " in line)
+        extra = "| Python toolchain | `.github/workflows/claude-code-review.yml` | `python 3.12` |"
+        planted = suite_markdown.replace(pin_row, f"{pin_row}\n{extra}", 1)
+
+        version = arm(inventory_discrepancies(planted, ci_artifacts), "version")
+
+        assert version == [], f"a toolchain version was read as a Claude Code pin: {version}"
 
     def test_a_binding_absorbed_by_a_longer_documented_name_is_reported(
         self, suite_markdown: str, ci_artifacts: dict[str, str]
@@ -838,6 +938,27 @@ jobs:
     if: github.event.pull_request.head.repo.full_name == github.repository
     steps:
       - uses: anthropics/claude-code-action@v1
+"""
+
+        assert fork_guard_discrepancies(suite_markdown, workflow) == []
+
+    def test_an_action_merely_sharing_the_prefix_is_not_the_review_action(
+        self, suite_markdown: str
+    ) -> None:
+        """Fork arm, the false-positive direction: a prefix is not an identity.
+
+        A fork or a local wrapper named ``claude-code-action-…`` is a different
+        action; requiring the guard of its job would name the wrong one.
+        """
+        workflow = """
+jobs:
+  experiment:
+    steps:
+      - uses: anthropics/claude-code-action-fork@v1
+  review:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - uses: anthropics/claude-code-action@v2
 """
 
         assert fork_guard_discrepancies(suite_markdown, workflow) == []

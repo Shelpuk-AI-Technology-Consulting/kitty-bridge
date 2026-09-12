@@ -4466,8 +4466,8 @@ memory does not grow is false on the paths that buffer a whole response.
 
 ## 11. Open questions for the product owner
 
-Answers belong in this document. They are not invented here. Q10, Q11 and Q13 are prerequisites
-for the implementation work they name — each blocks a test whose acceptance oracle depends on it. An
+Answers belong in this document. They are not invented here. Q10 and Q13 are prerequisites for
+the implementation work they name — each blocks a test whose acceptance oracle depends on it. An
 answered question keeps its place in the list and carries its answer in the heading.
 
 Q12 was in that set until 2026-09-12 (KBR-216). Its entry below records the answer, and what the
