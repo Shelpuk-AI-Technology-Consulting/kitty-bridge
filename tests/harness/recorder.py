@@ -51,6 +51,7 @@ __all__ = [
     "Reply",
     "minimal_success_body",
     "minimal_success_stream",
+    "format_for_path",
     "UnmatchedPathError",
 ]
 
@@ -256,6 +257,34 @@ def minimal_success_stream(fmt: WireFormat) -> tuple[bytes, ...]:
         )
 
     raise ValueError(f"the primary recorder serves {sorted(f.value for f in _SERVED_FORMATS)}, not {fmt.value}")
+
+
+def format_for_path(path: str) -> WireFormat | None:
+    """Return the wire format a request at ``path`` selects, or ``None``.
+
+    The pure half of :meth:`RecordingUpstream._format_for`: it answers the
+    question and records nothing.  Split out for T-W8 (KBR-31), whose bridge
+    fixture asserts at teardown that every captured path selected the format its
+    transport declares.  That assertion cannot call the method — the method
+    *appends to* :attr:`RecordingUpstream.unmatched` on a miss, so judging the
+    captures with it would mutate the evidence being judged, on every fixture
+    exit, and would fight the tests that deliberately clear that list.  Copying
+    :data:`_FORMAT_SUFFIXES` into the fixture was the alternative and is worse:
+    a second source of truth that stays green when the table moves.
+
+    Args:
+        path: The request's raw path.
+
+    Returns:
+        The format whose suffix ``path`` ends with, or ``None`` when no suffix
+        matches.  ``None`` rather than a default, because "no rule applies" and
+        "the fallback applies" are different facts and only the caller knows
+        which it wants.
+    """
+    for suffix, fmt in _FORMAT_SUFFIXES:
+        if path.endswith(suffix):
+            return fmt
+    return None
 
 
 def _wants_stream(body: bytes) -> bool:
@@ -480,9 +509,12 @@ class RecordingUpstream:
         Returns:
             The matched format, or :attr:`default_format` — recording the miss.
         """
-        for suffix, fmt in _FORMAT_SUFFIXES:
-            if path.endswith(suffix):
-                return fmt
+        matched = format_for_path(path)
+        if matched is not None:
+            return matched
+
+        # The recording half, which is why this is a method and not the pure
+        # function above: a miss is what `assert_all_paths_matched` reports.
         self.unmatched.append(path)
         return self.default_format
 

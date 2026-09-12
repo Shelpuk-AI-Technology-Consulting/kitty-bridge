@@ -100,8 +100,8 @@ After Milestone 0, seven streams advance independently, each owning its own modu
 | **T-W5** | Shared CONNECT proxy fixture | — | §7.3 | M |
 | **T-W6** | Corpus format, capture procedure, scrubber, loader | T-W3 | §7.1 | M |
 | **T-W7** | Assertion exemption registry | T-W1 | §8 | M |
-| **T-W8** | Bridge fixture **core + transport extension interface** | T-W4 | §6.3.1 | M |
-| **T-W9** | **The proven vertical slice** | T-W1, T-W2, T-W4, T-W8 | §6.3.1 | S |
+| **T-W8** | Bridge fixture **core + transport extension interface** | T-W4 | §6.3.1, §7.5 | M |
+| **T-W9** | **The proven vertical slice** | T-W1, T-W2, T-W4, T-W8 | §6.3.1, §7.5 | S |
 
 **T-W1 — markers and CI selection.** Register `l1`, `l2`, `l3`, `acceptance`, `agent_smoke`,
 `agent_live`, `eval`, `load`; a meta-test asserts every collected test carries exactly one. **Do
@@ -231,9 +231,14 @@ must not be collapsed.
 **T-W9 inherits three obligations T-W4 could not discharge**, because T-W4 starts no
 `BridgeServer` and they are only observable with one running:
 
-1. **Exactly one upstream request per inbound request.** T-W4 proves its replies are non-empty by
-   the judgements it can call directly; that is necessary and not sufficient. A second capture in
-   the recording is the only real evidence the retry ladder never fired.
+1. **Exactly one upstream request per inbound request**, for one request driven end to end. T-W4
+   proves its replies are non-empty by the judgements it can call directly; that is necessary and
+   not sufficient. A second capture in the recording is the only real evidence the retry ladder
+   never fired. **Scope, because T-W8 also asserts a form of this:** T-W8's is scoped to the one
+   binding its conformance check drives — a check tolerating a ladder could not tell a working
+   binding from a broken one — and T-W9's is the product claim for a driven request, against
+   T-W2's declared types. Quantifying it **over the corpus** is T-D1's; T-W9 depends on no corpus
+   task and is sized S. Design §7.5.4.
 2. **The `has_content` cell of §7.2.1's table.** It is a local flag in the pass-through streaming
    loop (`server.py:5145`), not a function — unreachable except by driving a bridge. T-W4's
    streams satisfy its precondition by construction; nothing has confirmed it.
@@ -580,6 +585,7 @@ merge.** So:
 | KBR-9 | G6 | T-G1 | Atomic fix + test now |
 | KBR-132 · **CLOSED** | G21 | — | Route taken: atomic fix + regression test, red at base, evidence in the PR. The broader guard is **KBR-138**, which has no plan-task ID because it was filed after this plan was written; G21 is its design gap. (Status convention: `TEST_SUITE.md` §9.2.) |
 | KBR-146 · **CLOSED** | G25 | — | Route taken: atomic fix + regression tests, red at base on both sides of the interpreter boundary, evidence in the PR. Landed the fifth §6.2.4 contract (`tests/test_ipaddress_contract.py`) ahead of all four planned ones; no plan-task ID, filed after this plan was written. G25 records what that contract still cannot prove. Duplicates KBR-141/142/150/162. (Status convention: `TEST_SUITE.md` §9.2.) |
+| KBR-175 | — | — | Found while writing **T-W8**. A **test fixture**, not product code: `tests/conftest.py::sample_profile_dict` carries a UUIDv7 `auth_ref` where `Profile` requires v4, so it cannot build the model it describes — and no test reads it. No regression-evidence rule applies, because nothing under `src/kitty` is wrong. The decision (delete it, or repair the id) is the owner's; T-W8 ships `profile_for()` and deliberately leaves it untouched |
 
 ---
 
@@ -619,7 +625,7 @@ Every design requirement has an owner. "Existing" means the current suite alread
 | §6.4.2 | Agent smoke · precedence · **five live scenarios** | T-I5 · T-I6 · T-I14 |
 | §6.4.3 | Eval harness, task set, statistics | T-K1–T-K3 |
 | §6.4.4 | Load rig and gate | T-K4, T-K5 |
-| §7.1–§7.4 | Corpus, recorders, proxy, oracle | T-W6/Epic C, T-W4/Epic B, T-W5, T-W2/T-D1 |
+| §7.1–§7.5 | Corpus, recorders, proxy, oracle, bridge fixture | T-W6/Epic C, T-W4/Epic B, T-W5, T-W2/T-D1, T-W8 |
 | §8 | Markers, selection, job activation | T-W1, T-K6–T-K12 |
 | §8, §8.3 | Assertion exemption policy and registry | T-W7 |
 | §5.1 | Real-socket transport proof across three stacks | **Existing** — `tests/test_egress_https_proxy.py`, extended by T-W5 |

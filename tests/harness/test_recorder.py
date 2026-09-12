@@ -33,6 +33,7 @@ from harness.recorder import (
     RecordingUpstream,
     Reply,
     UnmatchedPathError,
+    format_for_path,
     minimal_success_body,
     minimal_success_stream,
 )
@@ -607,6 +608,30 @@ class TestFormatDispatch:
         # Opt out of the fixture's own teardown guard: this test *meant* to take
         # the fallback, and the guard would otherwise fail it for succeeding.
         recorder.unmatched.clear()
+
+    async def test_the_pure_lookup_agrees_with_the_recording_one_and_records_nothing(
+        self, recorder: RecordingUpstream
+    ) -> None:
+        """Assert ``format_for_path`` answers the same question without the side effect.
+
+        T-W8's bridge fixture judges its captured paths against the format its
+        transport declares, at teardown, on every fixture exit. It must not do
+        that with :meth:`RecordingUpstream._format_for`, which *appends to*
+        ``unmatched`` on a miss — an assertion that mutates the evidence it is
+        judging. Both halves are asserted here because a lookup that silently
+        stopped agreeing with the recording one would be a second source of
+        truth, which is the thing splitting it was meant to avoid.
+
+        Args:
+            recorder: The running recorder.
+        """
+        assert format_for_path("/v1/messages") is WireFormat.ANTHROPIC_MESSAGES
+        assert format_for_path("/openai/deployments/d/chat/completions") is WireFormat.CHAT_COMPLETIONS
+
+        # `None` for a miss, not the fallback: "no rule applies" and "the
+        # fallback applies" are different facts, and only a caller knows which.
+        assert format_for_path("/not/an/api") is None
+        assert recorder.unmatched == []
 
     async def test_a_malformed_body_still_gets_a_success(
         self, recorder: RecordingUpstream
