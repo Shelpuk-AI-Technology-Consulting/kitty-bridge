@@ -2389,14 +2389,14 @@ to the transport is not on the wire.
 
 *Two things `abort()` no longer does on its own, stated so nothing is built on them.*
 
-- **It does not refuse later writes.** After `close()` the selector loop still queues and delivers
-  a write made while its queue is non-empty; the Proactor loop drops it. What keeps the response
-  unfinished is aiohttp refusing to write to a closing transport — so a responder writes nothing,
-  through aiohttp or around it, after `abort()`. `test_a_responder_can_abort_mid_stream` asserts
-  the reply is incomplete as well as `[DONE]`-free, so a response aiohttp was allowed to finish
-  fails it — but on the selector loop that case's queue is empty at the abort, and the Proactor
-  loop drops later writes regardless, so both drop them without aiohttp's help: **aiohttp's
-  closing-transport check is not itself under test**.
+- **It does not refuse later writes — aiohttp does.** The response stays unfinished only because
+  aiohttp will not write to a closing transport, so a responder writes nothing, through aiohttp or
+  around it, after `abort()`. asyncio alone does not guarantee it: after `close()` the Proactor
+  loop drops a later write, but the selector loop (Linux, macOS) still queues and delivers one if
+  its queue is non-empty at that moment. `test_a_responder_can_abort_mid_stream` asserts the reply
+  is incomplete as well as `[DONE]`-free, so a response aiohttp was allowed to finish fails it.
+  It does **not** test aiohttp's check itself: that case's small writes leave the selector queue
+  empty at the abort, where asyncio drops later writes on both loops without aiohttp's help.
 - **Its return is not the disconnect.** The drop completes when the reader has taken the queued
   bytes. A scripted injection (T-B4) that releases a barrier on `abort()` returning must not make
   the reader wait on end-of-connection before that barrier.
