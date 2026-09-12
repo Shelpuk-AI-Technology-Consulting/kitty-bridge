@@ -598,6 +598,16 @@ agree on a canonical form. They are six separate tasks, so the agreement is part
   still projects, in the turn where it occurred* — M7 exists to drop orphans, so a reader that
   raised on one would fail instead of producing the delta that names it.
 
+  **The four clauses are an ordered pipeline.** `ToolResult` parts come first *within the turn the
+  **run** and **following-message** clauses build*, never as a re-sort after the same-role merge —
+  so `ToolResult → user text → ToolResult` projects as `[ToolResult, Text, ToolResult]`: two runs,
+  the first absorbing the text that follows it, then concatenated. Re-sorting afterwards would
+  hoist a result ahead of text the agent sent **before** it — moving history the bridge did not
+  move — and because paths are index-based the invented delta would land on every part of that
+  turn and every turn after it. The rule gives a run of results one home; it does not reorder
+  history. Clause 3 is not thereby idle: it governs the formats that carry text and results inside
+  **one message**, where the run has no natural boundary.
+
   A lift rule ("into the user turn that follows the assistant turn") does **not** work: the standard
   Chat Completions exchange ends `assistant(tool_calls) → tool → tool`, with no following user
   message at all. And because paths are index-based, any disagreement about turn boundaries reports
@@ -626,6 +636,24 @@ agree on a canonical form. They are six separate tasks, so the agreement is part
   compares its value whole. No reader emits `envelope.extra[<key>.<subkey>]`; nesting belongs to
   the residual (§3.3.1a). Six readers cannot quietly disagree about whether `thinking.budget_tokens`
   has an address of its own.
+- **Tool-call arguments decode through one shared rule.** Chat Completions and Responses both
+  carry them as a JSON *string*. Absent, `null`, empty or whitespace decodes to `{}`; a value that
+  is valid JSON but not an object, or not valid JSON at all, decodes to `{}` **and residualises at
+  that argument's own path**. Never raises.
+
+  **Why an absent `arguments` does not residualise though an absent `name` does**, the schema
+  requiring both: the test is whether the projection can represent the absence *losslessly*.
+  `ToolUse.arguments` is a mapping defaulting to empty, and `{}` is a true statement about the
+  call — seen and classified, therefore accounted for, the same ground on which `STOP_REASONS`
+  gives `other` its escape instead of the residual. `ToolUse.name` is a `str` with no such value:
+  `""` claims a tool *named* empty-string, and a call nobody can name cannot be paired or
+  addressed. Apply that test to every required field, not only these two.
+
+  Six readers cannot quietly disagree about what `arguments: ""` means, and it is not
+  hypothetical — `openai_subscription.py:OpenAISubscriptionAdapter._cc_to_responses` writes
+  `func.get("arguments", "")`. The residual *path* is format-specific and stays each reader's own;
+  only the decode and the fail-closed policy are shared. Tracked for pinning as code beside
+  `image_digest` — KBR-174.
 - **`tool_choice`** unifies four wire keys — CC/Messages `tool_choice`, Converse's
   `toolConfig.toolChoice`, Gemini's `functionCallingConfig.mode` — onto
   `envelope.extra["tool_choice"]`, with the **value** normalised to `auto` · `any` · `none` ·
