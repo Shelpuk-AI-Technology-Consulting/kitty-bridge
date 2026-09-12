@@ -41,6 +41,33 @@ _COLLECTION_ANCHORS = (
     c.CONVERSATION_SAMPLING,
 )
 
+#: Every spelling that claims the whole ``envelope.extra`` collection, and which
+#: §3.3.1a therefore makes illegal as a register anchor. The wildcard and its
+#: legacy ``[]`` form reach an arbitrary wire key exactly as the bare collection
+#: does, so a rule naming only the bare one has a one-character bypass.
+_WHOLE_EXTRA = ("envelope.extra", "envelope.extra[*]", "envelope.extra[]")
+
+def whole_extra_anchors(rows: tuple[r.MutationRow, ...]) -> tuple[str, ...]:
+    """Report every row anchored at the whole ``envelope.extra`` collection.
+
+    Pure, and separate from the assertion that applies it, for
+    :func:`~harness.register.row_shape_problems`'s reason: plan §1.4 requires the
+    falsification case to run in the suite, and a rule written inline in a ``for``
+    over :data:`~harness.register.REGISTER` cannot be handed a deliberately bad
+    row.  That matters more here than elsewhere — §3.3.1a's bare-``extra``
+    prohibition is the one rule nothing else in the suite would notice, so an
+    inline ``assert`` is one ``pass`` away from silent.
+
+    Args:
+        rows: The register data, normally :data:`~harness.register.REGISTER`.
+
+    Returns:
+        One ``<row id>:<path>`` entry per offending anchor, in register order.
+        Empty when no row claims the collection.
+    """
+    return tuple(f"{row.id}:{path}" for row in rows for path in row.paths if path in _WHOLE_EXTRA)
+
+
 #: Every register path whose *pattern* form differs from its concrete form,
 #: paired with a concrete path built from the same helper. Module-level so the
 #: parametrised test and the coverage check below read one list rather than two
@@ -72,11 +99,11 @@ _SHAPES: tuple[tuple[str, str], ...] = (
 
 
 class TestTheRowsThemselves:
-    """§3.2 publishes 43 live rows; the data must be those rows and no others."""
+    """§3.2 publishes 44 live rows; the data must be those rows and no others."""
 
     def test_the_register_holds_every_live_row(self) -> None:
-        """16 bridge-level rows less the withdrawn M13, plus 28 provider-level."""
-        assert len(r.REGISTER) == 43
+        """16 bridge-level rows less the withdrawn M13, plus 29 provider-level."""
+        assert len(r.REGISTER) == 44
 
     def test_the_register_is_a_tuple_and_not_a_list(self) -> None:
         """`mypy` does not run over `tests/`, so the annotation is not enforcement.
@@ -312,6 +339,64 @@ class TestThePathsEachRowTouches:
         for row in r.REGISTER:
             for path in row.paths:
                 assert not path.startswith("residual"), f"{row.id} is anchored at the residual"
+
+    def test_no_row_claims_the_whole_extra_collection(self) -> None:
+        """§3.3.1a: `envelope.extra` is never a legal anchor, and the matcher will not say so.
+
+        The bare form *matches* — a bracket-free pattern segment claims a
+        bracketed member of itself — so nothing else in this suite would notice a
+        row using it. `extra` is where the injections live (P2a, P2b, P3, P4, P10
+        and G23's `reasoning` row), so a bare anchor would claim a registered
+        *injection* on the same route as a registered *drop*.
+
+        P13/P14's bare `conversation.sampling` is not a precedent, and §3.3.1a
+        says why at length: not because bare and enumerated agree there — they do
+        not — but because a closed set nothing injects into absorbs at worst
+        another sampling key, while `envelope.extra` absorbs whole rows.
+
+        All three spellings, because they claim the same thing: the wildcard and
+        its legacy `[]` form over-claim exactly as the bare collection does, and
+        a rule naming only the bare one is a rule with a one-character bypass.
+        """
+        assert whole_extra_anchors(r.REGISTER) == ()
+
+    @pytest.mark.parametrize("spelling", _WHOLE_EXTRA)
+    def test_a_doctored_row_claiming_the_whole_collection_is_reported(self, spelling: str) -> None:
+        """Plan §1.4's deliberate defect for the rule above.
+
+        Measured during review: with the rule written inline, replacing its
+        `assert` with `pass` left the whole suite green — because the rule's own
+        docstring is right that nothing else notices. A prohibition whose
+        negative control is missing is a prohibition on the honour system.
+        """
+        doctored = dataclasses.replace(next(row for row in r.REGISTER if row.id == "P23"), paths=(spelling,))
+
+        assert whole_extra_anchors((doctored,)) == (f"P23:{spelling}",)
+
+    @pytest.mark.parametrize("spelling", _WHOLE_EXTRA)
+    def test_every_whole_extra_spelling_really_claims_a_wire_key(self, spelling: str) -> None:
+        """The forbidden list must name paths that are actually dangerous.
+
+        A spelling the matcher rejects claims nothing and forbidding it would be
+        theatre; the rule earns its place only for patterns that *do* reach an
+        arbitrary key. This is the positive control §6.2 asks of any guard.
+        """
+        assert c.path_matches(spelling, c.extra_path("truncation"))
+
+    def test_p23_enumerates_its_keys_and_does_not_reach_the_reasoning_injection(self) -> None:
+        """The regression case for the rule above, on the row that wanted to break it.
+
+        KBR-171. P23 claims sixteen dropped control fields on the
+        Responses-origin path; G23 registers an injected `reasoning` on the same
+        route. Over-claiming is silent, so the boundary is asserted rather than
+        left to the anchoring comment.
+        """
+        p23 = next(row for row in r.REGISTER if row.id == "P23")
+
+        # `==` on both, because set equality elsewhere cannot see a duplicated key.
+        assert len(p23.paths) == len(set(p23.paths)) == 16
+        assert all(path.startswith("envelope.extra[") for path in p23.paths)
+        assert not any(c.path_matches(path, c.extra_path("reasoning")) for path in p23.paths)
 
     def test_p15_is_anchored_at_strict_and_not_at_the_whole_tool(self) -> None:
         """The regression case §3.3.1a names by hand.

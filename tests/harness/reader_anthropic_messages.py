@@ -28,7 +28,6 @@ from __future__ import annotations
 
 import base64
 import binascii
-import hashlib
 import json
 from collections.abc import Mapping, Sequence
 from typing import Any
@@ -712,45 +711,31 @@ def _read_opaque(
 
     Returns:
         The opaque part, carrying a digest of its payload.
+
+    Raises:
+        UnreadableBodyError: When the wire type has no canonical name — a block
+            the projection cannot address, not a reader that mis-routed a field.
     """
     # Every key is consumed — the payload lives in the digest — and
     # `cache_control` maps to the slot exactly as it does on a modelled block,
     # so one field does not behave two ways (KBR-167). It stays **out of the
-    # digest**: inside it, M16's strip would show as an opaque digest change
-    # that no register row could name.
+    # digest**, which `opaque_digest` enforces: inside it, M16's strip would
+    # show as an opaque digest change that no register row could name.
     _residualise(block, set(block), path, residual)
+
+    # `opaque_kind` raises when no canonical name can be derived. That is not a
+    # reader bug — the wire said it — so it is translated, per §7.4.1's rule that
+    # raising is right only when there is no partial projection to salvage.
+    try:
+        canonical = c.opaque_kind(kind)
+    except ValueError as exc:
+        raise c.UnreadableBodyError(f"{path}: {exc}") from exc
+
     return c.Opaque(
-        kind=kind,
-        digest=_payload_digest(block),
+        kind=canonical,
+        digest=c.opaque_digest(block),
         cache_control=_read_cache_control(block, path, residual, permitted=not nested),
     )
-
-
-def _payload_digest(block: Mapping[str, Any]) -> str:
-    """Return the digest of an unmodelled block's payload.
-
-    Over **canonical** JSON rather than the raw wire slice, so a translator that
-    reorders keys does not change the digest. ``ensure_ascii`` is pinned
-    alongside ``sort_keys`` and ``separators`` because its default is ``True``
-    while the surrounding prose says UTF-8: an author who passed ``False`` would
-    get a different digest for the same block, visible only on non-ASCII
-    content, which is the cross-reader disagreement §7.4.1 exists to prevent.
-
-    Args:
-        block: The block, whose ``type`` and ``cache_control`` are excluded —
-            ``type`` because it is already :attr:`~harness.contract.Opaque.kind`,
-            and ``cache_control`` because it is carried on
-            :attr:`~harness.contract.Opaque.cache_control` instead. **Keep it
-            out.** Inside the digest, **M16**'s strip would surface as an opaque
-            digest change that no register row could name, on a path where the
-            same field on a modelled block yields a diagnosis (§7.4.1).
-
-    Returns:
-        Lowercase hex SHA-256 of the canonical payload.
-    """
-    payload = {key: value for key, value in block.items() if key not in ("type", "cache_control")}
-    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def _typed_leaf(

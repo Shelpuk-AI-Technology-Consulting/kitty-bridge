@@ -217,7 +217,8 @@ partial today — see gap G22.
 | P11 | Translate CC → Bedrock Converse | `BedrockAdapter.translate_to_upstream` | Always, on `bedrock` | A third upstream wire format M2 does not name. Custom transport — see §3.3.4. |
 | P12 | Translate CC → Ollama `/api/chat` | `OllamaCloudAdapter.translate_to_upstream` | Always, on `ollama_cloud` | A fourth wire format. Custom transport. |
 | P13 | **Drop fourteen Chat-Completions-only parameters** — `temperature`, `top_p`, `max_tokens`, `max_completion_tokens`, `frequency_penalty`, `presence_penalty`, `logprobs`, `top_logprobs`, `response_format`, `stop`, `n`, `stream_options`, `seed`, `logit_bias` | `OpenAISubscriptionAdapter._cc_to_responses` | Always, on the **CC-origin** path | The Codex backend applies strict allowlist validation and rejects them with 400. **User-visible**: `max_tokens` and `temperature` silently do nothing on this provider. Logged at DEBUG. |
-| P14 | **Drop every parameter outside the Codex allowlist**, notably `max_output_tokens` | `OpenAISubscriptionAdapter._prepare_responses_body` | Always, on the **Responses-origin** path | Same backend restriction, different input shape — this path receives a Responses body, so the parameter is spelled `max_output_tokens`, not `max_tokens`. A single row cannot cover both paths; the sets differ. |
+| P14 | **Drop every *sampling* parameter outside the Codex allowlist**, notably `max_output_tokens` | `OpenAISubscriptionAdapter._prepare_responses_body` | Always, on the **Responses-origin** path | Same backend restriction, different input shape — this path receives a Responses body, so the parameter is spelled `max_output_tokens`, not `max_tokens`. A single row cannot cover both paths; the sets differ. **The non-sampling half of the same drop is P23**, which lands at `envelope.extra[<wire key>]` rather than here: one mutation site, two rows, because the register addresses effects and not sites. |
+| P23 | **Drop every non-sampling control field outside the Codex allowlist** — `background`, `context_management`, `conversation`, `max_tool_calls`, `metadata`, `moderation`, `previous_response_id`, `prompt`, `prompt_cache_key`, `prompt_cache_options`, `prompt_cache_retention`, `safety_identifier`, `service_tier`, `text`, `truncation`, `user` | `OpenAISubscriptionAdapter._prepare_responses_body` | Always, on the **Responses-origin** path | **P14's other half, and its own row because the two land at different addresses.** `CreateResponse` (`openai/openai-openapi` v2.3.0) defines 31 top-level request fields and `_ALLOWED_RESPONSES_PARAMS` keeps ten, so 21 are dropped: five are sampling parameters P14 claims at the bare `conversation.sampling`, and these **sixteen** are declared control fields, which §3.3.1b sends to `envelope.extra[<wire key>]` — an address no row reached. Under-claiming is the direction §3.3.1a calls unrecoverable, so the first T-D5 corpus entry carrying, say, `text` or `truncation` would have failed the run on a deliberate, legitimate mutation. **KBR-171.** The row **enumerates** its sixteen addresses instead of anchoring at a bare `envelope.extra`; §3.3.1a records why, and what enumerating costs. ⚠️ **"Dropped" here means *never copied*.** The allowlist literal is read only by the DEBUG log; the shipped body is an explicit `if` chain, and six of its branches test truthiness rather than presence — so an *allowlisted* field with a falsy value (`include: []`, `reasoning: {}`) is dropped too, and this row does **not** claim it. That residue is **G27**, because it is a conditional mutation with a trigger of its own and because claiming `envelope.extra[reasoning]` here would swallow G23. **User-visible**: `truncation`, `text` and `previous_response_id` silently do nothing on this provider. |
 | P15 | **Strip `strict` from every tool declaration** | `_prepare_responses_body` | Always, on the Responses-origin path | The Codex backend rejects it. A change to the **tool schema** the agent declared, not to a sampling parameter — a different kind of fidelity mutation and worth its own row. |
 | P16 | Rewrite content types `input_text` → `output_text` | `_convert_content_types`, called from `_prepare_responses_body` | Always, on the Responses-origin path | The Codex backend validates content types strictly. **Message-content mutation.** |
 | P17 | Inject `stream: True` and `store: False` | `_cc_to_responses` and the Responses-origin body builder | **Unconditionally**, both subscription paths | The Codex backend is streaming-only; kitty reassembles a non-streaming reply from the SSE. Note `stream: True` **overrides a non-streaming client request** — the subscription-path analogue of M11. |
@@ -227,14 +228,20 @@ partial today — see gap G22.
 **Conditional rows are the point.** Every row whose trigger is a condition must be provably
 *inert* when that condition is absent — the sharpest form of "unless absolutely necessary", and
 what §3.3.2 assertion 2 tests, with the trigger complements §3.3.4 requires. M1, M2, M10, M14, M15, M16, P1,
-P6, P9a, P9b, P9c, P10, P11, P12, P13, P14, P15, P16, P17, P18, P19, P20 and P21 are unconditional
-by design and are exempt from that assertion.
+P6, P9a, P9b, P9c, P10, P11, P12, P13, P14, P15, P16, P17, P18, P19, P20, P21 and P23 are
+unconditional by design and are exempt from that assertion.
 
 **M14, P20 and P21 were missing from that list until KBR-26**, while their own trigger cells read
 `Always`. A row that always fires has no complement, so assertion 2 would have demanded a corpus
 entry nobody could ever write. The list is also written out id by id rather than abbreviated as a
 range: `P9a–c` names three rows in one token, and §3.2.4's guard has to either guess at the
 expansion or drop two rows from the comparison. It refuses the notation instead.
+
+**The P family has a gap, and it is a reservation rather than an accident.** `P22` is held for
+the `reasoning` injection §9.2's G23 registers; P23 landed first (KBR-171) and did not take the
+reserved id, because an id is how every ticket and document refers to a row. The register is
+ordered by **document position**, not numerically — §3.2.2 already interleaves P20 and P21
+between P6 and P7 — so a row arriving out of numeric order costs nothing.
 
 **Register maintenance.** The register is the specification. A pull request that adds a mutation
 site without adding a row fails the L2 register guards (§6.2.3). **A row's table entry here and its
@@ -273,10 +280,34 @@ T-D8), and the corpus loader (T-W6, which indexes captured sessions **by trigger
 **Authority is split, deliberately.** The markdown remains the reviewed record of *why* each
 mutation is necessary — a reviewer reads a table, not a tuple. The data is what tests execute.
 Ids and the conditional/unconditional classification are **mechanically reconciled** between the
-two by an L2 guard. Paths and sites are **not**, because the tables have no path column and their
-Site cells are prose (M4's reads "step 1", P17's "and the Responses-origin body builder", P2b's
-simply "same"). Sites are checked against the **source tree** instead, which is the stronger
-check: it catches a renamed mutation site, which no comparison against a prose cell could.
+two by an L2 guard. Paths and sites are **not reconciled against the markdown**, because the
+tables have no path column and their Site cells are prose (M4's reads "step 1", P17's "and the
+Responses-origin body builder", P2b's simply "same"). Sites are checked against the **source
+tree** instead, which is the stronger check: it catches a renamed mutation site, which no
+comparison against a prose cell could.
+
+**One row's paths are reconciled, and they are reconciled twice — against the source *and*
+against the markdown.** Both exceptions belong to P23 and neither generalises:
+
+1. **Against the source.** P23's sixteen addresses are the published control fields the Codex
+   allowlist does not keep, and an L2 guard recomputes that difference from the adapter's
+   allowlist literal and T-A3's control-field table. This buys less than it appears to, and the
+   difference matters: a bidirectional set-equality makes widening the allowlist a **deliberate**
+   edit to the row rather than a silent one — it does **not** make the row independent of the
+   code, because once the code changes the only route back to green is to edit the row to match.
+   It is the posture G24 records for the OpenCode endpoint snapshot: a green run proves
+   self-consistency, not agreement with the vendor.
+2. **Against the markdown**, which is the exception to the paragraph above and exists because
+   P23's Mutation cell **enumerates its sixteen wire keys in prose**. "The tables have no path
+   column" is the reason paths are not reconciled, and for this one row it stops being true: the
+   cell is a path list in all but spelling, so it is a second copy, and a second copy nothing
+   compares is one nobody will notice going stale. Measured before the guard existed — deleting
+   one of the sixteen from the cell, and changing its count word, each left the whole suite green.
+
+Every other row's paths stay reviewed rather than derived, and P23 is enumerated rather than
+computed at import so that a reviewer still reads a list. **The obligation travels with the
+shape, not with the row**: a future row that also spells its keys out in the markdown inherits
+both exceptions, and one that does not inherits neither.
 
 **The Trigger column is reconciled by nothing, and that is the third state.** Editing a Trigger
 cell produces no disagreement. Those cells are prose of the same kind as Site — "Always, on the
@@ -334,19 +365,27 @@ plan §1.4's harness rule forbids. It is filed as **KBR-139** rather than guesse
 |---|---|---|---|
 | Data ⇄ §3.2 markdown — ids and conditionality | L2 | **T-W3** | Two files. No sockets |
 | Data ⇄ source tree — every site resolves | L2 | **T-W3** | The AST of `src/kitty`. No sockets |
+| Data ⇄ the adapter's own drop set — P23's sixteen paths | L2 | **T-W3** | One module's AST plus T-A3's control-field table. No sockets |
+| Data ⇄ §3.2.2's P23 cell — the same sixteen, spelled in prose | L2 | **T-W3** | Two files. No sockets |
 | Register completeness — projected delta at the wire equals the triggered rows | **L3** | T-G2 | Captures from T-D4–T-D9 |
 
-The first two are what make the register *well-formed*. Only the third makes it *true*, and it
-cannot run until a recorder and an oracle exist.
+The first four are what make the register *well-formed*. Only the last makes it *true*, and it
+cannot run until a recorder and an oracle exist. The third and fourth are narrower than the first
+two — they check **one row**, for the two reasons §3.2.4 gives — and the third is the only guard
+anywhere that reads a *value* out of `src/kitty` rather than a name.
 
-**None of the three proves the register is *complete*.** They prove the data and the document say
-the same thing, and that every site named still exists. A mutation the product performs and
+**None of the well-formedness guards proves the register is *complete*.** They prove the data and
+the document say the same thing, that every site named still exists, and that one row's paths
+match one allowlist and one published cell. A mutation the product performs and
 *neither* artifact records is invisible to all of them — only the wire-level guard can catch that,
-and it needs a recorder and an oracle. Two such omissions are already known and filed: G22
-(headers) and G23 (`openai_subscription`'s `reasoning` injection), the second found by walking the
-subscription request path by hand while writing the data.
+and it needs a recorder and an oracle. Four such omissions are already known and filed: G22
+(headers), G23 (`openai_subscription`'s `reasoning` injection), G26 (P13's CC-origin twin) and
+G27 (an allowlisted field dropped for being falsy). The last three were each found by walking the
+subscription request path by hand rather than by any guard — which is the evidence for the
+sentence above, not a decoration on it.
 
-**A header row's `paths` are checked by none of the three.** Under §3.2.2's header rule they are
+**A header row's `paths` are checked by none of the four well-formedness guards**, and the two
+that do check paths check P23's alone. Under §3.2.2's header rule they are
 consumed by §4.3 C1's exact-set assertion, which does not exist yet — so for P9a, P9b and P9c only
 the id, the conditionality and the sites are under test today. `headers[user-agent]` is a reviewed
 claim, not yet a tested one.
@@ -504,10 +543,21 @@ because Gemini puts every sampling parameter under `generationConfig` and Conver
 > empty across the whole corpus" for all seven readers. T-W2 pins this boundary with its own test,
 > so it stays a decision rather than an assumption.
 
-**Optional ids, because two formats have none.** Gemini's `functionCall`/`functionResponse` carry
-no id; pairing there is by tool name and the k-th unanswered call of that name in the most recent
-assistant turn. A required id would force those readers to synthesise one and show a delta on every
-tool turn.
+**Optional ids, because a format may carry none.** Where an id is absent, pairing is by tool name
+and the k-th unanswered call of that name in the most recent assistant turn. A required id would
+force such a reader to synthesise one and show a delta on every tool turn.
+
+> ⚠️ **Corrected by T-A4 (KBR-36).** This section previously read "two formats have none" and named
+> Gemini as one of them, on the strength of Google's Cloud / Agent-Platform reference. The
+> **Developer API** surface kitty actually serves differs: `v1beta`'s `FunctionCall` publishes an
+> optional `id` ("If populated, the client to execute the `function_call` and return the response
+> with the matching `id`") and `FunctionResponse` an optional `id` the client populates to match —
+> verified against the discovery document at revision `20260910`. Optional either way, so the
+> *decision* to make `ToolUse.id` and `ToolResult.tool_use_id` optional is unchanged and still
+> right; only its stated reason was wrong. The Gemini reader therefore **reads the wire id when one
+> is sent** and falls back to the name-and-position rule when it is not. KBR-36's own acceptance
+> asked for this to be confirmed rather than assumed, which is why it is recorded here rather than
+> left as a reader's private finding.
 
 **`ToolResult.content` is wider than text and images**, because Converse's `toolResult.content`
 carries `json` (the common case), `document`, `video` and `searchResult`, Anthropic's carries
@@ -554,7 +604,7 @@ only the second consumer; §3.2.2 says why.
 | Path form | Names |
 |---|---|
 | `envelope.model` · `envelope.stream` · `envelope.store` | The named control fields |
-| `envelope.extra[<wire key>]` | A format-specific control field — P2a `thinking`, P3 `reasoning`, P4 `reasoning_effort`, P10 `reasoning_split` |
+| `envelope.extra[<wire key>]` | A format-specific control field — P2a `thinking`, P3 `reasoning`, P4 `reasoning_effort`, P10 `reasoning_split`, and P23's sixteen dropped Responses control fields. **The bare `envelope.extra` is not a legal anchor** — see below |
 | `conversation.system[<i>]` | One system text part |
 | `conversation.turns[<i>].role` · `.parts[<j>]` | A turn, or one part of it |
 | `conversation.tools[<name>].description` · `.schema` · `.strict` | A tool declaration, **by name** |
@@ -640,6 +690,38 @@ the natural anchor. It is the opposite. A bare collection claims its members, P1
 the injected `x-kitty-trace` field that is one of §3.3.1's five mandatory falsification cases, and
 a real internal-key leak — the defect P1 exists to prevent. P1 takes the escape instead.
 
+⚠️ **`envelope.extra` is not a legal register anchor either**, which is why the table above lists
+it only in its keyed form. `path_matches` would accept the bare spelling — a bracket-free pattern
+segment claims a bracketed member of itself, so `envelope.extra` names `envelope.extra[text]` —
+and that is exactly the problem: this is the one prohibition nothing else in the suite would
+notice. **P23 (KBR-171) is the row that wanted it**, and the reason it may not have it is a
+collision, not an aesthetic:
+
+> `extra` is where the *injections* live — P2a, P2b, P3, P4, P10, and the `reasoning` injection
+> G23 registers at `envelope.extra[reasoning]`. A P23 anchored at the bare collection and
+> triggered on `RESPONSES_ORIGIN_PATH` would claim that delta too, **on the same route**, so
+> G23's row could be deleted and nothing would go red. One row silently absorbing another is the
+> unrecoverable half of the asymmetry this section opens with.
+
+**P13/P14's bare `conversation.sampling` is not a precedent for it**, and not for the reason a
+first reading suggests. It is *not* that the bare anchor and an enumeration claim the same thing
+there — `SAMPLING_KEYS` has fifteen members and P13 drops fourteen, so the bare anchor
+additionally claims `conversation.sampling[top_k]`. Those rows anchor bare **deliberately**, so
+that a fifteenth key added upstream is claimed by the same row (`register.py` says so at P13).
+The difference is what the over-claim can swallow: `conversation.sampling` is a closed set that
+`Conversation` enforces and that no row injects into, so the widest thing the bare anchor can
+absorb is another sampling key. `envelope.extra` is open, and absorbs whole rows.
+
+**The cost of enumerating is real, and it is not "already paid for".** A thirty-second published
+field that the allowlist drops would be unclaimed, and the oracle would report a false breach on
+it. Nothing in the suite detects a vendor revision — no test reads the published schema, by §8's
+determinism rules, which is G24's shape rather than a solved problem. What the enumeration buys
+is that the failure is **loud, local and one line to fix**, where the bare anchor's over-claim is
+silent and costs a row. A bare anchor would not have detected the revision either; it would only
+have hidden it. What *is* pinned is the harness side: T-A3's control-field table is asserted
+against the published key count, so editing it goes red there and again in P23's derivation
+guard.
+
 **The index builders accept the wildcard (KBR-26).** `system_path`, `turn_path`, `part_path` and
 `reply_part_path` take `WILDCARD` where they take a position, because a register row writes a
 pattern over every turn and part — M3, M4, M8, P5e and P8 all do — where a delta writes concrete
@@ -715,11 +797,22 @@ agree on a canonical form. They are six separate tasks, so the agreement is part
   `""` claims a tool *named* empty-string, and a call nobody can name cannot be paired or
   addressed. Apply that test to every required field, not only these two.
 
+  **A value that is not a string at all — including an already-decoded object — residualises
+  too.** Accepting the object form would make a bridge that emitted it where the schema demands a
+  string invisible to the oracle, which is the wire-format breach the readers exist to see. And
+  what residualises is the **raw wire value, unmodified** — `"[1,2]"` stores the *string*, never
+  the decoded list — because T-D8 diffs residual key sets across all six readers, and two
+  renderings of one unreadable value would report a delta neither reader caused.
+
   Six readers cannot quietly disagree about what `arguments: ""` means, and it is not
   hypothetical — `openai_subscription.py:OpenAISubscriptionAdapter._cc_to_responses` writes
   `func.get("arguments", "")`. The residual *path* is format-specific and stays each reader's own;
-  only the decode and the fail-closed policy are shared. Tracked for pinning as code beside
-  `image_digest` — KBR-174.
+  only the decode and the fail-closed policy are shared.
+
+  **Pinned as code: `contract.decode_arguments(raw, path, residual)`** (KBR-174), beside
+  `image_digest` and for the same reason. It takes the residual as a parameter rather than
+  reporting a flag the caller must act on: `mypy` covers `src/kitty` only, so a reader that
+  ignored such a flag would be caught by nothing.
 - **`tool_choice`** unifies four wire keys — CC/Messages `tool_choice`, Converse's
   `toolConfig.toolChoice`, Gemini's `functionCallingConfig.mode` — onto
   `envelope.extra["tool_choice"]`, with the **value** normalised to `auto` · `any` · `none` ·
@@ -849,7 +942,8 @@ the request went. Three providers carry routing outside the body:
 |---|---|---|
 | Azure | The deployment id, which **is** the request's normalized model (P20) — and P6 deliberately removes `model` from the body | Two requests to two different deployments have **byte-identical bodies**. A body-only oracle cannot tell them apart, so a misrouted request is invisible. |
 | Vertex | `project_id` and `location` (P21) | The account being billed is a URL component |
-| Gemini | Model and operation (`:generateContent` vs `:streamGenerateContent`) in the inbound path | M10 lifts the model into the body precisely because it is not there to begin with |
+| Gemini | Model and operation (`:generateContent` vs `:streamGenerateContent`) in the inbound path | M10 lifts the model into the **outbound Chat Completions** body precisely because it is not in
+the inbound one to begin with |
 
 So the oracle takes the **whole captured request** — method, scheme, host, path, query, headers,
 body — and asserts routing separately from content.
@@ -994,7 +1088,11 @@ The assertions:
 
 - *(i)* Transport-blip retries and empty-response retries — the two that repeat a request
   unchanged — must be **byte-identical** to the attempt they repeat: same body, same headers, no
-  added retry-count or correlation header.
+  added retry-count or correlation header. **Quantified over the retry arm, not the balancing
+  arm**: the latter re-runs `_normalize_model` and `normalize_request` and is the failover
+  re-normalisation exception in the table above, not a repeat. §11 Q14(b) widens this row's
+  population — once the preamble hold lands, empty-response retries become reachable on the
+  native-passthrough adapters too, so **T-I8** must name that path.
 - *(ii)* Each of the four paths above is a **declared exception**: assert each fires only under
   its own trigger and never otherwise. A provider that hashes bodies can see all four; whether to
   close any of them is Q6.
@@ -1651,6 +1749,7 @@ inspecting a body it never sends.
 | **Endpoint table** | The README endpoint table matches `_register_routes`. Catches F2 (KBR-9). |
 | **Attribution-header table** | The README's `X-Kitty-*` table matches `_attribution_headers()`, and none of those names can reach any `build_upstream_headers()`. |
 | **Flag table** | The README logging-flag table matches the CLI parser. |
+| **Answered questions ⇄ dependent passages** | A question `TEST_SUITE.md` §11 marks **ANSWERED** is not described as open or blocking anywhere in either design document. Landed with **KBR-163** as `tests/test_answered_questions_are_settled.py`. Range mentions (`Q10-Q13`) are expanded, because the site that escaped the hand-written enumeration was a range; §15's blocking table is checked by **row content** rather than by phrase, since such a row states the block by position and contains no still-open word at all. The one exclusion — a question's own §11 entry, which keeps the original wording verbatim — carries its own bound assertion, per the rule below. **Two stated limits:** a passage must *name the number* to be seen, and a paraphrase that never does is a reading job, not a scan. |
 
 
 **Scoping the internal-key scan (1): `providers/**` is in scope, not only `bridge/**`.** An earlier
@@ -1860,7 +1959,7 @@ each show how easily one goes vacuous.
 | Sealed network (§5.2), all three phases, per transport (§5.5) | Positive control passes; zero connections with the proxy down; the falsification control fails the harness |
 | Cross-attempt content (§4.3 C3) | Transport-blip and empty-response retries byte-identical; each of M6, M8, M9 and failover re-normalisation fires only under its own trigger |
 | Connection lifecycle (§4.3 C5) | Distinct-connection count per session, against the native baseline |
-| **Streaming recovery — content, not just grammar** (below) | Four injection points; no duplication, no replayed tool calls, no spliced arguments |
+| **Streaming recovery — content, not just grammar** (below) | Four injection points; no duplication, no replayed tool calls, no spliced arguments — and, per §11 Q14, exactly one upstream request at the recorder for the three post-emission points |
 | Client disconnect during a stream | Upstream connection released; the backend not marked unhealthy for a client-side fault |
 | All backends unhealthy | The 503 arrives in each protocol's native error envelope |
 | Oversized request | Rejected with the protocol's own error shape, not a raw 413 |
@@ -1879,19 +1978,30 @@ sequence rather than timing:
 | Injection point | Assertion |
 |---|---|
 | Before any downstream byte | Clean failover; the client sees one complete stream from the second backend |
-| After text has been emitted | No text the client already received is repeated; the transcript reads as one message |
-| Mid `input_json_delta`, tool arguments partly sent | Arguments are never a splice of two attempts. **The acceptance oracle here is undecided — Q14.** Until it is answered this row asserts only the negative (no silent merge, no reused id across attempts), which is weaker than the row needs to be |
-| After content, before the terminal event | Exactly one terminal outcome reaches the client; `message_stop` is not duplicated or omitted |
+| After text has been emitted | No text the client already received is repeated — **because there is no second attempt to repeat it from**: the recording upstream sees exactly one request, and the transcript reads as one message ending in a terminal error event. A clean failover to a second backend also satisfies "no repeated text", which is why the recorder assertion and not the transcript is what makes this row bite |
+| Mid `input_json_delta`, tool arguments partly sent | Arguments are never a splice of two attempts, **and the turn ends there**: per Q14 the client receives no argument bytes from a second attempt, the partial `tool_use` block is closed, and one terminal error follows. The negatives still hold — no silent merge, no reused id across attempts — but they are no longer the whole oracle |
+| After content, before the terminal event | Exactly one terminal outcome reaches the client, and per Q14 it is the **error** event rather than a `message_stop` synthesised from a second attempt; `message_stop` is not duplicated or omitted |
 
-Each case asserts tool-call **identity** (ids stable within an attempt, never reused across
-attempts) and a single terminal outcome.
+Each case asserts tool-call **identity** and a single terminal outcome. Only the first case has
+two attempts to compare, so only there does "never reused **across** attempts" have content; for
+the other three the stronger assertion is that no second attempt exists at all.
 
-**The post-emission semantics are a prerequisite, and they are not decided.** Once bytes have
-reached the client, what a correct recovery even *looks like* is a product decision, not a test
-detail: abandon and re-open, fail the turn, or something else. Writing "whichever the agreed
-semantics say" into a test specification leaves it without an acceptance oracle — the same defect
-this document objects to elsewhere. It is tracked as **Q14** rather than left as prose, so the
-gap is visible in the question list where decisions are collected, not buried in a table.
+**The post-emission semantics are settled — §11, Q14, answered 2026-09-12.** Once a byte has
+reached the client the bridge does not retry and does not fail over: it closes any half-open
+block, emits one terminal error, and lets the agent retry the turn. So every row above has a full
+acceptance oracle, and the four injection points divide cleanly — the first is pre-emission and
+recovers silently, the other three are post-emission and terminate.
+
+That is the same choice `bridge/server.py` already makes for a mid-stream transport drop — **the
+transport class only**; the timeout class still fails over after emission, which is gap G26 /
+KBR-183 — and
+the same one the real Anthropic API makes: its mid-stream failures arrive as an SSE `error` event on
+an already-`200` response and are raised to the caller, never resumed. **I2** is why that matters
+— a bridge that recovers where the provider gives up is observably not the provider.
+
+The empty-stream case does not reach these rows at all: per Q14(b) the native passthrough holds
+its leading events until the first content event, so a contentless reply is still pre-emission
+when it is detected. That is KBR-155's to implement; the rows here assume it.
 
 `/stats` remains authoritative for attribution after a mid-stream failover, per the README's own
 caveat that the headers name whoever produced the first byte.
@@ -2486,13 +2596,48 @@ and the second is the one that surprises:
 **`Opaque` consumes its block, and carries a payload digest.** A block type the grammar does not
 model projects as `Opaque(kind=…, digest=…)` where:
 
-- `kind` is the wire `type` converted to snake_case. Anthropic's spellings (`document`,
-  `search_result`, `redacted_thinking`, `server_tool_use`) are already canonical; Converse writes
-  `searchResult` for the same thing, so **the cross-vendor alias table lands in this section with
-  the first reader that needs one** (T-A5), rather than being invented twice.
-- `digest` is exactly
-  `hashlib.sha256(json.dumps(rest, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")).hexdigest()`,
-  where `rest` is the block without `type` and without `cache_control`.
+- `kind` is **named through `contract.opaque_kind()`** — not restated by each reader. For most
+  types that is the wire `type` itself; where two vendors spell one concept differently the table
+  reconciles them, and where a type is not snake_case at all it raises rather than converting (see
+  below). Anthropic's spellings (`document`, `search_result`,
+  `redacted_thinking`, `server_tool_use`) are already canonical; a format-unique type keeps its own
+  spelling, which is the deliberate exception to "never the wire's spelling".
+
+  **The alias table arrived with T-A3, not T-A5.** This section deferred it to "the first reader
+  that needs one"; that was wrong, and the cost was paid before it was noticed. T-A1 and T-A3
+  landed first and named one concept two ways — Anthropic's `document` and Responses' `file` for
+  an attached file — which is the permanent unclaimed delta the deferral was meant to avoid.
+  `document` is canonical because Anthropic Messages **and** Bedrock Converse both spell it that
+  way on the wire, so exactly one reader moved. The table is `contract.OPAQUE_ALIASES` and it is
+  **enforced**: `Opaque` rejects any key of it, so a reader cannot quietly project a rival name.
+  The lesson generalises — a shared vocabulary deferred to the reader that first needs it is
+  deferred to the *second* reader, because the first has already answered it alone.
+
+  **A non-snake_case wire type with no alias raises.** `opaque_kind` does not convert it: a
+  camelCase splitter with no caller and no corpus is a second source of drift, not a cure for one,
+  so the conversion belongs to the author who first meets a real one. That is **T-A5, nine times**
+  — Converse's `ContentBlock` union is `text` `image` `document` `video` `audio` `toolUse`
+  `toolResult` `guardContent` `cachePoint` `reasoningContent` `citationsContent` `searchResult`
+  `toolAddition` `toolRemoval` (confirmed against the `bedrock-runtime` 2023-09-30 service model),
+  of which nine are camelCase. A **reader** meeting such a type translates the `ValueError` into
+  `UnreadableBodyError`: the body is not projectable, but the reader is not at fault, and
+  `contract` defines a reader-raised `ValueError` as a reader bug. A new *snake_case* vendor type
+  needs no decision and still projects, so a vendor release is not a harness outage.
+- `digest` has **two recipes**, and which applies is a property of the content, not of the format:
+
+  * `contract.opaque_digest(block)` for a block the grammar cannot model — exactly
+    `hashlib.sha256(json.dumps(rest, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")).hexdigest()`,
+    where `rest` is the block without `type` and without `cache_control`.
+  * `contract.text_digest(text)` for content whose identity is a run of text — a refusal is the
+    case. One recipe was considered and rejected on a checked fact: Chat Completions carries a
+    refusal as a **bare string** on the message (`ChatCompletionResponseMessage.refusal` is
+    `anyOf[string, null]`), so there is no block for T-A2 to hash and a single rule would force it
+    to invent a wrapper — and the wrapper's shape would be a new thing six readers could disagree
+    about, which is this rule's own defect one level down.
+
+  Both are pinned in `contract.py` rather than restated here (KBR-174), because prose did not hold
+  the first one: in T-A1 all three wrong spellings survived mutation testing until a test pinned a
+  digest to an external literal.
 - the block's every other key is **consumed** — nothing beneath it residualises — while
   `cache_control` maps to `Opaque.cache_control` exactly as it does on a modelled block (KBR-167;
   it residualised until the grammar gained the slot).
@@ -2601,8 +2746,9 @@ exceptions, and they are not interchangeable:
    **No key currently exercises this branch**, and that is worth saying: an earlier draft of this
    section presented it as the general case using `effort` as its example, which is wrong twice
    — `effort` is client-sent, and generalising from it would have told six authors to ask "does a
-   register row name this?" about fields no row names, such as `context_management` and
-   `output_config`, and to residualise them.
+   register row name this?" about fields no row names, such as `output_config`, and to residualise
+   them. (`context_management` stood beside it until **P23** claimed it — which is the point:
+   membership of that set is a fact about the register on the day you read it.)
 
 A key kitty emits that **no** register row names is an *unregistered* mutation. That is the defect
 the oracle exists to find, and it must residualise.
@@ -2623,6 +2769,147 @@ third outcome is still unbuilt, and **no field currently needs it** — which is
 build it yet rather than an oversight. The next field the grammar cannot carry is the one that
 should settle whether a slot or a mechanism is the right answer; §3.3.1 records the trade-off that
 decision turns on.
+
+#### 7.4.2 What T-A4 settled — seven more rules, and which readers each one binds
+
+§7.4.1 fixed ten decisions writing T-A1. Writing **T-A4** (Gemini, [KBR-36]) reached seven more, each
+of which the remaining authors would otherwise answer differently, and each recorded here for the
+same reason: paths are index-based and `envelope.extra` is keyed, so two readers that disagree
+report a delta on content nobody changed.
+
+**Two of the seven are Google-specific and five are not**, which matters because only the five are a
+standing obligation on the rest of Epic A. **Rule 7 is different in kind from the other six**: it is
+not a new question this format raised but one the three shipped readers have already answered three
+different ways, which makes it the only rule here that is also a correction.
+
+| Rule | Binds |
+|---|---|
+| 1 — the route as a reader input | Gemini alone; no other format puts routing in the inbound URL (§3.3.5) |
+| 2 — a nested control field flattens to its leaf published key | **T-A5**, whose `inferenceConfig` and `toolConfig` nest the same way |
+| 3 — ProtoJSON's two spellings, and case-insensitive enum values | Google formats; a **Vertex** reader, if one is ever added, inherits it |
+| 4 — `envelope.extra` keyed by the *published* spelling | every reader of a format with more than one legal spelling, so today rule 3's set |
+| 5 — a capability toggle the wire does not name is control, not a `ToolDecl` | **T-A5** and **T-A6** |
+| 6 — digest the payload, not the carrier, where the field name discriminates | any format whose content union is discriminated by field name rather than by a `type` member |
+| 7 — a union member's own value is wrong: raise, residualise, or drop? | **every** reader; three answers are already shipped |
+
+**1. The route is a reader input, and only for what the body cannot show.** Gemini alone puts the
+model and the operation in the URL (§3.3.5), so its reader derives `envelope.model` from the path
+segment and `envelope.stream` from the operation suffix — `:streamGenerateContent` versus
+`:generateContent`, and **never** from `?alt=sse`, which selects SSE framing over JSON-array framing
+for a method that streams either way. The **query string is not read at all**: `verify_total`
+compares `consumed | residual` against the *body*, so a query key in either account would be
+reported as a claim on a key the body does not have. Asserting the route is T-D2's.
+
+A path that is not a published generate route raises `UnreadableBodyError`. That widens a type §7.4
+describes as "a body that cannot be read" to cover a *route* problem, which is defensible only on
+the inbound direction, where the path is the client's — and it is stated here because T-D1 uses that
+one exception type to tell a malformed corpus entry from an I1 breach.
+
+**2. A nested control field is addressed by its leaf published key.** Gemini puts sampling under
+`generationConfig` and the tool choice under `toolConfig.functionCallingConfig`; Converse nests
+`inferenceConfig` and `toolConfig` the same way, so T-A5 inherits this. `extra_path()` **raises** on
+a dotted key, which leaves exactly two dotless candidates, and the container loses:
+`envelope.extra[generationConfig]` cannot collide and survives a schema revision, but §3.3.1a
+compares an `extra` value **whole**, so it would collapse fourteen independently registrable fields
+into one address and make any row anchored there claim all of them — the coarse-anchor failure
+§3.3.1a warns about by name. The leaf key wins on the narrowest-anchor rule.
+
+The cost is a flat namespace assembled from several nested objects, so **each reader that flattens
+owes a test that its `extra` key sets are pairwise disjoint.** The namespace is not naturally
+disjoint — Gemini publishes `mediaResolution` on both `GenerationConfig` and `Part`, and the only
+reason there is no clash is that the `Part` one residualises. A collision would be introduced by a
+*schema revision*, not by a request, and the loser would overwrite the winner with no residual and
+no delta.
+
+**3. Google's JSON has two legal spellings of every field, and both must read.** Gemini's wire
+format is ProtoJSON, whose parsers "accept both the lowerCamelCase name … and the original proto
+field name" (`protobuf.dev/programming-guides/json/`). This is not theoretical: Google's own
+published examples mix them freely — `system_instruction`, `function_declarations`, `tool_config`,
+`file_data` and `response_mime_type` in snake_case, beside `generationConfig`, `stopSequences`,
+`maxOutputTokens` and `topP` in camelCase. A reader that knew only the schema's spelling would
+residualise the other and **fail the run on Google's own published example**, which §7.4.1 already
+calls "a harness defect and not a finding". Enum *values* are matched case-insensitively for the
+same reason: the published `FunctionCallingConfig.mode` enumeration is upper case and Google's
+`function_calling.sh` sends `"mode": "auto"`.
+
+Where one object carries both spellings of one field, the **published** spelling is read and the
+other residualises. Not "the first wins": §7.4.1 designs key order out of the projection elsewhere —
+"canonical JSON rather than the raw wire slice, because a translator that reorders keys must not
+change the digest" — and resolving by position would put it back, projecting one semantic body two
+ways depending on which alias a serialiser emitted first.
+
+**4. `envelope.extra` is keyed by the *published* wire key.** §3.3.1b says "keyed by the wire key",
+which named one thing until rule 3; it now names two. A register row can name only one, and T-D9's
+matrix needs one, so the published lowerCamelCase name is the address and the snake_case original
+resolves onto it. This is the one place where `extra` and the residual diverge deliberately:
+`consumed` and residual keys stay in the **wire** spelling, because `verify_total` compares them
+against the body's own keys.
+
+**5. A server-side capability toggle in the tools array is control, not a tool declaration.**
+Gemini's `Tool` message carries eight of them beside `functionDeclarations` — `googleSearch`,
+`codeExecution`, `urlContext`, `fileSearch`, `computerUse`, `googleMaps`, `googleSearchRetrieval`,
+`mcpServers` — each an unnamed toggle object such as `{"googleSearch": {}}`. They map to
+`envelope.extra[<key>]`.
+
+**This departs from T-A3**, which makes a non-`function` Responses tool a `ToolDecl` whose name is
+the tool type, and the departure is the point: a Responses built-in tool *has* a name to be
+addressed by, and §3.3.1a's tool paths are by name. Gemini's has none, so a `ToolDecl` would have to
+invent one — putting a vendor spelling into a form whose purpose is wire independence — while
+residualising would fail the run on every request that enables Google Search. The distinguishing
+question is therefore **"does the wire name this tool?"**, not "is it built in".
+
+**6. Digest the payload, not the carrier, where the field name is the discriminator.** §7.4.1's
+recipe says `rest` is "the block without `type` and without `cache_control`", which assumes a block
+discriminated by a `type` member. A Gemini `Part` is a union discriminated by **field name** and
+defines no `cache_control`, so the digest is taken over the *payload object* — `part["executableCode"]`
+— and neither exclusion has anything to remove. Sibling members on the same part residualise, which
+is exactly the role `cache_control` plays on a `type`-discriminated block. The recipe itself is
+unchanged, `ensure_ascii` included.
+
+**7. When a union member's own value is wrong: raise, residualise, or drop — and never drop.** Three
+readers have shipped and all three answer differently, which is the coordination failure §7.4.1
+exists to prevent, so it is settled here rather than left to T-A5 and T-A6 to pick a precedent from.
+The distinction is **what the bad value is a value *of***:
+
+| The wrong value is… | Outcome | Because |
+|---|---|---|
+| the value that **is** the part — `Part.text`, a `Thinking`'s text, `Opaque.kind` | **raise** `UnreadableBodyError` | the grammar has no absent value to fall back to, and `Text("")` fabricates an empty part — which is *meaningful* here, since P5e and P8 both inject one |
+| a **required field** of a part — a tool `name` | **residualise**, project the part with `""` | §3.3.1b settles it in those words: "an absent `name` *does* residualise … a call nobody can name cannot be paired or addressed" |
+| a **payload** the reader cannot canonicalise — base64 that does not decode | **residualise the leaf**, project the part with the grammar's absent value | `Image.digest` is `str \| None`, so an absent value exists, and §7.4.1: "raising is the other wrong answer: it blinds the oracle to everything else in a request it could otherwise diff" |
+| the **member itself**, where the schema declares an object and the wire sent a scalar — `{"functionCall": 7}` | **raise** | there is no value to put in the position, and the position cannot be vacated |
+
+**The line between the last two rows is where the member sits, not how bad the value is.** A
+container under the **envelope** — `generationConfig`, `toolConfig` — residualises whole when it is
+not an object, because every envelope field has an absent value and the rest of the request still
+projects. A container that **is a part or a turn** raises, because a part must occupy its index and
+the grammar offers nothing to put there: residualising it would leave the position empty, which is
+the drop this rule forbids. State the question as *"can the projection still fill this position?"*
+and every case above falls out of it.
+
+**No branch ever returns *no part*.** That is the load-bearing half, and it is where two of the three
+shipped readers are wrong: `reader_responses.py` returns `None` for both a wrongly-typed `input_text`
+and an undecodable data URL, which drops the part and shifts every later part's index — §7.4.1's own
+warning that "that invented delta lands on every part of the turn and on every turn after it". A
+reader that cannot read a part must still *occupy its position*.
+
+> **Reconciliation owed.** `reader_anthropic_messages.py` raises on undecodable base64 where this
+> rule residualises, and `reader_responses.py` drops a part where this rule keeps it. Both predate
+> this section. T-A4 is the reference implementation; the two landed readers need conforming, and
+> that is a change to shipped code rather than a note, so it is tracked as its own ticket.
+
+> **What this reader leaves on the record.** Six fields the format publishes, real clients send, and
+> the grammar cannot carry now residualise and so **fail the first oracle run** — the same shape as
+> the `cache_control` deadline above, and tracked as its own defect rather than as a note here. The
+> sharpest is `thoughtSignature` on a `functionCall` part, which Gemini 3 *requires* clients to echo
+> back verbatim. Unlike `cache_control` the grammar nearly has the slot — `contract.py` already says
+> `Thinking.signature` carries "Anthropic's `signature` or Gemini's `thoughtSignature`" — so the fix
+> is small and specific rather than open-ended.
+>
+> A second consequence, on the oracle rather than the reader: `GeminiTranslator` **discards** the
+> inbound tool-call id and synthesises one per call (`_make_tool_call_id`). Now that the §3.3.1 correction above
+> projects the wire id, every tool turn from a client that populates one shows a delta with no
+> register row to claim it. That is a correct oracle finding, not a reader defect, and it needs a
+> row or a ticket before T-D9 runs.
 
 ### 7.5 The bridge fixture
 
@@ -3475,6 +3762,8 @@ does not surface work that is done. `TEST_SUITE_IMPLEMENTATION_PLAN.md` §16 mir
 | **G15** | **F4 — `_effort` / `_thinking_adaptive` reach the wire** — KBR-6 | Live I1+I2 breach on every CC-wire provider | Add both to `_INTERNAL_KEYS`; internal-key completeness guard (§6.2.3); regression test at `BridgeServer._upstream_body_for`. Residual: `openai_subscription` alone builds its body independently of that boundary (allowlisted, hence never leaked); `bedrock` and `ollama_cloud` call `translate_to_upstream` inside their transports, so the assertion reaches their wire. Carried by T-G2 over T-D4–T-D9's captures | **0** |
 | **G16** | **F5 — `OpenCodeGoAdapter` misdeclared its wire shape** — KBR-7 · **CLOSED** | Was a latent defect in the M8 path and a trap for the oracle | Done: the declaration is per-model, both repair sites branch on it, and the **hook-level** honesty guard landed with the fix. The **wire-level** guard remains T-G4 / KBR-80 | — |
 | **G24** | **No staleness alarm on the provider endpoint snapshot** | KBR-126 checked in `tests/data/opencode_go_endpoints.json` as the routing oracle. Nothing detects that the provider has since changed its table: §8's determinism rules exclude both mechanisms that could — a networked check and a clock. Refreshing it is a human act | Accepted trade-off, recorded rather than fixed: a networked alarm makes CI depend on a third party's uptime and turns green into a statement about today's weather. Revisit only if the provider publishes a machine-readable endpoint table — today's `/v1/models` carries ids only, no endpoints, and still lists retired aliases | **3** |
+| **G26** | **P13's CC-origin twin — the Codex body builder drops 17 non-sampling control fields, unregistered** — KBR-184 | Found while closing KBR-171, which closed the identical defect on the Responses-origin path with P23. `_cc_to_responses` carries `model`, `messages`→`input`, `stream`, `store`, `tools`, `tool_choice` and an injected `reasoning`; against `CreateChatCompletionRequest`'s 37 published fields that leaves **17** which are neither carried nor sampling — `parallel_tool_calls`, `metadata`, `user`, `service_tier` and the agent's own `reasoning_effort` among them. P13 is anchored at the bare `conversation.sampling` and reaches none of them, so T-D5 reports a false I1 breach on the CC-origin route exactly as it would have on the Responses-origin one | Row **P24**, enumerating one `envelope.extra[<wire key>]` per dropped control field, with the derivation guard P23 carries. **Blocked on T-A2 (KBR-34)**: the enumeration is the Chat Completions reader's control-field table minus what the builder carries, and that table does not exist yet — authoring it now is the guesswork §3.2.4 refuses for `scope`. **Before T-D5** | **1** |
+| **G27** | **An allowlisted Codex control field is dropped when its value is falsy, unregistered** — KBR-185 | Found by the design review of KBR-171 and confirmed by running the builder. `_ALLOWED_RESPONSES_PARAMS` is read only by `_prepare_responses_body`'s DEBUG log; the shipped body is an explicit `if` chain and six of its branches test **truthiness** (only `parallel_tool_calls` tests presence), so `include: []` and `reasoning: {}` are permitted by the allowlist and dropped anyway. The reader projects by presence, so each is an unclaimed `envelope.extra[...]` delta. P23 excludes both by construction (they are inside the allowlist), P14 reaches no `extra` path, and G23's planned P22 is conditional on `REASONING_EFFORT_PRESENT`, which this case does not meet | A row of its own — **conditional**, so it also owes §3.3.2 assertion 2 a complement, which P23 did not. Two decisions first: whether the truthiness tests are themselves the defect (`parallel_tool_calls` already uses `is not None`), and how the row's `envelope.extra[reasoning]` claim is to coexist with P22's. **Before T-D5** | **1** |
 | **G23** | **`openai_subscription` injects `reasoning` from `_reasoning_effort`, unregistered** — KBR-149 | Three sites in `providers/openai_subscription.py` set `reasoning: {"effort": …}` from kitty's internal key. Structurally identical to P3 and P4, and **P4 cannot cover it**: §3.2.3 records that `translate_to_upstream` never runs on this adapter's request path. Unlike G22 this is a **request-body** row feeding §3.3.2 assertion 1, so the moment T-D5 drives a corpus entry carrying a reasoning effort the oracle reports a *false* I1 breach on a deliberate mutation — the under-claiming direction §3.3.1a calls unrecoverable | Add P22: trigger `REASONING_EFFORT_PRESENT`, conditional, anchored at `envelope.extra[reasoning]`. Needs a trigger case and a complement in the corpus. **Before T-D5** | **1** |
 | **G22** | **Register header coverage is partial and inconsistent** — KBR-148 | Rows exist for four adapters (P9a ×3, P9b, P9c). At least six more deviate from the base header set with none: `AnthropicAdapter` and its three subclasses plus `ZaiAnthropicAdapter` (`x-api-key` / `anthropic-version` / lowercase `content-type`), `AzureOpenAIAdapter` (`api-key` on the non-Entra credential), and `OllamaAdapter`, which drops `Authorization` entirely — the same shape as P9b, which *does* have a row. `openai_subscription` additionally sets a conditional `ChatGPT-Account-Id` no row names | One row per deviation; `ChatGPT-Account-Id` becomes P9d, conditional, with a claimless-`id_token` fixture for its assertion-2 complement. Then §4.3 C1's per-adapter expectation is *reviewable against the register* instead of written from scratch — which is what stops C1 reproducing the ad-hockery F1 names | **2** |
 | **G21** | **A declared trigger is never verified** — KBR-140 | §7.4 hands the oracle `triggers_met` as an argument and §3.3.2 asserts only that a row is **absent** when its trigger is not met. Nothing asserts a trigger declared met actually fired, so a corpus entry that over-declares makes assertion 1 claim every delta — the oracle reports green on a bridge that is rewriting messages. The same author writes the entry and its trigger index (T-W6), so the mechanism has no second reader | Roughly fifteen triggers are decidable from the inbound request; give those an optional predicate and have T-D8 require the declaration to agree with it. M6, M8, M9 and M12 depend on an upstream response and stay declaration-only — the stated residual risk. Blocked on T-A1/T-A2, since a predicate needs a projected request to read | **1** |
@@ -3495,6 +3784,7 @@ does not surface work that is done. `TEST_SUITE_IMPLEMENTATION_PLAN.md` §16 mir
 | **G9** | C5 unmeasured | `force_close=True` gives a per-request connection pattern unlike the agent's | Connection-count baseline | **3** |
 | **G11** | Dependency behaviour unpinned; `curl_cffi` unbounded, **botocore undeclared** and the interpreter declared to the minor only | One of five §6.2.4 contracts has landed — the stdlib `ipaddress` one (KBR-146). The four transport contracts and the `botocore` declaration remain, so containment still rests on an undeclared transitive dependency | Dependency contract tests (§6.2.4) + declare botocore | **3** |
 | **G25** | **§6.2.4 contracts are only ever evaluated on the newest patch of each minor** — KBR-146 | `tests.yml` names bare minor versions and `actions/setup-python` resolves each to the newest patch. Every dependency contract therefore proves forward drift only; a value that differs on an older patch a user runs — the shape KBR-146 had — is invisible to the gate. Today that half rests on one L1 test that forces the property both ways, which works because the surrounding behaviour was measured stable, and does not generalise to a contract whose neighbours have not been | One job pinned to the oldest supported patch (`setup-python` accepts an exact version, so it is one job, not four). Deferred as a CI-spend decision, not a technical one | **3** |
+| **G26** | **Post-emission failover is reachable for the timeout class** — KBR-183 | §11 Q14(a) decides that once a byte has reached the client the bridge closes the turn rather than recovering. `bridge/server.py` honours that for the **transport** class only: `_is_transport_error` returns `False` for `asyncio.TimeoutError` by design, and the failover arm after it carries **no** emission test, so a mid-stream `sock_read` timeout after emission marks the backend unhealthy, selects another and writes a second attempt onto the already-prepared response. Measured on this interpreter: `ServerTimeoutError` and bare `asyncio.TimeoutError` are both retryable and not-transport. Second-order: `_attribution_headers()` is evaluated inside `_ensure_prepared`, so such a switch also ships headers naming the first backend while the second's content streams, which falsifies §6.3.1's `/stats` caveat | Consult `sr is not None` in the failover arm, not only in the transport branch — the decision's mechanical test is `_ensure_prepared`'s own contract, and **any new branch in the streaming handler must read it**. T-I7 covers it once written | **1** |
 | **G12** | Product layer effectively absent | 2 E2E tests, never run in CI | Nightly job, extended to 5 Claude Code cases | **4** |
 | **G13** | No answer-quality signal | Compaction and the Fireworks cap can degrade output invisibly | Paired delta eval | **4** |
 
@@ -3656,8 +3946,9 @@ memory does not grow is false on the paths that buffer a whole response.
 
 ## 11. Open questions for the product owner
 
-Answers belong in this document. They are not invented here. Q10-Q14 are prerequisites for the
-implementation work they name — each blocks a test whose acceptance oracle depends on it.
+Answers belong in this document. They are not invented here. Q10-Q13 are prerequisites for the
+implementation work they name — each blocks a test whose acceptance oracle depends on it. An
+answered question keeps its place in the list and carries its answer in the heading.
 
 **Q1 — How faithful should the agent's identity be (F1, G3, KBR-8)?** Three options, materially
 different: (a) forward a curated allowlist of the agent's real headers, uniformly, so every
@@ -3744,7 +4035,93 @@ input the direct-provider arm returns a 400, so there is no answer to compare ag
 Candidates: kitty against a larger-context model, or kitty with compaction relaxed. The choice
 determines what a regression in that arm actually means.
 
-**Q14 — What is a correct stream recovery after bytes have reached the client (§6.3.1)?** Failover
+**Q14 — ANSWERED by the product owner, 2026-09-12.** Two parts, and the second is what makes the
+first affordable.
+
+**(a) Post-emission, the bridge closes the turn and surfaces the error.** Once a byte has reached
+the client there is no retry and no failover. The bridge closes any half-open content block,
+emits one terminal error, and lets the agent retry the whole turn. The first candidate below —
+abandon the partial block and re-open under a new id — is **rejected**.
+
+**(b) An empty stream is kept out of that situation rather than recovered from inside it.** On
+the native passthrough the bridge performs a **preamble hold**: it withholds the stream's *leading*
+events until the first content event arrives, mirroring the buffer the translated path already
+keeps (*"Buffer finish events to detect empty responses before writing"*). A contentless reply is
+therefore still pre-emission when it is detected and keeps the ordinary retry ladder. This is the
+KBR-155 remedy; KBR-163 records it, KBR-155 implements it.
+
+Four things the implementer needs that the question itself did not settle, decided here so KBR-155
+is writable:
+
+- **What releases the hold.** The first `content_block_delta` of a non-thinking block. A
+  thinking-only reply and a `message_delta` carrying `stop_reason: max_tokens` with no content are
+  **not** content: the first is a reply the user cannot read, the second is a truncation no retry
+  can improve — so the first releases nothing, and the second exhausts the ladder rather than
+  restarting it.
+- **The held bytes are replayed verbatim, never re-serialised.** §4.3 C2 keeps a byte-level
+  key-order assertion that applies wherever kitty claims to be forwarding rather than translating.
+  A hold that re-emitted parsed events would break that claim while looking identical downstream.
+- **Ladder exhaustion.** When every attempt comes back empty the client receives a **terminal
+  error** — not fallback text, and not the empty stream. Nothing has been emitted, so this is the
+  ordinary pre-emission error path. Deliberately *not* the translated path's substituted fallback
+  text: that is register row **M12**, whose Site column names the two translators, and the native
+  path drives neither. Fallback text here would open a second place where the bridge puts words in
+  the model's mouth and would require M12's row to be widened in the same change; an error opens
+  none.
+- **The accepted cost, stated rather than discovered.** Under the hold a stalled native stream
+  produces *no* downstream bytes until `_STREAM_READ_TIMEOUT`, where today the client sees
+  `message_start` within a round trip; and because `sr` stays `None`, that failure then surfaces as
+  a pre-emission JSON error response rather than a `200` carrying an SSE `error` event. Both change
+  the downstream contract, and §6.2.2's grammar suite must cover the second.
+
+**Why, and not the obvious alternative.** Three reasons, in decreasing order of how much they
+would cost to be wrong about.
+
+1. **It is what the provider being imitated does.** Verified against the official Anthropic Python
+   SDK, `src/anthropic/_streaming.py` (the `sse.event == "error"` branch, sync and async): a
+   mid-stream failure arrives as an SSE `error` event and is raised to the caller. No resumption,
+   no re-opened block, no second attempt — the HTTP status was already `200` and the stream simply
+   ends in an error. The claim this rests on is §1's ordinary-correctness promise that *protocol
+   translation is faithful*, together with §6.2.2's SSE grammar — **not I2**, which the correction
+   below shows is upstream-side and says nothing about what the client is handed. The client is
+   Claude Code, and Claude Code is written against Anthropic's stream shape.
+2. **It ratifies a policy already in force.** `bridge/server.py`'s streaming handler already makes
+   exactly this choice for a mid-stream transport drop — *"Bytes already reached the client, so a
+   restart on any backend would duplicate them. Close the message off instead"* — for exactly this
+   reason, and calls it the same choice FI-8.3 makes for a clean truncation. Answering the other
+   way would mean **changing working code to introduce a duplication hazard**.
+
+   **The transport class only, and that is a gap rather than a hedge.** `_is_transport_error`
+   returns `False` for `asyncio.TimeoutError` deliberately, and the failover arm that follows
+   carries no emission test at all, so a mid-stream `sock_read` timeout **after** bytes have
+   reached the client still marks the backend unhealthy, selects another and writes a second
+   attempt onto the already-prepared response. Measured, not inferred: `ServerTimeoutError` and
+   bare `asyncio.TimeoutError` both report retryable and not-transport. So (a) is a decision the
+   code honours on one path and breaches on another — gap **G26**, filed as **KBR-183**.
+3. **The alternative is not soundly implementable.** Re-opening on a second backend lets the client
+   receive the same sentence twice, or tool-call arguments spliced from two attempts. §6.3.1 states
+   the consequence and it is not hypothetical: every SSE event stays syntactically valid while the
+   conversation is corrupt, and Claude Code will act on a duplicated tool call. De-duplicating
+   across attempts needs to know what the second backend was about to say.
+
+**One correction to the framing this question was filed under.** KBR-163 argued that buffering the
+passthrough "changes downstream latency and the observable timing that invariant **I2**
+constrains". It does not: every I2 channel in §4.2 — C1 headers, C2 body, C3 cross-attempt content
+and cadence, C4 transport fingerprint, C5 connection lifecycle — is **upstream-side**. What the
+downstream client is handed, and when, is invisible to the provider. The only coupling is TCP
+backpressure, and holding a bounded preamble makes the bridge read upstream *sooner*, not later,
+which is what any promptly-reading client does. The real cost of (b) is downstream
+time-to-first-token, which is a user-experience question and bounded by the preamble, not an I2
+breach. That is why (b) is affordable and full buffering — unbounded, and growing with stream
+length — still is not.
+
+**What this does not decide.** The wording of the terminal error the client receives follows Q9's
+precedent (downstream only, names the product) and is KBR-155's to settle. The *zero-chunk* case
+is untouched: if upstream yields no chunks at all the loop body never runs, `sr` stays `None`, and
+the ordinary pre-emission ladder already applies.
+
+*Original question:* what is a correct stream recovery after bytes have reached the client
+(§6.3.1)? Failover
 before the first downstream byte is unambiguous. After text has been emitted, or mid tool-call
 arguments, there is no obvious right answer: abandon the partial block and re-open under a new
 id, fail the turn and let the agent retry, or something else. Until this is decided the L3 row
