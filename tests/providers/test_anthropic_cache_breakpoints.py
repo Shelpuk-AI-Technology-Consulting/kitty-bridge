@@ -40,9 +40,10 @@ only on an Anthropic-shaped upstream.
 covering sites, not a valid request. It carries seven breakpoints where Anthropic
 allows four; its top-level 5-minute breakpoint differs from the last block's
 1-hour one, which Anthropic answers with a 400; and it places a 5-minute entry
-before a 1-hour one, which Anthropic's docs forbid. Do not reuse it against a live or realistic upstream. Nor does this
-module cover the server's steps between the two hops (model normalisation,
-truncation, compaction): none of them reads or writes ``cache_control``.
+before a 1-hour one, which Anthropic's docs forbid. Do not reuse it against a
+live or realistic upstream. Nor does this module cover the server's steps
+between the two hops (model normalisation, truncation, compaction): none of
+them reads or writes ``cache_control``.
 
 Jira: KBR-199 (epic KBR-197). Design: ``.system_design/TEST_SUITE.md`` §3.2.1
 row M16, §3.4, and gaps G37 and G38.
@@ -281,8 +282,8 @@ def test_the_default_anthropic_route_delivers_none_of_the_agents_breakpoints() -
     the one a user routing Claude Code at Anthropic is most likely to be on, and
     where someone would assume the body passes through essentially untouched.
     Commercial consequence: the whole stable prefix (tool definitions, system
-    prompt, history) is re-billed at no less than ten times its cached rate on every
-    turn.
+    prompt, history) is re-billed at no less than ten times its cached rate, on
+    every turn.
     """
     intermediate = MessagesTranslator().translate_request(_claude_code_body(breakpoints=True))
 
@@ -371,9 +372,9 @@ def test_the_intermediate_handed_to_the_adapter_has_no_cache_control_field() -> 
 
     This is the only test here that catches the translator emitting a
     breakpoint of its own, one the agent never set, at a site the adapter
-    drops, where the round trip would not show it. Commercial consequence of such a change:
-    cache writes nobody asked for, at a TTL nobody chose, on every route that
-    forwards the key.
+    drops, where the round trip would not show it. Commercial consequence of
+    such a change: cache writes nobody asked for, at a TTL nobody chose, on
+    every route that forwards the key.
     """
     intermediate = MessagesTranslator().translate_request(_claude_code_body(breakpoints=True))
 
@@ -598,11 +599,10 @@ def test_the_adapter_keeps_or_drops_a_given_breakpoint_site_by_site(
 
     The adapter copies user content and tool-message content verbatim, so a
     breakpoint there survives with its position and TTL. The tool-message one is
-    moved inside the ``tool_result`` block's ``content``, a depth at which it is not
-    established that Anthropic honours a breakpoint, so a fix may change that case
-    too. The adapter
-    rebuilds the request, messages, ``system``, ``tools`` and tool calls, so a
-    breakpoint there is dropped.
+    moved inside the ``tool_result`` block's ``content``, a depth at which it is
+    not established that Anthropic honours a breakpoint, so a fix may change
+    that case too. The adapter rebuilds the request, messages, ``system``,
+    ``tools`` and tool calls, so a breakpoint there is dropped.
 
     Commercial consequence: a Chat Completions client on this provider still
     caches the tools and system prompt up to a kept user-turn breakpoint, since
