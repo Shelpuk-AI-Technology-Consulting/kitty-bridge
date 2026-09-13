@@ -250,10 +250,15 @@ class TestReleaseRule:
         typeless = b'event: content_block_delta\ndata: {"index":0,"delta":{"type":"text_delta","text":"Hi"}}\n\n'
         assert hold.feed(MESSAGE_START + typeless) != b""
 
-    def test_event_name_does_not_leak_past_its_blank_line(self):
-        """A type-less data line after an ``error`` event has ended is not that error."""
+    def test_error_event_name_releases_with_no_data_line(self):
+        """The SDK's SSE decoder dispatches a data-less ``event: error`` and raises on it."""
         hold = PreambleHold()
-        stream = b"event: error\n\n" + b'data: {"index":0}\n\n'
+        assert hold.feed(MESSAGE_START + b"event: error\n\n") != b""
+
+    def test_event_name_does_not_leak_past_its_blank_line(self):
+        """A type-less data line after an event has ended is not judged by that event's name."""
+        hold = PreambleHold()
+        stream = b"event: content_block_delta\n\n" + b'data: {"index":0,"delta":{"type":"text_delta","text":"Hi"}}\n\n'
         assert hold.feed(MESSAGE_START + stream) == b""
 
     def test_exceeding_the_cap_releases(self):

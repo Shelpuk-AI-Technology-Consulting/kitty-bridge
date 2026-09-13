@@ -149,15 +149,13 @@ class PreambleHold:
         """
         if line.startswith(b"event:"):
             self._event_name = line[6:].strip().decode("utf-8", errors="replace")
-            return False
+            # D2: the SDK dispatches and raises on `event: error` even with no data line at all.
+            return self._event_name == "error"
         if not line.strip():
             self._event_name = None
             return False
         if not line.startswith(b"data:"):
             return False
-        # D2: the SDK raises on `event: error` whatever its data holds, so the name alone releases.
-        if self._event_name == "error":
-            return True
         try:
             event = json.loads(line[5:].strip().decode("utf-8", errors="replace"))
         except (ValueError, RecursionError):
