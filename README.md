@@ -747,6 +747,13 @@ Running the same command again reattaches too. Notes:
 - If a session with that name exists but kitty did not start it, kitty stops and tells you how to
   attach to it or remove it.
 - If kitty fails inside the session, the pane stays open with the error until you press Enter.
+- The command's exit code is tmux's, not kitty's: a launch that fails inside the session still
+  exits 0 once the pane closes. Scripts should not branch on it; read the pane instead.
+- Kitty runs as it always did, with no tmux session and no protection, when there is no terminal
+  (a script or CI job), on Windows, or outside a git repository: `--tmux` reaches Claude Code
+  unchanged.
+- On macOS with iTerm2, `--tmux` under kitty gives a plain tmux session rather than iTerm2's
+  native panes.
 
 ### Can I use kitty with Cursor, Windsurf, or other IDEs?
 

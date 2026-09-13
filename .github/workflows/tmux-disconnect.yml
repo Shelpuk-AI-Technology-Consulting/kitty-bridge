@@ -161,6 +161,9 @@ jobs:
             || fail "the IPv6 reject rule for the test user is not in place"
           echo "Outbound traffic for the test user is limited to the egress gateway."
 
+      # `configure_kitty.py` addresses kitty as `$pythonLocation/bin/kitty` and refuses
+      # without it. `sudo` drops the runner's value, and the test user's kitty lives in
+      # its own virtualenv anyway, so the variable is set to that.
       - name: Configure kitty for the test user
         shell: bash
         env:
@@ -170,7 +173,7 @@ jobs:
         run: |
           set -euo pipefail
           sudo --preserve-env=KITTY_PROFILES_JSON,KITTY_CREDENTIALS_JSON,KITTY_EGRESS_JSON -u kittytest -H \
-            bash -c 'cd ~/repo && ~/venv/bin/python .github/review/scripts/configure_kitty.py --wrapper-dir ~/kitty-bin --github-output ~/configure.out'
+            bash -c 'cd ~/repo && pythonLocation="$HOME/venv" ~/venv/bin/python .github/review/scripts/configure_kitty.py --wrapper-dir ~/kitty-bin --github-output ~/configure.out'
           if ! sudo grep -qx "available=true" /home/kittytest/configure.out; then
             echo "::error::kitty could not be configured for the test user; see the annotation above."
             exit 1
