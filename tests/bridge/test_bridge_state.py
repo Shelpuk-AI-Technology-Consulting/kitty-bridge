@@ -130,6 +130,29 @@ class TestBridgeStateHelpers:
         assert loaded.started_at.endswith("Z")
 
 
+class TestDefaultStatePath:
+    """KBR-220: one resolver for where ``bridge_state.json`` lives."""
+
+    def test_it_is_under_the_home_directory_even_when_the_config_dir_is_elsewhere(self, tmp_path: Path, monkeypatch):
+        """Resolve under the home directory, whatever ``user_config_dir`` says.
+
+        The two directories are deliberately different: on stock Linux they
+        coincide, which is how the CLI and the bridge disagreed on macOS, Windows
+        and XDG Linux without any test noticing. The home is read at call time,
+        so a process whose home changes after import still agrees with a child
+        that starts with that home.
+        """
+        import platformdirs
+
+        from kitty.bridge.state import default_state_path
+
+        home = tmp_path / "home"
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+        monkeypatch.setattr(platformdirs, "user_config_dir", lambda *a, **k: str(tmp_path / "config" / "kitty"))
+
+        assert default_state_path() == home / ".config" / "kitty" / "bridge_state.json"
+
+
 class TestWriteStateAtomicity:
     """F40: write_state must use temp file + os.replace for atomic writes."""
 

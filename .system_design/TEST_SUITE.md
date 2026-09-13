@@ -3804,8 +3804,8 @@ business, together with the job that runs them; doing it earlier would remove th
 gate. T-H1 must take that reclassification into account before it measures a mutation
 baseline, because it selects on `l1`.
 
-**Nine modules are bulleted below — in seven bullets, since the T-W4 and T-W8 rows name two
-modules each — and `tests/cli/test_stream_encoding.py` (KBR-10) is described after them, ten in
+**Ten modules are bulleted below — in eight bullets, since the T-W4 and T-W8 rows name two
+modules each — and `tests/cli/test_stream_encoding.py` (KBR-10) is described after them, eleven in
 all, named here so T-K6 inherits a list rather than a search** — the count
 is what T-K6 and T-H1 plan against. (The bullet count and the KBR-10 paragraph were already
 drifting apart before T-W8 added two; spelling out both is what stops the next addition
@@ -3860,6 +3860,19 @@ separately.)
   behaviour. The four spawning cases take **~0.6 seconds** together and the whole module
   **~3 seconds**, measured. The child is a `python -c` script, never `kitty.bridge_runner`, which
   would refresh the model-context catalog over the network.
+- **KBR-220:** `tests/cli/test_bridge_state_location.py` runs the real `kitty bridge start`,
+  `status`, `restart` and `stop`, and a real `kitty.bridge_runner` started as a service would start
+  it. It has no choice: the defect lived *between* two processes, each of which resolved its path
+  correctly by its own logic. It is the **one** module allowed to spawn `kitty.bridge_runner`, and it
+  keeps KBR-176's reason for the rule. The model-context catalog cache is seeded fresh in an isolated
+  cache directory, so no fetch runs inside `start`'s 5-second window and no user cache is written.
+  Its isolation is worth copying: `WIN_PD_OVERRIDE_LOCAL_APPDATA` (platformdirs ≥ 4.8), because
+  plain `LOCALAPPDATA` does not redirect Windows. A child reports where kitty will look, and the
+  fixture refuses before writing anything unless that is the temporary directory. Its three cases
+  take **~6.5 seconds** on Linux, measured. **The Windows and macOS figures are to be read off the
+  first green legs.** One cost to know about: a bridge that misses the 5 s window fails the case
+  with *"did not report ready"* rather than slowing it, so a slow runner shows up as a red leg,
+  never as a quiet delay.
 
 **One cross-cutting cost, added by KBR-188's fix.** Every conformance probe now begins by waiting
 for the clock to report a new instant (§8.3). Measured at **80 calls** across the harness suite:

@@ -25,6 +25,26 @@ class BridgeState:
     tls: bool
 
 
+def default_state_path() -> Path:
+    """Return where a bridge records its state unless told otherwise.
+
+    This is the one resolver for ``bridge_state.json``: ``kitty bridge
+    start|stop|restart|status``, :mod:`kitty.bridge.manage` and
+    :mod:`kitty.bridge_runner` all call it, so the process that polls the file
+    and the process that writes it cannot name two different places (KBR-220).
+
+    It is ``~/.config/kitty`` on every platform, not ``platformdirs``'
+    ``user_config_dir``: every background bridge has always written its state
+    there, so bridges already running when kitty is upgraded stay visible to
+    ``status`` and ``stop`` with nothing to migrate. The home directory is read
+    on each call rather than at import.
+
+    Returns:
+        The default path of ``bridge_state.json``.
+    """
+    return Path.home() / ".config" / "kitty" / "bridge_state.json"
+
+
 def write_state(path: Path | str, state: BridgeState) -> None:
     """Write bridge state to a JSON file atomically (F40).
 
