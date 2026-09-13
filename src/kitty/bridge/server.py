@@ -4095,7 +4095,7 @@ class BridgeServer:
                                 type(exc).__name__,
                                 message_id,
                             )
-                            # The native-passthrough path never drives the
+                            # The Messages-wire forwarding path never drives the
                             # translator, so it has no half-open message to
                             # close and would otherwise leave the client on an
                             # SSE stream that just stops.  Those get the error

@@ -4983,6 +4983,32 @@ keeps (*"Buffer finish events to detect empty responses before writing"*). A con
 therefore still pre-emission when it is detected and keeps the ordinary retry ladder. This is the
 KBR-155 remedy; KBR-163 records it, KBR-155 implements it.
 
+**Amended by KBR-227 (2026-09-13): "the native passthrough" now means the Messages-wire passthrough.**
+`_stream_messages` forwards the upstream stream unchanged whenever `BridgeServer._serves_messages_wire`
+holds — a native adapter, **or** a translated one whose upstream speaks Messages for the routed model
+(`anthropic`, `minimax_token` by default, `opencode_go`'s Messages models). Those translated routes used
+to push Anthropic SSE through the Chat Completions chunk translator, which discarded every event and sent
+Claude Code an empty reply. So everything (b) says about the passthrough, and the preamble hold KBR-155
+adds, applies to them too; every site that decides "Messages wire" must call that one method. What the
+change traded, recorded here because each is a behaviour the translated branch had or lacked:
+
+- **A pre-content `error` event is forwarded and the backend marked healthy**, as on native passthrough.
+  The translated branch failed over on it, and on these routes that worked — while every successful
+  stream arrived empty. Restoring failover is **KBR-233**; the preamble hold is its natural home.
+- **Post-emission timeout failover (G26 / KBR-183) becomes reachable** on these routes, because bytes now
+  reach the client.
+- **A forwarded stream is counted as one completion** (`_log_usage(None)`), for native routes too, which
+  counted none. Tokens stay 0 on every Messages-wire route: `_log_usage` reads Chat Completions usage keys.
+  Under `--logging` this writes a zero-token usage-log line per turn. When the preamble hold lands, the
+  count belongs **inside** its release test: a discarded empty attempt is not a completion.
+- **Claude Code now receives signed thinking blocks**, and the request side still strips signatures, so
+  with thinking on a signature-validating upstream rejects turn 2 and a balancing pool classifies that 400
+  as `hard`. Not a regression — turn 1 used to be empty — and **KBR-228**'s to fix.
+- **Non-streaming** `/v1/messages` on the same routes still translates: thinking dropped, stop reason
+  mapped, M12 reachable. Aligning it is KBR-228's.
+- An accidental Chat Completions stream from a Messages-wire upstream is no longer translated on
+  `/v1/messages`. The other inbound protocols share the original defect and still translate: **KBR-232**.
+
 Four things the implementer needs that the question itself did not settle, decided here so KBR-155
 is writable:
 
