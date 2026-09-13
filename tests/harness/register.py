@@ -130,6 +130,7 @@ class Trigger(Enum):
     UPSTREAM_REJECTED_OVERSIZED_ON_BALANCING = "upstream_rejected_oversized_on_balancing"
     ORPHAN_TOOL_RESULT = "orphan_tool_result"
     THINKING_ROUNDTRIP_REJECTED = "thinking_roundtrip_rejected"
+    THINKING_SIGNATURE_REJECTED = "thinking_signature_rejected"
     NATIVE_TOOL_USE_FORMAT_ERROR = "native_tool_use_format_error"
     GEMINI_PROTOCOL = "gemini_protocol"
     GEMINI_NON_STREAMING = "gemini_non_streaming"
@@ -532,6 +533,17 @@ _BRIDGE_ROWS: tuple[MutationRow, ...] = (
         ),
         conditional=False,
         design_ref="§3.2.1 · §3.3.1 · §3.3.1a",
+    ),
+    MutationRow(
+        id="M17",
+        site=(f"{_SERVER}:_strip_thinking_blocks",),
+        trigger=Trigger.THINKING_SIGNATURE_REJECTED,
+        # The strip removes whole `thinking` and `redacted_thinking` parts, so the
+        # parts after them shift index: M8's prefix anchor over every part is the
+        # only address that claims that, for the same §3.3.1a reason.
+        paths=(c.part_path(c.WILDCARD, c.WILDCARD),),
+        conditional=True,
+        design_ref="§3.2.1 · §3.3.1a",
     ),
 )
 

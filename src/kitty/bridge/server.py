@@ -413,7 +413,7 @@ def _is_thinking_signature_error(status: int, body: object) -> bool:
 
 
 def _strip_thinking_blocks(body: dict) -> bool:
-    """Remove every ``thinking`` and ``redacted_thinking`` block from a Messages body's assistant turns.
+    """Remove every ``thinking`` and ``redacted_thinking`` content block from a Messages body.
 
     Anthropic's documented recovery for a signature rejection is to strip every
     thinking block and retry once; the model then answers without its earlier
@@ -440,7 +440,8 @@ def _strip_thinking_blocks(body: dict) -> bool:
     stripped = messages.copy()
     changed = False
     for index, msg in enumerate(messages):
-        if not isinstance(msg, dict) or msg.get("role") != "assistant" or not isinstance(msg.get("content"), list):
+        # Only assistant turns ever carry these blocks, so no role test is needed.
+        if not isinstance(msg, dict) or not isinstance(msg.get("content"), list):
             continue
         kept = [
             block
@@ -3797,7 +3798,8 @@ class BridgeServer:
             _original_max_attempts = (_MAX_RETRIES + 1) * n_backends
             max_attempts = _original_max_attempts + len(_EMPTY_FINAL_DELAYS)
             transport_grace = TransportGrace()
-            # One signature strip per request; the #32 repair must not undo it.
+            # Once thinking is stripped, the #32 repair must not re-add an unsigned carrier the
+            # API would reject again: the two would take turns until attempts ran out.
             thinking_stripped = False
             # A grace retry re-sends to the *same* backend after a connection
             # blip, so it must not spend a failover attempt or pull the
@@ -3891,9 +3893,6 @@ class BridgeServer:
                                 not thinking_stripped
                                 and attempt < max_attempts - 1
                                 and _is_thinking_signature_error(upstream.status, error_body)
-                                and self._active_provider.upstream_wire_is_messages_api_for_model(
-                                    _route_model(cc_request)
-                                )
                                 and _strip_thinking_blocks(upstream_body)
                             ):
                                 thinking_stripped = True
@@ -7315,12 +7314,12 @@ class BridgeServer:
 
                     # In balancing mode (retry_rate_limit=False), raise 429 immediately
                     # so the caller can fail over to another backend.
-                    # The bridge's history failed signature checks: strip thinking and retry
-                    # this backend once, before any path can blame the backend (KBR-238).
+                    # The bridge's history failed signature checks: strip thinking and retry this
+                    # backend once, before any path can blame it (KBR-238).  The flag bounds the
+                    # loop outright rather than trusting the strip to report no change next time.
                     if (
                         not thinking_stripped
                         and _is_thinking_signature_error(last_status, last_body)
-                        and self._active_provider.upstream_wire_is_messages_api_for_model(_route_model(cc_request))
                         and _strip_thinking_blocks(upstream_body)
                     ):
                         thinking_stripped = True

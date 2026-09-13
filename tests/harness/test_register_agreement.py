@@ -200,7 +200,7 @@ class TestTheParserReadsTheDesignDocument:
 
     def test_the_parser_reads_both_tables(self, markdown: str) -> None:
         """A parser that read only §3.2.1 would still look healthy on the M rows."""
-        assert len([i for i in r.parse_register_markdown(markdown).live_ids if i.startswith("M")]) == 15
+        assert len([i for i in r.parse_register_markdown(markdown).live_ids if i.startswith("M")]) == 16
         assert len([i for i in r.parse_register_markdown(markdown).live_ids if i.startswith("P")]) == 29
 
     def test_the_parser_reads_the_unconditional_list(self, markdown: str) -> None:

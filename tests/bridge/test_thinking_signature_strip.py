@@ -397,7 +397,7 @@ async def test_a_second_rejection_after_the_strip_is_surfaced_not_looped(stream)
 
 @pytest.mark.asyncio
 async def test_a_chat_completions_upstream_is_not_stripped():
-    """R7 — only a Messages-wire upstream renders thinking signatures; elsewhere the text is someone else's error."""
+    """R7 — a Chat Completions body carries no thinking blocks, so there is nothing to strip and no retry."""
     server = BridgeServer(
         adapter=_StubLauncher(),
         provider=CustomOpenAIAdapter(),
@@ -414,3 +414,21 @@ async def test_a_chat_completions_upstream_is_not_stripped():
 
     assert status == 400
     assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_stripped_stream_is_not_repaired_back_into_an_unsigned_carrier():
+    """R6b — after the strip, the issue-#32 carrier repair does not fire, so the two cannot ping-pong.
+
+    The carrier is an unsigned thinking block, exactly what the signature check
+    rejects.  Were the repair allowed after a strip, it would re-add one, the
+    strip would remove it again, and the pair would spend every attempt.
+    """
+    roundtrip = _envelope("The `content[].thinking` in the thinking mode must be passed back to the API.")
+
+    status, _text, calls = await _drive(
+        _native_server(), _NATIVE_URL, [(400, _envelope(_INVALID_SIGNATURE)), (400, roundtrip)], stream=True
+    )
+
+    assert status == 400
+    assert len(calls) == 2
