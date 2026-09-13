@@ -27,6 +27,10 @@ _EMPTY_ASSISTANT_FALLBACK_TEXT = (
 )
 
 
+#: KBR-203: the thinking ``display`` values Anthropic accepts without a beta header.
+_GA_THINKING_DISPLAYS: tuple[str, ...] = ("summarized", "omitted")
+
+
 class MessagesTranslator:
     """Translates between Anthropic Messages API and Chat Completions formats."""
 
@@ -231,11 +235,16 @@ class MessagesTranslator:
                 result["_reasoning_effort"] = "high"
             elif thinking.get("type") == "disabled":
                 result["_thinking_enabled"] = False
-            # KBR-203: `display` decides whether the user sees any thinking text,
-            # and Chat Completions has no slot for it.  Anthropic rejects it with
-            # `disabled`, so only the two modes that accept it carry it.
-            if thinking.get("type") in ("enabled", "adaptive") and "display" in thinking:
-                result["_thinking_display"] = thinking["display"]
+            # KBR-203: Chat Completions has no slot for `display`.  Only the two GA
+            # values are carried -- beta "updates" needs a header kitty never
+            # sends -- and never with `disabled`, which Anthropic rejects.
+            display = thinking.get("display")
+            if (
+                thinking.get("type") in ("enabled", "adaptive")
+                and isinstance(display, str)
+                and display in _GA_THINKING_DISPLAYS
+            ):
+                result["_thinking_display"] = display
 
         return result
 

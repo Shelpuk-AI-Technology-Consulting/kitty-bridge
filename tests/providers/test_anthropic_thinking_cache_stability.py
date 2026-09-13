@@ -130,7 +130,9 @@ class TestAdaptiveThinkingAndEffortAreStable:
         """R3 — ``{"type": "adaptive"}`` is forwarded as sent, and ``max_tokens`` is not raised.
 
         Parametrised over two ``max_tokens`` so the pair is the same comparison
-        R1 makes for the enabled branch, with the opposite outcome.
+        R1 makes for the enabled branch, with the opposite outcome.  The claim is
+        about the shipped thinking *configuration* only; the assistant turns on
+        this route change for other reasons (P5e).
 
         Args:
             max_tokens: The agent's ``max_tokens``.
@@ -142,14 +144,16 @@ class TestAdaptiveThinkingAndEffortAreStable:
 
     @pytest.mark.parametrize("effort", ["low", "medium", "high", "xhigh", "max"])
     def test_effort_ships_verbatim(self, effort):
-        """R4 — top-level ``effort`` is forwarded as sent.
+        """R4 — the top-level ``effort`` key kitty copies (P5d) is forwarded as sent.
 
-        Verbatim is the property that keeps it cache-safe: any normalisation
-        that could map one agent value to another would change the rendered
-        prompt the way P5c's rewrite does.
+        That key is not in Anthropic's API reference: it is what Claude Code
+        sends (TEST_SUITE.md §3.3.1b).  The documented spelling is
+        ``output_config.effort``, which this route drops (KBR-224), and the
+        values here are borrowed from that field's enum.  So this pins
+        verbatim copying and nothing more — it makes no claim about caching.
 
         Args:
-            effort: One of the documented effort levels.
+            effort: A value from ``output_config.effort``'s enum.
         """
         shipped = _ship(AnthropicAdapter(), _messages_body(max_tokens=8000, effort=effort))
 
@@ -179,11 +183,22 @@ class TestTranslatorCarriesThinkingDisplay:
 
     @pytest.mark.parametrize(
         "thinking",
-        [{"type": "adaptive"}, {"type": "disabled", "display": "summarized"}],
-        ids=["absent", "disabled-mode"],
+        [
+            {"type": "adaptive"},
+            {"type": "disabled", "display": "summarized"},
+            {"type": "adaptive", "display": "updates"},
+            {"type": "enabled", "budget_tokens": _AGENT_BUDGET, "display": "verbose"},
+            {"type": "adaptive", "display": {"mode": "summarized"}},
+        ],
+        ids=["absent", "disabled-mode", "beta-updates", "unknown-value", "non-string"],
     )
     def test_display_is_not_carried_when_absent_or_invalid(self, thinking):
-        """Nothing is invented, and ``display`` with ``disabled`` — which Anthropic rejects — is not carried.
+        """Only a GA value on a mode that accepts it is carried.
+
+        Nothing is invented when the agent sent none.  ``disabled`` rejects
+        ``display`` outright.  The beta ``"updates"`` needs an ``anthropic-beta``
+        header kitty never forwards, so carrying it would turn a request that
+        works today into a 400; an unknown or malformed value would do the same.
 
         Args:
             thinking: An agent thinking object that must not yield the key.
@@ -245,6 +260,23 @@ class TestThinkingDisplayRestoredOnlyWhereTheUpstreamDocumentsIt:
 
         assert shipped["thinking"]["type"] == thinking["type"]
         assert "display" not in shipped["thinking"]
+
+    def test_display_is_never_added_to_disabled_thinking(self):
+        """The adapter itself refuses ``display`` on ``disabled``, whoever wrote the key.
+
+        The translator never writes the pair, but the adapter must not rely on
+        that: Anthropic rejects ``display`` alongside ``disabled``.
+        """
+        cc_request = {
+            "model": "claude-opus-4-6",
+            "messages": [{"role": "user", "content": "hi"}],
+            "_thinking_enabled": False,
+            "_thinking_display": "summarized",
+        }
+
+        shipped = AnthropicAdapter().translate_to_upstream(cc_request)
+
+        assert shipped["thinking"] == {"type": "disabled"}
 
     def test_the_internal_key_never_ships(self):
         """``_thinking_display`` itself is stripped on a route that does not read it."""
