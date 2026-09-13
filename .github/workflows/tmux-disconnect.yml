@@ -1,0 +1,181 @@
+name: tmux disconnect (live)
+
+# Live proof that `kitty claude -w <name> --tmux` survives a terminal hang-up:
+# kitty, its bridge and Claude Code keep working after the pseudo-terminal they
+# were started on is hung up, the way a dropped SSH connection hangs one up.
+# Design and the reason for every rule below: .system_design/SYSTEM_DESIGN.md §3.4.
+#
+# NOT a required check. It is path-filtered, so on every pull request that does
+# not touch the wrap it never starts, and a required check would sit pending.
+#
+# Unlike `claude-code-review.yml`, this job installs the PULL REQUEST'S OWN
+# checkout: the claim under test is about this code. That is also why egress is
+# enforced below kitty (a firewall scoped to the test user) and not only by the
+# kitty under test, which could be the thing a pull request broke.
+
+on:
+  pull_request:
+    branches:
+      - main
+    types:
+      - opened
+      - synchronize
+      - ready_for_review
+      - reopened
+    paths:
+      - "src/kitty/cli/tmux_wrap.py"
+      - "src/kitty/cli/tmux_inner.py"
+      - "src/kitty/cli/main.py"
+      - "src/kitty/cli/launcher.py"
+      - "tests/integration/test_tmux_disconnect.py"
+      - ".github/workflows/tmux-disconnect.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tmux-disconnect-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  live:
+    name: Survives a terminal hang-up
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # A fork's pull request never gets the organisation's kitty credentials, and
+    # a draft is not ready to spend model tokens on.
+    if: >-
+      github.event.pull_request.draft == false &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    env:
+      # An empty value, not an unset one, neutralises a proxy variable the runner
+      # might carry: kitty reads it before the stored gateway (see the review
+      # workflow's note on the same line).
+      KITTY_EGRESS_PROXY: ""
+
+    steps:
+      - name: Checkout pull request head
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install tmux
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -q
+          sudo apt-get install -y -q tmux
+          tmux -V
+
+      # Everything the test touches belongs to one unprivileged user, so the
+      # firewall below can be scoped to it without cutting the runner's own
+      # connection to GitHub. `-w` writes into the repository, so the user gets
+      # its own copy of the checkout.
+      - name: Create the test user
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo useradd --create-home --shell /bin/bash kittytest
+          sudo cp -r "$GITHUB_WORKSPACE" /home/kittytest/repo
+          sudo chown -R kittytest:kittytest /home/kittytest/repo
+
+      - name: Install kitty-bridge (this checkout) and the Claude CLI for the test user
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo -u kittytest -H "$pythonLocation/bin/python" -m venv /home/kittytest/venv
+          sudo -u kittytest -H bash -c 'cd ~/repo && ~/venv/bin/python -m pip install --quiet --timeout 30 --retries 3 ".[dev]"'
+          # Same installer line and pin as claude-code-review.yml, so TEST_SUITE.md
+          # §8.6's version arm keeps one hand-maintained pairing.
+          sudo -u kittytest -H bash -c '
+            for i in 1 2 3; do
+              if timeout 300 bash -c "set -o pipefail; curl -fsSL https://claude.ai/install.sh | bash -s -- 2.1.238"; then
+                exit 0
+              fi
+              sleep 5
+            done
+            exit 1'
+
+      - name: Configure kitty for the test user
+        shell: bash
+        env:
+          KITTY_PROFILES_JSON: ${{ vars.KITTY_PROFILES_JSON }}
+          KITTY_CREDENTIALS_JSON: ${{ secrets.KITTY_CREDENTIALS_JSON }}
+          KITTY_EGRESS_JSON: ${{ secrets.KITTY_EGRESS_JSON }}
+        run: |
+          set -euo pipefail
+          sudo --preserve-env=KITTY_PROFILES_JSON,KITTY_CREDENTIALS_JSON,KITTY_EGRESS_JSON -u kittytest -H \
+            bash -c 'cd ~/repo && ~/venv/bin/python .github/review/scripts/configure_kitty.py --wrapper-dir ~/kitty-bin --github-output ~/configure.out'
+          if ! sudo grep -qx "available=true" /home/kittytest/configure.out; then
+            echo "::error::kitty could not be configured for the test user; see the annotation above."
+            exit 1
+          fi
+
+      # Both streams discarded: `egress show` prints the gateway, which comes
+      # from a secret. Only the exit status is read.
+      - name: Verify kitty resolved the egress gateway for the test user
+        shell: bash
+        run: |
+          if ! sudo -u kittytest -H env KITTY_EGRESS_PROXY= /home/kittytest/venv/bin/kitty egress show >/dev/null 2>&1; then
+            echo "::error::kitty resolved no egress gateway for the test user; the live test was not run."
+            exit 1
+          fi
+
+      # The guarantee that does not depend on the code under test. Every rule is
+      # inserted silently: rule text and errors would print the gateway address.
+      # Accepted costs (SYSTEM_DESIGN.md §3.4): DNS through the loopback stub stays
+      # open, and a gateway whose address changes after this step fails closed.
+      - name: Restrict the test user's outbound traffic to the egress gateway
+        shell: bash
+        run: |
+          set -euo pipefail
+          ENDPOINT=$(sudo cat /home/kittytest/.config/kitty/egress.json | "$pythonLocation/bin/python" -c '
+          import json, sys
+          from urllib.parse import urlsplit
+          url = urlsplit(json.load(sys.stdin)["egress"]["proxy_url"])
+          print(url.hostname, url.port or (443 if url.scheme == "https" else 80))')
+          HOST=${ENDPOINT% *}
+          PORT=${ENDPOINT#* }
+          echo "::add-mask::$HOST"
+          TEST_UID=$(id -u kittytest)
+          fail() { echo "::error::$1"; exit 1; }
+          for TOOL in iptables ip6tables; do
+            sudo "$TOOL" -A OUTPUT -m owner --uid-owner "$TEST_UID" -o lo -j ACCEPT >/dev/null 2>&1 || fail "could not add the loopback rule"
+            sudo "$TOOL" -A OUTPUT -m owner --uid-owner "$TEST_UID" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT >/dev/null 2>&1 || fail "could not add the established rule"
+          done
+          ALLOWED=0
+          for ADDRESS in $(getent ahostsv4 "$HOST" | awk '{print $1}' | sort -u); do
+            echo "::add-mask::$ADDRESS"
+            sudo iptables -A OUTPUT -m owner --uid-owner "$TEST_UID" -p tcp -d "$ADDRESS" --dport "$PORT" -j ACCEPT >/dev/null 2>&1 || fail "could not allow the gateway"
+            ALLOWED=1
+          done
+          for ADDRESS in $(getent ahostsv6 "$HOST" | awk '{print $1}' | grep ':' | sort -u); do
+            echo "::add-mask::$ADDRESS"
+            sudo ip6tables -A OUTPUT -m owner --uid-owner "$TEST_UID" -p tcp -d "$ADDRESS" --dport "$PORT" -j ACCEPT >/dev/null 2>&1 || fail "could not allow the gateway"
+            ALLOWED=1
+          done
+          [ "$ALLOWED" = 1 ] || fail "the egress gateway's host did not resolve"
+          for TOOL in iptables ip6tables; do
+            sudo "$TOOL" -A OUTPUT -m owner --uid-owner "$TEST_UID" -j REJECT >/dev/null 2>&1 || fail "could not add the reject rule"
+          done
+          # Self-check: a direct connection from the test user must now fail, in both families.
+          for FAMILY in -4 -6; do
+            if sudo -u kittytest -H curl "$FAMILY" -sS --max-time 10 -o /dev/null https://api.github.com >/dev/null 2>&1; then
+              fail "the firewall let the test user reach the internet directly ($FAMILY)"
+            fi
+          done
+          echo "Outbound traffic for the test user is limited to the egress gateway."
+
+      - name: Run the live disconnect test as the test user
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo -u kittytest -H env KITTY_EGRESS_PROXY= KITTY_TMUX_E2E=1 LANG=C.UTF-8 TERM=xterm-256color \
+            PATH=/home/kittytest/venv/bin:/home/kittytest/.local/bin:/usr/local/bin:/usr/bin:/bin \
+            bash -c 'cd ~/repo && pytest tests/integration/test_tmux_disconnect.py -m "agent_live" --strict-markers --require-category=agent_live -rfEs -p no:cacheprovider'
