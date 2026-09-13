@@ -244,7 +244,7 @@ async def test_a_chat_completions_routed_model_is_still_translated():
     ]
     upstream_sse = "".join(f"data: {json.dumps(c)}\n\n" for c in chunks) + "data: [DONE]\n\n"
 
-    _, status, body = await _stream(OpenCodeGoAdapter(), "glm-5.1", upstream_sse)
+    _, status, body = await _stream(OpenCodeGoAdapter(), "glm-5.2", upstream_sse)
 
     events = _parse_data_lines(body)
     assert status == 200
