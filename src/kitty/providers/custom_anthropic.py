@@ -79,7 +79,9 @@ class CustomAnthropicAdapter(AnthropicAdapter):
 
     def translate_to_upstream(self, cc_request: dict) -> dict:
         if cc_request.get("_native_messages_request"):
-            return {k: v for k, v in cc_request.items() if k not in self._INTERNAL_KEYS}
+            result = {k: v for k, v in cc_request.items() if k not in self._INTERNAL_KEYS}
+            result["messages"] = self._strip_internal_message_keys(result.get("messages"))
+            return result
         return super().translate_to_upstream(cc_request)
 
     def translate_from_upstream(self, raw_response: dict) -> dict:

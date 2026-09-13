@@ -104,7 +104,9 @@ class VertexAIAdapter(ProviderAdapter):
         Strips internal metadata fields.  The request body is otherwise
         standard Chat Completions format — passthrough.
         """
-        return {k: v for k, v in cc_request.items() if k not in self._INTERNAL_KEYS}
+        result = {k: v for k, v in cc_request.items() if k not in self._INTERNAL_KEYS}
+        result["messages"] = self._strip_internal_message_keys(result.get("messages"))
+        return result
 
     def translate_from_upstream(self, raw_response: dict) -> dict:
         """Vertex AI returns CC-compatible responses — passthrough."""

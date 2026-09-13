@@ -63,6 +63,7 @@ class _ZaiBase(ProviderAdapter):
 
     def translate_to_upstream(self, cc_request: dict) -> dict:
         result = {k: v for k, v in cc_request.items() if k not in self._INTERNAL_KEYS}
+        result["messages"] = self._strip_internal_message_keys(result.get("messages"))
         effort = cc_request.get("_reasoning_effort")
         thinking = cc_request.get("_thinking_enabled")
         thinking_active = (effort and effort != "none") or thinking

@@ -65,6 +65,49 @@ class ProviderAdapter(ABC):
         }
     )
 
+    #: Kitty-internal keys that ride on *message* dicts inside
+    #: ``cc_request["messages"]`` rather than on the request itself.  The
+    #: top-level strip above never sees them, so every adapter that forwards
+    #: messages through to its wire sanitises them via
+    #: :meth:`_strip_internal_message_keys`; the adapters that consume a key
+    #: are the exception, by construction of their own rebuild.
+    _INTERNAL_MESSAGE_KEYS = frozenset(
+        {
+            # KBR-228: verbatim Anthropic thinking-family blocks, signed where
+            # the upstream signed them.  Written onto assistant messages by the
+            # Messages -> CC converters (request direction) and onto the reply
+            # message by the Anthropic-family adapters (response direction).
+            "_thinking_blocks",
+        }
+    )
+
+    def _strip_internal_message_keys(self, messages: object) -> object:
+        """Return *messages* without kitty's message-level internal keys.
+
+        The counterpart of the ``_INTERNAL_KEYS`` strip for keys that ride on
+        message dicts: ``cc_request["messages"]`` is shared with the request
+        the next attempt re-serializes, so this is copy-on-write and the
+        original list and messages are untouched.  A list carrying none of the
+        registered keys is returned as-is, so the ordinary request pays one
+        membership scan and no copy.
+
+        Args:
+            messages: The ``messages`` value of a Chat Completions request.
+
+        Returns:
+            The sanitized list, or *messages* unchanged when there was nothing
+            to remove or the value is not a list.
+        """
+        if not isinstance(messages, list):
+            return messages
+        keys = self._INTERNAL_MESSAGE_KEYS
+        if not any(isinstance(msg, dict) and keys & msg.keys() for msg in messages):
+            return messages
+        return [
+            {k: v for k, v in msg.items() if k not in keys} if isinstance(msg, dict) else msg
+            for msg in messages
+        ]
+
     @property
     @abstractmethod
     def provider_type(self) -> str:
@@ -430,7 +473,11 @@ class ProviderAdapter(ABC):
         Returns:
             Dict to send as JSON body to the upstream endpoint.
         """
-        return {k: v for k, v in cc_request.items() if k not in self._INTERNAL_KEYS}
+        result = {k: v for k, v in cc_request.items() if k not in self._INTERNAL_KEYS}
+        # KBR-228: message-level internal keys ride inside ``messages``, where
+        # the top-level strip above cannot reach them.
+        result["messages"] = self._strip_internal_message_keys(result.get("messages"))
+        return result
 
     def _inject_empty_reasoning_content(self, messages: list[dict]) -> list[dict]:
         """Inject empty reasoning_content into assistant messages that lack it.
