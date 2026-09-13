@@ -4388,7 +4388,8 @@ fallback `_provider_outcome_text` already documents — no `result` key, so mode
 sites to `ValueError` and `RecursionError`: an integer over the interpreter's digit limit and a
 deeply nested document raised through the script, so the run that already failed wrote no
 status and no diagnostic. The cost is recorded: such a record takes the unparseable path, where
-`classify` searches the text whole — a crash traded for an unscoped verdict.
+`classify` searches the text whole — a crash traded for an unscoped verdict — unless it carries a
+`result` key, which since KBR-206 makes it unattributable (I-C5, D3).
 
 **I-C4 — The verdict, the `retryable` flag and the diagnostic's advice must agree.** They are
 computed by three different functions from three different inputs — pattern order, cost, and
@@ -4455,16 +4456,25 @@ fixture and no schema rejection changed verdict. The figure is a measurement, no
 * **D3 — a transcript too broken to attribute is `fatal`, not retried, full stop.** Closed in this
   ticket rather than filed, because the move widened it. Chosen over deferring it to a ticket after
   the narrower version was measured failing. The cost, accepted by name: a spent balance or a
-  transient outage in that shape is reported as unreadable and not retried, so an operator reads the
-  record tail and re-runs by hand — a spent balance whose top-up advice worked on `main` in that
+  transient outage in that shape is a workflow-level `fatal` and not retried — the PR notice, the job
+  summary and the `::error::` line say the workflow needs fixing, and only the embedded diagnostic
+  says the record was unreadable — and a spent balance whose top-up advice worked on `main` in that
   shape now gets none.
 
-*Residuals.* **D3 does not reach two broken shapes.** A transcript cut off before its result event
-carries no `result` key, is indistinguishable from raw CLI output, and is still searched whole — on
-`main` a `400` beside a quota phrase there was `fatal`, and it is now a paid retry with top-up advice
-(`test_a_transcript_cut_before_its_result_event_still_reads_what_was_read` pins it). And
-`_parse_events` treats a record as readable if any line decodes, so an NDJSON record whose result
-line is corrupt is not unattributable and its lost result is never seen. OpenRouter's *"can only afford 400"* message stays `fatal` with no advice unless a 402 is
+*Residuals.* **D3 is a text sentinel, and it does not reach three broken shapes.** (1) A transcript
+cut off before its result event carries no `result` key, is indistinguishable from raw CLI output,
+and is still searched whole — on `main` a `400` beside a quota phrase there was `fatal`, and it is now
+a paid retry with top-up advice (`test_a_transcript_cut_before_its_result_event_still_reads_what_was_read`).
+(2) A transcript whose result event is an error subtype — the Agent SDK's `SDKResultError` carries
+`errors` and no `result` — is the same case; with the dated refusal slug in a tool result it moved
+from `exhausted` to `fatal` with no retry (`test_an_error_subtype_transcript_is_not_unattributable`).
+Widening the sentinel to `"type": "result"` would refuse the truncated-401 record
+`test_a_result_value_is_not_a_result_key` keeps readable, so it is not done here. (3) `_parse_events`
+treats a record as readable if any line decodes, so an NDJSON record whose result line is corrupt is
+not unattributable and its lost result is never seen (`test_a_corrupt_ndjson_result_line_is_not_unattributable`).
+Conversely a raw provider body passed through unescaped that carries its own `"result":` key — e.g.
+Cloudflare's `{"result":null,"success":false,...}` wrapper — IS called unattributable; kitty's
+translated error escapes it, so the usual route is unaffected. OpenRouter's *"can only afford 400"* message stays `fatal` with no advice unless a 402 is
 in `api_error_status` or in the CLI's text outside `result`: a nested `"code":402` is never read, and
 `API Error: 402 …` inside `result` is read only by the anchored tiers, which carry no phrase of that
 message. A 401/402/403/404 status beside a malformed-request 400 body resolves to what the status

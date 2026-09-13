@@ -17336,8 +17336,12 @@ class ModelAuthoredProseTests(unittest.TestCase):
                     # KBR-206 (D3): an unparseable record carrying `result` is decided
                     # before any tier, so its reason is the unattributable one.
                     self.assertEqual(
-                        "invalid_request" in reason, shape == "well-formed", reason
+                        reason.startswith("workflow-level failure: 'invalid_request'"),
+                        shape == "well-formed",
+                        reason,
                     )
+                    if shape == "unparseable":
+                        self.assertEqual(reason, interpret.UNATTRIBUTABLE_RECORD_REASON)
                     self.assertFalse(
                         interpret.retry_verdict(
                             status,
@@ -18397,8 +18401,12 @@ class WeakQuotaPatternProseTests(unittest.TestCase):
                     # KBR-206 (D3): an unparseable record carrying `result` is decided
                     # before any tier, so its reason is the unattributable one.
                     self.assertEqual(
-                        "invalid_request" in reason, shape == "well-formed", reason
+                        reason.startswith("workflow-level failure: 'invalid_request'"),
+                        shape == "well-formed",
+                        reason,
                     )
+                    if shape == "unparseable":
+                        self.assertEqual(reason, interpret.UNATTRIBUTABLE_RECORD_REASON)
                     self.assertFalse(
                         interpret.retry_verdict(
                             status,
@@ -19086,6 +19094,58 @@ class FourHundredCarrierTests(unittest.TestCase):
 
         self.assertFalse(interpret._record_is_unattributable(record))
         self.assertEqual((status, retryable), ("exhausted", True), reason)
+
+    def test_an_error_subtype_transcript_is_not_unattributable(self):
+        """⚠️ D3's second residual, pinned (TEST_SUITE.md §8.5 I-C5).
+
+        The Agent SDK's `SDKResultError` carries `errors` and no `result`, so a broken
+        transcript ending in one has no `result` key and is searched whole. With the dated
+        refusal slug in a tool result -- the harness quotes it -- the refusal check reads it:
+        `fatal` with no retry, where `main` said `exhausted`. Widening the sentinel would refuse
+        the truncated-401 record `test_a_result_value_is_not_a_result_key` keeps readable.
+        """
+
+        record = json.dumps(
+            [
+                {
+                    "type": "user",
+                    "message": {
+                        "content": [
+                            {"type": "tool_result", "content": "context-management-2025-06-27"}
+                        ]
+                    },
+                },
+                {"type": "result", "subtype": "error_max_structured_output_retries"},
+            ],
+            indent=2,
+        ) + "\n<truncated"
+        status, reason, retryable, _ = self._cell(record)
+
+        self.assertFalse(interpret._record_is_unattributable(record))
+        self.assertEqual(
+            (status, reason, retryable),
+            ("fatal", interpret.CONTEXT_MANAGEMENT_REFUSAL_REASON, False),
+        )
+
+    def test_a_corrupt_ndjson_result_line_is_not_unattributable(self):
+        """⚠️ D3's third residual, pinned: one decodable line makes the record readable.
+
+        `_parse_events` keeps every NDJSON line that decodes, so a record whose result line is
+        corrupt still parses, its result is never seen, and it falls through with a retry.
+        """
+
+        record = (
+            '{"type": "system", "subtype": "init"}\n'
+            '{"type": "result", "subtype": "error", "result": "API Error: 402 {"error": trunc\n'
+        )
+        status, reason, retryable, _ = self._cell(record)
+
+        self.assertIsNotNone(interpret._parse_events(record))
+        self.assertFalse(interpret._record_is_unattributable(record))
+        self.assertEqual(
+            (status, reason, retryable),
+            ("exhausted", "ran but returned no payload and no recognisable error", True),
+        )
 
     def test_every_400_carrying_fixture_is_measured(self):
         """AC3's coverage half: a 400 body added to this file must join a table above."""

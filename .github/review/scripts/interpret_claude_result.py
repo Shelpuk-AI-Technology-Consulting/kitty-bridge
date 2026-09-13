@@ -768,7 +768,8 @@ def _parse_events(execution_text: str) -> list | None:
 
     Returns:
         The decoded events, or ``None`` when the text is not JSON at all (a bare CLI error
-        message, which every caller should then search whole).
+        message, which every caller should then search whole -- unless
+        :func:`_record_is_unattributable` decides it first).
     """
 
     stripped = execution_text.strip()
@@ -779,7 +780,8 @@ def _parse_events(execution_text: str) -> list | None:
     # `ValueError` from `int()`, and a deeply nested document raises `RecursionError`, so a
     # record carrying either crashed the script and no diagnostic was written.
     # `JSONDecodeError` subclasses `ValueError`, so every record that degraded still does.
-    # ⚠️ The cost: such a record is unparseable, and `classify` then searches it whole.
+    # ⚠️ The cost: such a record is unparseable, and `classify` then searches it whole --
+    # or, when it carries a `result` key, calls it unattributable (KBR-206 D3).
     try:
         decoded = json.loads(stripped)
     except (ValueError, RecursionError):
@@ -834,7 +836,7 @@ def _outcome_parts(events: list) -> tuple[list[str], list[str], list[str]]:
                 continue
             # Numbers are collected into their OWN bucket, never into `provider_parts`.
             # Only `_provider_outcome_text` joins it, which is what keeps a bare status
-            # out of the tier-1 haystack -- see `_numbers_in` for why that matters.
+            # out of the full haystack -- see `_numbers_in` for why that matters.
             provider_parts.extend(_strings_in(value))
             status_parts.extend(_numbers_in(value))
     return provider_parts, model_parts, status_parts
@@ -905,9 +907,10 @@ def _provider_outcome_text(execution_text: str) -> str:
     is recognised at all. So the two unparseable cases are separated by the fact that
     distinguishes them: raw CLI output has no ``result`` key to exclude, while a record
     that failed to parse does. Claiming nothing for the latter is the conservative
-    direction. ⚠️ Since KBR-206 (D3) :func:`classify` never reaches this branch for such a
-    record -- it is decided first, by :func:`_record_is_unattributable` -- so the branch
-    now serves the diagnostic's provider-scoped reads.
+    direction. ⚠️ Since KBR-206 (D3) no production path uses this branch's result for such
+    a record: :func:`classify` decides it first, and :func:`_write_diagnostic`'s
+    unattributable branch skips the quota read. It stays as this helper's own contract,
+    which ``test_an_unreadable_record_claims_nothing`` pins.
 
     ⚠️ **The first fallback branch is narrower than "nothing model-authored", and the
     difference is recorded rather than hidden.** A transcript truncated before its result
@@ -942,7 +945,7 @@ def _provider_outcome_text(execution_text: str) -> str:
         return execution_text
 
     # 🔴 KBR-182. The numeric status joins HERE and nowhere else. `_outcome_text` --
-    # the tier-1 haystack -- must never see it; `_numbers_in` records what happens if
+    # the full haystack -- must never see it; `_numbers_in` records what happens if
     # it does.
     provider_parts, _, status_parts = _outcome_parts(events)
     return "\n".join(provider_parts + status_parts)
@@ -961,11 +964,14 @@ def _record_is_unattributable(execution_text: str) -> bool:
     decided before every tier: ``fatal``, and no automatic retry.
 
     ⚠️ **What it costs, chosen by the product owner:** a spent balance or a transient outage
-    in this shape is reported as unreadable and not retried, so an operator reads the
-    record tail and re-runs by hand. Raw CLI output is NOT this shape -- it carries no
-    ``result`` key -- and keeps every tier. A transcript cut before its result event also
-    carries no ``result`` key, so it is not covered: TEST_SUITE.md §8.5 I-C5 records that
-    residual.
+    in this shape is a workflow-level ``fatal`` and not retried -- the notice, the job
+    summary and the ``::error::`` line all say so; only the diagnostic says the record
+    was unreadable. Raw CLI output is NOT this shape -- it carries no ``result`` key -- and
+    keeps every tier, unless a provider body passed through unescaped carries one.
+    ⚠️ **Not covered, because it is only a text sentinel:** a transcript cut before its
+    result event, and one whose result event is an error subtype (``SDKResultError`` has
+    ``errors`` and no ``result``), both carry no ``result`` key and are still searched
+    whole. TEST_SUITE.md §8.5 I-C5 records both residuals.
 
     Args:
         execution_text: Raw execution record text.
@@ -980,9 +986,8 @@ def _record_is_unattributable(execution_text: str) -> bool:
 #: The verdict for a record :func:`_record_is_unattributable` refuses to read. Fixed, so
 #: nothing from the unreadable text reaches ``$GITHUB_OUTPUT``.
 UNATTRIBUTABLE_RECORD_REASON = (
-    "the execution record could not be parsed, so the failure cannot be attributed to the "
-    "provider or the workflow; not retried automatically -- read the record tail and "
-    "re-run by hand"
+    "workflow-level failure: the execution record could not be parsed, so no provider "
+    "cause can be read from it"
 )
 
 #: The diagnostic paragraph under that verdict, in place of any quota or refusal advice.
@@ -990,8 +995,8 @@ UNATTRIBUTABLE_RECORD_ADVICE = (
     "The execution record is not valid JSON -- usually a transcript cut off or corrupted "
     "mid-write -- so this module cannot tell what the provider said from what the "
     "reviewer read, and it gives no advice rather than advice drawn from the wrong text. "
-    "Read the record tail below: a spent balance or a transient provider error there is "
-    "worth a manual re-run; anything else is worth checking first."
+    "Read the record tail below before acting on the verdict: it is the only evidence of "
+    "what actually failed."
 )
 
 
@@ -1749,7 +1754,9 @@ def _write_diagnostic(
     elif _record_is_unattributable(execution_text):
         # 🔴 KBR-206 (D3). Mirrors `classify`, which decides this record before any tier: the
         # refusal and quota branches below would read what the reviewer READ and print advice
-        # under a verdict that says the record cannot be attributed.
+        # under a verdict that says the record cannot be attributed. Deliberately NOT gated
+        # on `payload_present`: a payload's verdict does not make the unreadable text any
+        # safer to draw advice from, and on `main` that case printed a top-up paragraph.
         lines += [UNATTRIBUTABLE_RECORD_ADVICE, ""]
     elif re.search(CONTEXT_MANAGEMENT_REFUSAL, evidence, re.I):
         # upstream. Placed above the quota branch so a refusal that happens to
