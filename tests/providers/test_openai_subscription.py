@@ -533,7 +533,24 @@ class TestCcToResponses:
     def test_no_tool_choice_invents_none(self, adapter: OpenAISubscriptionAdapter) -> None:
         """No CC ``tool_choice`` means none on the Responses body (R9)."""
         cc = {"model": "gpt-5.4", "messages": [{"role": "user", "content": "test"}]}
-        assert "tool_choice" not in adapter._cc_to_responses(cc)
+        result = adapter._cc_to_responses(cc)
+        assert "tool_choice" not in result
+        assert "parallel_tool_calls" not in result
+
+    def test_parallel_tool_calls_false_is_carried(self, adapter: OpenAISubscriptionAdapter) -> None:
+        """KBR-214 PR review: the knob the Messages ingress now produces must reach Codex (R8b).
+
+        ``parallel_tool_calls`` is in ``_ALLOWED_RESPONSES_PARAMS`` and the
+        Responses-origin builder already forwards it, so dropping it here was the
+        one seam where "call at most one tool at a time" still vanished.
+        """
+        cc = {
+            "model": "gpt-5.4",
+            "messages": [{"role": "user", "content": "test"}],
+            "tool_choice": "required",
+            "parallel_tool_calls": False,
+        }
+        assert adapter._cc_to_responses(cc)["parallel_tool_calls"] is False
 
 
 # ── map_error ─────────────────────────────────────────────────────────────

@@ -1135,6 +1135,10 @@ class OpenAISubscriptionAdapter(OpenAIAdapter):
 
         if cc_request.get("tool_choice"):
             body["tool_choice"] = _responses_tool_choice(cc_request["tool_choice"])
+        # KBR-214: the Messages ingress now produces this knob, and the Codex
+        # allowlist accepts it -- `_prepare_responses_body` already forwards it.
+        if cc_request.get("parallel_tool_calls") is not None:
+            body["parallel_tool_calls"] = cc_request["parallel_tool_calls"]
 
         # Inject reasoning effort from normalized metadata
         effort = cc_request.get("_reasoning_effort")
