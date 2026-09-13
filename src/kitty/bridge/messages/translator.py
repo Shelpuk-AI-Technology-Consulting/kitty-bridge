@@ -231,6 +231,11 @@ class MessagesTranslator:
                 result["_reasoning_effort"] = "high"
             elif thinking.get("type") == "disabled":
                 result["_thinking_enabled"] = False
+            # KBR-203: `display` decides whether the user sees any thinking text,
+            # and Chat Completions has no slot for it.  Anthropic rejects it with
+            # `disabled`, so only the two modes that accept it carry it.
+            if thinking.get("type") in ("enabled", "adaptive") and "display" in thinking:
+                result["_thinking_display"] = thinking["display"]
 
         return result
 

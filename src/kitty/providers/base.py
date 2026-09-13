@@ -44,6 +44,10 @@ class ProviderAdapter(ABC):
             # "do not restore", not "would reject": ollama_cloud accepts an
             # options.top_k and is simply never sent one -- gap G28 records why.
             "_top_k",
+            # KBR-203: written by MessagesTranslator.translate_request to carry the
+            # agent's thinking `display`; AnthropicAdapter restores it onto
+            # `thinking` where the upstream documents the field.
+            "_thinking_display",
             "base_url",  # F15 defense-in-depth — URL override goes through build_base_url(),
             # not the CC request body.  Stripping it here protects
             # adapters that rely on the default translate_to_upstream().

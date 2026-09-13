@@ -56,7 +56,17 @@ class AnthropicAdapter(ProviderAdapter):
     Anthropic's Messages API (``POST /v1/messages``).  Anthropic uses
     ``x-api-key`` authentication and a content-block based request/response
     format rather than CC's message/content structure.
+
+    Attributes:
+        forwards_thinking_display: Whether :meth:`translate_to_upstream`
+            restores the agent's thinking ``display`` onto ``thinking``.  True
+            here, because Anthropic's Messages API defines the field.  A
+            subclass whose upstream does not document it sets this to False, so
+            an unknown field cannot turn every thinking request into a 400
+            (KBR-203).
     """
+
+    forwards_thinking_display: bool = True
 
     @property
     def provider_type(self) -> str:
@@ -181,6 +191,12 @@ class AnthropicAdapter(ProviderAdapter):
             anthropic["thinking"] = {"type": "enabled", "budget_tokens": max_tokens - 1}
         elif cc_request.get("_thinking_enabled") is False:
             anthropic["thinking"] = {"type": "disabled"}
+
+        # Dropping the agent's `display` hides every thinking token on models
+        # whose default is "omitted".  The translator carries it only for the
+        # two modes above that accept it, never for `disabled`.
+        if self.forwards_thinking_display and "_thinking_display" in cc_request and "thinking" in anthropic:
+            anthropic["thinking"]["display"] = cc_request["_thinking_display"]
 
         # Restore the effort parameter for Anthropic-compatible upstreams.
         # Claude Code sends this to control reasoning depth (e.g. "low",
