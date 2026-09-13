@@ -5,8 +5,8 @@ A native-passthrough adapter (``custom_anthropic``, ``zai_coding``, opt-in
 used to hand that body back untranslated whenever the *provider* was native, so
 Chat Completions, Responses and Gemini clients received a Messages object they
 cannot parse.  Only Claude Code's own ``/v1/messages`` request may take the body
-as-is, and the Messages handler must decide from the reply's shape — after a
-balancing failover the active provider need not be the one that answered.
+as-is, and the Messages handler must decide from the reply's shape — a native
+provider answers in Chat Completions form when the request was not marked native.
 
 Every test drives a real in-process :class:`~kitty.bridge.server.BridgeServer`
 against an ``aioresponses`` upstream.
@@ -20,7 +20,10 @@ from aioresponses import aioresponses
 
 from kitty.bridge.server import BridgeServer
 from kitty.launchers.base import LauncherAdapter, SpawnConfig
+from kitty.providers.base import ProviderAdapter
 from kitty.providers.custom_anthropic import CustomAnthropicAdapter
+from kitty.providers.minimax_token import MiniMaxTokenAnthropicAdapter
+from kitty.providers.zai_anthropic import ZaiAnthropicAdapter
 from kitty.types import BridgeProtocol
 
 #: A minimal Anthropic Messages reply, the shape every native adapter's upstream returns.
@@ -88,21 +91,31 @@ class _StubLauncher(LauncherAdapter):
         return SpawnConfig(env_overrides={}, env_clear=[], cli_args=[])
 
 
-async def _post(protocol: BridgeProtocol, path: str, payload: dict) -> tuple[int, dict]:
-    """POST one non-streaming request through a native bridge whose upstream answers in Messages.
+async def _post(
+    protocol: BridgeProtocol,
+    path: str,
+    payload: dict,
+    *,
+    provider: ProviderAdapter | None = None,
+    reply: dict | None = None,
+) -> tuple[int, dict]:
+    """POST one non-streaming request through a native bridge and return what the agent received.
 
     Args:
         protocol: The inbound protocol the bridge serves.
         path: The bridge route to post to.
         payload: The agent's request body.
+        provider: The native adapter to serve with; ``custom_anthropic`` when omitted.
+        reply: The body the mocked upstream returns; a Messages reply when omitted.
 
     Returns:
         The HTTP status and the decoded JSON body the agent received.
     """
-    server = BridgeServer(_StubLauncher(protocol), CustomAnthropicAdapter(), "sk-test", host="127.0.0.1", port=0)
+    provider = provider or CustomAnthropicAdapter()
+    server = BridgeServer(_StubLauncher(protocol), provider, "sk-test", host="127.0.0.1", port=0)
     upstream_url = server._build_upstream_url({"model": "claude-opus-4-6"})
     with aioresponses(passthrough=["http://127.0.0.1"]) as mocked:
-        mocked.post(upstream_url, payload=_MESSAGES_REPLY)
+        mocked.post(upstream_url, payload=reply or _MESSAGES_REPLY)
         await server.start_async()
         try:
             async with (
@@ -114,13 +127,29 @@ async def _post(protocol: BridgeProtocol, path: str, payload: dict) -> tuple[int
             await server.stop_async()
 
 
+_NATIVE_ADAPTERS = [
+    pytest.param(CustomAnthropicAdapter, id="custom_anthropic"),
+    pytest.param(ZaiAnthropicAdapter, id="zai_coding"),
+    pytest.param(lambda: MiniMaxTokenAnthropicAdapter(native_messages=True), id="minimax_token-native"),
+]
+
+
 @pytest.mark.asyncio
-async def test_a_chat_completions_client_gets_a_chat_completion():
-    """R1 — ``/v1/chat/completions`` receives a ``chat.completion``, not a Messages object."""
+@pytest.mark.parametrize("provider_factory", _NATIVE_ADAPTERS)
+async def test_a_chat_completions_client_gets_a_chat_completion(provider_factory):
+    """R1 — ``/v1/chat/completions`` receives a ``chat.completion``, not a Messages object.
+
+    Args:
+        provider_factory: Builds a native-passthrough adapter.
+    """
+    provider = provider_factory()
+    assert provider.use_native_messages, "precondition: this test is about native adapters"
+
     status, body = await _post(
         BridgeProtocol.CHAT_COMPLETIONS_API,
         "/v1/chat/completions",
         {"model": "claude-opus-4-6", "messages": [{"role": "user", "content": "hi"}]},
+        provider=provider,
     )
 
     assert status == 200
@@ -170,16 +199,13 @@ async def test_claude_code_still_gets_the_upstream_messages_reply():
 
 
 @pytest.mark.asyncio
-async def test_the_messages_handler_translates_a_chat_completions_reply_even_on_a_native_provider(monkeypatch):
-    """R5 — ``/v1/messages`` decides from the reply's shape, not from the active provider.
+async def test_the_messages_handler_translates_a_chat_completions_reply_even_on_a_native_provider():
+    """R5 — ``/v1/messages`` decides from the reply's shape, not from the provider.
 
-    After a balancing failover the backend that answered need not be the one now
-    active.  Here the active provider is native but the reply is a Chat
-    Completions object; Claude Code must still receive a Messages reply.
+    A native-provider endpoint can answer in Chat Completions form — the
+    adapters' own ``translate_from_upstream`` passes such a body through — so
+    Claude Code must still receive a Messages reply rather than the raw object.
     """
-    server = BridgeServer(
-        _StubLauncher(BridgeProtocol.MESSAGES_API), CustomAnthropicAdapter(), "sk-test", host="127.0.0.1", port=0
-    )
     cc_reply = {
         "id": "chatcmpl-1",
         "object": "chat.completion",
@@ -189,30 +215,12 @@ async def test_the_messages_handler_translates_a_chat_completions_reply_even_on_
         "usage": {"prompt_tokens": 3, "completion_tokens": 1, "total_tokens": 4},
     }
 
-    async def _answered_by_another_backend(cc_request: dict) -> dict:
-        """Stand in for a retry ladder whose successful attempt came from a Chat Completions backend.
-
-        Args:
-            cc_request: Unused.
-
-        Returns:
-            A Chat Completions reply.
-        """
-        return cc_reply
-
-    monkeypatch.setattr(server, "_request_with_retry", _answered_by_another_backend)
-    await server.start_async()
-    try:
-        async with (
-            aiohttp.ClientSession() as session,
-            session.post(
-                f"http://127.0.0.1:{server.port}/v1/messages",
-                json={"model": "claude-opus-4-6", "max_tokens": 100, "messages": [{"role": "user", "content": "hi"}]},
-            ) as resp,
-        ):
-            status, body = resp.status, await resp.json()
-    finally:
-        await server.stop_async()
+    status, body = await _post(
+        BridgeProtocol.MESSAGES_API,
+        "/v1/messages",
+        {"model": "claude-opus-4-6", "max_tokens": 100, "messages": [{"role": "user", "content": "hi"}]},
+        reply=cc_reply,
+    )
 
     assert status == 200
     assert body.get("type") == "message", body

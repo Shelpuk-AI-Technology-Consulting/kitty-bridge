@@ -3369,8 +3369,8 @@ class BridgeServer:
                     status=500,
                 )
 
-            # Decide by the reply's shape: after a failover the provider now active
-            # need not be the one that answered (KBR-237).
+            # Decide by the reply's shape: a native provider answers in Chat Completions
+            # form when the request was not marked native, e.g. after a failover (KBR-237).
             if cc_response.get("type") == "message":
                 result = cc_response
             else:
