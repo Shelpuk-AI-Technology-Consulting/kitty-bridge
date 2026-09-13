@@ -275,8 +275,8 @@ class AnthropicAdapter(ProviderAdapter):
             cc_request: The Chat Completions request, read for ``_thinking_display``.
 
         Returns:
-            *thinking*, with ``display`` set when :attr:`forwards_thinking_display`
-            is true and the translator carried a value.
+            *thinking* itself, not a copy: ``display``, when added, is set in
+            place.  Callers pass a freshly built dict, so nothing is aliased.
         """
         if self.forwards_thinking_display and "_thinking_display" in cc_request:
             thinking["display"] = cc_request["_thinking_display"]
