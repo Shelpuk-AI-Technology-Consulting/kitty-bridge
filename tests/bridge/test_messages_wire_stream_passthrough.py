@@ -253,31 +253,39 @@ async def test_a_chat_completions_routed_model_is_still_translated():
 
 
 @pytest.mark.asyncio
-async def test_the_tool_use_auditor_reads_the_forwarded_stream():
+@pytest.mark.parametrize(("provider_factory", "model"), _MESSAGES_WIRE_TRANSLATED)
+async def test_the_tool_use_auditor_reads_the_forwarded_stream(provider_factory, model):
     """R4 — a malformed ``tool_use`` on this route is still counted, so auditing did not go blind.
 
     The input wraps the declared fields in an envelope, which the auditor flags
     against the client's own schema (issue #33).  A clean input would prove
     nothing: an auditor that never saw the bytes also reports no anomaly.
+
+    Args:
+        provider_factory: Builds an Anthropic-wire adapter that is not native passthrough.
+        model: A model that adapter serves on its Messages route.
     """
     events = _anthropic_events({"result": {"path": "a"}})
 
-    server, status, _ = await _stream(AnthropicAdapter(), "claude-opus-4-6", _render_sse(events))
+    server, status, _ = await _stream(provider_factory(), model, _render_sse(events))
 
     assert status == 200
     assert sum(server._stats_malformed_tool_use.values()) == 1
 
 
 @pytest.mark.asyncio
-async def test_a_forwarded_stream_is_counted_as_a_completion():
+@pytest.mark.parametrize(("provider_factory", "model"), _MESSAGES_WIRE_TRANSLATED)
+async def test_a_forwarded_stream_is_counted_as_a_completion(provider_factory, model):
     """R6 — ``GET /stats`` still counts the turn, as the translated branch did before forwarding.
 
     The forwarded stream carries Anthropic usage keys, which ``_log_usage`` does
     not read, so the claim is the completion count and nothing about tokens.
+
+    Args:
+        provider_factory: Builds an Anthropic-wire adapter that is not native passthrough.
+        model: A model that adapter serves on its Messages route.
     """
-    server, status, _ = await _stream(
-        AnthropicAdapter(), "claude-opus-4-6", _render_sse(_anthropic_events({"path": "a"}))
-    )
+    server, status, _ = await _stream(provider_factory(), model, _render_sse(_anthropic_events({"path": "a"})))
 
     served = server._session_stats()["models_served"]
     assert status == 200
