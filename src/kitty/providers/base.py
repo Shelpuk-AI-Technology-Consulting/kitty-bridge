@@ -44,6 +44,10 @@ class ProviderAdapter(ABC):
             # "do not restore", not "would reject": ollama_cloud accepts an
             # options.top_k and is simply never sent one -- gap G28 records why.
             "_top_k",
+            # KBR-203: written by MessagesTranslator.translate_request to carry the
+            # agent's thinking `display`; AnthropicAdapter restores it onto
+            # `thinking` where the upstream documents the field.
+            "_thinking_display",
             # KBR-214: carries the agent's Anthropic `metadata` to the
             # Anthropic-family adapters that restore it. Chat Completions' own
             # `metadata` is a stored-completions tag map, a different concept, so
