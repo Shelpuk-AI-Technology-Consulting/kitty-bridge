@@ -359,8 +359,10 @@ you the truth.
 | `X-Kitty-Model`   | The real model sent upstream (absent if no override is set)   |
 | `X-Kitty-Tier`    | `primary` or `backup` (reserve-tier members)                 |
 
-These name the backend that produced the **first byte** of the response. A stream that fails over after that has
-already sent its headers, so `/stats` is authoritative for the session.
+These name the backend selected when the response headers were sent. A stream never switches backend once content
+has reached the client, so on `/v1/messages`, whose headers go out with the first content, they name the backend that
+produced the response. The other endpoints send headers before the first upstream attempt, so a request that failed
+over before any content can name a backend that produced nothing. `/stats` is authoritative for the session.
 
 **Live.** `GET /stats` returns JSON for the running bridge: per-backend request counts, the real models served with
 their token totals, how many times a request switched backend (`failovers`), and whether the pool was ever exhausted
@@ -679,6 +681,24 @@ window.
 
 The response is a normal `400` in your agent's own error format, carrying `"reason": "compaction_failed"` so it is
 distinguishable in logs from the ordinary "request too large" rejection.
+
+### "Kitty Bridge received an empty reply from the upstream provider on every attempt"
+
+Applies to providers kitty talks to in Anthropic's own format (`custom_anthropic`, `zai_coding`, and `minimax_token`
+when configured for it). Kitty holds back the start of each streamed reply until it carries text or a tool call, so a
+reply with nothing in it — or only thinking, up to 10 MiB of it — can be retried before your agent sees it. This error
+means every attempt kitty made came back empty. Nothing reached the agent, so simply resend; if it persists, the provider
+or model is misbehaving.
+
+The response is a `502` carrying `"reason": "empty_response"`. One visible cost of the hold: on reasoning models the
+agent shows its spinner, not live thinking, until the first text or tool call arrives.
+
+### "Kitty Bridge received a reply from the upstream provider that stopped (max_tokens) before producing any content"
+
+Same providers. The model used its whole output budget — typically all of it on thinking — or filled its context window
+(`model_context_window_exceeded`) before writing anything. A retry cannot fix that, so kitty fails the request at once
+with a `400` carrying `"reason": "max_tokens_before_content"` (or `"model_context_window_exceeded_before_content"`).
+Raise the output token limit, lower the thinking effort, or `/clear` a very long conversation.
 
 ### Mouse wheel scrolls through previous prompts instead of the conversation (Claude Code)
 
