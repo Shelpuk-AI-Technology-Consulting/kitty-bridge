@@ -23,7 +23,12 @@ import aiohttp
 import pytest
 from aioresponses import CallbackResult, aioresponses
 
-from kitty.bridge.server import BridgeServer, _is_thinking_signature_error, _strip_thinking_blocks
+from kitty.bridge.server import (
+    BridgeServer,
+    _is_thinking_signature_error,
+    _recover_rejected_thinking,
+    _strip_thinking_blocks,
+)
 from kitty.launchers.base import LauncherAdapter, SpawnConfig
 from kitty.profiles.schema import Profile
 from kitty.providers.custom_anthropic import CustomAnthropicAdapter
@@ -55,6 +60,19 @@ _HISTORY = [
         ],
     },
     {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_1", "content": "18C"}]},
+]
+
+#: A longer transcript: a signed turn Anthropic can no longer verify at index 1, and a later signed turn at index 3.
+_LONG_HISTORY = [
+    *_HISTORY,
+    {
+        "role": "assistant",
+        "content": [
+            {"type": "thinking", "thinking": "Now Rome.", "signature": "sig-3"},
+            {"type": "tool_use", "id": "toolu_2", "name": "get_weather", "input": {"city": "Rome"}},
+        ],
+    },
+    {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_2", "content": "22C"}]},
 ]
 
 _OK_REPLY = {
@@ -170,6 +188,75 @@ def test_strip_reports_no_change_when_there_is_no_thinking():
     assert _strip_thinking_blocks(body) is False
 
 
+def test_a_targeted_strip_keeps_thinking_after_the_named_message():
+    """R2b — only thinking at or before the rejected message goes; the later, still-valid turn keeps its reasoning.
+
+    Removing thinking from the front of the history leaves later blocks valid
+    (live-probed on ``claude-fable-5-1``), so the model's newest reasoning survives.
+    """
+    body = {"messages": copy.deepcopy(_LONG_HISTORY)}
+
+    assert _strip_thinking_blocks(body, through_message=1) is True
+    assert [b["type"] for b in body["messages"][1]["content"]] == ["text", "tool_use"]
+    assert body["messages"][3]["content"][0] == {"type": "thinking", "thinking": "Now Rome.", "signature": "sig-3"}
+
+
+def test_a_targeted_strip_also_removes_unsigned_thinking_anywhere():
+    """R2b — an unsigned block can never verify, so it goes in the same pass instead of costing its own rejection."""
+    history = copy.deepcopy(_LONG_HISTORY)
+    history[3]["content"][0] = {"type": "thinking", "thinking": ""}
+    body = {"messages": history}
+
+    assert _strip_thinking_blocks(body, through_message=1) is True
+    assert [b["type"] for b in body["messages"][3]["content"]] == ["tool_use"]
+
+
+@pytest.mark.parametrize(
+    ("error", "strips_done", "later_turn_keeps_thinking"),
+    [
+        (_envelope(_INVALID_SIGNATURE), 0, True),
+        (_envelope(_INVALID_SIGNATURE), 1, True),
+        (_envelope(_INVALID_SIGNATURE), 2, False),
+        (_envelope("thinking.signature: Field required somewhere"), 0, False),
+    ],
+    ids=["first-strip-targeted", "second-strip-targeted", "third-strip-everything", "no-path-everything"],
+)
+def test_recovery_targets_the_named_message_then_escalates(error, strips_done, later_turn_keeps_thinking):
+    """R2c — two targeted strips, then everything; a rejection naming no message strips everything at once.
+
+    Args:
+        error: The upstream rejection body.
+        strips_done: Strips already made against the body.
+        later_turn_keeps_thinking: Whether the still-valid turn at index 3 should keep its thinking.
+    """
+    body = {"messages": copy.deepcopy(_LONG_HISTORY)}
+
+    assert _recover_rejected_thinking(body, error, strips_done) is True
+    assert (body["messages"][3]["content"][0]["type"] == "thinking") is later_turn_keeps_thinking
+
+
+def test_recovery_stops_after_three_strips():
+    """R2c — the cap bounds the loop however the upstream answers."""
+    body = {"messages": copy.deepcopy(_LONG_HISTORY)}
+
+    assert _recover_rejected_thinking(body, _envelope(_INVALID_SIGNATURE), 3) is False
+    assert body["messages"] == _LONG_HISTORY
+
+
+def test_a_targeted_strip_that_finds_nothing_falls_back_to_everything():
+    """R2c — a path naming a message with no thinking must not end the recovery while broken thinking remains."""
+    body = {"messages": copy.deepcopy(_LONG_HISTORY)}
+    error = _envelope("messages.0.content.0: Invalid `signature` in `thinking` block")
+
+    assert _recover_rejected_thinking(body, error, 0) is True
+    assert all(
+        b["type"] not in ("thinking", "redacted_thinking")
+        for m in body["messages"]
+        if isinstance(m["content"], list)
+        for b in m["content"]
+    )
+
+
 # ── R3–R7: the bridge ───────────────────────────────────────────────────────
 
 
@@ -277,7 +364,14 @@ def _sse_reply() -> str:
     return "".join(f"event: {e['type']}\ndata: {json.dumps(e)}\n\n" for e in events)
 
 
-async def _drive(server: BridgeServer, url: str, replies: list[tuple[int, object]], *, stream: bool = False):
+async def _drive(
+    server: BridgeServer,
+    url: str,
+    replies: list[tuple[int, object]],
+    *,
+    stream: bool = False,
+    history: list[dict] | None = None,
+):
     """Serve scripted upstream replies in order and return what the client and upstream saw.
 
     Args:
@@ -285,6 +379,7 @@ async def _drive(server: BridgeServer, url: str, replies: list[tuple[int, object
         url: The upstream URL to mock.
         replies: ``(status, body)`` per upstream call; a dict body is JSON, a str body is SSE.
         stream: Whether the client request streams.
+        history: The agent's transcript; ``_HISTORY`` when omitted.
 
     Returns:
         ``(status, client_body_text, upstream_calls)`` where each call is ``(json_body, headers)``.
@@ -307,7 +402,12 @@ async def _drive(server: BridgeServer, url: str, replies: list[tuple[int, object
             return CallbackResult(status=status, headers={"Content-Type": "text/event-stream"}, body=body)
         return CallbackResult(status=status, content_type="application/json", body=json.dumps(body))
 
-    request = {"model": "claude-opus-4-6", "max_tokens": 1024, "stream": stream, "messages": copy.deepcopy(_HISTORY)}
+    request = {
+        "model": "claude-opus-4-6",
+        "max_tokens": 1024,
+        "stream": stream,
+        "messages": copy.deepcopy(history or _HISTORY),
+    }
     with aioresponses(passthrough=["http://127.0.0.1"]) as mocked:
         mocked.post(url, callback=respond, repeat=True)
         await server.start_async()
@@ -381,18 +481,91 @@ async def test_streaming_signature_rejection_is_stripped_and_retried_once():
 
 @pytest.mark.parametrize("stream", [False, True], ids=["non-streaming", "streaming"])
 @pytest.mark.asyncio
-async def test_a_second_rejection_after_the_strip_is_surfaced_not_looped(stream):
-    """R6 — one strip per request; if the stripped body is rejected too, the client sees an error.
+async def test_rejections_beyond_the_strip_cap_are_surfaced_not_looped(stream):
+    """R6 — three strips at most: two targeted, the third everything; a fourth rejection reaches the client.
+
+    Each rejection names a later turn, as a history broken in several places would,
+    so every strip has something to remove and only the cap ends the recovery.
 
     Args:
         stream: Whether the client request streams.
     """
-    status, text, calls = await _drive(
-        _native_server(), _NATIVE_URL, [(400, _envelope(_INVALID_SIGNATURE))], stream=stream
-    )
+    history = [
+        *copy.deepcopy(_LONG_HISTORY),
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "thinking", "thinking": "Done.", "signature": "sig-5"},
+                {"type": "text", "text": "Both checked."},
+            ],
+        },
+        {"role": "user", "content": "Thanks."},
+    ]
+    rejections = [
+        (400, _envelope(f"messages.{index}.content.0: Invalid `signature` in `thinking` block"))
+        for index in (1, 3, 5, 5)
+    ]
+
+    status, text, calls = await _drive(_native_server(), _NATIVE_URL, rejections, stream=stream, history=history)
 
     assert status == 400, text
+    assert len(calls) == 4
+    assert _thinking_types(calls[1][0]) == ["thinking", "thinking"]
+    assert _thinking_types(calls[2][0]) == ["thinking"]
+    assert _thinking_types(calls[3][0]) == []
+
+
+@pytest.mark.parametrize("stream", [False, True], ids=["non-streaming", "streaming"])
+@pytest.mark.asyncio
+async def test_the_retry_keeps_the_reasoning_after_the_rejected_turn(stream):
+    """R3b — through the bridge, the named turn loses its thinking and the later valid turn keeps it.
+
+    Args:
+        stream: Whether the client request streams.
+    """
+    ok = _sse_reply() if stream else _OK_REPLY
+    status, text, calls = await _drive(
+        _native_server(),
+        _NATIVE_URL,
+        [(400, _envelope(_INVALID_SIGNATURE)), (200, ok)],
+        stream=stream,
+        history=_LONG_HISTORY,
+    )
+
+    assert status == 200, text
     assert len(calls) == 2
+    assert _thinking_types(calls[0][0]) == ["thinking", "redacted_thinking", "thinking"]
+    assert _thinking_types(calls[1][0]) == ["thinking"]
+
+
+@pytest.mark.asyncio
+async def test_a_failover_after_a_strip_lets_the_next_backend_recover_too():
+    """R4b — strips are counted per serialized body: the next backend's rebuilt body gets its own recovery.
+
+    Member A is stripped, then rate-limits; the pool fails over, rebuilding the
+    body with its thinking restored.  Member B rejects it too.  Had the count
+    been per request, B would have been blamed and quarantined for kitty's history.
+    """
+    server = _native_server(pool=True)
+
+    status, text, calls = await _drive(
+        server,
+        _NATIVE_URL,
+        [
+            (400, _envelope(_INVALID_SIGNATURE)),
+            (429, {"type": "error", "error": {"type": "rate_limit_error", "message": "slow down"}}),
+            (400, _envelope(_INVALID_SIGNATURE)),
+            (200, _sse_reply()),
+        ],
+        stream=True,
+    )
+
+    assert status == 200, text
+    assert len(calls) == 4
+    served_by = calls[-1][1].get("x-api-key")
+    assert calls[2][1].get("x-api-key") == served_by != calls[0][1].get("x-api-key")
+    member = int(served_by.rsplit("-", 1)[1]) - 1
+    assert server._backend_health[member]["healthy"]
 
 
 @pytest.mark.asyncio
