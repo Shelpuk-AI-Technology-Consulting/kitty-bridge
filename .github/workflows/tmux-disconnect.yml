@@ -186,6 +186,36 @@ jobs:
         run: |
           if ! sudo -u kittytest -H env KITTY_EGRESS_PROXY= /home/kittytest/venv/bin/kitty egress show >/dev/null 2>&1; then
             echo "::error::kitty resolved no egress gateway for the test user; the live test was not run."
+            # Value-free diagnosis: file presence, booleans and exception class names only.
+            sudo -u kittytest -H env KITTY_EGRESS_PROXY= /home/kittytest/venv/bin/python -c '
+          import json, os
+          from pathlib import Path
+          from platformdirs import user_config_dir
+          config = Path(user_config_dir("kitty"))
+          print("config dir is ~/.config/kitty:", config == Path.home() / ".config" / "kitty")
+          for name in ("profiles.json", "credentials.json", "egress.json"):
+              path = config / name
+              print(name, "exists:", path.exists(), "readable:", os.access(path, os.R_OK))
+          try:
+              document = json.loads((config / "egress.json").read_text())
+              print("egress.json top-level keys:", sorted(document) if isinstance(document, dict) else type(document).__name__)
+              print("egress.json version:", document.get("version") if isinstance(document, dict) else None)
+          except Exception as exc:
+              print("egress.json unreadable:", type(exc).__name__)
+          from kitty.credentials.file_backend import FileBackend
+          from kitty.credentials.store import CredentialStore
+          from kitty.egress_store import EgressStore, resolve_egress
+          record = EgressStore().load()
+          print("record loaded:", record is not None)
+          if record is not None:
+              print("record has auth_ref:", bool(record.auth_ref))
+              if record.auth_ref:
+                  print("credential resolves:", bool(CredentialStore(backends=[FileBackend()]).get(record.auth_ref)))
+          try:
+              print("resolve_egress returned a gateway:", resolve_egress(cred_store=CredentialStore(backends=[FileBackend()])) is not None)
+          except Exception as exc:
+              print("resolve_egress raised:", type(exc).__name__)
+          ' 2>&1 | grep -E "^(config dir|profiles|credentials|egress|record|credential|resolve_egress)" || echo "diagnosis could not run"
             exit 1
           fi
 
