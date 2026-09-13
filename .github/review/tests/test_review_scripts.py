@@ -162,6 +162,9 @@ EXPECTED_JOBS = {
     ("publish.yml", "publish"),
     ("tests.yml", "test"),
     ("claude-code-review.yml", "review"),
+    # The live `--tmux` disconnect proof (SYSTEM_DESIGN.md §3.4). A kitty-bridge
+    # addition with no upstream counterpart: upstream has no kitty to test.
+    ("tmux-disconnect.yml", "live"),
 }
 
 #: The workflow files themselves, pinned for the same reason one level up: the
@@ -173,6 +176,7 @@ EXPECTED_WORKFLOW_FILES = {
     "model-metadata.yml",
     "publish.yml",
     "tests.yml",
+    "tmux-disconnect.yml",
 }
 
 

@@ -378,11 +378,20 @@ def main() -> None:
         )
     elif result.adapter is not None and (result.backend is not None or result.profile is not None):
         backend = result.backend or result.profile
+        extra_args = result.extra_args
+        # Claude Code's --tmux: kitty itself must move into tmux, or its bridge dies with the SSH terminal.
+        from kitty.cli import tmux_wrap
+
+        if tmux_wrap.wants_tmux(result.adapter.name, extra_args):
+            outcome = tmux_wrap.handle(result.adapter.name, sys.argv[1:], extra_args, tmux_wrap.default_host())
+            if outcome.exit_code is not None:
+                sys.exit(outcome.exit_code)
+            extra_args = outcome.agent_args
         exit_code = _launch_target(
             result.adapter,
             backend,
             cred_store,
-            result.extra_args,
+            extra_args,
             debug=args.debug,
             debug_file=args.debug_file,
             validate=not args.no_validate,

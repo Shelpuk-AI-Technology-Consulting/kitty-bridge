@@ -3812,7 +3812,13 @@ same tree, which is worse than not having it.
 ### 8.2 Activation is incremental, and the gap is on the record
 
 The matrix above describes the finished state. Today only the Fast job exists, so `l3`,
-`acceptance`, `agent_smoke`, `agent_live`, `eval` and `load` are selected by **no job at all**.
+`acceptance`, `agent_smoke`, `eval` and `load` are selected by **no job at all**.
+`agent_live` has one job, and it is **not** the nightly: `.github/workflows/tmux-disconnect.yml`
+runs exactly one file, `tests/integration/test_tmux_disconnect.py`, on pull requests that touch
+the `--tmux` wrap (`SYSTEM_DESIGN.md` §3.4). That job removed `agent_live` from
+`PENDING_ACTIVATION_LAYERS`, so the registry no longer records that
+`tests/integration/test_agent_e2e.py` still runs nowhere: **T-K11, the Agent-live nightly, is
+still owed** (product owner, 2026-09-13).
 What each of those jobs would need from the runner is §8.6; for `agent_smoke` and `agent_live`
 the answer is that CI has had it all along, so what they are still waiting on is the tests, not
 the resources. **`eval` is not in that sentence:** its runner needs are met too, but T-K12 waits
@@ -4548,6 +4554,13 @@ this suite can afford to test.
 
 `configure_kitty.py` materialises the three kitty documents at the paths kitty itself reads,
 and generates the launcher that puts `kitty` in front of `claude`.
+
+**A second consumer binds the same three settings:** `.github/workflows/tmux-disconnect.yml`
+runs the pull request's own kitty against them for the live `--tmux` test (`SYSTEM_DESIGN.md`
+§3.4), with the same Claude Code pin. The rows above keep naming the review workflow because a
+duplicate row per consumer could be deleted with every arm green. Every job binding a `KITTY_*`
+capability, in any workflow, must refuse a fork's pull request; `kitty_job_fork_discrepancies`
+holds that.
 
 **The profile is a balancing pool, and that changes what an assertion may say.** The workflow
 derives the consequence three times over: *"the profile is a four-member balancing pool"*, so

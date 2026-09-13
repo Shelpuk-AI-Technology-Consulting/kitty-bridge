@@ -438,6 +438,71 @@ def fork_guard_discrepancies(markdown: str, review_workflow: str) -> list[str]:
     return problems
 
 
+def kitty_job_conditions(text: str) -> dict[str, str]:
+    """Return the ``if:`` of every job whose definition binds a ``KITTY_*`` capability.
+
+    The review job is not the only consumer any more: ``tmux-disconnect.yml``
+    binds the same organisation secrets to test the pull request's own code.
+    Selecting jobs by what they *bind*, rather than by which action they run, is
+    what makes the next consumer covered before anyone remembers to add it.
+
+    **Stated limits:** only the dotted spelling (``secrets.KITTY_X``) is seen,
+    so ``secrets['KITTY_X']`` and ``secrets: inherit`` into a reusable workflow
+    are not; no workflow here uses either.
+
+    Args:
+        text: The full text of one workflow file.
+
+    Returns:
+        Job name to condition (empty string for a job with no ``if:``), for
+        every job whose own YAML references ``secrets.KITTY_*`` or ``vars.KITTY_*``.
+
+    Raises:
+        yaml.YAMLError: When ``text`` is not valid YAML; a workflow that will not
+            parse must fail the arm, never pass it with no jobs to check.
+    """
+    document = yaml.safe_load(text)
+    jobs = document.get("jobs") if isinstance(document, dict) else None
+    if not isinstance(jobs, dict):
+        return {}
+    return {
+        str(name): str(job.get("if", ""))
+        for name, job in jobs.items()
+        if isinstance(job, dict) and _KITTY_BINDING.search(yaml.safe_dump(job))
+    }
+
+
+def kitty_job_fork_discrepancies(workflow: str) -> list[str]:
+    """Report every job binding a ``KITTY_*`` capability that a fork's pull request could start.
+
+    §8.6 says a fork run never receives the kitty credentials. GitHub withholds
+    secrets from a fork's ``pull_request`` run, but a ``vars.`` value is not
+    documented as withheld, and ``pull_request_target`` hands a fork the secrets
+    outright, so each such job must refuse forks itself.
+
+    Args:
+        workflow: The full text of one workflow file.
+
+    Returns:
+        Human-readable discrepancies. Empty when every binding job carries the
+        guard without a disjunct and the workflow is not triggered by
+        ``pull_request_target``.
+    """
+    problems: list[str] = []
+    conditions = kitty_job_conditions(workflow)
+    for name, condition in conditions.items():
+        if _FORK_GUARD not in condition:
+            problems.append(f"job {name!r} binds a KITTY_* capability and does not carry {_FORK_GUARD!r}")
+        elif "||" in condition:
+            problems.append(f"job {name!r} weakens the fork guard with a disjunct: {condition!r}")
+    if conditions and _PULL_REQUEST_TARGET in workflow_triggers(workflow):
+        problems.append(
+            f"a workflow binding KITTY_* capabilities is triggered by {_PULL_REQUEST_TARGET!r}, "
+            "which hands a fork run the secrets"
+        )
+    return problems
+
+
 def launcher_log_discrepancies(markdown: str, launcher: str) -> list[str]:
     """Report any log the CI launcher writes that §8.6 does not name.
 
@@ -684,6 +749,19 @@ class TestTheInventoryAndTheWorkflowsAgree:
         assert problems == [], "§8.6's fork claim no longer matches the workflow:\n" + "\n".join(
             problems
         )
+
+    def test_every_job_binding_kitty_capabilities_refuses_a_fork_pull_request(
+        self, ci_artifacts: dict[str, str]
+    ) -> None:
+        """The fork claim, for every consumer of the kitty credentials, not only the review job."""
+        workflows = {path: text for path, text in ci_artifacts.items() if path.endswith((".yml", ".yaml"))}
+        binding_jobs = sum(len(kitty_job_conditions(text)) for text in workflows.values())
+        problems = [
+            f"{path}: {problem}" for path, text in workflows.items() for problem in kitty_job_fork_discrepancies(text)
+        ]
+
+        assert binding_jobs >= 2, f"the sweep found {binding_jobs} kitty-binding jobs; the tree has at least two"
+        assert problems == [], "a job holding kitty credentials would run for a fork:\n" + "\n".join(problems)
 
 
 class TestTheGuardCanFail:
@@ -1023,3 +1101,71 @@ jobs:
         assert any(_PULL_REQUEST_TARGET in problem for problem in problems), (
             f"a pull_request_target trigger reported {problems}"
         )
+
+    def test_an_unguarded_job_binding_a_kitty_secret_is_reported(self) -> None:
+        """Kitty-job fork arm: a new consumer of the secrets forgot the guard."""
+        workflow = """
+jobs:
+  live:
+    steps:
+      - env:
+          KITTY_CREDENTIALS_JSON: ${{ secrets.KITTY_CREDENTIALS_JSON }}
+        run: configure
+"""
+
+        problems = kitty_job_fork_discrepancies(workflow)
+
+        assert any("'live'" in problem and "does not carry" in problem for problem in problems), problems
+
+    def test_a_kitty_job_guard_weakened_by_a_disjunct_is_reported(self) -> None:
+        """Kitty-job fork arm: the literal is present and no longer excludes forks."""
+        workflow = f"""
+jobs:
+  live:
+    if: {_FORK_GUARD} || github.actor == 'someone'
+    env:
+      PROFILES: ${{{{ vars.KITTY_PROFILES_JSON }}}}
+    steps: []
+"""
+
+        problems = kitty_job_fork_discrepancies(workflow)
+
+        assert any("disjunct" in problem for problem in problems), problems
+
+    def test_a_kitty_workflow_on_pull_request_target_is_reported(self) -> None:
+        """Kitty-job fork arm: the trigger that gives a fork the secrets despite the guard."""
+        workflow = f"""
+on:
+  pull_request_target:
+jobs:
+  live:
+    if: {_FORK_GUARD}
+    steps:
+      - env:
+          KITTY_EGRESS_JSON: ${{{{ secrets.KITTY_EGRESS_JSON }}}}
+        run: configure
+"""
+
+        problems = kitty_job_fork_discrepancies(workflow)
+
+        assert any(_PULL_REQUEST_TARGET in problem for problem in problems), problems
+
+    def test_a_guarded_kitty_job_and_an_unrelated_job_are_not_reported(self) -> None:
+        """Kitty-job fork arm, the false-positive direction: only binding jobs need the guard."""
+        workflow = f"""
+jobs:
+  build:
+    steps:
+      - run: make
+  live:
+    if: >-
+      github.event.pull_request.draft == false &&
+      {_FORK_GUARD}
+    steps:
+      - env:
+          KITTY_EGRESS_JSON: ${{{{ secrets.KITTY_EGRESS_JSON }}}}
+        run: configure
+"""
+
+        assert kitty_job_conditions(workflow).keys() == {"live"}
+        assert kitty_job_fork_discrepancies(workflow) == []
