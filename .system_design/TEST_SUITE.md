@@ -4907,11 +4907,12 @@ found cases they did not reach and one they understated. Each is decided here, w
   An uncapped hold would make that memory unbounded, against every other bound the bridge keeps
   (F24's line cap, the auditor's). The price of the cap is stated rather than discovered: a
   thinking-only reply longer than 10 MiB cannot be retried. Worst-case memory per concurrent
-  native request is therefore about 10 MiB for the hold plus the auditor's own 10 MiB line bound.
-  The cap is checked per upstream chunk — aiohttp's iterator yields one line at a time — so it can
-  be overshot by the line that crosses it, and releasing copies the buffer once. The set of
-  remembered thinking-block indices is bounded the same way: past 256 distinct thinking blocks the
-  hold fails open, mirroring the auditor's bound on open `tool_use` blocks.
+  native request is therefore about 10 MiB for the hold, plus the auditor's own 10 MiB line bound,
+  plus a set of at most 256 thinking-block indices (kilobytes). The cap is checked per upstream
+  chunk — aiohttp's `StreamReader.__aiter__` is `AsyncStreamIterator(self.readline)`, one line at a
+  time, and `readuntil` raises `LineTooLong` past the reader's high-water mark — so it can be
+  overshot by at most that one line, and releasing copies the buffer once. The index set fails
+  open past its bound, mirroring the auditor's bound on open `tool_use` blocks.
 - **D6 — an empty text chunk is not content.** A `text_delta` whose `text` is `""` releases
   nothing. *Why:* the literal rule would release a reply that opens a text block, streams `""`
   and stops — a blank turn, the defect this ticket exists to fix — while D1 already declines to
