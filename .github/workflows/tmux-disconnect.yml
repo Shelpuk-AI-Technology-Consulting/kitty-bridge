@@ -102,6 +102,65 @@ jobs:
             done
             exit 1'
 
+      # The guarantee that does not depend on the code under test, so it goes up
+      # BEFORE any pull-request code sees the credentials. The gateway is read
+      # from the secret by the runner's own interpreter, not by kitty.
+      # Every rule is inserted silently: rule text and errors would print the
+      # gateway address. Accepted costs (SYSTEM_DESIGN.md §3.4): DNS through the
+      # loopback stub stays open, and a gateway whose address changes after this
+      # step fails closed.
+      - name: Restrict the test user's outbound traffic to the egress gateway
+        shell: bash
+        env:
+          KITTY_EGRESS_JSON: ${{ secrets.KITTY_EGRESS_JSON }}
+        run: |
+          set -euo pipefail
+          fail() { echo "::error::$1"; exit 1; }
+          ENDPOINT=$("$pythonLocation/bin/python" -c '
+          import json, os
+          from urllib.parse import urlsplit
+          url = urlsplit(json.loads(os.environ["KITTY_EGRESS_JSON"])["egress"]["proxy_url"])
+          print(url.hostname, url.port or (443 if url.scheme == "https" else 80))' 2>/dev/null) || fail "KITTY_EGRESS_JSON names no gateway"
+          HOST=${ENDPOINT% *}
+          PORT=${ENDPOINT#* }
+          echo "::add-mask::$HOST"
+          TEST_UID=$(id -u kittytest)
+          PROBE=https://api.github.com
+
+          # Before: the probe must work, or the check after the rules proves nothing.
+          sudo -u kittytest -H curl -4 -sS --max-time 10 -o /dev/null "$PROBE" >/dev/null 2>&1 \
+            || fail "the test user cannot reach the internet even before the firewall; the self-check would be vacuous"
+
+          for TOOL in iptables ip6tables; do
+            sudo "$TOOL" -A OUTPUT -m owner --uid-owner "$TEST_UID" -o lo -j ACCEPT >/dev/null 2>&1 || fail "could not add the loopback rule"
+            sudo "$TOOL" -A OUTPUT -m owner --uid-owner "$TEST_UID" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT >/dev/null 2>&1 || fail "could not add the established rule"
+          done
+          ALLOWED=0
+          for ADDRESS in $(getent ahostsv4 "$HOST" | awk '{print $1}' | sort -u); do
+            echo "::add-mask::$ADDRESS"
+            sudo iptables -A OUTPUT -m owner --uid-owner "$TEST_UID" -p tcp -d "$ADDRESS" --dport "$PORT" -j ACCEPT >/dev/null 2>&1 || fail "could not allow the gateway"
+            ALLOWED=1
+          done
+          for ADDRESS in $(getent ahostsv6 "$HOST" | awk '{print $1}' | grep ':' | sort -u); do
+            echo "::add-mask::$ADDRESS"
+            sudo ip6tables -A OUTPUT -m owner --uid-owner "$TEST_UID" -p tcp -d "$ADDRESS" --dport "$PORT" -j ACCEPT >/dev/null 2>&1 || fail "could not allow the gateway"
+            ALLOWED=1
+          done
+          [ "$ALLOWED" = 1 ] || fail "the egress gateway's host did not resolve"
+          for TOOL in iptables ip6tables; do
+            sudo "$TOOL" -A OUTPUT -m owner --uid-owner "$TEST_UID" -j REJECT >/dev/null 2>&1 || fail "could not add the reject rule"
+          done
+
+          # After: the same IPv4 probe must now fail. IPv6 cannot be probed the same
+          # way (the runner has no IPv6 route and the probe host no IPv6 address, so
+          # a failure would prove nothing), so the rule itself is confirmed instead.
+          if sudo -u kittytest -H curl -4 -sS --max-time 10 -o /dev/null "$PROBE" >/dev/null 2>&1; then
+            fail "the firewall let the test user reach the internet directly over IPv4"
+          fi
+          sudo ip6tables -C OUTPUT -m owner --uid-owner "$TEST_UID" -j REJECT >/dev/null 2>&1 \
+            || fail "the IPv6 reject rule for the test user is not in place"
+          echo "Outbound traffic for the test user is limited to the egress gateway."
+
       - name: Configure kitty for the test user
         shell: bash
         env:
@@ -126,51 +185,6 @@ jobs:
             echo "::error::kitty resolved no egress gateway for the test user; the live test was not run."
             exit 1
           fi
-
-      # The guarantee that does not depend on the code under test. Every rule is
-      # inserted silently: rule text and errors would print the gateway address.
-      # Accepted costs (SYSTEM_DESIGN.md §3.4): DNS through the loopback stub stays
-      # open, and a gateway whose address changes after this step fails closed.
-      - name: Restrict the test user's outbound traffic to the egress gateway
-        shell: bash
-        run: |
-          set -euo pipefail
-          ENDPOINT=$(sudo cat /home/kittytest/.config/kitty/egress.json | "$pythonLocation/bin/python" -c '
-          import json, sys
-          from urllib.parse import urlsplit
-          url = urlsplit(json.load(sys.stdin)["egress"]["proxy_url"])
-          print(url.hostname, url.port or (443 if url.scheme == "https" else 80))')
-          HOST=${ENDPOINT% *}
-          PORT=${ENDPOINT#* }
-          echo "::add-mask::$HOST"
-          TEST_UID=$(id -u kittytest)
-          fail() { echo "::error::$1"; exit 1; }
-          for TOOL in iptables ip6tables; do
-            sudo "$TOOL" -A OUTPUT -m owner --uid-owner "$TEST_UID" -o lo -j ACCEPT >/dev/null 2>&1 || fail "could not add the loopback rule"
-            sudo "$TOOL" -A OUTPUT -m owner --uid-owner "$TEST_UID" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT >/dev/null 2>&1 || fail "could not add the established rule"
-          done
-          ALLOWED=0
-          for ADDRESS in $(getent ahostsv4 "$HOST" | awk '{print $1}' | sort -u); do
-            echo "::add-mask::$ADDRESS"
-            sudo iptables -A OUTPUT -m owner --uid-owner "$TEST_UID" -p tcp -d "$ADDRESS" --dport "$PORT" -j ACCEPT >/dev/null 2>&1 || fail "could not allow the gateway"
-            ALLOWED=1
-          done
-          for ADDRESS in $(getent ahostsv6 "$HOST" | awk '{print $1}' | grep ':' | sort -u); do
-            echo "::add-mask::$ADDRESS"
-            sudo ip6tables -A OUTPUT -m owner --uid-owner "$TEST_UID" -p tcp -d "$ADDRESS" --dport "$PORT" -j ACCEPT >/dev/null 2>&1 || fail "could not allow the gateway"
-            ALLOWED=1
-          done
-          [ "$ALLOWED" = 1 ] || fail "the egress gateway's host did not resolve"
-          for TOOL in iptables ip6tables; do
-            sudo "$TOOL" -A OUTPUT -m owner --uid-owner "$TEST_UID" -j REJECT >/dev/null 2>&1 || fail "could not add the reject rule"
-          done
-          # Self-check: a direct connection from the test user must now fail, in both families.
-          for FAMILY in -4 -6; do
-            if sudo -u kittytest -H curl "$FAMILY" -sS --max-time 10 -o /dev/null https://api.github.com >/dev/null 2>&1; then
-              fail "the firewall let the test user reach the internet directly ($FAMILY)"
-            fi
-          done
-          echo "Outbound traffic for the test user is limited to the egress gateway."
 
       - name: Run the live disconnect test as the test user
         shell: bash

@@ -446,6 +446,10 @@ def kitty_job_conditions(text: str) -> dict[str, str]:
     Selecting jobs by what they *bind*, rather than by which action they run, is
     what makes the next consumer covered before anyone remembers to add it.
 
+    **Stated limits:** only the dotted spelling (``secrets.KITTY_X``) is seen,
+    so ``secrets['KITTY_X']`` and ``secrets: inherit`` into a reusable workflow
+    are not; no workflow here uses either.
+
     Args:
         text: The full text of one workflow file.
 
@@ -746,7 +750,6 @@ class TestTheInventoryAndTheWorkflowsAgree:
             problems
         )
 
-
     def test_every_job_binding_kitty_capabilities_refuses_a_fork_pull_request(
         self, ci_artifacts: dict[str, str]
     ) -> None:
@@ -759,6 +762,7 @@ class TestTheInventoryAndTheWorkflowsAgree:
 
         assert binding_jobs >= 2, f"the sweep found {binding_jobs} kitty-binding jobs; the tree has at least two"
         assert problems == [], "a job holding kitty credentials would run for a fork:\n" + "\n".join(problems)
+
 
 class TestTheGuardCanFail:
     """🔴 Negative controls. Each arm is handed a planted defect and must report it.

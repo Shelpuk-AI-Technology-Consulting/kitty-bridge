@@ -178,6 +178,12 @@ def test_a_crash_prints_the_traceback_then_holds(tmp_path: Path) -> None:
     assert stderr.index("RuntimeError: boom") < stderr.index("kitty exited with code 1")
 
 
+def test_ctrl_c_is_not_held(tmp_path: Path) -> None:
+    """A user who presses Ctrl-C asked to stop, so the pane closes without a prompt."""
+    with pytest.raises(KeyboardInterrupt):
+        _run(tmp_path, outcome=KeyboardInterrupt())
+
+
 def test_end_of_input_releases_the_hold(tmp_path: Path) -> None:
     """With stdin already at EOF the prompt returns instead of hanging."""
     code, _, _, stderr, _ = _run(tmp_path, outcome=3, stdin="")
@@ -238,6 +244,11 @@ def test_kitty_is_imported_only_after_the_environment_is_replaced(tmp_path: Path
     )
     child_env = {**os.environ, "KITTY_TMUX_ENV_FILE": str(env_file)}
     completed = subprocess.run(
-        [sys.executable, "-c", probe], capture_output=True, text=True, check=True, env=child_env
+        [sys.executable, "-c", probe],
+        capture_output=True,
+        text=True,
+        check=True,
+        env=child_env,
+        stdin=subprocess.DEVNULL,
     )
     assert completed.stdout.strip().splitlines()[-1] == "0 [False] True"
