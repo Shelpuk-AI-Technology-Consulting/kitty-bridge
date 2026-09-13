@@ -932,6 +932,141 @@ class TestResponseThinkingCarriage:
         assert "_thinking_blocks" not in result["choices"][0]["message"]
 
 
+class TestSignedThinkingRestore:
+    """KBR-228 part B: carried signed blocks and system are restored verbatim.
+
+    On adapters whose upstream honours Anthropic's thinking-binding contract
+    (``forwards_thinking_signature``), the agent's signed blocks go back
+    byte-identical — in wire order, ahead of the rebuilt text and tool calls —
+    and the agent's ``system`` value replaces the join, cache breakpoints
+    included.  On adapters whose upstream has never been shown to accept the
+    fields, the wire is today's, unchanged.
+    """
+
+    #: Verbatim thinking-family blocks, as the client sent them in history.
+    _CARRIED = [
+        {"type": "thinking", "thinking": "Reasoning.", "signature": "sig-1"},
+        {"type": "redacted_thinking", "data": "opaque"},
+    ]
+
+    @staticmethod
+    def _cc_message() -> dict:
+        return {
+            "role": "assistant",
+            "content": "Answer.",
+            "reasoning_content": "Reasoning.",
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "get_weather", "arguments": '{"city": "London"}'},
+                }
+            ],
+            "_thinking_blocks": TestSignedThinkingRestore._CARRIED,
+        }
+
+    def test_carried_blocks_are_restored_verbatim_before_rebuilt_content(self):
+        cc = {
+            "model": "claude-sonnet-4-6",
+            "messages": [self._cc_message()],
+            "stream": False,
+        }
+        result = AnthropicAdapter().translate_to_upstream(cc)
+        assert result["messages"][0]["content"] == [
+            {"type": "thinking", "thinking": "Reasoning.", "signature": "sig-1"},
+            {"type": "redacted_thinking", "data": "opaque"},
+            {"type": "text", "text": "Answer."},
+            {"type": "tool_use", "id": "call_1", "name": "get_weather", "input": {"city": "London"}},
+        ]
+        # The carriage key never reaches the wire.
+        assert "_thinking_blocks" not in result["messages"][0]
+
+    def test_carriage_absent_rebuilds_the_unsigned_block(self):
+        cc = {
+            "model": "claude-sonnet-4-6",
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": "Answer.",
+                    "reasoning_content": "Reasoning.",
+                }
+            ],
+            "stream": False,
+        }
+        result = AnthropicAdapter().translate_to_upstream(cc)
+        assert result["messages"][0]["content"][0] == {"type": "thinking", "thinking": "Reasoning."}
+
+    @pytest.mark.parametrize("adapter_cls", [MiniMaxTokenAnthropicAdapter, OpenCodeGoAdapter])
+    def test_switch_off_keeps_todays_wire(self, adapter_cls):
+        model = "minimax-m2.7" if adapter_cls is OpenCodeGoAdapter else "claude-sonnet-4-6"
+        cc = {
+            "model": model,
+            "messages": [self._cc_message()],
+            "stream": False,
+        }
+        result = adapter_cls().translate_to_upstream(cc)
+        assistant = result["messages"][0]
+        thinking_blocks = [b for b in assistant["content"] if b["type"] == "thinking"]
+        assert thinking_blocks == [{"type": "thinking", "thinking": "Reasoning."}]
+        assert all("signature" not in b for b in assistant["content"])
+
+    def test_carried_system_is_restored_verbatim(self):
+        system = [
+            {"type": "text", "text": "You are a coding agent.", "cache_control": {"type": "ephemeral"}},
+            {"type": "text", "text": "Use the tools."},
+        ]
+        cc = {
+            "model": "claude-sonnet-4-6",
+            "messages": [
+                {"role": "system", "content": "You are a coding agent.\nUse the tools."},
+                {"role": "user", "content": "hi"},
+            ],
+            "_anthropic_system": system,
+            "stream": False,
+        }
+        result = AnthropicAdapter().translate_to_upstream(cc)
+        assert result["system"] == system
+
+    def test_carried_system_string_restored_verbatim(self):
+        cc = {
+            "model": "claude-sonnet-4-6",
+            "messages": [{"role": "user", "content": "hi"}],
+            "_anthropic_system": "Verbatim system prompt.",
+            "stream": False,
+        }
+        result = AnthropicAdapter().translate_to_upstream(cc)
+        assert result["system"] == "Verbatim system prompt."
+
+    @pytest.mark.parametrize("adapter_cls", [MiniMaxTokenAnthropicAdapter, OpenCodeGoAdapter])
+    def test_switch_off_joins_the_system_as_before(self, adapter_cls):
+        model = "minimax-m2.7" if adapter_cls is OpenCodeGoAdapter else "claude-sonnet-4-6"
+        cc = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": "joined system string"},
+                {"role": "user", "content": "hi"},
+            ],
+            "_anthropic_system": [{"type": "text", "text": "blocks"}],
+            "stream": False,
+        }
+        result = adapter_cls().translate_to_upstream(cc)
+        assert result["system"] == "joined system string"
+
+    @pytest.mark.parametrize(
+        ("adapter_cls", "expected"),
+        [
+            (AnthropicAdapter, True),
+            (CustomAnthropicAdapter, True),
+            (ZaiAnthropicAdapter, True),
+            (MiniMaxTokenAnthropicAdapter, False),
+            (OpenCodeGoAdapter, False),
+        ],
+    )
+    def test_forwards_thinking_signature_defaults(self, adapter_cls, expected):
+        """The switch mirrors where the binding contract is honoured or already exercised."""
+        assert adapter_cls.forwards_thinking_signature is expected
+
+
 class TestThinkingBudgetTokensUncapped:
     """budget_tokens must be max_tokens - 1, not a hardcoded cap."""
 

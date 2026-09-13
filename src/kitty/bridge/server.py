@@ -673,7 +673,11 @@ def _convert_native_to_cc_format(body: dict) -> dict:
     """
     messages: list[dict] = []
 
-    # System prompt → system message
+    # System prompt → system message.  The original value rides the internal
+    # `_anthropic_system` key verbatim (KBR-228 part B), exactly as in
+    # MessagesTranslator.translate_request — this is the second Messages → CC
+    # converter, and the Anthropic adapters restore it on the retry.
+    carried_system = body.get("system")
     system = body.get("system")
     if system:
         if isinstance(system, list):
@@ -697,6 +701,13 @@ def _convert_native_to_cc_format(body: dict) -> dict:
         if role == "assistant" and isinstance(content, list):
             text_blocks = [b for b in content if isinstance(b, dict) and b.get("type") == "text"]
             tool_use_blocks = [b for b in content if isinstance(b, dict) and b.get("type") == "tool_use"]
+            # KBR-228 part B: the signed originals ride the message verbatim,
+            # as in MessagesTranslator.translate_request.
+            carried_blocks = [
+                dict(b)
+                for b in content
+                if isinstance(b, dict) and b.get("type") in ("thinking", "redacted_thinking")
+            ]
 
             if tool_use_blocks:
                 text = "\n".join(b.get("text", "") for b in text_blocks) if text_blocks else None
@@ -712,12 +723,17 @@ def _convert_native_to_cc_format(body: dict) -> dict:
                     }
                     for tu in tool_use_blocks
                 ]
+                if carried_blocks:
+                    cc_msg["_thinking_blocks"] = carried_blocks
                 messages.append(cc_msg)
                 continue
 
             # Text-only content — flatten to string
             text = "\n".join(b.get("text", "") for b in text_blocks)
-            messages.append({**msg, "content": text or None})
+            text_only = {**msg, "content": text or None}
+            if carried_blocks:
+                text_only["_thinking_blocks"] = carried_blocks
+            messages.append(text_only)
             continue
 
         if role == "user" and isinstance(content, list):
@@ -764,6 +780,10 @@ def _convert_native_to_cc_format(body: dict) -> dict:
         "messages": messages,
         "stream": body.get("stream", False),
     }
+
+    # KBR-228 part B: the verbatim system carriage, mirroring the translator.
+    if carried_system:
+        result["_anthropic_system"] = carried_system
 
     if "max_tokens" in body:
         result["max_tokens"] = body["max_tokens"]

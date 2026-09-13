@@ -116,6 +116,12 @@ class OpenCodeGoAdapter(AnthropicAdapter):
     #: (KBR-228 part C).
     injects_placeholder_thinking = True
 
+    #: Restores no signed thinking blocks and no verbatim system on the
+    #: Messages route: these upstreams' tolerance for ``signature`` and
+    #: ``redacted_thinking`` fields is unverified, and M17's recovery
+    #: recognises only Anthropic's rejection wording (KBR-228 part B).
+    forwards_thinking_signature = False
+
     @property
     def provider_type(self) -> str:
         return "opencode_go"

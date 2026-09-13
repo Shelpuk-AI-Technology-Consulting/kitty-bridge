@@ -989,6 +989,86 @@ class TestTranslateResponseThinkingCarriage:
         assert "retry" in result["content"][1]["text"].lower()
 
 
+# ── translate_request: the request carriage (KBR-228 part B) ───────────────
+
+
+class TestRequestThinkingCarriage:
+    """The agent's signed thinking blocks ride the CC request verbatim.
+
+    ``translate_request`` used to flatten thinking to ``reasoning_content`` —
+    signature and ``redacted_thinking`` lost — and to join the system block
+    list into one string, which is exactly the history api.anthropic.com's
+    signature binding rejects on turn 2 (KBR-228).  The original blocks and
+    the original ``system`` value now ride internal keys so the Anthropic
+    adapters can restore them verbatim; every other wire strips the keys.
+    """
+
+    def setup_method(self):
+        self.t = MessagesTranslator()
+
+    def test_assistant_thinking_blocks_are_carried_verbatim_in_order(self):
+        req = {
+            "model": "m",
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "thinking", "thinking": "Reasoning.", "signature": "sig-1"},
+                        {"type": "redacted_thinking", "data": "opaque"},
+                        {"type": "text", "text": "Answer."},
+                    ],
+                },
+            ],
+            "max_tokens": 10,
+        }
+        result = self.t.translate_request(req)
+        assistant_msg = result["messages"][-1]
+        assert assistant_msg["_thinking_blocks"] == [
+            {"type": "thinking", "thinking": "Reasoning.", "signature": "sig-1"},
+            {"type": "redacted_thinking", "data": "opaque"},
+        ]
+        # The CC-facing halves stay: reasoning_content feeds providers that
+        # display it, content/tool_calls feed every CC provider.
+        assert assistant_msg["reasoning_content"] == "Reasoning."
+        assert assistant_msg["content"] == "Answer."
+
+    def test_assistant_without_thinking_carries_no_key(self):
+        req = {
+            "model": "m",
+            "messages": [{"role": "assistant", "content": "Plain."}],
+            "max_tokens": 10,
+        }
+        result = self.t.translate_request(req)
+        assert "_thinking_blocks" not in result["messages"][-1]
+
+    def test_system_block_list_is_carried_verbatim_with_breakpoints(self):
+        system = [
+            {"type": "text", "text": "You are a coding agent.", "cache_control": {"type": "ephemeral"}},
+            {"type": "text", "text": "Use the tools."},
+        ]
+        req = {"model": "m", "system": system, "messages": [{"role": "user", "content": "hi"}], "max_tokens": 10}
+        result = self.t.translate_request(req)
+        assert result["_anthropic_system"] == system
+        # The CC intermediate still carries the joined system message.
+        assert result["messages"][0]["role"] == "system"
+        assert "coding agent" in result["messages"][0]["content"]
+
+    def test_system_string_is_carried_verbatim(self):
+        req = {
+            "model": "m",
+            "system": "Plain system prompt.",
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 10,
+        }
+        result = self.t.translate_request(req)
+        assert result["_anthropic_system"] == "Plain system prompt."
+
+    def test_no_system_means_no_system_carriage(self):
+        req = {"model": "m", "messages": [{"role": "user", "content": "hi"}], "max_tokens": 10}
+        result = self.t.translate_request(req)
+        assert "_anthropic_system" not in result
+
+
 # ── translate_stream_chunk ─────────────────────────────────────────────────
 
 

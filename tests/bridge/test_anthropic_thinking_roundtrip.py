@@ -211,6 +211,52 @@ class TestNonStreamingResponseCarriage:
         assert "_thinking_blocks" not in json.loads(text)
 
 
+class TestFollowUpTurnRestoresTheSignedHistory:
+    """The client's signed blocks and system go back upstream byte-identical (AC-2).
+
+    Anthropic signature-binds every thinking block to the conversation that
+    produced it: the block, and the ``system`` prompt and messages sent before
+    it.  Turn 2 therefore re-sends what turn 1 produced — the signed blocks
+    the client received, and the system prompt as the client addressed it —
+    and kitty must ship both verbatim instead of rebuilding them unsigned and
+    joined.
+    """
+
+    @pytest.mark.asyncio
+    async def test_turn_two_ships_signed_blocks_and_system_byte_identical(self):
+        system = list(_SYSTEM_BLOCKS)
+        turn1_history = [{"role": "user", "content": "What's the weather in Paris?"}]
+        status1, text1, calls = await _drive(
+            _translated_server(),
+            [(200, _SIGNED_REPLY)],
+            history=turn1_history,
+            system=system,
+        )
+        assert status1 == 200
+        client_blocks = json.loads(text1)["content"]
+
+        # The client replays exactly what it received, as Claude Code does.
+        turn2_history = [
+            *turn1_history,
+            {"role": "assistant", "content": client_blocks},
+            {"role": "user", "content": "And in London?"},
+        ]
+        status2, _text2, calls2 = await _drive(
+            _translated_server(),
+            [(200, _SIGNED_REPLY)],
+            history=turn2_history,
+            system=system,
+        )
+        assert status2 == 200
+        assert len(calls2) == 1
+        upstream_body = calls2[0][0]
+
+        assistant_on_wire = [m for m in upstream_body["messages"] if m.get("role") == "assistant"]
+        assert assistant_on_wire[0]["content"] == _SIGNED_REPLY["content"]
+        assert "_thinking_blocks" not in assistant_on_wire[0]
+        assert upstream_body["system"] == system
+
+
 class TestChatCompletionsContainment:
     """No downstream client except Messages sees the internal carriage (AC-3, response half)."""
 

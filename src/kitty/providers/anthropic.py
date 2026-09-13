@@ -120,11 +120,24 @@ class AnthropicAdapter(ProviderAdapter):
             rejected round-trip per turn and M17's strip has to remove it
             again (KBR-228 part C).  A subclass whose upstream has not been
             shown to reject the block sets this to True to keep the old wire.
+        forwards_thinking_signature: Whether :meth:`translate_to_upstream`
+            restores the agent's signed thinking blocks and original
+            ``system`` value verbatim from the KBR-228 carriage.  True here:
+            api.anthropic.com signature-binds thinking to the conversation
+            that produced it, and only a byte-identical restore — signatures,
+            ``redacted_thinking`` and cache breakpoints included — satisfies
+            the check (KBR-228 part B).  A subclass whose upstream has never
+            been shown to accept a ``signature`` or ``redacted_thinking``
+            field sets this to False, which keeps today's wire: restoring
+            unverified fields with no recovery pattern that recognises a
+            foreign rejection would trade a verified fix for a hard failure.
     """
 
     forwards_thinking_display: bool = True
 
     injects_placeholder_thinking: bool = False
+
+    forwards_thinking_signature: bool = True
 
     @property
     def provider_type(self) -> str:
@@ -211,7 +224,21 @@ class AnthropicAdapter(ProviderAdapter):
                         elif isinstance(block, str):
                             system_parts.append(block)
 
-        if system_parts:
+        # KBR-228 part B: on the signature-binding routes the agent's own
+        # system value — blocks and cache breakpoints included — is what the
+        # thinking signatures are bound to, so it is restored verbatim from
+        # the carriage instead of this joined string.  Where the carriage is
+        # absent (a Chat Completions origin) or the upstream is unverified,
+        # today's join stands.
+        carried_system = cc_request.get("_anthropic_system")
+        if carried_system is not None and self.forwards_thinking_signature:
+            if isinstance(carried_system, list):
+                anthropic["system"] = [
+                    dict(block) if isinstance(block, dict) else block for block in carried_system
+                ]
+            else:
+                anthropic["system"] = carried_system
+        elif system_parts:
             anthropic["system"] = "\n".join(system_parts)
 
         # Translate messages
@@ -307,7 +334,15 @@ class AnthropicAdapter(ProviderAdapter):
 
         reasoning = msg.get("reasoning_content")
         thinking_enabled = (cc_request or {}).get("_thinking_enabled")
-        if reasoning:
+        # KBR-228 part B: the signed originals, verbatim and in wire order,
+        # ahead of the rebuilt text and tool calls — thinking always precedes
+        # both on this wire, so the original order survives.  A carriage with
+        # the switch off, or none at all, rebuilds the unsigned block as
+        # before.
+        carried = msg.get("_thinking_blocks")
+        if isinstance(carried, list) and carried and self.forwards_thinking_signature:
+            content_blocks.extend(dict(block) for block in carried if isinstance(block, dict))
+        elif reasoning:
             content_blocks.append({"type": "thinking", "thinking": reasoning})
         elif thinking_enabled and self.injects_placeholder_thinking:
             content_blocks.append({"type": "thinking", "thinking": ""})

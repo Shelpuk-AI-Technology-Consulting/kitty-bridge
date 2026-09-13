@@ -72,6 +72,13 @@ class MiniMaxTokenAnthropicAdapter(AnthropicAdapter):
     #: (KBR-228 part C).
     injects_placeholder_thinking = True
 
+    #: Restores no signed thinking blocks and no verbatim system: MiniMax's
+    #: tolerance for ``signature`` and ``redacted_thinking`` fields is
+    #: unverified, M17's recovery recognises only Anthropic's rejection
+    #: wording, and this route exists because MiniMax rejected Claude Code
+    #: fields before (KBR-228 part B; the P5d precedent).
+    forwards_thinking_signature = False
+
     def __init__(
         self,
         *,

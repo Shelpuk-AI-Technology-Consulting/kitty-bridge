@@ -266,7 +266,12 @@ class MessagesTranslator:
         """Convert a Messages API request to a Chat Completions request."""
         messages = []
 
-        # System prompt -> system message
+        # System prompt -> system message.  The original value is remembered
+        # verbatim — blocks and cache breakpoints included — and rides the
+        # internal ``_anthropic_system`` key so the Anthropic adapters can
+        # restore what the thinking signatures are bound to instead of this
+        # joined string (KBR-228 part B); every other wire strips the key.
+        carried_system = messages_request.get("system")
         system = messages_request.get("system")
         if system:
             # Anthropic allows system as a string or array of content blocks.
@@ -296,6 +301,11 @@ class MessagesTranslator:
             "messages": messages,
             "stream": messages_request.get("stream", False),
         }
+
+        # KBR-228 part B: the verbatim system carriage, set here where the
+        # joined form above has already been written into ``messages``.
+        if carried_system:
+            result["_anthropic_system"] = carried_system
 
         if "max_tokens" in messages_request:
             result["max_tokens"] = messages_request["max_tokens"]
@@ -439,6 +449,15 @@ class MessagesTranslator:
             text_parts = []
             tool_calls = []
             thinking_parts = []
+            # KBR-228 part B: the signed originals ride the message verbatim —
+            # signatures and redacted_thinking included, wire order preserved —
+            # so the Anthropic adapters can restore what their upstream
+            # signature-binds.  Every other wire strips the key.
+            thinking_blocks = [
+                dict(block)
+                for block in content
+                if isinstance(block, dict) and block.get("type") in ("thinking", "redacted_thinking")
+            ]
             for block in content:
                 if not isinstance(block, dict):
                     continue
@@ -466,6 +485,8 @@ class MessagesTranslator:
             }
             if thinking_parts:
                 result["reasoning_content"] = "\n".join(thinking_parts)
+            if thinking_blocks:
+                result["_thinking_blocks"] = thinking_blocks
             if tool_calls:
                 result["tool_calls"] = tool_calls
             return result

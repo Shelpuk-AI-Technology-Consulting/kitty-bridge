@@ -59,6 +59,11 @@ class ProviderAdapter(ABC):
             # both directions; the message-level strip keeps it off every wire
             # that does not consume it (KBR-228 parts A and B).
             "_thinking_blocks",
+            # KBR-228 part B: the agent's original system value (blocks and
+            # cache breakpoints included), restored verbatim by the
+            # Anthropic-family adapters whose upstream honours the
+            # thinking-binding contract.
+            "_anthropic_system",
             "base_url",  # F15 defense-in-depth — URL override goes through build_base_url(),
             # not the CC request body.  Stripping it here protects
             # adapters that rely on the default translate_to_upstream().
