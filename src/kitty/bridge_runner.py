@@ -29,9 +29,9 @@ def main() -> None:
 
     Reads its configuration from the command line; see ``--help``.
     """
-    # `kitty bridge start` spawns this process with stdout and stderr as pipes,
-    # so the locale-codepage path is not an edge case here -- it is the only
-    # path. The parent reads this stderr back and decodes it as UTF-8
+    # `kitty bridge start` spawns this process with stderr merged into a stdout
+    # pipe, so the locale-codepage path is not an edge case here -- it is the only
+    # path. The parent reads that output back and decodes it as UTF-8
     # (`bridge/manage.py`), which is correct only because of this call.
     harden_output_streams()
 
