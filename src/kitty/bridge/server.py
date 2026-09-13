@@ -3369,7 +3369,9 @@ class BridgeServer:
                     status=500,
                 )
 
-            if self._active_provider.use_native_messages:
+            # Decide by the reply's shape: after a failover the provider now active
+            # need not be the one that answered (KBR-237).
+            if cc_response.get("type") == "message":
                 result = cc_response
             else:
                 result = translator.translate_response(cc_response, context=self._empty_response_context())
@@ -7200,8 +7202,10 @@ class BridgeServer:
                         last_body = await resp.text()
 
                     if last_status < 400:
+                        # Only Claude Code's native request takes a Messages body as-is;
+                        # every other inbound protocol needs it translated (KBR-237).
                         if (
-                            self._active_provider.use_native_messages
+                            cc_request.get("_native_messages_request")
                             and isinstance(last_body, dict)
                             and last_body.get("type") == "message"
                         ):
