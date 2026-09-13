@@ -14,11 +14,13 @@ breakpoint's position changes, so two tests' outcomes can differ only by site.
 
 **The prefix is sized to be cacheable.** Below a per-model minimum (512 to 4,096
 tokens) Anthropic skips caching *and returns no error*, which would make a wire test
-vacuous. The tool description precedes every breakpoint in Anthropic's
-``tools -> system -> messages`` order and holds at least :data:`MIN_PREFIX_WORDS`
-words. That is a stand-in, not a token count: it assumes ordinary English prose is at
-least one token per word and doubles the largest minimum for margin. The real proof
-is ``usage.cache_creation_input_tokens > 0`` on the wire.
+vacuous. A breakpoint caches everything up to *and including* its block, and in
+Anthropic's ``tools -> system -> messages`` order the tool definition comes first,
+so the tool description is inside every site's prefix (at the ``tool`` site it is
+the marked block itself). It holds at least :data:`MIN_PREFIX_WORDS` words. That is
+a stand-in, not a token count: it assumes ordinary English prose is at least one
+token per word and doubles the largest minimum for margin. The real proof is
+``usage.cache_creation_input_tokens > 0`` on the wire.
 
 **The detector matches by key name and by value.** :func:`find_breakpoints` finds any
 key containing ``cache_control`` (so a carry-through on a private ``_cache_control``

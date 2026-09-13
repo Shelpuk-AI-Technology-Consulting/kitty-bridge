@@ -27,8 +27,8 @@ import pytest
 from harness import cache_breakpoints as cb
 from harness.test_contract import _KITTY_IMPORT
 
-# Written from REQUIREMENTS R1a, not read from the module, so a wrong path table
-# in the builder cannot agree with itself.
+# Written independently of the module, so a wrong path table in the builder
+# cannot agree with itself.
 EXPECTED_SITE_PATHS: dict[str, tuple[str | int, ...]] = {
     "tool": ("tools", 0),
     "system": ("system", 0),
