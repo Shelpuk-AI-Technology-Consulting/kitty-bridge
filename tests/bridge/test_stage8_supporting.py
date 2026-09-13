@@ -12,6 +12,7 @@ F47: OAuth session save uses file lock
 from __future__ import annotations
 
 import contextlib
+import io
 import json
 import threading
 from pathlib import Path
@@ -51,7 +52,7 @@ class TestStartBridgeRaceCondition:
         with patch("kitty.bridge.manage.subprocess.Popen") as mock_popen:
             mock_proc = MagicMock()
             mock_proc.poll.return_value = None
-            mock_proc.stderr = None
+            mock_proc.stdout = io.BytesIO()
             mock_popen.return_value = mock_proc
 
             # Make the state file appear after a short delay

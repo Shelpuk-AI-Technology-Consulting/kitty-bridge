@@ -3804,8 +3804,8 @@ business, together with the job that runs them; doing it earlier would remove th
 gate. T-H1 must take that reclassification into account before it measures a mutation
 baseline, because it selects on `l1`.
 
-**Eight modules are bulleted below — in six bullets, since the T-W4 and T-W8 rows name two
-modules each — and `tests/cli/test_stream_encoding.py` (KBR-10) is described after them, nine in
+**Nine modules are bulleted below — in seven bullets, since the T-W4 and T-W8 rows name two
+modules each — and `tests/cli/test_stream_encoding.py` (KBR-10) is described after them, ten in
 all, named here so T-K6 inherits a list rather than a search** — the count
 is what T-K6 and T-H1 plan against. (The bullet count and the KBR-10 paragraph were already
 drifting apart before T-W8 added two; spelling out both is what stops the next addition
@@ -3851,6 +3851,15 @@ separately.)
   ephemeral port in four of its classes, following the existing convention of
   `tests/bridge/test_crash_resilience.py` rather than inventing a second one. The whole module
   runs in **~0.6 seconds**, measured, of which the socket-binding cases are ~0.1.
+- **KBR-176:** `tests/bridge/test_bridge_management.py` spawns real child interpreters in four
+  cases of `TestStartBridgeWithALoudChild`, and already bound loopback sockets in
+  `TestBridgeReachable` before that, unlisted. It has no choice for the children: the defect is a
+  child blocked inside `write()` on a pipe nobody reads, which only a real pipe and a real writer
+  can show — a stand-in stream never blocks — and one case runs a whole second interpreter as the
+  CLI, because how an interpreter exits around a thread still blocked on that pipe is platform
+  behaviour. The four spawning cases take **~0.6 seconds** together and the whole module
+  **~3 seconds**, measured. The child is a `python -c` script, never `kitty.bridge_runner`, which
+  would refresh the model-context catalog over the network.
 
 **One cross-cutting cost, added by KBR-188's fix.** Every conformance probe now begins by waiting
 for the clock to report a new instant (§8.3). Measured at **80 calls** across the harness suite:

@@ -2,16 +2,20 @@
 
 from __future__ import annotations
 
+import contextlib
 import io
 import ipaddress
 import json
 import os
 import signal
 import socket
+import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -203,7 +207,7 @@ class TestBridgeManagementHelpers:
 
         def _spawn(*_args, **_kwargs):
             state_at_spawn.append(state_path.exists())
-            return SimpleNamespace(poll=lambda: 1, stderr=None, returncode=1)
+            return SimpleNamespace(poll=lambda: 1, stdout=io.BytesIO(), returncode=1)
 
         with (
             patch("kitty.bridge.manage.subprocess.Popen", side_effect=_spawn) as mock_popen,
@@ -250,7 +254,7 @@ class TestBridgeRestart:
 
         def _spawn(cmd, *_args, **_kwargs):
             spawned_cmd.extend(cmd)
-            return SimpleNamespace(poll=lambda: 1, stderr=None, returncode=1)
+            return SimpleNamespace(poll=lambda: 1, stdout=io.BytesIO(), returncode=1)
 
         # restart will fail at process spawn, but should clear stale state first
         with (
@@ -578,7 +582,7 @@ class TestStartBridgeWithAProcessWeMayNotSignal:
         # start_bridge takes its success path instead of timing out.
         def _spawn(*_args, **_kwargs):
             self._write_state(state_path)
-            return SimpleNamespace(poll=lambda: None, stderr=None, returncode=None)
+            return SimpleNamespace(poll=lambda: None, stdout=io.BytesIO(), returncode=None)
 
         with (
             patch("kitty.bridge.manage.probe_pid", return_value=ProcessLiveness.UNKNOWN),
@@ -1070,7 +1074,7 @@ class TestStopBridgeForceKillIsCrossPlatform:
 class TestStartBridgeReportingAChildThatDiedAtImport:
     """Reporting a bridge child that exited before it wrote its state file.
 
-    The parent explains the failure by reading the dead child's stderr back. A child
+    The parent explains the failure by reading the dead child's output back. A child
     that never reached :func:`kitty.bridge_runner.main` never ran
     :func:`kitty.io_encoding.harden_output_streams`, so those bytes carry the machine's
     locale codepage rather than UTF-8, and a strict decode of them killed the parent
@@ -1092,9 +1096,12 @@ class TestStartBridgeReportingAChildThatDiedAtImport:
 
         Returns:
             An object exposing the three attributes ``start_bridge`` reads from a
-            :class:`subprocess.Popen`: ``poll``, ``returncode`` and ``stderr``.
+            :class:`subprocess.Popen`: ``poll``, ``returncode`` and ``stdout``, which
+            carries the child's stderr since KBR-176 merged the two streams. It hands
+            over one byte per read, so a decode of each read rather than of the whole
+            output would split every multi-byte character and fail the verbatim case.
         """
-        return SimpleNamespace(poll=lambda: 1, returncode=1, stderr=io.BytesIO(stderr_bytes))
+        return SimpleNamespace(poll=lambda: 1, returncode=1, stdout=_OneBytePerRead(stderr_bytes))
 
     def _report(self, tmp_path: Path, stderr_bytes: bytes) -> SystemExit:
         """Run ``start_bridge`` against a dead child and return the exit it raised.
@@ -1153,3 +1160,369 @@ class TestStartBridgeReportingAChildThatDiedAtImport:
         self._report(tmp_path, "Ошибка импорта".encode())
 
         assert "Ошибка импорта" in capsys.readouterr().err
+
+
+class TestStartBridgeWithALoudChild:
+    """A bridge child that writes more than one pipe buffer before its state file (KBR-176).
+
+    A pipe holds a bounded amount before its writer blocks — about 64 KiB on Linux, less on
+    Windows. A parent that does not read while it waits leaves such a child blocked in
+    ``write()``: it never writes its state and never exits, so the operator was told
+    "Bridge started but state file not found" while the child's diagnostic sat unread in the
+    buffer that wedged it. The wedge needs a real pipe and a writer that really blocks, so
+    these cases spawn real children. They are ``python -c`` scripts rather than
+    ``kitty.bridge_runner``, which would refresh the catalog over the network; only the
+    command is swapped, and ``start_bridge``'s own pipe wiring reaches the real
+    :class:`subprocess.Popen` unchanged.
+    """
+
+    # More than the default pipe buffer on every CI platform, by a wide margin.
+    _LOUD_BYTES = 256 * 1024
+
+    # Captured before any patch: ``kitty.bridge.manage.subprocess`` is this same module.
+    _REAL_POPEN = subprocess.Popen
+
+    @pytest.fixture
+    def children(self):
+        """Collect the children a case spawns, then kill each one and close its pipe.
+
+        The order matters: closing a pipe while ``start_bridge``'s reader is blocked on it
+        waits for the child to exit, and closing it between two reads raises inside that
+        reader. So the child is killed, reaped, and its reader allowed to finish first; the
+        reader is found by the name production gives it.
+
+        Yields:
+            list[subprocess.Popen]: Filled by :meth:`_spawning` as children start.
+        """
+        spawned: list[subprocess.Popen] = []
+        from kitty.bridge.manage import OUTPUT_READER_NAME
+
+        yield spawned
+        for child in spawned:
+            child.kill()
+            child.wait(timeout=30)
+        for reader in threading.enumerate():
+            if reader.name == OUTPUT_READER_NAME:
+                reader.join(timeout=30)
+        for child in spawned:
+            if child.stdout is not None:
+                child.stdout.close()
+
+    def _spawning(self, script: str, children: list[subprocess.Popen]):
+        """Build a ``Popen`` replacement that runs ``script`` with the caller's own wiring.
+
+        Args:
+            script: Python source for the child, run as ``python -c``.
+            children: Receives every child started, so the fixture can kill it.
+
+        Returns:
+            A callable with :class:`subprocess.Popen`'s signature.
+        """
+
+        def _spawn(_cmd, **kwargs):
+            """Start ``script`` in place of ``_cmd``, keeping every keyword argument.
+
+            Args:
+                _cmd: The command ``start_bridge`` built, which is not run.
+                **kwargs: ``start_bridge``'s own arguments to :class:`subprocess.Popen`.
+
+            Returns:
+                subprocess.Popen: The started child.
+            """
+            child = self._REAL_POPEN([sys.executable, "-c", script], **kwargs)
+            children.append(child)
+            return child
+
+        return _spawn
+
+    @pytest.mark.parametrize("stream", ["stdout", "stderr"])
+    def test_a_child_louder_than_a_pipe_buffer_still_comes_up(self, stream: str, tmp_path: Path, children, capsys):
+        """Report the URL for a child that is loud before it writes its state.
+
+        Both streams are cases: before KBR-176 the parent read neither while it waited, and
+        a stdout that is never read wedges a child exactly as stderr does.
+        """
+        from kitty.bridge.manage import start_bridge
+
+        state_path = tmp_path / "state.json"
+        state = {
+            "host": "127.0.0.1",
+            "port": 54321,
+            "profile": "loud",
+            "started_at": "2026-09-12T20:00:00Z",
+            "tls": False,
+        }
+        # Renamed into place: start_bridge loads the file the instant it exists
+        script = (
+            "import json, os, sys, time\n"
+            f"getattr(sys, {stream!r}).write('w' * {self._LOUD_BYTES})\n"
+            f"getattr(sys, {stream!r}).flush()\n"
+            f"state = dict({state!r}, pid=os.getpid())\n"
+            f"with open({str(state_path) + '.tmp'!r}, 'w') as f:\n"
+            "    json.dump(state, f)\n"
+            f"os.replace({str(state_path) + '.tmp'!r}, {str(state_path)!r})\n"
+            "time.sleep(120)\n"
+        )
+
+        with patch("kitty.bridge.manage.subprocess.Popen", side_effect=self._spawning(script, children)):
+            start_bridge(state_path=state_path, host="127.0.0.1", port=0)
+
+        assert "http://127.0.0.1:54321" in capsys.readouterr().out
+
+    def test_the_cli_exits_cleanly_while_its_reader_still_waits_on_the_bridge(self, tmp_path: Path):
+        """Let the parent process end normally with the output reader still blocked.
+
+        After every successful start, and every start that outlasts the window, ``kitty``
+        exits while its daemon reader is still inside a read on the live bridge's pipe. How
+        an interpreter shuts down around such a thread is platform behaviour, so it is run
+        rather than reasoned about: a separate interpreter plays ``kitty``, and must exit 0,
+        promptly, with no fatal error. The bridge is loud first, so this also fails before
+        KBR-176.
+        """
+        state_path = tmp_path / "state.json"
+        bridge = (
+            "import json, os, sys, time\n"
+            f"sys.stderr.write('w' * {self._LOUD_BYTES})\n"
+            "sys.stderr.flush()\n"
+            "state = dict(host='127.0.0.1', port=54321, profile='loud', started_at='now', tls=False, pid=os.getpid())\n"
+            f"with open({str(state_path) + '.tmp'!r}, 'w') as f:\n"
+            "    json.dump(state, f)\n"
+            f"os.replace({str(state_path) + '.tmp'!r}, {str(state_path)!r})\n"
+            "time.sleep(120)\n"
+        )
+        cli = (
+            "import subprocess, sys\n"
+            "from unittest.mock import patch\n"
+            "from kitty.bridge.manage import start_bridge\n"
+            "real = subprocess.Popen\n"
+            "def spawn(_cmd, **kwargs):\n"
+            f"    return real([sys.executable, '-c', {bridge!r}], **kwargs)\n"
+            "with patch('kitty.bridge.manage.subprocess.Popen', side_effect=spawn):\n"
+            f"    start_bridge(state_path={str(state_path)!r}, host='127.0.0.1', port=0)\n"
+        )
+
+        try:
+            finished = subprocess.run(
+                [sys.executable, "-c", cli], capture_output=True, text=True, errors="replace", timeout=60
+            )
+        finally:
+            # The bridge outlives the CLI by design; its state file is how it is found
+            with contextlib.suppress(OSError, ValueError, KeyError):
+                os.kill(json.loads(state_path.read_text())["pid"], getattr(signal, "SIGKILL", signal.SIGTERM))
+
+        assert finished.returncode == 0, finished.stderr
+        assert "Fatal Python error" not in finished.stderr
+        assert "http://127.0.0.1:54321" in finished.stdout
+
+    def test_a_loud_child_that_dies_is_reported_with_everything_it_wrote(self, tmp_path: Path, children, capsys):
+        """Show a dead child's diagnostic from both streams, past a buffer of noise.
+
+        The stdout marker is what separates the chosen design, both streams merged into the
+        one the parent reads, from discarding stdout: a ``DEVNULL`` stdout would still pass
+        every other assertion here.
+        """
+        from kitty.bridge.manage import start_bridge
+
+        script = (
+            "import sys\n"
+            f"sys.stdout.write('w' * {self._LOUD_BYTES})\n"
+            "sys.stdout.write('\\nkbr176 marker written to stdout\\n')\n"
+            "sys.stdout.flush()\n"
+            "sys.stderr.write(\"ModuleNotFoundError: No module named 'kbr176_absent'\\n\")\n"
+            "sys.stderr.flush()\n"
+            "sys.exit(1)\n"
+        )
+
+        with (
+            patch("kitty.bridge.manage.subprocess.Popen", side_effect=self._spawning(script, children)),
+            pytest.raises(SystemExit) as excinfo,
+        ):
+            start_bridge(state_path=tmp_path / "state.json", host="127.0.0.1", port=0)
+
+        err = capsys.readouterr().err
+        assert excinfo.value.code == 1
+        assert "Bridge failed to start (exit code 1)" in err
+        assert "kbr176 marker written to stdout" in err
+        assert "ModuleNotFoundError: No module named 'kbr176_absent'" in err
+        assert "Bridge started" not in err
+
+    def test_a_child_still_starting_is_left_running_and_not_called_started(self, tmp_path: Path, capsys):
+        """Report only facts about a child still running without a state file, and leave it be.
+
+        A healthy bridge can take longer than the window, and on some platforms its state file
+        is not where the parent looks (KBR-220), so the report neither calls it started nor
+        promises it will come up nor advises killing it. The stand-in behaves like the pipe of
+        a live child: it never reaches its end, and a read for more than it holds waits. The
+        window's sleeps each wait only until the reader has taken what is there, so the report
+        is written with that output collected and no real time passes.
+        """
+        from kitty.bridge.manage import start_bridge
+
+        output = _LivePipe(b"Refreshing the model-context catalog\n")
+        child = SimpleNamespace(
+            pid=48213,
+            poll=lambda: None,
+            returncode=None,
+            stdout=output,
+            terminate=Mock(),
+            kill=Mock(),
+        )
+        clock = SimpleNamespace(sleep=lambda _s: output.caught_up.wait(0.1))
+
+        try:
+            with (
+                patch("kitty.bridge.manage.subprocess.Popen", return_value=child),
+                patch("kitty.bridge.manage.time", clock),
+                patch("kitty.bridge.manage.os.kill") as os_kill,
+                pytest.raises(SystemExit) as excinfo,
+            ):
+                start_bridge(state_path=tmp_path / "state.json", host="127.0.0.1", port=0)
+        finally:
+            output.released.set()
+
+        err = capsys.readouterr().err
+        assert excinfo.value.code == 1
+        assert "did not report ready within 5 seconds and is still running (PID 48213)" in err
+        assert "Refreshing the model-context catalog" in err
+        assert "Bridge started" not in err
+        assert "end process" not in err
+        child.terminate.assert_not_called()
+        child.kill.assert_not_called()
+        os_kill.assert_not_called()
+
+    def test_output_still_arriving_as_the_child_exits_is_waited_for(self, tmp_path: Path, capsys):
+        """Report a dead child's last output even when it reaches the parent after the exit.
+
+        The parent sees the exit through ``poll()``, which says nothing about whether the
+        reader has drained the pipe yet. Here the output is held back until the exit has been
+        seen, so a report written from whatever had arrived by then would be empty.
+        """
+        from kitty.bridge.manage import start_bridge
+
+        output = _OutputAfterExit(b"ModuleNotFoundError: the line that lands last\n")
+        child = SimpleNamespace(pid=48213, poll=output.see_exit, returncode=1, stdout=output)
+
+        with (
+            patch("kitty.bridge.manage.subprocess.Popen", return_value=child),
+            pytest.raises(SystemExit) as excinfo,
+        ):
+            start_bridge(state_path=tmp_path / "state.json", host="127.0.0.1", port=0)
+
+        assert excinfo.value.code == 1
+        assert "ModuleNotFoundError: the line that lands last" in capsys.readouterr().err
+
+
+class _LivePipe(io.BytesIO):
+    """The output pipe of a child that is still running.
+
+    It never reaches its end while the test holds it: a read that would find the end, or a
+    ``read(n)`` asking for more than is there, waits until :attr:`released` is set, as a
+    real pipe waits for its writer. That is what separates ``read1``, which hands over what
+    has arrived, from ``read(n)``, which would sit on it.
+
+    Attributes:
+        caught_up: Set when a reader has taken everything written so far.
+        released: Set by the test to let a waiting reader see the end.
+    """
+
+    def __init__(self, data: bytes) -> None:
+        """Hold ``data`` as everything the child has written so far.
+
+        Args:
+            data: The bytes a reader is to find.
+        """
+        super().__init__(data)
+        self.caught_up = threading.Event()
+        self.released = threading.Event()
+
+    def read1(self, size: int | None = -1) -> bytes:
+        """Return what has arrived, waiting for release only once nothing is left.
+
+        Args:
+            size: The maximum number of bytes to return; all of them when negative.
+
+        Returns:
+            The bytes read; empty only after release.
+        """
+        chunk = super().read1(size)
+        if not chunk:
+            self._wait_for_release()
+        return chunk
+
+    def read(self, size: int | None = -1) -> bytes:
+        """Wait for release first whenever the request cannot be met from what has arrived.
+
+        Args:
+            size: The number of bytes wanted; everything to the end when negative.
+
+        Returns:
+            The bytes read.
+        """
+        if size is None or size < 0 or size > len(self.getbuffer()) - self.tell():
+            self._wait_for_release()
+        return super().read(size)
+
+    def _wait_for_release(self) -> None:
+        """Signal that the reader has caught up, then wait, bounded, for the test's release."""
+        self.caught_up.set()
+        self.released.wait(10)
+
+
+class _OneBytePerRead(io.BytesIO):
+    """A dead child's output that hands over a single byte per ``read1``.
+
+    Real reads end wherever the child's writes did, so a multi-byte character can straddle
+    two of them; one byte per read makes that certain instead of occasional.
+    """
+
+    def read1(self, size: int | None = -1) -> bytes:
+        """Read at most one byte.
+
+        Args:
+            size: Zero returns nothing; any other value returns at most one byte.
+
+        Returns:
+            The next byte, or empty at the end.
+        """
+        return super().read1(1 if size is None or size != 0 else 0)
+
+
+class _OutputAfterExit(io.BytesIO):
+    """A child's output stream whose data arrives only after the parent has seen the exit.
+
+    Stands in for the last bytes still in flight when a child exits.
+    """
+
+    # Long enough that a report which does not wait for the reader is written first.
+    _IN_FLIGHT_SECONDS = 0.2
+
+    def __init__(self, data: bytes) -> None:
+        """Hold ``data`` back until :meth:`see_exit` has been called.
+
+        Args:
+            data: The bytes the reader is to find once the exit has been seen.
+        """
+        super().__init__(data)
+        self._exit_seen = threading.Event()
+
+    def see_exit(self) -> int:
+        """Report the child as exited, as ``Popen.poll`` would, releasing the data.
+
+        Returns:
+            The exit code, ``1``.
+        """
+        self._exit_seen.set()
+        return 1
+
+    def read1(self, size: int | None = -1) -> bytes:
+        """Wait until the exit has been seen and the data is in flight, then read.
+
+        Args:
+            size: The maximum number of bytes to return; all of them when negative.
+
+        Returns:
+            The bytes read; empty at the end.
+        """
+        if self._exit_seen.wait(timeout=10) and self.tell() == 0:
+            time.sleep(self._IN_FLIGHT_SECONDS)
+        return super().read1(size)
