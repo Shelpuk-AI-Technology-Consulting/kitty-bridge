@@ -3884,8 +3884,9 @@ separately.)
   Its isolation is worth copying: `WIN_PD_OVERRIDE_LOCAL_APPDATA` (platformdirs ≥ 4.8), because
   plain `LOCALAPPDATA` does not redirect Windows. A child reports where kitty will look, and the
   fixture refuses before writing anything unless that is the temporary directory. Its three cases
-  take **~6.5 seconds** on Linux, measured. **The Windows and macOS figures are to be read off the
-  first green legs.** One cost to know about: a bridge that misses the 5 s window fails the case
+  take **~6.5 seconds** on Linux, measured. They passed unskipped on the Windows and macOS legs of
+  the first PR run (2026-09-13, run 34766656090), but the gate prints no per-test durations, so those
+  legs have a result and no figure yet. One cost to know about: a bridge that misses the 5 s window fails the case
   with *"did not report ready"* rather than slowing it, so a slow runner shows up as a red leg,
   never as a quiet delay.
 
