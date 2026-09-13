@@ -829,10 +829,18 @@ class Reply(web.StreamResponse):
 
         §6.3.1 injects a disconnect at four points, one of them part-way through
         a stream. T-B4 builds those on this.
+
+        Everything already written reaches the client first, then the connection
+        ends: ``transport.close()`` flushes what is queued, where
+        ``transport.abort()`` discards it. Windows' Proactor loop still holds
+        every write in that queue when the responder's next statement runs, so
+        ``abort()`` sent the headers and no body there (KBR-189). The cost is
+        that a live peer which has stopped reading keeps the connection open;
+        TEST_SUITE.md §7.2 records why that is accepted.
         """
         transport = self.request.transport
         if transport is not None:
-            transport.abort()
+            transport.close()
 
 
 # Bound after the class is defined, because the server subclass needs to refer
