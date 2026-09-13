@@ -359,8 +359,10 @@ you the truth.
 | `X-Kitty-Model`   | The real model sent upstream (absent if no override is set)   |
 | `X-Kitty-Tier`    | `primary` or `backup` (reserve-tier members)                 |
 
-These name the backend that produced the **first byte** of the response. A stream that fails over after that has
-already sent its headers, so `/stats` is authoritative for the session.
+These name the backend selected when the response headers were sent. A stream never switches backend once content
+has reached the client, so on `/v1/messages`, whose headers go out with the first content, they name the backend that
+produced the response. The other endpoints send headers before the first upstream attempt, so a request that failed
+over before any content can name a backend that produced nothing. `/stats` is authoritative for the session.
 
 **Live.** `GET /stats` returns JSON for the running bridge: per-backend request counts, the real models served with
 their token totals, how many times a request switched backend (`failovers`), and whether the pool was ever exhausted

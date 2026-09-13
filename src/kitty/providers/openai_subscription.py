@@ -950,17 +950,25 @@ class OpenAISubscriptionAdapter(OpenAIAdapter):
                 # Stream SSE chunks to the downstream client.  Do NOT call
                 # resp.close() — curl_cffi's internal cleanup callback releases
                 # the handle back to the session pool when the stream task completes.
+                wrote = False
                 try:
                     async for chunk in resp.aiter_content():
                         if chunk:
                             # Strip UTF-8 BOM that some responses include
                             cleaned = chunk.replace(b"\xef\xbb\xbf", b"")
                             if cleaned:
+                                wrote = True
                                 await write(cleaned)
                     # Stream completed successfully
                     return
                 except Exception as exc:
-                    if self._is_transient_stream_error(exc) and _stream_attempt < _STREAM_RECV_ERROR_RETRIES:
+                    # Written bytes may already be on the client's stream; a retry would append
+                    # its attempt after them (KBR-183, §11 Q14(a)), so only a clean reset is retried.
+                    if (
+                        not wrote
+                        and self._is_transient_stream_error(exc)
+                        and _stream_attempt < _STREAM_RECV_ERROR_RETRIES
+                    ):
                         _stream_attempt += 1
                         logger.info(
                             "Codex backend stream reset (attempt %d/%d), retrying: %s",

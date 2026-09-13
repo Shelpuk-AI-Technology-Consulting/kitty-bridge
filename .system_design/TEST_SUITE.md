@@ -2025,7 +2025,7 @@ sequence rather than timing:
 | Before any downstream byte | Clean failover; the client sees one complete stream from the second backend |
 | After text has been emitted | No text the client already received is repeated — **because there is no second attempt to repeat it from**: the recording upstream sees exactly one request, and the transcript reads as one message ending in a terminal error event. A clean failover to a second backend also satisfies "no repeated text", which is why the recorder assertion and not the transcript is what makes this row bite |
 | Mid `input_json_delta`, tool arguments partly sent | Arguments are never a splice of two attempts, **and the turn ends there**: per Q14 the client receives no argument bytes from a second attempt, the partial `tool_use` block is closed, and one terminal error follows. The negatives still hold — no silent merge, no reused id across attempts — but they are no longer the whole oracle |
-| After content, before the terminal event | Exactly one terminal outcome reaches the client, and per Q14 it is the **error** event rather than a `message_stop` synthesised from a second attempt; `message_stop` is not duplicated or omitted |
+| After content, before the terminal event | Exactly one terminal outcome reaches the client, and per Q14 it is the **error** event rather than a `message_stop` synthesised from a second attempt; no `message_stop` follows the error, and none is duplicated. Where the finish chunk already arrived but its events were still buffered, the buffered `content_block_stop`s of blocks the client already saw open precede the error — never a stop for a block that chunk itself opened |
 
 Each case asserts tool-call **identity** and a single terminal outcome. Only the first case has
 two attempts to compare, so only there does "never reused **across** attempts" have content; for
@@ -2037,9 +2037,13 @@ block, emits one terminal error, and lets the agent retry the turn. So every row
 acceptance oracle, and the four injection points divide cleanly — the first is pre-emission and
 recovers silently, the other three are post-emission and terminate.
 
-That is the same choice `bridge/server.py` already makes for a mid-stream transport drop — **the
-transport class only**; the timeout class still fails over after emission, which is gap G26 /
-KBR-183 — and
+Since KBR-183 closed gap G26 (2026-09-13) that is the choice the bridge makes for **every**
+post-emission failure: no retry and no failover on `/v1/messages`, on the Responses and Gemini
+custom-transport branches, and inside `openai_subscription`'s own stream-reset retry. One residual
+differs in its *ending*, not in its recovery: a post-emission **transport** drop on the translated
+`/v1/messages` path still closes with `end_turn` + `message_stop` rather than the error event
+(KBR-183's decision D2, carried as a scope addition on KBR-99, so the second, third and fourth rows
+above go red on a transport-drop injection until it is settled). It is also
 the same one the real Anthropic API makes: its mid-stream failures arrive as an SSE `error` event on
 an already-`200` response and are raised to the caller, never resumed. **I2** is why that matters
 — a bridge that recovers where the provider gives up is observably not the provider.
@@ -2048,8 +2052,12 @@ The empty-stream case does not reach these rows at all: per Q14(b) the native pa
 its leading events until the first content event, so a contentless reply is still pre-emission
 when it is detected. That is KBR-155's to implement; the rows here assume it.
 
-`/stats` remains authoritative for attribution after a mid-stream failover, per the README's own
-caveat that the headers name whoever produced the first byte.
+`/stats` remains authoritative for attribution, but not for the reason this paragraph used to give.
+Since KBR-183 no stream switches backend after its first byte, and `/v1/messages` prepares its
+response at the first content write, so there the `X-Kitty-*` headers name the backend that produced
+every byte. The Responses, Gemini and Chat Completions handlers prepare their response before the
+first upstream attempt, so after a legitimate **pre-emission** failover their headers name a backend
+that produced nothing.
 
 #### 6.3.2 CLI with real filesystem and processes
 
@@ -4547,7 +4555,7 @@ does not surface work that is done. `TEST_SUITE_IMPLEMENTATION_PLAN.md` §16 mir
 | **G9** | C5 unmeasured | `force_close=True` gives a per-request connection pattern unlike the agent's | Connection-count baseline | **3** |
 | **G11** | Dependency behaviour unpinned; `curl_cffi` unbounded, **botocore undeclared** and the interpreter declared to the minor only | One of five §6.2.4 contracts has landed — the stdlib `ipaddress` one (KBR-146). The four transport contracts and the `botocore` declaration remain, so containment still rests on an undeclared transitive dependency | Dependency contract tests (§6.2.4) + declare botocore | **3** |
 | **G25** | **§6.2.4 contracts are only ever evaluated on the newest patch of each minor** — KBR-146 | `tests.yml` names bare minor versions and `actions/setup-python` resolves each to the newest patch. Every dependency contract therefore proves forward drift only; a value that differs on an older patch a user runs — the shape KBR-146 had — is invisible to the gate. Today that half rests on one L1 test that forces the property both ways, which works because the surrounding behaviour was measured stable, and does not generalise to a contract whose neighbours have not been | One job pinned to the oldest supported patch (`setup-python` accepts an exact version, so it is one job, not four). Deferred as a CI-spend decision, not a technical one | **3** |
-| **G26** | **Post-emission failover is reachable for the timeout class** — KBR-183 | §11 Q14(a) decides that once a byte has reached the client the bridge closes the turn rather than recovering. `bridge/server.py` honours that for the **transport** class only: `_is_transport_error` returns `False` for `asyncio.TimeoutError` by design, and the failover arm after it carries **no** emission test, so a mid-stream `sock_read` timeout after emission marks the backend unhealthy, selects another and writes a second attempt onto the already-prepared response. Measured on this interpreter: `ServerTimeoutError` and bare `asyncio.TimeoutError` are both retryable and not-transport. Second-order: `_attribution_headers()` is evaluated inside `_ensure_prepared`, so such a switch also ships headers naming the first backend while the second's content streams, which falsifies §6.3.1's `/stats` caveat | Consult `sr is not None` in the failover arm, not only in the transport branch — the decision's mechanical test is `_ensure_prepared`'s own contract, and **any new branch in the streaming handler must read it**. T-I7 covers it once written | **1** |
+| ~~**G26**~~ | ~~**Post-emission failover is reachable for the timeout class** — KBR-183~~ · **CLOSED 2026-09-13** *(this ID is also used by KBR-184's row above — a numbering collision, not the same gap)* | Was: §11 Q14(a) was honoured for the **transport** class only. `_is_transport_error` returns `False` for `asyncio.TimeoutError` by design and the failover arm after it carried **no** emission test, so a mid-stream `sock_read` timeout after emission selected another backend (or, without balancing, retried the same one up to six times) and wrote a second attempt onto the already-prepared response | Done: the arm reads `sr`; a post-emission failure closes the blocks the client saw open (from the translator, or from the unsent finish buffer) and ends in one error, charging the backend. The same guard landed on the Responses and Gemini custom-transport failovers (`_bytes_written`) and in `openai_subscription`'s stream-reset retry, and a pre-emission failover now resets the translator. Regression tests: `tests/bridge/test_post_emission_no_failover.py`, `TestCloseOpenBlocks`, `test_does_not_retry_a_reset_after_bytes_were_written`. T-I7 still owns the L3 form. Residual: the transport drop's `message_stop` ending (§6.3.1) | — |
 | **G12** | Product layer effectively absent | 2 E2E tests, never run in CI | Nightly job, extended to 5 Claude Code cases | **4** |
 | **G13** | No answer-quality signal | Compaction and the Fireworks cap can degrade output invisibly | Paired delta eval | **4** |
 
@@ -4877,13 +4885,15 @@ would cost to be wrong about.
    reason, and calls it the same choice FI-8.3 makes for a clean truncation. Answering the other
    way would mean **changing working code to introduce a duplication hazard**.
 
-   **The transport class only, and that is a gap rather than a hedge.** `_is_transport_error`
-   returns `False` for `asyncio.TimeoutError` deliberately, and the failover arm that follows
-   carries no emission test at all, so a mid-stream `sock_read` timeout **after** bytes have
-   reached the client still marks the backend unhealthy, selects another and writes a second
-   attempt onto the already-prepared response. Measured, not inferred: `ServerTimeoutError` and
-   bare `asyncio.TimeoutError` both report retryable and not-transport. So (a) is a decision the
-   code honours on one path and breaches on another — gap **G26**, filed as **KBR-183**.
+   **It was the transport class only — gap G26, closed by KBR-183 on 2026-09-13.**
+   `_is_transport_error` returns `False` for `asyncio.TimeoutError` deliberately, and the failover
+   arm that followed carried no emission test, so a mid-stream `sock_read` timeout **after** bytes
+   had reached the client marked the backend unhealthy, selected another and wrote a second attempt
+   onto the already-prepared response — measured at 2 upstream requests with two backends and 6
+   with one. KBR-183 guards that arm and three sites of the same class it found on the way: the
+   Responses and Gemini custom-transport failovers, and `openai_subscription`'s in-provider retry
+   of a stream reset. The transport drop's own *ending* still differs from (a) — `message_stop`
+   rather than an error — and is recorded in §6.3.1 rather than ratified.
 3. **The alternative is not soundly implementable.** Re-opening on a second backend lets the client
    receive the same sentence twice, or tool-call arguments spliced from two attempts. §6.3.1 states
    the consequence and it is not hypothetical: every SSE event stays syntactically valid while the

@@ -897,6 +897,38 @@ async def _write_client(stream: web.StreamResponse, data: bytes) -> None:
         raise ClientDisconnectedError(str(exc) or type(exc).__name__) from exc
 
 
+def _stops_for_blocks_the_client_saw(buffered_events: list[str]) -> list[str]:
+    """Pick the ``content_block_stop`` events a client needs from an unsent finish buffer.
+
+    A finish chunk's events are held back until the stream ends. If the stream
+    fails first, the blocks the client already saw open still need closing,
+    but a block opened *inside* the buffer was never started on the wire, so
+    its stop must not be sent either.
+
+    Args:
+        buffered_events: The formatted SSE events of the unsent finish chunk.
+
+    Returns:
+        The stop events for blocks opened before the buffer, in buffer order.
+    """
+
+    def _index(event: str) -> int:
+        """Return the content block index an SSE event carries.
+
+        Args:
+            event: One formatted ``content_block_*`` SSE event.
+
+        Returns:
+            The event's ``index`` field.
+        """
+        return int(json.loads(event.split("data: ", 1)[1])["index"])
+
+    started_unsent = {_index(e) for e in buffered_events if e.startswith("event: content_block_start\n")}
+    return [
+        e for e in buffered_events if e.startswith("event: content_block_stop\n") and _index(e) not in started_unsent
+    ]
+
+
 def _is_retryable_exception(exc: Exception) -> bool:
     """Return True for transient network exceptions that should be retried."""
     # A gone client is not an upstream fault: retrying has nobody to serve.
@@ -1908,10 +1940,13 @@ class BridgeServer:
     def _attribution_headers(self) -> dict[str, str]:
         """Return the ``X-Kitty-*`` headers describing the current request's backend.
 
-        Names the backend that produced the response's first byte. A stream
-        that fails over after that has already flushed its headers, so
-        ``/stats`` and the session summary — which count every attempt —
-        remain the authoritative record for a session.
+        Names the backend selected when the headers are sent. No stream
+        switches backend once content reached the client (KBR-183), so on the
+        Messages path, which sends headers with the first content, this is the
+        backend that produced the response; the other handlers send headers
+        before their first attempt, so a pre-emission failover leaves them
+        naming a backend that produced nothing. ``/stats`` and the session
+        summary — which count every attempt — remain the authoritative record.
 
         Returns:
             ``X-Kitty-Backend`` and ``X-Kitty-Tier``, plus ``X-Kitty-Model``
@@ -2816,7 +2851,12 @@ class BridgeServer:
                             failure_kind=kind,
                             cooldown=self._retry_after_from_exc(exc),
                         )
-                        if self._any_healthy_backend(require_streaming=True) and attempt < n_backends - 1:
+                        # Once the provider wrote to the client, another backend would append its attempt (§11 Q14(a)).
+                        if (
+                            not _bytes_written
+                            and self._any_healthy_backend(require_streaming=True)
+                            and attempt < n_backends - 1
+                        ):
                             try:
                                 self._select_backend(require_streaming=True)
                             except AllBackendsUnhealthyError as all_unhealthy:
@@ -4115,7 +4155,29 @@ class BridgeServer:
                             # tool_use is worth seeing, as FI-8.3 notes.
                             auditor.finish()
                             break
-                        if attempt < max_attempts - 1:
+                        # A non-transport failure (a timeout, most often) lands here with bytes on the
+                        # wire; any retry would write a second attempt onto them (§11 Q14(a)).
+                        if sr is not None:
+                            logger.warning(
+                                "Upstream failed mid-stream (%s); ending the turn with an error for %s",
+                                type(exc).__name__,
+                                message_id,
+                            )
+                            if self._backends and self._current_backend_idx >= 0:
+                                self._mark_backend_unhealthy(self._current_backend_idx, cooldown=self._backend_cooldown)
+                            block_stops = translator.close_open_blocks()
+                            # A finish chunk already reset the translator; its stops sit unwritten in the buffer.
+                            if not block_stops and not self._active_provider.use_native_messages:
+                                block_stops = _stops_for_blocks_the_client_saw(finish_events)
+                            try:
+                                for stop in block_stops:
+                                    stop_bytes = stop.encode()
+                                    await _write_client(sr, stop_bytes)
+                                    auditor.feed(stop_bytes)
+                            except ClientDisconnectedError:
+                                logger.debug("Client disconnected before open blocks were closed for %s", message_id)
+                            auditor.finish()
+                        elif attempt < max_attempts - 1:
                             # In balancing mode: mark unhealthy, try next backend
                             if self._backends and self._current_backend_idx >= 0:
                                 is_transport = _is_transport_error(exc)
@@ -4143,6 +4205,7 @@ class BridgeServer:
                                         max_attempts,
                                         type(exc).__name__,
                                     )
+                                    translator.reset()
                                     continue
                                 # No healthy backends — fall through to surface error
                             else:
@@ -4155,6 +4218,7 @@ class BridgeServer:
                                     max_attempts - 1,
                                 )
                                 await asyncio.sleep(delay)
+                                translator.reset()
                                 continue
 
                         if isinstance(exc, asyncio.TimeoutError):
@@ -4362,7 +4426,12 @@ class BridgeServer:
                             failure_kind=kind,
                             cooldown=self._retry_after_from_exc(exc),
                         )
-                        if self._any_healthy_backend(require_streaming=True) and attempt < n_backends - 1:
+                        # Once the provider wrote to the client, another backend would append its attempt (§11 Q14(a)).
+                        if (
+                            not _bytes_written
+                            and self._any_healthy_backend(require_streaming=True)
+                            and attempt < n_backends - 1
+                        ):
                             translator.reset()  # F22: clear stale tool buffers before same-mode failover
                             try:
                                 self._select_backend(require_streaming=True)

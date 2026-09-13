@@ -1044,3 +1044,90 @@ class TestTranslateStreamChunk:
 
         # Must contain fallback text
         assert "retry" in event_blob.lower() or "/clear" in event_blob
+
+
+# ── close_open_blocks (KBR-183) ─────────────────────────────────────────────
+
+
+def _parse_events(events: list[str]) -> list[tuple[str, dict]]:
+    """Split formatted SSE event strings into ``(event name, data)`` pairs.
+
+    Args:
+        events: Strings as returned by the translator, one SSE event each.
+
+    Returns:
+        The event name and decoded JSON payload of every event, in order.
+    """
+    parsed = []
+    for event in events:
+        name = next(line[len("event: ") :] for line in event.splitlines() if line.startswith("event: "))
+        data = next(line[len("data: ") :] for line in event.splitlines() if line.startswith("data: "))
+        parsed.append((name, json.loads(data)))
+    return parsed
+
+
+class TestCloseOpenBlocks:
+    """A post-emission failure closes what the client has open and nothing more.
+
+    §11 Q14(a): the turn ends in one terminal error, so this must not
+    synthesise the normal ending (``message_delta`` / ``message_stop``) or put
+    fallback words in the model's mouth the way
+    :meth:`MessagesTranslator.finalize_interrupted_stream` does.
+    """
+
+    def setup_method(self):
+        """Give each test a fresh translator."""
+        self.t = MessagesTranslator()
+        self.msg_id = f"msg_{uuid.uuid4().hex[:24]}"
+
+    def _feed(self, delta: dict) -> None:
+        """Translate one non-final Chat Completions chunk carrying ``delta``.
+
+        Args:
+            delta: The ``choices[0].delta`` object of the chunk.
+        """
+        self.t.translate_stream_chunk(
+            self.msg_id, "m", {"choices": [{"index": 0, "delta": delta, "finish_reason": None}]}
+        )
+
+    def test_close_open_blocks_before_any_message_returns_nothing(self):
+        """Nothing reached the client, so there is nothing to close."""
+        assert self.t.close_open_blocks() == []
+
+    def test_close_open_blocks_stops_an_open_text_block_only(self):
+        """An open text block gets exactly its own stop event."""
+        self._feed({"content": "Hello"})
+
+        assert _parse_events(self.t.close_open_blocks()) == [
+            ("content_block_stop", {"type": "content_block_stop", "index": 0}),
+        ]
+
+    def test_close_open_blocks_stops_an_open_thinking_block(self):
+        """A reply that is still thinking has its thinking block closed."""
+        self._feed({"reasoning_content": "hmm"})
+
+        assert _parse_events(self.t.close_open_blocks()) == [
+            ("content_block_stop", {"type": "content_block_stop", "index": 0}),
+        ]
+
+    def test_close_open_blocks_stops_a_tool_block_with_partial_arguments(self):
+        """A tool_use whose arguments were cut off is closed at its own index."""
+        self._feed({"content": "Let me look."})
+        self._feed(
+            {
+                "tool_calls": [
+                    {"index": 0, "id": "call_1", "type": "function", "function": {"name": "f", "arguments": '{"q":'}}
+                ]
+            }
+        )
+
+        assert _parse_events(self.t.close_open_blocks()) == [
+            ("content_block_stop", {"type": "content_block_stop", "index": 1}),
+        ]
+
+    def test_close_open_blocks_twice_closes_nothing_the_second_time(self):
+        """A block is closed once; a repeat call must not emit a second stop."""
+        self._feed({"content": "Hello"})
+        self.t.close_open_blocks()
+
+        assert self.t.close_open_blocks() == []

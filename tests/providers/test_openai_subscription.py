@@ -1084,6 +1084,7 @@ class TestStreamRequestBasic:
         adapter: OpenAISubscriptionAdapter,
         fresh_session: tuple[OAuthSession, Path],
     ) -> None:
+        """A reset before the first chunk is retried: nothing reached the client yet."""
         _, session_path = fresh_session
         cc_request = {
             "model": "gpt-5.4",
@@ -1098,7 +1099,7 @@ class TestStreamRequestBasic:
 
         first_resp = _make_streaming_error_response(
             status_code=200,
-            chunks_before_error=[b'data: {"type":"response.output_text.delta","delta":"Hel"}\n\n'],
+            chunks_before_error=[],
             error_message="Failed to perform, curl: (56) Connection closed abruptly.",
         )
         second_resp = _make_streaming_codex_response(
@@ -1121,6 +1122,61 @@ class TestStreamRequestBasic:
 
         assert mock_session.post.await_count == 2
         assert any(b'"delta":"Hello"' in chunk for chunk in written)
+
+    @pytest.mark.asyncio()
+    async def test_does_not_retry_a_reset_after_bytes_were_written(
+        self,
+        adapter: OpenAISubscriptionAdapter,
+        fresh_session: tuple[OAuthSession, Path],
+    ) -> None:
+        """A reset after a chunk was written raises instead of streaming a second attempt (KBR-183).
+
+        The written bytes may already be on the client's stream, so a retry
+        would append the new attempt's text after the partial one (§11 Q14(a)).
+        """
+        _, session_path = fresh_session
+        cc_request = {
+            "model": "gpt-5.4",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": True,
+            "_resolved_key": str(session_path),
+        }
+        written: list[bytes] = []
+
+        async def mock_write(data: bytes) -> None:
+            """Record what the provider sends to the client.
+
+            Args:
+                data: The bytes written.
+            """
+            written.append(data)
+
+        partial = b'data: {"type":"response.output_text.delta","delta":"Hel"}\n\n'
+        first_resp = _make_streaming_error_response(
+            status_code=200,
+            chunks_before_error=[partial],
+            error_message="Failed to perform, curl: (56) Connection closed abruptly.",
+        )
+        second_resp = _make_streaming_codex_response(
+            status_code=200,
+            chunks=[b'data: {"type":"response.output_text.delta","delta":"Hello"}\n\n', b"data: [DONE]\n\n"],
+        )
+
+        mock_session = unittest.mock.AsyncMock()
+        mock_session.post = unittest.mock.AsyncMock(side_effect=[first_resp, second_resp])
+        with unittest.mock.patch.object(
+            OpenAISubscriptionAdapter,
+            "_curl_session",
+            new_callable=unittest.mock.PropertyMock,
+            return_value=mock_session,
+        ):
+            from kitty.providers.base import ProviderError
+
+            with pytest.raises(ProviderError):
+                await adapter.stream_request(cc_request, mock_write)
+
+        assert mock_session.post.await_count == 1
+        assert written == [partial]
 
     @pytest.mark.asyncio()
     async def test_raises_after_retry_exhaustion(
