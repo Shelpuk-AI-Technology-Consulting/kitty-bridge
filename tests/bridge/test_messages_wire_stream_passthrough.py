@@ -215,10 +215,11 @@ _MESSAGES_WIRE_TRANSLATED = [
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("provider_factory", "model"), _MESSAGES_WIRE_TRANSLATED)
 async def test_the_upstream_stream_reaches_the_client_unchanged(provider_factory, model):
-    """R1/R2 — every upstream event arrives, in order, as the upstream sent it.
+    """R1/R2 — the client receives the upstream's SSE body byte for byte.
 
-    Equality of the whole event list is the claim: text, the tool call's
-    streamed arguments, the thinking signature and the usage all ride on it.
+    Equality of the whole body is the claim: the ``event:`` names SDK clients
+    dispatch on, the text, the tool call's streamed arguments, the thinking
+    signature and the usage all ride on it.
 
     Args:
         provider_factory: Builds an Anthropic-wire adapter that is not native passthrough.
@@ -231,7 +232,7 @@ async def test_the_upstream_stream_reaches_the_client_unchanged(provider_factory
     _, status, body = await _stream(provider, model, _render_sse(events))
 
     assert status == 200
-    assert _parse_data_lines(body) == events
+    assert body == _render_sse(events)
 
 
 @pytest.mark.asyncio
@@ -265,3 +266,19 @@ async def test_the_tool_use_auditor_reads_the_forwarded_stream():
 
     assert status == 200
     assert sum(server._stats_malformed_tool_use.values()) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_forwarded_stream_is_counted_as_a_completion():
+    """R6 — ``GET /stats`` still counts the turn, as the translated branch did before forwarding.
+
+    The forwarded stream carries Anthropic usage keys, which ``_log_usage`` does
+    not read, so the claim is the completion count and nothing about tokens.
+    """
+    server, status, _ = await _stream(
+        AnthropicAdapter(), "claude-opus-4-6", _render_sse(_anthropic_events({"path": "a"}))
+    )
+
+    served = server._session_stats()["models_served"]
+    assert status == 200
+    assert sum(record["completions"] for record in served.values()) == 1

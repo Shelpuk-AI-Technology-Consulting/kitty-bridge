@@ -377,8 +377,9 @@ def _route_model(cc_request: dict) -> str:
     """Return the model every routing decision for this request must read.
 
     One question — "which model is this request for?" — kept in one place. On
-    the bridge's side the upstream **path**, the auth **scheme** and the
-    thinking-repair carrier's dialect all read it; on the adapter's side
+    the bridge's side the upstream **path**, the auth **scheme**, the
+    thinking-repair carrier's dialect and whether a Messages stream is forwarded
+    (:meth:`BridgeServer._serves_messages_wire`) all read it; on the adapter's side
     ``translate_to_upstream`` reads the same key directly, because
     ``kitty.providers`` cannot import from ``kitty.bridge``. Keeping those two
     halves on one string is what this function is for.
@@ -3774,13 +3775,8 @@ class BridgeServer:
                             await _write_client(sr, messages_format_error(error_data).encode())
                             break
 
-                        # Success path — stream the response.  A Messages-wire upstream
-                        # already speaks the client's protocol, native or translated:
-                        # the CC chunk translator below would find no `choices` and
-                        # send an empty reply (KBR-227).
-                        if self._active_provider.use_native_messages or (
-                            self._active_provider.upstream_wire_is_messages_api_for_model(_route_model(cc_request))
-                        ):
+                        # Success path — stream the response
+                        if self._serves_messages_wire(cc_request):
                             # Messages wire: forward raw SSE bytes to client.
                             # The auditor reads the same bytes so the forwarded
                             # tool_use inputs are recoverable from our own log
@@ -3801,6 +3797,9 @@ class BridgeServer:
                                 # iteration raised, so the partial tool_use is
                                 # still worth reporting.
                                 auditor.finish()
+                            # Count the turn in /stats as the translated branch does; the
+                            # Anthropic usage keys are not ones _log_usage reads.
+                            self._log_usage(None)
                             stream_ok = True
                             break
 
@@ -6807,6 +6806,30 @@ class BridgeServer:
         model = _route_model(cc_request)
         path = self._active_provider.get_upstream_path(model)
         return self._active_provider.compose_upstream_url(base, path)
+
+    def _serves_messages_wire(self, cc_request: dict) -> bool:
+        """Return whether the selected backend's upstream speaks Anthropic Messages for this request.
+
+        A ``/v1/messages`` stream from such an upstream is already in the
+        client's protocol, so the handler forwards it rather than translating it.
+        Native passthrough adapters qualify, and so do translated ones —
+        ``anthropic``, ``minimax_token`` by default, ``opencode_go`` for its
+        Messages-routed models — whose streams the Chat Completions chunk
+        translator used to discard entirely (KBR-227).  Every branch that
+        decides how a Messages-wire stream is handled must ask this one method,
+        so a change to the rule cannot reach one site and miss another.
+
+        Args:
+            cc_request: The request, normalized for the selected backend; its
+                model is read through :func:`_route_model`.
+
+        Returns:
+            True when the upstream's reply is an Anthropic Messages stream.
+        """
+        provider = self._active_provider
+        return provider.use_native_messages or provider.upstream_wire_is_messages_api_for_model(
+            _route_model(cc_request)
+        )
 
     def _upstream_body_for(self, cc_request: dict) -> dict:
         """Serialize ``cc_request`` for the backend currently selected.

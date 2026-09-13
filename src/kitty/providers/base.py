@@ -541,6 +541,11 @@ class ProviderAdapter(ABC):
         When True, the bridge's ``/v1/messages`` path skips the Messages →
         Chat Completions translation layer and forwards Messages API request,
         response, and SSE event formats directly through this adapter.
+
+        True here must imply :meth:`upstream_wire_is_messages_api_for_model`
+        for every model: the bridge forwards a Messages-wire stream to the
+        client unchanged, and a native adapter with any other wire would have
+        its raw stream forwarded (KBR-227).
         """
         return False
 
