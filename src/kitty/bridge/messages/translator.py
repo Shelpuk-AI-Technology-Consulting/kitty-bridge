@@ -231,6 +231,31 @@ class MessagesTranslator:
         self._last_was_empty = not had_any_content
         return events
 
+    def close_open_blocks(self) -> list[str]:
+        """Close the content blocks the client has open, and nothing else.
+
+        Used when a stream fails after bytes reached the client: per §11
+        Q14(a) of ``.system_design/TEST_SUITE.md`` the turn then ends in one
+        terminal error, so unlike :meth:`finalize_interrupted_stream` this
+        emits no fallback text, ``message_delta`` or ``message_stop``.
+
+        Returns:
+            One ``content_block_stop`` event per open block, or an empty list
+            when no message has started. The translator is reset afterwards,
+            so a repeat call returns an empty list.
+        """
+        if not self._message_started:
+            return []
+
+        events: list[str] = []
+        if self._thinking_block_opened or self._text_block_opened:
+            events.append(format_content_block_stop_event(self._content_block_index))
+        for block_index in sorted({meta["block_index"] for meta in self._tool_call_meta.values()}):
+            events.append(format_content_block_stop_event(block_index))
+
+        self.reset()
+        return events
+
     # ── Request translation ───────────────────────────────────────────────
 
     def translate_request(self, messages_request: dict) -> dict:

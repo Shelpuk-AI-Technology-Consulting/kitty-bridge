@@ -125,12 +125,17 @@ _CC_JSON_RESPONSE = {
 }
 
 # Anthropic Messages SSE, forwarded verbatim by the native-passthrough path.
-_NATIVE_STREAM = (
+_NATIVE_MESSAGE_START = (
     b'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_1",'
     b'"type":"message","role":"assistant","content":[],"model":"test-model",'
     b'"stop_reason":null,"usage":{"input_tokens":1,"output_tokens":1}}}\n\n'
-    b'event: message_stop\ndata: {"type":"message_stop"}\n\n'
 )
+# Content is what releases the native preamble hold (KBR-155); without it nothing is written.
+_NATIVE_TEXT_DELTA = (
+    b'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,'
+    b'"delta":{"type":"text_delta","text":"Hi"}}\n\n'
+)
+_NATIVE_STREAM = _NATIVE_MESSAGE_START + _NATIVE_TEXT_DELTA + b'event: message_stop\ndata: {"type":"message_stop"}\n\n'
 
 
 @pytest.fixture
@@ -308,8 +313,10 @@ class TestClientDisconnectLeavesBackendsHealthy:
                         headers={"Content-Type": "text/event-stream"},
                         repeat=True,
                     )
-                with patch.object(web.StreamResponse, "write", _WriteFailer(fail_after=0)):
+                failer = _WriteFailer(fail_after=0)
+                with patch.object(web.StreamResponse, "write", failer):
                     await _post_stream(port)
+            assert failer.calls > 0, "the disconnect was never injected, so nothing was tested"
             _assert_all_backends_untouched(server)
         finally:
             await server.stop_async()
@@ -576,11 +583,8 @@ class TestUpstreamAbortAfterBytesReachedTheClient:
         message to close — it must still get a terminal event rather than an
         SSE stream that simply stops."""
         calls: list[int] = []
-        native_chunk = (
-            b'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_1",'
-            b'"type":"message","role":"assistant","content":[],"model":"test-model",'
-            b'"stop_reason":null,"usage":{"input_tokens":1,"output_tokens":1}}}\n\n'
-        )
+        # Content first: before release nothing has reached the client, and that drop is retried instead.
+        native_chunk = _NATIVE_MESSAGE_START + _NATIVE_TEXT_DELTA
         runner, base = await self._serve_abort("/v1/messages", native_chunk, calls)
         server = _make_server(2, native=True, base_urls=[base, base])
         port = await server.start_async()
