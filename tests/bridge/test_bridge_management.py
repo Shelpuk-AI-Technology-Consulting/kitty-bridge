@@ -222,6 +222,30 @@ class TestBridgeManagementHelpers:
         mock_popen.assert_called_once()
         assert state_at_spawn == [False], "stale state must be cleared before the spawn"
 
+    def test_start_bridge_tells_the_child_where_to_write_its_state(self, tmp_path: Path):
+        """The child is handed the state path the parent will poll (KBR-220).
+
+        Without it the child wrote to its own default while the parent waited on
+        ``state_path``, so any caller passing a non-default path -- the CLI on
+        macOS, Windows and XDG Linux -- reported a healthy bridge as failed.
+        """
+        from kitty.bridge.manage import start_bridge
+
+        state_path = tmp_path / "somewhere" / "state.json"
+        spawned: list[list[str]] = []
+
+        def _spawn(cmd, *_args, **_kwargs):
+            """Record the child command, then exit at once as a failed child."""
+            spawned.append(list(cmd))
+            return SimpleNamespace(poll=lambda: 1, stdout=io.BytesIO(), returncode=1)
+
+        with patch("kitty.bridge.manage.subprocess.Popen", side_effect=_spawn), pytest.raises(SystemExit):
+            start_bridge(state_path=state_path)
+
+        [cmd] = spawned
+        assert "--state-file" in cmd, f"child command carries no state path: {cmd}"
+        assert cmd[cmd.index("--state-file") + 1] == str(state_path)
+
 
 class TestBridgeRestart:
     """Test restart logic (stop + start with re-read of bridge.yaml)."""

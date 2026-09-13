@@ -10,11 +10,12 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
-import signal
 import sys
 from pathlib import Path
 
 from kitty.bridge.server import BridgeServer
+from kitty.bridge.state import default_state_path
+from kitty.bridge.stop_signals import install_stop_handlers
 from kitty.io_encoding import harden_output_streams
 
 
@@ -45,6 +46,7 @@ def main() -> None:
     parser.add_argument("--log-file", default=None, metavar="PATH")
     parser.add_argument("--tls-cert", default=None)
     parser.add_argument("--tls-key", default=None)
+    parser.add_argument("--state-file", default=None, metavar="PATH")
     args = parser.parse_args()
 
     # Load config if specified
@@ -104,8 +106,9 @@ def main() -> None:
         sys.exit(1)
     set_egress(egress)
 
-    # State file — always use default path
-    state_path = Path.home() / ".config" / "kitty" / "bridge_state.json"
+    # `kitty bridge start` names the file it polls; a service-started bridge
+    # names none and takes the default `kitty bridge status` also reads.
+    state_path = Path(args.state_file) if args.state_file else default_state_path()
 
     profile_name = args.profile
     backend = profile_store.get_backend(profile_name) if profile_name else None
@@ -196,9 +199,7 @@ def main() -> None:
         await model_context_sync.refresh_model_context_overrides()
         await server.start_async()
         stop_event = asyncio.Event()
-        loop = asyncio.get_running_loop()
-        loop.add_signal_handler(signal.SIGINT, stop_event.set)
-        loop.add_signal_handler(signal.SIGTERM, stop_event.set)
+        install_stop_handlers(asyncio.get_running_loop(), stop_event.set)
 
         try:
             await stop_event.wait()
