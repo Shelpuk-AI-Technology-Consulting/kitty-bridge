@@ -3369,8 +3369,9 @@ class BridgeServer:
                     status=500,
                 )
 
-            # Decide by the reply's shape: a native provider answers in Chat Completions
-            # form when the request was not marked native, e.g. after a failover (KBR-237).
+            # Decide by the reply's shape: a native provider answers in Chat Completions form
+            # when `_native_messages_request` is unset (it is set only in the native branch
+            # above, and cleared by the tool_use-format fallback) (KBR-237).
             if cc_response.get("type") == "message":
                 result = cc_response
             else:

@@ -217,12 +217,16 @@ async def test_claude_code_still_gets_the_upstream_messages_reply(provider_facto
 
 
 @pytest.mark.asyncio
-async def test_the_messages_handler_translates_a_chat_completions_reply_even_on_a_native_provider():
+@pytest.mark.parametrize("provider_factory", _NATIVE_ADAPTERS)
+async def test_the_messages_handler_translates_a_chat_completions_reply_even_on_a_native_provider(provider_factory):
     """R5 — ``/v1/messages`` decides from the reply's shape, not from the provider.
 
-    A native-provider endpoint can answer in Chat Completions form — the
-    adapters' own ``translate_from_upstream`` passes such a body through — so
+    A native-provider endpoint can answer in Chat Completions form — each
+    adapter's own ``translate_from_upstream`` passes such a body through — so
     Claude Code must still receive a Messages reply rather than the raw object.
+
+    Args:
+        provider_factory: Builds a native-passthrough adapter.
     """
     cc_reply = {
         "id": "chatcmpl-1",
@@ -237,6 +241,7 @@ async def test_the_messages_handler_translates_a_chat_completions_reply_even_on_
         BridgeProtocol.MESSAGES_API,
         "/v1/messages",
         {"model": "claude-opus-4-6", "max_tokens": 100, "messages": [{"role": "user", "content": "hi"}]},
+        provider=provider_factory(),
         reply=cc_reply,
     )
 
