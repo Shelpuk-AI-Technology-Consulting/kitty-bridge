@@ -7202,8 +7202,9 @@ class BridgeServer:
                         last_body = await resp.text()
 
                     if last_status < 400:
-                        # Only Claude Code's native request takes a Messages body as-is;
-                        # every other inbound protocol needs it translated (KBR-237).
+                        # Only Claude Code's native request takes a Messages body as-is: every other
+                        # inbound protocol needs it translated. `_native_messages_request` is set only by
+                        # _handle_messages' native branch and never ships (_INTERNAL_KEYS) (KBR-237).
                         if (
                             cc_request.get("_native_messages_request")
                             and isinstance(last_body, dict)

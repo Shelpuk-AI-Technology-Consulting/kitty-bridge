@@ -158,12 +158,18 @@ async def test_a_chat_completions_client_gets_a_chat_completion(provider_factory
 
 
 @pytest.mark.asyncio
-async def test_a_responses_client_gets_a_response():
-    """R2 — ``/v1/responses`` receives a ``response`` carrying the reply text."""
+@pytest.mark.parametrize("provider_factory", _NATIVE_ADAPTERS)
+async def test_a_responses_client_gets_a_response(provider_factory):
+    """R2 — ``/v1/responses`` receives a ``response`` carrying the reply text.
+
+    Args:
+        provider_factory: Builds a native-passthrough adapter.
+    """
     status, body = await _post(
         BridgeProtocol.RESPONSES_API,
         "/v1/responses",
         {"model": "claude-opus-4-6", "input": "hi"},
+        provider=provider_factory(),
     )
 
     assert status == 200
@@ -172,12 +178,18 @@ async def test_a_responses_client_gets_a_response():
 
 
 @pytest.mark.asyncio
-async def test_a_gemini_client_gets_candidates():
-    """R3 — ``:generateContent`` receives Gemini ``candidates`` carrying the reply text."""
+@pytest.mark.parametrize("provider_factory", _NATIVE_ADAPTERS)
+async def test_a_gemini_client_gets_candidates(provider_factory):
+    """R3 — ``:generateContent`` receives Gemini ``candidates`` carrying the reply text.
+
+    Args:
+        provider_factory: Builds a native-passthrough adapter.
+    """
     status, body = await _post(
         BridgeProtocol.GEMINI_API,
         "/v1beta/models/claude-opus-4-6:generateContent",
         {"contents": [{"role": "user", "parts": [{"text": "hi"}]}]},
+        provider=provider_factory(),
     )
 
     assert status == 200
@@ -186,12 +198,18 @@ async def test_a_gemini_client_gets_candidates():
 
 
 @pytest.mark.asyncio
-async def test_claude_code_still_gets_the_upstream_messages_reply():
-    """R4 — the native route's own client keeps receiving the upstream body as-is."""
+@pytest.mark.parametrize("provider_factory", _NATIVE_ADAPTERS)
+async def test_claude_code_still_gets_the_upstream_messages_reply(provider_factory):
+    """R4 — the native route's own client keeps receiving the upstream body as-is.
+
+    Args:
+        provider_factory: Builds a native-passthrough adapter.
+    """
     status, body = await _post(
         BridgeProtocol.MESSAGES_API,
         "/v1/messages",
         {"model": "claude-opus-4-6", "max_tokens": 100, "messages": [{"role": "user", "content": "hi"}]},
+        provider=provider_factory(),
     )
 
     assert status == 200
