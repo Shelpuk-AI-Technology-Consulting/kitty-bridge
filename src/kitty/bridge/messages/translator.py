@@ -341,11 +341,7 @@ class MessagesTranslator:
             # values are carried -- beta "updates" needs a header kitty never
             # sends -- and never with `disabled`, which Anthropic rejects.
             display = thinking.get("display")
-            if (
-                thinking.get("type") in ("enabled", "adaptive")
-                and isinstance(display, str)
-                and display in _GA_THINKING_DISPLAYS
-            ):
+            if thinking.get("type") in ("enabled", "adaptive") and display in _GA_THINKING_DISPLAYS:
                 result["_thinking_display"] = display
 
         return result

@@ -5,8 +5,9 @@
 one derived from ``max_tokens`` (register row P5c), which changes the rendered
 prompt and so the prompt cache.  This file establishes that the defect is
 specific to that route — on native passthrough the agent's ``thinking`` and
-``effort`` reach the upstream byte-for-byte, so P5c does not compound the
-breakpoint guarantee the native route is meant to keep (epic KBR-197, CB-3).
+``effort`` reach the upstream unchanged as JSON values.  The cache cost P5c
+records is therefore confined to the translated route and does not erode the
+native route, the one KBR-197's CB-3 relies on to keep cache breakpoints.
 
 Driven through a real in-process :class:`~kitty.bridge.server.BridgeServer`
 rather than the adapter hook, because the native route is decided in
@@ -138,6 +139,15 @@ async def _upstream_body(provider: AnthropicAdapter) -> dict:
     sent: dict = {}
 
     def capture(url, **kwargs):
+        """Record the upstream JSON body and answer with a canned message.
+
+        Args:
+            url: The upstream URL aioresponses matched.
+            **kwargs: The request's keyword arguments; ``json`` is the body.
+
+        Returns:
+            A 200 JSON response carrying a minimal Messages reply.
+        """
         sent.update(kwargs["json"])
         return CallbackResult(status=200, content_type="application/json", body=json.dumps(_anthropic_message()))
 

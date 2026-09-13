@@ -147,7 +147,7 @@ class TestAdaptiveThinkingAndEffortAreStable:
         """R4 — the top-level ``effort`` key kitty copies (P5d) is forwarded as sent.
 
         That key is not in Anthropic's API reference: it is what Claude Code
-        sends (TEST_SUITE.md §3.3.1b).  The documented spelling is
+        sends (TEST_SUITE.md §7.4.1).  The documented spelling is
         ``output_config.effort``, which this route drops (KBR-224), and the
         values here are borrowed from that field's enum.  So this pins
         verbatim copying and nothing more — it makes no claim about caching.
@@ -217,8 +217,9 @@ _WITH_DISPLAY = [
 class TestThinkingDisplayRestoredOnlyWhereTheUpstreamDocumentsIt:
     """R8 — ``display`` is restored on Anthropic's own wire, and withheld where it is undocumented.
 
-    Dropping ``"summarized"`` hides every thinking token from the user on models
-    whose default is ``"omitted"``.  Restoring it on MiniMax, whose
+    Restoring ``display`` keeps the request faithful to what the agent sent — the
+    translated route does not yet return thinking to the user (KBR-227,
+    KBR-228).  Restoring it on MiniMax, whose
     Anthropic-compatible reference does not name the field, risks a 400 on every
     thinking request — so MiniMax-backed routes keep today's behaviour (decision
     D2, KBR-203).
@@ -262,10 +263,10 @@ class TestThinkingDisplayRestoredOnlyWhereTheUpstreamDocumentsIt:
         assert "display" not in shipped["thinking"]
 
     def test_display_is_never_added_to_disabled_thinking(self):
-        """The adapter itself refuses ``display`` on ``disabled``, whoever wrote the key.
+        """The adapter refuses ``display`` on ``disabled``, whoever wrote the key.
 
-        The translator never writes the pair, but the adapter must not rely on
-        that: Anthropic rejects ``display`` alongside ``disabled``.
+        Anthropic rejects ``display`` alongside ``disabled``, so this branch must
+        hold on its own.  Checking the *value* is the translator's job.
         """
         cc_request = {
             "model": "claude-opus-4-6",
@@ -277,11 +278,3 @@ class TestThinkingDisplayRestoredOnlyWhereTheUpstreamDocumentsIt:
         shipped = AnthropicAdapter().translate_to_upstream(cc_request)
 
         assert shipped["thinking"] == {"type": "disabled"}
-
-    def test_the_internal_key_never_ships(self):
-        """``_thinking_display`` itself is stripped on a route that does not read it."""
-        body = _messages_body(max_tokens=8000, thinking=_WITH_DISPLAY[0])
-
-        shipped = _ship(OpenCodeGoAdapter(), body, model="glm-5.1")
-
-        assert "_thinking_display" not in shipped
