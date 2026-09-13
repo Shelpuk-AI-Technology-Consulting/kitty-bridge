@@ -4303,8 +4303,12 @@ status and retry but lost the quota reason and top-up advice on 10 of 11 statuse
 402, which now names the quota itself); the anchor lost nothing. Its residual is that a
 quotation still leaks, and that Gemini sends the same sentence for a per-minute rate limit, so a
 free-tier throttle is advised to top up — status and retry still right. The rule is about the
-tiers that can **promote** a record to `exhausted`; `FATAL_PATTERNS` is weak and reads the full
-haystack too, and that is KBR-206's subject rather than this rule's. `CREDENTIAL_PATTERNS`'
+tiers that can **promote** a record to `exhausted`. KBR-206 added a second exception on the same
+terms — `your credit balance is too low`, the shared prefix of Anthropic's two spent-balance sentences
+(*"…to access the Anthropic API"* and *"…to access the Claude API"*, both in public reports); the longer
+prefix would lose one of them. It is needed for the same reason: the CLI's error line in `result` is
+the carrier no provider-scoped pattern reads. `FATAL_PATTERNS` no longer carries a weak entry — see
+I-C5. `CREDENTIAL_PATTERNS`'
 `model not found` / `authentication_failed` words are the same exposure and are KBR-217's.
 
 The four moved patterns kept every English body: Z.ai's own error table puts a stronger vendor
@@ -4314,10 +4318,10 @@ because a code survives translation and a phrase does not.
 **I-C3 — A numeric outcome field is admitted to the provider-scoped haystack only.** KBR-182.
 `api_error_status` is a JSON number and was discarded before any pattern saw it, so the field
 whose purpose is to report the provider's status was dead weight while looking live. It is now
-read — but it must never reach the haystack `_outcome_text` returns, because that one is read
-first by `FATAL_PATTERNS`, which carries `\b400\b`. Anthropic reports a spent balance as HTTP
-400, so a bare status in the tier-1 haystack turns an empty account into a "broken workflow"
-verdict with the re-run refused. The bound is at the field's own value: a number nested inside
+read — but it must never reach the haystack `_outcome_text` returns, because that one is read by
+`FATAL_UNLESS_PROVIDER_NAMED_PATTERNS`, which carries `\b400\b` (tier 1 until KBR-206). Anthropic reports a spent balance as HTTP
+400, so a bare status in that haystack turns a bodyless 400 into a "broken workflow" verdict with the
+re-run refused — `test_a_bare_400_is_not_promoted_to_a_workflow_fault` is the row. The bound is at the field's own value: a number nested inside
 a provider's error object is a parameter, not a status.
 
 ⚠️ Two qualifications, because the rule is easy to state more absolutely than it holds. It
@@ -4344,7 +4348,7 @@ top-up. That is KBR-206's family — tier 1 reading text that is not a workflow 
 advice is the correct half, so it is pinned rather than hidden: gating the diagnostic on the
 verdict would suppress correct advice there and in KBR-206's own row. A pre-existing
 disagreement of a third kind — a quota verdict under the context-management paragraph — is not
-touched by this change.
+touched by this change. **KBR-206 closed all three** (I-C5).
 
 **Residuals, stated so they read as decisions.** A non-English Z.ai body in `result` keeps
 `exhausted` and its retry but loses the quota reason and advice. A provider that writes `0.402`
@@ -4363,6 +4367,43 @@ computed by three different functions from three different inputs — pattern or
 the evidence text — so they can disagree without any one of them being obviously wrong.
 KBR-145 was filed because they did: an operator was told to top up a balance and, one
 paragraph up, that the workflow was broken. Any change to the tier order re-checks all three.
+
+**I-C5 — Tier 1 names a workflow fault; it never carries a bare status or a generic code.** KBR-206.
+`FATAL_PATTERNS` is consulted before any provider-named cause, so whatever it matches decides the
+verdict *and* refuses the retry. `\b400\b` sat there, and a 400 says the request was rejected, not
+**by what**: Anthropic bills a spent balance as a 400 (*"Your credit balance is too low…"*), and the
+CLI writes the status into its error line, so tier 1 called an empty account a broken workflow while
+the diagnostic, reading evidence, advised a top-up. KBR-145 moved `invalid[_ ]request` down for the
+identical reason; KBR-206 moves `\b400\b` beside it, into `FATAL_UNLESS_PROVIDER_NAMED_PATTERNS`.
+
+*Why not simply demote it.* The context-management refusal is also a 400 and carries *"No quota was
+consumed"*, so with the status gone from tier 1 the quota word would claim a genuine workflow fault.
+The two 400s are separated by their **bodies**, not by tier order: tier 1 now carries
+`CONTEXT_MANAGEMENT_REFUSAL` — the constant `_write_diagnostic`'s refusal branch already reads — so the
+verdict and the refusal advice are decided by one pattern and cannot drift apart.
+
+*Measured*, `origin/main` @ `b902076` against the change: every 400-carrying body in
+`test_review_scripts.py`, `QUOTA_FIXTURES`, both schema rejections, two public-report bodies (the
+*"Claude API"* wording and claude-code#4283's malformed-request 400) and the status-matrix bodies,
+× three carriers (bare CLI line, `result`, `error`) × every matrix status — 549 cells, 150 moved.
+Verdict/advice disagreements fell from **70 to 4**; the four are pre-existing (a schema rejection beside
+a `402` status) and are the named I-C4 exclusion. No quota fixture and no schema rejection moved.
+`FourHundredCarrierTests` pins the sweep and fails when a new 400-carrying fixture is not in it.
+
+*Owner decisions (2026-09-13)*, recorded because each flips a row that was pinned on purpose:
+
+* **D1 — a 400 whose only cause evidence is a billing word is a spent balance.** Anthropic's real body
+  has exactly that shape (`Plans & Billing`), so no rule separates it from a synthetic *"the billing
+  account is not permitted to use this model"* except tier order, which this invariant forbids. The
+  cost is at most one re-run of a request that was rejected before the model ran.
+* **D2 — a record naming only the context-management slug is `fatal`.** Its advice already said
+  "re-running unchanged will not help"; the verdict now agrees. The cost is that a reviewer quoting the
+  dated slug in a non-schema-failure `result` loses its retry.
+
+*Residuals.* OpenRouter's *"can only afford 400"* message with no `402` anywhere in the record is still
+`fatal`: the message carries no quota vocabulary, and adding one is a new pattern, not this change. A
+401/403/404 status beside a malformed-request 400 body now reads as a credential failure — the same
+incoherent-pair resolution KBR-182 recorded for the generic code.
 
 **How it is proven.** `.github/review/tests/test_review_scripts.py`, run directly by `ci.yml`
 rather than through `pytest`, so it is outside §8.1's marker matrix and carries no layer

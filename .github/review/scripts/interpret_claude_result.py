@@ -187,6 +187,13 @@ QUOTA_PATTERNS = (
     # retry are right there. In the error-object carrier `quota` below would send that
     # advice anyway; in the CLI-line-in-`result` carrier THIS anchor is what sends it.
     r"you exceeded your current quota",
+    # 🔴 KBR-206: Anthropic's spent balance, anchored on the same terms as the line above. It
+    # arrives as HTTP **400** `invalid_request_error`, and in the CLI-line-in-`result` carrier
+    # the provider-scoped `\bbilling\b` (from "Plans & Billing") cannot see it, so without this
+    # the record falls to the generic tier and is called a broken workflow. The prefix stops at
+    # "too low" because the sentence ends two ways in public reports -- "...to access the
+    # Anthropic API" and "...to access the Claude API" -- and the longer anchor loses one.
+    r"your credit balance is too low",
 )
 
 # 🔴 **KBR-166. The same words, searched ONLY over what the PROVIDER wrote.**
@@ -303,18 +310,39 @@ CREDENTIAL_PATTERNS = (
 # The reason string already says "or model".
 CREDENTIAL_STATUS_PATTERNS = (r"\b40[134]\b",)
 
+# upstream. Anchored on the beta's own dated slug, or on the refusal's distinctive
+# phrasing, and NOT on the bare words "context management".
+#
+# 🔴 The loose form was written first and is the bug this module documents twice:
+# `_outcome_text` includes `result`, which on a schema failure carries the
+# model's own prose, so a review that merely discussed context management would
+# have been told its own failure was unfixable. A classifier that pattern-matches
+# a haystack it does not control will eventually match itself.
+CONTEXT_MANAGEMENT_REFUSAL = (
+    r"context-management-\d{4}-\d{2}-\d{2}"
+    r"|no endpoints available[^\n]{0,80}context[-. ]management"
+)
+
 # Universal: the workflow itself is wrong and any provider would reject it the
 # same way, so re-running is pure waste. Both failures seen on the first live
 # run land here -- the apostrophes that truncated --json-schema, and the
 # unresolvable $schema reference.
 #
 # ⚠️ **This set is checked BEFORE `QUOTA_PATTERNS`, and that is still deliberate:
-# a rejected schema can coexist with other noise in the record.** `\b400\b` stays
-# here for a measured reason rather than a tidy one -- the context-management
-# refusal is a 400 whose body says "No quota was consumed for this request", so
-# demoting it below quota reports a genuine workflow fault as a spent balance.
-# `_write_diagnostic` already encodes that precedence, with its
-# CONTEXT_MANAGEMENT_REFUSAL branch above its quota branch.
+# a rejected schema can coexist with other noise in the record.** So every entry must
+# name a specific workflow fault -- whatever matches here decides the verdict AND
+# refuses the retry before any provider-named cause is heard.
+#
+# 🔴 **KBR-206 moved `\b400\b` OUT, and put the refusal's own wording in its place.**
+# A 400 says the request was rejected, not by what: Anthropic bills a spent balance as
+# a 400 ("Your credit balance is too low..."), the CLI writes the status into its error
+# line, and this set called an empty account a broken workflow while the diagnostic
+# advised a top-up. The status was here to keep the context-management refusal fatal --
+# a 400 whose body says "No quota was consumed" -- and demoting it alone would hand
+# that refusal to `quota`. So the two 400s are separated by their BODIES:
+# `CONTEXT_MANAGEMENT_REFUSAL` is the very constant `_write_diagnostic`'s refusal
+# branch reads, so the verdict and the refusal advice cannot disagree. The status now
+# sits beside `invalid[_ ]request` below. TEST_SUITE.md §8.5 I-C5 carries the measurement.
 #
 # 🔴 **KBR-145 moved `invalid[_ ]request` OUT of this set**, to
 # `FATAL_UNLESS_PROVIDER_NAMED_PATTERNS` below. DeepSeek reports a spent balance
@@ -326,7 +354,7 @@ CREDENTIAL_STATUS_PATTERNS = (r"\b40[134]\b",)
 FATAL_PATTERNS = (
     r"is not valid json",
     r"is not a valid json schema",
-    r"\b400\b",
+    CONTEXT_MANAGEMENT_REFUSAL,
     r"unterminated string",
 )
 
@@ -356,20 +384,12 @@ FATAL_PATTERNS = (
 # only fail to rescue one. The sets above this line had the opposite exposure, which is
 # why KBR-166 moved those and left these alone. Do not "finish the job" here without
 # first moving this tier.
-FATAL_UNLESS_PROVIDER_NAMED_PATTERNS = (r"invalid[_ ]request",)
-
-# upstream. Anchored on the beta's own dated slug, or on the refusal's distinctive
-# phrasing, and NOT on the bare words "context management".
 #
-# 🔴 The loose form was written first and is the bug this module documents twice:
-# `_outcome_text` includes `result`, which on a schema failure carries the
-# model's own prose, so a review that merely discussed context management would
-# have been told its own failure was unfixable. A classifier that pattern-matches
-# a haystack it does not control will eventually match itself.
-CONTEXT_MANAGEMENT_REFUSAL = (
-    r"context-management-\d{4}-\d{2}-\d{2}"
-    r"|no endpoints available[^\n]{0,80}context[-. ]management"
-)
+# 🔴 KBR-206: `\b400\b` joins it from tier 1, for the reason KBR-145 moved the generic
+# code -- a status names no cause, and Anthropic's spent balance is a 400. It reads the
+# full haystack like its neighbour: this tier can only return `fatal`, so a prose 400
+# here can fail to rescue a record, never promote one to a paid retry.
+FATAL_UNLESS_PROVIDER_NAMED_PATTERNS = (r"invalid[_ ]request", r"\b400\b")
 
 #: What the CLOCK says, one per reachable state — and NOTHING else, because this
 #: is the only sentence in the record-absent body that is true on every path
@@ -670,7 +690,8 @@ def _extract_structured_output(raw_output: str, execution_text: str) -> dict | N
 #: ⚠️ **The rule that replaced the defect, and the one to preserve: a numeric outcome
 #: field is admitted to the PROVIDER-SCOPED text only** -- what
 #: :func:`_provider_outcome_text` returns -- **and must never reach the haystack
-#: :func:`_outcome_text` returns**, which is read first by :data:`FATAL_PATTERNS`.
+#: :func:`_outcome_text` returns**, which is what :data:`FATAL_PATTERNS` and
+#: :data:`FATAL_UNLESS_PROVIDER_NAMED_PATTERNS` -- the tier ``\b400\b`` lives in since KBR-206 -- read.
 #: :func:`_numbers_in` carries the argument and the measurement; it is not repeated
 #: here, because a third copy is the one that goes stale.
 #:
@@ -951,13 +972,15 @@ def _numbers_in(value: object) -> list[str]:
     a record that PARSED -- and that is the load-bearing decision rather than an
     implementation detail.** (An unparseable record is searched whole by
     :func:`classify`, unchanged and pre-existing; see :data:`OUTCOME_FIELDS`.)
-    :data:`FATAL_PATTERNS` is tier 1 and carries ``\b400\b``, so a bare status in the
-    full haystack would let any 400 pre-empt every body-derived verdict below it.
-    Measured, and not hypothetical: Anthropic reports a spent credit balance as HTTP
-    **400** ``invalid_request_error`` -- *"Your credit balance is too low to access the
-    Anthropic API"* -- so the full-haystack form turns that record from
-    ``exhausted``/quota into ``fatal`` with ``retryable`` false. That is KBR-145's filed
-    defect arriving through a new door. KBR-166 already established that the separable
+    :data:`FATAL_UNLESS_PROVIDER_NAMED_PATTERNS` carries ``\b400\b``, so a bare status
+    in the full haystack would turn any 400 that names no provider-side cause into
+    ``fatal`` -- a bodyless 400, or a structured-output failure beside one -- with the
+    re-run refused. When KBR-182 measured this the pattern was still tier 1 and the
+    victim was sharper: Anthropic reports a spent credit balance as HTTP **400**
+    ``invalid_request_error`` -- *"Your credit balance is too low to access the
+    Anthropic API"* -- and the full-haystack form turned it from ``exhausted``/quota into
+    ``fatal``. KBR-206 moved the pattern below the quota group, which rescues that body
+    but not a record carrying no cause at all, so the bound still holds. KBR-166 already established that the separable
     question is who WROTE a field; a numeric status is the most unambiguously
     provider-authored value in the record, so this applies that mechanism once more
     rather than widening what KBR-166 narrowed.
