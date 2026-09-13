@@ -4999,7 +4999,7 @@ keeps (*"Buffer finish events to detect empty responses before writing"*). A con
 therefore still pre-emission when it is detected and keeps the ordinary retry ladder. This is the
 KBR-155 remedy; KBR-163 records it, KBR-155 implements it.
 
-**Amended by KBR-227 (2026-09-13): "the native passthrough" now means the Messages-wire passthrough.** *The implementer's reading of scope, awaiting the product owner's confirmation that (b) and the KBR-155 decisions D1–D7 below cover the translated Messages-wire routes too.*
+**Amended by KBR-227 (2026-09-13): "the native passthrough" now means the Messages-wire passthrough.** **Confirmed by the product owner, 2026-09-13:** (b) and the KBR-155 decisions D1–D7 below cover the translated Messages-wire routes too — one behaviour for every upstream that speaks Anthropic Messages, accepting that their users watch the spinner rather than live thinking until content arrives.
 `_stream_messages` forwards the upstream stream unchanged whenever `BridgeServer._serves_messages_wire`
 holds — a native adapter, **or** a translated one whose upstream speaks Messages for the routed model
 (`anthropic`, `minimax_token` by default, `opencode_go`'s Messages models). Those translated routes used
