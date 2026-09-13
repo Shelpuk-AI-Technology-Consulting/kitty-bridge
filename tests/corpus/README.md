@@ -116,14 +116,14 @@ either a *route* property or a *request* property, and only the second kind can 
 corpus entry; several more (M6's upstream 400, M8's rejected thinking round trip, M12's empty
 upstream response) are properties of the **upstream response**, arranged by a scripted recorder.
 An entry declares neither state for those, and the loader **rejects** a manifest that tries:
-`upstream_empty_response`, `thinking_roundtrip_rejected`, `native_tool_use_format_error`,
-`upstream_rejected_oversized_on_balancing` and `always` are refused in both lists. §9.2's gap
+`upstream_empty_response`, `thinking_roundtrip_rejected`, `thinking_signature_rejected`,
+`native_tool_use_format_error`, `upstream_rejected_oversized_on_balancing` and `always` are refused in both lists. §9.2's gap
 **G21** is the reason — an over-declaring entry makes the oracle's first assertion claim every
 delta and pass over a broken bridge, and "the same author writes the entry and its trigger index,
-so the mechanism has no second reader". This is that second reader, for the five cases the
-repository already proves. Classifying the whole 25-trigger vocabulary is **KBR-186**, filed
-rather than guessed; until it lands, T-D8 cannot read corpus coverage for M6, M8, M9 and M12, and
-those four are discharged by a scripted-recorder test instead.
+so the mechanism has no second reader". This is that second reader, for the six cases the
+repository already proves. Classifying the whole 26-trigger vocabulary is **KBR-186**, filed
+rather than guessed; until it lands, T-D8 cannot read corpus coverage for M6, M8, M9, M12 and M17, and
+those five are discharged by a scripted-recorder test instead.
 
 ---
 

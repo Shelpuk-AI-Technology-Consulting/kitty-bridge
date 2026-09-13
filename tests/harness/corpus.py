@@ -833,16 +833,17 @@ def _checked_id(entry_id: str) -> str:
 #:
 #: **This set is the subset that is *provable* from text already in the
 #: repository, not a classification of the whole vocabulary.**  Classifying all
-#: 25 triggers is `KBR-186`, filed rather than guessed, for the reason T-W3 gave
+#: 26 triggers is `KBR-186`, filed rather than guessed, for the reason T-W3 gave
 #: for deferring trigger predicates: data nothing in this change could prove
 #: wrong is what plan §1.4 forbids.  Until it lands, T-D8 cannot read corpus
-#: coverage for M6, M8, M9 and M12 — they are discharged by a scripted-recorder
+#: coverage for M6, M8, M9, M12 and M17 — they are discharged by a scripted-recorder
 #: test, not by an entry.
 NOT_CORPUS_DECIDABLE: frozenset[Trigger] = frozenset(
     {
         Trigger.ALWAYS,
         Trigger.UPSTREAM_REJECTED_OVERSIZED_ON_BALANCING,
         Trigger.THINKING_ROUNDTRIP_REJECTED,
+        Trigger.THINKING_SIGNATURE_REJECTED,
         Trigger.NATIVE_TOOL_USE_FORMAT_ERROR,
         Trigger.UPSTREAM_EMPTY_RESPONSE,
     }
