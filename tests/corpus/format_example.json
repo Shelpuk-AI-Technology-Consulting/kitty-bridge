@@ -1,0 +1,49 @@
+{
+  "id": "format_example",
+  "description": "A worked example of the corpus format: one plain Messages turn, no tools, no triggers.",
+  "origin": "synthetic",
+  "origin_note": "Hand-written, not captured. It exists so the format has an example a reviewer can read in one screen, and so the loader and the lint have something real to run over before T-C1 lands the first evidence. It is NOT evidence and must never be read as such -- `captured_only()` excludes it by construction. Delete it once the captured corpus is large enough that the format speaks for itself.",
+  "captured_from": "",
+  "captured_at": "",
+  "method": "POST",
+  "scheme": "http",
+  "host": "127.0.0.1",
+  "path": "/v1/messages",
+  "query": "",
+  "headers": [
+    [
+      "Host",
+      "127.0.0.1"
+    ],
+    [
+      "Accept",
+      "application/json"
+    ],
+    [
+      "Content-Type",
+      "application/json"
+    ],
+    [
+      "X-Api-Key",
+      "<redacted:credential_header>"
+    ],
+    [
+      "anthropic-version",
+      "2023-06-01"
+    ],
+    [
+      "anthropic-beta",
+      "claude-code-20250219"
+    ],
+    [
+      "Content-Length",
+      "241"
+    ]
+  ],
+  "body_file": "format_example.body",
+  "body_sha256": "d87cc1b37cdbc24a9958d9d2ad9dd52805b0bb28956c4c1a5c6418712b530bc1",
+  "wire_format": "anthropic_messages",
+  "known_non_secrets": [],
+  "triggers_met": [],
+  "triggers_absent": []
+}
