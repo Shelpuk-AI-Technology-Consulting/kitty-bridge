@@ -333,6 +333,67 @@ class TestBedrockStopSequences:
         assert "_top_k" not in result
 
 
+class TestBedrockToolChoice:
+    """KBR-214: the CC ``tool_choice`` reaches Converse's ``toolConfig.toolChoice``."""
+
+    def setup_method(self):
+        self.adapter = BedrockAdapter()
+
+    def _cc(self, **extra):
+        """Build a minimal CC request with one tool, plus the case's fields."""
+        cc = {
+            "model": "anthropic.claude-sonnet-4-20250514",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream": False,
+            "tools": [{"type": "function", "function": {"name": "get_weather", "parameters": {}}}],
+        }
+        cc.update(extra)
+        return cc
+
+    @pytest.mark.parametrize(
+        ("cc", "converse"),
+        [
+            ("required", {"any": {}}),
+            ({"type": "function", "function": {"name": "get_weather"}}, {"tool": {"name": "get_weather"}}),
+            ("auto", {"auto": {}}),
+        ],
+        ids=["required", "named", "auto"],
+    )
+    def test_tool_choice_value_is_translated(self, cc, converse):
+        """The two forcing values stop being downgraded to ``auto`` (R7)."""
+        result = self.adapter.translate_to_upstream(self._cc(tool_choice=cc))
+        assert result["toolConfig"]["toolChoice"] == converse
+        assert "tool_choice" not in result
+
+    @pytest.mark.parametrize(
+        "value",
+        ["none", None, "bogus", {"type": "function", "function": {}}],
+        ids=["none", "null", "unrecognised", "named-without-name"],
+    )
+    def test_values_converse_cannot_express_keep_todays_auto(self, value):
+        """Converse's ``ToolChoice`` union has no ``none``, so today's value stands (D7, G33)."""
+        result = self.adapter.translate_to_upstream(self._cc(tool_choice=value))
+        assert result["toolConfig"]["toolChoice"] == {"auto": {}}
+
+    def test_no_tool_choice_keeps_todays_auto(self):
+        """No CC ``tool_choice`` leaves the existing default untouched (R9)."""
+        result = self.adapter.translate_to_upstream(self._cc())
+        assert result["toolConfig"]["toolChoice"] == {"auto": {}}
+
+    def test_no_tools_means_no_tool_config(self):
+        """A choice without tools builds no ``toolConfig``, exactly as before (R7)."""
+        cc = self._cc(tool_choice="required")
+        del cc["tools"]
+        result = self.adapter.translate_to_upstream(cc)
+        assert "toolConfig" not in result
+
+    def test_parallel_tool_calls_does_not_reach_the_converse_body(self):
+        """Converse has no parallel-tool-use field; nothing is invented (G32)."""
+        result = self.adapter.translate_to_upstream(self._cc(tool_choice="required", parallel_tool_calls=False))
+        assert "parallel_tool_calls" not in result
+        assert set(result["toolConfig"]) == {"tools", "toolChoice"}
+
+
 class TestBedrockTranslateFromUpstream:
     def setup_method(self):
         self.adapter = BedrockAdapter()

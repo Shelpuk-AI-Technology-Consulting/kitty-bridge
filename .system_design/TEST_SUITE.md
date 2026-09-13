@@ -378,15 +378,21 @@ anywhere that reads a *value* out of `src/kitty` rather than a name.
 the document say the same thing, that every site named still exists, and that one row's paths
 match one allowlist and one published cell. A mutation the product performs and
 *neither* artifact records is invisible to all of them — only the wire-level guard can catch that,
-and it needs a recorder and an oracle. Nine such omissions are already known and filed: G22
+and it needs a recorder and an oracle. Fourteen such omissions are already known and filed: G22
 (headers), G23 (`openai_subscription`'s `reasoning` injection), G26 (P13's CC-origin twin),
 G27 (an allowlisted field dropped for being falsy), G28 (`top_k` dropped off the
-Anthropic family), G29 (an empty `stop_sequences` omitted) and G30 (a string-form
-`stop` rewritten into a list), G37 (the Anthropic family dropping a Chat Completions request's
-breakpoints) and G38 (a top-level `cache_control` dropped on the translated route). **None of the
-nine was found by a guard** — the earlier
-ones by walking the subscription request path by hand, G28-G30 by the design and code reviews of
-KBR-178, G37 and G38 by probing inputs for KBR-199 and its design review. That is the evidence for the sentence above, not a decoration on it.
+Anthropic family), G29 (an empty `stop_sequences` omitted), G30 (a string-form
+`stop` rewritten into a list), G31 (`metadata` dropped off the Anthropic family), G32
+(tool-selection fields dropped where a wire has no field), G33 (Bedrock's `toolChoice: auto`
+written when the body forces nothing), G34 (`disable_parallel_tool_use: false` omitted), G35
+(a legal `tool_choice` omitted where carrying it would create a failure), G37 (the Anthropic
+family dropping a Chat Completions request's breakpoints) and G38 (a top-level `cache_control`
+dropped on the translated route). **None of the fourteen was found by a guard** — the earlier ones
+by walking the subscription request path by hand, G28-G30 by the design and code reviews of
+KBR-178, G31-G35 by writing and reviewing KBR-214's requirements, G37 and G38 by probing inputs for
+KBR-199 and its design review. That is the evidence for the sentence above, not a decoration on
+it. (G36, found alongside G31-G35, is a gap in the harness rather than a mutation, so it is not
+counted here.)
 
 **A header row's `paths` are checked by none of the four well-formedness guards**, and the two
 that do check paths check P23's alone. Under §3.2.2's header rule they are
@@ -3827,8 +3833,8 @@ business, together with the job that runs them; doing it earlier would remove th
 gate. T-H1 must take that reclassification into account before it measures a mutation
 baseline, because it selects on `l1`.
 
-**Nine modules are bulleted below — in seven bullets, since the T-W4 and T-W8 rows name two
-modules each — and `tests/cli/test_stream_encoding.py` (KBR-10) is described after them, ten in
+**Ten modules are bulleted below — in eight bullets, since the T-W4 and T-W8 rows name two
+modules each — and `tests/cli/test_stream_encoding.py` (KBR-10) is described after them, eleven in
 all, named here so T-K6 inherits a list rather than a search** — the count
 is what T-K6 and T-H1 plan against. (The bullet count and the KBR-10 paragraph were already
 drifting apart before T-W8 added two; spelling out both is what stops the next addition
@@ -3883,6 +3889,20 @@ separately.)
   behaviour. The four spawning cases take **~0.6 seconds** together and the whole module
   **~3 seconds**, measured. The child is a `python -c` script, never `kitty.bridge_runner`, which
   would refresh the model-context catalog over the network.
+- **KBR-220:** `tests/cli/test_bridge_state_location.py` runs the real `kitty bridge start`,
+  `status`, `restart` and `stop`, and a real `kitty.bridge_runner` started as a service would start
+  it. It has no choice: the defect lived *between* two processes, each of which resolved its path
+  correctly by its own logic. It is the **one** module allowed to spawn `kitty.bridge_runner`, and it
+  keeps KBR-176's reason for the rule. The model-context catalog cache is seeded fresh in an isolated
+  cache directory, so no fetch runs inside `start`'s 5-second window and no user cache is written.
+  Its isolation is worth copying: `WIN_PD_OVERRIDE_LOCAL_APPDATA` (platformdirs ≥ 4.8), because
+  plain `LOCALAPPDATA` does not redirect Windows. A child reports where kitty will look, and the
+  fixture refuses before writing anything unless that is the temporary directory. Its three cases
+  take **~6.5 seconds** on Linux, measured. They passed unskipped on the Windows and macOS legs of
+  the first PR run (2026-09-13, run 34766656090), but the gate prints no per-test durations, so those
+  legs have a result and no figure yet. One cost to know about: a bridge that misses the 5 s window fails the case
+  with *"did not report ready"* rather than slowing it, so a slow runner shows up as a red leg,
+  never as a quiet delay.
 
 **One cross-cutting cost, added by KBR-188's fix.** Every conformance probe now begins by waiting
 for the clock to report a new instant (§8.3). Measured at **80 calls** across the harness suite:
@@ -4300,8 +4320,10 @@ entire rationale has lived in module comments, which is why three tickets (KBR-1
 KBR-166) each re-derived the same reasoning from scratch. The invariants are recorded here so
 the next change to it has something to contradict.
 
-**I-C1 — Tier order is a cost ordering, not a specificity ordering.** `FATAL_PATTERNS` is
-consulted first, then quota, then credentials, then the generic-code tier, then transients.
+**I-C1 — Tier order is a cost ordering, not a specificity ordering.** Tier 1 is consulted
+first — since KBR-206, the context-management refusal and then `FATAL_PATTERNS`, and ahead of it
+the unattributable-record check (I-C5, D3) — then quota, then credentials, then the generic-code
+tier, then transients.
 "Generic loses to everything more specific" reads well and is wrong: `EXHAUSTED_PATTERNS`
 carries the bare words `timeout` and `capacity`, which a model can write in its own prose, so
 yielding to them would let a billed rejection be retried at full price. The order is justified
@@ -4326,8 +4348,12 @@ status and retry but lost the quota reason and top-up advice on 10 of 11 statuse
 402, which now names the quota itself); the anchor lost nothing. Its residual is that a
 quotation still leaks, and that Gemini sends the same sentence for a per-minute rate limit, so a
 free-tier throttle is advised to top up — status and retry still right. The rule is about the
-tiers that can **promote** a record to `exhausted`; `FATAL_PATTERNS` is weak and reads the full
-haystack too, and that is KBR-206's subject rather than this rule's. `CREDENTIAL_PATTERNS`'
+tiers that can **promote** a record to `exhausted`. KBR-206 added a second exception on the same
+terms — `your credit balance is too low`, the shared prefix of Anthropic's two spent-balance sentences
+(*"…to access the Anthropic API"* and *"…to access the Claude API"*, both in public reports); the longer
+prefix would lose one of them. It is needed for the same reason: the CLI's error line in `result` is
+the carrier no provider-scoped pattern reads. `FATAL_PATTERNS` no longer carries a weak entry — see
+I-C5. `CREDENTIAL_PATTERNS`'
 `model not found` / `authentication_failed` words are the same exposure and are KBR-217's.
 
 The four moved patterns kept every English body: Z.ai's own error table puts a stronger vendor
@@ -4337,15 +4363,25 @@ because a code survives translation and a phrase does not.
 **I-C3 — A numeric outcome field is admitted to the provider-scoped haystack only.** KBR-182.
 `api_error_status` is a JSON number and was discarded before any pattern saw it, so the field
 whose purpose is to report the provider's status was dead weight while looking live. It is now
-read — but it must never reach the haystack `_outcome_text` returns, because that one is read
-first by `FATAL_PATTERNS`, which carries `\b400\b`. Anthropic reports a spent balance as HTTP
-400, so a bare status in the tier-1 haystack turns an empty account into a "broken workflow"
-verdict with the re-run refused. The bound is at the field's own value: a number nested inside
-a provider's error object is a parameter, not a status.
+read — but it must never reach the haystack `_outcome_text` returns. When KBR-182 set this rule that
+haystack was read first by tier 1, which carried `\b400\b`, and the victim was Anthropic's spent
+balance, which is an HTTP 400. KBR-206 moved `\b400\b` to `FATAL_UNLESS_PROVIDER_NAMED_PATTERNS`,
+below the quota group, and the rule still holds for a different harm: that tier is consulted
+**before** `EXHAUSTED_PATTERNS` and `STRUCTURED_OUTPUT_PATTERNS`, so a status in the full haystack
+would turn a transient server error or a structured-output give-up beside a 400 into `fatal` with
+the re-run refused. `StatusMatrixTests.test_no_status_turns_a_record_into_a_workflow_fault` and
+`test_a_bare_400_is_not_promoted_to_a_workflow_fault` are the rows. The bound is at the field's own
+value: a number nested inside a provider's error object is a parameter, not a status.
+
+⚠️ **One consequence, accepted by name.** A 400 that names no cause reaches different verdicts by
+carrier: in the CLI's text (`API Error: 400`, bare or in `result`) the generic tier reads it and the
+record is `fatal`; as `api_error_status` alone it is not read there, and the record falls through to
+`exhausted` "no recognisable error" with a retry. Production usually writes both, so the text decides.
 
 ⚠️ Two qualifications, because the rule is easy to state more absolutely than it holds. It
 governs **parseable** records: when `_parse_events` fails, `classify` searches the raw text
-whole and always has, status text included. And `_provider_outcome_text` has a **second
+whole and always has, status text included — except that since KBR-206 (D3, I-C5) such a
+record carrying a `result` key is decided before every tier. And `_provider_outcome_text` has a **second
 consumer** — `_write_diagnostic`'s quota branch — so a numeric pattern added to
 `QUOTA_WORD_PATTERNS` would fire the top-up paragraph off a bare status, including under a
 `fatal` verdict. That is the door KBR-207 has to walk through carefully.
@@ -4367,7 +4403,9 @@ top-up. That is KBR-206's family — tier 1 reading text that is not a workflow 
 advice is the correct half, so it is pinned rather than hidden: gating the diagnostic on the
 verdict would suppress correct advice there and in KBR-206's own row. A pre-existing
 disagreement of a third kind — a quota verdict under the context-management paragraph — is not
-touched by this change.
+touched by this change. **KBR-206 closed the 400-carried instance of the first kind, including
+this 402 cell, and the whole of the third**; four cells of the first kind remain, and the second kind
+was never measured in its sweep (I-C5).
 
 **Residuals, stated so they read as decisions.** A non-English Z.ai body in `result` keeps
 `exhausted` and its retry but loses the quota reason and advice. A provider that writes `0.402`
@@ -4379,13 +4417,99 @@ fallback `_provider_outcome_text` already documents — no `result` key, so mode
 sites to `ValueError` and `RecursionError`: an integer over the interpreter's digit limit and a
 deeply nested document raised through the script, so the run that already failed wrote no
 status and no diagnostic. The cost is recorded: such a record takes the unparseable path, where
-`classify` searches the text whole — a crash traded for an unscoped verdict.
+`classify` searches the text whole — a crash traded for an unscoped verdict — unless it carries a
+`result` key, which since KBR-206 makes it unattributable (I-C5, D3).
 
 **I-C4 — The verdict, the `retryable` flag and the diagnostic's advice must agree.** They are
 computed by three different functions from three different inputs — pattern order, cost, and
 the evidence text — so they can disagree without any one of them being obviously wrong.
 KBR-145 was filed because they did: an operator was told to top up a balance and, one
 paragraph up, that the workflow was broken. Any change to the tier order re-checks all three.
+
+**I-C5 — Tier 1 names a workflow fault; it never carries a bare status or a generic code.** KBR-206.
+Tier 1 is consulted before any provider-named cause, so whatever it matches decides the verdict
+*and* refuses the retry. `\b400\b` sat there, and a 400 says the request was rejected, not **by what**:
+Anthropic bills a spent balance as a 400 (*"Your credit balance is too low…"*), and the CLI writes the
+status into its error line, so tier 1 called an empty account a broken workflow while the diagnostic,
+reading evidence, advised a top-up. KBR-145 moved `invalid[_ ]request` down for the identical reason;
+KBR-206 moves `\b400\b` beside it, into `FATAL_UNLESS_PROVIDER_NAMED_PATTERNS`, and adds Anthropic's
+sentence prefix to `QUOTA_PATTERNS` (I-C2) so the `result` carrier is read.
+
+*Why not simply demote it.* The context-management refusal is also a 400, and the wording this
+repository has carried since upstream adds *"No quota was consumed"* — a sentence KBR-206 found in no
+public report. The verbatim OpenRouter body (cc-switch#1929) carries no quota word, but its
+`"code":400` is nested and never read, so in the error-object carrier nothing except its wording can
+call it fatal. So the two 400s are separated by their **bodies**, not by tier order: `classify` reads
+`CONTEXT_MANAGEMENT_REFUSAL` — the constant `_write_diagnostic`'s refusal branch already reads — first.
+It is read **ahead of the schema patterns** because the diagnostic has a refusal branch and no schema
+branch, so a record carrying both is told one thing. Its reason is a **fixed string**, not the match:
+this pattern now decides the verdict, and echoing up to 80 characters of provider- or model-written
+text into a `reason=` line of `$GITHUB_OUTPUT` is a surface the other reasons never had. ⚠️ "One
+pattern" is not "one matcher": `classify` searches lowercased text and the diagnostic uses `re.I`, and
+the two can differ on a character whose lowercase is longer (`İ`) inside the phrase's 80-character
+window. The coverage of `CONTEXT_MANAGEMENT_REFUSAL` is what decides the verdict: a future refusal
+wording matching neither alternative falls to the tiers below.
+
+*The leak the move uncovered (D3).* An unparseable record is searched whole, tool results included.
+A `400` anywhere in it used to reach tier 1 first; with the status demoted, every full-haystack tier
+read what the reviewer read — `src/kitty/bridge/server.py` names `authentication_error`, the harness
+quotes the refusal's dated slug, and prose says `timeout` — and each granted a paid retry or gave advice
+drawn from it. The leak already existed for text without a `400`. **Scoping tiers one at a time was
+built first and failed review:** it removed the quota and credential votes, and the record fell to
+`EXHAUSTED_PATTERNS` or the fallthrough and was retried anyway, while a real spent balance in that
+shape lost its top-up advice. So `_record_is_unattributable` — not JSON per `_parse_events`, and
+carrying a `result` key — decides such a record before every tier: `fatal`, a fixed reason, no
+automatic retry, and a diagnostic paragraph that gives no advice drawn from unattributable text.
+
+*Measured*, `origin/main` @ `b902076` against the change: the 400-carrying module-level fixtures in
+`test_review_scripts.py`, the inline KBR-206 rows, `QUOTA_FIXTURES`, both schema rejections, four
+public-report bodies (the *"Claude API"* wording, claude-code#4283's malformed-request 400, a bare
+`HTTP 400 Bad Request`, OpenRouter's verbatim refusal) and the status-matrix bodies, × three carriers
+(bare CLI line, `result`, `error`) × every matrix status — 595 cells, 181 changed (reason-only changes
+included). Verdict/advice disagreements of the two kinds the sweep checks (top-up advice against a
+non-quota verdict; refusal advice against a non-`fatal` one) fell from **72 to 4**; the four are
+pre-existing (a schema rejection beside a `402` status) and are the named I-C4 exclusion. No quota
+fixture and no schema rejection changed verdict. The figure is a measurement, not a pinned test;
+`FourHundredCarrierTests` pins the verdicts it rests on, and fails when a new 400-carrying
+**module-level** fixture joins the file without a row.
+
+*Owner decisions (2026-09-13)*, recorded because each flips behaviour that was pinned or relied on:
+
+* **D1 — a 400 whose only cause evidence is a billing word is a spent balance.** Anthropic's real body
+  has exactly that shape (`Plans & Billing`), so no rule separates it from a synthetic *"the billing
+  account is not permitted to use this model"* except tier order, which this invariant forbids. The
+  cost is at most one re-run of a request that was rejected before the model ran.
+* **D2 — a record naming only the context-management slug is `fatal`.** Its advice already said
+  "re-running unchanged will not help"; the verdict now agrees. The cost is that a reviewer quoting the
+  dated slug in a non-schema-failure `result` loses its retry.
+* **D3 — a transcript too broken to attribute is `fatal`, not retried, full stop.** Closed in this
+  ticket rather than filed, because the move widened it. Chosen over deferring it to a ticket after
+  the narrower version was measured failing. The cost, accepted by name: a spent balance or a
+  transient outage in that shape is a workflow-level `fatal` and not retried — the PR notice, the job
+  summary and the `::error::` line say the workflow needs fixing, and only the embedded diagnostic
+  says the record was unreadable — and a spent balance whose top-up advice worked on `main` in that
+  shape now gets none.
+
+*Residuals.* **D3 is a text sentinel, and it does not reach three broken shapes.** (1) A transcript
+cut off before its result event carries no `result` key, is indistinguishable from raw CLI output,
+and is still searched whole — on `main` a `400` beside a quota phrase there was `fatal`, and it is now
+a paid retry with top-up advice (`test_a_transcript_cut_before_its_result_event_still_reads_what_was_read`).
+(2) A transcript whose result event is an error subtype — the Agent SDK's `SDKResultError` carries
+`errors` and no `result` — is the same case; with the dated refusal slug in a tool result it moved
+from `exhausted` to `fatal` with no retry (`test_an_error_subtype_transcript_is_not_unattributable`).
+Widening the sentinel to `"type": "result"` would refuse the truncated-401 record
+`test_a_result_value_is_not_a_result_key` keeps readable, so it is not done here. (3) `_parse_events`
+treats a record as readable if any line decodes, so an NDJSON record whose result line is corrupt is
+not unattributable and its lost result is never seen (`test_a_corrupt_ndjson_result_line_is_not_unattributable`).
+Conversely a raw provider body passed through unescaped that carries its own `"result":` key — e.g.
+Cloudflare's `{"result":null,"success":false,...}` wrapper — IS called unattributable; kitty's
+translated error escapes it, so the usual route is unaffected. OpenRouter's *"can only afford 400"* message stays `fatal` with no advice unless a 402 is
+in `api_error_status` or in the CLI's text outside `result`: a nested `"code":402` is never read, and
+`API Error: 402 …` inside `result` is read only by the anchored tiers, which carry no phrase of that
+message. A 401/402/403/404 status beside a malformed-request 400 body resolves to what the status
+names — credentials, or quota with the top-up paragraph — with `retryable` **true**, the incoherent-pair
+resolution `STATUS_MATRIX_MOVED` records for the generic code; that body comes from a run 27 turns
+deep, so the retry is priced, and `FourHundredCarrierTests` pins it.
 
 **How it is proven.** `.github/review/tests/test_review_scripts.py`, run directly by `ci.yml`
 rather than through `pytest`, so it is outside §8.1's marker matrix and carries no layer
@@ -4545,11 +4669,17 @@ does not surface work that is done. `TEST_SUITE_IMPLEMENTATION_PLAN.md` §16 mir
 | **G15** | **F4 — `_effort` / `_thinking_adaptive` reach the wire** — KBR-6 | Live I1+I2 breach on every CC-wire provider | Add both to `_INTERNAL_KEYS`; internal-key completeness guard (§6.2.3); regression test at `BridgeServer._upstream_body_for`. Residual: `openai_subscription` alone builds its body independently of that boundary (allowlisted, hence never leaked); `bedrock` and `ollama_cloud` call `translate_to_upstream` inside their transports, so the assertion reaches their wire. Carried by T-G2 over T-D4–T-D9's captures | **0** |
 | **G16** | **F5 — `OpenCodeGoAdapter` misdeclared its wire shape** — KBR-7 · **CLOSED** | Was a latent defect in the M8 path and a trap for the oracle | Done: the declaration is per-model, both repair sites branch on it, and the **hook-level** honesty guard landed with the fix. The **wire-level** guard remains T-G4 / KBR-80 | — |
 | **G24** | **No staleness alarm on the provider endpoint snapshot** | KBR-126 checked in `tests/data/opencode_go_endpoints.json` as the routing oracle. Nothing detects that the provider has since changed its table: §8's determinism rules exclude both mechanisms that could — a networked check and a clock. Refreshing it is a human act | Accepted trade-off, recorded rather than fixed: a networked alarm makes CI depend on a third party's uptime and turns green into a statement about today's weather. Revisit only if the provider publishes a machine-readable endpoint table — today's `/v1/models` carries ids only, no endpoints, and still lists retired aliases | **3** |
-| **G26** | **P13's CC-origin twin — the Codex body builder drops 17 non-sampling control fields, unregistered** — KBR-184 | Found while closing KBR-171, which closed the identical defect on the Responses-origin path with P23. `_cc_to_responses` carries `model`, `messages`→`input`, `stream`, `store`, `tools`, `tool_choice` and an injected `reasoning`; against `CreateChatCompletionRequest`'s 37 published fields that leaves **17** which are neither carried nor sampling — `parallel_tool_calls`, `metadata`, `user`, `service_tier` and the agent's own `reasoning_effort` among them. P13 is anchored at the bare `conversation.sampling` and reaches none of them, so T-D5 reports a false I1 breach on the CC-origin route exactly as it would have on the Responses-origin one | Row **P24**, enumerating one `envelope.extra[<wire key>]` per dropped control field, with the derivation guard P23 carries. **Blocked on T-A2 (KBR-34)**: the enumeration is the Chat Completions reader's control-field table minus what the builder carries, and that table does not exist yet — authoring it now is the guesswork §3.2.4 refuses for `scope`. **Before T-D5** | **1** |
+| **G26** | **P13's CC-origin twin — the Codex body builder drops 16 non-sampling control fields, unregistered** — KBR-184 | Found while closing KBR-171, which closed the identical defect on the Responses-origin path with P23. `_cc_to_responses` carries `model`, `messages`→`input`, `stream`, `store`, `tools`, `tool_choice`, `parallel_tool_calls` and an injected `reasoning`; against `CreateChatCompletionRequest`'s 37 published fields that leaves **16** which are neither carried nor sampling — `metadata`, `user`, `service_tier` and the agent's own `reasoning_effort` among them. *(Seventeen until KBR-214, which began carrying `parallel_tool_calls` once the Messages ingress started producing it; the Codex allowlist accepts it and the Responses-origin builder already forwarded it.)* P13 is anchored at the bare `conversation.sampling` and reaches none of them, so T-D5 reports a false I1 breach on the CC-origin route exactly as it would have on the Responses-origin one | Row **P24**, enumerating one `envelope.extra[<wire key>]` per dropped control field, with the derivation guard P23 carries. **Blocked on T-A2 (KBR-34)**: the enumeration is the Chat Completions reader's control-field table minus what the builder carries, and that table does not exist yet — authoring it now is the guesswork §3.2.4 refuses for `scope`. **Before T-D5** | **1** |
 | **G27** | **An allowlisted Codex control field is dropped when its value is falsy, unregistered** — KBR-185 | Found by the design review of KBR-171 and confirmed by running the builder. `_ALLOWED_RESPONSES_PARAMS` is read only by `_prepare_responses_body`'s DEBUG log; the shipped body is an explicit `if` chain and six of its branches test **truthiness** (only `parallel_tool_calls` tests presence), so `include: []` and `reasoning: {}` are permitted by the allowlist and dropped anyway. The reader projects by presence, so each is an unclaimed `envelope.extra[...]` delta. P23 excludes both by construction (they are inside the allowlist), P14 reaches no `extra` path, and G23's planned P22 is conditional on `REASONING_EFFORT_PRESENT`, which this case does not meet | A row of its own — **conditional**, so it also owes §3.3.2 assertion 2 a complement, which P23 did not. Two decisions first: whether the truthiness tests are themselves the defect (`parallel_tool_calls` already uses `is not None`), and how the row's `envelope.extra[reasoning]` claim is to coexist with P22's. **Before T-D5** | **1** |
 | **G28** | **`top_k` is dropped on every non-Anthropic-family route, unregistered** — KBR-178 | Found by the design review of KBR-178. Chat Completions declares no `top_k` (`CreateChatCompletionRequest` has zero occurrences), so KBR-178 carries the agent's value on the internal key `_top_k` and only `AnthropicAdapter` and its four delegates restore it — **five** registry entries, `opencode_go` only on its Messages-routed models. The other **eighteen** routes therefore drop it **by design and permanently** — including `ollama_cloud`, which is the one adapter that accepts `options.top_k` and is now guaranteed never to receive it, and `bedrock`, whose Converse `InferenceConfiguration` has no `topK` member at all. `reader_anthropic_messages.py:84` projects the field and `Conversation` enforces it as one of the closed fifteen `SAMPLING_KEYS`, and no register row claims `conversation.sampling[top_k]` outside `openai_subscription` (P13/P14 reach it there via the bare `CONVERSATION_SAMPLING` anchor). So the moment T-D5 drives a corpus entry carrying a `top_k`, the oracle reports a **false** I1 breach on a deliberate drop — the under-claiming direction §3.3.1a calls unrecoverable, and structurally the same defect as G26 and G27 | Either widen the restore to every destination that accepts the field, or add a bridge-level row anchored at `conversation.sampling[top_k]`. **Unconditional** in P13's sense — it fires wherever the field is present, so it owes no §3.3.2 assertion-2 complement, which is what separates it from G29. **Deferred deliberately, not overlooked:** KBR-178 chose the internal-key route on the product owner's decision. The row itself waits on T-D5 for its trigger case, as G26 and G27 do. Recording the residue here is what stops the trade-off being mistaken for an accident. **Before T-D5** | **1** |
 | **G29** | **An empty inbound `stop_sequences` is omitted rather than forwarded, unregistered** — KBR-178 | Found by the design review of KBR-178 and confirmed by running the reader. D6 omits an empty `stop_sequences` instead of forwarding it, because `StopConfiguration` in `openai/openai-openapi` declares **`minItems: 1`** — so `stop: []` is a schema-invalid Chat Completions body, and forwarding it would put one on the wire of the **sixteen** adapters that deliver a top-level `stop`. **The omission is correct and must not be "fixed" by forwarding `[]`.** But it is still an unclaimed delta: `reader_anthropic_messages.py:193-195` projects sampling **by presence with no emptiness guard** and `contract.py:1063` validates sampling **keys only**, so an inbound `stop_sequences: []` projects as `conversation.sampling[stop] = []` while the upstream projection has none. Measured: `_project({... 'stop_sequences': []})` yields `{'max_tokens': 8, 'stop': []}`. Claimed only by P13/P14's bare `CONVERSATION_SAMPLING` on `openai_subscription`; unclaimed on the other twenty-two routes, so §3.3.2 assertion 1 reports a **false** I1 breach on a deliberate, correct omission | A row of its own, and **conditional** — unlike G28 this depends on the *value*, not the route, so per G27's precedent it also owes §3.3.2 assertion 2 a **complement**: a corpus entry with a non-empty `stop_sequences` in which the omission is provably absent. Trigger `EMPTY_STOP_SEQUENCES`. Deferred with G28 and G30, for the reason G26/G27 are: the trigger case and the assertion-2 complement both need the T-D5 corpus. **Before T-D5** | **1** |
 | **G30** | **The Chat Completions string-form `stop` is rewritten into a list, unregistered** — KBR-178 | Found by the code review of KBR-178. `StopConfiguration` declares `stop` as `oneOf` a string or an array, so `"END"` and `["END"]` are the same request; every wire kitty writes downstream takes only the array form. `server._normalize_cc_stop`, called from `_handle_chat_completions` before the body forks, wraps a non-empty string. That is a real rewrite of the agent's bytes at the §3.2.3 boundary, and **no register row claims it** — the same class as G22/G23/G26-G29 | Row **M17**, modelled exactly on **M15**, which is this same decision already taken for the Responses `input` field: `site=("server._normalize_cc_stop",)`, trigger always, `paths=(NOT_PROJECTABLE,)`, **unconditional** — an array-form body meets the row as a no-op, so there is no complement state for §3.3.2 assertion 2 — and `NOT_PROJECTABLE` for P16's reason: both forms project to one `Conversation`, and a projection that told them apart would be reading a vendor's spelling into a wire-independent form. **This binds the future Chat Completions reader (T-A2 / KBR-34) to read `stop: "END"` and `stop: ["END"]` into the identical `Request`; if it ever does not, this row needs a projectable anchor instead.** Without that clause the escape is void, which is the failure M15's own text warns about. Deferred for the reason G26 and G27 are: a register row needs its trigger case and, when conditional, its §3.3.2 assertion-2 complement, and the corpus that supplies both arrives with T-D5. *(An earlier draft gave the reason as "`register.py` is held by a concurrent session"; KBR-167 merged as PR #87 mid-task, so that reason is void — and it was a scheduling reason masquerading as a design one, which the design review said at the time.)* **Before T-D5** | **1** |
+| **G31** | **An agent's `metadata` is dropped off the Anthropic family, unregistered** — KBR-214 | KBR-214 carries the Anthropic `metadata` (Claude Code sends `metadata.user_id` on every request) on the internal key `_metadata`, which only `AnthropicAdapter` and its four delegates restore — the same five registry entries as G28, measured. So **seventeen** routes drop it by design and permanently, plus `openai_subscription`, whose drop G26 (KBR-184) already lists. `reader_anthropic_messages.py` projects it to `envelope.extra[metadata]` and no row claims that address, so T-D5 reports a **false** I1 breach — G28's shape. **Deliberate, on the product owner's decision (2026-09-13):** Chat Completions' own `metadata` is a 16-pair string map for stored completions, and its abuse field is `safety_identifier`; a bare mapping would put a new field on every request to sixteen third-party providers, and a strict one would reject every turn. ⚠️ Because §3.3.1b keys `extra` by wire key, the future Chat Completions reader (T-A2 / KBR-34) will land CC's `metadata` at **the same address** with a different meaning — a row or a comparison there must not treat a user-id object and a tag map as one field | A bridge-level row anchored at `envelope.extra[metadata]`, **unconditional** in P13's sense (route, not value), so no §3.3.2 assertion-2 complement. Deferred with G28–G30 for their reason: the row waits on T-D5 for its trigger case. **Before T-D5** | **1** |
+| **G32** | **Tool-selection fields are dropped where the destination wire has no field for them, unregistered** — KBR-214 | Ollama `/api/chat` defines neither a tool choice nor a parallel-tool-use knob (`ollama/ollama` `docs/api.md`), so `OllamaCloudAdapter` writes neither; Bedrock Converse's `ToolConfiguration` has no parallel knob (botocore `bedrock-runtime` 2023-09-30), so `BedrockAdapter` does not write one. Each is an unclaimed `envelope.extra[tool_choice]` or parallel-knob delta on its route. Not a defect in the adapters — nothing on those wires can carry the field | Rows per route, **unconditional** (route). The parallel-knob half cannot be anchored until **G36** gives the knob an address. **Before T-D5** | **2** |
+| **G33** | **Bedrock writes `toolChoice: {"auto": {}}` whenever the Chat Completions body forces nothing, unregistered** — KBR-214 | `BedrockAdapter.translate_to_upstream` has always written `auto` whenever tools are present; KBR-214 maps only `required` and the named form onto `any` and `tool`. Converse's `ToolChoice` union has no `none`, and dropping `toolConfig` to honour it is unavailable once the transcript holds `toolUse`/`toolResult` blocks (*"The toolConfig field must be defined when using toolUse and toolResult content blocks"*) — conditional on history, which KBR-214 rejected as a new conditional mutation. Pre-existing; **recorded now** because the Converse reader (T-A5) maps `toolConfig.toolChoice` onto `envelope.extra[tool_choice]` (§3.3.1b) and P11 is `NOT_PROJECTABLE`, so nearly every Bedrock request with tools shows it | A row anchored at `envelope.extra[tool_choice]`, **conditional** on the value: trigger "tools present and the Chat Completions body carries no `required` or named choice" — which covers an absent choice, `none`, and the choices **G35** omits upstream of this adapter; its §3.3.2 assertion-2 complement is a `required` choice or a named choice to an ordinary tool, which the adapter must carry as `any` or `tool`. G33 and G35 share the address and overlap on `bedrock`, where a G35 omission is *rewritten to `auto`* rather than merely dropped; both rows are conditional, so the two rows cannot disagree about whether the address owes a complement. **Before T-D5** | **2** |
+| **G34** | **`disable_parallel_tool_use: false` is omitted rather than forwarded, unregistered** — KBR-214 | KBR-214 maps the flag only when `true`, onto `parallel_tool_calls: false`, on the product owner's decision: `false` is Anthropic's documented default and `true` is `ParallelToolCalls`' default, so the two spellings are one request on both wires, and writing it would add a second field some providers reject. The Anthropic reader can nonetheless tell them apart, so an explicit `false` is a delta — **the omission is correct and must not be "fixed" by forwarding it**, G29's exact shape | A row of its own, **conditional** on the value, owing a complement in which the flag is `true` and carried. Blocked on **G36** as well as T-D5, because the flag has no address to anchor at yet. **Before T-D5** | **2** |
+| **G35** | **A legal inbound `tool_choice` is omitted in two cases, unregistered** — KBR-214 | KBR-214 carries the agent's choice except where carrying it would **create** a failure the agent did not cause: (1) a choice over no tools — legal on Anthropic, and *"'tool_choice' is only allowed when 'tools' are specified"* on OpenAI; (2) a forced call to an **Anthropic-defined** tool, meaning a declaration whose `type` is neither absent, `null` nor `"custom"` — Claude Code's WebSearch forces `web_search`, declared `type: "web_search_20250305"`, which the translator flattens into a schema-less function nothing on the route can execute (anthropics/claude-code#56984; omitted on the product owner's decision, 2026-09-13). A forced call to an **undeclared** tool is *not* omitted: it is the agent's mistake and the provider's error names it. Each case projects as `envelope.extra[tool_choice]` inbound and nothing upstream — or `auto` on `bedrock`, which is **G33**. `{"type": "any"}` over only Anthropic-defined tools is carried: nothing shows an agent sending it, and guarding it would mean reasoning about the whole tool list rather than one name | A row anchored at `envelope.extra[tool_choice]`, **conditional** on the value, with a complement per case: a choice beside tools, and forcing an untyped tool. **Blocked on the Anthropic reader carrying a tool's `type`**, which today residualises (`tools[i].type`) and fails the run before matching — case (2)'s trigger *and* its complement, whatever the product does, as G34 is blocked on G36. Case (2) is also where a future capability — running server tools on a translated route — would remove the row rather than widen it. **Before T-D5** | **1** |
+| **G36** | **The parallel-tool-use knob has no canonical address, so the oracle fails the run on it** — KBR-214 · **harness, not product** | Found by the design review of KBR-214. `reader_anthropic_messages._read_tool_choice` sends `disable_parallel_tool_use` to the **residual** (pinned by its own test), and a non-empty residual fails the run before register matching — so every Messages body carrying the flag fails, whatever the product does. Fixing the reader alone is not enough: §3.3.1b unifies `tool_choice` across four wire keys *"because four spellings name one concept"* and says nothing about the knob, so Anthropic's nested, inverted flag and Chat Completions' top-level `parallel_tool_calls` would land at two addresses with two polarities, and every route that carries the flag **correctly** would show a false delta. Excluded from §3.2.5's count, which is about mutations the product performs | A §3.3.1b bullet giving the knob one address and one polarity (the likely shape is `envelope.extra["parallel_tool_calls"]`, value "parallel allowed", as `tool_choice` already takes the Chat Completions key), then the Anthropic reader conforms and the Chat Completions reader is written against it. Owned by **T-A2 (KBR-34)**, which is the first reader that meets both spellings. **Before T-D1** | **1** |
 | **G37** | **The Anthropic adapter family drops a Chat Completions request's cache breakpoints everywhere except user and tool content, unregistered** — KBR-199 | Found while implementing KBR-199. `_handle_chat_completions` hands the body to `translate_to_upstream` without translating it, and a `cache_control` is then **dropped** at the top level, on a system content part and on a tool declaration (a system content part is one of OpenRouter's defined content parts; the top level and the tool declaration are the other two sites its Chat Completions dialect defines), and on a message object and a tool call (two sites no published dialect defines), and **kept** on a user content part and on tool-message content (moved inside the `tool_result`). Measured identical on `anthropic`, `minimax_token`, `zai_coding` and `custom_anthropic` (the last two are native only for Messages bodies). OpenAI's own spelling, `prompt_cache_breakpoint`, is not ignored: the same family forwards it verbatim on user and tool content, onto an Anthropic wire whose schema does not define it, and drops it elsewhere. (`bedrock` also copies list content verbatim, but there any list-form content fails boto3's validation whatever it carries — KBR-223.) No register row claims any of it, and the oracle cannot see it yet: no Chat Completions reader fills the `cache_control` slot (§3.3.1), so such a body residualises and fails the run first | **Binds T-A2 (KBR-34)**: decide whether its reader fills the slot from `cache_control`, from `prompt_cache_breakpoint`, or neither; then one row per dropped site, anchored on the field as M16 is. **Before T-D1 drives a Chat Completions body with a breakpoint**, and before T-F6's projection property consumes the decision. The behaviour is recorded for `anthropic` and `cache_control` by `tests/providers/test_anthropic_cache_breakpoints.py`; the rest of the family and `prompt_cache_breakpoint` were measured but are not pinned | **2** |
 | **G38** | **A top-level `cache_control` is dropped on every translated route, and M16 disclaims it** — KBR-199 | Found by the design review of KBR-199. Anthropic's automatic-caching form projects to `envelope.extra[cache_control]` (§3.3.1). `MessagesTranslator.translate_request` never copies it, so on every route that is not native passthrough the upstream projection has no such key. M16's paths name the system, part and tool carriers only and its text calls the top-level form "not this row's"; M2 is `NOT_PROJECTABLE`; no row anchors on that `extra` key. So a body using automatic caching yields an unclaimed delta on every translated route — §3.3.1a's under-claiming direction, a false I1 breach. The loss itself costs the user the same as M16's | Add `envelope.extra[cache_control]` to M16's paths (same site, same trigger) or give it its own row — either way one change with `register.py`. **Before T-D1 (KBR-51) drives a body with a top-level `cache_control`** | **1** |
 | **G23** | **`openai_subscription` injects `reasoning` from `_reasoning_effort`, unregistered** — KBR-149 | Three sites in `providers/openai_subscription.py` set `reasoning: {"effort": …}` from kitty's internal key. Structurally identical to P3 and P4, and **P4 cannot cover it**: §3.2.3 records that `translate_to_upstream` never runs on this adapter's request path. Unlike G22 this is a **request-body** row feeding §3.3.2 assertion 1, so the moment T-D5 drives a corpus entry carrying a reasoning effort the oracle reports a *false* I1 breach on a deliberate mutation — the under-claiming direction §3.3.1a calls unrecoverable | Add P22: trigger `REASONING_EFFORT_PRESENT`, conditional, anchored at `envelope.extra[reasoning]`. Needs a trigger case and a complement in the corpus. **Before T-D5** | **1** |

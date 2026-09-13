@@ -36,7 +36,7 @@ from kitty.bridge.messages.events import (
 from kitty.bridge.messages.events import (
     format_error_event as messages_format_error,
 )
-from kitty.bridge.messages.translator import MessagesTranslator
+from kitty.bridge.messages.translator import MessagesTranslator, carry_tool_choice_and_metadata
 from kitty.bridge.preamble_hold import PreambleHold
 from kitty.bridge.responses.events import (
     format_error_event as responses_format_error,
@@ -522,6 +522,7 @@ def _convert_native_to_cc_format(body: dict) -> dict:
     - Anthropic ``tools`` → CC-format tools
     - Preserves model, stream, max_tokens, temperature, top_p
     - ``stop_sequences`` → ``stop``, and ``top_k`` → the internal ``_top_k``
+    - ``tool_choice`` and ``metadata``, through the translator's own helper
 
     This is a subset of what ``MessagesTranslator.translate_request`` does.
     A standalone function is used here so the fallback path has no dependency
@@ -651,6 +652,10 @@ def _convert_native_to_cc_format(body: dict) -> dict:
 
     if body.get("top_k") is not None:
         result["_top_k"] = body["top_k"]
+
+    # KBR-214: the same helper as hop 1, deliberately -- a second copy of the
+    # value table is the drift that lost KBR-178's field on this retry path.
+    carry_tool_choice_and_metadata(body, result)
 
     return result
 

@@ -3,9 +3,11 @@
 import json
 import uuid
 
+import pytest
 from harness import cache_breakpoints as cb
 
 from kitty.bridge.messages.translator import MessagesTranslator
+from kitty.providers.anthropic import AnthropicAdapter
 
 
 def _v4() -> str:
@@ -277,20 +279,18 @@ class TestTranslateRequest:
         """Fields the translator has no mapping for do not reach the CC body.
 
         ``stop_sequences`` and ``top_k`` were listed here until KBR-178 gave
-        them mappings; they are now asserted positively by the cases above.
-        Both fields left here are still genuinely dropped and each has its own
-        ticket.
+        them mappings, and ``tool_choice`` and ``metadata`` until KBR-214 did;
+        all four are now asserted positively elsewhere.  ``service_tier`` stands
+        in as a published Messages field that is still genuinely dropped.
         """
         req = {
             "model": "m",
             "messages": [{"role": "user", "content": "hi"}],
             "max_tokens": 10,
-            "metadata": {"user_id": "123"},
-            "tool_choice": "auto",
+            "service_tier": "auto",
         }
         result = self.t.translate_request(req)
-        assert "metadata" not in result
-        assert "tool_choice" not in result
+        assert "service_tier" not in result
 
     def test_thinking_block_mapped_to_reasoning_content(self):
         """Thinking blocks in assistant messages must be mapped to reasoning_content
@@ -372,6 +372,196 @@ class TestTranslateRequest:
         result = self.t.translate_request(req)
         assistant_msg = result["messages"][-1]
         assert "reasoning_content" not in assistant_msg
+
+
+class TestToolChoiceAndMetadata:
+    """KBR-214: ``tool_choice`` and ``metadata`` survive the Messages -> CC hop.
+
+    ``tool_choice`` is a constraint, not a hint: dropping ``{"type": "any"}``
+    lets the model answer in prose where the agent required a tool call, and
+    dropping ``{"type": "none"}`` lets it call a tool the agent forbade.  The
+    two wires spell the *values* differently, so this is a translation table,
+    not a rename.  ``metadata`` rides the internal ``_metadata`` key and is
+    restored only by Anthropic-family adapters (D1).
+    """
+
+    def setup_method(self):
+        self.t = MessagesTranslator()
+
+    def _req(self, **extra):
+        """Build a minimal Messages request with one tool, plus the case's fields."""
+        req = {
+            "model": "m",
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 10,
+            "tools": [{"name": "get_weather", "input_schema": {}}],
+        }
+        req.update(extra)
+        return req
+
+    @pytest.mark.parametrize(
+        ("anthropic", "cc"),
+        [
+            ({"type": "auto"}, "auto"),
+            ({"type": "any"}, "required"),
+            ({"type": "none"}, "none"),
+            ({"type": "tool", "name": "get_weather"}, {"type": "function", "function": {"name": "get_weather"}}),
+        ],
+        ids=["auto", "any", "none", "tool"],
+    )
+    def test_tool_choice_value_is_translated(self, anthropic, cc):
+        """Each published Anthropic shape maps onto its Chat Completions spelling (R1)."""
+        result = self.t.translate_request(self._req(tool_choice=anthropic))
+        assert result["tool_choice"] == cc
+
+    @pytest.mark.parametrize(
+        "malformed",
+        [None, "auto", {"type": "bogus"}, {"type": "tool"}, {"type": "tool", "name": 7}],
+        ids=["null", "string", "unknown-type", "tool-without-name", "tool-with-non-string-name"],
+    )
+    def test_malformed_tool_choice_is_omitted(self, malformed):
+        """Anthropic publishes four object shapes and no string form (D5).
+
+        Kitty has no authority to invent a reading, so anything else is left out
+        rather than repaired into a value the agent never sent.
+        """
+        result = self.t.translate_request(self._req(tool_choice=malformed))
+        assert "tool_choice" not in result
+
+    @pytest.mark.parametrize("tools", [None, []], ids=["absent", "empty"])
+    def test_tool_choice_without_tools_is_omitted(self, tools):
+        """Legal on Anthropic, a 400 on Chat Completions -- so not carried (D9)."""
+        req = self._req(tool_choice={"type": "any", "disable_parallel_tool_use": True})
+        if tools is None:
+            del req["tools"]
+        else:
+            req["tools"] = tools
+        result = self.t.translate_request(req)
+        assert "tool_choice" not in result
+        assert "parallel_tool_calls" not in result
+
+    def test_forced_server_tool_is_not_carried(self):
+        """Claude Code's WebSearch forces ``web_search``, a server tool (D10).
+
+        This hop flattens the server tool into a schema-less function, so
+        forcing it would force a call nothing on the route can execute.  The
+        rest of the request -- the tool list included -- is unaffected.
+        """
+        req = self._req(
+            tools=[{"type": "web_search_20250305", "name": "web_search", "max_uses": 5}],
+            tool_choice={"type": "tool", "name": "web_search", "disable_parallel_tool_use": True},
+        )
+        result = self.t.translate_request(req)
+        assert "tool_choice" not in result
+        assert "parallel_tool_calls" not in result
+        assert [t["function"]["name"] for t in result["tools"]] == ["web_search"]
+
+    @pytest.mark.parametrize(
+        "declaration",
+        [
+            {"name": "get_weather", "input_schema": {}},
+            {"type": "custom", "name": "get_weather", "input_schema": {}},
+            {"type": None, "name": "get_weather", "input_schema": {}},
+        ],
+        ids=["untyped", "custom", "type-null"],
+    )
+    def test_forced_ordinary_tool_is_carried_beside_a_server_tool(self, declaration):
+        """Only the server tool is exempt; an ordinary tool next to one is still forced (D10)."""
+        req = self._req(
+            tools=[{"type": "web_search_20250305", "name": "web_search"}, declaration],
+            tool_choice={"type": "tool", "name": "get_weather"},
+        )
+        result = self.t.translate_request(req)
+        assert result["tool_choice"] == {"type": "function", "function": {"name": "get_weather"}}
+
+    def test_forcing_an_undeclared_tool_is_still_carried(self):
+        """A choice naming no declared tool is the agent's mistake, not kitty's to hide (D8).
+
+        The provider rejects it with an error that names the problem; omitting it
+        would quietly answer a request the agent did not make.
+        """
+        result = self.t.translate_request(self._req(tool_choice={"type": "tool", "name": "not_declared"}))
+        assert result["tool_choice"] == {"type": "function", "function": {"name": "not_declared"}}
+
+    def test_a_non_string_tool_name_is_omitted_even_when_a_tool_has_it(self):
+        """The name check is its own guard, not a side effect of the declaration lookup (D5)."""
+        req = self._req(tools=[{"name": 7, "input_schema": {}}], tool_choice={"type": "tool", "name": 7})
+        assert "tool_choice" not in self.t.translate_request(req)
+
+    def test_a_truthy_non_boolean_disable_parallel_tool_use_is_not_carried(self):
+        """R2 carries the flag only when it is exactly ``true``."""
+        result = self.t.translate_request(self._req(tool_choice={"type": "any", "disable_parallel_tool_use": 1}))
+        assert "parallel_tool_calls" not in result
+
+    def test_empty_metadata_is_still_carried(self):
+        """``{}`` is a value the agent sent; only ``None`` means absent (R3)."""
+        assert self.t.translate_request(self._req(metadata={}))["_metadata"] == {}
+
+    def test_no_tool_choice_invents_none(self):
+        """No inbound ``tool_choice`` means neither key outbound (R9)."""
+        result = self.t.translate_request(self._req())
+        assert "tool_choice" not in result
+        assert "parallel_tool_calls" not in result
+
+    @pytest.mark.parametrize(
+        "choice",
+        [
+            {"type": "auto"},
+            {"type": "any"},
+            {"type": "tool", "name": "get_weather"},
+            {"type": "tool", "name": "not_declared"},
+        ],
+        ids=["auto", "any", "tool-declared", "tool-undeclared"],
+    )
+    def test_disable_parallel_tool_use_true_maps_to_parallel_tool_calls_false(self, choice):
+        """The knob is inverted between the wires, and carried when it is on (R2)."""
+        result = self.t.translate_request(self._req(tool_choice={**choice, "disable_parallel_tool_use": True}))
+        assert result["parallel_tool_calls"] is False
+
+    def test_disable_parallel_tool_use_false_is_omitted(self):
+        """``false`` is both vendors' default, so it adds nothing to the body (D2)."""
+        result = self.t.translate_request(self._req(tool_choice={"type": "any", "disable_parallel_tool_use": False}))
+        assert result["tool_choice"] == "required"
+        assert "parallel_tool_calls" not in result
+
+    def test_disable_parallel_tool_use_on_none_is_ignored(self):
+        """``ToolChoiceNone`` declares no such field, so it cannot produce the key (R2)."""
+        result = self.t.translate_request(self._req(tool_choice={"type": "none", "disable_parallel_tool_use": True}))
+        assert result["tool_choice"] == "none"
+        assert "parallel_tool_calls" not in result
+
+    def test_metadata_rides_the_internal_key(self):
+        """``metadata`` is carried unmodified on ``_metadata``, never bare (R3)."""
+        result = self.t.translate_request(self._req(metadata={"user_id": "u-123"}))
+        assert result["_metadata"] == {"user_id": "u-123"}
+        assert "metadata" not in result
+
+    def test_null_metadata_invents_no_internal_key(self):
+        """A ``null`` or absent ``metadata`` carries nothing (R3, R9)."""
+        assert "_metadata" not in self.t.translate_request(self._req(metadata=None))
+        assert "_metadata" not in self.t.translate_request(self._req())
+
+    @pytest.mark.parametrize(
+        "choice",
+        [
+            {"type": "auto"},
+            {"type": "any"},
+            {"type": "none"},
+            {"type": "tool", "name": "get_weather"},
+            {"type": "tool", "name": "get_weather", "disable_parallel_tool_use": True},
+        ],
+        ids=["auto", "any", "none", "tool", "tool-disable-parallel"],
+    )
+    def test_round_trip_to_an_anthropic_upstream(self, choice):
+        """The ticket's reproduction: Messages -> CC -> Messages, unchanged (R1b, R2).
+
+        This is the assertion that survives a refactor moving the mapping
+        between the two hops.
+        """
+        cc = self.t.translate_request(self._req(tool_choice=choice, metadata={"user_id": "u-123"}))
+        upstream = AnthropicAdapter().translate_to_upstream(cc)
+        assert upstream["tool_choice"] == choice
+        assert upstream["metadata"] == {"user_id": "u-123"}
 
 
 # ── translate_request: cache breakpoints (KBR-198) ─────────────────────────

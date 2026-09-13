@@ -19,12 +19,110 @@ from kitty.bridge.messages.events import (
     format_message_stop_event,
 )
 
-__all__ = ["MessagesTranslator"]
+__all__ = ["MessagesTranslator", "carry_tool_choice_and_metadata"]
 
 _EMPTY_ASSISTANT_FALLBACK_TEXT = (
     "Upstream model returned an empty response. Please retry. "
     "If the context is full, use /clear to reset the conversation."
 )
+
+#: Anthropic ``tool_choice.type`` values whose Chat Completions spelling is a
+#: plain string.  ``tool`` is absent because it carries a name.
+_SIMPLE_TOOL_CHOICES: dict[str, str] = {"auto": "auto", "any": "required", "none": "none"}
+
+
+def _names_anthropic_defined_tool(tools: list, name: str) -> bool:
+    """Report whether ``tools`` declares ``name`` as an Anthropic-defined tool.
+
+    An ordinary client tool carries ``type: "custom"``, ``type: null`` or no
+    ``type`` at all (``ToolParam.type`` is ``Optional[Literal["custom"]]``).  Any
+    other ``type`` -- ``web_search_20250305``, ``bash_20250124`` and the rest --
+    is Anthropic-defined, and this hop flattens it into a plain function without
+    its real schema or runtime.  A name nothing declares is *not* reported: that
+    body is the agent's mistake, and the provider's error says so better than a
+    silent omission would.
+
+    Args:
+        tools: The inbound Messages ``tools`` list.
+        name: The tool name a ``tool_choice`` of type ``tool`` selects.
+
+    Returns:
+        True when a declaration with that name carries an Anthropic-defined type.
+    """
+    return any(
+        isinstance(tool, dict) and tool.get("name") == name and tool.get("type") not in (None, "custom")
+        for tool in tools
+    )
+
+
+def carry_tool_choice_and_metadata(messages_request: dict, cc_request: dict) -> None:
+    """Carry an Anthropic ``tool_choice`` and ``metadata`` onto a Chat Completions body.
+
+    Both Messages -> Chat Completions converters call this --
+    :meth:`MessagesTranslator.translate_request` and the ``tool_use`` fallback's
+    ``_convert_native_to_cc_format`` in :mod:`kitty.bridge.server` -- so the value
+    table exists once.  A drifted second copy of hop 1 is how KBR-178's field was
+    lost on the retry path.
+
+    ``tool_choice`` is a constraint, not a hint, and the two wires spell its
+    values differently: ``{"type": "any"}`` is ``"required"``, and
+    ``{"type": "tool", "name": x}`` is ``{"type": "function", "function":
+    {"name": x}}``.  A value Anthropic does not publish -- a string, an unknown
+    ``type``, a ``tool`` with no string name -- is omitted rather than repaired,
+    because kitty has no authority to invent a reading of it (KBR-214 D5).
+
+    Two further omissions keep the fix from creating failures of its own:
+
+    * **No tools, no choice** (D9).  Anthropic accepts a ``tool_choice`` beside
+      no tools; OpenAI rejects one ("'tool_choice' is only allowed when 'tools'
+      are specified"), so carrying it would turn a legal request into a 400.
+    * **A forced call to an Anthropic-defined tool is not carried** (D10).  A
+      server tool such as Claude Code's ``web_search`` carries a versioned
+      ``type`` and is flattened into a schema-less function on this hop, so
+      forcing it would force a call nothing on the route can execute.  Left
+      unforced, the turn behaves as it did before this mapping existed.
+
+    ``disable_parallel_tool_use`` is carried only when ``True``, as
+    ``parallel_tool_calls: False``.  ``False`` is the default on both wires, so
+    writing it would add a field to a request whose behaviour it does not change
+    (D2).
+
+    ``metadata`` has no Chat Completions counterpart -- CC's own ``metadata`` is a
+    stored-completions tag map -- so it rides the internal ``_metadata`` key,
+    which only Anthropic-family adapters restore (D1).
+
+    Args:
+        messages_request: The inbound Anthropic Messages body.  Not modified.
+        cc_request: The Chat Completions body being built, mutated in place.
+
+    Returns:
+        None. ``cc_request`` gains ``tool_choice``, ``parallel_tool_calls`` and
+        ``_metadata`` only where the inbound body carries a value for them.
+    """
+    # Metadata is independent of the tool choice, so it is carried first and a
+    # malformed choice below cannot cost it.
+    metadata = messages_request.get("metadata")
+    if metadata is not None:
+        cc_request["_metadata"] = metadata
+
+    tool_choice = messages_request.get("tool_choice")
+    tools = messages_request.get("tools")
+    # A choice over no tools is legal Anthropic and a 400 on Chat Completions.
+    if not isinstance(tool_choice, dict) or not isinstance(tools, list) or not tools:
+        return
+
+    kind = tool_choice.get("type")
+    name = tool_choice.get("name")
+    if kind in _SIMPLE_TOOL_CHOICES:
+        cc_request["tool_choice"] = _SIMPLE_TOOL_CHOICES[kind]
+    elif kind == "tool" and isinstance(name, str) and not _names_anthropic_defined_tool(tools, name):
+        cc_request["tool_choice"] = {"type": "function", "function": {"name": name}}
+    else:
+        return
+
+    # `ToolChoiceNone` declares no parallel knob, so a stray one there is ignored.
+    if kind != "none" and tool_choice.get("disable_parallel_tool_use") is True:
+        cc_request["parallel_tool_calls"] = False
 
 
 class MessagesTranslator:
@@ -207,6 +305,10 @@ class MessagesTranslator:
         # it; `_INTERNAL_KEYS` keeps it off every other provider's wire.
         if messages_request.get("top_k") is not None:
             result["_top_k"] = messages_request["top_k"]
+
+        # KBR-214: without this the agent's tool constraint dies here -- a forced
+        # tool call becomes optional, and a forbidden one becomes possible.
+        carry_tool_choice_and_metadata(messages_request, result)
 
         # Preserve the effort parameter for Anthropic-compatible upstreams.
         # Claude Code sends this to control reasoning depth (e.g. "low",
