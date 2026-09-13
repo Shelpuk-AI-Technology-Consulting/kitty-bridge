@@ -47,6 +47,7 @@ class TestConfigureFlow:
 
         with (
             patch("sys.stdin.isatty", return_value=True),
+            patch("sys.stdout.isatty", return_value=True),
             patch(f"{_MOD}.SelectionMenu.show", side_effect=["Configure gateway", "Back"]),
             patch(f"{_MOD}.prompt_text", side_effect=["proxy.iproyal.com:12323", "myuser"]),
             patch(f"{_MOD}.prompt_secret", return_value="s3cr3t"),
@@ -68,6 +69,7 @@ class TestConfigureFlow:
 
         with (
             patch("sys.stdin.isatty", return_value=True),
+            patch("sys.stdout.isatty", return_value=True),
             patch(f"{_MOD}.SelectionMenu.show", side_effect=["Configure gateway", "Back"]),
             patch(f"{_MOD}.prompt_text", side_effect=["10.20.0.5:3128"]),
             patch(f"{_MOD}.prompt_confirm", side_effect=[False, False]),
@@ -83,6 +85,7 @@ class TestConfigureFlow:
 
         with (
             patch("sys.stdin.isatty", return_value=True),
+            patch("sys.stdout.isatty", return_value=True),
             patch(f"{_MOD}.SelectionMenu.show", side_effect=["Configure gateway", "Back"]),
             patch(f"{_MOD}.prompt_text", side_effect=["http://proxy.example.com:3128"]),
             patch(f"{_MOD}.prompt_secret") as mock_secret,
@@ -101,6 +104,7 @@ class TestConfigureFlow:
 
         with (
             patch("sys.stdin.isatty", return_value=True),
+            patch("sys.stdout.isatty", return_value=True),
             patch(f"{_MOD}.SelectionMenu.show", side_effect=["Configure gateway", "Back"]),
             # first answer is a scheme kitty cannot use, second is valid
             patch(f"{_MOD}.prompt_text", side_effect=["socks5://proxy.example.com:1080", "proxy.example.com:3128"]),
@@ -122,6 +126,7 @@ class TestConfigureFlow:
 
         with (
             patch("sys.stdin.isatty", return_value=True),
+            patch("sys.stdout.isatty", return_value=True),
             patch(f"{_MOD}.SelectionMenu.show", side_effect=["Configure gateway", "Back"]),
             patch(f"{_MOD}.prompt_text", side_effect=["new.example.com:9999", "newuser"]),
             patch(f"{_MOD}.prompt_secret", return_value="new-pass"),
@@ -143,6 +148,7 @@ class TestRemoveFlow:
 
         with (
             patch("sys.stdin.isatty", return_value=True),
+            patch("sys.stdout.isatty", return_value=True),
             patch(f"{_MOD}.SelectionMenu.show", side_effect=["Remove gateway", "Back"]),
             patch(f"{_MOD}.prompt_confirm", return_value=True),
         ):
@@ -157,6 +163,7 @@ class TestRemoveFlow:
 
         with (
             patch("sys.stdin.isatty", return_value=True),
+            patch("sys.stdout.isatty", return_value=True),
             patch(f"{_MOD}.SelectionMenu.show", side_effect=["Remove gateway", "Back"]),
             patch(f"{_MOD}.prompt_confirm", return_value=False),
         ):
@@ -171,6 +178,7 @@ class TestMenuShape:
 
         with (
             patch("sys.stdin.isatty", return_value=True),
+            patch("sys.stdout.isatty", return_value=True),
             patch(f"{_MOD}.SelectionMenu") as mock_menu_cls,
         ):
             mock_menu_cls.return_value.show.return_value = None
@@ -185,6 +193,7 @@ class TestMenuShape:
 
         with (
             patch("sys.stdin.isatty", return_value=True),
+            patch("sys.stdout.isatty", return_value=True),
             patch(f"{_MOD}.SelectionMenu") as mock_menu_cls,
         ):
             mock_menu_cls.return_value.show.return_value = None
