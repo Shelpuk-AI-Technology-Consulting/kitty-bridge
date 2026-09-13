@@ -144,32 +144,49 @@ QUOTA_PATTERNS = (
     #   hour. Your limit will reset at 2026-07-26 23:56:57]
     #   1308  Usage limit reached for 5 hour
     #   1310  Weekly/Monthly Limit Exhausted
+    #
+    # 🔴 KBR-181: the numeric codes and `limit will reset` that sat here moved to the
+    # provider-scoped `QUOTA_WORD_PATTERNS` below. Z.ai's own error table puts a stronger phrase beside
+    # every one of them -- 1308 "usage limit reached", 1310 "weekly/monthly limit
+    # exhausted", 1113 "insufficient balance" -- so on an English body they bought nothing
+    # here, and a reviewer citing `test_review_scripts.py:1308` retried a billed failure.
     r"usage limit reached",
     r"weekly/monthly limit exhausted",
-    r"limit will reset",
-    r"\b1308\b",
-    r"\b1310\b",
-    r"\b1113\b",
     r"insufficient balance",
     # upstream: OpenRouter's wording for the same condition. It bills from a
     # prepaid credit balance and documents a spent one as "insufficient
     # credits", which matched NOTHING in this set -- every entry above was
     # written against a provider that says "balance".
     #
-    # 🔴 The status code is deliberately NOT matched. A first version of this
-    # added `\b402\b` beside it and reproduced, in the module that documents the
-    # failure twice, the exact bug it documents: `_outcome_text` includes
-    # `result`, which on a schema failure is the model's OWN prose, so
-    # "interpret_claude_result.py:402" or "billed $0.402" classified as
-    # `exhausted` and told an operator to top up a balance that was not spent.
-    # The wording alone catches the real 402 -- its body carries
-    # "Insufficient credits" -- so the code bought nothing and cost that.
+    # 🔴 The status code is deliberately NOT matched IN THIS TUPLE. A first version
+    # added `\b402\b` beside it and reproduced the exact bug this module documents:
+    # this tuple reads `result`, the model's OWN prose, so
+    # "interpret_claude_result.py:402" or "billed $0.402" classified as `exhausted`
+    # and told an operator to top up a balance that was not spent. KBR-181 put the
+    # code where that cannot happen -- `QUOTA_WORD_PATTERNS`, which reads only what
+    # the provider wrote -- so the reason still holds for this tuple and no longer
+    # for the status itself.
     r"insufficient credits",
     # upstream: Anthropic's documented 402 type. `\bbilling\b` could never match it --
     # `_` is a word character -- so the one status that means "your balance is the
     # problem" reached nothing in this set. See `platform.claude.com/docs/en/api/errors`.
     r"billing_error",
-    r"exceeded your current",
+    # 🔴 KBR-181: ANCHORED, not moved like its neighbours -- the one exception to
+    # KBR-166's rule, and measured rather than argued. The bare `exceeded your current`
+    # matched "the budget exceeded your current API_TIMEOUT_MS". But OpenAI's spent quota
+    # -- "You exceeded your current quota, please check your plan and billing details."
+    # -- arrives in production as the CLI's error line in `result`, where no
+    # provider-scoped pattern can read it, so this is that body's ONLY quota signal.
+    # Moving or deleting it kept every status and retry but lost the quota reason and
+    # the top-up advice on 10 of 11 matrix statuses (the 11th is 402, which names the
+    # quota itself); this anchor lost nothing. The exception is a VERBATIM PREFIX of a
+    # vendor's own sentence, long enough that prose matching it is a quotation.
+    #
+    # ⚠️ Residuals: a quotation still matches, and Gemini sends this same sentence for a
+    # per-minute rate limit, so a free-tier throttle is advised to top up. Status and
+    # retry are right there. In the error-object carrier `quota` below would send that
+    # advice anyway; in the CLI-line-in-`result` carrier THIS anchor is what sends it.
+    r"you exceeded your current quota",
 )
 
 # 🔴 **KBR-166. The same words, searched ONLY over what the PROVIDER wrote.**
@@ -205,6 +222,39 @@ QUOTA_PATTERNS = (
 QUOTA_WORD_PATTERNS = (
     r"quota",
     r"\bbilling\b",
+    # KBR-181: moved from `QUOTA_PATTERNS`, where "the retry limit will reset after the
+    # backoff window" -- plain English about any retry ladder -- read as a spent plan.
+    # Every documented body carrying it also carries a phrase that stayed behind.
+    r"limit will reset",
+    # 🔴 **KBR-181. The quota CODES, moved here for the same reason as the words.** A bare
+    # number is the weakest pattern there is, and a reviewer of this repository cites line
+    # numbers -- `test_review_scripts.py` is far longer than 1,308 lines. KBR-172 and
+    # KBR-166 each measured that no anchor separates a code from prose, so these are
+    # scoped, not tightened. They share this tuple rather than getting their own so that no
+    # reader of the provider-scoped text can take the words and miss the codes.
+    #
+    # ⚠️ **Moved, not deleted, because a code survives translation and a phrase does not.**
+    # Z.ai's English messages each carry a vendor phrase `QUOTA_PATTERNS` still reads; a
+    # body in any other language carries only the code. Residual, stated so it reads as a
+    # decision: such a body in `result` loses its quota reason and advice here -- it stays
+    # `exhausted` and keeps its retry through the tiers below.
+    #
+    # `\b402\b` is Payment Required, read from `api_error_status` since KBR-182. The
+    # comment beside `QUOTA_PATTERNS` records why it may not live there; here it cannot see
+    # `result`. ⚠️ A provider that writes "0.402" in its own message is read as quota -- the
+    # residual this tuple already accepts for `quota`.
+    #
+    # 🔴 **Read above `CREDENTIAL_PATTERNS` because of what the diagnostic reads, not
+    # because a status is more specific than a named type.** A 402 beside a named
+    # `authentication_error` is incoherent and either verdict is arguable, but
+    # `_write_diagnostic` keys its top-up paragraph on evidence rather than on the verdict,
+    # so a 402 read below the credential names would print a credential verdict over a
+    # top-up paragraph. Here the two agree, and
+    # `StatusMatrixTests.test_the_advice_agrees_with_the_verdict_in_every_cell` is the row.
+    r"\b402\b",
+    r"\b1308\b",
+    r"\b1310\b",
+    r"\b1113\b",
 )
 
 # Credentials and model resolution. Provider-specific by definition: a different
@@ -223,6 +273,9 @@ CREDENTIAL_PATTERNS = (
     # the status now reaches the provider-scoped text, so this ordering decides what an
     # operator actually reads rather than winning by default.
     # `test_a_named_type_still_outranks_the_status_that_arrives_beside_it` is the row.
+    #
+    # ⚠️ "FIRST" is within the credential family. KBR-181's `\b402\b` is read in the
+    # quota group above this tuple, and the reason is beside it in `QUOTA_WORD_PATTERNS`.
     r"\bauthentication_error\b",
     r"\bpermission_error\b",
     r"model_not_found",
@@ -242,7 +295,13 @@ CREDENTIAL_PATTERNS = (
 # So is `{"error":{"message":"HTTP 401 Unauthorized","type":"invalid_request_error"}}`,
 # the nested carrier `BILLED_INVALID_REQUEST` itself uses. Both were measured falling
 # through to the generic tier and being called workflow faults.
-CREDENTIAL_STATUS_PATTERNS = (r"\b40[13]\b",)
+#
+# KBR-181: 404 joins them. A reproduction filed against the Agent SDK
+# (anthropics/claude-agent-sdk-python#1031, CLI v2.1.173) shows a 404 for a model that does
+# not exist, and neither spelling of `model_not_found` above matches its prose -- so the
+# status was the only thing naming it, and it matched nothing.
+# The reason string already says "or model".
+CREDENTIAL_STATUS_PATTERNS = (r"\b40[134]\b",)
 
 # Universal: the workflow itself is wrong and any provider would reject it the
 # same way, so re-running is pure waste. Both failures seen on the first live
@@ -284,7 +343,9 @@ FATAL_PATTERNS = (
 # 🔴 **KBR-166 CLOSED the exposure KBR-145 accepted here, and not by anchoring.**
 # This tier still yields to `quota`, `\bbilling\b`, `\b401\b` and `\b403\b`, but
 # those four now live in `QUOTA_WORD_PATTERNS` and `CREDENTIAL_STATUS_PATTERNS` and are
-# searched only over what the PROVIDER wrote. Three anchoring schemes were measured and
+# searched only over what the PROVIDER wrote -- as, since KBR-181, are `402`, `404`,
+# `limit will reset` and the Z.ai quota codes, so a status that names its cause rescues a
+# record from here. Three anchoring schemes were measured and
 # each lost a real body to this very tier; the reasoning is recorded beside those two
 # tuples.
 #
@@ -528,7 +589,8 @@ def _as_findings_payload(value: object) -> dict | None:
     if isinstance(value, str):
         try:
             value = json.loads(value)
-        except json.JSONDecodeError:
+        # Not only `JSONDecodeError`: see `_parse_events`. This decodes model-authored text.
+        except (ValueError, RecursionError):
             return None
     if isinstance(value, dict) and "findings" in value:
         return value
@@ -562,7 +624,9 @@ def _extract_structured_output(raw_output: str, execution_text: str) -> dict | N
             continue
         try:
             event = json.loads(line)
-        except json.JSONDecodeError:
+        # Not only `JSONDecodeError`: see `_parse_events`. `main()` reaches this scan BEFORE
+        # `classify`, so fixing only that function left an NDJSON record raising.
+        except (ValueError, RecursionError):
             continue
         if not isinstance(event, dict):
             continue
@@ -672,9 +736,15 @@ def _parse_events(execution_text: str) -> list | None:
     stripped = execution_text.strip()
     if not stripped:
         return None
+    # 🔴 KBR-181 (was KBR-209): not only `JSONDecodeError`, at BOTH decodes. An integer over the
+    # interpreter's digit limit (4,300 by default) makes `json.loads` raise a plain
+    # `ValueError` from `int()`, and a deeply nested document raises `RecursionError`, so a
+    # record carrying either crashed the script and no diagnostic was written.
+    # `JSONDecodeError` subclasses `ValueError`, so every record that degraded still does.
+    # ⚠️ The cost: such a record is unparseable, and `classify` then searches it whole.
     try:
         decoded = json.loads(stripped)
-    except json.JSONDecodeError:
+    except (ValueError, RecursionError):
         pass
     else:
         return decoded if isinstance(decoded, list) else [decoded]
@@ -686,7 +756,7 @@ def _parse_events(execution_text: str) -> list | None:
             continue
         try:
             events.append(json.loads(line))
-        except json.JSONDecodeError:
+        except (ValueError, RecursionError):
             continue
     return events or None
 
@@ -929,11 +999,10 @@ def _numbers_in(value: object) -> list[str]:
     # express this because the CONVERSION is what grows: without it a 4,000-digit
     # status becomes 4,000 characters of haystack.
     #
-    # ⚠️ It does NOT stop the related crash, and claiming otherwise would be worse than
-    # not bounding at all. The 4,300-digit ceiling belongs to `int()`, which `json`'s
-    # integer parser calls, so `json.loads` raises inside `_parse_events` -- which
-    # catches only `JSONDecodeError` -- before this function is ever reached. An absurd
-    # status still raises there, on `main` exactly as here. Filed as KBR-209; this
+    # ⚠️ It does NOT stop the related crash, and never did. The 4,300-digit ceiling belongs
+    # to `int()`, which `json`'s integer parser calls, so `json.loads` raises before this
+    # function is ever reached. KBR-181 fixed that at the decode sites -- `_parse_events`
+    # no longer lets it escape -- so such a record degrades to unparseable there. This
     # bound is about size, and about the band below that ceiling where it does the work.
     if not 0 <= value < OUTCOME_NUMBER_BOUND:
         return []
