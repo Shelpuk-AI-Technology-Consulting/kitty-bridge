@@ -36,6 +36,11 @@ class ZaiAnthropicAdapter(AnthropicAdapter):
     request is already in Messages format via ``_native_messages_request``.
     """
 
+    #: Z.AI does not document ``display``.  The translated branch still sees the
+    #: key when a balancing profile fails over here from a backend whose request
+    #: was translated.  KBR-203, decision D2.
+    forwards_thinking_display = False
+
     @property
     def provider_type(self) -> str:
         return "zai_coding"
