@@ -3805,8 +3805,8 @@ business, together with the job that runs them; doing it earlier would remove th
 gate. T-H1 must take that reclassification into account before it measures a mutation
 baseline, because it selects on `l1`.
 
-**Eight modules are bulleted below — in six bullets, since the T-W4 and T-W8 rows name two
-modules each — and `tests/cli/test_stream_encoding.py` (KBR-10) is described after them, nine in
+**Nine modules are bulleted below — in seven bullets, since the T-W4 and T-W8 rows name two
+modules each — and `tests/cli/test_stream_encoding.py` (KBR-10) is described after them, ten in
 all, named here so T-K6 inherits a list rather than a search** — the count
 is what T-K6 and T-H1 plan against. (The bullet count and the KBR-10 paragraph were already
 drifting apart before T-W8 added two; spelling out both is what stops the next addition
@@ -3852,6 +3852,15 @@ separately.)
   ephemeral port in four of its classes, following the existing convention of
   `tests/bridge/test_crash_resilience.py` rather than inventing a second one. The whole module
   runs in **~0.6 seconds**, measured, of which the socket-binding cases are ~0.1.
+- **KBR-176:** `tests/bridge/test_bridge_management.py` spawns real child interpreters in four
+  cases of `TestStartBridgeWithALoudChild`, and already bound loopback sockets in
+  `TestBridgeReachable` before that, unlisted. It has no choice for the children: the defect is a
+  child blocked inside `write()` on a pipe nobody reads, which only a real pipe and a real writer
+  can show — a stand-in stream never blocks — and one case runs a whole second interpreter as the
+  CLI, because how an interpreter exits around a thread still blocked on that pipe is platform
+  behaviour. The four spawning cases take **~0.6 seconds** together and the whole module
+  **~3 seconds**, measured. The child is a `python -c` script, never `kitty.bridge_runner`, which
+  would refresh the model-context catalog over the network.
 
 **One cross-cutting cost, added by KBR-188's fix.** Every conformance probe now begins by waiting
 for the clock to report a new instant (§8.3). Measured at **80 calls** across the harness suite:
@@ -4278,11 +4287,30 @@ by what each misclassification costs, and each entry's position is measured rath
 argued.
 
 **I-C2 — A pattern weak enough to appear in ordinary prose is scoped by AUTHORSHIP, never by
-a tighter regex.** KBR-172 and KBR-166 each measured anchoring — on vendor vocabulary, on the
+a tighter regex — with one measured exception, below.** KBR-172 and KBR-166 each measured anchoring — on vendor vocabulary, on the
 CLI's line shape, on proximity to a spending verb — and every version lost a real provider
 body while still leaking model prose. The separable question is not what the text says but who
 wrote it, and the execution record already answers it: `_provider_outcome_text` is the
 narrower haystack, and the weak patterns read only that.
+
+KBR-181 moved four more there — the Z.ai business codes `1308`, `1310`, `1113` and the phrase
+`limit will reset` — and **anchored a fifth instead, which is the exception.** The exception is
+a **verbatim prefix of a vendor's own error sentence, long enough that prose matching it is a
+quotation of that vendor**: `you exceeded your current quota`. It stays in the full haystack
+because OpenAI's spent quota arrives in production as CLI text in `result`, where no
+provider-scoped pattern can see it, so the bare `exceeded your current` was that body's only
+quota signal. Measured across the status matrix, moving or deleting the phrase kept every
+status and retry but lost the quota reason and top-up advice on 10 of 11 statuses (the 11th is
+402, which now names the quota itself); the anchor lost nothing. Its residual is that a
+quotation still leaks, and that Gemini sends the same sentence for a per-minute rate limit, so a
+free-tier throttle is advised to top up — status and retry still right. The rule is about the
+tiers that can **promote** a record to `exhausted`; `FATAL_PATTERNS` is weak and reads the full
+haystack too, and that is KBR-206's subject rather than this rule's. `CREDENTIAL_PATTERNS`'
+`model not found` / `authentication_failed` words are the same exposure and are KBR-217's.
+
+The four moved patterns kept every English body: Z.ai's own error table puts a stronger vendor
+phrase beside every code and every `limit will reset`. They moved rather than being deleted
+because a code survives translation and a phrase does not.
 
 **I-C3 — A numeric outcome field is admitted to the provider-scoped haystack only.** KBR-182.
 `api_error_status` is a JSON number and was discarded before any pattern saw it, so the field
@@ -4299,6 +4327,37 @@ whole and always has, status text included. And `_provider_outcome_text` has a *
 consumer** — `_write_diagnostic`'s quota branch — so a numeric pattern added to
 `QUOTA_WORD_PATTERNS` would fire the top-up paragraph off a bare status, including under a
 `fatal` verdict. That is the door KBR-207 has to walk through carefully.
+
+KBR-181 walked through it (KBR-207 folded into that ticket). `\b402\b` and the three Z.ai codes
+joined `QUOTA_WORD_PATTERNS` — one provider-scoped tuple, so no consumer can read the words and
+miss the codes — and `\b40[134]\b` replaced `\b40[13]\b`. **The 402 is read in the quota
+group, above `CREDENTIAL_PATTERNS`, because of I-C4 rather than specificity.** A 402 beside a
+named `authentication_error` is incoherent and either verdict is arguable, but the diagnostic
+keys on evidence, so a 402 placed below the credential names would print a credential verdict
+over a top-up paragraph. In the quota group the two agree.
+
+Measured over the full cross product for the two disagreement kinds this change can create —
+`fatal` over a top-up paragraph, and a credential verdict over one — exactly one new cell
+appears, and it is **reachable**: a 402 whose body carries the number 400. OpenRouter's own
+spent-credit message is *"You requested up to N tokens, but can only afford M"*, and at M=400
+tier 1's `\b400\b` calls it a workflow fault while the diagnostic, reading the 402, advises a
+top-up. That is KBR-206's family — tier 1 reading text that is not a workflow fault — and the
+advice is the correct half, so it is pinned rather than hidden: gating the diagnostic on the
+verdict would suppress correct advice there and in KBR-206's own row. A pre-existing
+disagreement of a third kind — a quota verdict under the context-management paragraph — is not
+touched by this change.
+
+**Residuals, stated so they read as decisions.** A non-English Z.ai body in `result` keeps
+`exhausted` and its retry but loses the quota reason and advice. A provider that writes `0.402`
+or `1308` in its own message is read as quota, as KBR-166 records for `quota`. The truncated-record
+fallback `_provider_outcome_text` already documents — no `result` key, so model-authored
+`message`/`content` is handed back — reaches 402 and 404 exactly as it reached 401 and 403.
+
+**A decode failure degrades; it does not crash.** KBR-181 also widened the four `json.loads`
+sites to `ValueError` and `RecursionError`: an integer over the interpreter's digit limit and a
+deeply nested document raised through the script, so the run that already failed wrote no
+status and no diagnostic. The cost is recorded: such a record takes the unparseable path, where
+`classify` searches the text whole — a crash traded for an unscoped verdict.
 
 **I-C4 — The verdict, the `retryable` flag and the diagnostic's advice must agree.** They are
 computed by three different functions from three different inputs — pattern order, cost, and

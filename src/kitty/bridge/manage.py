@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import enum
+import io
 import ipaddress
 import os
 import signal
@@ -29,6 +30,19 @@ class BridgeStatus(enum.Enum):
 _DEFAULT_STATE_PATH = Path.home() / ".config" / "kitty" / "bridge_state.json"
 
 PROBE_TIMEOUT_SECONDS = 0.5
+
+# How many times, and how often, start_bridge looks for the child's state file.
+_START_POLLS = 50
+_START_POLL_SECONDS = 0.1
+
+# How much of a starting child's output one read may return.
+_OUTPUT_CHUNK_BYTES = 64 * 1024
+
+# How long to wait, after a starting child has exited, for its output to end.
+_OUTPUT_JOIN_SECONDS = 5.0
+
+# The name of the thread that reads a starting child's output.
+OUTPUT_READER_NAME = "kitty-bridge-child-output"
 
 
 class ProcessLiveness(enum.Enum):
@@ -429,6 +443,35 @@ def stop_bridge(state_path: Path | str | None = None) -> None:
     remove_state(state_path)
 
 
+def _drain_output(stream: io.BufferedIOBase) -> tuple[threading.Thread, list[bytes]]:
+    """Read a starting child's output to its end on a background thread.
+
+    A pipe holds a bounded amount before its writer blocks, so a parent that
+    waits on a child without reading lets a loud child wedge inside ``write()``,
+    never writing its state and never exiting (KBR-176). Reading for as long as
+    the parent waits keeps the child moving, and keeps what it wrote for the
+    report if it does not come up.
+
+    Args:
+        stream: The child's output pipe, in binary mode.
+
+    Returns:
+        The started daemon thread, which ends when ``stream`` reaches its end,
+        and the list that thread appends each chunk to as it arrives.
+    """
+    chunks: list[bytes] = []
+
+    def _pump() -> None:
+        """Append each chunk ``stream`` yields until it reports its end."""
+        # read1 hands over what is available now; read(n) would sit on a partial chunk
+        for chunk in iter(lambda: stream.read1(_OUTPUT_CHUNK_BYTES), b""):
+            chunks.append(chunk)
+
+    reader = threading.Thread(target=_pump, name=OUTPUT_READER_NAME, daemon=True)
+    reader.start()
+    return reader, chunks
+
+
 def start_bridge(
     *,
     state_path: Path | str | None = None,
@@ -458,7 +501,8 @@ def start_bridge(
     Raises:
         SystemExit: When a bridge is already running — including one owned by
             another user account that is still serving at the recorded address —
-            or when the spawned child fails to come up.
+            or when the spawned child fails to come up. A child still running
+            without a state file when the wait ends is left running.
     """
     state_path = Path(state_path) if state_path else _get_state_path()
 
@@ -527,23 +571,25 @@ def start_bridge(
         if tls_key:
             cmd.extend(["--tls-key", tls_key])
 
-        # Spawn background process
+        # Spawn background process; stderr joins stdout so one reader drains both (KBR-176)
         proc = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
             start_new_session=True,
             env=child_env,
         )
+        # A PIPE comes back as a buffered reader, which has the read1 the drain uses
+        reader, output = _drain_output(typing.cast(io.BufferedIOBase, proc.stdout))
 
         # Wait briefly for the process to start and write state
-        for _ in range(50):
+        for _ in range(_START_POLLS):
             if state_path.exists():
                 break
             # Check if process already exited (startup error)
             if proc.poll() is not None:
                 break
-            time.sleep(0.1)
+            time.sleep(_START_POLL_SECONDS)
 
         state = load_state(state_path)
         if state is not None:
@@ -552,18 +598,25 @@ def start_bridge(
         else:
             # Process may have failed to start
             if proc.poll() is not None:
-                # Process already exited — read error
+                # The exit ends the output; bounded, so a pipe held open cannot hang the report
+                reader.join(timeout=_OUTPUT_JOIN_SECONDS)
                 print(f"Error: Bridge failed to start (exit code {proc.returncode})", file=sys.stderr)
-                if proc.stderr:
-                    # A child that died before `kitty.bridge_runner:main` never ran
-                    # harden_output_streams, so its traceback carries the locale
-                    # codepage, not UTF-8. A strict decode killed this diagnostic
-                    # instead of printing it (KBR-154); backslashreplace keeps the
-                    # undecodable bytes readable rather than collapsing them to U+FFFD.
-                    print(proc.stderr.read().decode(errors="backslashreplace"), file=sys.stderr)
             else:
-                # Process is running but state file never appeared
-                print("Error: Bridge started but state file not found", file=sys.stderr)
+                # A healthy start can outlast the wait, so the child is left running and only facts are reported
+                print(
+                    f"Error: Bridge did not report ready within {_START_POLLS * _START_POLL_SECONDS:g} "
+                    f"seconds and is still running (PID {proc.pid}).",
+                    file=sys.stderr,
+                )
+            # A copy, because the reader of a still-running child may be appending.
+            written = b"".join(list(output))
+            if written:
+                # A child that died before `kitty.bridge_runner:main` never ran
+                # harden_output_streams, so its traceback carries the locale
+                # codepage, not UTF-8. A strict decode killed this diagnostic
+                # instead of printing it (KBR-154); backslashreplace keeps the
+                # undecodable bytes readable rather than collapsing them to U+FFFD.
+                print(written.decode(errors="backslashreplace"), file=sys.stderr)
             sys.exit(1)
     finally:
         start_lock.release()
