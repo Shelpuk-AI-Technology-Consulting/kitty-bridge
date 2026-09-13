@@ -374,6 +374,86 @@ def _with_thinking_carrier(msg: dict, *, native: bool) -> dict | None:
     return None
 
 
+# Token pairs that identify Anthropic rejecting a thinking block's signature: a block
+# with none ("thinking.signature: Field required") or one that no longer verifies,
+# including the prefix check's "bound to a different conversation" (KBR-238).  Both
+# tokens must be present so a bare "signature" in an unrelated 400 does not match.
+_THINKING_SIGNATURE_PATTERNS: tuple[tuple[str, ...], ...] = (
+    (".thinking.signature", "field required"),
+    ("invalid `signature`", "`thinking` block"),
+)
+
+
+def _is_thinking_signature_error(status: int, body: object) -> bool:
+    """Return True if Anthropic rejected a thinking block's signature in the transcript.
+
+    api.anthropic.com verifies every ``thinking`` block it is sent back: a block
+    without a signature, with an altered one, or — under the prefix check — after
+    an edited earlier message is refused with a 400.  Kitty produces all three:
+    the translator drops signatures, P5e and the issue-#32 carrier inject unsigned
+    blocks, and compaction edits the signed prefix.  Like
+    :func:`_is_thinking_roundtrip_error`, this is a rejection of the request the
+    bridge built, so the caller strips thinking and retries the same backend
+    instead of failing over (see :func:`_strip_thinking_blocks`).
+
+    The patterns are the texts the API returned when probed live on 2026-09-13.
+    Only 4xx statuses match: the same words with a 5xx are a backend fault.
+
+    Args:
+        status: The upstream HTTP status code.
+        body: The upstream error body, as text or as a parsed dict.
+
+    Returns:
+        True when the body reports a missing or invalid thinking signature.
+    """
+    if status < 400 or status >= 500 or body is None:
+        return False
+    searchable = str(body).lower()
+    return any(all(token in searchable for token in tokens) for tokens in _THINKING_SIGNATURE_PATTERNS)
+
+
+def _strip_thinking_blocks(body: dict) -> bool:
+    """Remove every ``thinking`` and ``redacted_thinking`` block from a Messages body's assistant turns.
+
+    Anthropic's documented recovery for a signature rejection is to strip every
+    thinking block and retry once; the model then answers without its earlier
+    reasoning, which is the price of a history kitty has already altered.  A turn
+    left with nothing keeps ``content: []``, which the API accepts, rather than
+    being dropped: dropping it would merge two user turns and edit the history
+    further.
+
+    Copy-on-write, for the reason :func:`_repair_thinking_roundtrip` gives:
+    ``translate_to_upstream`` shares ``messages`` with ``cc_request``, so editing a
+    message in place would reach the request the next attempt re-serializes.
+
+    Args:
+        body: The outgoing Anthropic Messages body. Its ``messages`` key is
+            rebound when anything changes; the original list and messages are untouched.
+
+    Returns:
+        True if at least one block was removed.  The caller retries only then.
+    """
+    messages = body.get("messages")
+    if not isinstance(messages, list):
+        return False
+
+    stripped = messages.copy()
+    changed = False
+    for index, msg in enumerate(messages):
+        if not isinstance(msg, dict) or msg.get("role") != "assistant" or not isinstance(msg.get("content"), list):
+            continue
+        kept = [
+            block
+            for block in msg["content"]
+            if not (isinstance(block, dict) and block.get("type") in ("thinking", "redacted_thinking"))
+        ]
+        if len(kept) != len(msg["content"]):
+            stripped[index] = {**msg, "content": kept}
+            changed = True
+    if changed:
+        body["messages"] = stripped
+    return changed
+
 def _route_model(cc_request: dict) -> str:
     """Return the model every routing decision for this request must read.
 
@@ -3717,6 +3797,8 @@ class BridgeServer:
             _original_max_attempts = (_MAX_RETRIES + 1) * n_backends
             max_attempts = _original_max_attempts + len(_EMPTY_FINAL_DELAYS)
             transport_grace = TransportGrace()
+            # One signature strip per request; the #32 repair must not undo it.
+            thinking_stripped = False
             # A grace retry re-sends to the *same* backend after a connection
             # blip, so it must not spend a failover attempt or pull the
             # empty-response schedule forward — the loop is extended by the most
@@ -3803,12 +3885,34 @@ class BridgeServer:
                                 upstream_body = self._upstream_body_for(cc_request)
                                 continue
 
+                            # A signature the API will not verify is the bridge's history, not
+                            # a sick backend: strip thinking and retry the same backend once (KBR-238).
+                            if (
+                                not thinking_stripped
+                                and attempt < max_attempts - 1
+                                and _is_thinking_signature_error(upstream.status, error_body)
+                                and self._active_provider.upstream_wire_is_messages_api_for_model(
+                                    _route_model(cc_request)
+                                )
+                                and _strip_thinking_blocks(upstream_body)
+                            ):
+                                thinking_stripped = True
+                                logger.warning(
+                                    "Backend rejected a thinking signature (status %d) — stripped thinking "
+                                    "and retrying the same backend once (attempt %d/%d)",
+                                    upstream.status,
+                                    attempt + 1,
+                                    max_attempts,
+                                )
+                                continue
+
                             # Transcript the bridge malformed, not a sick backend
                             # (issue #32): repair and retry the same backend.
                             # A False repair means nothing changed, so retrying
                             # would re-send identical bytes — fall through.
                             if (
-                                attempt < max_attempts - 1
+                                not thinking_stripped
+                                and attempt < max_attempts - 1
                                 and _is_thinking_roundtrip_error(upstream.status, error_body)
                                 and _repair_thinking_roundtrip(
                                     upstream_body,
@@ -7188,6 +7292,7 @@ class BridgeServer:
         # Connection blips get their own budget so they cannot eat the
         # status-retry attempts, and vice versa (issue #38).
         attempt = 0
+        thinking_stripped = False
         transport_grace = TransportGrace() if grace is None else grace
         while True:
             session = await self._session_for(url)
@@ -7210,6 +7315,21 @@ class BridgeServer:
 
                     # In balancing mode (retry_rate_limit=False), raise 429 immediately
                     # so the caller can fail over to another backend.
+                    # The bridge's history failed signature checks: strip thinking and retry
+                    # this backend once, before any path can blame the backend (KBR-238).
+                    if (
+                        not thinking_stripped
+                        and _is_thinking_signature_error(last_status, last_body)
+                        and self._active_provider.upstream_wire_is_messages_api_for_model(_route_model(cc_request))
+                        and _strip_thinking_blocks(upstream_body)
+                    ):
+                        thinking_stripped = True
+                        logger.warning(
+                            "Backend rejected a thinking signature (status %d) — stripped thinking and retrying once",
+                            last_status,
+                        )
+                        continue
+
                     if last_status == 429 and not retry_rate_limit:
                         raise UpstreamError(last_status, last_body)
 
