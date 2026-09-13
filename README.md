@@ -704,6 +704,30 @@ Claude Code saves the choice and relaunches with your conversation intact, so it
 One trade-off: fullscreen captures the mouse, so your terminal's own copy-on-select stops working. Hold `Shift` while
 dragging (`Option` in iTerm2, `Fn` in Terminal.app) when you want a native selection.
 
+### Can my Claude Code session survive an SSH disconnect?
+
+Yes, with Claude Code's own tmux flag:
+
+```bash
+kitty claude -w mike --tmux=classic
+```
+
+Kitty sees `--tmux` and starts a tmux session running *itself*, so kitty, its bridge and Claude Code
+all keep running when the SSH connection drops. Without this, only Claude Code would survive, talking
+to a bridge that died with your terminal. Reconnect with the command kitty prints before it starts:
+
+```bash
+tmux attach -t <repo>_worktree-mike
+```
+
+Running the same command again reattaches too. Notes:
+
+- It needs tmux 3.2 or newer and a worktree flag (`-w`/`--worktree`), as Claude Code's `--tmux` does.
+- Already inside tmux, kitty just removes `--tmux` and runs in the current pane.
+- If a session with that name exists but kitty did not start it, kitty stops and tells you how to
+  attach to it or remove it.
+- If kitty fails inside the session, the pane stays open with the error until you press Enter.
+
 ### Can I use kitty with Cursor, Windsurf, or other IDEs?
 
 Yes, but with caveats. Cursor uses a proprietary protocol that Kitty cannot integrate with automatically. However, you
