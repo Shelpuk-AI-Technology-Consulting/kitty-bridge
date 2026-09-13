@@ -41,6 +41,11 @@ class ZaiAnthropicAdapter(AnthropicAdapter):
     #: was translated.  KBR-203, decision D2.
     forwards_thinking_display = False
 
+    #: Keeps the empty placeholder thinking block (register row P5e): whether
+    #: Z.AI accepts a history with no thinking block is unverified, and the
+    #: route must not change wire behaviour without evidence (KBR-228 part C).
+    injects_placeholder_thinking = True
+
     @property
     def provider_type(self) -> str:
         return "zai_coding"

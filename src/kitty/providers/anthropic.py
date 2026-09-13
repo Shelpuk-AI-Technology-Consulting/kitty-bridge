@@ -109,9 +109,22 @@ class AnthropicAdapter(ProviderAdapter):
             subclass whose upstream does not document it sets this to False, so
             an unknown field cannot turn every thinking request into a 400
             (KBR-203).
+        injects_placeholder_thinking: Whether
+            :meth:`_translate_assistant_msg` injects an empty unsigned
+            thinking block into an assistant message that lacks one while
+            thinking is active (register row P5e).  False here — the default,
+            because this class *is* the ``anthropic`` provider: the live probe
+            behind KBR-238 showed the unsigned block itself is rejected with
+            ``400 ... thinking.signature: Field required`` while a history
+            with no thinking block is accepted, so manufacturing one costs a
+            rejected round-trip per turn and M17's strip has to remove it
+            again (KBR-228 part C).  A subclass whose upstream has not been
+            shown to reject the block sets this to True to keep the old wire.
     """
 
     forwards_thinking_display: bool = True
+
+    injects_placeholder_thinking: bool = False
 
     @property
     def provider_type(self) -> str:
@@ -296,7 +309,7 @@ class AnthropicAdapter(ProviderAdapter):
         thinking_enabled = (cc_request or {}).get("_thinking_enabled")
         if reasoning:
             content_blocks.append({"type": "thinking", "thinking": reasoning})
-        elif thinking_enabled:
+        elif thinking_enabled and self.injects_placeholder_thinking:
             content_blocks.append({"type": "thinking", "thinking": ""})
 
         text = msg.get("content")

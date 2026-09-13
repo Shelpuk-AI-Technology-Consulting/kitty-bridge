@@ -6,6 +6,10 @@ import pytest
 
 from kitty.bridge.messages.translator import MessagesTranslator
 from kitty.providers.anthropic import AnthropicAdapter
+from kitty.providers.custom_anthropic import CustomAnthropicAdapter
+from kitty.providers.minimax_token import MiniMaxTokenAnthropicAdapter
+from kitty.providers.opencode import OpenCodeGoAdapter
+from kitty.providers.zai_anthropic import ZaiAnthropicAdapter
 
 # ── CC format samples (what the bridge produces internally) ─────────────────
 
@@ -697,18 +701,31 @@ class TestAnthropicNormalizeModelName:
         assert self.adapter.normalize_model_name("anthropic/claude-sonnet-4-6") == "claude-sonnet-4-6"
 
 
-class TestThinkingEnabledToolCallGap:
-    """Regression tests for: thinking enabled but assistant tool-call messages lack reasoning_content.
+class TestPlaceholderThinkingInjection:
+    """Which adapters inject the unsigned empty thinking block (register row P5e).
 
-    When _thinking_enabled is True, the upstream Anthropic API requires every assistant message
-    to contain a thinking block.  Historical tool-call messages that predate the thinking turn
-    will not have reasoning_content, so the bridge must inject an empty thinking block.
+    KBR-228 part C.  The live probe behind KBR-238 (2026-09-13, against
+    ``claude-sonnet-5``, ``claude-opus-4-6`` and ``claude-fable-5-1``) falsified
+    this injection's original premise: the empty unsigned block itself is
+    rejected with ``400 ... thinking.signature: Field required``, while a
+    history carrying no thinking block at all is accepted.  The default
+    ``anthropic`` route therefore must not manufacture the block — an unsigned
+    block costs one rejected round-trip per turn toward a signature-checking
+    upstream, and M17's strip has to remove it again.  Adapters whose upstreams
+    have not been shown to reject it keep today's behaviour by opting in
+    explicitly (KBR-228 part C; ``forwards_thinking_signature`` scopes the
+    request-side restore the same way).
     """
 
     def setup_method(self):
         self.adapter = AnthropicAdapter()
 
-    def test_thinking_enabled_tool_call_without_reasoning_gets_empty_thinking(self):
+    @staticmethod
+    def _thinking_blocks(message: dict) -> list[dict]:
+        """Return the thinking blocks of one translated assistant message."""
+        return [b for b in message["content"] if b.get("type") == "thinking"]
+
+    def test_default_route_injects_no_placeholder_for_tool_call_assistant(self):
         cc = {
             "model": "claude-sonnet-4-6",
             "messages": [
@@ -738,14 +755,13 @@ class TestThinkingEnabledToolCallGap:
         result = self.adapter.translate_to_upstream(cc)
         assert result["thinking"]["type"] == "enabled"
 
-        # First assistant message has tool_calls but no reasoning_content
+        # First assistant message has tool_calls but no reasoning_content: the
+        # placeholder must be absent, not injected (KBR-228 part C).
         assistant_with_tools = result["messages"][1]
         assert assistant_with_tools["role"] == "assistant"
-        thinking_blocks = [b for b in assistant_with_tools["content"] if b["type"] == "thinking"]
-        assert len(thinking_blocks) == 1, "Should inject empty thinking block when thinking enabled"
-        assert thinking_blocks[0]["thinking"] == ""
+        assert self._thinking_blocks(assistant_with_tools) == []
 
-    def test_thinking_enabled_text_only_assistant_without_reasoning_gets_empty_thinking(self):
+    def test_default_route_injects_no_placeholder_for_text_only_assistant(self):
         cc = {
             "model": "claude-sonnet-4-6",
             "messages": [
@@ -763,9 +779,51 @@ class TestThinkingEnabledToolCallGap:
         }
         result = self.adapter.translate_to_upstream(cc)
         first_assistant = result["messages"][1]
-        thinking_blocks = [b for b in first_assistant["content"] if b["type"] == "thinking"]
-        assert len(thinking_blocks) == 1, "Should inject empty thinking for text-only assistant"
-        assert thinking_blocks[0]["thinking"] == ""
+        assert self._thinking_blocks(first_assistant) == []
+
+    @pytest.mark.parametrize(
+        "adapter_cls,model",
+        [
+            (CustomAnthropicAdapter, "claude-sonnet-4-6"),
+            (MiniMaxTokenAnthropicAdapter, "claude-sonnet-4-6"),
+            (OpenCodeGoAdapter, "minimax-m2.7"),
+            (ZaiAnthropicAdapter, "claude-sonnet-4-6"),
+        ],
+    )
+    def test_subclasses_opt_in_keeps_the_placeholder(self, adapter_cls, model):
+        """Characterisation: the four subclasses keep today's wire behaviour.
+
+        KBR-228 part C scopes the opt-out to the default ``anthropic`` route,
+        whose upstream probed the placeholder out; every other adapter opts in
+        explicitly so no profile's wire changes without evidence.  The OpenCode
+        case names a Messages-routed model because the adapter routes on the
+        model and its Chat Completions route builds no Messages body.
+        """
+        adapter = adapter_cls()
+        cc = {
+            "model": model,
+            "messages": [
+                {"role": "user", "content": "What's the weather?"},
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "call_abc",
+                            "type": "function",
+                            "function": {"name": "get_weather", "arguments": '{"city": "London"}'},
+                        }
+                    ],
+                },
+            ],
+            "stream": False,
+            "_thinking_enabled": True,
+        }
+        result = adapter.translate_to_upstream(cc)
+        assistant_with_tools = result["messages"][1]
+        blocks = self._thinking_blocks(assistant_with_tools)
+        assert len(blocks) == 1, f"{adapter_cls.__name__} must keep the placeholder (opt-in)"
+        assert blocks[0]["thinking"] == ""
 
     def test_thinking_not_enabled_no_injection(self):
         cc = {

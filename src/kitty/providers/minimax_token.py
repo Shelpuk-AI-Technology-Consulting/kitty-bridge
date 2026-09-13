@@ -66,6 +66,12 @@ class MiniMaxTokenAnthropicAdapter(AnthropicAdapter):
     #: fields before (module docstring).  KBR-203, decision D2.
     forwards_thinking_display = False
 
+    #: Keeps the empty placeholder thinking block (register row P5e): whether
+    #: MiniMax accepts a history with no thinking block is unverified, and the
+    #: translated default must not change wire behaviour without evidence
+    #: (KBR-228 part C).
+    injects_placeholder_thinking = True
+
     def __init__(
         self,
         *,

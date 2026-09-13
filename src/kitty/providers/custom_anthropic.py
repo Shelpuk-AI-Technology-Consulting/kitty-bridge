@@ -35,6 +35,12 @@ class CustomAnthropicAdapter(AnthropicAdapter):
     For non-Claude agents, the inherited CC↔Messages translation is used.
     """
 
+    #: Keeps the empty placeholder thinking block (register row P5e) on the
+    #: translated re-serialization path: the user pointed this adapter at an
+    #: upstream of their own choosing, and its tolerance for a missing block is
+    #: unverified (KBR-228 part C).
+    injects_placeholder_thinking = True
+
     @property
     def provider_type(self) -> str:
         return "custom_anthropic"
