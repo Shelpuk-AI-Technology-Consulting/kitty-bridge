@@ -29,6 +29,36 @@ _STOP_REASON_MAP: dict[str | None, str] = {
 }
 
 
+def _converse_tool_choice(cc_tool_choice: object) -> dict:
+    """Translate a Chat Completions ``tool_choice`` into a Converse ``toolChoice``.
+
+    Converse's ``ToolChoice`` union has exactly three members -- ``auto``,
+    ``any`` and ``tool`` (botocore ``bedrock-runtime`` 2023-09-30).  ``"required"``
+    becomes ``{"any": {}}`` and the named form becomes ``{"tool": {"name": x}}``.
+    Everything else, ``"none"`` included, keeps ``{"auto": {}}``, the value this
+    adapter always sent: Converse cannot say "no tools", and dropping the tool
+    list instead is not available, because Converse rejects a conversation
+    holding ``toolUse`` or ``toolResult`` blocks without a ``toolConfig``.  That
+    residue is gap G33 (KBR-214).
+
+    Args:
+        cc_tool_choice: The request's ``tool_choice`` value, or ``None``.
+
+    Returns:
+        The Converse ``toolChoice`` object.
+    """
+    if cc_tool_choice == "required":
+        return {"any": {}}
+    if (
+        isinstance(cc_tool_choice, dict)
+        and cc_tool_choice.get("type") == "function"
+        and isinstance(cc_tool_choice.get("function"), dict)
+        and isinstance(cc_tool_choice["function"].get("name"), str)
+    ):
+        return {"tool": {"name": cc_tool_choice["function"]["name"]}}
+    return {"auto": {}}
+
+
 class BedrockAdapter(ProviderAdapter):
     """AWS Bedrock Converse API adapter.
 
@@ -203,7 +233,9 @@ class BedrockAdapter(ProviderAdapter):
         if "tools" in cc_request and cc_request["tools"]:
             bedrock["toolConfig"] = {
                 "tools": self._translate_tools(cc_request["tools"]),
-                "toolChoice": {"auto": {}},
+                # KBR-214: was a hard-coded `auto`, which silently downgraded an
+                # agent's forced tool call to an optional one.
+                "toolChoice": _converse_tool_choice(cc_request.get("tool_choice")),
             }
 
         return bedrock

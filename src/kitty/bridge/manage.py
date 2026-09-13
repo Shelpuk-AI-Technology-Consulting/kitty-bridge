@@ -16,7 +16,7 @@ import time
 import typing
 from pathlib import Path
 
-from kitty.bridge.state import load_state, remove_state
+from kitty.bridge.state import default_state_path, load_state, remove_state
 from kitty.egress import ENV_PROXY, get_egress
 
 
@@ -26,8 +26,6 @@ class BridgeStatus(enum.Enum):
     STALE = "stale"  # State file exists but PID is dead
     UNMANAGEABLE = "unmanageable"  # Bridge is serving, but under another user
 
-
-_DEFAULT_STATE_PATH = Path.home() / ".config" / "kitty" / "bridge_state.json"
 
 PROBE_TIMEOUT_SECONDS = 0.5
 
@@ -294,7 +292,12 @@ def bridge_reachable(host: str, port: int, timeout: float = PROBE_TIMEOUT_SECOND
 
 
 def _get_state_path() -> Path:
-    return _DEFAULT_STATE_PATH
+    """Return the state path used when a caller passes none.
+
+    Returns:
+        The path from :func:`kitty.bridge.state.default_state_path`.
+    """
+    return default_state_path()
 
 
 def bridge_status(state_path: Path | str | None = None) -> BridgeStatus:
@@ -553,7 +556,9 @@ def start_bridge(
         if egress is not None:
             child_env[ENV_PROXY] = egress.url_with_credentials()
 
-        cmd = [sys.executable, "-m", "kitty.bridge_runner"]
+        # The child is told where to record its state, so it writes exactly the
+        # file this loop polls instead of resolving a default of its own.
+        cmd = [sys.executable, "-m", "kitty.bridge_runner", "--state-file", str(state_path)]
         if host:
             cmd.extend(["--host", host])
         if port is not None:

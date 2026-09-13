@@ -7,6 +7,9 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
+from kitty.bridge.messages.translator import MessagesTranslator
 from kitty.bridge.server import (
     _convert_native_to_cc_format,
     _has_tool_use_blocks,
@@ -363,6 +366,80 @@ class TestConvertNativeToCCFormat:
         upstream = AnthropicAdapter().translate_to_upstream(cc)
 
         assert upstream["stop_sequences"] == ["A", "B"]
+
+    @pytest.mark.parametrize(
+        "choice",
+        [
+            {"type": "auto"},
+            {"type": "any", "disable_parallel_tool_use": True},
+            {"type": "any", "disable_parallel_tool_use": False},
+            {"type": "none", "disable_parallel_tool_use": True},
+            {"type": "tool", "name": "Bash", "disable_parallel_tool_use": True},
+            {"type": "tool"},
+            "auto",
+            None,
+        ],
+        ids=["auto", "any-disable", "any-keep", "none-disable", "tool-disable", "tool-nameless", "string", "null"],
+    )
+    @pytest.mark.parametrize("guarded", [False, True], ids=["pristine-body", "normalised-cc-request"])
+    def test_tool_choice_and_metadata_agree_with_the_translator(self, choice, guarded):
+        """KBR-214 R4: both Messages -> CC converters produce the same three keys.
+
+        ``_convert_native_to_cc_format`` is a second, partial copy of hop 1, and a
+        drifted second copy is how KBR-178's field was lost on the ``tool_use``
+        retry.  Parity over legal, off-by-default and malformed shapes is what
+        catches this converter's table *diverging*; a faithful copy is caught by
+        the call test below instead.  Both argument shapes are exercised: the
+        live Messages-ingress site (``_stream_messages``) passes the pristine
+        body, and the three sites in the other stream handlers pass a
+        ``cc_request`` carrying the guard flag.
+        """
+        body = _anthropic_body_with_tool_use()
+        body["tool_choice"] = choice
+        body["metadata"] = {"user_id": "u-123"}
+        from_translator = MessagesTranslator().translate_request(body)
+        if guarded:
+            body["_native_messages_request"] = True
+        from_fallback = _convert_native_to_cc_format(body)
+
+        for key in ("tool_choice", "parallel_tool_calls", "_metadata"):
+            assert from_fallback.get(key, "<absent>") == from_translator.get(key, "<absent>"), key
+
+    def test_the_fallback_converter_calls_the_shared_helper(self, monkeypatch):
+        """R4 is "the same helper", not "an equal table" (D3).
+
+        A faithful copy of the value table passes every parity case above and
+        still reintroduces the drift KBR-178 paid for, so the call itself is the
+        claim.
+        """
+        import kitty.bridge.server as server
+
+        seen: list[tuple[dict, dict]] = []
+        monkeypatch.setattr(server, "carry_tool_choice_and_metadata", lambda body, cc: seen.append((body, cc)))
+        body = _anthropic_body_with_tool_use()
+        result = _convert_native_to_cc_format(body)
+
+        assert len(seen) == 1
+        assert seen[0][0] is body
+        assert seen[0][1] is result
+
+    def test_no_tool_choice_or_metadata_invents_nothing(self):
+        """Neither field inbound means none of the three keys outbound (R9)."""
+        result = _convert_native_to_cc_format(_anthropic_body_with_tool_use())
+
+        assert "tool_choice" not in result
+        assert "parallel_tool_calls" not in result
+        assert "_metadata" not in result
+
+    def test_fallback_body_reaches_anthropic_upstream_with_tool_choice_and_metadata(self):
+        """End to end over the seam, in user terms: a forced tool survives the retry."""
+        body = _anthropic_body_with_tool_use()
+        body["tool_choice"] = {"type": "tool", "name": "Bash", "disable_parallel_tool_use": True}
+        body["metadata"] = {"user_id": "u-123"}
+        upstream = AnthropicAdapter().translate_to_upstream(_convert_native_to_cc_format(body))
+
+        assert upstream["tool_choice"] == {"type": "tool", "name": "Bash", "disable_parallel_tool_use": True}
+        assert upstream["metadata"] == {"user_id": "u-123"}
 
 
 class TestNormalizeCCStop:

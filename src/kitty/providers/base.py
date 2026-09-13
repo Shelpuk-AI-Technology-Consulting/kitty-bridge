@@ -48,6 +48,11 @@ class ProviderAdapter(ABC):
             # agent's thinking `display`; AnthropicAdapter restores it onto
             # `thinking` where the upstream documents the field.
             "_thinking_display",
+            # KBR-214: carries the agent's Anthropic `metadata` to the
+            # Anthropic-family adapters that restore it. Chat Completions' own
+            # `metadata` is a stored-completions tag map, a different concept, so
+            # stripping it here keeps it off every other provider's wire.
+            "_metadata",
             "base_url",  # F15 defense-in-depth — URL override goes through build_base_url(),
             # not the CC request body.  Stripping it here protects
             # adapters that rely on the default translate_to_upstream().
