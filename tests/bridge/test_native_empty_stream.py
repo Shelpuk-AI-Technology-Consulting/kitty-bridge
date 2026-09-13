@@ -640,14 +640,22 @@ class TestFailuresWhileHeld:
             await runner.cleanup()
         assert len(calls) == 1, "a gone client must not be served a retry"
 
-    async def test_empty_retry_after_bytes_reached_the_client_closes_the_stream(self, monkeypatch):
-        """KBR-183 still lets a timeout after release retry; an empty retry must then end the open stream."""
+    async def test_a_timeout_after_release_ends_the_open_stream_without_a_retry(self, monkeypatch):
+        """A stall after the hold released ends the turn on the open stream, and is not retried.
+
+        Written against an interim where KBR-183 had not landed, this test once
+        expected the timeout to be retried and the empty retry to close the
+        stream.  KBR-183 forbids any retry once a byte has reached the client
+        (§11 Q14(a)), so the claim is now the one the merged pair actually
+        makes: the released content reaches the client, one upstream request is
+        made, and the stream ends in an error event instead of hanging (KBR-234).
+        """
         monkeypatch.setattr(server_module, "_STREAM_READ_TIMEOUT", 1.0)
         calls: list[int] = []
         stop = asyncio.Event()
 
         async def _handler(request: web.Request) -> web.StreamResponse:
-            """Send content then stall on the first call; answer empty on the next."""
+            """Send content, then stall; a second call would answer empty."""
             calls.append(1)
             resp = web.StreamResponse(headers=_SSE_HEADERS)
             await resp.prepare(request)
@@ -671,7 +679,7 @@ class TestFailuresWhileHeld:
         finally:
             stop.set()
             await runner.cleanup()
-        assert len(calls) == 2
+        assert len(calls) == 1, "bytes reached the client, so the stall must not be retried"
         assert status == 200
         assert body.startswith(_MESSAGE_START), "the released content reached the client"
         assert b"event: error" in body, "the open stream must end in a terminal error, not hang"
