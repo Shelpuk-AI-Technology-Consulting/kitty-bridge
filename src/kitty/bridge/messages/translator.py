@@ -354,6 +354,19 @@ class MessagesTranslator:
             if thinking.get("type") == "enabled":
                 result["_thinking_enabled"] = True
                 result["_reasoning_effort"] = "high"
+                # KBR-225: carry the agent's own budget so AnthropicAdapter can
+                # ship it verbatim instead of deriving one from max_tokens.
+                # Only a valid budget rides the key -- an int, at least 1024,
+                # and strictly below max_tokens (Anthropic's constraint) --
+                # because the adapter trusts the key and falls back when it is
+                # absent.  max_tokens must itself be an int: comparing against
+                # a non-int would move the malformed-input TypeError from the
+                # Anthropic-family adapter into this shared translator.  A bool
+                # budget is excluded by the floor (every bool is 0 or 1).
+                budget = thinking.get("budget_tokens")
+                max_tokens = messages_request.get("max_tokens")
+                if isinstance(budget, int) and isinstance(max_tokens, int) and 1024 <= budget < max_tokens:
+                    result["_thinking_budget_tokens"] = budget
             elif thinking.get("type") == "adaptive":
                 # Adaptive thinking — remember the original type so
                 # AnthropicAdapter can restore it verbatim.
