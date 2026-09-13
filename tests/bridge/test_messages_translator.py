@@ -504,8 +504,13 @@ class TestToolChoiceAndMetadata:
 
     @pytest.mark.parametrize(
         "choice",
-        [{"type": "auto"}, {"type": "any"}, {"type": "tool", "name": "get_weather"}],
-        ids=["auto", "any", "tool"],
+        [
+            {"type": "auto"},
+            {"type": "any"},
+            {"type": "tool", "name": "get_weather"},
+            {"type": "tool", "name": "not_declared"},
+        ],
+        ids=["auto", "any", "tool-declared", "tool-undeclared"],
     )
     def test_disable_parallel_tool_use_true_maps_to_parallel_tool_calls_false(self, choice):
         """The knob is inverted between the wires, and carried when it is on (R2)."""
