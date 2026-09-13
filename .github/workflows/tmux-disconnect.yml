@@ -161,6 +161,11 @@ jobs:
             || fail "the IPv6 reject rule for the test user is not in place"
           echo "Outbound traffic for the test user is limited to the egress gateway."
 
+      # The runner image sets XDG_CONFIG_HOME (and friends) to the RUNNER's home system-wide,
+      # and sudo re-applies it for the test user, so kitty would look for its files in a
+      # directory the test user cannot read. Every kitty-facing command as the test user
+      # therefore sets the XDG base directories to that user's home explicitly.
+      #
       # `configure_kitty.py` addresses kitty as `$pythonLocation/bin/kitty` and refuses
       # without it. `sudo` drops the runner's value, and the test user's kitty lives in
       # its own virtualenv anyway, so the variable is set to that.
@@ -173,7 +178,7 @@ jobs:
         run: |
           set -euo pipefail
           sudo --preserve-env=KITTY_PROFILES_JSON,KITTY_CREDENTIALS_JSON,KITTY_EGRESS_JSON -u kittytest -H \
-            bash -c 'cd ~/repo && pythonLocation="$HOME/venv" ~/venv/bin/python .github/review/scripts/configure_kitty.py --wrapper-dir ~/kitty-bin --github-output ~/configure.out'
+            bash -c 'cd ~/repo && XDG_CONFIG_HOME="$HOME/.config" pythonLocation="$HOME/venv" ~/venv/bin/python .github/review/scripts/configure_kitty.py --wrapper-dir ~/kitty-bin --github-output ~/configure.out'
           if ! sudo grep -qx "available=true" /home/kittytest/configure.out; then
             echo "::error::kitty could not be configured for the test user; see the annotation above."
             exit 1
@@ -184,18 +189,22 @@ jobs:
       - name: Verify kitty resolved the egress gateway for the test user
         shell: bash
         run: |
-          if ! sudo -u kittytest -H env KITTY_EGRESS_PROXY= /home/kittytest/venv/bin/kitty egress show >/dev/null 2>&1; then
+          if ! sudo -u kittytest -H env XDG_CONFIG_HOME=/home/kittytest/.config XDG_CACHE_HOME=/home/kittytest/.cache XDG_DATA_HOME=/home/kittytest/.local/share XDG_STATE_HOME=/home/kittytest/.local/state KITTY_EGRESS_PROXY= /home/kittytest/venv/bin/kitty egress show >/dev/null 2>&1; then
             echo "::error::kitty resolved no egress gateway for the test user; the live test was not run."
             # Value-free diagnosis: file presence, booleans and exception class names only.
-            sudo -u kittytest -H env KITTY_EGRESS_PROXY= /home/kittytest/venv/bin/python -c '
+            sudo -u kittytest -H env XDG_CONFIG_HOME=/home/kittytest/.config XDG_CACHE_HOME=/home/kittytest/.cache XDG_DATA_HOME=/home/kittytest/.local/share XDG_STATE_HOME=/home/kittytest/.local/state KITTY_EGRESS_PROXY= /home/kittytest/venv/bin/python -c '
           import json, os
           from pathlib import Path
           from platformdirs import user_config_dir
           config = Path(user_config_dir("kitty"))
           print("config dir is ~/.config/kitty:", config == Path.home() / ".config" / "kitty")
+          print("XDG_CONFIG_HOME set:", "XDG_CONFIG_HOME" in os.environ)
           for name in ("profiles.json", "credentials.json", "egress.json"):
               path = config / name
-              print(name, "exists:", path.exists(), "readable:", os.access(path, os.R_OK))
+              try:
+                  print(name, "exists:", path.exists(), "readable:", os.access(path, os.R_OK))
+              except OSError as exc:
+                  print(name, "probe failed:", type(exc).__name__)
           try:
               document = json.loads((config / "egress.json").read_text())
               print("egress.json top-level keys:", sorted(document) if isinstance(document, dict) else type(document).__name__)
@@ -205,7 +214,11 @@ jobs:
           from kitty.credentials.file_backend import FileBackend
           from kitty.credentials.store import CredentialStore
           from kitty.egress_store import EgressStore, resolve_egress
-          record = EgressStore().load()
+          try:
+              record = EgressStore().load()
+          except Exception as exc:
+              record = None
+              print("record load raised:", type(exc).__name__)
           print("record loaded:", record is not None)
           if record is not None:
               print("record has auth_ref:", bool(record.auth_ref))
@@ -215,7 +228,7 @@ jobs:
               print("resolve_egress returned a gateway:", resolve_egress(cred_store=CredentialStore(backends=[FileBackend()])) is not None)
           except Exception as exc:
               print("resolve_egress raised:", type(exc).__name__)
-          ' 2>&1 | grep -E "^(config dir|profiles|credentials|egress|record|credential|resolve_egress)" || echo "diagnosis could not run"
+          ' 2>&1 | grep -E "^(config dir|XDG_CONFIG_HOME|profiles|credentials|egress|record|credential|resolve_egress)" || echo "diagnosis could not run"
             exit 1
           fi
 
@@ -223,6 +236,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          sudo -u kittytest -H env KITTY_EGRESS_PROXY= KITTY_TMUX_E2E=1 LANG=C.UTF-8 TERM=xterm-256color \
+          sudo -u kittytest -H env XDG_CONFIG_HOME=/home/kittytest/.config XDG_CACHE_HOME=/home/kittytest/.cache XDG_DATA_HOME=/home/kittytest/.local/share XDG_STATE_HOME=/home/kittytest/.local/state \
+            KITTY_EGRESS_PROXY= KITTY_TMUX_E2E=1 LANG=C.UTF-8 TERM=xterm-256color \
             PATH=/home/kittytest/venv/bin:/home/kittytest/.local/bin:/usr/local/bin:/usr/bin:/bin \
             bash -c 'cd ~/repo && pytest tests/integration/test_tmux_disconnect.py -m "agent_live" --strict-markers --require-category=agent_live -rfEs -p no:cacheprovider'
