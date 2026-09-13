@@ -524,6 +524,12 @@ class TestCcToResponses:
         cc = {"model": "gpt-5.4", "messages": [{"role": "user", "content": "test"}], "tool_choice": value}
         assert adapter._cc_to_responses(cc)["tool_choice"] == value
 
+    def test_a_named_form_without_a_name_is_copied_unchanged(self, adapter: OpenAISubscriptionAdapter) -> None:
+        """Only a well-formed named choice is rewritten; anything else keeps today's copy (R8)."""
+        malformed = {"type": "function", "function": {}}
+        cc = {"model": "gpt-5.4", "messages": [{"role": "user", "content": "test"}], "tool_choice": malformed}
+        assert adapter._cc_to_responses(cc)["tool_choice"] == malformed
+
     def test_no_tool_choice_invents_none(self, adapter: OpenAISubscriptionAdapter) -> None:
         """No CC ``tool_choice`` means none on the Responses body (R9)."""
         cc = {"model": "gpt-5.4", "messages": [{"role": "user", "content": "test"}]}

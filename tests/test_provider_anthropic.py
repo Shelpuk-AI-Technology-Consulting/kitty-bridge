@@ -448,9 +448,18 @@ class TestAnthropicToolChoiceAndMetadata:
             None,
             {"type": "allowed_tools", "allowed_tools": {"mode": "auto", "tools": []}},
             {"type": "function"},
+            {"type": "function", "function": {}},
+            {"type": "function", "function": {"name": 7}},
             "bogus",
         ],
-        ids=["null", "allowed-tools", "named-without-function", "unknown-string"],
+        ids=[
+            "null",
+            "allowed-tools",
+            "named-without-function",
+            "named-without-name",
+            "non-string-name",
+            "unknown-string",
+        ],
     )
     def test_unrecognised_tool_choice_is_omitted(self, unrecognised):
         """A CC value with no Messages spelling is left out, never guessed (R5)."""
@@ -479,6 +488,11 @@ class TestAnthropicToolChoiceAndMetadata:
         result = self.adapter.translate_to_upstream(self._cc(_metadata={"user_id": "u-123"}))
         assert result["metadata"] == {"user_id": "u-123"}
         assert "_metadata" not in result
+
+    def test_empty_internal_metadata_is_still_restored(self):
+        """``{}`` is a value the agent sent; only ``None`` means absent (R6)."""
+        result = self.adapter.translate_to_upstream(self._cc(_metadata={}))
+        assert result["metadata"] == {}
 
     def test_no_internal_metadata_means_no_metadata(self):
         """No ``_metadata`` invents no ``metadata`` (R9)."""

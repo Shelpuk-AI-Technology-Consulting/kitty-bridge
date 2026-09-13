@@ -365,9 +365,13 @@ class TestBedrockToolChoice:
         assert result["toolConfig"]["toolChoice"] == converse
         assert "tool_choice" not in result
 
-    @pytest.mark.parametrize("value", ["none", None, "bogus"], ids=["none", "null", "unrecognised"])
+    @pytest.mark.parametrize(
+        "value",
+        ["none", None, "bogus", {"type": "function", "function": {}}],
+        ids=["none", "null", "unrecognised", "named-without-name"],
+    )
     def test_values_converse_cannot_express_keep_todays_auto(self, value):
-        """Converse's ``ToolChoice`` union has no ``none``, so today's value stands (D7, G32)."""
+        """Converse's ``ToolChoice`` union has no ``none``, so today's value stands (D7, G33)."""
         result = self.adapter.translate_to_upstream(self._cc(tool_choice=value))
         assert result["toolConfig"]["toolChoice"] == {"auto": {}}
 
@@ -384,7 +388,7 @@ class TestBedrockToolChoice:
         assert "toolConfig" not in result
 
     def test_parallel_tool_calls_does_not_reach_the_converse_body(self):
-        """Converse has no parallel-tool-use field; nothing is invented (G33)."""
+        """Converse has no parallel-tool-use field; nothing is invented (G32)."""
         result = self.adapter.translate_to_upstream(self._cc(tool_choice="required", parallel_tool_calls=False))
         assert "parallel_tool_calls" not in result
         assert set(result["toolConfig"]) == {"tools", "toolChoice"}

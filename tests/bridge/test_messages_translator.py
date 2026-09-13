@@ -457,8 +457,12 @@ class TestToolChoiceAndMetadata:
 
     @pytest.mark.parametrize(
         "declaration",
-        [{"name": "get_weather", "input_schema": {}}, {"type": "custom", "name": "get_weather", "input_schema": {}}],
-        ids=["untyped", "custom"],
+        [
+            {"name": "get_weather", "input_schema": {}},
+            {"type": "custom", "name": "get_weather", "input_schema": {}},
+            {"type": None, "name": "get_weather", "input_schema": {}},
+        ],
+        ids=["untyped", "custom", "type-null"],
     )
     def test_forced_ordinary_tool_is_carried_beside_a_server_tool(self, declaration):
         """Only the server tool is exempt; an ordinary tool next to one is still forced (D10)."""
@@ -469,10 +473,28 @@ class TestToolChoiceAndMetadata:
         result = self.t.translate_request(req)
         assert result["tool_choice"] == {"type": "function", "function": {"name": "get_weather"}}
 
-    def test_forcing_an_undeclared_tool_is_omitted(self):
-        """A choice naming no declared tool is one Anthropic itself would reject (D5)."""
+    def test_forcing_an_undeclared_tool_is_still_carried(self):
+        """A choice naming no declared tool is the agent's mistake, not kitty's to hide (D8).
+
+        The provider rejects it with an error that names the problem; omitting it
+        would quietly answer a request the agent did not make.
+        """
         result = self.t.translate_request(self._req(tool_choice={"type": "tool", "name": "not_declared"}))
-        assert "tool_choice" not in result
+        assert result["tool_choice"] == {"type": "function", "function": {"name": "not_declared"}}
+
+    def test_a_non_string_tool_name_is_omitted_even_when_a_tool_has_it(self):
+        """The name check is its own guard, not a side effect of the declaration lookup (D5)."""
+        req = self._req(tools=[{"name": 7, "input_schema": {}}], tool_choice={"type": "tool", "name": 7})
+        assert "tool_choice" not in self.t.translate_request(req)
+
+    def test_a_truthy_non_boolean_disable_parallel_tool_use_is_not_carried(self):
+        """R2 carries the flag only when it is exactly ``true``."""
+        result = self.t.translate_request(self._req(tool_choice={"type": "any", "disable_parallel_tool_use": 1}))
+        assert "parallel_tool_calls" not in result
+
+    def test_empty_metadata_is_still_carried(self):
+        """``{}`` is a value the agent sent; only ``None`` means absent (R3)."""
+        assert self.t.translate_request(self._req(metadata={}))["_metadata"] == {}
 
     def test_no_tool_choice_invents_none(self):
         """No inbound ``tool_choice`` means neither key outbound (R9)."""

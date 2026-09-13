@@ -31,23 +31,26 @@ _EMPTY_ASSISTANT_FALLBACK_TEXT = (
 _SIMPLE_TOOL_CHOICES: dict[str, str] = {"auto": "auto", "any": "required", "none": "none"}
 
 
-def _declares_ordinary_tool(tools: list, name: str) -> bool:
-    """Report whether ``tools`` declares ``name`` as an ordinary, client-defined tool.
+def _names_anthropic_defined_tool(tools: list, name: str) -> bool:
+    """Report whether ``tools`` declares ``name`` as an Anthropic-defined tool.
 
-    Anthropic marks a custom tool with ``type: "custom"`` or with no ``type`` at
-    all; every other ``type`` -- ``web_search_20250305``, ``bash_20250124`` and
-    the rest -- is an Anthropic-defined tool that this hop flattens into a plain
-    function without its real schema or runtime.
+    An ordinary client tool carries ``type: "custom"``, ``type: null`` or no
+    ``type`` at all (``ToolParam.type`` is ``Optional[Literal["custom"]]``).  Any
+    other ``type`` -- ``web_search_20250305``, ``bash_20250124`` and the rest --
+    is Anthropic-defined, and this hop flattens it into a plain function without
+    its real schema or runtime.  A name nothing declares is *not* reported: that
+    body is the agent's mistake, and the provider's error says so better than a
+    silent omission would.
 
     Args:
         tools: The inbound Messages ``tools`` list.
         name: The tool name a ``tool_choice`` of type ``tool`` selects.
 
     Returns:
-        True when a declaration with that name exists and is an ordinary tool.
+        True when a declaration with that name carries an Anthropic-defined type.
     """
     return any(
-        isinstance(tool, dict) and tool.get("name") == name and tool.get("type", "custom") == "custom"
+        isinstance(tool, dict) and tool.get("name") == name and tool.get("type") not in (None, "custom")
         for tool in tools
     )
 
@@ -73,8 +76,8 @@ def carry_tool_choice_and_metadata(messages_request: dict, cc_request: dict) -> 
     * **No tools, no choice** (D9).  Anthropic accepts a ``tool_choice`` beside
       no tools; OpenAI rejects one ("'tool_choice' is only allowed when 'tools'
       are specified"), so carrying it would turn a legal request into a 400.
-    * **A named tool must be one the agent declared as an ordinary tool** (D10).
-      A server tool such as Claude Code's ``web_search`` carries a versioned
+    * **A forced call to an Anthropic-defined tool is not carried** (D10).  A
+      server tool such as Claude Code's ``web_search`` carries a versioned
       ``type`` and is flattened into a schema-less function on this hop, so
       forcing it would force a call nothing on the route can execute.  Left
       unforced, the turn behaves as it did before this mapping existed.
@@ -112,7 +115,7 @@ def carry_tool_choice_and_metadata(messages_request: dict, cc_request: dict) -> 
     name = tool_choice.get("name")
     if kind in _SIMPLE_TOOL_CHOICES:
         cc_request["tool_choice"] = _SIMPLE_TOOL_CHOICES[kind]
-    elif kind == "tool" and isinstance(name, str) and _declares_ordinary_tool(tools, name):
+    elif kind == "tool" and isinstance(name, str) and not _names_anthropic_defined_tool(tools, name):
         cc_request["tool_choice"] = {"type": "function", "function": {"name": name}}
     else:
         return

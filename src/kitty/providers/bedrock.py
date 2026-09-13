@@ -39,7 +39,7 @@ def _converse_tool_choice(cc_tool_choice: object) -> dict:
     adapter always sent: Converse cannot say "no tools", and dropping the tool
     list instead is not available, because Converse rejects a conversation
     holding ``toolUse`` or ``toolResult`` blocks without a ``toolConfig``.  That
-    residue is gap G32 (KBR-214).
+    residue is gap G33 (KBR-214).
 
     Args:
         cc_tool_choice: The request's ``tool_choice`` value, or ``None``.
