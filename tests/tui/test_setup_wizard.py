@@ -21,8 +21,11 @@ _MOD = "kitty.cli.setup_cmd"
 
 @contextmanager
 def _mock_tty():
-    """Context manager to mock TTY state as True."""
-    with patch("sys.stdin.isatty", return_value=True):
+    """Context manager presenting both standard streams as terminals.
+
+    Both since KBR-204: the interactivity guard now requires stdout as well as stdin.
+    """
+    with patch("sys.stdin.isatty", return_value=True), patch("sys.stdout.isatty", return_value=True):
         yield
 
 

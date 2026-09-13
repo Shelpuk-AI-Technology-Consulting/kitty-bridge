@@ -47,7 +47,7 @@ def _tty_required(command: str, *, note: str | None = None) -> Iterator[None]:
         None. The wrapped call runs inside the guard.
 
     Raises:
-        SystemExit: With code 2 when stdin is not a terminal.
+        SystemExit: With code 2 when stdin or stdout is not a terminal.
     """
     from kitty.tui.prompts import NonTTYError
 

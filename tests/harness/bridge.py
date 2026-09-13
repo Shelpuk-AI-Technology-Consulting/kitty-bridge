@@ -99,8 +99,7 @@ DEFAULT_TIMEOUT = 10.0
 _CONNECT_LADDER_SECONDS = 30
 _EMPTY_LADDER_SECONDS = 80
 
-#: A valid UUIDv4. ``tests/conftest.py``'s `sample_profile_dict` carries a UUIDv7
-#: and therefore cannot build a ``Profile`` at all (KBR-175).
+#: A valid UUIDv4 — the only version ``Profile`` accepts for ``auth_ref``.
 _AUTH_REF = "6f1d4f3e-2b9a-4c1d-8f7e-5a2b3c4d5e6f"
 
 #: The resolved key every fixture profile carries. Never a real credential shape.
@@ -598,8 +597,8 @@ def profile_for(
             building several profiles does not pay for it repeatedly.
 
     Returns:
-        A profile the shipped schema accepts — including a UUIDv4 ``auth_ref``,
-        which ``tests/conftest.py``'s `sample_profile_dict` is not (KBR-175).
+        A profile the shipped schema accepts — including the UUIDv4 ``auth_ref``
+        it requires.
     """
     adapter, provider_config = binding if binding is not None else transport.bind()
     return Profile(

@@ -1793,6 +1793,7 @@ inspecting a body it never sends.
 | **Endpoint table** | The README endpoint table matches `_register_routes`. Catches F2 (KBR-9). |
 | **Attribution-header table** | The README's `X-Kitty-*` table matches `_attribution_headers()`, and none of those names can reach any `build_upstream_headers()`. |
 | **Flag table** | The README logging-flag table matches the CLI parser. |
+| **CI capability inventory ⇄ the workflow tree** | §8.6's table of what the CI environment supplies matches `.github/`. Landed with **KBR-216** as `tests/test_ci_capability_inventory.py`. Five arms: forward (the document promises nothing CI lacks), reverse (a capability cannot reach CI undocumented — compared as **whole binding names**, so a new `secrets.KITTY_EGRESS` is not absorbed by the documented `secrets.KITTY_EGRESS_JSON`), version (the hand-maintained Claude Code pin, both ways), the logs the generated launcher writes, and the fork guard. The last two exist because a review round found four surviving mutants on them: the two log rows bind neither a secret nor a version, so every other arm was blind to their deletion, and the fork guard's removal changes no binding at all. Every row is covered by at least one *reverse* direction — that is the property, not the count. It lives in `tests/` rather than beside the review system's own suite in `.github/review/tests/` — §8.5's precedent — because its subject is `TEST_SUITE.md`, and that suite must stay runnable by a bare interpreter that cannot be asked to reason about the design documents. **Two stated limits:** the reverse arm scans the `KITTY_`-prefixed namespace only, so a non-kitty secret is deliberately not a row; and the forward arm is a substring scan for every artifact *except* the launcher, which is read by calling `wrapper_body` because that module's own prose defeats a scan of its source. |
 | **Answered questions ⇄ dependent passages** | A question `TEST_SUITE.md` §11 marks **ANSWERED** is not described as open or blocking anywhere in either design document. Landed with **KBR-163** as `tests/test_answered_questions_are_settled.py`. Range mentions (`Q10-Q13`) are expanded, because the site that escaped the hand-written enumeration was a range; §15's blocking table is checked by **row content** rather than by phrase, since such a row states the block by position and contains no still-open word at all. The one exclusion — a question's own §11 entry, which keeps the original wording verbatim — carries its own bound assertion, per the rule below. **Two stated limits:** a passage must *name the number* to be seen, and a paraphrase that never does is a reading job, not a scan. |
 
 
@@ -2202,6 +2203,9 @@ Two distinct things, currently conflated, with different costs and different cad
 *Startup smoke.* A **pinned real Claude Code binary** runs one non-interactive turn against the
 scripted recorder (§7.2) — no live provider, no credentials, no network. The binary starts,
 resolves the bridge URL, its request arrives, it exits cleanly. This proves connectivity.
+§8.6 supplies the binary and two facts this paragraph would otherwise mislead on: the CI
+installer leaves `claude` at a path that is **not** on `PATH`, and the review wrapper passes
+`--no-validate`.
 
 *Precedence.* Connectivity is **not** the claim. The claim is that kitty's `--settings` file wins
 over the process environment and over `~/.claude/settings.json` — a fact about *Claude Code's*
@@ -2236,12 +2240,22 @@ Control 1 alone leaves A unexercised, so a typo in A's URL would read as a pass 
 A is *supposed* to be silent there, and a broken A is silent too. Three runs, three winners, and
 every sentinel demonstrated live.
 
-Pinning it in CI has real questions attached — which distribution, how tightly version-pinned, licensing for
-redistribution in a CI image — recorded as Q12 rather than assumed away.
+Pinning it in CI was recorded as Q12 rather than assumed away — which distribution, how tightly
+version-pinned, and whether redistribution inside a CI image is acceptable. **Q12 is answered
+(2026-09-12, KBR-216) and the answer is in the tree:** the review workflow installs the CLI from
+the official installer at an exact version, at run time, so nothing is redistributed and the
+question of whether it may be does not arise. §8.6 is the inventory, including the two limits a
+job planned around it has to respect — the pin is a hand-maintained pairing, and a fork pull
+request gets no secrets. The hermetic smoke above needs **only the pinned CLI**, which a fork run
+can also download, so it is a per-PR gate without an asterisk.
 
 **Agent live — nightly.** `tests/integration/test_agent_e2e.py` as it exists: real binaries, real
-credentials, real providers. Keep it out of the default run — it needs four agent CLIs and live
-network, and a suite that cannot run on a laptop stops being trusted. Nightly with CI secrets,
+credentials, real providers. §8.6 is where those credentials come from, and it carries the two
+constraints this job inherits: the profile is a balancing pool, so no assertion may name a single
+model; and kitty's debug log carries whole request bodies, so it **may never be uploaded as an
+artifact** however convenient that would be for diagnosing a nightly failure. Keep it out of the
+default run — it needs four agent CLIs and live network, and a suite that cannot run on a laptop
+stops being trusted. Nightly with CI secrets,
 extended from two cases to cover, for Claude Code: a plain turn, a tool-using turn, a multi-turn
 session with tool results, an extended-thinking turn, and a session crossing the compaction
 threshold.
@@ -2346,6 +2360,135 @@ as public as the repository. The corpus needs a refresh cadence tied to Claude C
 a recorded capture procedure — an un-refreshable corpus becomes a museum of a protocol nobody
 speaks any more.
 
+#### 7.1.1 What T-W6 settled — the format, the scrubber and the loader
+
+Delivered as `tests/harness/corpus.py`, `tests/corpus/` and `tests/corpus/README.md`, which carries
+the capture procedure in full. **An entry is one request** — not a session and not a transcript, and
+§3.2.4's "indexes captured sessions" should be read as "entries". The unit matters: M8's trigger
+case is a *pair* (a request, an upstream rejection, the repaired retry), which a single-request
+entry cannot express and which therefore belongs to the test that scripts the recorder.
+
+**Owner and cadence, answered by the product owner (2026-09-12).** Owner: the repository
+maintainer. Cadence: **re-capture when the pinned Claude Code version changes.** A version bump is
+the only event that can invalidate a capture, so a calendar cadence is both too late (a release
+lands the week after it runs) and wasted work (nothing changed), and refresh-on-demand is the
+museum this section warns about. This is why the format **requires** `captured_from` on a captured
+entry: a cadence tied to a version bump is unactionable if the entries do not say which version
+they are.
+
+**Scrub scope, answered by the product owner (2026-09-12).** Credentials **and** personal
+identifiers — keys, tokens, auth headers and query parameters, plus home-directory paths,
+usernames, e-mail addresses and hostnames. File contents and prompts are *not* synthesised; that
+would destroy this section's own rationale. Human review before commit stays mandatory.
+
+**Manifest plus sidecar body, not one file.** Byte-exactness is the obvious argument and the
+weakest — JSON escaping is reversible. The two that decide it are **reviewability** (this section
+makes human review mandatory, and a 50,000-character escaped one-liner is not reviewable in a
+diff) and **greppability** (the lint reads the body as text, and so does GitHub's push protection,
+which is the last line of defence when the scrubber misses). Base64 is byte-exact and removes that
+second net entirely — which is the answer to any later proposal to "simplify" to one file.
+
+**The committed body is byte-exact as committed, not as sent.** Scrubbing is the one bounded
+departure from the wire bytes. It is free for I1, because the oracle diffs two projections of the
+same scrubbed input. It is not free in two places, both recorded in the README: the **size-derived
+triggers** (M3 and M5 are decided by length, and scrubbing shortens a body, so a declaration is
+made against the committed artifact and never the capture), and **`content-length`**, the single
+header the corpus does not preserve as captured — it is recomputed, because the alternative is a
+manifest internally inconsistent with its own body. Nothing downstream reads the original value:
+§4.3 C1 asserts on the headers the bridge *builds*, and C1b compares names.
+
+**Captures carrying `content-encoding` or `transfer-encoding` are refused at write time.** The
+corpus stores entity bodies, not wire octets. A compressed body is one the scrubber reads as noise
+and reports clean — a false clean that no plaintext falsification case can ever detect, and the
+worst failure available to this component.
+
+**Triggers have three states: met, explicitly absent, and silent.** Silence is not absence. §3.3.2
+assertion 2 is only as good as the complement it runs against, so a complement must be *claimed*;
+if absence were inferred, every entry whose author never considered a trigger would be silently
+offered as its complement and the assertion would run over entries nobody vetted.
+
+**§3.2.4's binary is incomplete.** A trigger is described there as "a route property or a request
+property", but four conditional rows are decided by neither: M6 fires on an upstream 400, M8 on a
+rejected thinking round-trip, M9 on an upstream tool-use format error, M12 on an empty upstream
+response — all properties of the **upstream response**, arranged by a scripted recorder. The
+loader refuses those four and `ALWAYS` in a manifest, which closes gap **G21**'s over-declaration
+hazard for the cases the repository already proves in text. Classifying the whole 25-trigger
+vocabulary is **KBR-186**, filed rather than guessed, for the reason T-W3 gave for deferring
+trigger predicates: data nothing in the change could prove wrong is what plan §1.4 forbids. Until
+it lands, **T-D8 cannot read corpus coverage for M6, M8, M9 and M12**; those are discharged by a
+scripted-recorder test instead.
+
+**T-C7's connection-pattern baseline is a different artifact.** This format carries the *header*
+half — a single request whose `host` is the real one. C5 counts distinct TCP connections across an
+N-turn session, which needs session grouping, ordering and `CapturedRequest`'s `arrival` and
+`peer_port`; the manifest carries none of those, deliberately. T-C7 defines that artifact. Do not
+stretch this format to hold it.
+
+**The lint fails on an empty corpus.** "No secrets found" is satisfied perfectly by having looked
+at nothing (the rule §8's marker guard is built on). It also turns a quieter mistake into a loud
+one: `load_corpus` takes a root, so a caller pointed at the wrong directory would otherwise report
+the corpus clean forever. This is why one synthetic `format_example` entry ships with T-W6 — as a
+worked example reviewable in one screen, excluded from every evidence query by `captured_only()`.
+
+**No finding, message or `repr` ever carries a matched value, not even a prefix** — class and byte
+offset only. A message that quoted what it matched would turn a contained authoring mistake into a
+published one the moment CI logged it, and the remedy for a published credential is rotation, not
+a better diff. The README carries that incident step.
+
+**Every pattern is anchored, and the scan runs to a fixed point.** The two are one decision. An
+unanchored rule matches inside ordinary words — `disk-usage-monitoring-service.py` redacts to
+`di<redacted:openai_key>.py`, and file paths are the commonest payload in a Claude Code body, so an
+unanchored table mangles legitimate content at scale. Anchoring alone then creates the opposite
+defect: two secrets flush against each other leave the second with no boundary in front of it,
+until the first is redacted — and by then a single-pass scan has moved on. That shipped briefly as
+a live key left in a scrubbed body, with the fixed-point invariant asserted as load-bearing in
+three documents and false in practice. Both halves therefore iterate, and both claim exactly the
+span the rewriter replaces; dropping either rule made them disagree on 216 and 23 of 4,000
+adversarial bodies. What is guaranteed is that no secret survives and a second scrub is a no-op,
+asserted over every ordered pair of known shapes at three separations. What is *not* guaranteed is
+that the finding count equals the placeholder count: one redaction can subsume a neighbour, which
+names more than it needs to rather than less.
+
+**The writer refuses exactly what the reader refuses — by running the reader's rules, not a copy.**
+`write_entry` accepted entries `load_corpus` then rejected, which turns the capture procedure's last
+step into a success that fails later in CI against a file already committed. It was closed one rule
+at a time for three review rounds — the id, then provenance and triggers, then field types — and
+each round found the writer's copy of the rules one short again. The fix that ended it was
+structural: there is now **one** validator, `_entry_from_manifest`, pure over a manifest and its
+body; the reader calls it on what it parsed and the writer calls it on the entry it was given, before
+anything is scrubbed or written. A rule list maintained twice drifts; a rule list run twice cannot.
+The test that holds it is adversarial — every malformed shape review found, fed through the writer —
+because the earlier version used only well-typed entries and so could not fail on the very defect it
+was named for.
+
+The second asymmetry had the same shape — a rule enforced on one side only, so the gap looked like a
+check that existed. And `scrub` scanned the body, the headers and the query but left
+**`host` and `path`** alone: a path of `/v1/key/<token>/messages` was committed and linted clean,
+and an internal hostname survived even when the operator named it in `extra` — while this document
+already claimed hostnames were removed. Scanning the routing fields costs nothing the oracle needs,
+because the patterns are shape-anchored and §3.3.5's evidence is structural: Azure's deployment
+segment and Vertex's `projects/…/locations/…` are pinned by test against exactly this change.
+
+**The manifest's prose is linted, not scrubbed.** `description` and `origin_note` are where a
+maintainer writes what the policy exists to exclude, and they sat outside both the scrubber and the
+lint. They are now reported and deliberately not rewritten: mangling a description makes an entry
+harder to review rather than safer, and the author of the sentence is the right person to fix it.
+
+**The scrubber matches shapes, never entropy.** A general high-entropy rule is the tempting
+addition and was rejected on measurement: a real Claude Code body is full of long opaque strings
+that are not secrets — thinking-block signatures, `toolu_` identifiers, base64 images — and §3.3.3
+requires `Please explain how kitty-bridge works` to survive byte-identically. A scrubber that
+mangles legitimate content breaks I1 in the act of defending the repository. The residue is the
+review step's, and a per-entry `known_non_secrets` allow-list (each pair carrying a reason, each
+failing the lint when it stops matching, per §6.2.3's rule for a stale exclusion) covers the case
+this repository creates for itself: captures are taken while working on kitty-bridge, so a tool
+result quotes this tree — and `tests/test_integration.py` alone contains `api_key = "sk-test-…"`.
+
+**Entry size is left open.** T-C3's over-budget transcript is ~2.8 MB, which nobody reviews by
+eye. The format imposes no ceiling, because the choice between committing the real thing and
+synthesising a padded construction belongs to T-C3 and T-C4 — plan §6 already blesses synthesis
+for those two — along with saying what replaces the review step either way.
+
 ### 7.2 Recording upstreams — one per transport
 
 The bridge reaches upstream through **five** distinct client configurations (§3.2.3, §5.5), and
@@ -2366,6 +2509,51 @@ peer port of the accepted connection**, which is the join key against the proxy'
 the only difference between two otherwise identical requests. Each replays
 scripted responses: SSE streams, error statuses, Cloudflare blocks, empty responses,
 context-too-large rejections, and disconnects at each of §6.3.1's four injection points.
+
+**A disconnect delivers what was written before it, then drops — on every platform.** Three of
+§6.3.1's four points are *post-emission*: their oracle is what the client already received, so a
+recorder whose disconnect loses the bytes before it would turn "after text has been emitted" into
+"before any downstream byte" and test the wrong row. `Reply.abort()` therefore ends the connection
+with `transport.close()`, whose asyncio contract is that queued data is flushed first, and **not**
+`transport.abort()`, whose contract is that it is lost. The response is still left unfinished — no
+chunked terminator, no `[DONE]` — so the client reads a truncated stream and then end-of-connection.
+
+*Why this is not a POSIX detail.* The first version called `transport.abort()` and passed on Linux
+and macOS, where a write reaches the kernel immediately and the transport's queue is empty when
+the abort runs. Windows' Proactor loop sends each write as an overlapped operation completed on a
+later loop iteration, so the body was still queued and the client saw headers and nothing else —
+deterministically, on the Windows leg (KBR-189). The same loss is reproducible on Linux by queuing
+more than the socket accepts: of a 32 MiB body, 23,764,432 bytes were still queued at the abort
+and exactly that many never arrived. `test_an_abort_delivers_every_byte_written_before_it` builds
+that state on every leg — it holds its client back from reading until the abort has run, so the
+queue's size does not race a concurrent reader. *Why not "signal that the frame was written, then
+abort"*, which the ticket first suggested: `await write()` has already returned by then — written
+to the transport is not on the wire.
+
+*Two things `abort()` no longer does on its own, stated so nothing is built on them.*
+
+- **It does not refuse later writes — aiohttp does.** The response stays unfinished only because
+  aiohttp will not write to a closing transport, so a responder writes nothing, through aiohttp or
+  around it, after `abort()`. asyncio alone does not guarantee it: after `close()` the Proactor
+  loop drops a later write, but the selector loop (Linux, macOS) still queues and delivers one if
+  its queue is non-empty at that moment. `test_a_responder_can_abort_mid_stream` asserts the reply
+  is incomplete as well as `[DONE]`-free, so a response aiohttp was allowed to finish fails it.
+  It does **not** test aiohttp's check itself: that case's small writes leave the selector queue
+  empty at the abort, where asyncio drops later writes on both loops without aiohttp's help.
+- **Its return is not the disconnect.** The drop completes when the reader has taken the queued
+  bytes. A scripted injection (T-B4) that releases a barrier on `abort()` returning must not make
+  the reader wait on end-of-connection before that barrier.
+
+*The cost, and why it is the opposite of §7.3's rule.* §7.3 aborts the proxy's connections
+because that is **teardown**, where a flush serves nothing and a TLS `close()` waits out
+`ssl_shutdown_timeout`. This is a **scripted disconnect inside a test**, where the flushed bytes are
+the evidence. The price is that a peer which is alive but has stopped reading holds the connection
+open — past `recorder.stop()`, whose force-close is a no-op on a transport already closing — until
+it reads or disconnects. No reader of this recorder does that: the bridge's HTTP client reads to
+the end, and the raw-socket probes close their socket, which fails the pending send and
+force-closes the transport. A TLS recorder (T-B2) that reuses `Reply` inherits the wait for the
+peer's `close_notify` on top — bounded at 30 s on 3.11+, unbounded on 3.10 — and should decide for
+itself.
 
 **Casing** is asserted by C1; **order** is recorded for the C1b baseline report only, not
 asserted — what reaches the wire is the client library's ordering, not the agent's. Peer
@@ -3588,6 +3776,11 @@ same tree, which is worse than not having it.
 
 The matrix above describes the finished state. Today only the Fast job exists, so `l3`,
 `acceptance`, `agent_smoke`, `agent_live`, `eval` and `load` are selected by **no job at all**.
+What each of those jobs would need from the runner is §8.6; for `agent_smoke` and `agent_live`
+the answer is that CI has had it all along, so what they are still waiting on is the tests, not
+the resources. **`eval` is not in that sentence:** its runner needs are met too, but T-K12 waits
+on T-K3, which waits on Q4 and Q13 — both still open. A resource being available does not close a
+decision.
 
 That is a real hole and it is the one this mechanism could most easily hide: before the split,
 `pytest -q` ran everything, so a subsystem test written tomorrow ran in CI. After it, that test
@@ -3675,12 +3868,21 @@ returns, and a worst case of **~1.2 s** on the Windows leg, whose step is ~15.6 
 the number of raw-socket probes, so a future recorder adds to it in proportion to the probes it
 drives, not to its test count.
 
-KBR-10 added the largest one: `tests/cli/test_stream_encoding.py` spawns **35 child interpreters**
-per run, ×4 Python versions. It has no choice — the behaviour it proves is that kitty survives a
+KBR-10 added the largest one: `tests/cli/test_stream_encoding.py` spawns **38 child interpreters**
+per run, on each of the gate's six legs (four Linux interpreters, plus the Windows and macOS legs
+§8.4 added). It has no choice — the behaviour it proves is that kitty survives a
 hostile *interpreter start-up encoding*, and `PYTHONIOENCODING` is read before any in-process test
-exists, so a real child is the only oracle. Each spawn is short (the whole file runs in ~14s), but
+exists, so a real child is the only oracle. Each spawn is short (the whole file runs in ~13s,
+measured on Linux), but
 T-H1 should note that mutation testing over `l1` will re-pay that cost per mutant, and may want to
 deselect this file from the mutation baseline rather than from the gate.
+
+**KBR-204 added three of the 38**, for the same Windows family by another route: an interactive
+command whose stdin reports as a terminal while its stdout is a pipe. The children get a
+pseudo-terminal as stdin on POSIX and `NUL` on Windows, so all six legs build the real asymmetry.
+One cost to know about: a child that gets past **both** guards — the prompts' and the menus' —
+with that stdin **blocks** waiting for keys nothing will type, so a regression there shows up as
+the runner's 60-second `TimeoutExpired`, not as a fast assertion.
 
 **The load gate has to be wired, not merely declared.** The table above marks Load as gating a
 release, but `publish.yml` currently depends only on the reusable `tests.yml`. Putting the load
@@ -3828,15 +4030,15 @@ T-G5 and T-J2 land — is unchecked until that job is activated, so there the ex
 outlive its defect. The task that activates the job owns re-checking the rows on its layer, in
 the same way §8.2 makes each pending layer someone's named handoff.
 
-**The registry no longer ships empty — KBR-164 added the first five rows**, and they are not the
-row this section anticipated. TR-1c's header-subset assertion (KBR-8) still belongs to an
+**KBR-164 gave the registry its first rows**, and they were not the row this section
+anticipated. TR-1c's header-subset assertion (KBR-8) still belongs to an
 acceptance scenario that does not exist yet (§6.4.1, delivered by T-J2 downstream of T-J1), and a
 registry row for an assertion no test contains documents a fiction — so it is still unwritten.
-What arrived first instead were the **Windows cells** of five assertions that the platform legs
-(§8.4) found to be false on Windows and true everywhere else: four over KBR-188 and one over
+What arrived first instead were the **Windows cells** of assertions that the platform legs
+(§8.4) found to be false on Windows and true everywhere else: several over KBR-188 and one over
 KBR-189.
 
-**Four of those five are gone again, and why they could not have worked is the lesson.** KBR-188
+**The KBR-188 rows are gone again, and why they could not have worked is the lesson.** KBR-188
 was one defect — Windows' `time.monotonic` advances in ~15.6 ms steps, so two probes sent back to
 back are stamped at the same instant and `check_arrival_increases` is false. Its four rows
 exempted the assertions that observed it. But **whether a given pair collides is a race**, not a
@@ -3879,16 +4081,20 @@ no real time passes and every run agrees. That clock is sound only away from the
 reads `time.monotonic` for its own timers, so the end-to-end cases keep the quantised clock and
 the placement case, which never opens a loop, uses the stepped one.
 
-Only KBR-189's row survives, over a different defect: a mid-stream abort that wins its race
-against the first chunk. That one is deterministic on Windows.
+KBR-189's row was over a different defect — a mid-stream abort that lost the body on Windows —
+and it was sound where KBR-188's were not, because that loss was deterministic there. It is gone
+too, withdrawn together with its fix: KBR-189 changed `Reply.abort()` (§7.2), and the Windows leg
+of the PR that removed the row is the evidence the assertion now holds there. **The registry is
+empty again.**
 
-They are the parametrised-cell shape above rather than whole-test exemptions, and the reason is
-the rule this section opens with. A `skipif` would have been the obvious move and is the wrong
-one: §8 permits a platform skip for behaviour that **does not exist** on a platform, and these
-assertions are not inapplicable on Windows — they are **false** there, which is a defect with a
-ticket. Exempting the cell keeps the assertion gating on the four Linux legs and on macOS, keeps
-the count of outstanding Windows defects readable in one file, and fails the job the day Windows
-starts passing. Skipping would have bought a green leg by not looking.
+All of those rows were the parametrised-cell shape above rather than whole-test exemptions, and the reason
+is the rule this section opens with — the reason the next platform row should take that shape too.
+A `skipif` would have been the obvious move and is the wrong one: §8 permits a platform skip for
+behaviour that **does not exist** on a platform, and these assertions were not inapplicable on
+Windows — they were **false** there, which is a defect with a ticket. Exempting the cell kept the
+assertion gating on the four Linux legs and on macOS, kept the count of outstanding Windows defects
+readable in one file, and failed the job the day Windows started passing. Skipping would have
+bought a green leg by not looking.
 
 That makes the registry-shape check itself vulnerable to §8's own "green because it stopped
 looking": a validator run over zero rows passes perfectly. So `registry_violations` is proved
@@ -4117,6 +4323,123 @@ order carry a before/after table over the full cross product of statuses and bod
 incoherent pairs included, since a gateway's status need not match a passed-through upstream
 body — and `StatusMatrixTests` is the pattern to copy.
 
+### 8.6 What the CI environment already supplies
+
+Recorded because this document spent its first draft reasoning about these resources as things
+CI might one day be given. It has had all of them since the automated reviewer landed.
+`.github/workflows/claude-code-review.yml` runs a real Claude Code through a released Kitty
+Bridge on every same-repository pull request, which means the runner is already provisioned
+with a complete kitty installation — and that is the single most consequential fact about what
+this suite can afford to test.
+
+| Capability | Artifact | Binding |
+|---|---|---|
+| Claude Code CLI, version-pinned | `.github/workflows/claude-code-review.yml` | `bash -s -- 2.1.238` |
+| Kitty profiles — a balancing pool by default | `.github/workflows/claude-code-review.yml` | `vars.KITTY_PROFILES_JSON` |
+| Kitty credentials | `.github/workflows/claude-code-review.yml` | `secrets.KITTY_CREDENTIALS_JSON` |
+| Kitty egress gateway | `.github/workflows/claude-code-review.yml` | `secrets.KITTY_EGRESS_JSON` |
+| Kitty bridge debug log | `.github/review/scripts/configure_kitty.py` | `kitty-bridge-debug.log` |
+| Kitty launch stderr — a disjoint window | `.github/review/scripts/configure_kitty.py` | `kitty-bridge-stderr.log` |
+
+`configure_kitty.py` materialises the three kitty documents at the paths kitty itself reads,
+and generates the launcher that puts `kitty` in front of `claude`.
+
+**The profile is a balancing pool, and that changes what an assertion may say.** The workflow
+derives the consequence three times over: *"the profile is a four-member balancing pool"*, so
+*"no single name here could be true of the run"*. A `agent_live` or `eval` assertion may
+therefore not name a model — it may assert membership, or a property every member has, and
+nothing else. This is the half of the capability that is easiest to plan around wrongly.
+
+**Both logs exist, and neither may leave the runner.** They cover disjoint windows:
+`--debug-file` records everything after the bridge is up, and the stderr redirect catches the
+launch failures kitty prints nowhere else — an egress refusal, a credential that will not
+resolve — which reach `claude-code-action` as an empty execution record. Between them they are
+the only evidence a failed run leaves. Two properties a test job must inherit rather than
+rediscover:
+
+- 🔴 **The debug log carries kitty's inbound request bodies — the bridge token and the entire
+  prompt. It must never be uploaded as an artifact.** The obvious way to use a debug log in a
+  smoke or e2e job is `actions/upload-artifact`, and that is the one thing it may not do. The
+  review workflow keeps the log on the runner and uploads a filtered timeline instead.
+- The logs are **per-runner, not per-run** — *on a persistent runner*. The workflow purges stale
+  copies before launching, so at most one failed run's evidence is ever on a machine. The review
+  job runs on `ubuntu-latest`, which is destroyed after the job, so the purge is a no-op there and
+  is kept for the half of the invariant that survives a move back to a self-hosted fleet. A job
+  that expects to find its own log by name, unqualified, is reading someone else's the moment the
+  runner persists.
+
+**Two limits, stated because a job planned without them will be wrong.**
+
+**The CLI pin is a manual pairing, not a mechanism.** `anthropics/claude-code-action` is
+referenced at a floating `@v1` tag and the literal above is kept equal to the version that
+action pins internally, by hand, as one change when the action bumps. Nothing fails when they
+diverge. `tests/test_ci_capability_inventory.py` holds this table to the workflow, which catches
+the table going stale but cannot catch the action moving underneath both. Two more facts that
+will surprise whoever writes the startup smoke: the wrapper passes `--no-validate`, because in
+CI the run itself is the validation; and `~/.local/bin/claude` is deliberately **not** on `PATH`
+— kitty's own fallback chain is the rung that finds it, so a job that assumes a plain `PATH`
+lookup will not find a CLI that is present.
+
+**A fork pull request does not get the secrets, and the profile variable is unmeasured.** Stated
+split because only one half is established. GitHub documents that *"with the exception of
+`GITHUB_TOKEN`, secrets are not passed to the runner when a workflow is triggered from a forked
+repository"*, which covers the credential and egress stores. It documents **nothing** about
+configuration variables, so whether `vars.KITTY_PROFILES_JSON` reaches a fork run is **unknown
+here and was not measured**; no gating decision may assume either answer. Independently of both,
+this workflow's job does not start on a fork at all, guarded by
+`github.event.pull_request.head.repo.full_name == github.repository` — and the documented wrong
+way to "fix" a skipped fork run is `pull_request_target`, which runs the fork's pull request in
+the base branch's context *with* secrets. A new workflow inherits none of that guard and has to
+write its own.
+
+That asymmetry divides the L4 jobs, and the division is why the §8 cadence table reads as it
+does:
+
+| Job | Needs | Consequence |
+|---|---|---|
+| `agent_smoke` (hermetic, §6.4.2) | the pinned CLI only — no credentials, no variables, no network, no provider | The installer is a public download, so the fork question does not arise. A per-PR gate stays viable. |
+| `agent_live`, `eval` | the kitty credential store, and a provider that bills | Withheld from a fork run by GitHub's own rule. Nightly on `schedule`, where the fork case does not arise — which is where §8 already puts them, now for a stated reason rather than by cadence preference. |
+
+**The pinned CLI is an environment prerequisite of the Acceptance job, not something a test may
+probe for** — §8's `openssl` reasoning applies unchanged, and this is the shape that makes a
+per-PR `agent_smoke` gate compatible with "skips are failures in a gating job". The CLI arrives
+by a live download from a third party on every run, so the *install step* owns the retry ladder
+and the job must fail when it cannot install. That is **prescriptive for a future `agent_smoke`
+job, not a description of the review workflow**, whose install step carries `continue-on-error:
+true` on purpose: there an install failure composes into the review path and is classified, which
+is the right answer for a job whose output is a review and the wrong one for a gate. One non-obvious reason that ladder is shaped as it is,
+worth carrying into any job that copies it: without `set -o pipefail` inside the `bash -c`, a
+curl 429 or 403 feeds `bash -s` empty stdin, which exits 0 — the retry loop then breaks on the
+first attempt with **no CLI installed** and the transient download error reaches the classifier
+as a fatal.
+
+**What this unlocks that was not previously plannable.** The balancing pool means the nightly
+`agent_live` job can exercise member selection and failover against real providers, which §4.3
+C3's cross-attempt row otherwise proves only against recorded upstreams. The egress secret means
+the same job can assert I3 containment end to end, through a real gateway, rather than only
+through the local CONNECT proxy of §5.2. Neither is specified here; both are named so that T-K11
+and T-I14 inherit them.
+
+**Five directions, because fewer would not have caught this.**
+`tests/test_ci_capability_inventory.py` checks forward, so the document cannot promise a
+capability CI does not have; reverse, so a capability cannot be added to CI and left out of the
+design; the version pin, both ways, because that pairing is maintained by hand; the logs the
+generated launcher writes, because the two log rows bind neither a secret nor a version and a
+review round found that both could be deleted from the table with every other arm green; and the
+fork guard itself, whose removal changes no binding and would leave the paragraph above false.
+Every row is covered by at least one *reverse* direction — that is the property, not the count.
+A forward-only check would have gone green through the entire period this section describes —
+the table would simply have been absent, which is what it was.
+
+**One case is read rather than scanned, and the reason generalises.** The launcher's two log rows
+are checked against the text `configure_kitty.py` *generates*, not against its source: the module
+discusses `--debug-file` and both log names at length in its own docstring and comments, so a
+substring scan over the file is satisfied by the prose after the launcher stops emitting either
+flag — measured, in the same review round. It is the trap the fork arm was already built to avoid
+by reading the parsed `on:` block instead of a file whose comments argue about
+`pull_request_target`. When a matcher reads text the change under test does not control, scope it
+by what the artifact *declares*.
+
 ---
 
 ## 9. Gap register
@@ -4186,7 +4509,10 @@ oracle's scoping never depended on it.) G8 unblocks G1's
 corpus; G10 rides along with G2 once the harness is parametrised. G3's measurement lands with G1;
 G3's *fix* is its own ticket. G4 and G7 reinforce an existing layer and can run in parallel. G5,
 G6, G9, G11 are cheap and independent. G12 and G13 are last: most expensive to run, least caught
-per hour.
+per hour. **§8.6 does not move G12**, and the reason is worth stating so the next reader does not
+re-derive it: the inventory removes the *provisioning* half of G12's cost — credentials, profiles
+and a gateway are already on the runner — but the cost that put G12 last is token spend and
+nondeterminism, and neither is changed by a resource being available.
 
 ---
 
@@ -4336,9 +4662,12 @@ memory does not grow is false on the paths that buffer a whole response.
 
 ## 11. Open questions for the product owner
 
-Answers belong in this document. They are not invented here. Q10-Q13 are prerequisites for the
-implementation work they name — each blocks a test whose acceptance oracle depends on it. An
+Answers belong in this document. They are not invented here. Q10 and Q13 are prerequisites for
+the implementation work they name — each blocks a test whose acceptance oracle depends on it. An
 answered question keeps its place in the list and carries its answer in the heading.
+
+Q12 was in that set until 2026-09-12 (KBR-216). Its entry below records the answer, and what the
+answer does not settle.
 
 **Q1 — How faithful should the agent's identity be (F1, G3, KBR-8)?** Three options, materially
 different: (a) forward a curated allowlist of the agent's real headers, uniformly, so every
@@ -4414,11 +4743,28 @@ touches, against the budget the fast gate can absorb given it already runs ~18.5
 Python version. Adopt per-PR if it fits, nightly-only otherwise. The current nightly-only choice
 is provisional pending that number.
 
-**Q12 — How is a pinned Claude Code binary supplied to CI (§6.4.2)?** The per-PR agent smoke
-needs a real Claude Code, not an arbitrary child process, because the claim under test is Claude
-Code's own settings precedence. Which distribution, pinned how, and is redistribution inside a CI
-image acceptable? If it is not, the settings-precedence claim has no per-PR proof, and that
-limitation should be stated rather than papered over.
+**Q12 — ANSWERED by the product owner, 2026-09-12 (KBR-216).** CI has had a version-pinned
+Claude Code since the automated reviewer landed, together with kitty profiles, credentials and an
+egress gateway. `.github/workflows/claude-code-review.yml` installs the CLI from the official
+installer script at an exact version, at run time. §8.6 is the inventory and the reasoning; the
+answer to each half of the original question is: the official distribution, pinned by an exact
+version argument, and **redistribution does not arise** because nothing is baked into an image.
+So the settings-precedence claim *does* have a per-PR proof available, and T-I5, T-I6 and T-K10
+are unblocked.
+
+**What this does not settle.** Three things, named so a task does not inherit them as surprises.
+The pin is a **hand-maintained pairing** with a floating `@v1` action tag — `§8.6` holds the
+document to the workflow, but nothing holds the workflow to the action, so a job asserting a
+*specific* CLI version rests on a human having noticed. A **fork pull request receives no
+secrets**, which costs the hermetic smoke nothing and rules out a credential-dependent per-PR
+gate entirely. And the product owner's answer establishes that the resource **exists**, not that
+the smoke job's three-sentinel design (§6.4.2) is the right shape — that remains T-I6's to prove.
+
+*Original question:* how is a pinned Claude Code binary supplied to CI (§6.4.2)? The per-PR agent
+smoke needs a real Claude Code, not an arbitrary child process, because the claim under test is
+Claude Code's own settings precedence. Which distribution, pinned how, and is redistribution
+inside a CI image acceptable? If it is not, the settings-precedence claim has no per-PR proof,
+and that limitation should be stated rather than papered over.
 
 **Q13 — What is the baseline for the compaction arm of the evals (§6.4.3)?** For an over-context
 input the direct-provider arm returns a 400, so there is no answer to compare against.

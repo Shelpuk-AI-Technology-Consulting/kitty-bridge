@@ -409,6 +409,11 @@ class TestTheWholeSuiteIsCoherent:
             "tests/test_upstream_identity_consistency.py",
             "tests/test_upstream_route_source_of_truth.py",
             "tests/test_github_actions.py",
+            # KBR-216. A §6.2.3 docs-vs-code guard: TEST_SUITE.md §8.6 states
+            # what the CI environment supplies, and the workflow tree is where
+            # it is actually supplied -- two artifacts edited separately, held
+            # against each other in both directions.
+            "tests/test_ci_capability_inventory.py",
             "tests/test_layer_markers.py",
             "tests/test_layer_selection.py",
             "tests/test_custom_url_docs.py",
@@ -434,6 +439,13 @@ class TestTheWholeSuiteIsCoherent:
             # pin), and that both legs present one identity from one source.
             "tests/test_curl_cffi_transport_contract.py",
             "tests/test_oauth_leg_identity.py",
+            # T-W6 (KBR-29). The corpus's *lint* reads three real artifacts --
+            # the committed entries, the capture procedure in
+            # `tests/corpus/README.md`, and the AST of `harness/corpus.py` --
+            # so it is a contract guard in the §6.2.3 sense. Its *format* tests
+            # read none of them and stay at the l1 default in
+            # `tests/harness/test_corpus.py`, the same split T-W3 made.
+            "tests/harness/test_corpus_lint.py",
             # KBR-178. A §6.2.3 structural guard: it holds the shipped call site
             # of `_normalize_cc_stop` against R11's placement rule, which M15
             # states and KBR-144 is the cost of breaking. Its own file because a
