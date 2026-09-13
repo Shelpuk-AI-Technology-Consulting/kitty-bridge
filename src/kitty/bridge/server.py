@@ -3357,6 +3357,27 @@ class BridgeServer:
         translator: MessagesTranslator,
         cc_request: dict,
     ) -> web.StreamResponse:
+        """Stream an Anthropic Messages response to the client from one upstream request.
+
+        Three upstream shapes share this handler and its retry loop: a custom
+        transport (collected, then translated), a Chat Completions stream
+        (translated event by event, finish events buffered so an empty reply is
+        judged before it is written), and the native Messages passthrough
+        (forwarded verbatim behind a :class:`~kitty.bridge.preamble_hold.PreambleHold`,
+        so an empty reply is likewise judged before any byte is written —
+        KBR-155). Once a byte has reached the client, failures close the stream
+        rather than retry (``TEST_SUITE.md`` §11 Q14).
+
+        Args:
+            request: The inbound client request.
+            body: The client's Messages API request body.
+            translator: The translator for the Chat Completions shape.
+            cc_request: The request as sent upstream, mutated on failover.
+
+        Returns:
+            The prepared SSE stream, or a JSON error response when the request
+            failed before any byte was written.
+        """
         message_id = f"msg_{uuid.uuid4().hex[:24]}"
         model = cc_request.get("model", body.get("model", ""))
         # The client's own tool declarations are the only ground truth for what
@@ -3675,8 +3696,8 @@ class BridgeServer:
                     )
                     await asyncio.sleep(delay)
                 try:
-                    # Every native attempt after the first follows a hold that wrote nothing, so no
-                    # failed write can have revealed a gone client; check before paying for another.
+                    # Until release a native attempt writes nothing, so no failed write can reveal a
+                    # gone client — on the first attempt or a retry; check before paying for one.
                     if sr is None and self._active_provider.use_native_messages:
                         _raise_if_client_gone()
                     session = await self._session_for(url)

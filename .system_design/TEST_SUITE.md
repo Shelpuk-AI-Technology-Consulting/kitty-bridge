@@ -4908,6 +4908,10 @@ found cases they did not reach and one they understated. Each is decided here, w
   (F24's line cap, the auditor's). The price of the cap is stated rather than discovered: a
   thinking-only reply longer than 10 MiB cannot be retried. Worst-case memory per concurrent
   native request is therefore about 10 MiB for the hold plus the auditor's own 10 MiB line bound.
+  The cap is checked per upstream chunk — aiohttp's iterator yields one line at a time — so it can
+  be overshot by the line that crosses it, and releasing copies the buffer once. The set of
+  remembered thinking-block indices is bounded the same way: past 256 distinct thinking blocks the
+  hold fails open, mirroring the auditor's bound on open `tool_use` blocks.
 - **D6 — an empty text chunk is not content.** A `text_delta` whose `text` is `""` releases
   nothing. *Why:* the literal rule would release a reply that opens a text block, streams `""`
   and stops — a blank turn, the defect this ticket exists to fix — while D1 already declines to
@@ -4927,8 +4931,9 @@ found cases they did not reach and one they understated. Each is decided here, w
   the native branch checks the client connection on each held chunk and before each upstream
   attempt, and stops — leaving backend health alone, as issue #38 requires. Without that check a user who
   presses Esc during a long thinking phase would keep it billing upstream. (ii) Headers go out at
-  release, so on the native path the attribution headers now name the backend that produced the
-  content, not merely the first to answer. (iii) Each discarded attempt is logged at WARNING with
+  release, so a discarded empty attempt never names its backend: the attribution headers name
+  the backend whose bytes are the first the client receives — which is what the README already
+  promises ("the backend that produced the first byte of the response"). (iii) Each discarded attempt is logged at WARNING with
   its held byte count and stop reason, and a bounded head of the held bytes at DEBUG — a `200`
   carrying a non-SSE body is otherwise undiagnosable, because nothing of it was written.
   (iv) Until KBR-183 lands, a timeout *after* release can still start another attempt; if that

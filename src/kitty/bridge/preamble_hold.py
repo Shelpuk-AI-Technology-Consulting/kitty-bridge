@@ -39,6 +39,10 @@ MAX_HELD_BYTES = 10 * 1024 * 1024
 # Block types that are thinking, so their start and deltas release nothing.
 _THINKING_BLOCK_TYPES = frozenset({"thinking", "redacted_thinking"})
 
+# Bound on remembered thinking-block indices, as the auditor bounds its open blocks: a
+# hostile stream of distinct thinking starts must not grow the set without limit.
+_MAX_THINKING_BLOCKS = 256
+
 # Delta types that belong to a thinking block even without a recorded start.
 _THINKING_DELTA_TYPES = frozenset({"thinking_delta", "signature_delta"})
 
@@ -62,7 +66,9 @@ class PreambleHold:
         """Initialise a hold for one upstream attempt.
 
         Args:
-            max_held_bytes: Bound on withheld bytes; exceeding it releases.
+            max_held_bytes: Bound on withheld bytes; exceeding it releases. The
+                bound is checked per upstream chunk, so it can be overshot by
+                at most the chunk that crossed it.
         """
         self._max_held_bytes = max_held_bytes
         self._held = bytearray()
@@ -198,7 +204,9 @@ class PreambleHold:
             index = event.get("index")
             if isinstance(index, int):
                 self._thinking_indices.add(index)
-            return False
+            # Fail open, as the byte cap does (D5), rather than track an unbounded set.
+            return len(self._thinking_indices) > _MAX_THINKING_BLOCKS
+        # D6's twin: a text block that starts empty is not content either.
         if block_type == "text":
             text = block.get("text")
             return isinstance(text, str) and text != ""

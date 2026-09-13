@@ -267,6 +267,19 @@ class TestReleaseRule:
         hold = PreambleHold(max_held_bytes=len(MESSAGE_START))
         assert hold.feed(MESSAGE_START) == b""
 
+    def test_too_many_thinking_blocks_release(self):
+        """The thinking-index set is bounded like the byte buffer, and fails open the same way."""
+        hold = PreambleHold()
+        starts = [
+            _sse(
+                "content_block_start",
+                {"type": "content_block_start", "index": i, "content_block": {"type": "thinking", "thinking": ""}},
+            )
+            for i in range(257)
+        ]
+        assert hold.feed(MESSAGE_START + b"".join(starts[:256])) == b""
+        assert hold.feed(starts[256]) != b""
+
     def test_default_cap_is_ten_mebibytes(self):
         assert MAX_HELD_BYTES == 10 * 1024 * 1024
 
