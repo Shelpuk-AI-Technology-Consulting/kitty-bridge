@@ -37,6 +37,7 @@ from kitty.bridge.messages.events import (
     format_error_event as messages_format_error,
 )
 from kitty.bridge.messages.translator import MessagesTranslator
+from kitty.bridge.preamble_hold import PreambleHold
 from kitty.bridge.responses.events import (
     format_error_event as responses_format_error,
 )
@@ -697,6 +698,15 @@ _EMPTY_RETRY_DELAYS = [5.0, 15.0]  # delays between retries for empty responses 
 # Adding entries here automatically adds retry attempts; removing entries
 # reduces them.  Do NOT hardcode `+ 2` anywhere — always use len().
 _EMPTY_FINAL_DELAYS = [20.0, 40.0]  # final delays before emitting empty-response fallback
+# Terminal errors of the native passthrough's preamble hold (KBR-155, TEST_SUITE.md §11 Q14(b)
+# D3/D4). Downstream only, so they name the product (Q9); an error rather than fallback text,
+# so the bridge never puts words in the model's mouth on a path that drives no translator.
+_NATIVE_EMPTY_REPLY_MESSAGE = (
+    "Kitty Bridge received an empty reply from the upstream provider on every attempt. Retry the request."
+)
+# D3: stop reasons that truncate a reply, so no retry can improve one that arrives before content.
+_NATIVE_TRUNCATING_STOP_REASONS = frozenset({"max_tokens", "model_context_window_exceeded"})
+_MAX_LOGGED_HELD_BYTES = 2000  # bound on a discarded native reply's head in the DEBUG log
 
 # Error codes and patterns that indicate rate limiting or quota exhaustion.
 # These trigger the circuit breaker even on non-retryable HTTP statuses (e.g. 400).
@@ -3396,6 +3406,19 @@ class BridgeServer:
             """Build a Messages API error response for pre-stream failures."""
             return web.json_response(error_data, status=status)
 
+        def _raise_if_client_gone() -> None:
+            """Stop work for a client that has already disconnected.
+
+            While the native preamble hold writes nothing, a failed write can no
+            longer reveal a gone client, and aiohttp does not cancel the handler
+            (``handler_cancellation`` is off), so the connection is checked.
+
+            Raises:
+                ClientDisconnectedError: When the client connection is closed.
+            """
+            if request.transport is None or request.transport.is_closing():
+                raise ClientDisconnectedError("client disconnected while the reply was held")
+
         last_usage: dict | None = None
         stream_ok = False  # Set True only on clean completion
 
@@ -3771,8 +3794,11 @@ class BridgeServer:
 
                         # Success path — stream the response
                         if self._active_provider.use_native_messages:
-                            # Native Messages: forward raw SSE bytes to client.
-                            # The auditor reads the same bytes so the forwarded
+                            # Native Messages: forward raw SSE bytes to client,
+                            # withholding the leading events until content arrives
+                            # (KBR-155, §11 Q14(b)) so an empty reply is judged
+                            # before any byte is written and can still be retried.
+                            # The auditor reads the bytes written, so the forwarded
                             # tool_use inputs are recoverable from our own log
                             # (issue #33); it never alters what is written.
                             auditor = ToolUseAuditor(
@@ -3780,19 +3806,92 @@ class BridgeServer:
                                 backend=self._backend_label(),
                                 on_anomaly=self._record_malformed_tool_use,
                             )
+                            hold = PreambleHold()
                             try:
                                 async for chunk_bytes in upstream.content:
-                                    s = await _ensure_prepared()
-                                    await _write_client(s, chunk_bytes)
-                                    auditor.feed(chunk_bytes)
-                                    events_emitted = True
+                                    released = hold.feed(chunk_bytes)
+                                    if released:
+                                        s = await _ensure_prepared()
+                                        await _write_client(s, released)
+                                        auditor.feed(released)
+                                    elif sr is None:
+                                        # An abandoned request must not keep a thinking phase billing.
+                                        _raise_if_client_gone()
                             finally:
-                                # Bytes already reached the client even if the
-                                # iteration raised, so the partial tool_use is
+                                # Bytes may already have reached the client even if
+                                # the iteration raised, so the partial tool_use is
                                 # still worth reporting.
                                 auditor.finish()
-                            stream_ok = True
-                            break
+                            if hold.released:
+                                stream_ok = True
+                                break
+
+                            # Nothing was written, so the discarded bytes exist only here.
+                            logger.warning(
+                                "Native Messages stream ended with no content for %s (%d bytes held, stop_reason=%s)",
+                                message_id,
+                                len(hold.held),
+                                hold.stop_reason,
+                            )
+                            logger.debug("Discarded native reply head: %r", hold.held[:_MAX_LOGGED_HELD_BYTES])
+
+                            # D3: a truncation before any content is not improved by a retry.
+                            if hold.stop_reason in _NATIVE_TRUNCATING_STOP_REASONS:
+                                return _make_error_response(
+                                    {
+                                        "type": "error",
+                                        "error": {
+                                            "type": "invalid_request_error",
+                                            "message": (
+                                                "Kitty Bridge received a reply from the upstream provider that "
+                                                f"stopped ({hold.stop_reason}) before producing any content."
+                                            ),
+                                            "reason": f"{hold.stop_reason}_before_content",
+                                        },
+                                    },
+                                    status=400,
+                                )
+
+                            # Empty reply, nothing written: the translated path's
+                            # empty-response ladder, including its balancing quirk of
+                            # retrying only inside the final delays once no backend
+                            # is healthy.
+                            retry = attempt < max_attempts - 1
+                            balancing = bool(self._backends) and self._current_backend_idx >= 0
+                            if retry and balancing and not self._any_healthy_backend():
+                                final_idx = attempt - _original_max_attempts
+                                retry = 0 <= final_idx < len(_EMPTY_FINAL_DELAYS)
+                                if retry:
+                                    await asyncio.sleep(_EMPTY_FINAL_DELAYS[final_idx])
+                            if retry:
+                                _raise_if_client_gone()
+                                if balancing:
+                                    self._select_backend()
+                                    self._normalize_model(cc_request)
+                                    self._active_provider.normalize_request(cc_request)
+                                    url = self._build_upstream_url(cc_request)
+                                    headers = self._build_upstream_headers(cc_request)
+                                    upstream_body = self._upstream_body_for(cc_request)
+                                else:
+                                    await asyncio.sleep(_BACKOFF_BASE * (2 ** (attempt % (_MAX_RETRIES + 1))))
+                                logger.warning(
+                                    "Native Messages stream empty response: retrying (%d/%d)",
+                                    attempt + 1,
+                                    max_attempts,
+                                )
+                                continue
+                            logger.warning("Native Messages stream empty response after %d attempts", attempt + 1)
+                            return _make_error_response(
+                                {
+                                    "type": "error",
+                                    "error": {
+                                        "type": "api_error",
+                                        "message": _NATIVE_EMPTY_REPLY_MESSAGE,
+                                        "reason": "empty_response",
+                                    },
+                                },
+                                status=502,
+                            )
 
                         line_buffer = bytearray()  # F23+F24: byte-based buffering
                         done = False

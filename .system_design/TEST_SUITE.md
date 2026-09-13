@@ -2613,14 +2613,22 @@ falls back to a declared default and is **recorded**, failing the fixture at tea
 wrong-format reply is not a loud failure but an apparently empty response, and that costs
 the 80-second retry ladder.
 
-**One thing no bridge-side judgement checks.** §4.3 C3's emptiness oracles are keyed on the
-**upstream** format: `_is_empty_cc_response` for non-streaming, `translator.response_was_empty`
-plus the `has_content` byte flag for Chat Completions streams — and **nothing at all** for a
-native Anthropic Messages stream, which `server.py:3616` forwards to the client byte-for-byte.
-A recorder's Anthropic SSE success is therefore guarded only by §6.2.2's grammar. That is a
-property of the product, not of the harness: an upstream returning a well-formed but
-contentless Anthropic stream reaches Claude Code with none of the retry the Chat Completions
-path has.
+**One thing no bridge-side judgement checked — until KBR-155.** §4.3 C3's emptiness oracles are
+keyed on the **upstream** format: `_is_empty_cc_response` for non-streaming,
+`translator.response_was_empty` plus the `has_content` byte flag for Chat Completions streams —
+and, when this recorder landed, **nothing at all** for a native Anthropic Messages stream, which
+the native branch forwarded to the client byte-for-byte. That was a property of the product, not
+of the harness: an upstream returning a well-formed but contentless Anthropic stream reached
+Claude Code with none of the retry the Chat Completions path has. KBR-155 closed it with the
+preamble hold of §11 Q14(b): `bridge/preamble_hold.py`'s `PreambleHold` is now the fourth oracle,
+judging the native stream by its release rule before any byte is written. A recorder's scripted
+Anthropic SSE success must therefore carry content — a contentless one is an empty reply and costs
+the retry ladder. **The four oracles still do not agree on every shape**, and this is recorded
+rather than smoothed over: the non-streaming judgement `_is_empty_cc_response` calls a reply of only
+`server_tool_use` or `web_search_tool_result` blocks empty (D1 does not) and retries a `max_tokens`
+reply with no content (D3 does not), and a translated stream that yields no chunk and no
+`finish_reason` never reaches its buffered-finish check, so it is written as an empty `200`. None of
+the three is KBR-155's; each is a candidate for its own ticket.
 
 #### 7.2.2 What T-B1 settled — the provider-session recorder
 
@@ -4801,6 +4809,70 @@ is writable:
   a pre-emission JSON error response rather than a `200` carrying an SSE `error` event. Both change
   the downstream contract, and §6.2.2's grammar suite must cover the second.
 
+**Amended by the product owner, 2026-09-13, while implementing KBR-155.** Reading the four
+points above against the Anthropic stream format, and a design review of the implementation,
+found cases they did not reach and one they understated. Each is decided here, with its reason:
+
+- **D1 — the release rule also counts a block that arrives whole.** Besides the first
+  `content_block_delta` of a non-thinking block, the hold releases on a `content_block_start`
+  whose block already carries content: any type other than `text`, `thinking` and
+  `redacted_thinking` (`tool_use`, `server_tool_use`, `web_search_tool_result`, and any type not
+  yet known), and a `text` block whose `text` is non-empty. *Why:* Anthropic's own result blocks
+  have no delta at all — the official SDK's accumulator (`lib/streaming/_messages.py`) seeds its
+  snapshot straight from `content_block_start` — and `bridge/tool_audit.py` records that shims
+  handing back a pre-parsed tool call do the same. The delta-only rule would judge those replies
+  empty, retry them, and then fail them.
+- **D2 — an upstream `error` event before content is passed through.** It releases the hold and
+  is forwarded verbatim, exactly as before the hold existed. *Why:* the provider's own error type
+  (`overloaded_error` and the like) is what Claude Code is written against; treating it as an
+  empty reply would replace it with the bridge's wording and add a retry policy nobody decided.
+  The event is recognised by its SSE `event:` name as well as its `data.type`, because the
+  official SDK (`_streaming.py`) raises on `sse.event == "error"` whatever the data holds, and
+  fills a missing `data.type` from the event name. **Also as before:** a released error-only
+  stream counts as a completed attempt, so its backend is marked healthy — the translated path
+  quarantines on an in-stream error, and closing that difference is not this decision's.
+- **D3 — a truncation before content fails at once with a `400`.** A reply whose stop reason is
+  `max_tokens` or `model_context_window_exceeded` and that carried no content gets
+  `invalid_request_error` with `reason: "<stop_reason>_before_content"`, and the ladder ends on
+  that attempt. *Why:* the point above already says no retry can improve a `max_tokens`
+  truncation, and the SDK's `StopReason` names the context-window stop as the same kind of
+  ending; a `400` also stops the agent retrying it, where a `5xx` would invite exactly that.
+  Every other stop reason before content is an empty reply.
+- **D4 — the exhaustion error.** `502`, `api_error`, `reason: "empty_response"`, and a message
+  that names the product, per Q9's precedent. The `reason` marker follows `compaction_failed`:
+  without it the body is indistinguishable from any other `502`.
+- **D5 — the hold is capped at 10 MiB and fails open.** Past the cap it releases and the stream
+  continues as a plain passthrough. *Why:* the adapters on this path serve reasoning models, so the
+  "preamble" is not a few events but the whole thinking phase — the downstream cost in the fourth
+  point above includes it, and the user watches Claude Code's spinner rather than live thinking.
+  An uncapped hold would make that memory unbounded, against every other bound the bridge keeps
+  (F24's line cap, the auditor's). The price of the cap is stated rather than discovered: a
+  thinking-only reply longer than 10 MiB cannot be retried. Worst-case memory per concurrent
+  native request is therefore about 10 MiB for the hold plus the auditor's own 10 MiB line bound.
+- **D6 — an empty text chunk is not content.** A `text_delta` whose `text` is `""` releases
+  nothing. *Why:* the literal rule would release a reply that opens a text block, streams `""`
+  and stops — a blank turn, the defect this ticket exists to fix — while D1 already declines to
+  count a text block that *starts* empty.
+- **D7 — a stall while held takes the ordinary pre-emission ladder; the cost above is corrected,
+  not the policy.** The fourth point above says a stalled stream sends nothing "until
+  `_STREAM_READ_TIMEOUT`" and then errors. That understates it: `asyncio.TimeoutError` is
+  retryable and not a transport error, so each timeout while held is retried — failed over, with
+  the backend quarantined, on a balancing profile — up to the whole attempt budget. On one
+  backend the worst case is six 120-second reads plus the backoff and final delays, about
+  thirteen minutes with no downstream byte. *Why keep it:* it is exactly the policy the bridge
+  already applies to a provider that never answers at all, which is what Q14 meant by "the
+  ordinary pre-emission path"; a separate stall rule would make the two cases differ for no
+  product reason.
+- **Implementation consequences recorded with the decision.** (i) A client that disconnects
+  while held is no longer revealed by a failed write, and aiohttp does not cancel the handler, so
+  the native branch checks the client connection on each held chunk and before each retry, and
+  stops — leaving backend health alone, as issue #38 requires. Without that check a user who
+  presses Esc during a long thinking phase would keep it billing upstream. (ii) Headers go out at
+  release, so on the native path the attribution headers now name the backend that produced the
+  content, not merely the first to answer. (iii) Each discarded attempt is logged at WARNING with
+  its held byte count and stop reason, and a bounded head of the held bytes at DEBUG — a `200`
+  carrying a non-SSE body is otherwise undiagnosable, because nothing of it was written.
+
 **Why, and not the obvious alternative.** Three reasons, in decreasing order of how much they
 would cost to be wrong about.
 
@@ -4843,9 +4915,12 @@ breach. That is why (b) is affordable and full buffering — unbounded, and grow
 length — still is not.
 
 **What this does not decide.** The wording of the terminal error the client receives follows Q9's
-precedent (downstream only, names the product) and is KBR-155's to settle. The *zero-chunk* case
-is untouched: if upstream yields no chunks at all the loop body never runs, `sr` stays `None`, and
-the ordinary pre-emission ladder already applies.
+precedent (downstream only, names the product); KBR-155 settled it as D4 above. The *zero-chunk*
+case needs no separate rule, but the sentence first recorded here — that the ordinary
+pre-emission ladder already applied to it — was not what the code did: the native branch set
+`stream_ok` unconditionally, so a zero-byte stream skipped the ladder, fell to the handler's
+"should not happen" `502` and marked the backend healthy. Under the hold it is simply an empty
+reply and takes the ladder like any other.
 
 *Original question:* what is a correct stream recovery after bytes have reached the client
 (§6.3.1)? Failover
