@@ -197,6 +197,33 @@ def _convert_content_types(items: list) -> list:
     return converted
 
 
+def _responses_tool_choice(cc_tool_choice: object) -> object:
+    """Rewrite a Chat Completions named ``tool_choice`` into the Responses form.
+
+    Chat Completions nests the name -- ``{"type": "function", "function":
+    {"name": x}}`` -- while Responses' ``ToolChoiceFunction`` is flat:
+    ``{"type": "function", "name": x}``.  The three string modes are spelled
+    the same in both APIs, and every other value keeps the verbatim copy this
+    builder always made, because the Messages ingress cannot produce one and
+    translating Chat Completions' allowed-tools and custom forms is not
+    KBR-214's to decide.
+
+    Args:
+        cc_tool_choice: The request's ``tool_choice`` value.
+
+    Returns:
+        The value to put on the Responses body.
+    """
+    if (
+        isinstance(cc_tool_choice, dict)
+        and cc_tool_choice.get("type") == "function"
+        and isinstance(cc_tool_choice.get("function"), dict)
+        and isinstance(cc_tool_choice["function"].get("name"), str)
+    ):
+        return {"type": "function", "name": cc_tool_choice["function"]["name"]}
+    return cc_tool_choice
+
+
 class OpenAISubscriptionAdapter(OpenAIAdapter):
     """OpenAI ChatGPT subscription adapter using the Codex backend.
 
@@ -1107,7 +1134,7 @@ class OpenAISubscriptionAdapter(OpenAIAdapter):
             body["tools"] = resp_tools
 
         if cc_request.get("tool_choice"):
-            body["tool_choice"] = cc_request["tool_choice"]
+            body["tool_choice"] = _responses_tool_choice(cc_request["tool_choice"])
 
         # Inject reasoning effort from normalized metadata
         effort = cc_request.get("_reasoning_effort")

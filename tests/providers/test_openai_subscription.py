@@ -499,6 +499,36 @@ class TestCcToResponses:
         assert "max_output_tokens" not in result
         assert "max_tokens" not in result
 
+    def test_named_tool_choice_is_rewritten_into_the_responses_form(self, adapter: OpenAISubscriptionAdapter) -> None:
+        """KBR-214 R8: Chat Completions nests the name, Responses does not.
+
+        ``ChatCompletionNamedToolChoice`` is ``{"type": "function", "function":
+        {"name": ...}}`` while Responses' ``ToolChoiceFunction`` is ``{"type":
+        "function", "name": ...}``.  Copied verbatim, a forced-tool request from
+        the Messages ingress would reach the Codex backend in a shape it does not
+        publish.
+        """
+        cc = {
+            "model": "gpt-5.4",
+            "messages": [{"role": "user", "content": "test"}],
+            "tool_choice": {"type": "function", "function": {"name": "bash"}},
+        }
+        result = adapter._cc_to_responses(cc)
+        assert result["tool_choice"] == {"type": "function", "name": "bash"}
+
+    @pytest.mark.parametrize("value", ["required", "auto", "none"])
+    def test_string_tool_choice_is_spelled_the_same_in_both_apis(
+        self, adapter: OpenAISubscriptionAdapter, value: str
+    ) -> None:
+        """The three modes need no rewrite (R8)."""
+        cc = {"model": "gpt-5.4", "messages": [{"role": "user", "content": "test"}], "tool_choice": value}
+        assert adapter._cc_to_responses(cc)["tool_choice"] == value
+
+    def test_no_tool_choice_invents_none(self, adapter: OpenAISubscriptionAdapter) -> None:
+        """No CC ``tool_choice`` means none on the Responses body (R9)."""
+        cc = {"model": "gpt-5.4", "messages": [{"role": "user", "content": "test"}]}
+        assert "tool_choice" not in adapter._cc_to_responses(cc)
+
 
 # ── map_error ─────────────────────────────────────────────────────────────
 
