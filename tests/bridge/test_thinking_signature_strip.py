@@ -26,6 +26,7 @@ from aioresponses import CallbackResult, aioresponses
 from kitty.bridge import server as server_module
 from kitty.bridge.server import (
     BridgeServer,
+    UpstreamError,
     _is_thinking_signature_error,
     _recover_rejected_thinking,
     _strip_thinking_blocks,
@@ -537,6 +538,97 @@ async def test_rejections_beyond_the_strip_cap_are_surfaced_not_looped(stream):
     assert _thinking_types(calls[1][0]) == ["thinking", "thinking", "thinking"]
     assert _thinking_types(calls[2][0]) == ["thinking", "thinking"]
     assert _thinking_types(calls[3][0]) == []
+
+
+@pytest.mark.parametrize("stream", [False, True], ids=["non-streaming", "streaming"])
+@pytest.mark.asyncio
+async def test_a_rejection_that_outlives_recovery_does_not_quarantine_a_pool_member(stream):
+    """R4b — once the strips run out, the error reaches the client and every backend stays healthy.
+
+    The history is the bridge's fault on every backend alike, so cooling one down
+    would only take a healthy member out of the pool (M17, PR #113 review).
+
+    Args:
+        stream: Whether the client request streams.
+    """
+    server = _native_server(pool=True)
+    rejections = [(400, _rejection_at(index)) for index in (1, 3, 5, 5)]
+
+    status, text, _calls = await _drive(server, _NATIVE_URL, rejections, stream=stream, history=_FOUR_TURN_HISTORY)
+
+    assert status == 400, text
+    assert all(health["healthy"] and not health.get("failure_count") for health in server._backend_health)
+
+
+@pytest.mark.asyncio
+async def test_the_final_retry_ladder_does_not_quarantine_a_member_either(monkeypatch):
+    """R4b — the non-streaming pool's last retries apply the same rule as its failover loop.
+
+    The pool's first attempt exhausts its strips; its second attempt rate-limits,
+    so the loop ends without the two-400 stop.  Selection is random between
+    healthy members, so the rate-limited one may be either; the ladder can only
+    reach the other, which rejects again and must stay healthy.
+
+    Args:
+        monkeypatch: Removes the ladder's 20 s and 40 s sleeps.
+    """
+    monkeypatch.setattr(server_module, "_EMPTY_FINAL_DELAYS", [0.0, 0.0])
+    server = _native_server(pool=True)
+    rate_limited = {"type": "error", "error": {"type": "rate_limit_error", "message": "slow down"}}
+    exhausted = [(400, _rejection_at(index)) for index in (1, 3, 5, 5)]
+    replies = [*exhausted, (429, rate_limited), *exhausted, *exhausted]
+
+    status, text, calls = await _drive(server, _NATIVE_URL, replies, history=_FOUR_TURN_HISTORY)
+
+    assert status == 400, text
+    assert len(calls) == 13
+    ladder_key = calls[-1][1]["x-api-key"]
+    assert ladder_key != calls[4][1]["x-api-key"]
+    ladder_member = int(ladder_key.rsplit("-", 1)[1]) - 1
+    assert server._backend_health[ladder_member]["healthy"]
+    assert not server._backend_health[ladder_member].get("failure_count")
+
+
+@pytest.mark.asyncio
+async def test_a_rejection_after_tighter_compaction_does_not_quarantine_either(monkeypatch):
+    """R4b — the verdict follows the compaction retry's error, not the context-too-large that started it.
+
+    Tighter compaction edits the signed history, so its retry is where an
+    unrecoverable signature rejection is most likely to appear.
+
+    Args:
+        monkeypatch: Stubs the upstream call and compaction, and records cooling.
+    """
+    server = _native_server(pool=True)
+    calls: list[int] = []
+    cooled: list[int] = []
+
+    async def upstream(cc_request, *args, **kwargs):
+        """Reject as too large on each backend's first call, then as a bad signature.
+
+        Args:
+            cc_request: The request; unused.
+            *args: Unused.
+            **kwargs: Unused.
+
+        Raises:
+            UpstreamError: Always.
+        """
+        calls.append(server._current_backend_idx)
+        if len(calls) % 2:
+            raise UpstreamError(400, _envelope("prompt is too long: context length exceeded"))
+        raise UpstreamError(400, _envelope(_INVALID_SIGNATURE))
+
+    monkeypatch.setattr(server, "_make_upstream_request", upstream)
+    monkeypatch.setattr(server, "_is_oversized_request", lambda _request: True)
+    monkeypatch.setattr(server, "_compact_with_tighter_budget", lambda cc_request, factor=0.5: None)
+    monkeypatch.setattr(server, "_mark_backend_unhealthy", lambda idx, **kwargs: cooled.append(idx))
+
+    status, text, _calls = await _drive(server, _NATIVE_URL, [], history=_FOUR_TURN_HISTORY)
+
+    assert status == 400, text
+    assert len(calls) == 4
+    assert cooled == []
 
 
 @pytest.mark.parametrize("stream", [False, True], ids=["non-streaming", "streaming"])
