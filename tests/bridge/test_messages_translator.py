@@ -3,6 +3,8 @@
 import json
 import uuid
 
+from harness import cache_breakpoints as cb
+
 from kitty.bridge.messages.translator import MessagesTranslator
 
 
@@ -370,6 +372,104 @@ class TestTranslateRequest:
         result = self.t.translate_request(req)
         assistant_msg = result["messages"][-1]
         assert "reasoning_content" not in assistant_msg
+
+
+# ── translate_request: cache breakpoints (KBR-198) ─────────────────────────
+
+
+class TestTranslateRequestCacheBreakpoints:
+    """Characterise which prompt-cache breakpoints ``translate_request`` destroys, site by site.
+
+    KBR-198 (CB-1, epic KBR-197). Each body carries one one-hour breakpoint from
+    :func:`harness.cache_breakpoints.build_request`, whose own tests prove it is
+    really there. These tests pin today's behaviour, not the correct one: the
+    carry-through fix is expected to turn the nine absence tests red and invert
+    them.
+
+    The cost stated in each docstring applies on upstreams that honour
+    ``cache_control`` — Anthropic-compatible providers, and OpenRouter's Chat
+    Completions API. Anthropic bills a cache read at 0.1x base input, so a lost
+    breakpoint re-bills its prefix at roughly 10x on every turn. Where caching is
+    implicit (OpenAI) the loss changes nothing billable.
+    """
+
+    def setup_method(self):
+        """Give each test a fresh translator."""
+        self.t = MessagesTranslator()
+
+    def _translate(self, site: str) -> dict:
+        """Translate the fixture body carrying a breakpoint at ``site``.
+
+        Args:
+            site: One of :data:`harness.cache_breakpoints.SITES`.
+
+        Returns:
+            The Chat Completions body ``translate_request`` emits.
+        """
+        return self.t.translate_request(cb.build_request(site))
+
+    def test_tool_definition_breakpoint_is_destroyed(self):
+        """Tool definitions are re-billed uncached every turn: the tool is rebuilt as a bare function."""
+        assert cb.find_breakpoints(self._translate("tool")) == []
+
+    def test_system_block_breakpoint_is_destroyed(self):
+        """The system prompt is re-billed uncached every turn: its blocks are joined into one string."""
+        assert cb.find_breakpoints(self._translate("system")) == []
+
+    def test_user_text_block_breakpoint_is_destroyed(self):
+        """History up to a user turn is re-billed uncached: text blocks are joined into one string."""
+        assert cb.find_breakpoints(self._translate("user_text")) == []
+
+    def test_assistant_text_block_breakpoint_is_destroyed(self):
+        """History up to an assistant turn is re-billed uncached: text blocks are joined into one string."""
+        assert cb.find_breakpoints(self._translate("assistant_text")) == []
+
+    def test_image_block_breakpoint_is_destroyed(self):
+        """A cached image prefix is re-billed uncached: the image block is dropped whole (KBR-222)."""
+        assert cb.find_breakpoints(self._translate("image")) == []
+
+    def test_document_block_breakpoint_is_destroyed(self):
+        """A cached document prefix is re-billed uncached: the document block is dropped whole (KBR-222)."""
+        assert cb.find_breakpoints(self._translate("document")) == []
+
+    def test_tool_use_block_breakpoint_is_destroyed(self):
+        """History up to a tool call is re-billed uncached: the block is rebuilt as ``tool_calls``."""
+        assert cb.find_breakpoints(self._translate("tool_use")) == []
+
+    def test_tool_result_block_breakpoint_is_destroyed(self):
+        """History up to a tool result (Claude Code's usual last breakpoint) is re-billed uncached."""
+        assert cb.find_breakpoints(self._translate("tool_result")) == []
+
+    def test_top_level_automatic_caching_breakpoint_is_destroyed(self):
+        """Automatic caching is switched off entirely: the top-level breakpoint appears nowhere in the output."""
+        assert cb.find_breakpoints(self._translate("top_level")) == []
+
+    def test_top_level_cache_control_is_not_a_re_emitted_key(self):
+        """Automatic caching is switched off entirely: ``cache_control`` is not among the keys re-emitted.
+
+        The ticket asks for this key-set form explicitly; the case above is
+        strictly stronger, since it searches the whole body.
+        """
+        result = self._translate("top_level")
+
+        assert "cache_control" not in result
+
+    def test_breakpoint_nested_in_tool_result_content_survives_in_place(self):
+        """The one breakpoint carried through, since ``tool_result.content`` is forwarded as-is: pinned, not endorsed.
+
+        Whether Anthropic honours a breakpoint at that depth is not established:
+        its SDK types accept one inside ``tool_result`` content, but its docs'
+        sub-content rule names citations only (KBR-199). On an upstream that
+        ignores ``cache_control`` it is an Anthropic field leaking into a Chat
+        Completions ``tool`` message. The test exists so that this site, too,
+        cannot start losing its breakpoint unnoticed.
+        """
+        result = self._translate("tool_result_nested")
+        content = result["messages"][-1]["content"]
+
+        assert isinstance(content, list), f"tool_result content was flattened: {content!r}"
+        assert content[0]["cache_control"] == cb.BREAKPOINT
+        assert cb.find_breakpoints(result) == [cb.BREAKPOINT]
 
 
 # ── translate_response ──────────────────────────────────────────────────────
