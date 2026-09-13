@@ -788,12 +788,13 @@ def _read_cache_control(
         residual: The residual mapping, extended in place when the value is not
             an object, or when the block may not carry a breakpoint at all.
         permitted: Whether Anthropic permits a breakpoint on this block.
-            ``False`` for a block nested inside a ``tool_result``: the vendor
-            directs a sub-content block to be cached through its top-level block
-            instead, and §3.3.1a defines no path form reaching inside a
+            ``False`` for a block nested inside a ``tool_result``: §3.3.1a defines
+            no path form reaching inside a
             :class:`~harness.contract.ToolResult`, so a breakpoint mapped there
             would be one **M16** could never claim -- the under-claiming
-            direction §3.3.1a calls a false I1 breach.
+            direction §3.3.1a calls a false I1 breach. Whether Anthropic honours a
+            breakpoint at that depth is not established (KBR-199), so this is the
+            design's choice, not a vendor rule.
 
     Returns:
         The breakpoint as the wire mapping, or ``None`` when absent or unusable.
