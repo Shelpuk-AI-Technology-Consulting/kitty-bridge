@@ -3774,9 +3774,14 @@ class BridgeServer:
                             await _write_client(sr, messages_format_error(error_data).encode())
                             break
 
-                        # Success path — stream the response
-                        if self._active_provider.use_native_messages:
-                            # Native Messages: forward raw SSE bytes to client.
+                        # Success path — stream the response.  A Messages-wire upstream
+                        # already speaks the client's protocol, native or translated:
+                        # the CC chunk translator below would find no `choices` and
+                        # send an empty reply (KBR-227).
+                        if self._active_provider.use_native_messages or (
+                            self._active_provider.upstream_wire_is_messages_api_for_model(_route_model(cc_request))
+                        ):
+                            # Messages wire: forward raw SSE bytes to client.
                             # The auditor reads the same bytes so the forwarded
                             # tool_use inputs are recoverable from our own log
                             # (issue #33); it never alters what is written.
