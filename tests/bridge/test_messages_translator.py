@@ -457,11 +457,12 @@ class TestTranslateRequestCacheBreakpoints:
     def test_breakpoint_nested_in_tool_result_content_survives_in_place(self):
         """The one breakpoint carried through, since ``tool_result.content`` is forwarded as-is: pinned, not endorsed.
 
-        Anthropic does not cache sub-content blocks directly, so this is no cache
-        write on the wire; and on an upstream that ignores ``cache_control`` it is
-        an Anthropic field leaking into a Chat Completions ``tool`` message. The
-        test exists so that this site, too, cannot start losing its breakpoint
-        unnoticed.
+        Whether Anthropic honours a breakpoint at that depth is not established:
+        its SDK types accept one inside ``tool_result`` content, but its docs'
+        sub-content rule names citations only (KBR-199). On an upstream that
+        ignores ``cache_control`` it is an Anthropic field leaking into a Chat
+        Completions ``tool`` message. The test exists so that this site, too,
+        cannot start losing its breakpoint unnoticed.
         """
         result = self._translate("tool_result_nested")
         content = result["messages"][-1]["content"]
