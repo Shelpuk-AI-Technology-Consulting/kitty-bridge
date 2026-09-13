@@ -507,8 +507,11 @@ def _recover_rejected_thinking(body: dict, error_body: object, strips_done: int)
     if strips_done >= _MAX_THINKING_STRIPS:
         return False
     match = _THINKING_REJECTION_PATH.search(str(error_body))
-    targeted = match is not None and strips_done < _MAX_THINKING_STRIPS - 1
-    if targeted and _strip_thinking_blocks(body, through_message=int(match.group(1))):
+    if (
+        match is not None
+        and strips_done < _MAX_THINKING_STRIPS - 1
+        and _strip_thinking_blocks(body, through_message=int(match.group(1)))
+    ):
         return True
     return _strip_thinking_blocks(body)
 
@@ -3863,12 +3866,16 @@ class BridgeServer:
             # re-add an unsigned carrier the API would reject again: the two would take turns.
             strip_body: dict | None = None
             strip_count = 0
+            # Strips given back to the attempt budget; capped so failovers cannot extend it forever.
+            strip_retries = 0
             # A grace retry re-sends to the *same* backend after a connection
             # blip, so it must not spend a failover attempt or pull the
             # empty-response schedule forward — the loop is extended by the most
             # grace can use, and `attempt` counts only real backend attempts.
-            for raw_attempt in range(max_attempts + len(_TRANSPORT_GRACE_DELAYS)):
-                attempt = raw_attempt - transport_grace.retries
+            for raw_attempt in range(max_attempts + len(_TRANSPORT_GRACE_DELAYS) + _MAX_THINKING_STRIPS):
+                # A thinking strip re-sends the bridge's own repaired history, like a grace retry,
+                # so it gets its attempt back rather than pulling the empty-response schedule forward.
+                attempt = raw_attempt - transport_grace.retries - strip_retries
                 # The extra iterations exist only to give grace retries back.
                 # Without this the loop could run past the last real attempt —
                 # a `continue` that does not check `attempt` (the tool_use
@@ -3959,6 +3966,7 @@ class BridgeServer:
                                 and _recover_rejected_thinking(upstream_body, error_body, strips_done)
                             ):
                                 strip_body, strip_count = upstream_body, strips_done + 1
+                                strip_retries = min(strip_retries + 1, _MAX_THINKING_STRIPS)
                                 logger.warning(
                                     "Backend rejected a thinking signature (status %d) — stripped thinking "
                                     "and retrying the same backend (strip %d, attempt %d/%d)",

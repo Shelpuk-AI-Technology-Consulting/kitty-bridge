@@ -1533,10 +1533,11 @@ class TestTriggersAnEntryCannotArrange:
             "thinking_roundtrip_rejected",
             "native_tool_use_format_error",
             "upstream_rejected_oversized_on_balancing",
+            "thinking_signature_rejected",
         ],
     )
     def test_a_response_trigger_cannot_be_declared(self, tmp_path: Path, name: str) -> None:
-        """These four are decided by the upstream, not by the request.
+        """These five are decided by the upstream, not by the request.
 
         `register.py`'s own docstring names each one; an entry claiming it would
         be claiming something it is not the thing that decides, which is exactly

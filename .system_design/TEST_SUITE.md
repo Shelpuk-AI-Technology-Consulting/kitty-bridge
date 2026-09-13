@@ -1119,7 +1119,7 @@ The assertions:
   population — once the preamble hold lands, empty-response retries become reachable on the
   native-passthrough adapters too, so **T-I8** must name that path.
 - *(ii)* Each of the five paths above is a **declared exception**: assert each fires only under
-  its own trigger and never otherwise. A provider that hashes bodies can see all four; whether to
+  its own trigger and never otherwise. A provider that hashes bodies can see all five; whether to
   close any of them is Q6.
 
 **C5 — Connection lifecycle (L3).** Count distinct TCP connections the recording upstream accepts
@@ -2439,11 +2439,11 @@ if absence were inferred, every entry whose author never considered a trigger wo
 offered as its complement and the assertion would run over entries nobody vetted.
 
 **§3.2.4's binary is incomplete.** A trigger is described there as "a route property or a request
-property", but four conditional rows are decided by neither: M6 fires on an upstream 400, M8 on a
+property", but five conditional rows are decided by neither: M6 fires on an upstream 400, M8 on a
 rejected thinking round-trip, M9 on an upstream tool-use format error, M12 on an empty upstream
-response — all properties of the **upstream response**, arranged by a scripted recorder. The
-loader refuses those four and `ALWAYS` in a manifest, which closes gap **G21**'s over-declaration
-hazard for the cases the repository already proves in text. Classifying the whole 25-trigger
+response, M17 on a rejected thinking signature — all properties of the **upstream response**,
+arranged by a scripted recorder. The loader refuses those five and `ALWAYS` in a manifest, which closes gap **G21**'s over-declaration
+hazard for the cases the repository already proves in text. Classifying the whole 26-trigger
 vocabulary is **KBR-186**, filed rather than guessed, for the reason T-W3 gave for deferring
 trigger predicates: data nothing in the change could prove wrong is what plan §1.4 forbids. Until
 it lands, **T-D8 cannot read corpus coverage for M6, M8, M9 and M12**; those are discharged by a

@@ -23,6 +23,7 @@ import aiohttp
 import pytest
 from aioresponses import CallbackResult, aioresponses
 
+from kitty.bridge import server as server_module
 from kitty.bridge.server import (
     BridgeServer,
     _is_thinking_signature_error,
@@ -172,7 +173,7 @@ def test_other_errors_are_not_recognised(status, message):
 # ── R2: the strip ───────────────────────────────────────────────────────────
 
 
-def test_strip_removes_thinking_from_assistant_turns_only_and_keeps_order():
+def test_strip_removes_every_thinking_block_and_keeps_the_rest_in_order():
     """R2 — thinking and redacted thinking go; text and tool calls stay in their order; user turns are untouched."""
     body = {"model": "m", "messages": copy.deepcopy(_HISTORY)}
 
@@ -590,6 +591,34 @@ async def test_a_failover_after_a_strip_lets_the_next_backend_recover_too():
     assert _thinking_types(calls[4][0]) == ["thinking", "redacted_thinking", "thinking", "thinking", "thinking"]
     member = int(served_by.rsplit("-", 1)[1]) - 1
     assert server._backend_health[member]["healthy"]
+
+
+@pytest.mark.asyncio
+async def test_strips_do_not_spend_the_streams_retry_budget(monkeypatch):
+    """R6b — three strips followed by an ordinary provider hiccup still end in the answer.
+
+    A strip re-sends kitty's own repaired history, like a transport-grace retry,
+    so it must give its attempt back.  Otherwise three strips leave a single
+    backend one normal attempt, the empty-response final delays fire for a 503,
+    and a turn the unstripped path would have answered fails.
+    """
+    monkeypatch.setattr(server_module, "_BACKOFF_BASE", 0.0)
+    monkeypatch.setattr(server_module, "_EMPTY_FINAL_DELAYS", [0.0, 0.0])
+    unavailable = {"type": "error", "error": {"type": "overloaded_error", "message": "try again"}}
+    replies = [
+        (400, _rejection_at(1)),
+        (400, _rejection_at(3)),
+        (400, _rejection_at(5)),
+        (503, unavailable),
+        (503, unavailable),
+        (503, unavailable),
+        (200, _sse_reply()),
+    ]
+
+    status, text, calls = await _drive(_native_server(), _NATIVE_URL, replies, stream=True, history=_FOUR_TURN_HISTORY)
+
+    assert status == 200, text
+    assert len(calls) == 7
 
 
 @pytest.mark.asyncio
