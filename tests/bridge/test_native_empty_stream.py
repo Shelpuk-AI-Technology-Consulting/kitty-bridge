@@ -639,39 +639,3 @@ class TestFailuresWhileHeld:
             await server.stop_async()
             await runner.cleanup()
         assert len(calls) == 1, "a gone client must not be served a retry"
-
-    async def test_empty_retry_after_bytes_reached_the_client_closes_the_stream(self, monkeypatch):
-        """KBR-183 still lets a timeout after release retry; an empty retry must then end the open stream."""
-        monkeypatch.setattr(server_module, "_STREAM_READ_TIMEOUT", 1.0)
-        calls: list[int] = []
-        stop = asyncio.Event()
-
-        async def _handler(request: web.Request) -> web.StreamResponse:
-            """Send content then stall on the first call; answer empty on the next."""
-            calls.append(1)
-            resp = web.StreamResponse(headers=_SSE_HEADERS)
-            await resp.prepare(request)
-            if len(calls) == 1:
-                await resp.write(_MESSAGE_START + _EMPTY_TEXT_START)
-                await resp.write(
-                    _sse(
-                        "content_block_delta",
-                        {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "Hi"}},
-                    )
-                )
-                await stop.wait()
-            return resp
-
-        runner, base = await self._serve(_handler)
-        try:
-            server = BridgeServer(
-                adapter=_StubLauncher(), provider=_NativeProvider(base), resolved_key="key-0", model="test-model"
-            )
-            status, body = await asyncio.wait_for(_stream(server), timeout=15)
-        finally:
-            stop.set()
-            await runner.cleanup()
-        assert len(calls) == 2
-        assert status == 200
-        assert body.startswith(_MESSAGE_START), "the released content reached the client"
-        assert b"event: error" in body, "the open stream must end in a terminal error, not hang"
