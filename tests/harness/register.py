@@ -536,14 +536,14 @@ _BRIDGE_ROWS: tuple[MutationRow, ...] = (
     ),
     MutationRow(
         id="M17",
-        site=(f"{_SERVER}:_strip_thinking_blocks",),
+        site=(f"{_SERVER}:_recover_rejected_thinking", f"{_SERVER}:_strip_thinking_blocks"),
         trigger=Trigger.THINKING_SIGNATURE_REJECTED,
         # The strip removes whole `thinking` and `redacted_thinking` parts, so the
         # parts after them shift index: M8's prefix anchor over every part is the
         # only address that claims that, for the same §3.3.1a reason.
         paths=(c.part_path(c.WILDCARD, c.WILDCARD),),
         conditional=True,
-        design_ref="§3.2.1 · §3.3.1a",
+        design_ref="§3.2.1 · §3.3.1a · §4.3 C3",
     ),
 )
 
