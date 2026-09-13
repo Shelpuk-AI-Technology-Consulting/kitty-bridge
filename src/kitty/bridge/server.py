@@ -3370,7 +3370,10 @@ class BridgeServer:
                     status=500,
                 )
 
-            if self._active_provider.use_native_messages:
+            # Decide by the reply's shape: a native provider answers in Chat Completions form
+            # when `_native_messages_request` is unset (it is set only in the native branch
+            # above, and cleared by the tool_use-format fallback) (KBR-237).
+            if cc_response.get("type") == "message":
                 result = cc_response
             else:
                 result = translator.translate_response(cc_response, context=self._empty_response_context())
@@ -7228,8 +7231,11 @@ class BridgeServer:
                         last_body = await resp.text()
 
                     if last_status < 400:
+                        # Only Claude Code's native request takes a Messages body as-is: every other
+                        # inbound protocol needs it translated. `_native_messages_request` is set only by
+                        # _handle_messages' native branch and never ships (_INTERNAL_KEYS) (KBR-237).
                         if (
-                            self._active_provider.use_native_messages
+                            cc_request.get("_native_messages_request")
                             and isinstance(last_body, dict)
                             and last_body.get("type") == "message"
                         ):
