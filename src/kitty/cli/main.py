@@ -224,20 +224,17 @@ def main() -> None:
 
         _config_dir = _Path(_ucd("kitty"))
         from kitty.bridge.manage import start_bridge
+        from kitty.bridge.state import default_state_path
 
         start_bridge(
-            state_path=_config_dir / "bridge_state.json",
+            state_path=default_state_path(),
             config_path=_config_dir / "bridge.yaml",
         )
     elif result.builtin == BuiltinCommand.BRIDGE_STOP:
-        from pathlib import Path as _Path
-
-        from platformdirs import user_config_dir as _ucd
-
-        _config_dir = _Path(_ucd("kitty"))
         from kitty.bridge.manage import stop_bridge
+        from kitty.bridge.state import default_state_path
 
-        stop_bridge(_config_dir / "bridge_state.json")
+        stop_bridge(default_state_path())
     elif result.builtin == BuiltinCommand.BRIDGE_RESTART:
         from pathlib import Path as _Path
 
@@ -245,21 +242,18 @@ def main() -> None:
 
         _config_dir = _Path(_ucd("kitty"))
         from kitty.bridge.manage import restart_bridge
+        from kitty.bridge.state import default_state_path
 
         restart_bridge(
-            state_path=_config_dir / "bridge_state.json",
+            state_path=default_state_path(),
             config_path=_config_dir / "bridge.yaml",
         )
     elif result.builtin == BuiltinCommand.BRIDGE_STATUS:
-        from pathlib import Path as _Path
-
-        from platformdirs import user_config_dir as _ucd
-
-        _config_dir = _Path(_ucd("kitty"))
         from kitty.bridge.manage import BridgeStatus, bridge_status
-        from kitty.bridge.state import load_state
+        from kitty.bridge.state import default_state_path, load_state
 
-        _state_path = _config_dir / "bridge_state.json"
+        # The bridge's own default, not the config dir: bridge.yaml lives there, the state does not (KBR-220).
+        _state_path = default_state_path()
         status = bridge_status(_state_path)
         if status == BridgeStatus.RUNNING:
             state = load_state(_state_path)
@@ -495,7 +489,6 @@ def _run_bridge(
 ) -> None:
     """Run bridge mode — start OpenAI-compatible API server without launching agent."""
     import asyncio
-    import signal
     import sys
     from contextlib import suppress
 
@@ -585,9 +578,9 @@ def _run_bridge(
 
         # Set up graceful shutdown
         stop_event = asyncio.Event()
-        loop = asyncio.get_running_loop()
-        loop.add_signal_handler(signal.SIGINT, stop_event.set)
-        loop.add_signal_handler(signal.SIGTERM, stop_event.set)
+        from kitty.bridge.stop_signals import install_stop_handlers
+
+        install_stop_handlers(asyncio.get_running_loop(), stop_event.set)
 
         try:
             await stop_event.wait()
@@ -614,7 +607,6 @@ def _run_bridge_balancing(
 ) -> None:
     """Run bridge mode with a balancing profile — random selection across healthy members."""
     import asyncio
-    import signal
     import sys
 
     from kitty.bridge.server import BridgeServer
@@ -690,9 +682,9 @@ def _run_bridge_balancing(
         )
 
         stop_event = asyncio.Event()
-        loop = asyncio.get_running_loop()
-        loop.add_signal_handler(signal.SIGINT, stop_event.set)
-        loop.add_signal_handler(signal.SIGTERM, stop_event.set)
+        from kitty.bridge.stop_signals import install_stop_handlers
+
+        install_stop_handlers(asyncio.get_running_loop(), stop_event.set)
 
         try:
             await stop_event.wait()

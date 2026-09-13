@@ -1209,14 +1209,14 @@ class TestCacheBreakpoints:
             c.verify_total(projected)
 
     def test_a_breakpoint_nested_inside_a_tool_result_residualises(self) -> None:
-        """R5 — the vendor caches a sub-content block through its top-level block.
+        """R5 — a breakpoint nested inside a ``tool_result`` has no path to be mapped onto.
 
-        Two reasons, and the second is the one that bites. Anthropic directs a
-        sub-content block to be cached via the block above it, so a breakpoint
-        here is not a thing the API does. And §3.3.1a defines **no path form**
+        §3.3.1a defines **no path form**
         reaching inside a `ToolResult`, so a breakpoint mapped onto a nested part
         would be a delta M16 could never claim — §3.3.1a's under-claiming
-        direction, which manufactures a false I1 breach.
+        direction, which manufactures a false I1 breach. Whether Anthropic
+        honours a breakpoint at that depth is not established (KBR-199): its docs'
+        sub-content rule names citations only, and its SDK types accept one here.
         """
         body = _minimal(
             messages=[

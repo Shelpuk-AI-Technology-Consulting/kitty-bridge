@@ -187,6 +187,13 @@ QUOTA_PATTERNS = (
     # retry are right there. In the error-object carrier `quota` below would send that
     # advice anyway; in the CLI-line-in-`result` carrier THIS anchor is what sends it.
     r"you exceeded your current quota",
+    # 🔴 KBR-206: Anthropic's spent balance, anchored on the same terms as the line above. It
+    # arrives as HTTP **400** `invalid_request_error`, and in the CLI-line-in-`result` carrier
+    # the provider-scoped `\bbilling\b` (from "Plans & Billing") cannot see it, so without this
+    # the record falls to the generic tier and is called a broken workflow. The prefix stops at
+    # "too low" because the sentence ends two ways in public reports -- "...to access the
+    # Anthropic API" and "...to access the Claude API" -- and the longer anchor loses one.
+    r"your credit balance is too low",
 )
 
 # 🔴 **KBR-166. The same words, searched ONLY over what the PROVIDER wrote.**
@@ -303,18 +310,49 @@ CREDENTIAL_PATTERNS = (
 # The reason string already says "or model".
 CREDENTIAL_STATUS_PATTERNS = (r"\b40[134]\b",)
 
+# The gateway's refusal of Anthropic's context-management beta, recognised by its own
+# wording: anchored on the beta's dated slug, or on the refusal's distinctive phrasing,
+# and NOT on the bare words "context management".
+#
+# 🔴 The loose form was written first and is the bug this module documents twice:
+# `_outcome_text` includes `result`, which on a schema failure carries the
+# model's own prose, so a review that merely discussed context management would
+# have been told its own failure was unfixable. A classifier that pattern-matches
+# a haystack it does not control will eventually match itself.
+CONTEXT_MANAGEMENT_REFUSAL = (
+    r"context-management-\d{4}-\d{2}-\d{2}"
+    r"|no endpoints available[^\n]{0,80}context[-. ]management"
+)
+
+#: What `classify` reports when it meets that refusal. A FIXED string, not the match:
+#: KBR-206 made this pattern decide the verdict, and echoing up to 80 characters the
+#: provider -- or, in `result`, the model -- wrote into a `reason=` line of
+#: `$GITHUB_OUTPUT` is an injection surface the other tier-1 reasons never had.
+CONTEXT_MANAGEMENT_REFUSAL_REASON = (
+    "workflow-level failure: the gateway refused the context-management beta for "
+    "the configured model"
+)
+
 # Universal: the workflow itself is wrong and any provider would reject it the
 # same way, so re-running is pure waste. Both failures seen on the first live
 # run land here -- the apostrophes that truncated --json-schema, and the
 # unresolvable $schema reference.
 #
 # ⚠️ **This set is checked BEFORE `QUOTA_PATTERNS`, and that is still deliberate:
-# a rejected schema can coexist with other noise in the record.** `\b400\b` stays
-# here for a measured reason rather than a tidy one -- the context-management
-# refusal is a 400 whose body says "No quota was consumed for this request", so
-# demoting it below quota reports a genuine workflow fault as a spent balance.
-# `_write_diagnostic` already encodes that precedence, with its
-# CONTEXT_MANAGEMENT_REFUSAL branch above its quota branch.
+# a rejected schema can coexist with other noise in the record.** So every entry must
+# name a specific workflow fault -- whatever matches here decides the verdict AND
+# refuses the retry before any provider-named cause is heard.
+#
+# 🔴 **KBR-206 moved `\b400\b` OUT, and `classify` now reads the refusal's own wording
+# just before this set.** A 400 says the request was rejected, not by what: Anthropic
+# bills a spent balance as a 400 ("Your credit balance is too low..."), the CLI writes the
+# status into its error line, and this set called an empty account a broken workflow
+# while the diagnostic advised a top-up. The status was here to keep the
+# context-management refusal fatal -- one wording of it carries "No quota was consumed" --
+# and demoting it alone would hand that refusal to `quota`. So the two 400s are separated
+# by their BODIES, through the very constant `_write_diagnostic`'s refusal branch reads.
+# The status now sits beside `invalid[_ ]request` below. TEST_SUITE.md §8.5 I-C5 carries
+# the measurement.
 #
 # 🔴 **KBR-145 moved `invalid[_ ]request` OUT of this set**, to
 # `FATAL_UNLESS_PROVIDER_NAMED_PATTERNS` below. DeepSeek reports a spent balance
@@ -326,7 +364,6 @@ CREDENTIAL_STATUS_PATTERNS = (r"\b40[134]\b",)
 FATAL_PATTERNS = (
     r"is not valid json",
     r"is not a valid json schema",
-    r"\b400\b",
     r"unterminated string",
 )
 
@@ -356,20 +393,15 @@ FATAL_PATTERNS = (
 # only fail to rescue one. The sets above this line had the opposite exposure, which is
 # why KBR-166 moved those and left these alone. Do not "finish the job" here without
 # first moving this tier.
-FATAL_UNLESS_PROVIDER_NAMED_PATTERNS = (r"invalid[_ ]request",)
-
-# upstream. Anchored on the beta's own dated slug, or on the refusal's distinctive
-# phrasing, and NOT on the bare words "context management".
 #
-# 🔴 The loose form was written first and is the bug this module documents twice:
-# `_outcome_text` includes `result`, which on a schema failure carries the
-# model's own prose, so a review that merely discussed context management would
-# have been told its own failure was unfixable. A classifier that pattern-matches
-# a haystack it does not control will eventually match itself.
-CONTEXT_MANAGEMENT_REFUSAL = (
-    r"context-management-\d{4}-\d{2}-\d{2}"
-    r"|no endpoints available[^\n]{0,80}context[-. ]management"
-)
+# 🔴 KBR-206: `\b400\b` joins it from tier 1, for the reason KBR-145 moved the generic
+# code -- a status names no cause, and Anthropic's spent balance is a 400. It reads the
+# full haystack like its neighbour: this tier can only return `fatal`, so a prose 400
+# here can fail to rescue a record, never promote one to a paid retry. ⚠️ That is true
+# of THIS tier, not of the move: a 400 anywhere in a record used to reach tier 1 first,
+# which is why an unattributable record is now decided before any tier -- see
+# `_record_is_unattributable`.
+FATAL_UNLESS_PROVIDER_NAMED_PATTERNS = (r"invalid[_ ]request", r"\b400\b")
 
 #: What the CLOCK says, one per reachable state — and NOTHING else, because this
 #: is the only sentence in the record-absent body that is true on every path
@@ -644,7 +676,7 @@ def _extract_structured_output(raw_output: str, execution_text: str) -> dict | N
 #: patterns are searched. Reviewing a change under `.github/review/scripts/` therefore fed this
 #: module's own source into its own matcher: `interpret_claude_result.py` contains the literals
 #: ``\b400\b``, ``quota``, ``insufficient balance`` and ``billing``, and one read of it matches
-#: **most of** :data:`QUOTA_PATTERNS` and **every** fatal pattern in the file.
+#: **most of** :data:`QUOTA_PATTERNS` and most of the fatal vocabulary.
 #:
 #: ⚠️ **Stated as a shape rather than as figures, because the figures rotted.** This line
 #: quoted "nine of QUOTA_PATTERNS and three of FATAL_PATTERNS"; re-derived by running the
@@ -670,14 +702,15 @@ def _extract_structured_output(raw_output: str, execution_text: str) -> dict | N
 #: ⚠️ **The rule that replaced the defect, and the one to preserve: a numeric outcome
 #: field is admitted to the PROVIDER-SCOPED text only** -- what
 #: :func:`_provider_outcome_text` returns -- **and must never reach the haystack
-#: :func:`_outcome_text` returns**, which is read first by :data:`FATAL_PATTERNS`.
+#: :func:`_outcome_text` returns**, the haystack :data:`FATAL_UNLESS_PROVIDER_NAMED_PATTERNS`
+#: reads -- where ``\b400\b`` has lived since KBR-206.
 #: :func:`_numbers_in` carries the argument and the measurement; it is not repeated
 #: here, because a third copy is the one that goes stale.
 #:
 #: ⚠️ The rule governs **parseable** records. An unparseable one is searched whole by
-#: :func:`classify` and always has been, ``"api_error_status": 400`` in its text
-#: included -- that is the fallback family :func:`_provider_outcome_text` documents,
-#: unchanged here.
+#: :func:`classify`, ``"api_error_status": 400`` in its text included -- that is the
+#: fallback family :func:`_provider_outcome_text` documents -- except that since KBR-206
+#: (D3) one carrying a ``result`` key is decided by :func:`_record_is_unattributable` first.
 OUTCOME_FIELDS = (
     "error",
     "result",
@@ -716,6 +749,11 @@ OUTCOME_NUMBER_BOUND = 10**9
 #: it out unconditionally would trade this defect for a silent miss on a spent account.
 MODEL_AUTHORED_FIELD = "result"
 
+#: A ``result`` KEY in raw record text: what separates raw CLI output (none) from a record
+#: too broken to attribute (one). Read only through :func:`_record_is_unattributable`, so
+#: :func:`_provider_outcome_text`, :func:`classify` and the diagnostic cannot disagree on it.
+RESULT_KEY = re.compile(r'"result"\s*:')
+
 
 def _parse_events(execution_text: str) -> list | None:
     """Decode the execution record into events, accepting both shapes it comes in.
@@ -730,7 +768,8 @@ def _parse_events(execution_text: str) -> list | None:
 
     Returns:
         The decoded events, or ``None`` when the text is not JSON at all (a bare CLI error
-        message, which every caller should then search whole).
+        message, which every caller should then search whole -- unless
+        :func:`_record_is_unattributable` decides it first).
     """
 
     stripped = execution_text.strip()
@@ -741,7 +780,8 @@ def _parse_events(execution_text: str) -> list | None:
     # `ValueError` from `int()`, and a deeply nested document raises `RecursionError`, so a
     # record carrying either crashed the script and no diagnostic was written.
     # `JSONDecodeError` subclasses `ValueError`, so every record that degraded still does.
-    # ⚠️ The cost: such a record is unparseable, and `classify` then searches it whole.
+    # ⚠️ The cost: such a record is unparseable, and `classify` then searches it whole --
+    # or, when it carries a `result` key, calls it unattributable (KBR-206 D3).
     try:
         decoded = json.loads(stripped)
     except (ValueError, RecursionError):
@@ -796,7 +836,7 @@ def _outcome_parts(events: list) -> tuple[list[str], list[str], list[str]]:
                 continue
             # Numbers are collected into their OWN bucket, never into `provider_parts`.
             # Only `_provider_outcome_text` joins it, which is what keeps a bare status
-            # out of the tier-1 haystack -- see `_numbers_in` for why that matters.
+            # out of the full haystack -- see `_numbers_in` for why that matters.
             provider_parts.extend(_strings_in(value))
             status_parts.extend(_numbers_in(value))
     return provider_parts, model_parts, status_parts
@@ -815,9 +855,11 @@ def _outcome_text(execution_text: str) -> str | None:
         execution_text: Raw execution record text.
 
     Returns:
-        The joined outcome fields, or ``None`` when the record is not JSON — in which case it
-        is a CLI-level failure message with no tool results in it, and searching it whole is
+        The joined outcome fields, or ``None`` when the record is not JSON — usually a
+        CLI-level failure message with no tool results in it, where searching it whole is
         both safe and necessary (a rejected ``--json-schema`` arrives exactly that way).
+        ⚠️ A transcript that failed to parse is the other kind, and does carry tool results;
+        :func:`_record_is_unattributable` separates the two.
         On a structured-output failure ``result`` is omitted from the join; on every other
         record it is included.
     """
@@ -865,8 +907,10 @@ def _provider_outcome_text(execution_text: str) -> str:
     is recognised at all. So the two unparseable cases are separated by the fact that
     distinguishes them: raw CLI output has no ``result`` key to exclude, while a record
     that failed to parse does. Claiming nothing for the latter is the conservative
-    direction -- it falls through to ``fatal``, which spends nothing on a record that
-    cannot be read.
+    direction. ⚠️ Since KBR-206 (D3) no production path uses this branch's result for such
+    a record: :func:`classify` decides it first, and :func:`_write_diagnostic`'s
+    unattributable branch skips the quota read. It stays as this helper's own contract,
+    which ``test_an_unreadable_record_claims_nothing`` pins.
 
     ⚠️ **The first fallback branch is narrower than "nothing model-authored", and the
     difference is recorded rather than hidden.** A transcript truncated before its result
@@ -896,15 +940,64 @@ def _provider_outcome_text(execution_text: str) -> str:
     # turns a truncated 401 back into a workflow fault. `test_a_result_value_is_not_a_
     # result_key` is the row that fails when the colon is dropped.
     if events is None:
-        if re.search(r'"result"\s*:', execution_text):
+        if _record_is_unattributable(execution_text):
             return ""
         return execution_text
 
     # 🔴 KBR-182. The numeric status joins HERE and nowhere else. `_outcome_text` --
-    # the tier-1 haystack -- must never see it; `_numbers_in` records what happens if
+    # the full haystack -- must never see it; `_numbers_in` records what happens if
     # it does.
     provider_parts, _, status_parts = _outcome_parts(events)
     return "\n".join(provider_parts + status_parts)
+
+
+def _record_is_unattributable(execution_text: str) -> bool:
+    """Report whether a record is too broken to say who wrote any of it.
+
+    🔴 **KBR-206 (owner decision D3).** A record that :func:`_parse_events` cannot decode
+    is searched whole, tool results included, so every tier that reads the full haystack
+    votes on what the reviewer merely READ -- this repository's own source names
+    ``authentication_error``, ``quota`` and ``timeout``, and each granted a paid retry. A
+    ``400`` anywhere in that text used to reach tier 1 first and hide the leak; KBR-206
+    moved the status down and uncovered it. Scoping one tier at a time was built and
+    measured first, and it only moved the vote to the next tier down. So such a record is
+    decided before every tier: ``fatal``, and no automatic retry.
+
+    ⚠️ **What it costs, chosen by the product owner:** a spent balance or a transient outage
+    in this shape is a workflow-level ``fatal`` and not retried -- the notice, the job
+    summary and the ``::error::`` line all say so; only the diagnostic says the record
+    was unreadable. Raw CLI output is NOT this shape -- it carries no ``result`` key -- and
+    keeps every tier, unless a provider body passed through unescaped carries one.
+    ⚠️ **Not covered, because it is only a text sentinel:** a transcript cut before its
+    result event, and one whose result event is an error subtype (``SDKResultError`` has
+    ``errors`` and no ``result``), both carry no ``result`` key and are still searched
+    whole. TEST_SUITE.md §8.5 I-C5 records both residuals.
+
+    Args:
+        execution_text: Raw execution record text.
+
+    Returns:
+        True when the text does not decode as JSON and still carries a ``result`` key.
+    """
+
+    return _parse_events(execution_text) is None and bool(RESULT_KEY.search(execution_text))
+
+
+#: The verdict for a record :func:`_record_is_unattributable` refuses to read. Fixed, so
+#: nothing from the unreadable text reaches ``$GITHUB_OUTPUT``.
+UNATTRIBUTABLE_RECORD_REASON = (
+    "workflow-level failure: the execution record could not be parsed, so no provider "
+    "cause can be read from it"
+)
+
+#: The diagnostic paragraph under that verdict, in place of any quota or refusal advice.
+UNATTRIBUTABLE_RECORD_ADVICE = (
+    "The execution record is not valid JSON -- usually a transcript cut off or corrupted "
+    "mid-write -- so this module cannot tell what the provider said from what the "
+    "reviewer read, and it gives no advice rather than advice drawn from the wrong text. "
+    "Read the record tail below before acting on the verdict: it is the only evidence of "
+    "what actually failed."
+)
 
 
 def _strings_in(value: object, depth: int = 0) -> list[str]:
@@ -950,17 +1043,20 @@ def _numbers_in(value: object) -> list[str]:
     ⚠️ **What this function returns is admitted to the PROVIDER-SCOPED text only -- of
     a record that PARSED -- and that is the load-bearing decision rather than an
     implementation detail.** (An unparseable record is searched whole by
-    :func:`classify`, unchanged and pre-existing; see :data:`OUTCOME_FIELDS`.)
-    :data:`FATAL_PATTERNS` is tier 1 and carries ``\b400\b``, so a bare status in the
-    full haystack would let any 400 pre-empt every body-derived verdict below it.
-    Measured, and not hypothetical: Anthropic reports a spent credit balance as HTTP
-    **400** ``invalid_request_error`` -- *"Your credit balance is too low to access the
-    Anthropic API"* -- so the full-haystack form turns that record from
-    ``exhausted``/quota into ``fatal`` with ``retryable`` false. That is KBR-145's filed
-    defect arriving through a new door. KBR-166 already established that the separable
-    question is who WROTE a field; a numeric status is the most unambiguously
-    provider-authored value in the record, so this applies that mechanism once more
-    rather than widening what KBR-166 narrowed.
+    :func:`classify` unless :func:`_record_is_unattributable` decides it first; see
+    :data:`OUTCOME_FIELDS`.)
+    :data:`FATAL_UNLESS_PROVIDER_NAMED_PATTERNS` carries ``\b400\b``, so a bare status
+    in the full haystack would turn any 400 that names no provider-side cause into
+    ``fatal`` -- a bodyless 400, or a structured-output failure beside one -- with the
+    re-run refused. When KBR-182 measured this the pattern was still tier 1 and the
+    victim was sharper: Anthropic reports a spent credit balance as HTTP **400**
+    ``invalid_request_error`` -- *"Your credit balance is too low to access the
+    Anthropic API"* -- and the full-haystack form turned it from ``exhausted``/quota into
+    ``fatal``. KBR-206 moved the pattern below the quota group, which rescues that body
+    but not a record carrying no cause at all, so the bound still holds. KBR-166 already
+    established that the separable question is who WROTE a field; a numeric status is
+    the most unambiguously provider-authored value in the record, so this applies that
+    mechanism once more rather than widening what KBR-166 narrowed.
 
     The bounds are measured too. ``bool`` is excluded because it is an ``int`` subclass
     in Python and ``True`` would enter the haystack as ``"True"``. ``float`` is excluded
@@ -1077,12 +1173,24 @@ def classify(
             )
         return "fatal", "no execution record; Claude never reached the model"
 
+    # 🔴 KBR-206 (D3). A transcript too broken to attribute is decided before every tier:
+    # searched whole, what the reviewer READ would vote -- see `_record_is_unattributable`.
+    if _record_is_unattributable(execution_text):
+        return "fatal", UNATTRIBUTABLE_RECORD_REASON
+
     # Scoped to the record's own outcome fields when it is JSON, so that text the model merely
-    # READ cannot vote on why the run failed. A record that is not JSON is a CLI-level message
-    # with no tool results in it, and is searched whole -- which is how a rejected
-    # `--json-schema` is still caught.
+    # READ cannot vote on why the run failed. A record that is not JSON and reaches here is a
+    # CLI-level message with no tool results in it, and is searched whole -- which is how a
+    # rejected `--json-schema` is still caught.
     scoped = _outcome_text(execution_text)
     haystack = (execution_text if scoped is None else scoped).lower()
+
+    # 🔴 KBR-206. The context-management refusal is named by its own wording, ahead of
+    # everything, with a fixed reason. Ahead of the schema patterns too: the diagnostic has
+    # a refusal branch and no schema branch, so a record carrying both is told the same
+    # thing by the verdict and by the advice. See `CONTEXT_MANAGEMENT_REFUSAL_REASON`.
+    if re.search(CONTEXT_MANAGEMENT_REFUSAL, haystack):
+        return "fatal", CONTEXT_MANAGEMENT_REFUSAL_REASON
 
     # Fatal first: a rejected schema can coexist with other noise in the record,
     # and spending the remaining providers on it is pure waste. That reasoning is
@@ -1643,6 +1751,13 @@ def _write_diagnostic(
         else:
             lines += [INSIDE_THE_BUDGET_OPENING]
         lines += ["", TIMED_OUT_DIAGNOSIS if timed_out_attempt else NO_RUN_ADVICE, ""]
+    elif _record_is_unattributable(execution_text):
+        # 🔴 KBR-206 (D3). Mirrors `classify`, which decides this record before any tier: the
+        # refusal and quota branches below would read what the reviewer READ and print advice
+        # under a verdict that says the record cannot be attributed. Deliberately NOT gated
+        # on `payload_present`: a payload's verdict does not make the unreadable text any
+        # safer to draw advice from, and on `main` that case printed a top-up paragraph.
+        lines += [UNATTRIBUTABLE_RECORD_ADVICE, ""]
     elif re.search(CONTEXT_MANAGEMENT_REFUSAL, evidence, re.I):
         # upstream. Placed above the quota branch so a refusal that happens to
         # carry a billing word cannot be read as a spent balance.

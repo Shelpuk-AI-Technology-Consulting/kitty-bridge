@@ -414,6 +414,11 @@ class TestTheWholeSuiteIsCoherent:
             # it is actually supplied -- two artifacts edited separately, held
             # against each other in both directions.
             "tests/test_ci_capability_inventory.py",
+            # KBR-220. A source guard, not behaviour: no run loop in src/kitty may
+            # call the Unix-only `add_signal_handler` except the shared helper, and
+            # the foreground `kitty bridge` loops are started by no test that could
+            # show the Windows crash instead.
+            "tests/test_stop_handler_call_sites.py",
             "tests/test_layer_markers.py",
             "tests/test_layer_selection.py",
             "tests/test_custom_url_docs.py",
