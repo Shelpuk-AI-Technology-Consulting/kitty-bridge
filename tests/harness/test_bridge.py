@@ -479,11 +479,7 @@ class TestTheProfileFactory:
     """Valid profiles, and the balancing triple ``BridgeServer`` consumes."""
 
     async def test_a_profile_carries_the_binding_and_is_schema_valid(self) -> None:
-        """Including a UUIDv4 ``auth_ref``, which `sample_profile_dict` is not.
-
-        KBR-175: the existing shared fixture carries a UUIDv7 and cannot build a
-        ``Profile`` at all, which is why this factory exists rather than reusing it.
-        """
+        """Including the UUIDv4 ``auth_ref`` that ``Profile`` requires."""
         subject = transport("aiohttp", WireFormat.ANTHROPIC_MESSAGES)
         await subject.start()
         try:

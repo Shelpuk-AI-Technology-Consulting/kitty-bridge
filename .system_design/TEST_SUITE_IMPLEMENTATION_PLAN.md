@@ -424,8 +424,8 @@ that makes *its* bytes observable. Bundled, the Ollama half would have had no ev
 | **T-I2** | Concurrent sessions | | T-I1 | Separate `--settings` files; neither touches the global file (issue #22) | §6.3.2 | M |
 | **T-I3** | `prepare_launch` failure fails the launch | | — | Never proceeds on the user's own credentials | §6.3.2 | S |
 | **T-I4** | Background bridge ownership | | — | Not stopped, not restarted, no second bridge | §6.3.2 | S |
-| **T-I5** | Agent startup smoke | blocked Q12 | T-W8, T-W9, T-B4 | Pinned Claude Code binary, one turn, clean exit | §6.4.2 | M |
-| **T-I6** | Agent settings precedence | blocked Q12 | T-I5 | Three runs, three winners; every sentinel demonstrated live | §6.4.2 | M |
+| **T-I5** | Agent startup smoke | | T-W8, T-W9, T-B4 | Pinned Claude Code binary, one turn, clean exit | §6.4.2 | M |
+| **T-I6** | Agent settings precedence | | T-I5 | Three runs, three winners; every sentinel demonstrated live | §6.4.2 | M |
 | **T-I7** | Streaming recovery — content | | T-B4, T-G7, T-W8 | Four injection points; no duplicated text, no reused tool-call id, no spliced arguments — and, per the answer in §11, the three post-emission points each close the block and terminate with one error rather than recovering | §6.3.1 | L |
 | **T-I8** | Cross-attempt content and cadence | | T-D1, T-W8, T-B4 | Blip and empty-response retries byte-identical; M6, M8, M9 and failover re-normalisation each fire only on trigger | §4.3 C3 | M |
 | **T-I9** | Connection lifecycle baseline | | T-W8, T-C7 | Distinct connections per session vs the native capture; ratcheted — a **reported baseline**, not `exemptions.ratchet`, which is the unrelated gating mechanism of §8.3 | §4.3 C5 | M |
@@ -453,13 +453,15 @@ that makes *its* bytes observable. Bundled, the Ollama half would have had no ev
 | **T-K7** | Deep nightly — mutation and schema fuzzing | ci | T-H3, T-G6 | Both exist before the job claims to run them | §8 | S |
 | **T-K8** | Attach the per-category checks to each job | ci | T-W1, T-K6 | **The mechanism is T-W1's** — `--require-category`, and the test pairing it to every job's marker expression, landed there. What is left here is attaching a flag per category as each job activates, and removing that layer from `PENDING_ACTIVATION_LAYERS`. Narrowed after T-W1 delivered the enforcement rather than only the vocabulary | §8.1 | S |
 | **T-K9** | Activate the Acceptance job | ci | T-J2, T-J3, T-K6 | `acceptance` gates PRs and releases | §8 | S |
-| **T-K10** | Activate the `agent_smoke` category | ci, blocked Q12 | T-W1, T-I5, T-I6 | Its own required category — **it does not block Subsystem or Acceptance**, and it does not wait for them either: the T-K9 dependency was delay with no shared prerequisite behind it. It requires **T-I6 as well as T-I5**, because startup connectivity alone would let the category go green without proving the settings precedence that is the whole reason it exists | §8 | S |
+| **T-K10** | Activate the `agent_smoke` category | ci | T-W1, T-I5, T-I6 | Its own required category — **it does not block Subsystem or Acceptance**, and it does not wait for them either: the T-K9 dependency was delay with no shared prerequisite behind it. It requires **T-I6 as well as T-I5**, because startup connectivity alone would let the category go green without proving the settings precedence that is the whole reason it exists | §8 | S |
 | **T-K11** | Agent-live nightly | ci | T-I14 | Runs the **expanded** five-scenario coverage, not the two existing cases | §8 | S |
 | **T-K12** | Eval nightly | ci | T-K3 | Runs once the decision rule exists; alerts, never gates | §8 | S |
 
 **CI activation is incremental.** Each job turns on when its first independently runnable slice
-lands, and each required category carries its own collection check. `agent_smoke` stays pending
-Q12 as a separate category so it cannot hold up Subsystem or Acceptance.
+lands, and each required category carries its own collection check. `agent_smoke` is a separate
+category so it cannot hold up Subsystem or Acceptance — a separation that was made while it waited
+on Q12 and is kept now that Q12 is answered (2026-09-12, KBR-216), because the reason was never
+the block: the category proves a different claim and fails for different causes.
 
 ---
 
@@ -556,11 +558,12 @@ exist, and the plan should not offer it.
 | **Q4** + **Q13** | T-K3, and therefore T-K12 | The eval runs and cannot conclude; T-K1/T-K2 proceed |
 | **Q10** | T-F2's exact bound, TR-3's wording, register rows M3–M7 | T-F2 lands with the observed-behaviour property and is revised **together with** TR-3 and the register. Narrowed by KBR-5: M13 is withdrawn, so "keep current behaviour" is no longer an option for that row |
 | **Q11** | Nothing — **T-H4 answers it** | T-H3 lands nightly-only |
-| **Q12** | T-I5, T-I6, T-K10 | The settings-precedence claim has no per-PR proof. **It no longer blocks Subsystem or Acceptance** — T-K10 is a separate category |
 
 **Q1** blocks no task but decides whether T-I12 and TR-1c ever gate. **Q5–Q7** affect register
 rows and wording, not delivery. **Q14 left this table on 2026-09-12** (KBR-163): T-I7 now carries a
-full oracle, and the answer's second half is KBR-155's remedy.
+full oracle, and the answer's second half is KBR-155's remedy. **Q12 left it the same day**
+(KBR-216): CI has had a version-pinned Claude Code all along, so T-I5, T-I6 and T-K10 are
+schedulable — see `TEST_SUITE.md` §8.6 for the inventory and its two limits.
 
 ---
 
@@ -597,7 +600,7 @@ merge.** So:
 | KBR-132 · **CLOSED** | G21 | — | Route taken: atomic fix + regression test, red at base, evidence in the PR. The broader guard is **KBR-138**, which has no plan-task ID because it was filed after this plan was written; G21 is its design gap. (Status convention: `TEST_SUITE.md` §9.2.) |
 | KBR-146 · **CLOSED** | G25 | — | Route taken: atomic fix + regression tests, red at base on both sides of the interpreter boundary, evidence in the PR. Landed the fifth §6.2.4 contract (`tests/test_ipaddress_contract.py`) ahead of all four planned ones; no plan-task ID, filed after this plan was written. G25 records what that contract still cannot prove. Duplicates KBR-141/142/150/162. (Status convention: `TEST_SUITE.md` §9.2.) |
 | KBR-183 | G26 | T-I7 | Found while answering **Q14** (KBR-163), by checking the claim that the answer merely ratified existing behaviour. It does not: `_is_transport_error` excludes `asyncio.TimeoutError` by design and the failover arm carries no emission test, so a post-emission timeout still writes a second attempt onto the client's open stream. Measured, not inferred. Product code, so the atomic-PR rule applies — the regression test must be red at the base revision |
-| KBR-175 | — | — | Found while writing **T-W8**. A **test fixture**, not product code: `tests/conftest.py::sample_profile_dict` carries a UUIDv7 `auth_ref` where `Profile` requires v4, so it cannot build the model it describes — and no test reads it. No regression-evidence rule applies, because nothing under `src/kitty` is wrong. The decision (delete it, or repair the id) is the owner's; T-W8 ships `profile_for()` and deliberately leaves it untouched |
+| KBR-175 · **CLOSED** | — | — | Found while writing **T-W8**. A **test fixture**, not product code: `tests/conftest.py::sample_profile_dict` carried a UUIDv7 `auth_ref` where `Profile` requires v4, so it could not build the model it described — and no test read it. No regression-evidence rule applied, because nothing under `src/kitty` was wrong. Route taken: **deleted**, on the product owner's decision (2026-09-12), over repairing the id — nothing read it, T-W8's `profile_for()` already supplies a schema-valid profile to the harness tests, and a repaired fixture would have needed a drift guard of its own to stay honest. No test was added: there is no behaviour left to prove. (Status convention: `TEST_SUITE.md` §9.2.) |
 | KBR-178 | G28, G29, G30 | — | Found while implementing **T-A1** (KBR-33) by reading the Anthropic Messages schema field by field. `MessagesTranslator.translate_request` never read `stop_sequences` or `top_k`, and `server._convert_native_to_cc_format` — a second Messages → CC converter — did not either, so the `tool_use` retry re-dropped both. Product code, so the atomic-PR rule applies: eleven regression tests red at the base revision, evidence in the PR. Fixed at five seams (both converters, plus the three allowlist rebuilds in `anthropic`, `bedrock` and `ollama_cloud`); the sixteen adapters that deliver a top-level `stop` carry it for free. `top_k` rides the internal `_top_k` because Chat Completions has no field for it — **G28** records what that leaves dropped elsewhere, **G29** the empty-list omission, and **G30** the string-form rewrite R11 adds at the Chat Completions ingress (modelled on M15). No broader guard covers the `stop` half; the internal-key guards (§6.2.3) cover only `_top_k` |
 
 ---

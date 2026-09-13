@@ -252,20 +252,6 @@ def tmp_dir(tmp_path: Path) -> Path:
 
 
 @pytest.fixture()
-def sample_profile_dict() -> dict:
-    """Valid profile data dict for reuse across tests."""
-    return {
-        "name": "test-profile",
-        "provider": "zai_regular",
-        "model": "gpt-4o",
-        "auth_ref": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
-        "base_url": None,
-        "provider_config": {},
-        "is_default": False,
-    }
-
-
-@pytest.fixture()
 def mock_provider_response() -> dict:
     """Sample Chat Completions response dict."""
     return {
