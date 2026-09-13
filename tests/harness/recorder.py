@@ -197,10 +197,10 @@ def minimal_success_stream(fmt: WireFormat) -> tuple[bytes, ...]:
 
     For Anthropic Messages the sequence follows §6.2.2's grammar —
     ``message_start`` … ``content_block_start`` / ``content_block_delta`` /
-    ``content_block_stop`` … ``message_delta``, ``message_stop``. That grammar
-    is the *only* guard on this path: verified at ``server.py:3616``, a native
-    Messages stream is forwarded to the client byte-for-byte and never reaches a
-    translator, so no bridge-side emptiness judgement sees it.
+    ``content_block_stop`` … ``message_delta``, ``message_stop``. A native
+    Messages stream never reaches a translator; since KBR-155 the bridge's
+    preamble hold judges it instead, so the ``content_block_delta`` here is
+    load-bearing — without it the reply is empty and costs the retry ladder.
 
     Args:
         fmt: The wire format to answer in.

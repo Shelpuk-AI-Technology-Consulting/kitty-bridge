@@ -98,6 +98,18 @@ _ALLOWLIST: dict[str, str] = {
         '. Either the model is not available at that endpoint, or this profile\'s '
         'base URL is wrong: Kitty appends "'
     ): "downstream error body: how the user fixes a wrong base URL (KBR-134)",
+    # KBR-155's two preamble-hold errors. Downstream only, by construction: both are
+    # built in _stream_messages' native branch after the upstream reply has ended,
+    # and go only to _make_error_response() or an SSE error event written to `sr`.
+    "Kitty Bridge received an empty reply from the upstream provider on every attempt. Retry the request.": (
+        "downstream 502 body / SSE error when every native attempt was empty (KBR-155)"
+    ),
+    "Kitty Bridge lost the upstream reply mid-stream and the retry came back empty. Retry the request.": (
+        "downstream SSE error ending an open native stream after an empty retry (KBR-155)"
+    ),
+    "Kitty Bridge received a reply from the upstream provider that stopped (": (
+        "downstream 400 body for a native reply truncated before content (KBR-155)"
+    ),
 }
 
 #: The string this ticket deleted. The scanner must still be able to see it.
