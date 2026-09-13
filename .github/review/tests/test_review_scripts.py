@@ -17333,7 +17333,11 @@ class ModelAuthoredProseTests(unittest.TestCase):
                     status, reason = interpret.classify(record)
 
                     self.assertEqual(status, "fatal", f"{word}/{shape}: verdict")
-                    self.assertIn("invalid_request", reason)
+                    # KBR-206 (D3): an unparseable record carrying `result` is decided
+                    # before any tier, so its reason is the unattributable one.
+                    self.assertEqual(
+                        "invalid_request" in reason, shape == "well-formed", reason
+                    )
                     self.assertFalse(
                         interpret.retry_verdict(
                             status,
@@ -18390,7 +18394,11 @@ class WeakQuotaPatternProseTests(unittest.TestCase):
                     status, reason = interpret.classify(record)
 
                     self.assertEqual(status, "fatal", f"{shape}: {reason!r}")
-                    self.assertIn("invalid_request", reason)
+                    # KBR-206 (D3): an unparseable record carrying `result` is decided
+                    # before any tier, so its reason is the unattributable one.
+                    self.assertEqual(
+                        "invalid_request" in reason, shape == "well-formed", reason
+                    )
                     self.assertFalse(
                         interpret.retry_verdict(
                             status,
@@ -18765,6 +18773,16 @@ OPENROUTER_CONTEXT_MANAGEMENT_400 = (
 FOUR_HUNDRED_REFUSALS = (
     ("CONTEXT_MANAGEMENT_400_REFUSAL", CONTEXT_MANAGEMENT_400_REFUSAL),
     ("OPENROUTER_CONTEXT_MANAGEMENT_400", OPENROUTER_CONTEXT_MANAGEMENT_400),
+    # The message alone, as it sits in a provider's `error` object with its status nested
+    # in `code`: no `API Error: 400` anywhere, so without the refusal check the record falls
+    # to the fallthrough and is retried. Every row above keeps the prefix, which the generic
+    # tier would still call fatal -- code review found the check's reason for being unpinned.
+    (
+        "OpenRouter refusal message alone",
+        "No endpoints available that support Anthropic's context management features "
+        "(context-management-2025-06-27). Context management requires a supported provider "
+        "(Anthropic).",
+    ),
     # The phrase half of the pattern, with the dated slug removed: every real body carries
     # both, so without this row the phrase alternative could be deleted unnoticed.
     (
@@ -18985,26 +19003,37 @@ class FourHundredCarrierTests(unittest.TestCase):
     def test_an_unattributable_record_gets_no_paid_retry_from_what_the_reviewer_read(self):
         """🔴 KBR-206, owner decision D3 -- a leak this ticket uncovered, closed here.
 
-        A transcript that does not parse is searched whole, tool results included. The
-        tool result below is a real line of `src/kitty/bridge/server.py` beside a real
-        quota phrase from this module's own fixtures; a reviewer reading either used to be
-        hidden by any `400` elsewhere in the text reaching tier 1 first. With the status
-        demoted, `CREDENTIAL_PATTERNS` and `QUOTA_PATTERNS` claimed the record and granted a
-        paid retry. Now a record carrying a `result` key it cannot attribute gets no vote
-        from those tiers, and the generic code decides.
+        A transcript that does not parse is searched whole, tool results included. A
+        reviewer reading this repository -- `server.py` names `authentication_error`, and the
+        harness quotes the refusal's dated slug -- used to be hidden by any `400` elsewhere
+        in the text reaching tier 1 first. With the status demoted, each tier in turn
+        granted a paid retry or gave advice drawn from what was read.
+
+        🔴 **Every row carries no generic code and no 400, and that is the point.** The first
+        version of this fix only scoped the quota and credential tiers, and its test carried
+        `invalid_request_error` -- so it passed while the same record without the code fell
+        to `EXHAUSTED_PATTERNS` or the fallthrough and was retried anyway. Design and code
+        review both measured that; these rows are the shapes they measured.
         """
 
-        for label, read in (
-            ("credential word", 'return status, "authentication_error"'),
-            ("quota phrase", "Insufficient Balance"),
+        for label, read, result in (
+            ("credential word", 'return status, "authentication_error"', "x"),
+            ("quota phrase", "Insufficient Balance", "x"),
+            ("transient word", "retry on timeout", "x"),
+            ("refusal slug", "context-management-2025-06-27", "x"),
+            ("schema phrase", "--json-schema is not valid JSON", "x"),
+            (
+                "spent balance in result",
+                "ok",
+                'API Error: 402 {"error":{"message":"Insufficient Balance"}}',
+            ),
         ):
             events = [
                 {
                     "type": "user",
                     "message": {"content": [{"type": "tool_result", "content": read}]},
                 },
-                {"type": "result", "subtype": "error", "result": "API Error: rejected",
-                 "error": {"type": "invalid_request_error", "message": "the request was rejected"}},
+                {"type": "result", "subtype": "error", "result": result},
             ]
             record = json.dumps(events, indent=2) + "\n<truncated"
             with self.subTest(read=label):
@@ -19012,26 +19041,51 @@ class FourHundredCarrierTests(unittest.TestCase):
                 status, reason, retryable, advice = self._cell(record)
 
                 self.assertEqual(
-                    (status, reason), ("fatal", "workflow-level failure: 'invalid_request'")
+                    (status, reason), ("fatal", interpret.UNATTRIBUTABLE_RECORD_REASON)
                 )
                 self.assertFalse(retryable)
+                self.assertIn(interpret.UNATTRIBUTABLE_RECORD_ADVICE, advice)
                 self.assertNotIn("Top up the balance", advice)
+                self.assertNotIn("context-management feature", advice)
 
-    def test_raw_cli_output_still_reaches_the_promoting_tiers(self):
+    def test_raw_cli_output_is_not_unattributable(self):
         """The control for the row above: no `result` key means raw CLI text, read whole.
 
-        Without it, returning `""` for every unparseable record would pass the row above and
-        blind the classifier to the bare CLI line -- the carrier Anthropic's spent balance
-        actually arrives in.
+        Without it, treating every unparseable record as unattributable would pass the row
+        above and blind the classifier to the bare CLI line -- the carrier Anthropic's spent
+        balance actually arrives in.
         """
 
-        self.assertEqual(
-            interpret._promotable_outcome_text(ANTHROPIC_400_LOW_CREDIT),
-            ANTHROPIC_400_LOW_CREDIT,
-        )
-        self.assertEqual(
-            interpret._promotable_outcome_text('[{"result": "x"}\n<truncated'), ""
-        )
+        self.assertFalse(interpret._record_is_unattributable(ANTHROPIC_400_LOW_CREDIT))
+        self.assertTrue(interpret._record_is_unattributable('[{"result": "x"}\n<truncated'))
+        self.assertFalse(interpret._record_is_unattributable('[{"result": "x"}]'))
+
+    def test_a_transcript_cut_before_its_result_event_still_reads_what_was_read(self):
+        """⚠️ D3's residual, pinned rather than hidden (TEST_SUITE.md §8.5 I-C5).
+
+        With no `result` key the record is indistinguishable from raw CLI output, so it is
+        searched whole and a quota phrase the reviewer read decides. On `main` the `400`
+        beside it reached tier 1 first; after KBR-206 this record is a paid retry with top-up
+        advice. If a later change separates the two shapes, this row should flip.
+        """
+
+        record = json.dumps(
+            [
+                {
+                    "type": "user",
+                    "message": {
+                        "content": [
+                            {"type": "tool_result", "content": "Insufficient Balance; returns 400"}
+                        ]
+                    },
+                }
+            ],
+            indent=2,
+        ) + "\n<truncated"
+        status, reason, retryable, _ = self._cell(record)
+
+        self.assertFalse(interpret._record_is_unattributable(record))
+        self.assertEqual((status, retryable), ("exhausted", True), reason)
 
     def test_every_400_carrying_fixture_is_measured(self):
         """AC3's coverage half: a 400 body added to this file must join a table above."""

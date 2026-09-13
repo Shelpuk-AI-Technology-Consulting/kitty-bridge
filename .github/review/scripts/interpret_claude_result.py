@@ -399,8 +399,8 @@ FATAL_PATTERNS = (
 # full haystack like its neighbour: this tier can only return `fatal`, so a prose 400
 # here can fail to rescue a record, never promote one to a paid retry. ⚠️ That is true
 # of THIS tier, not of the move: a 400 anywhere in a record used to reach tier 1 first,
-# which is why an unattributable record is now kept from the promoting tiers -- see
-# `_promotable_outcome_text`.
+# which is why an unattributable record is now decided before any tier -- see
+# `_record_is_unattributable`.
 FATAL_UNLESS_PROVIDER_NAMED_PATTERNS = (r"invalid[_ ]request", r"\b400\b")
 
 #: What the CLOCK says, one per reachable state — and NOTHING else, because this
@@ -708,9 +708,9 @@ def _extract_structured_output(raw_output: str, execution_text: str) -> dict | N
 #: here, because a third copy is the one that goes stale.
 #:
 #: ⚠️ The rule governs **parseable** records. An unparseable one is searched whole by
-#: :func:`classify` and always has been, ``"api_error_status": 400`` in its text
-#: included -- that is the fallback family :func:`_provider_outcome_text` documents,
-#: unchanged here.
+#: :func:`classify`, ``"api_error_status": 400`` in its text included -- that is the
+#: fallback family :func:`_provider_outcome_text` documents -- except that since KBR-206
+#: (D3) one carrying a ``result`` key is decided by :func:`_record_is_unattributable` first.
 OUTCOME_FIELDS = (
     "error",
     "result",
@@ -750,8 +750,8 @@ OUTCOME_NUMBER_BOUND = 10**9
 MODEL_AUTHORED_FIELD = "result"
 
 #: A ``result`` KEY in raw record text: what separates raw CLI output (none) from a record
-#: too broken to attribute (one). Shared by :func:`_provider_outcome_text` and
-#: :func:`_promotable_outcome_text` so the two fallbacks cannot disagree on the sentinel.
+#: too broken to attribute (one). Read only through :func:`_record_is_unattributable`, so
+#: :func:`_provider_outcome_text`, :func:`classify` and the diagnostic cannot disagree on it.
 RESULT_KEY = re.compile(r'"result"\s*:')
 
 
@@ -853,9 +853,11 @@ def _outcome_text(execution_text: str) -> str | None:
         execution_text: Raw execution record text.
 
     Returns:
-        The joined outcome fields, or ``None`` when the record is not JSON — in which case it
-        is a CLI-level failure message with no tool results in it, and searching it whole is
+        The joined outcome fields, or ``None`` when the record is not JSON — usually a
+        CLI-level failure message with no tool results in it, where searching it whole is
         both safe and necessary (a rejected ``--json-schema`` arrives exactly that way).
+        ⚠️ A transcript that failed to parse is the other kind, and does carry tool results;
+        :func:`_record_is_unattributable` separates the two.
         On a structured-output failure ``result`` is omitted from the join; on every other
         record it is included.
     """
@@ -903,8 +905,9 @@ def _provider_outcome_text(execution_text: str) -> str:
     is recognised at all. So the two unparseable cases are separated by the fact that
     distinguishes them: raw CLI output has no ``result`` key to exclude, while a record
     that failed to parse does. Claiming nothing for the latter is the conservative
-    direction -- it falls through to ``fatal``, which spends nothing on a record that
-    cannot be read.
+    direction. ⚠️ Since KBR-206 (D3) :func:`classify` never reaches this branch for such a
+    record -- it is decided first, by :func:`_record_is_unattributable` -- so the branch
+    now serves the diagnostic's provider-scoped reads.
 
     ⚠️ **The first fallback branch is narrower than "nothing model-authored", and the
     difference is recorded rather than hidden.** A transcript truncated before its result
@@ -934,7 +937,7 @@ def _provider_outcome_text(execution_text: str) -> str:
     # turns a truncated 401 back into a workflow fault. `test_a_result_value_is_not_a_
     # result_key` is the row that fails when the colon is dropped.
     if events is None:
-        if RESULT_KEY.search(execution_text):
+        if _record_is_unattributable(execution_text):
             return ""
         return execution_text
 
@@ -945,34 +948,51 @@ def _provider_outcome_text(execution_text: str) -> str:
     return "\n".join(provider_parts + status_parts)
 
 
-def _promotable_outcome_text(execution_text: str) -> str:
-    """Return the text the full-haystack tiers that grant a retry may read.
+def _record_is_unattributable(execution_text: str) -> bool:
+    """Report whether a record is too broken to say who wrote any of it.
 
-    🔴 **KBR-206 (owner decision D3).** :data:`QUOTA_PATTERNS` and
-    :data:`CREDENTIAL_PATTERNS` read the full haystack and turn a record ``exhausted``,
-    which :func:`retry_verdict` retries at full price. For an unparseable record that
-    haystack is the whole transcript, tool results included -- so a reviewer that read
-    this repository's source, which names ``authentication_error``, got a paid retry. A
-    ``400`` somewhere in that text used to reach tier 1 first and hide it; KBR-206 moved
-    the status below these tiers and uncovered the leak, which had always existed for
-    text without a ``400``. So the rule :func:`_provider_outcome_text` applies to the weak
-    tiers is applied here too: a record too broken to attribute gets no vote on a paid
-    retry, and falls to the generic tier's conservative ``fatal``.
+    🔴 **KBR-206 (owner decision D3).** A record that :func:`_parse_events` cannot decode
+    is searched whole, tool results included, so every tier that reads the full haystack
+    votes on what the reviewer merely READ -- this repository's own source names
+    ``authentication_error``, ``quota`` and ``timeout``, and each granted a paid retry. A
+    ``400`` anywhere in that text used to reach tier 1 first and hide the leak; KBR-206
+    moved the status down and uncovered it. Scoping one tier at a time was built and
+    measured first, and it only moved the vote to the next tier down. So such a record is
+    decided before every tier: ``fatal``, and no automatic retry.
+
+    ⚠️ **What it costs, chosen by the product owner:** a spent balance or a transient outage
+    in this shape is reported as unreadable and not retried, so an operator reads the
+    record tail and re-runs by hand. Raw CLI output is NOT this shape -- it carries no
+    ``result`` key -- and keeps every tier. A transcript cut before its result event also
+    carries no ``result`` key, so it is not covered: TEST_SUITE.md §8.5 I-C5 records that
+    residual.
 
     Args:
         execution_text: Raw execution record text.
 
     Returns:
-        :func:`_outcome_text`'s result for a parseable record; for one that is not JSON,
-        the whole text when it carries no ``result`` key and ``""`` when it does.
+        True when the text does not decode as JSON and still carries a ``result`` key.
     """
 
-    scoped = _outcome_text(execution_text)
-    if scoped is not None:
-        return scoped
-    if RESULT_KEY.search(execution_text):
-        return ""
-    return execution_text
+    return _parse_events(execution_text) is None and bool(RESULT_KEY.search(execution_text))
+
+
+#: The verdict for a record :func:`_record_is_unattributable` refuses to read. Fixed, so
+#: nothing from the unreadable text reaches ``$GITHUB_OUTPUT``.
+UNATTRIBUTABLE_RECORD_REASON = (
+    "the execution record could not be parsed, so the failure cannot be attributed to the "
+    "provider or the workflow; not retried automatically -- read the record tail and "
+    "re-run by hand"
+)
+
+#: The diagnostic paragraph under that verdict, in place of any quota or refusal advice.
+UNATTRIBUTABLE_RECORD_ADVICE = (
+    "The execution record is not valid JSON -- usually a transcript cut off or corrupted "
+    "mid-write -- so this module cannot tell what the provider said from what the "
+    "reviewer read, and it gives no advice rather than advice drawn from the wrong text. "
+    "Read the record tail below: a spent balance or a transient provider error there is "
+    "worth a manual re-run; anything else is worth checking first."
+)
 
 
 def _strings_in(value: object, depth: int = 0) -> list[str]:
@@ -1018,7 +1038,8 @@ def _numbers_in(value: object) -> list[str]:
     ⚠️ **What this function returns is admitted to the PROVIDER-SCOPED text only -- of
     a record that PARSED -- and that is the load-bearing decision rather than an
     implementation detail.** (An unparseable record is searched whole by
-    :func:`classify`, unchanged and pre-existing; see :data:`OUTCOME_FIELDS`.)
+    :func:`classify` unless :func:`_record_is_unattributable` decides it first; see
+    :data:`OUTCOME_FIELDS`.)
     :data:`FATAL_UNLESS_PROVIDER_NAMED_PATTERNS` carries ``\b400\b``, so a bare status
     in the full haystack would turn any 400 that names no provider-side cause into
     ``fatal`` -- a bodyless 400, or a structured-output failure beside one -- with the
@@ -1027,9 +1048,8 @@ def _numbers_in(value: object) -> list[str]:
     ``invalid_request_error`` -- *"Your credit balance is too low to access the
     Anthropic API"* -- and the full-haystack form turned it from ``exhausted``/quota into
     ``fatal``. KBR-206 moved the pattern below the quota group, which rescues that body
-    but not a record carrying no cause at all, so the bound still holds.
-    KBR-166 already established that the separable
-    question is who WROTE a field; a numeric status is the most unambiguously
+    but not a record carrying no cause at all, so the bound still holds. KBR-166 already
+    established that the separable question is who WROTE a field; a numeric status is the most unambiguously
     provider-authored value in the record, so this applies that mechanism once more
     rather than widening what KBR-166 narrowed.
 
@@ -1148,10 +1168,15 @@ def classify(
             )
         return "fatal", "no execution record; Claude never reached the model"
 
+    # 🔴 KBR-206 (D3). A transcript too broken to attribute is decided before every tier:
+    # searched whole, what the reviewer READ would vote -- see `_record_is_unattributable`.
+    if _record_is_unattributable(execution_text):
+        return "fatal", UNATTRIBUTABLE_RECORD_REASON
+
     # Scoped to the record's own outcome fields when it is JSON, so that text the model merely
-    # READ cannot vote on why the run failed. A record that is not JSON is a CLI-level message
-    # with no tool results in it, and is searched whole -- which is how a rejected
-    # `--json-schema` is still caught.
+    # READ cannot vote on why the run failed. A record that is not JSON and reaches here is a
+    # CLI-level message with no tool results in it, and is searched whole -- which is how a
+    # rejected `--json-schema` is still caught.
     scoped = _outcome_text(execution_text)
     haystack = (execution_text if scoped is None else scoped).lower()
 
@@ -1180,11 +1205,8 @@ def classify(
     # -- one finding, derived once, is the only shape in which two readers cannot
     # disagree, which is the rule `retry_verdict` already states about `timed_out_attempt`.
     provider_scoped = _provider_outcome_text(execution_text).lower()
-    # KBR-206 (D3): the full-haystack tiers that grant a paid retry skip a record too
-    # broken to attribute. See `_promotable_outcome_text`.
-    promotable = _promotable_outcome_text(execution_text).lower()
 
-    hit = _first_match(QUOTA_PATTERNS, promotable)
+    hit = _first_match(QUOTA_PATTERNS, haystack)
     if hit:
         return "exhausted", f"provider quota exhausted: {hit!r}"
 
@@ -1194,7 +1216,7 @@ def classify(
     if hit:
         return "exhausted", f"provider quota exhausted: {hit!r}"
 
-    hit = _first_match(CREDENTIAL_PATTERNS, promotable)
+    hit = _first_match(CREDENTIAL_PATTERNS, haystack)
     if hit:
         return "exhausted", f"provider rejected the credentials or model: {hit!r}"
 
@@ -1724,6 +1746,11 @@ def _write_diagnostic(
         else:
             lines += [INSIDE_THE_BUDGET_OPENING]
         lines += ["", TIMED_OUT_DIAGNOSIS if timed_out_attempt else NO_RUN_ADVICE, ""]
+    elif _record_is_unattributable(execution_text):
+        # 🔴 KBR-206 (D3). Mirrors `classify`, which decides this record before any tier: the
+        # refusal and quota branches below would read what the reviewer READ and print advice
+        # under a verdict that says the record cannot be attributed.
+        lines += [UNATTRIBUTABLE_RECORD_ADVICE, ""]
     elif re.search(CONTEXT_MANAGEMENT_REFUSAL, evidence, re.I):
         # upstream. Placed above the quota branch so a refusal that happens to
         # carry a billing word cannot be read as a spent balance.
@@ -1764,10 +1791,7 @@ def _write_diagnostic(
             "is the knob.",
             "",
         ]
-    elif any(
-        re.search(p, _promotable_outcome_text(execution_text), re.I)
-        for p in QUOTA_PATTERNS
-    ) or any(
+    elif any(re.search(p, evidence, re.I) for p in QUOTA_PATTERNS) or any(
         re.search(p, provider_evidence, re.I) for p in QUOTA_WORD_PATTERNS
     ):
         # 🔴 KBR-166: this branch must mirror `classify`'s split, and forgetting the

@@ -4291,8 +4291,10 @@ entire rationale has lived in module comments, which is why three tickets (KBR-1
 KBR-166) each re-derived the same reasoning from scratch. The invariants are recorded here so
 the next change to it has something to contradict.
 
-**I-C1 — Tier order is a cost ordering, not a specificity ordering.** `FATAL_PATTERNS` is
-consulted first, then quota, then credentials, then the generic-code tier, then transients.
+**I-C1 — Tier order is a cost ordering, not a specificity ordering.** Tier 1 is consulted
+first — since KBR-206, the context-management refusal and then `FATAL_PATTERNS`, and ahead of it
+the unattributable-record check (I-C5, D3) — then quota, then credentials, then the generic-code
+tier, then transients.
 "Generic loses to everything more specific" reads well and is wrong: `EXHAUSTED_PATTERNS`
 carries the bare words `timeout` and `capacity`, which a model can write in its own prose, so
 yielding to them would let a billed rejection be retried at full price. The order is justified
@@ -4349,8 +4351,8 @@ record is `fatal`; as `api_error_status` alone it is not read there, and the rec
 
 ⚠️ Two qualifications, because the rule is easy to state more absolutely than it holds. It
 governs **parseable** records: when `_parse_events` fails, `classify` searches the raw text
-whole and always has, status text included — except that since KBR-206 (D3, I-C5) the
-full-haystack tiers that grant a paid retry skip such a record when it carries a `result` key. And `_provider_outcome_text` has a **second
+whole and always has, status text included — except that since KBR-206 (D3, I-C5) such a
+record carrying a `result` key is decided before every tier. And `_provider_outcome_text` has a **second
 consumer** — `_write_diagnostic`'s quota branch — so a numeric pattern added to
 `QUOTA_WORD_PATTERNS` would fire the top-up paragraph off a bare status, including under a
 `fatal` verdict. That is the door KBR-207 has to walk through carefully.
@@ -4419,12 +4421,15 @@ window. The coverage of `CONTEXT_MANAGEMENT_REFUSAL` is what decides the verdict
 wording matching neither alternative falls to the tiers below.
 
 *The leak the move uncovered (D3).* An unparseable record is searched whole, tool results included.
-A `400` anywhere in it used to reach tier 1 first; with the status demoted, `QUOTA_PATTERNS` and
-`CREDENTIAL_PATTERNS` read what the reviewer read — `src/kitty/bridge/server.py` names
-`authentication_error` — and granted a paid retry. The leak already existed for text without a `400`.
-`_promotable_outcome_text` applies `_provider_outcome_text`'s fallback rule to those two tiers and to
-the diagnostic's quota branch: a record too broken to attribute (not JSON, carrying a `result` key)
-gets no vote on a paid retry and falls to the generic tier's `fatal`.
+A `400` anywhere in it used to reach tier 1 first; with the status demoted, every full-haystack tier
+read what the reviewer read — `src/kitty/bridge/server.py` names `authentication_error`, the harness
+quotes the refusal's dated slug, and prose says `timeout` — and each granted a paid retry or gave advice
+drawn from it. The leak already existed for text without a `400`. **Scoping tiers one at a time was
+built first and failed review:** it removed the quota and credential votes, and the record fell to
+`EXHAUSTED_PATTERNS` or the fallthrough and was retried anyway, while a real spent balance in that
+shape lost its top-up advice. So `_record_is_unattributable` — not JSON per `_parse_events`, and
+carrying a `result` key — decides such a record before every tier: `fatal`, a fixed reason, no
+automatic retry, and a diagnostic paragraph that gives no advice drawn from unattributable text.
 
 *Measured*, `origin/main` @ `b902076` against the change: the 400-carrying module-level fixtures in
 `test_review_scripts.py`, the inline KBR-206 rows, `QUOTA_FIXTURES`, both schema rejections, four
@@ -4447,11 +4452,19 @@ fixture and no schema rejection changed verdict. The figure is a measurement, no
 * **D2 — a record naming only the context-management slug is `fatal`.** Its advice already said
   "re-running unchanged will not help"; the verdict now agrees. The cost is that a reviewer quoting the
   dated slug in a non-schema-failure `result` loses its retry.
-* **D3 — an unattributable record gets no paid retry from the full-haystack quota and credential
-  tiers**, closed in this ticket rather than filed, because the move widened it. `EXHAUSTED_PATTERNS`
-  and `STRUCTURED_OUTPUT_PATTERNS` are untouched: they sit below the generic tier, as I-C1 records.
+* **D3 — a transcript too broken to attribute is `fatal`, not retried, full stop.** Closed in this
+  ticket rather than filed, because the move widened it. Chosen over deferring it to a ticket after
+  the narrower version was measured failing. The cost, accepted by name: a spent balance or a
+  transient outage in that shape is reported as unreadable and not retried, so an operator reads the
+  record tail and re-runs by hand — a spent balance whose top-up advice worked on `main` in that
+  shape now gets none.
 
-*Residuals.* OpenRouter's *"can only afford 400"* message stays `fatal` with no advice unless a 402 is
+*Residuals.* **D3 does not reach two broken shapes.** A transcript cut off before its result event
+carries no `result` key, is indistinguishable from raw CLI output, and is still searched whole — on
+`main` a `400` beside a quota phrase there was `fatal`, and it is now a paid retry with top-up advice
+(`test_a_transcript_cut_before_its_result_event_still_reads_what_was_read` pins it). And
+`_parse_events` treats a record as readable if any line decodes, so an NDJSON record whose result
+line is corrupt is not unattributable and its lost result is never seen. OpenRouter's *"can only afford 400"* message stays `fatal` with no advice unless a 402 is
 in `api_error_status` or in the CLI's text outside `result`: a nested `"code":402` is never read, and
 `API Error: 402 …` inside `result` is read only by the anchored tiers, which carry no phrase of that
 message. A 401/402/403/404 status beside a malformed-request 400 body resolves to what the status
