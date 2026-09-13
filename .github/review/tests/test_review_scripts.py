@@ -18742,11 +18742,11 @@ MALFORMED_REQUEST_400 = (
 
 #: A 400 that names nothing at all, verbatim from continuedev/continue#1185.
 #:
-#: ⚠️ **A commenter on that issue later found the cause was a free-tier key**, and nothing in
-#: this text can say so -- which is the residual, stated rather than hidden: a status with no body is
-#: `fatal`, the conservative verdict that spends nothing. It is also the only fixture that
-#: reaches the generic tier through the STATUS alone, so it is what shows `\b400\b` still
-#: lives there.
+#: ⚠️ **A commenter on that issue later found the cause was a free-tier key**, and nothing
+#: in this text can say so -- which is the residual, stated rather than hidden: a status
+#: with no body is `fatal`, the conservative verdict that spends nothing. It is also the
+#: only fixture that reaches the generic tier through the STATUS alone, so it is what shows
+#: `\b400\b` still lives there.
 HTTP_400_NAMING_NO_CAUSE = "HTTP 400 Bad Request from https://api.anthropic.com/v1/messages"
 
 #: Every module-level fixture in this file whose text carries a 400, by the verdict it must

@@ -1049,9 +1049,9 @@ def _numbers_in(value: object) -> list[str]:
     Anthropic API"* -- and the full-haystack form turned it from ``exhausted``/quota into
     ``fatal``. KBR-206 moved the pattern below the quota group, which rescues that body
     but not a record carrying no cause at all, so the bound still holds. KBR-166 already
-    established that the separable question is who WROTE a field; a numeric status is the most unambiguously
-    provider-authored value in the record, so this applies that mechanism once more
-    rather than widening what KBR-166 narrowed.
+    established that the separable question is who WROTE a field; a numeric status is
+    the most unambiguously provider-authored value in the record, so this applies that
+    mechanism once more rather than widening what KBR-166 narrowed.
 
     The bounds are measured too. ``bool`` is excluded because it is an ``int`` subclass
     in Python and ``True`` would enter the haystack as ``"True"``. ``float`` is excluded
