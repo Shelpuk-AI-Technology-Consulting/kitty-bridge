@@ -1141,6 +1141,7 @@ class TestBackupColumnInProfileTable:
 
         with (
             patch("sys.stdin.isatty", return_value=True),
+            patch("sys.stdout.isatty", return_value=True),
             patch("kitty.cli.profile_cmd.print_table") as mock_table,
             patch("kitty.cli.profile_cmd.SelectionMenu.show", return_value="Back"),
         ):

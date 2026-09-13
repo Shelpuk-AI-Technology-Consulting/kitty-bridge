@@ -21,14 +21,12 @@ import asyncio
 import gzip
 import json
 import socket
-import sys
+import threading
 import time
 from collections.abc import Callable
-from contextlib import nullcontext
 from pathlib import Path
 
 import pytest
-from exemptions import ratchet
 
 import harness.recorder as recorder_module
 import harness.recorder_conformance as conformance_module
@@ -87,6 +85,13 @@ _SETTLE_STEP = 0.005
 
 #: How long to wait for a reply before giving up on it.
 _REPLY_TIMEOUT = 5.0
+
+#: More body than a loopback socket accepts in one non-blocking write while its
+#: reader is held back -- measured on Linux, where the kernel took under 4 MiB --
+#: so some of it is still queued in the transport when the abort runs, the state
+#: Windows' Proactor loop is in after every write. If a platform ever accepts it
+#: all, the case's precondition fails loudly rather than passing vacuously.
+_OVERRUN_BYTES = 16 * 1024 * 1024
 
 
 #: A clock step far coarser than a probe pair takes, so two back-to-back probes
@@ -950,14 +955,68 @@ class TestTheResponderSeam:
         recorder.responder = truncate
         reply = await _exchange(recorder, probe("t", body=b'{"stream": true}'))
 
-        # KBR-188/189: exempt the WINDOWS CELL only -- this assertion gates
-        # normally on the Linux and macOS legs, and fails the job the day
-        # Windows starts passing. §8.3's parametrised-cell shape.
-        exempt = sys.platform == "win32"
-        with ratchet("recorder-responder-abort-emits-before-dropping") if exempt else nullcontext():
-            assert b"data: " in reply
+        assert b"data: " in reply
 
         assert b"[DONE]" not in reply, "the stream must have been cut before its terminator"
+        assert not _reply_is_complete(reply), (
+            "the HTTP response must be left unfinished, with no chunked terminator"
+        )
+
+    async def test_an_abort_delivers_every_byte_written_before_it(
+        self, recorder: RecordingUpstream
+    ) -> None:
+        """Assert an abort drops the connection only after what was written is sent.
+
+        On Windows every write is still queued in the transport when the
+        responder's next statement runs, and an abort that discarded the queue
+        sent headers and no body (KBR-189). Linux hands a write to the kernel at
+        once, so this case reaches that state on every leg by queuing more than
+        the socket accepts, with the client held back from reading until the
+        abort has run. It proves delivery only; the reply's own
+        ``Content-Length`` is met, so unfinishedness is the case above's claim.
+
+        Args:
+            recorder: The running recorder.
+        """
+        queued_at_abort: list[int] = []
+        aborted = threading.Event()
+
+        async def overrun(captured: CapturedRequest, response: Reply) -> None:
+            """Queue more body than the socket accepts, then abort.
+
+            Args:
+                captured: The recorded request.
+                response: The response to write.
+            """
+            try:
+                response.content_length = _OVERRUN_BYTES
+                await response.begin(200, {"Content-Type": "application/octet-stream"})
+                transport = response.request.transport
+                assert transport is not None, "the connection closed before the body was queued"
+                # Onto the transport directly: past 64 KiB aiohttp's own write
+                # waits for the queue to fall to its low-water mark, nearly empty.
+                transport.write(b"x" * _OVERRUN_BYTES)
+                # `Reply.abort()` has no `await` before its close, so no loop turn
+                # separates this reading from the close, and the reader is held back.
+                queued_at_abort.append(transport.get_write_buffer_size())
+                await response.abort()
+            finally:
+                aborted.set()
+
+        recorder.responder = overrun
+        reply = await asyncio.to_thread(
+            _read_to_eof_blocking, recorder.host, recorder.port, probe("o"), aborted
+        )
+
+        assert queued_at_abort and queued_at_abort[0] > 0, (
+            "vacuous: nothing was still queued when abort() ran, so this run "
+            "could not tell a flushing abort from a discarding one"
+        )
+        received = len(reply.partition(b"\r\n\r\n")[2])
+        assert received == _OVERRUN_BYTES, (
+            f"abort() lost {_OVERRUN_BYTES - received:,} of {_OVERRUN_BYTES:,} body bytes "
+            f"with {queued_at_abort[0]:,} still queued: it must flush before dropping"
+        )
 
 
 class TestTheRecorderStaysIndependentOfKitty:
@@ -1064,6 +1123,36 @@ def _exchange_blocking(host: str, port: int, raw: bytes) -> bytes:
                 break
     finally:
         sock.close()
+    return b"".join(chunks)
+
+
+def _read_to_eof_blocking(host: str, port: int, raw: bytes, released: threading.Event) -> bytes:
+    """Send ``raw``, wait for ``released``, then read until the connection closes.
+
+    For a reply that ends in a disconnect, where end-of-connection is the only
+    end there is. Unlike :func:`_exchange_blocking` it joins the chunks once, not
+    per read, which matters at :data:`_OVERRUN_BYTES`, and it lets a reset
+    propagate rather than returning what arrived before it.
+
+    Args:
+        host: The recorder's bind address.
+        port: The recorder's listening port.
+        raw: The request bytes.
+        released: Set by the responder when it finishes, aborted or not. Reading
+            starts only then, so a concurrent reader cannot drain the socket while
+            the responder is queuing, which would make the queue's size a race. A
+            responder that never finishes costs one timeout, then reading starts
+            anyway and the case fails on what arrived.
+
+    Returns:
+        Every byte received before end-of-connection.
+    """
+    chunks: list[bytes] = []
+    with socket.create_connection((host, port), timeout=_REPLY_TIMEOUT) as sock:
+        sock.sendall(raw)
+        released.wait(_REPLY_TIMEOUT)
+        while chunk := sock.recv(1 << 20):
+            chunks.append(chunk)
     return b"".join(chunks)
 
 

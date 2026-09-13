@@ -14,6 +14,11 @@ subprocess tests spawn a real child, because the claim is about the *interpreter
 start-up encoding* and no in-process test can create one: ``PYTHONIOENCODING``
 is read before the test exists.
 
+**KBR-204 shares the harness.** The last group of subprocess tests is about the
+same Windows family — kitty misbehaving because its output is redirected — reached
+through the interactivity guard rather than the encoding. They reuse the isolated
+child runner, and hand it a stdin the child genuinely reports as a terminal.
+
 **Layer.** ``l1`` by path default, and it stays there even though it spawns
 processes: ``TEST_SUITE.md`` §8.2 forbids moving a test to ``l3`` before the
 Subsystem job exists, and ``l3`` is selected by no job today. §8.2 lists this
@@ -22,11 +27,13 @@ file among the ``l1`` modules that spawn processes, for T-K6 and T-H1.
 
 from __future__ import annotations
 
+import contextlib
 import inspect
 import io
 import os
 import subprocess
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -69,6 +76,12 @@ _CRASH_MARKERS = ("UnicodeEncodeError", "Traceback (most recent call last)")
 # falsification assertion would go red saying the harness is broken, when what
 # actually changed is the bait. See `test_the_harness_detects_an_unhardened_child`.
 FALSIFICATION_GLYPH = "\u2139"
+
+# The diagnosis `kitty.cli.main._tty_required` prints for every interactive
+# command, and the exit code it raises. Exit code alone is not enough: 2 is also
+# argparse's usage-error code.
+TTY_DIAGNOSIS = "requires an interactive terminal"
+TTY_REQUIRED_EXIT = 2
 
 
 def _isolated_environment(home: Path, encoding: str) -> dict[str, str]:
@@ -119,13 +132,17 @@ def _isolated_environment(home: Path, encoding: str) -> dict[str, str]:
     return environment
 
 
-def _run_child(argv: list[str], *, home: Path, encoding: str) -> subprocess.CompletedProcess[bytes]:
+def _run_child(
+    argv: list[str], *, home: Path, encoding: str, stdin: int = subprocess.DEVNULL
+) -> subprocess.CompletedProcess[bytes]:
     """Run a child interpreter with a fixed stream encoding and capture raw bytes.
 
     Args:
         argv: Arguments after the interpreter, e.g. ``["-m", "kitty", "doctor"]``.
         home: Directory to isolate the child into.
         encoding: Value for ``PYTHONIOENCODING``.
+        stdin: What the child reads from — :data:`subprocess.DEVNULL` by
+            default, or a file descriptor from :func:`_interactive_looking_stdin`.
 
     Returns:
         The completed process, with ``stdout`` and ``stderr`` as :class:`bytes`.
@@ -144,25 +161,28 @@ def _run_child(argv: list[str], *, home: Path, encoding: str) -> subprocess.Comp
     return subprocess.run(  # noqa: S603
         [sys.executable, *argv],
         env=_isolated_environment(home, encoding),
-        stdin=subprocess.DEVNULL,
+        stdin=stdin,
         capture_output=True,
         timeout=60,
         check=False,
     )
 
 
-def _run_kitty(command: tuple[str, ...], *, home: Path, encoding: str) -> subprocess.CompletedProcess[bytes]:
+def _run_kitty(
+    command: tuple[str, ...], *, home: Path, encoding: str, stdin: int = subprocess.DEVNULL
+) -> subprocess.CompletedProcess[bytes]:
     """Run one kitty command in an isolated child.
 
     Args:
         command: The command words, e.g. ``("egress", "show")``.
         home: Directory to isolate the child into.
         encoding: Value for ``PYTHONIOENCODING``.
+        stdin: What the child reads from; see :func:`_run_child`.
 
     Returns:
         The completed process, with output as :class:`bytes`.
     """
-    return _run_child(["-m", "kitty", *command], home=home, encoding=encoding)
+    return _run_child(["-m", "kitty", *command], home=home, encoding=encoding, stdin=stdin)
 
 
 def _crashed(completed: subprocess.CompletedProcess[bytes]) -> bool:
@@ -540,6 +560,149 @@ def test_the_glyphs_still_reach_stdout_on_a_utf8_stream(tmp_path: Path) -> None:
     completed = _run_kitty(("--version",), home=tmp_path / "home", encoding="utf-8")
 
     assert "—" in completed.stdout.decode("utf-8")
+
+
+@contextlib.contextmanager
+def _interactive_looking_stdin() -> Iterator[int]:
+    """Yield a stdin that a child reports as a terminal, while its stdout stays a pipe.
+
+    This is the asymmetry KBR-187 and KBR-204 are about, built for real on every
+    platform instead of simulated. On Windows it is ``NUL``: ``isatty()`` is true
+    there for any character device, which is the defect's own premise. On POSIX
+    ``/dev/null`` is *not* a terminal, so the harness opens a pseudo-terminal and
+    hands the child its terminal end.
+
+    Yields:
+        A value for :func:`_run_child`'s ``stdin``.
+    """
+    if sys.platform == "win32":
+        yield subprocess.DEVNULL
+        return
+
+    # Imported here because `pty` does not exist on Windows.
+    import pty
+
+    controller, terminal = pty.openpty()
+    try:
+        yield terminal
+    finally:
+        os.close(terminal)
+        os.close(controller)
+
+
+def _asked_for_a_terminal(completed: subprocess.CompletedProcess[bytes]) -> bool:
+    """Report whether a child refused the way an interactive command should.
+
+    Args:
+        completed: A finished child process.
+
+    Returns:
+        True when the child exited with :data:`TTY_REQUIRED_EXIT`, printed
+        :data:`TTY_DIAGNOSIS`, and did not crash.
+    """
+    output = (completed.stdout + completed.stderr).decode("utf-8", errors="replace")
+
+    return completed.returncode == TTY_REQUIRED_EXIT and TTY_DIAGNOSIS in output and not _crashed(completed)
+
+
+def test_the_child_sees_an_interactive_stdin_and_a_piped_stdout(tmp_path: Path) -> None:
+    """Premise: the two KBR-204 tests below run against the asymmetry they claim to.
+
+    Without this, a stdin helper that quietly fell back to ``/dev/null`` on POSIX
+    would turn the product test green on the Linux and macOS legs **against the
+    defect**, because a non-terminal stdin is refused by the old guard too.
+
+    Args:
+        tmp_path: Per-test isolated home.
+    """
+    with _interactive_looking_stdin() as stdin:
+        completed = _run_child(
+            ["-c", "import sys; print(sys.stdin.isatty(), sys.stdout.isatty())"],
+            home=tmp_path / "home",
+            encoding="utf-8",
+            stdin=stdin,
+        )
+
+    assert completed.stdout.decode().split() == ["True", "False"], (
+        "the child did not see (interactive stdin, piped stdout), so the KBR-204 "
+        f"tests would not exercise the defect:\n{completed.stderr.decode('utf-8', errors='replace')}"
+    )
+
+
+def test_an_interactive_command_with_redirected_output_asks_for_a_terminal(tmp_path: Path) -> None:
+    """KBR-204: ``kitty egress`` refuses a redirected stdout instead of reporting success.
+
+    Before the fix, ``check_tty`` read stdin alone and let the command in; the
+    menu's own guard — already both-streams since KBR-187 — then declined in
+    silence, and kitty exited **0** having done nothing. A script would read that
+    as success. On Windows the same gap took ``kitty auth openai`` through a
+    browser login and then crashed at the first prompt.
+
+    ``egress`` is the command this drives because it reaches ``check_tty``
+    directly on a fresh home. ``profile``, ``setup`` and ``auth`` are routed to
+    the setup wizard first when no profile exists, and the wizard's first menu
+    already refuses, so they would pass with or without the fix.
+
+    Args:
+        tmp_path: Per-test isolated home.
+    """
+    with _interactive_looking_stdin() as stdin:
+        completed = _run_kitty(("egress",), home=tmp_path / "home", encoding="utf-8", stdin=stdin)
+
+    assert _asked_for_a_terminal(completed), (
+        f"`kitty egress` with an interactive stdin and a piped stdout exited {completed.returncode} "
+        f"instead of {TTY_REQUIRED_EXIT} with {TTY_DIAGNOSIS!r}:\n"
+        f"stdout: {completed.stdout.decode('utf-8', errors='replace')}\n"
+        f"stderr: {completed.stderr.decode('utf-8', errors='replace')}"
+    )
+
+
+def test_the_harness_detects_a_stdin_only_guard(tmp_path: Path) -> None:
+    """Falsification: the harness must see the KBR-204 defect when it is put back.
+
+    ``TEST_SUITE_IMPLEMENTATION_PLAN.md`` §1.4. The child reverts the one shared
+    predicate to its old stdin-only reading, then runs the real ``main`` on
+    ``egress``. That is exactly the state before the fix, and the assertion pins
+    its exact signature — exit 0, no diagnosis, no traceback — rather than merely
+    "not a refusal", so a child that died of a typo cannot pass it.
+
+    Routed through :func:`_run_child` with the same stdin helper as the product
+    test, so a runner that stopped passing ``stdin`` turns this red.
+
+    ⚠️ ``kitty.tui.menu`` is imported **before** the revert, so the menus keep the
+    real predicate they bound at import. That is the pre-fix pairing — menus
+    already fixed by KBR-187, ``check_tty`` not. Reverting both would be a
+    different defect: the menu would start drawing and wait on the pseudo-terminal
+    for keys, and this case would fail by timeout instead of by signature. The
+    child asserts the menus still hold the real predicate, so an import-order
+    change fails here with a traceback that names the bait rather than a
+    60-second timeout.
+
+    Args:
+        tmp_path: Per-test isolated home.
+    """
+    revert_the_guard = (
+        "import sys, kitty.tui.menu as menu, kitty.tui.prompts as prompts; "
+        "real = prompts.can_interact; "
+        "prompts.can_interact = lambda: sys.stdin.isatty(); "
+        "assert menu.can_interact is real, 'the bait reverted the menus too, or they stopped sharing it'; "
+        "sys.argv = ['kitty', 'egress']; "
+        "from kitty.cli.main import main; main()"
+    )
+    with _interactive_looking_stdin() as stdin:
+        completed = _run_child(["-c", revert_the_guard], home=tmp_path / "home", encoding="utf-8", stdin=stdin)
+
+    output = (completed.stdout + completed.stderr).decode("utf-8", errors="replace")
+    assert not _asked_for_a_terminal(completed), (
+        "`_asked_for_a_terminal` accepted a kitty whose guard reads stdin alone, so the product "
+        f"test above cannot tell the fix from the defect. exit={completed.returncode}\n{output}"
+    )
+    assert (completed.returncode, TTY_DIAGNOSIS in output, _crashed(completed)) == (0, False, False), (
+        "a kitty whose guard reads stdin alone did not show the KBR-204 signature "
+        "(exit 0, no diagnosis, no traceback). Either the harness no longer builds the "
+        "asymmetry, or `kitty.tui.prompts.can_interact` is no longer what `check_tty` "
+        f"consults, and this bait no longer reverts it. exit={completed.returncode}\n{output}"
+    )
 
 
 class _Sentinel(Exception):
