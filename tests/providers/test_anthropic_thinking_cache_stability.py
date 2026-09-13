@@ -14,8 +14,9 @@ and then the adapter's ``translate_to_upstream`` — the translated route as the
 bridge runs it.  Starting from a hand-built Chat Completions dict would skip the
 half of the route that decides what is carried at all.
 
-Register rows: P5c (the budget rewrite) and P5d (adaptive thinking, effort and
-``display``), ``.system_design/TEST_SUITE.md`` §3.2.2.  The native-passthrough
+Register rows: P5c (the budget rewrite) and P5d (adaptive thinking, effort,
+``display`` and — since KBR-224 — ``output_config``),
+``.system_design/TEST_SUITE.md`` §3.2.2.  The native-passthrough
 counterpart lives in ``tests/bridge/test_native_thinking_passthrough.py``.
 """
 
@@ -148,9 +149,10 @@ class TestAdaptiveThinkingAndEffortAreStable:
 
         That key is not in Anthropic's API reference: it is what Claude Code
         sends (TEST_SUITE.md §7.4.1).  The documented spelling is
-        ``output_config.effort``, which this route drops (KBR-224), and the
-        values here are borrowed from that field's enum.  So this pins
-        verbatim copying and nothing more — it makes no claim about caching.
+        ``output_config.effort``, which KBR-224 now carries alongside this key
+        (see ``tests/providers/test_anthropic_output_config.py``); the values
+        here are borrowed from that field's enum.  So this pins verbatim
+        copying and nothing more — it makes no claim about caching.
 
         Args:
             effort: A value from ``output_config.effort``'s enum.

@@ -53,6 +53,11 @@ class ProviderAdapter(ABC):
             # `metadata` is a stored-completions tag map, a different concept, so
             # stripping it here keeps it off every other provider's wire.
             "_metadata",
+            # KBR-224: written by MessagesTranslator.translate_request to carry the
+            # agent's `output_config` — Anthropic's documented spelling of the
+            # effort control — which Chat Completions has no field for.
+            # AnthropicAdapter restores it where the upstream documents the field.
+            "_output_config",
             "base_url",  # F15 defense-in-depth — URL override goes through build_base_url(),
             # not the CC request body.  Stripping it here protects
             # adapters that rely on the default translate_to_upstream().
