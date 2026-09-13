@@ -83,7 +83,7 @@ PENDING_ACTIVATION_LAYERS: Mapping[str, str] = {
     "l3": "the Subsystem job — plan task T-K6",
     "acceptance": "the Acceptance job — plan task T-K9",
     "agent_smoke": "the agent-smoke category — plan task T-K10",
-    "agent_live": "the Agent-live nightly — plan task T-K11",
+    # agent_live is selected by tmux-disconnect.yml for one file; the nightly for the rest (T-K11) is still owed.
     "eval": "the Eval nightly — plan task T-K12",
     "load": "the Load workflow — plan task T-K5",
 }

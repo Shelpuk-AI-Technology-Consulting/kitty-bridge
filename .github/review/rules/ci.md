@@ -1,7 +1,8 @@
 # Rule: CI and the review system (`.github/**`)
 
-This directory contains five workflows — `claude-code-review.yml`, `ci.yml`,
-`tests.yml`, `publish.yml` and `model-metadata.yml` — plus the review system that
+This directory contains six workflows — `claude-code-review.yml`, `ci.yml`,
+`tests.yml`, `publish.yml`, `model-metadata.yml` and `tmux-disconnect.yml` — plus the
+review system that
 `claude-code-review.yml` drives. (The files are **named** rather than counted: a
 count in prose is wrong the moment the next one lands, silently, and nothing
 checks it. A guard holds this list to the recorded set — which is also why the
@@ -19,6 +20,13 @@ Their division of labour is the thing to hold when reviewing a change here:
   Moving it back into `ci.yml` would force either a red `main` on every merge or
   a second event-conditional excuse in the aggregate — and there may be exactly
   one of those. Flag such a move.
+- **`tmux-disconnect.yml`** is the live proof that `kitty claude -w … --tmux`
+  survives a terminal hang-up (`SYSTEM_DESIGN.md` §3.4). It is **not** a gate: it
+  is path-filtered, so as a required check it would sit pending on every other
+  pull request. Unlike the review job it installs the pull request's **own**
+  checkout with the organisation's kitty credentials, so its egress guarantee is
+  a firewall scoped to its test user, not kitty's resolver. Weakening that
+  firewall, its self-check, or the job's fork guard is a critical finding.
 
 **The reviewer is reviewing itself here**, so the bar is higher, not lower: a
 defect in this tree degrades or disables review across the repository without

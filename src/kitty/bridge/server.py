@@ -520,8 +520,9 @@ def _route_model(cc_request: dict) -> str:
     """Return the model every routing decision for this request must read.
 
     One question — "which model is this request for?" — kept in one place. On
-    the bridge's side the upstream **path**, the auth **scheme** and the
-    thinking-repair carrier's dialect all read it; on the adapter's side
+    the bridge's side the upstream **path**, the auth **scheme**, the
+    thinking-repair carrier's dialect and whether a Messages stream is forwarded
+    (:meth:`BridgeServer._serves_messages_wire`) all read it; on the adapter's side
     ``translate_to_upstream`` reads the same key directly, because
     ``kitty.providers`` cannot import from ``kitty.bridge``. Keeping those two
     halves on one string is what this function is for.
@@ -3894,9 +3895,9 @@ class BridgeServer:
                     )
                     await asyncio.sleep(delay)
                 try:
-                    # Until release a native attempt writes nothing, so no failed write can reveal a
+                    # Until release a Messages-wire attempt writes nothing, so no failed write can reveal a
                     # gone client — on the first attempt or a retry; check before paying for one.
-                    if sr is None and self._active_provider.use_native_messages:
+                    if sr is None and self._serves_messages_wire(cc_request):
                         _raise_if_client_gone()
                     session = await self._session_for(url)
                     async with session.post(
@@ -4042,11 +4043,11 @@ class BridgeServer:
                             break
 
                         # Success path — stream the response
-                        if self._active_provider.use_native_messages:
-                            # Native Messages: forward raw SSE bytes to client,
-                            # withholding the leading events until content arrives
-                            # (KBR-155, §11 Q14(b)) so an empty reply is judged
-                            # before any byte is written and can still be retried.
+                        if self._serves_messages_wire(cc_request):
+                            # Messages wire, native or translated (KBR-227): forward raw
+                            # SSE bytes to client, withholding the leading events until
+                            # content arrives (KBR-155, §11 Q14(b)) so an empty reply is
+                            # judged before any byte is written and can still be retried.
                             # The auditor reads the bytes written, so the forwarded
                             # tool_use inputs are recoverable from our own log
                             # (issue #33); it never alters what is written.
@@ -4072,6 +4073,9 @@ class BridgeServer:
                                 # still worth reporting.
                                 auditor.finish()
                             if hold.released:
+                                # Count the turn in /stats as the translated branch does; a
+                                # discarded empty attempt is not a completion (KBR-227).
+                                self._log_usage(None)
                                 stream_ok = True
                                 break
 
@@ -4450,7 +4454,7 @@ class BridgeServer:
                                 type(exc).__name__,
                                 message_id,
                             )
-                            # The native-passthrough path never drives the
+                            # The Messages-wire forwarding path never drives the
                             # translator, so it has no half-open message to
                             # close and would otherwise leave the client on an
                             # SSE stream that just stops.  Those get the error
@@ -4491,7 +4495,7 @@ class BridgeServer:
                                 self._mark_backend_unhealthy(self._current_backend_idx, cooldown=self._backend_cooldown)
                             block_stops = translator.close_open_blocks()
                             # A finish chunk already reset the translator; its stops sit unwritten in the buffer.
-                            if not block_stops and not self._active_provider.use_native_messages:
+                            if not block_stops and not self._serves_messages_wire(cc_request):
                                 block_stops = _stops_for_blocks_the_client_saw(finish_events)
                             try:
                                 for stop in block_stops:
@@ -7190,6 +7194,30 @@ class BridgeServer:
         model = _route_model(cc_request)
         path = self._active_provider.get_upstream_path(model)
         return self._active_provider.compose_upstream_url(base, path)
+
+    def _serves_messages_wire(self, cc_request: dict) -> bool:
+        """Return whether the selected backend's upstream speaks Anthropic Messages for this request.
+
+        A ``/v1/messages`` stream from such an upstream is already in the
+        client's protocol, so the handler forwards it rather than translating it.
+        Native passthrough adapters qualify, and so do translated ones —
+        ``anthropic``, ``minimax_token`` by default, ``opencode_go`` for its
+        Messages-routed models — whose streams the Chat Completions chunk
+        translator used to discard entirely (KBR-227).  Every branch that
+        decides how a Messages-wire stream is handled must ask this one method,
+        so a change to the rule cannot reach one site and miss another.
+
+        Args:
+            cc_request: The request, normalized for the selected backend; its
+                model is read through :func:`_route_model`.
+
+        Returns:
+            True when the upstream's reply is an Anthropic Messages stream.
+        """
+        provider = self._active_provider
+        return provider.use_native_messages or provider.upstream_wire_is_messages_api_for_model(
+            _route_model(cc_request)
+        )
 
     def _upstream_body_for(self, cc_request: dict) -> dict:
         """Serialize ``cc_request`` for the backend currently selected.
