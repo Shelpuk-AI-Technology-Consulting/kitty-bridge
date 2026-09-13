@@ -53,6 +53,11 @@ _EXPECTED_KEYS: dict[str, set[str]] = {
         # KBR-178: Chat Completions has no `top_k`, so the inbound value rides
         # an internal key to the Anthropic-family adapters that accept it.
         "_top_k",
+        # KBR-214: the Anthropic `metadata` rides an internal key for the same
+        # reason; CC's own `metadata` is a different concept (D1). Written by the
+        # shared helper both Messages -> CC converters call, so it is minted
+        # here and not in `bridge/server.py`.
+        "_metadata",
     },
     "bridge/responses/translator.py": {"_reasoning_effort", "_thinking_enabled"},
     "bridge/server.py": {

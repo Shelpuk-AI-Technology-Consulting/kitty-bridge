@@ -44,6 +44,11 @@ class ProviderAdapter(ABC):
             # "do not restore", not "would reject": ollama_cloud accepts an
             # options.top_k and is simply never sent one -- gap G28 records why.
             "_top_k",
+            # KBR-214: carries the agent's Anthropic `metadata` to the
+            # Anthropic-family adapters that restore it. Chat Completions' own
+            # `metadata` is a stored-completions tag map, a different concept, so
+            # stripping it here keeps it off every other provider's wire.
+            "_metadata",
             "base_url",  # F15 defense-in-depth — URL override goes through build_base_url(),
             # not the CC request body.  Stripping it here protects
             # adapters that rely on the default translate_to_upstream().

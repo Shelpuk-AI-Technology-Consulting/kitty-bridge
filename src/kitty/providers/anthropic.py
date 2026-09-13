@@ -25,12 +25,57 @@ _STOP_REASON_MAP: dict[str | None, str] = {
     None: "stop",
 }
 
+# CC string tool_choice → Anthropic tool_choice type (KBR-214)
+_CC_TO_ANTHROPIC_TOOL_CHOICE: dict[str, str] = {"auto": "auto", "required": "any", "none": "none"}
+
 # CC finish_reason → Anthropic stop_reason (for reverse mapping if needed)
 _FINISH_TO_STOP: dict[str, str] = {
     "stop": "end_turn",
     "tool_calls": "tool_use",
     "length": "max_tokens",
 }
+
+
+def _anthropic_tool_choice(cc_request: dict) -> dict | None:
+    """Translate a Chat Completions ``tool_choice`` into Anthropic's object form.
+
+    ``"auto"``, ``"required"`` and ``"none"`` become ``{"type": "auto"}``,
+    ``{"type": "any"}`` and ``{"type": "none"}``; the named form
+    ``{"type": "function", "function": {"name": x}}`` becomes
+    ``{"type": "tool", "name": x}``.  Any other value -- including Chat
+    Completions' allowed-tools and custom forms, which Anthropic cannot express
+    -- yields ``None`` so the caller writes nothing rather than a guess.
+
+    ``parallel_tool_calls: False`` is carried as ``disable_parallel_tool_use:
+    True`` on the returned object, because Anthropic has no top-level knob.
+    ``none`` has no slot for it, and a bare ``parallel_tool_calls`` with no
+    choice returns ``None``: carrying it would mean inventing a
+    ``{"type": "auto"}`` the agent never sent (KBR-214 D4).
+
+    Args:
+        cc_request: The Chat Completions request being translated.
+
+    Returns:
+        The Anthropic ``tool_choice`` object, or ``None`` when there is nothing
+        Anthropic can be told.
+    """
+    choice = cc_request.get("tool_choice")
+    if isinstance(choice, str) and choice in _CC_TO_ANTHROPIC_TOOL_CHOICE:
+        anthropic: dict = {"type": _CC_TO_ANTHROPIC_TOOL_CHOICE[choice]}
+    elif (
+        isinstance(choice, dict)
+        and choice.get("type") == "function"
+        and isinstance(choice.get("function"), dict)
+        and isinstance(choice["function"].get("name"), str)
+    ):
+        anthropic = {"type": "tool", "name": choice["function"]["name"]}
+    else:
+        return None
+
+    # Only a present, explicit `false` changes anything; `true` is the default.
+    if anthropic["type"] != "none" and cc_request.get("parallel_tool_calls") is False:
+        anthropic["disable_parallel_tool_use"] = True
+    return anthropic
 
 
 def _safe_json_load_args(arguments: str | None) -> dict:
@@ -167,6 +212,18 @@ class AnthropicAdapter(ProviderAdapter):
         # Translate tools
         if "tools" in cc_request and cc_request["tools"]:
             anthropic["tools"] = self._translate_tools(cc_request["tools"])
+
+        # KBR-214: this body is rebuilt from an allowlist, so an agent's tool
+        # constraint is dropped here unless it is written back explicitly.
+        tool_choice = _anthropic_tool_choice(cc_request)
+        # A choice over no tools would describe tools this body does not declare.
+        if tool_choice is not None and "tools" in anthropic:
+            anthropic["tool_choice"] = tool_choice
+
+        # KBR-214: restored from internal metadata, because Chat Completions has
+        # no field of its own that means Anthropic's `metadata`.
+        if cc_request.get("_metadata") is not None:
+            anthropic["metadata"] = cc_request["_metadata"]
 
         # Restore thinking from normalized effort metadata
         if cc_request.get("_thinking_adaptive"):

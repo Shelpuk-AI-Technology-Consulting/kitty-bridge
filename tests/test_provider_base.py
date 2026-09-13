@@ -207,6 +207,34 @@ class TestTranslateToUpstreamDefault:
         assert "_top_k" not in result
         assert result["model"] == "gpt-4o"
 
+    def test_keeps_tool_choice_and_parallel_tool_calls_so_the_passthrough_carries_them(self):
+        """KBR-214: the default passthrough must KEEP both CC tool-selection fields.
+
+        Both are Chat Completions' own field names, so the passthrough adapters
+        deliver the agent's tool choice purely by copying the keys through.  This
+        is the positive control for that "fixed for free" half: if either key ever
+        joined ``_INTERNAL_KEYS`` those adapters would silently drop it again.
+        """
+        adapter = _stub_adapter()
+        cc = {"model": "gpt-4o", "messages": [], "tool_choice": "required", "parallel_tool_calls": False}
+        result = adapter.translate_to_upstream(cc)
+        assert result["tool_choice"] == "required"
+        assert result["parallel_tool_calls"] is False
+
+    def test_strips_internal_metadata(self):
+        """KBR-214: ``_metadata`` is internal and must never reach a provider.
+
+        It carries the agent's Anthropic ``metadata`` to the Anthropic-family
+        adapters that restore it.  Chat Completions' own ``metadata`` is a
+        different concept, so registering the key here keeps it off every other
+        wire (D1).
+        """
+        adapter = _stub_adapter()
+        cc = {"model": "gpt-4o", "messages": [], "_metadata": {"user_id": "u-123"}}
+        result = adapter.translate_to_upstream(cc)
+        assert "_metadata" not in result
+        assert "metadata" not in result
+
     def test_strips_base_url_defense_in_depth(self):
         """F15: base_url must never leak into the upstream body.
 

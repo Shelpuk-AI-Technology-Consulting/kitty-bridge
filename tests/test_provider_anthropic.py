@@ -2,6 +2,8 @@
 
 import json
 
+import pytest
+
 from kitty.bridge.messages.translator import MessagesTranslator
 from kitty.providers.anthropic import AnthropicAdapter
 
@@ -371,6 +373,131 @@ class TestAnthropicStopSequencesAndTopK:
         result = self.adapter.translate_to_upstream(cc)
         assert result["stop_sequences"] == ["one", "two", "three", "four", "five"]
         assert result["top_k"] == 40
+
+
+class TestAnthropicToolChoiceAndMetadata:
+    """KBR-214: the CC ``tool_choice`` and ``_metadata`` reach the Messages body.
+
+    This adapter rebuilds its body from an allowlist, so anything it does not
+    write is dropped -- which is how a Messages -> CC -> Messages route lost both
+    fields even after hop 1 carried them.
+    """
+
+    def setup_method(self):
+        self.adapter = AnthropicAdapter()
+
+    def _cc(self, **extra):
+        """Build a minimal CC request with one tool, plus the case's fields."""
+        cc = {
+            "model": "claude-sonnet-4-6",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream": False,
+            "tools": [{"type": "function", "function": {"name": "get_weather", "parameters": {}}}],
+        }
+        cc.update(extra)
+        return cc
+
+    @pytest.mark.parametrize(
+        ("cc", "anthropic"),
+        [
+            ("auto", {"type": "auto"}),
+            ("required", {"type": "any"}),
+            ("none", {"type": "none"}),
+            ({"type": "function", "function": {"name": "get_weather"}}, {"type": "tool", "name": "get_weather"}),
+        ],
+        ids=["auto", "required", "none", "named"],
+    )
+    def test_tool_choice_value_is_translated(self, cc, anthropic):
+        """Each CC value the Messages ingress can produce maps back (R5)."""
+        result = self.adapter.translate_to_upstream(self._cc(tool_choice=cc))
+        assert result["tool_choice"] == anthropic
+
+    @pytest.mark.parametrize(
+        ("cc", "anthropic"),
+        [
+            ("auto", {"type": "auto", "disable_parallel_tool_use": True}),
+            ("required", {"type": "any", "disable_parallel_tool_use": True}),
+            (
+                {"type": "function", "function": {"name": "get_weather"}},
+                {"type": "tool", "name": "get_weather", "disable_parallel_tool_use": True},
+            ),
+            ("none", {"type": "none"}),
+        ],
+        ids=["auto", "required", "named", "none-cannot-carry-it"],
+    )
+    def test_parallel_tool_calls_false_rides_the_choice(self, cc, anthropic):
+        """Anthropic spells the knob inside the choice object, and ``none`` has no slot (R5)."""
+        result = self.adapter.translate_to_upstream(self._cc(tool_choice=cc, parallel_tool_calls=False))
+        assert result["tool_choice"] == anthropic
+        assert "parallel_tool_calls" not in result
+
+    def test_parallel_tool_calls_true_adds_nothing(self):
+        """``true`` is the default on both wires (D2)."""
+        result = self.adapter.translate_to_upstream(self._cc(tool_choice="required", parallel_tool_calls=True))
+        assert result["tool_choice"] == {"type": "any"}
+
+    def test_bare_parallel_tool_calls_false_synthesises_no_choice(self):
+        """Carrying the knob alone would mean inventing ``{"type": "auto"}`` (D4)."""
+        result = self.adapter.translate_to_upstream(self._cc(parallel_tool_calls=False))
+        assert "tool_choice" not in result
+        assert "parallel_tool_calls" not in result
+
+    @pytest.mark.parametrize(
+        "unrecognised",
+        [
+            None,
+            {"type": "allowed_tools", "allowed_tools": {"mode": "auto", "tools": []}},
+            {"type": "function"},
+            {"type": "function", "function": {}},
+            {"type": "function", "function": {"name": 7}},
+            "bogus",
+        ],
+        ids=[
+            "null",
+            "allowed-tools",
+            "named-without-function",
+            "named-without-name",
+            "non-string-name",
+            "unknown-string",
+        ],
+    )
+    def test_unrecognised_tool_choice_is_omitted(self, unrecognised):
+        """A CC value with no Messages spelling is left out, never guessed (R5)."""
+        result = self.adapter.translate_to_upstream(self._cc(tool_choice=unrecognised))
+        assert "tool_choice" not in result
+
+    @pytest.mark.parametrize("tools", [None, []], ids=["absent", "empty"])
+    def test_tool_choice_without_tools_is_omitted(self, tools):
+        """This body declares no tools, so a choice over them is not written (D9)."""
+        cc = self._cc(tool_choice="required", parallel_tool_calls=False)
+        if tools is None:
+            del cc["tools"]
+        else:
+            cc["tools"] = tools
+        result = self.adapter.translate_to_upstream(cc)
+        assert "tool_choice" not in result
+        assert "tools" not in result
+
+    def test_no_tool_choice_means_no_tool_choice(self):
+        """No CC ``tool_choice`` invents none (R9)."""
+        result = self.adapter.translate_to_upstream(self._cc())
+        assert "tool_choice" not in result
+
+    def test_internal_metadata_restored(self):
+        """``_metadata`` comes back as ``metadata`` and does not leak (R6)."""
+        result = self.adapter.translate_to_upstream(self._cc(_metadata={"user_id": "u-123"}))
+        assert result["metadata"] == {"user_id": "u-123"}
+        assert "_metadata" not in result
+
+    def test_empty_internal_metadata_is_still_restored(self):
+        """``{}`` is a value the agent sent; only ``None`` means absent (R6)."""
+        result = self.adapter.translate_to_upstream(self._cc(_metadata={}))
+        assert result["metadata"] == {}
+
+    def test_no_internal_metadata_means_no_metadata(self):
+        """No ``_metadata`` invents no ``metadata`` (R9)."""
+        assert "metadata" not in self.adapter.translate_to_upstream(self._cc())
+        assert "metadata" not in self.adapter.translate_to_upstream(self._cc(_metadata=None))
 
 
 class TestAnthropicTranslateFromUpstream:
