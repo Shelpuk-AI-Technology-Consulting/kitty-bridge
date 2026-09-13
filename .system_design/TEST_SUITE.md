@@ -1793,6 +1793,7 @@ inspecting a body it never sends.
 | **Endpoint table** | The README endpoint table matches `_register_routes`. Catches F2 (KBR-9). |
 | **Attribution-header table** | The README's `X-Kitty-*` table matches `_attribution_headers()`, and none of those names can reach any `build_upstream_headers()`. |
 | **Flag table** | The README logging-flag table matches the CLI parser. |
+| **CI capability inventory ⇄ the workflow tree** | §8.6's table of what the CI environment supplies matches `.github/`. Landed with **KBR-216** as `tests/test_ci_capability_inventory.py`. Five arms: forward (the document promises nothing CI lacks), reverse (a capability cannot reach CI undocumented — compared as **whole binding names**, so a new `secrets.KITTY_EGRESS` is not absorbed by the documented `secrets.KITTY_EGRESS_JSON`), version (the hand-maintained Claude Code pin, both ways), the logs the generated launcher writes, and the fork guard. The last two exist because a review round found four surviving mutants on them: the two log rows bind neither a secret nor a version, so every other arm was blind to their deletion, and the fork guard's removal changes no binding at all. Every row is covered by at least one *reverse* direction — that is the property, not the count. It lives in `tests/` rather than beside the review system's own suite in `.github/review/tests/` — §8.5's precedent — because its subject is `TEST_SUITE.md`, and that suite must stay runnable by a bare interpreter that cannot be asked to reason about the design documents. **Two stated limits:** the reverse arm scans the `KITTY_`-prefixed namespace only, so a non-kitty secret is deliberately not a row; and the forward arm is a substring scan for every artifact *except* the launcher, which is read by calling `wrapper_body` because that module's own prose defeats a scan of its source. |
 | **Answered questions ⇄ dependent passages** | A question `TEST_SUITE.md` §11 marks **ANSWERED** is not described as open or blocking anywhere in either design document. Landed with **KBR-163** as `tests/test_answered_questions_are_settled.py`. Range mentions (`Q10-Q13`) are expanded, because the site that escaped the hand-written enumeration was a range; §15's blocking table is checked by **row content** rather than by phrase, since such a row states the block by position and contains no still-open word at all. The one exclusion — a question's own §11 entry, which keeps the original wording verbatim — carries its own bound assertion, per the rule below. **Two stated limits:** a passage must *name the number* to be seen, and a paraphrase that never does is a reading job, not a scan. |
 
 
@@ -2202,6 +2203,9 @@ Two distinct things, currently conflated, with different costs and different cad
 *Startup smoke.* A **pinned real Claude Code binary** runs one non-interactive turn against the
 scripted recorder (§7.2) — no live provider, no credentials, no network. The binary starts,
 resolves the bridge URL, its request arrives, it exits cleanly. This proves connectivity.
+§8.6 supplies the binary and two facts this paragraph would otherwise mislead on: the CI
+installer leaves `claude` at a path that is **not** on `PATH`, and the review wrapper passes
+`--no-validate`.
 
 *Precedence.* Connectivity is **not** the claim. The claim is that kitty's `--settings` file wins
 over the process environment and over `~/.claude/settings.json` — a fact about *Claude Code's*
@@ -2236,12 +2240,22 @@ Control 1 alone leaves A unexercised, so a typo in A's URL would read as a pass 
 A is *supposed* to be silent there, and a broken A is silent too. Three runs, three winners, and
 every sentinel demonstrated live.
 
-Pinning it in CI has real questions attached — which distribution, how tightly version-pinned, licensing for
-redistribution in a CI image — recorded as Q12 rather than assumed away.
+Pinning it in CI was recorded as Q12 rather than assumed away — which distribution, how tightly
+version-pinned, and whether redistribution inside a CI image is acceptable. **Q12 is answered
+(2026-09-12, KBR-216) and the answer is in the tree:** the review workflow installs the CLI from
+the official installer at an exact version, at run time, so nothing is redistributed and the
+question of whether it may be does not arise. §8.6 is the inventory, including the two limits a
+job planned around it has to respect — the pin is a hand-maintained pairing, and a fork pull
+request gets no secrets. The hermetic smoke above needs **only the pinned CLI**, which a fork run
+can also download, so it is a per-PR gate without an asterisk.
 
 **Agent live — nightly.** `tests/integration/test_agent_e2e.py` as it exists: real binaries, real
-credentials, real providers. Keep it out of the default run — it needs four agent CLIs and live
-network, and a suite that cannot run on a laptop stops being trusted. Nightly with CI secrets,
+credentials, real providers. §8.6 is where those credentials come from, and it carries the two
+constraints this job inherits: the profile is a balancing pool, so no assertion may name a single
+model; and kitty's debug log carries whole request bodies, so it **may never be uploaded as an
+artifact** however convenient that would be for diagnosing a nightly failure. Keep it out of the
+default run — it needs four agent CLIs and live network, and a suite that cannot run on a laptop
+stops being trusted. Nightly with CI secrets,
 extended from two cases to cover, for Claude Code: a plain turn, a tool-using turn, a multi-turn
 session with tool results, an extended-thinking turn, and a session crossing the compaction
 threshold.
@@ -3588,6 +3602,11 @@ same tree, which is worse than not having it.
 
 The matrix above describes the finished state. Today only the Fast job exists, so `l3`,
 `acceptance`, `agent_smoke`, `agent_live`, `eval` and `load` are selected by **no job at all**.
+What each of those jobs would need from the runner is §8.6; for `agent_smoke` and `agent_live`
+the answer is that CI has had it all along, so what they are still waiting on is the tests, not
+the resources. **`eval` is not in that sentence:** its runner needs are met too, but T-K12 waits
+on T-K3, which waits on Q4 and Q13 — both still open. A resource being available does not close a
+decision.
 
 That is a real hole and it is the one this mechanism could most easily hide: before the split,
 `pytest -q` ran everything, so a subsystem test written tomorrow ran in CI. After it, that test
@@ -4108,6 +4127,123 @@ order carry a before/after table over the full cross product of statuses and bod
 incoherent pairs included, since a gateway's status need not match a passed-through upstream
 body — and `StatusMatrixTests` is the pattern to copy.
 
+### 8.6 What the CI environment already supplies
+
+Recorded because this document spent its first draft reasoning about these resources as things
+CI might one day be given. It has had all of them since the automated reviewer landed.
+`.github/workflows/claude-code-review.yml` runs a real Claude Code through a released Kitty
+Bridge on every same-repository pull request, which means the runner is already provisioned
+with a complete kitty installation — and that is the single most consequential fact about what
+this suite can afford to test.
+
+| Capability | Artifact | Binding |
+|---|---|---|
+| Claude Code CLI, version-pinned | `.github/workflows/claude-code-review.yml` | `bash -s -- 2.1.238` |
+| Kitty profiles — a balancing pool by default | `.github/workflows/claude-code-review.yml` | `vars.KITTY_PROFILES_JSON` |
+| Kitty credentials | `.github/workflows/claude-code-review.yml` | `secrets.KITTY_CREDENTIALS_JSON` |
+| Kitty egress gateway | `.github/workflows/claude-code-review.yml` | `secrets.KITTY_EGRESS_JSON` |
+| Kitty bridge debug log | `.github/review/scripts/configure_kitty.py` | `kitty-bridge-debug.log` |
+| Kitty launch stderr — a disjoint window | `.github/review/scripts/configure_kitty.py` | `kitty-bridge-stderr.log` |
+
+`configure_kitty.py` materialises the three kitty documents at the paths kitty itself reads,
+and generates the launcher that puts `kitty` in front of `claude`.
+
+**The profile is a balancing pool, and that changes what an assertion may say.** The workflow
+derives the consequence three times over: *"the profile is a four-member balancing pool"*, so
+*"no single name here could be true of the run"*. A `agent_live` or `eval` assertion may
+therefore not name a model — it may assert membership, or a property every member has, and
+nothing else. This is the half of the capability that is easiest to plan around wrongly.
+
+**Both logs exist, and neither may leave the runner.** They cover disjoint windows:
+`--debug-file` records everything after the bridge is up, and the stderr redirect catches the
+launch failures kitty prints nowhere else — an egress refusal, a credential that will not
+resolve — which reach `claude-code-action` as an empty execution record. Between them they are
+the only evidence a failed run leaves. Two properties a test job must inherit rather than
+rediscover:
+
+- 🔴 **The debug log carries kitty's inbound request bodies — the bridge token and the entire
+  prompt. It must never be uploaded as an artifact.** The obvious way to use a debug log in a
+  smoke or e2e job is `actions/upload-artifact`, and that is the one thing it may not do. The
+  review workflow keeps the log on the runner and uploads a filtered timeline instead.
+- The logs are **per-runner, not per-run** — *on a persistent runner*. The workflow purges stale
+  copies before launching, so at most one failed run's evidence is ever on a machine. The review
+  job runs on `ubuntu-latest`, which is destroyed after the job, so the purge is a no-op there and
+  is kept for the half of the invariant that survives a move back to a self-hosted fleet. A job
+  that expects to find its own log by name, unqualified, is reading someone else's the moment the
+  runner persists.
+
+**Two limits, stated because a job planned without them will be wrong.**
+
+**The CLI pin is a manual pairing, not a mechanism.** `anthropics/claude-code-action` is
+referenced at a floating `@v1` tag and the literal above is kept equal to the version that
+action pins internally, by hand, as one change when the action bumps. Nothing fails when they
+diverge. `tests/test_ci_capability_inventory.py` holds this table to the workflow, which catches
+the table going stale but cannot catch the action moving underneath both. Two more facts that
+will surprise whoever writes the startup smoke: the wrapper passes `--no-validate`, because in
+CI the run itself is the validation; and `~/.local/bin/claude` is deliberately **not** on `PATH`
+— kitty's own fallback chain is the rung that finds it, so a job that assumes a plain `PATH`
+lookup will not find a CLI that is present.
+
+**A fork pull request does not get the secrets, and the profile variable is unmeasured.** Stated
+split because only one half is established. GitHub documents that *"with the exception of
+`GITHUB_TOKEN`, secrets are not passed to the runner when a workflow is triggered from a forked
+repository"*, which covers the credential and egress stores. It documents **nothing** about
+configuration variables, so whether `vars.KITTY_PROFILES_JSON` reaches a fork run is **unknown
+here and was not measured**; no gating decision may assume either answer. Independently of both,
+this workflow's job does not start on a fork at all, guarded by
+`github.event.pull_request.head.repo.full_name == github.repository` — and the documented wrong
+way to "fix" a skipped fork run is `pull_request_target`, which runs the fork's pull request in
+the base branch's context *with* secrets. A new workflow inherits none of that guard and has to
+write its own.
+
+That asymmetry divides the L4 jobs, and the division is why the §8 cadence table reads as it
+does:
+
+| Job | Needs | Consequence |
+|---|---|---|
+| `agent_smoke` (hermetic, §6.4.2) | the pinned CLI only — no credentials, no variables, no network, no provider | The installer is a public download, so the fork question does not arise. A per-PR gate stays viable. |
+| `agent_live`, `eval` | the kitty credential store, and a provider that bills | Withheld from a fork run by GitHub's own rule. Nightly on `schedule`, where the fork case does not arise — which is where §8 already puts them, now for a stated reason rather than by cadence preference. |
+
+**The pinned CLI is an environment prerequisite of the Acceptance job, not something a test may
+probe for** — §8's `openssl` reasoning applies unchanged, and this is the shape that makes a
+per-PR `agent_smoke` gate compatible with "skips are failures in a gating job". The CLI arrives
+by a live download from a third party on every run, so the *install step* owns the retry ladder
+and the job must fail when it cannot install. That is **prescriptive for a future `agent_smoke`
+job, not a description of the review workflow**, whose install step carries `continue-on-error:
+true` on purpose: there an install failure composes into the review path and is classified, which
+is the right answer for a job whose output is a review and the wrong one for a gate. One non-obvious reason that ladder is shaped as it is,
+worth carrying into any job that copies it: without `set -o pipefail` inside the `bash -c`, a
+curl 429 or 403 feeds `bash -s` empty stdin, which exits 0 — the retry loop then breaks on the
+first attempt with **no CLI installed** and the transient download error reaches the classifier
+as a fatal.
+
+**What this unlocks that was not previously plannable.** The balancing pool means the nightly
+`agent_live` job can exercise member selection and failover against real providers, which §4.3
+C3's cross-attempt row otherwise proves only against recorded upstreams. The egress secret means
+the same job can assert I3 containment end to end, through a real gateway, rather than only
+through the local CONNECT proxy of §5.2. Neither is specified here; both are named so that T-K11
+and T-I14 inherit them.
+
+**Five directions, because fewer would not have caught this.**
+`tests/test_ci_capability_inventory.py` checks forward, so the document cannot promise a
+capability CI does not have; reverse, so a capability cannot be added to CI and left out of the
+design; the version pin, both ways, because that pairing is maintained by hand; the logs the
+generated launcher writes, because the two log rows bind neither a secret nor a version and a
+review round found that both could be deleted from the table with every other arm green; and the
+fork guard itself, whose removal changes no binding and would leave the paragraph above false.
+Every row is covered by at least one *reverse* direction — that is the property, not the count.
+A forward-only check would have gone green through the entire period this section describes —
+the table would simply have been absent, which is what it was.
+
+**One case is read rather than scanned, and the reason generalises.** The launcher's two log rows
+are checked against the text `configure_kitty.py` *generates*, not against its source: the module
+discusses `--debug-file` and both log names at length in its own docstring and comments, so a
+substring scan over the file is satisfied by the prose after the launcher stops emitting either
+flag — measured, in the same review round. It is the trap the fork arm was already built to avoid
+by reading the parsed `on:` block instead of a file whose comments argue about
+`pull_request_target`. When a matcher reads text the change under test does not control, scope it
+by what the artifact *declares*.
+
 ---
 
 ## 9. Gap register
@@ -4177,7 +4313,10 @@ oracle's scoping never depended on it.) G8 unblocks G1's
 corpus; G10 rides along with G2 once the harness is parametrised. G3's measurement lands with G1;
 G3's *fix* is its own ticket. G4 and G7 reinforce an existing layer and can run in parallel. G5,
 G6, G9, G11 are cheap and independent. G12 and G13 are last: most expensive to run, least caught
-per hour.
+per hour. **§8.6 does not move G12**, and the reason is worth stating so the next reader does not
+re-derive it: the inventory removes the *provisioning* half of G12's cost — credentials, profiles
+and a gateway are already on the runner — but the cost that put G12 last is token spend and
+nondeterminism, and neither is changed by a resource being available.
 
 ---
 
@@ -4327,9 +4466,12 @@ memory does not grow is false on the paths that buffer a whole response.
 
 ## 11. Open questions for the product owner
 
-Answers belong in this document. They are not invented here. Q10-Q13 are prerequisites for the
-implementation work they name — each blocks a test whose acceptance oracle depends on it. An
+Answers belong in this document. They are not invented here. Q10 and Q13 are prerequisites for
+the implementation work they name — each blocks a test whose acceptance oracle depends on it. An
 answered question keeps its place in the list and carries its answer in the heading.
+
+Q12 was in that set until 2026-09-12 (KBR-216). Its entry below records the answer, and what the
+answer does not settle.
 
 **Q1 — How faithful should the agent's identity be (F1, G3, KBR-8)?** Three options, materially
 different: (a) forward a curated allowlist of the agent's real headers, uniformly, so every
@@ -4405,11 +4547,28 @@ touches, against the budget the fast gate can absorb given it already runs ~18.5
 Python version. Adopt per-PR if it fits, nightly-only otherwise. The current nightly-only choice
 is provisional pending that number.
 
-**Q12 — How is a pinned Claude Code binary supplied to CI (§6.4.2)?** The per-PR agent smoke
-needs a real Claude Code, not an arbitrary child process, because the claim under test is Claude
-Code's own settings precedence. Which distribution, pinned how, and is redistribution inside a CI
-image acceptable? If it is not, the settings-precedence claim has no per-PR proof, and that
-limitation should be stated rather than papered over.
+**Q12 — ANSWERED by the product owner, 2026-09-12 (KBR-216).** CI has had a version-pinned
+Claude Code since the automated reviewer landed, together with kitty profiles, credentials and an
+egress gateway. `.github/workflows/claude-code-review.yml` installs the CLI from the official
+installer script at an exact version, at run time. §8.6 is the inventory and the reasoning; the
+answer to each half of the original question is: the official distribution, pinned by an exact
+version argument, and **redistribution does not arise** because nothing is baked into an image.
+So the settings-precedence claim *does* have a per-PR proof available, and T-I5, T-I6 and T-K10
+are unblocked.
+
+**What this does not settle.** Three things, named so a task does not inherit them as surprises.
+The pin is a **hand-maintained pairing** with a floating `@v1` action tag — `§8.6` holds the
+document to the workflow, but nothing holds the workflow to the action, so a job asserting a
+*specific* CLI version rests on a human having noticed. A **fork pull request receives no
+secrets**, which costs the hermetic smoke nothing and rules out a credential-dependent per-PR
+gate entirely. And the product owner's answer establishes that the resource **exists**, not that
+the smoke job's three-sentinel design (§6.4.2) is the right shape — that remains T-I6's to prove.
+
+*Original question:* how is a pinned Claude Code binary supplied to CI (§6.4.2)? The per-PR agent
+smoke needs a real Claude Code, not an arbitrary child process, because the claim under test is
+Claude Code's own settings precedence. Which distribution, pinned how, and is redistribution
+inside a CI image acceptable? If it is not, the settings-precedence claim has no per-PR proof,
+and that limitation should be stated rather than papered over.
 
 **Q13 — What is the baseline for the compaction arm of the evals (§6.4.3)?** For an over-context
 input the direct-provider arm returns a 400, so there is no answer to compare against.

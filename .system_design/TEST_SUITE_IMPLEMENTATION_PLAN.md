@@ -424,8 +424,8 @@ that makes *its* bytes observable. Bundled, the Ollama half would have had no ev
 | **T-I2** | Concurrent sessions | | T-I1 | Separate `--settings` files; neither touches the global file (issue #22) | §6.3.2 | M |
 | **T-I3** | `prepare_launch` failure fails the launch | | — | Never proceeds on the user's own credentials | §6.3.2 | S |
 | **T-I4** | Background bridge ownership | | — | Not stopped, not restarted, no second bridge | §6.3.2 | S |
-| **T-I5** | Agent startup smoke | blocked Q12 | T-W8, T-W9, T-B4 | Pinned Claude Code binary, one turn, clean exit | §6.4.2 | M |
-| **T-I6** | Agent settings precedence | blocked Q12 | T-I5 | Three runs, three winners; every sentinel demonstrated live | §6.4.2 | M |
+| **T-I5** | Agent startup smoke | | T-W8, T-W9, T-B4 | Pinned Claude Code binary, one turn, clean exit | §6.4.2 | M |
+| **T-I6** | Agent settings precedence | | T-I5 | Three runs, three winners; every sentinel demonstrated live | §6.4.2 | M |
 | **T-I7** | Streaming recovery — content | | T-B4, T-G7, T-W8 | Four injection points; no duplicated text, no reused tool-call id, no spliced arguments — and, per the answer in §11, the three post-emission points each close the block and terminate with one error rather than recovering | §6.3.1 | L |
 | **T-I8** | Cross-attempt content and cadence | | T-D1, T-W8, T-B4 | Blip and empty-response retries byte-identical; M6, M8, M9 and failover re-normalisation each fire only on trigger | §4.3 C3 | M |
 | **T-I9** | Connection lifecycle baseline | | T-W8, T-C7 | Distinct connections per session vs the native capture; ratcheted — a **reported baseline**, not `exemptions.ratchet`, which is the unrelated gating mechanism of §8.3 | §4.3 C5 | M |
@@ -453,13 +453,15 @@ that makes *its* bytes observable. Bundled, the Ollama half would have had no ev
 | **T-K7** | Deep nightly — mutation and schema fuzzing | ci | T-H3, T-G6 | Both exist before the job claims to run them | §8 | S |
 | **T-K8** | Attach the per-category checks to each job | ci | T-W1, T-K6 | **The mechanism is T-W1's** — `--require-category`, and the test pairing it to every job's marker expression, landed there. What is left here is attaching a flag per category as each job activates, and removing that layer from `PENDING_ACTIVATION_LAYERS`. Narrowed after T-W1 delivered the enforcement rather than only the vocabulary | §8.1 | S |
 | **T-K9** | Activate the Acceptance job | ci | T-J2, T-J3, T-K6 | `acceptance` gates PRs and releases | §8 | S |
-| **T-K10** | Activate the `agent_smoke` category | ci, blocked Q12 | T-W1, T-I5, T-I6 | Its own required category — **it does not block Subsystem or Acceptance**, and it does not wait for them either: the T-K9 dependency was delay with no shared prerequisite behind it. It requires **T-I6 as well as T-I5**, because startup connectivity alone would let the category go green without proving the settings precedence that is the whole reason it exists | §8 | S |
+| **T-K10** | Activate the `agent_smoke` category | ci | T-W1, T-I5, T-I6 | Its own required category — **it does not block Subsystem or Acceptance**, and it does not wait for them either: the T-K9 dependency was delay with no shared prerequisite behind it. It requires **T-I6 as well as T-I5**, because startup connectivity alone would let the category go green without proving the settings precedence that is the whole reason it exists | §8 | S |
 | **T-K11** | Agent-live nightly | ci | T-I14 | Runs the **expanded** five-scenario coverage, not the two existing cases | §8 | S |
 | **T-K12** | Eval nightly | ci | T-K3 | Runs once the decision rule exists; alerts, never gates | §8 | S |
 
 **CI activation is incremental.** Each job turns on when its first independently runnable slice
-lands, and each required category carries its own collection check. `agent_smoke` stays pending
-Q12 as a separate category so it cannot hold up Subsystem or Acceptance.
+lands, and each required category carries its own collection check. `agent_smoke` is a separate
+category so it cannot hold up Subsystem or Acceptance — a separation that was made while it waited
+on Q12 and is kept now that Q12 is answered (2026-09-12, KBR-216), because the reason was never
+the block: the category proves a different claim and fails for different causes.
 
 ---
 
@@ -556,11 +558,12 @@ exist, and the plan should not offer it.
 | **Q4** + **Q13** | T-K3, and therefore T-K12 | The eval runs and cannot conclude; T-K1/T-K2 proceed |
 | **Q10** | T-F2's exact bound, TR-3's wording, register rows M3–M7 | T-F2 lands with the observed-behaviour property and is revised **together with** TR-3 and the register. Narrowed by KBR-5: M13 is withdrawn, so "keep current behaviour" is no longer an option for that row |
 | **Q11** | Nothing — **T-H4 answers it** | T-H3 lands nightly-only |
-| **Q12** | T-I5, T-I6, T-K10 | The settings-precedence claim has no per-PR proof. **It no longer blocks Subsystem or Acceptance** — T-K10 is a separate category |
 
 **Q1** blocks no task but decides whether T-I12 and TR-1c ever gate. **Q5–Q7** affect register
 rows and wording, not delivery. **Q14 left this table on 2026-09-12** (KBR-163): T-I7 now carries a
-full oracle, and the answer's second half is KBR-155's remedy.
+full oracle, and the answer's second half is KBR-155's remedy. **Q12 left it the same day**
+(KBR-216): CI has had a version-pinned Claude Code all along, so T-I5, T-I6 and T-K10 are
+schedulable — see `TEST_SUITE.md` §8.6 for the inventory and its two limits.
 
 ---
 
