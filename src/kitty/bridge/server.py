@@ -3411,7 +3411,8 @@ class BridgeServer:
 
             While the native preamble hold writes nothing, a failed write can no
             longer reveal a gone client, and aiohttp does not cancel the handler
-            (``handler_cancellation`` is off), so the connection is checked.
+            (``handler_cancellation`` is off), so the connection is checked on
+            each held chunk and before each native upstream attempt.
 
             Raises:
                 ClientDisconnectedError: When the client connection is closed.
@@ -3671,6 +3672,10 @@ class BridgeServer:
                     )
                     await asyncio.sleep(delay)
                 try:
+                    # Every native attempt after the first follows a hold that wrote nothing, so no
+                    # failed write can have revealed a gone client; check before paying for another.
+                    if sr is None and self._active_provider.use_native_messages:
+                        _raise_if_client_gone()
                     session = await self._session_for(url)
                     async with session.post(
                         url,
@@ -3826,14 +3831,28 @@ class BridgeServer:
                                 stream_ok = True
                                 break
 
+                            # An earlier attempt already wrote (the KBR-183 failover), so a JSON
+                            # error cannot follow: per Q14(a) the open stream ends in an error event.
+                            if sr is not None:
+                                await _write_client(
+                                    sr,
+                                    messages_format_error(
+                                        {
+                                            "type": "error",
+                                            "error": {"type": "api_error", "message": _NATIVE_EMPTY_REPLY_MESSAGE},
+                                        }
+                                    ).encode(),
+                                )
+                                break
+
                             # Nothing was written, so the discarded bytes exist only here.
                             logger.warning(
                                 "Native Messages stream ended with no content for %s (%d bytes held, stop_reason=%s)",
                                 message_id,
-                                len(hold.held),
+                                hold.held_size,
                                 hold.stop_reason,
                             )
-                            logger.debug("Discarded native reply head: %r", hold.held[:_MAX_LOGGED_HELD_BYTES])
+                            logger.debug("Discarded native reply head: %r", hold.head(_MAX_LOGGED_HELD_BYTES))
 
                             # D3: a truncation before any content is not improved by a retry.
                             if hold.stop_reason in _NATIVE_TRUNCATING_STOP_REASONS:
@@ -3864,7 +3883,6 @@ class BridgeServer:
                                 if retry:
                                     await asyncio.sleep(_EMPTY_FINAL_DELAYS[final_idx])
                             if retry:
-                                _raise_if_client_gone()
                                 if balancing:
                                     self._select_backend()
                                     self._normalize_model(cc_request)

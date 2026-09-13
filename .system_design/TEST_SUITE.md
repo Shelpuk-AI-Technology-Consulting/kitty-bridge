@@ -4865,13 +4865,16 @@ found cases they did not reach and one they understated. Each is decided here, w
   product reason.
 - **Implementation consequences recorded with the decision.** (i) A client that disconnects
   while held is no longer revealed by a failed write, and aiohttp does not cancel the handler, so
-  the native branch checks the client connection on each held chunk and before each retry, and
-  stops — leaving backend health alone, as issue #38 requires. Without that check a user who
+  the native branch checks the client connection on each held chunk and before each upstream
+  attempt, and stops — leaving backend health alone, as issue #38 requires. Without that check a user who
   presses Esc during a long thinking phase would keep it billing upstream. (ii) Headers go out at
   release, so on the native path the attribution headers now name the backend that produced the
   content, not merely the first to answer. (iii) Each discarded attempt is logged at WARNING with
   its held byte count and stop reason, and a bounded head of the held bytes at DEBUG — a `200`
   carrying a non-SSE body is otherwise undiagnosable, because nothing of it was written.
+  (iv) Until KBR-183 lands, a timeout *after* release can still start another attempt; if that
+  attempt comes back empty the stream is already open, so the branch reads `sr` — as G26 requires of
+  every new branch — and ends the stream with one SSE `error` event instead of a JSON `502`.
 
 **Why, and not the obvious alternative.** Three reasons, in decreasing order of how much they
 would cost to be wrong about.

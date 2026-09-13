@@ -54,7 +54,8 @@ class PreambleHold:
     Attributes:
         stop_reason: The last ``stop_reason`` a ``message_delta`` carried while
             the stream was held, or ``None``. After the stream ends unreleased,
-            ``"max_tokens"`` means the reply was truncated before any content.
+            ``"max_tokens"`` or ``"model_context_window_exceeded"`` means the
+            reply was truncated before any content.
     """
 
     def __init__(self, *, max_held_bytes: int = MAX_HELD_BYTES) -> None:
@@ -79,9 +80,20 @@ class PreambleHold:
         return self._released
 
     @property
-    def held(self) -> bytes:
-        """bytes: The bytes withheld so far; empty once released."""
-        return bytes(self._held)
+    def held_size(self) -> int:
+        """int: How many bytes are withheld; 0 once released."""
+        return len(self._held)
+
+    def head(self, limit: int) -> bytes:
+        """Return the first withheld bytes without copying the whole buffer.
+
+        Args:
+            limit: The most bytes to return.
+
+        Returns:
+            Up to ``limit`` withheld bytes; empty once released.
+        """
+        return bytes(self._held[:limit])
 
     def feed(self, chunk: bytes) -> bytes:
         """Consume one upstream chunk and return the bytes to write to the client.
@@ -104,7 +116,7 @@ class PreambleHold:
             if self._is_release_line(line):
                 return self._release()
 
-        # D5: checked after judging, so a chunk that completes a trigger still releases on content.
+        # D5: bound the hold rather than grow it without limit.
         if len(self._held) > self._max_held_bytes:
             return self._release()
         return b""
@@ -142,7 +154,8 @@ class PreambleHold:
             return True
         try:
             event = json.loads(line[5:].strip().decode("utf-8", errors="replace"))
-        except json.JSONDecodeError:
+        except (ValueError, RecursionError):
+            # Untrusted bytes: a 4300-digit integer or deep nesting must not escape as an error.
             return False
         if not isinstance(event, dict):
             return False

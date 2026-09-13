@@ -138,10 +138,22 @@ class TestHolding:
         assert hold.feed(MESSAGE_START + EMPTY_TEXT_START + empty + BLOCK_STOP + END_TURN + MESSAGE_STOP) == b""
         assert hold.released is False
 
-    def test_held_exposes_the_withheld_bytes(self):
+    def test_held_size_and_head_describe_the_withheld_bytes(self):
         hold = PreambleHold()
         hold.feed(MESSAGE_START + PING)
-        assert hold.held == MESSAGE_START + PING
+        assert hold.held_size == len(MESSAGE_START + PING)
+        assert hold.head(10) == MESSAGE_START[:10]
+
+    @pytest.mark.parametrize(
+        "payload",
+        [b'{"type":"message_delta","n":' + b"9" * 5000 + b"}", b"[" * 200_000],
+        ids=["integer_past_the_digit_limit", "nesting_past_the_recursion_limit"],
+    )
+    def test_hostile_json_is_held_not_raised(self, payload):
+        """Untrusted bytes: json.loads raises ValueError or RecursionError here, not JSONDecodeError."""
+        hold = PreambleHold()
+        assert hold.feed(MESSAGE_START + b"data: " + payload + b"\n\n") == b""
+        assert hold.released is False
 
     def test_zero_chunks_leave_the_hold_unreleased(self):
         assert PreambleHold().released is False
@@ -290,9 +302,26 @@ class TestVerbatimReplay:
         assert _feed_all(hold, [stream]) == stream
         assert hold.released is True
 
-    def test_every_split_point_replays_the_stream_exactly(self):
-        """Chunks arrive on arbitrary byte boundaries; the trigger may straddle any of them."""
-        stream = MESSAGE_START + EMPTY_TEXT_START + TEXT_DELTA + BLOCK_STOP + END_TURN + MESSAGE_STOP
+    @pytest.mark.parametrize(
+        "trigger",
+        [
+            TEXT_DELTA,
+            _sse(
+                "content_block_start",
+                {"type": "content_block_start", "index": 1, "content_block": {"type": "tool_use", "name": "Read"}},
+            ),
+            _sse(
+                "content_block_start",
+                {"type": "content_block_start", "index": 1, "content_block": {"type": "text", "text": "Hi"}},
+            ),
+            b"event: error\ndata: upstream exploded\n\n",
+            b'data: {"type":"error","error":{"type":"overloaded_error"}}\n\n',
+        ],
+        ids=["text_delta", "tool_use_start", "prefilled_text_start", "error_by_name", "error_by_type"],
+    )
+    def test_every_split_point_replays_the_stream_exactly(self, trigger):
+        """Chunks arrive on arbitrary byte boundaries; each trigger may straddle any of them."""
+        stream = MESSAGE_START + EMPTY_TEXT_START + trigger + BLOCK_STOP + END_TURN + MESSAGE_STOP
         for cut in range(len(stream) + 1):
             hold = PreambleHold()
             out = _feed_all(hold, [stream[:cut], stream[cut:]])

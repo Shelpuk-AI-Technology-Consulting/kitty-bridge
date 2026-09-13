@@ -4,10 +4,10 @@ Before the preamble hold, ``_stream_messages`` forwarded every native upstream
 chunk the instant it arrived and recorded the attempt as a success whatever it
 carried, so a contentless Anthropic stream reached Claude Code as a blank turn
 with no retry and no failover. These tests drive the whole handler against a
-mocked upstream and pin what the client receives once the hold is in place:
-``.system_design/TEST_SUITE.md`` §11 Q14(b) and amendments D1–D4.
+mocked or local upstream and pin what the client receives once the hold is in
+place: ``.system_design/TEST_SUITE.md`` §11 Q14(b) and amendments D1–D7.
 
-Covers ``.requirements/20260913T134250Z_native_preamble_hold`` R3–R7.
+Covers ``.requirements/20260913T134250Z_native_preamble_hold`` R1 and R3–R12.
 """
 
 from __future__ import annotations
@@ -222,19 +222,19 @@ def _single_backend_server() -> BridgeServer:
     )
 
 
-def _balancing_server(n_backends: int = 2) -> BridgeServer:
-    """Build a balancing bridge over ``n_backends`` distinct native upstreams.
+def _balancing_server(base_urls: list[str] | None = None) -> BridgeServer:
+    """Build a balancing bridge over two native upstreams.
 
     Args:
-        n_backends: Number of backends.
+        base_urls: One base URL per backend; defaults to two distinct mocked hosts.
 
     Returns:
         The unstarted server.
     """
     backends = []
-    for i in range(n_backends):
+    for i, base_url in enumerate(base_urls or [f"https://api{i}.example.com/v1" for i in range(2)]):
         profile = Profile(name=f"profile-{i}", provider="openai", model="test-model", auth_ref=str(uuid.uuid4()))
-        backends.append((_NativeProvider(f"https://api{i}.example.com/v1"), f"key-{i}", profile))
+        backends.append((_NativeProvider(base_url), f"key-{i}", profile))
     return BridgeServer(
         adapter=_StubLauncher(),
         provider=backends[0][0],
@@ -518,7 +518,8 @@ class TestFailuresWhileHeld:
             await resp.prepare(request)
             if len(calls) == 1:
                 await resp.write(_MESSAGE_START + _EMPTY_TEXT_START)
-                request.transport.abort()  # type: ignore[union-attr]
+                # close(), not abort(): on Windows abort() discards the queued preamble (KBR-189).
+                request.transport.close()  # type: ignore[union-attr]
                 return resp
             await resp.write(_CONTENT)
             return resp
@@ -566,9 +567,7 @@ class TestFailuresWhileHeld:
             return resp
 
         runner, base = await self._serve(_handler)
-        server = BridgeServer(
-            adapter=_StubLauncher(), provider=_NativeProvider(base), resolved_key="key-0", model="test-model"
-        )
+        server = _balancing_server(base_urls=[base, base])
         port = await server.start_async()
         try:
             session = aiohttp.ClientSession()
@@ -586,21 +585,28 @@ class TestFailuresWhileHeld:
             await server.stop_async()
             await runner.cleanup()
         assert len(calls) == 1, "a gone client must not be served a retry"
+        for health in server._backend_health:
+            assert (health["healthy"], health["failure_count"]) == (True, 0), "a client fault is not a backend's"
 
-    async def test_client_disconnect_before_a_retry_stops_the_ladder(self):
-        """A zero-byte reply holds no chunk to check on, so the retry itself must check the client."""
+    @pytest.mark.parametrize("first_reply", ["zero_bytes", "dropped_preamble"])
+    async def test_client_disconnect_before_a_retry_stops_the_ladder(self, first_reply, monkeypatch):
+        """Neither reply offers a held chunk to check on, so the next attempt itself must check the client."""
+        monkeypatch.setattr(server_module, "_TRANSPORT_GRACE_DELAYS", (0.0, 0.0))
         calls: list[int] = []
         request_arrived = asyncio.Event()
         client_gone = asyncio.Event()
 
         async def _handler(request: web.Request) -> web.StreamResponse:
-            """Answer with an empty stream, the first time only after the client has gone."""
+            """Fail the first attempt only after the client has gone; answer empty afterwards."""
             calls.append(1)
             request_arrived.set()
             if len(calls) == 1:
                 await asyncio.wait_for(client_gone.wait(), timeout=10)
             resp = web.StreamResponse(headers=_SSE_HEADERS)
             await resp.prepare(request)
+            if len(calls) == 1 and first_reply == "dropped_preamble":
+                await resp.write(_MESSAGE_START)
+                request.transport.close()  # type: ignore[union-attr]
             return resp
 
         runner, base = await self._serve(_handler)
@@ -633,3 +639,39 @@ class TestFailuresWhileHeld:
             await server.stop_async()
             await runner.cleanup()
         assert len(calls) == 1, "a gone client must not be served a retry"
+
+    async def test_empty_retry_after_bytes_reached_the_client_closes_the_stream(self, monkeypatch):
+        """KBR-183 still lets a timeout after release retry; an empty retry must then end the open stream."""
+        monkeypatch.setattr(server_module, "_STREAM_READ_TIMEOUT", 0.2)
+        calls: list[int] = []
+        stop = asyncio.Event()
+
+        async def _handler(request: web.Request) -> web.StreamResponse:
+            """Send content then stall on the first call; answer empty on the next."""
+            calls.append(1)
+            resp = web.StreamResponse(headers=_SSE_HEADERS)
+            await resp.prepare(request)
+            if len(calls) == 1:
+                await resp.write(_MESSAGE_START + _EMPTY_TEXT_START)
+                await resp.write(
+                    _sse(
+                        "content_block_delta",
+                        {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "Hi"}},
+                    )
+                )
+                await stop.wait()
+            return resp
+
+        runner, base = await self._serve(_handler)
+        try:
+            server = BridgeServer(
+                adapter=_StubLauncher(), provider=_NativeProvider(base), resolved_key="key-0", model="test-model"
+            )
+            status, body = await asyncio.wait_for(_stream(server), timeout=15)
+        finally:
+            stop.set()
+            await runner.cleanup()
+        assert len(calls) == 2
+        assert status == 200
+        assert body.startswith(_MESSAGE_START), "the released content reached the client"
+        assert b"event: error" in body, "the open stream must end in a terminal error, not hang"

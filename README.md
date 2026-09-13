@@ -684,9 +684,9 @@ distinguishable in logs from the ordinary "request too large" rejection.
 
 Applies to providers kitty talks to in Anthropic's own format (`custom_anthropic`, `zai_anthropic`, and `minimax_token`
 when configured for it). Kitty holds back the start of each streamed reply until it carries text or a tool call, so a
-reply with nothing in it — or only thinking — can be retried before your agent sees it. This error means every retry,
-and every backend in a balancing profile, came back empty. Nothing reached the agent, so simply resend; if it persists,
-the provider or model is misbehaving.
+reply with nothing in it — or only thinking, up to 10 MiB of it — can be retried before your agent sees it. This error
+means every attempt kitty made came back empty. Nothing reached the agent, so simply resend; if it persists, the provider
+or model is misbehaving.
 
 The response is a `502` carrying `"reason": "empty_response"`. One visible cost of the hold: on reasoning models the
 agent shows its spinner, not live thinking, until the first text or tool call arrives.
