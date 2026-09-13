@@ -310,8 +310,9 @@ CREDENTIAL_PATTERNS = (
 # The reason string already says "or model".
 CREDENTIAL_STATUS_PATTERNS = (r"\b40[134]\b",)
 
-# upstream. Anchored on the beta's own dated slug, or on the refusal's distinctive
-# phrasing, and NOT on the bare words "context management".
+# The gateway's refusal of Anthropic's context-management beta, recognised by its own
+# wording: anchored on the beta's dated slug, or on the refusal's distinctive phrasing,
+# and NOT on the bare words "context management".
 #
 # 🔴 The loose form was written first and is the bug this module documents twice:
 # `_outcome_text` includes `result`, which on a schema failure carries the
@@ -321,6 +322,15 @@ CREDENTIAL_STATUS_PATTERNS = (r"\b40[134]\b",)
 CONTEXT_MANAGEMENT_REFUSAL = (
     r"context-management-\d{4}-\d{2}-\d{2}"
     r"|no endpoints available[^\n]{0,80}context[-. ]management"
+)
+
+#: What `classify` reports when it meets that refusal. A FIXED string, not the match:
+#: KBR-206 made this pattern decide the verdict, and echoing up to 80 characters the
+#: provider -- or, in `result`, the model -- wrote into a `reason=` line of
+#: `$GITHUB_OUTPUT` is an injection surface the other tier-1 reasons never had.
+CONTEXT_MANAGEMENT_REFUSAL_REASON = (
+    "workflow-level failure: the gateway refused the context-management beta for "
+    "the configured model"
 )
 
 # Universal: the workflow itself is wrong and any provider would reject it the
@@ -333,16 +343,16 @@ CONTEXT_MANAGEMENT_REFUSAL = (
 # name a specific workflow fault -- whatever matches here decides the verdict AND
 # refuses the retry before any provider-named cause is heard.
 #
-# 🔴 **KBR-206 moved `\b400\b` OUT, and put the refusal's own wording in its place.**
-# A 400 says the request was rejected, not by what: Anthropic bills a spent balance as
-# a 400 ("Your credit balance is too low..."), the CLI writes the status into its error
-# line, and this set called an empty account a broken workflow while the diagnostic
-# advised a top-up. The status was here to keep the context-management refusal fatal --
-# a 400 whose body says "No quota was consumed" -- and demoting it alone would hand
-# that refusal to `quota`. So the two 400s are separated by their BODIES:
-# `CONTEXT_MANAGEMENT_REFUSAL` is the very constant `_write_diagnostic`'s refusal
-# branch reads, so the verdict and the refusal advice cannot disagree. The status now
-# sits beside `invalid[_ ]request` below. TEST_SUITE.md §8.5 I-C5 carries the measurement.
+# 🔴 **KBR-206 moved `\b400\b` OUT, and `classify` now reads the refusal's own wording
+# just before this set.** A 400 says the request was rejected, not by what: Anthropic
+# bills a spent balance as a 400 ("Your credit balance is too low..."), the CLI writes the
+# status into its error line, and this set called an empty account a broken workflow
+# while the diagnostic advised a top-up. The status was here to keep the
+# context-management refusal fatal -- one wording of it carries "No quota was consumed" --
+# and demoting it alone would hand that refusal to `quota`. So the two 400s are separated
+# by their BODIES, through the very constant `_write_diagnostic`'s refusal branch reads.
+# The status now sits beside `invalid[_ ]request` below. TEST_SUITE.md §8.5 I-C5 carries
+# the measurement.
 #
 # 🔴 **KBR-145 moved `invalid[_ ]request` OUT of this set**, to
 # `FATAL_UNLESS_PROVIDER_NAMED_PATTERNS` below. DeepSeek reports a spent balance
@@ -354,7 +364,6 @@ CONTEXT_MANAGEMENT_REFUSAL = (
 FATAL_PATTERNS = (
     r"is not valid json",
     r"is not a valid json schema",
-    CONTEXT_MANAGEMENT_REFUSAL,
     r"unterminated string",
 )
 
@@ -388,7 +397,10 @@ FATAL_PATTERNS = (
 # 🔴 KBR-206: `\b400\b` joins it from tier 1, for the reason KBR-145 moved the generic
 # code -- a status names no cause, and Anthropic's spent balance is a 400. It reads the
 # full haystack like its neighbour: this tier can only return `fatal`, so a prose 400
-# here can fail to rescue a record, never promote one to a paid retry.
+# here can fail to rescue a record, never promote one to a paid retry. ⚠️ That is true
+# of THIS tier, not of the move: a 400 anywhere in a record used to reach tier 1 first,
+# which is why an unattributable record is now kept from the promoting tiers -- see
+# `_promotable_outcome_text`.
 FATAL_UNLESS_PROVIDER_NAMED_PATTERNS = (r"invalid[_ ]request", r"\b400\b")
 
 #: What the CLOCK says, one per reachable state — and NOTHING else, because this
@@ -664,7 +676,7 @@ def _extract_structured_output(raw_output: str, execution_text: str) -> dict | N
 #: patterns are searched. Reviewing a change under `.github/review/scripts/` therefore fed this
 #: module's own source into its own matcher: `interpret_claude_result.py` contains the literals
 #: ``\b400\b``, ``quota``, ``insufficient balance`` and ``billing``, and one read of it matches
-#: **most of** :data:`QUOTA_PATTERNS` and **every** fatal pattern in the file.
+#: **most of** :data:`QUOTA_PATTERNS` and most of the fatal vocabulary.
 #:
 #: ⚠️ **Stated as a shape rather than as figures, because the figures rotted.** This line
 #: quoted "nine of QUOTA_PATTERNS and three of FATAL_PATTERNS"; re-derived by running the
@@ -690,8 +702,8 @@ def _extract_structured_output(raw_output: str, execution_text: str) -> dict | N
 #: ⚠️ **The rule that replaced the defect, and the one to preserve: a numeric outcome
 #: field is admitted to the PROVIDER-SCOPED text only** -- what
 #: :func:`_provider_outcome_text` returns -- **and must never reach the haystack
-#: :func:`_outcome_text` returns**, which is what :data:`FATAL_PATTERNS` and
-#: :data:`FATAL_UNLESS_PROVIDER_NAMED_PATTERNS` -- the tier ``\b400\b`` lives in since KBR-206 -- read.
+#: :func:`_outcome_text` returns**, the haystack :data:`FATAL_UNLESS_PROVIDER_NAMED_PATTERNS`
+#: reads -- where ``\b400\b`` has lived since KBR-206.
 #: :func:`_numbers_in` carries the argument and the measurement; it is not repeated
 #: here, because a third copy is the one that goes stale.
 #:
@@ -736,6 +748,11 @@ OUTCOME_NUMBER_BOUND = 10**9
 #: `API Error: 402 {"error":{"message":"Insufficient Balance"}}`, arrives that way. Scoping
 #: it out unconditionally would trade this defect for a silent miss on a spent account.
 MODEL_AUTHORED_FIELD = "result"
+
+#: A ``result`` KEY in raw record text: what separates raw CLI output (none) from a record
+#: too broken to attribute (one). Shared by :func:`_provider_outcome_text` and
+#: :func:`_promotable_outcome_text` so the two fallbacks cannot disagree on the sentinel.
+RESULT_KEY = re.compile(r'"result"\s*:')
 
 
 def _parse_events(execution_text: str) -> list | None:
@@ -917,7 +934,7 @@ def _provider_outcome_text(execution_text: str) -> str:
     # turns a truncated 401 back into a workflow fault. `test_a_result_value_is_not_a_
     # result_key` is the row that fails when the colon is dropped.
     if events is None:
-        if re.search(r'"result"\s*:', execution_text):
+        if RESULT_KEY.search(execution_text):
             return ""
         return execution_text
 
@@ -926,6 +943,36 @@ def _provider_outcome_text(execution_text: str) -> str:
     # it does.
     provider_parts, _, status_parts = _outcome_parts(events)
     return "\n".join(provider_parts + status_parts)
+
+
+def _promotable_outcome_text(execution_text: str) -> str:
+    """Return the text the full-haystack tiers that grant a retry may read.
+
+    🔴 **KBR-206 (owner decision D3).** :data:`QUOTA_PATTERNS` and
+    :data:`CREDENTIAL_PATTERNS` read the full haystack and turn a record ``exhausted``,
+    which :func:`retry_verdict` retries at full price. For an unparseable record that
+    haystack is the whole transcript, tool results included -- so a reviewer that read
+    this repository's source, which names ``authentication_error``, got a paid retry. A
+    ``400`` somewhere in that text used to reach tier 1 first and hide it; KBR-206 moved
+    the status below these tiers and uncovered the leak, which had always existed for
+    text without a ``400``. So the rule :func:`_provider_outcome_text` applies to the weak
+    tiers is applied here too: a record too broken to attribute gets no vote on a paid
+    retry, and falls to the generic tier's conservative ``fatal``.
+
+    Args:
+        execution_text: Raw execution record text.
+
+    Returns:
+        :func:`_outcome_text`'s result for a parseable record; for one that is not JSON,
+        the whole text when it carries no ``result`` key and ``""`` when it does.
+    """
+
+    scoped = _outcome_text(execution_text)
+    if scoped is not None:
+        return scoped
+    if RESULT_KEY.search(execution_text):
+        return ""
+    return execution_text
 
 
 def _strings_in(value: object, depth: int = 0) -> list[str]:
@@ -980,7 +1027,8 @@ def _numbers_in(value: object) -> list[str]:
     ``invalid_request_error`` -- *"Your credit balance is too low to access the
     Anthropic API"* -- and the full-haystack form turned it from ``exhausted``/quota into
     ``fatal``. KBR-206 moved the pattern below the quota group, which rescues that body
-    but not a record carrying no cause at all, so the bound still holds. KBR-166 already established that the separable
+    but not a record carrying no cause at all, so the bound still holds.
+    KBR-166 already established that the separable
     question is who WROTE a field; a numeric status is the most unambiguously
     provider-authored value in the record, so this applies that mechanism once more
     rather than widening what KBR-166 narrowed.
@@ -1107,6 +1155,13 @@ def classify(
     scoped = _outcome_text(execution_text)
     haystack = (execution_text if scoped is None else scoped).lower()
 
+    # 🔴 KBR-206. The context-management refusal is named by its own wording, ahead of
+    # everything, with a fixed reason. Ahead of the schema patterns too: the diagnostic has
+    # a refusal branch and no schema branch, so a record carrying both is told the same
+    # thing by the verdict and by the advice. See `CONTEXT_MANAGEMENT_REFUSAL_REASON`.
+    if re.search(CONTEXT_MANAGEMENT_REFUSAL, haystack):
+        return "fatal", CONTEXT_MANAGEMENT_REFUSAL_REASON
+
     # Fatal first: a rejected schema can coexist with other noise in the record,
     # and spending the remaining providers on it is pure waste. That reasoning is
     # unchanged for everything still in this set.
@@ -1125,8 +1180,11 @@ def classify(
     # -- one finding, derived once, is the only shape in which two readers cannot
     # disagree, which is the rule `retry_verdict` already states about `timed_out_attempt`.
     provider_scoped = _provider_outcome_text(execution_text).lower()
+    # KBR-206 (D3): the full-haystack tiers that grant a paid retry skip a record too
+    # broken to attribute. See `_promotable_outcome_text`.
+    promotable = _promotable_outcome_text(execution_text).lower()
 
-    hit = _first_match(QUOTA_PATTERNS, haystack)
+    hit = _first_match(QUOTA_PATTERNS, promotable)
     if hit:
         return "exhausted", f"provider quota exhausted: {hit!r}"
 
@@ -1136,7 +1194,7 @@ def classify(
     if hit:
         return "exhausted", f"provider quota exhausted: {hit!r}"
 
-    hit = _first_match(CREDENTIAL_PATTERNS, haystack)
+    hit = _first_match(CREDENTIAL_PATTERNS, promotable)
     if hit:
         return "exhausted", f"provider rejected the credentials or model: {hit!r}"
 
@@ -1706,7 +1764,10 @@ def _write_diagnostic(
             "is the knob.",
             "",
         ]
-    elif any(re.search(p, evidence, re.I) for p in QUOTA_PATTERNS) or any(
+    elif any(
+        re.search(p, _promotable_outcome_text(execution_text), re.I)
+        for p in QUOTA_PATTERNS
+    ) or any(
         re.search(p, provider_evidence, re.I) for p in QUOTA_WORD_PATTERNS
     ):
         # 🔴 KBR-166: this branch must mirror `classify`'s split, and forgetting the

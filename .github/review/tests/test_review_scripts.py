@@ -2151,7 +2151,8 @@ class TestClassify(unittest.TestCase):
     def test_a_400_in_the_models_prose_does_not_abandon_the_review(self):
         """🔴 KBR-172. The one code whose false match changes the DECISION, not the wording.
 
-        ``\\b400\\b`` sits in :data:`FATAL_PATTERNS`, which is consulted first, and ``fatal``
+        ``\\b400\\b`` sits in a ``fatal`` tier (:data:`FATAL_PATTERNS` until KBR-206,
+        :data:`FATAL_UNLESS_PROVIDER_NAMED_PATTERNS` since), and ``fatal``
         means *"re-running will not fix this"* — so the run is abandoned and the operator is
         told the workflow is wrong when it is not. Every other code lands on ``exhausted``,
         which is the status the fallthrough would have given anyway; they corrupt the reason
@@ -2490,8 +2491,9 @@ class TestClassify(unittest.TestCase):
 
         Claude Code sends Anthropic's context-management beta at the protocol
         level, and OpenRouter serves it only for Anthropic-family models. The
-        refusal is a 400, so it lands in `FATAL_PATTERNS` and is *correctly*
-        called fatal -- and then, without a branch of its own, prints the
+        refusal is recognised by its own wording ahead of every other tier (a 400
+        until KBR-206), and is *correctly* called fatal -- and then, without a
+        branch of its own, prints the
         generic "the workflow is misconfigured" and sends the operator to check
         four settings that are all correct.
 
@@ -16752,8 +16754,8 @@ class VerdictAndAdviceAgreeTests(unittest.TestCase):
 
         Scoped to the guards the code actually imposes: a record-present attempt with
         no findings payload, whose evidence matches neither tier 1 nor the
-        context-management refusal. The two exclusions below are what those guards
-        are for.
+        context-management refusal. The one exclusion below is what those guards are
+        for; since KBR-206 the two rows after it are agreement rows.
         """
 
         for name, record in QUOTA_FIXTURES:
@@ -17937,7 +17939,8 @@ class StatusNeverReachesTheFatalTierTests(unittest.TestCase):
     credential tier -- and Anthropic reports a SPENT BALANCE as HTTP 400. KBR-206 moved it
     below those tiers, so the spent balance is now rescued either way; a 400 carrying no
     cause is not. Measured under KBR-206 by moving the coercion into the full haystack,
-    the fix KBR-182's own ticket text proposes: `test_a_bare_400_is_not_promoted_to_a_workflow_fault`,
+    the fix KBR-182's own ticket text proposes:
+    `test_a_bare_400_is_not_promoted_to_a_workflow_fault`,
     `test_the_numeric_status_is_absent_from_the_tier_one_haystack` and
     `StatusMatrixTests.test_no_status_turns_a_record_into_a_workflow_fault` fail.
     """
@@ -18705,8 +18708,9 @@ class OversizedIntegerTests(unittest.TestCase):
 #: ⚠️ **Vendor-reported rather than run-observed**, admitted on the protocol
 #: :data:`ANTHROPIC_400_LOW_CREDIT` states. The sentence is quoted verbatim in
 #: continuedev/continue#1185 (`400 {type:error,error:{type:invalid_request_error,message:Your
-#: credit balance is too low to access the Claude API. …}}`) and in Make community thread
-#: 52640; the `API Error: 400 ` prefix is the CLI's error-line shape. It is the reason the
+#: credit balance is too low to access the Claude API. …}}`), which shows it with its JSON
+#: quotes stripped; they and the `API Error: 400 ` prefix -- the CLI's error-line shape -- are
+#: restored here. It is the reason the
 #: `QUOTA_PATTERNS` anchor stops at "too low": the longer prefix loses this wording.
 ANTHROPIC_400_LOW_CREDIT_CLAUDE_API = (
     'API Error: 400 {"type":"error","error":{"type":"invalid_request_error",'
@@ -18716,7 +18720,8 @@ ANTHROPIC_400_LOW_CREDIT_CLAUDE_API = (
 
 #: A genuine 400 workflow fault that names no provider-side cause.
 #:
-#: Verbatim from anthropics/claude-code#4283: a transcript Claude Code itself malformed. It
+#: From anthropics/claude-code#4283, a transcript Claude Code itself malformed -- verbatim
+#: except that the issue's terminal wrapping ("invalid_r / equest_error") is undone. It
 #: is the shape `\b400\b` in tier 1 was ever right about, and the control that shows moving
 #: the status to the generic tier kept it: the tier still reaches it, through
 #: `invalid_request_error` or the status.
@@ -18729,8 +18734,8 @@ MALFORMED_REQUEST_400 = (
 
 #: A 400 that names nothing at all, verbatim from continuedev/continue#1185.
 #:
-#: ⚠️ **The reporter later found the cause was a spent balance**, and nothing in this text
-#: can say so -- which is the residual, stated rather than hidden: a status with no body is
+#: ⚠️ **A commenter on that issue later found the cause was a free-tier key**, and nothing in
+#: this text can say so -- which is the residual, stated rather than hidden: a status with no body is
 #: `fatal`, the conservative verdict that spends nothing. It is also the only fixture that
 #: reaches the generic tier through the STATUS alone, so it is what shows `\b400\b` still
 #: lives there.
@@ -18743,7 +18748,30 @@ FOUR_HUNDRED_SPENT_BALANCES = (
     ("ANTHROPIC_400_LOW_CREDIT", ANTHROPIC_400_LOW_CREDIT),
     ("ANTHROPIC_400_LOW_CREDIT_CLAUDE_API", ANTHROPIC_400_LOW_CREDIT_CLAUDE_API),
 )
-FOUR_HUNDRED_REFUSALS = (("CONTEXT_MANAGEMENT_400_REFUSAL", CONTEXT_MANAGEMENT_400_REFUSAL),)
+#: OpenRouter's context-management refusal as Claude Code prints it, verbatim from
+#: farion1231/cc-switch#1929 (Claude Code v2.1.81; the issue's line wrap is undone).
+#:
+#: 🔴 **It carries no quota word, and its `code: 400` is NESTED, which is never read.** So
+#: unlike :data:`CONTEXT_MANAGEMENT_400_REFUSAL` -- whose "No quota was consumed" sentence
+#: KBR-206 found in no public report -- nothing but the refusal's wording can call it fatal in
+#: the error-object carrier. That wording now decides the verdict and the retry, not only the
+#: advice.
+OPENROUTER_CONTEXT_MANAGEMENT_400 = (
+    'API Error: 400 {"error":{"message":"No endpoints available that support Anthropic\'s '
+    "context management features (context-management-2025-06-27). Context management "
+    'requires a supported provider (Anthropic).","code":400}}'
+)
+
+FOUR_HUNDRED_REFUSALS = (
+    ("CONTEXT_MANAGEMENT_400_REFUSAL", CONTEXT_MANAGEMENT_400_REFUSAL),
+    ("OPENROUTER_CONTEXT_MANAGEMENT_400", OPENROUTER_CONTEXT_MANAGEMENT_400),
+    # The phrase half of the pattern, with the dated slug removed: every real body carries
+    # both, so without this row the phrase alternative could be deleted unnoticed.
+    (
+        "OPENROUTER_CONTEXT_MANAGEMENT_400 without its slug",
+        OPENROUTER_CONTEXT_MANAGEMENT_400.replace(" (context-management-2025-06-27)", ""),
+    ),
+)
 FOUR_HUNDRED_NAMING_NO_PROVIDER_CAUSE = (
     ("MALFORMED_REQUEST_400", MALFORMED_REQUEST_400),
     ("HTTP_400_NAMING_NO_CAUSE", HTTP_400_NAMING_NO_CAUSE),
@@ -18854,7 +18882,10 @@ class FourHundredCarrierTests(unittest.TestCase):
                     with self.subTest(fixture=name, carrier=carrier, status=code):
                         status, reason, retryable, advice = self._cell(record)
 
-                        self.assertEqual(status, "fatal", reason)
+                        self.assertEqual(
+                            (status, reason),
+                            ("fatal", interpret.CONTEXT_MANAGEMENT_REFUSAL_REASON),
+                        )
                         self.assertFalse(retryable)
                         self.assertIn("context-management feature", advice)
                         self.assertNotIn("Top up the balance", advice)
@@ -18862,21 +18893,54 @@ class FourHundredCarrierTests(unittest.TestCase):
     def test_a_400_naming_no_provider_cause_is_still_a_workflow_fault(self):
         """AC6: the demotion reaches a 400 only when a provider-named cause outranks it.
 
-        Swept over the two coherent statuses only. Beside a 401/403/404 the status names a
-        credential cause and wins -- the incoherent-pair resolution KBR-182 recorded for the
-        generic code -- and beside a 402 the quota group does, which is asserted in
-        :class:`StatusMatrixTests` for that group rather than restated here.
+        🔴 **Every status, and the cells that move are pinned as moves, not skipped.**
+        Design review found the first version swept only `None` and `400`, which cannot see
+        the cost: beside a 401/403/404 the status names a credential cause, and beside a 402
+        the quota group names a spent balance, so each resolves to what its status says and
+        `retryable` turns TRUE. That is the incoherent-pair resolution `STATUS_MATRIX_MOVED`
+        records for the generic code since KBR-182; here the pair is priced, because
+        `MALFORMED_REQUEST_400` comes from a run 27 turns deep.
         """
 
+        moves = {
+            401: "provider rejected the credentials",
+            402: "provider quota exhausted",
+            403: "provider rejected the credentials",
+            404: "provider rejected the credentials",
+        }
         for name, text in FOUR_HUNDRED_NAMING_NO_PROVIDER_CAUSE:
-            for code in (None, 400):
+            for code in STATUS_MATRIX_STATUSES:
                 for carrier, record in _four_hundred_carriers(text, code):
                     with self.subTest(fixture=name, carrier=carrier, status=code):
                         status, reason, retryable, advice = self._cell(record)
 
-                        self.assertEqual(status, "fatal", reason)
-                        self.assertFalse(retryable)
-                        self.assertNotIn("Top up the balance", advice)
+                        if code in moves:
+                            self.assertEqual(status, "exhausted", reason)
+                            self.assertTrue(reason.startswith(moves[code]), reason)
+                            self.assertTrue(retryable)
+                            self.assertEqual(
+                                "Top up the balance" in advice, code == 402
+                            )
+                        else:
+                            self.assertEqual(status, "fatal", reason)
+                            self.assertFalse(retryable)
+                            self.assertNotIn("Top up the balance", advice)
+
+    def test_the_refusal_outranks_a_schema_rejection_in_the_same_record(self):
+        """The refusal is read before the schema patterns, so verdict and advice match.
+
+        `_write_diagnostic` has a refusal branch and no schema branch. With the schema
+        patterns first, a record carrying both would be reported as a schema failure over
+        the refusal paragraph -- both fatal, but saying two different things.
+        """
+
+        record = SCHEMA_UNTERMINATED + "\n" + OPENROUTER_CONTEXT_MANAGEMENT_400
+        status, reason, _, advice = self._cell(record)
+
+        self.assertEqual(
+            (status, reason), ("fatal", interpret.CONTEXT_MANAGEMENT_REFUSAL_REASON)
+        )
+        self.assertIn("context-management feature", advice)
 
     def test_the_quota_and_schema_fixtures_keep_their_verdicts(self):
         """AC5: what `\\b400\\b` in tier 1 was said to protect did not move."""
@@ -18895,30 +18959,78 @@ class FourHundredCarrierTests(unittest.TestCase):
                     interpret.classify(record), ("fatal", f"workflow-level failure: {hit!r}")
                 )
 
-    def test_tier_one_matches_the_refusal_by_its_body_and_no_bare_status(self):
+    def test_tier_one_matches_no_bare_status_and_no_generic_code(self):
         """AC3, asserted through the matcher rather than through tuple membership.
 
-        🔴 `assertNotIn(r"\\b400\\b", FATAL_PATTERNS)` would pass for `r"\\b400\\b|x"`. A
-        status-only haystack must match nothing in tier 1, the refusal must match without
-        its status, and the generic tier must still read the status.
+        🔴 `assertNotIn(r"\\b400\\b", FATAL_PATTERNS)` would pass for `r"\\b400\\b|x"`.
+        Every status this repository can produce, and the generic code KBR-145 moved, must
+        match nothing in tier 1 -- and the generic tier must still read the 400, or a record
+        naming no cause would lose the conservative `fatal`.
         """
 
-        refusal_without_status = CONTEXT_MANAGEMENT_400_REFUSAL.replace("API Error: 400 ", "")
+        for probe in [f"api error: {code}" for code in STATUS_MATRIX_STATUSES if code] + [
+            '{"type":"invalid_request_error"}'
+        ]:
+            with self.subTest(probe=probe):
+                self.assertIsNone(interpret._first_match(interpret.FATAL_PATTERNS, probe))
+                self.assertIsNone(re.search(interpret.CONTEXT_MANAGEMENT_REFUSAL, probe))
 
-        self.assertIsNone(
-            interpret._first_match(interpret.FATAL_PATTERNS, "api error: 400 bad request")
-        )
-        self.assertIsNotNone(
-            interpret._first_match(
-                interpret.FATAL_PATTERNS, refusal_without_status.lower()
-            ),
-            "tier 1 must name the refusal by its wording",
-        )
         self.assertIsNotNone(
             interpret._first_match(
                 interpret.FATAL_UNLESS_PROVIDER_NAMED_PATTERNS, "api error: 400 bad request"
             ),
             "the generic tier must still read a bare 400",
+        )
+
+    def test_an_unattributable_record_gets_no_paid_retry_from_what_the_reviewer_read(self):
+        """🔴 KBR-206, owner decision D3 -- a leak this ticket uncovered, closed here.
+
+        A transcript that does not parse is searched whole, tool results included. The
+        tool result below is a real line of `src/kitty/bridge/server.py` beside a real
+        quota phrase from this module's own fixtures; a reviewer reading either used to be
+        hidden by any `400` elsewhere in the text reaching tier 1 first. With the status
+        demoted, `CREDENTIAL_PATTERNS` and `QUOTA_PATTERNS` claimed the record and granted a
+        paid retry. Now a record carrying a `result` key it cannot attribute gets no vote
+        from those tiers, and the generic code decides.
+        """
+
+        for label, read in (
+            ("credential word", 'return status, "authentication_error"'),
+            ("quota phrase", "Insufficient Balance"),
+        ):
+            events = [
+                {
+                    "type": "user",
+                    "message": {"content": [{"type": "tool_result", "content": read}]},
+                },
+                {"type": "result", "subtype": "error", "result": "API Error: rejected",
+                 "error": {"type": "invalid_request_error", "message": "the request was rejected"}},
+            ]
+            record = json.dumps(events, indent=2) + "\n<truncated"
+            with self.subTest(read=label):
+                self.assertIsNone(interpret._parse_events(record), "the record must not parse")
+                status, reason, retryable, advice = self._cell(record)
+
+                self.assertEqual(
+                    (status, reason), ("fatal", "workflow-level failure: 'invalid_request'")
+                )
+                self.assertFalse(retryable)
+                self.assertNotIn("Top up the balance", advice)
+
+    def test_raw_cli_output_still_reaches_the_promoting_tiers(self):
+        """The control for the row above: no `result` key means raw CLI text, read whole.
+
+        Without it, returning `""` for every unparseable record would pass the row above and
+        blind the classifier to the bare CLI line -- the carrier Anthropic's spent balance
+        actually arrives in.
+        """
+
+        self.assertEqual(
+            interpret._promotable_outcome_text(ANTHROPIC_400_LOW_CREDIT),
+            ANTHROPIC_400_LOW_CREDIT,
+        )
+        self.assertEqual(
+            interpret._promotable_outcome_text('[{"result": "x"}\n<truncated'), ""
         )
 
     def test_every_400_carrying_fixture_is_measured(self):
