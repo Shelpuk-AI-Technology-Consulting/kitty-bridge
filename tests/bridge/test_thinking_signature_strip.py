@@ -75,6 +75,27 @@ _LONG_HISTORY = [
     {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_2", "content": "22C"}]},
 ]
 
+#: Four signed assistant turns (indices 1, 3, 5, 7): enough for two targeted strips to leave thinking for the third.
+_FOUR_TURN_HISTORY = [
+    *_LONG_HISTORY,
+    {
+        "role": "assistant",
+        "content": [
+            {"type": "thinking", "thinking": "Done.", "signature": "sig-5"},
+            {"type": "text", "text": "Both checked."},
+        ],
+    },
+    {"role": "user", "content": "And Oslo?"},
+    {
+        "role": "assistant",
+        "content": [
+            {"type": "thinking", "thinking": "Oslo next.", "signature": "sig-7"},
+            {"type": "text", "text": "Checking Oslo."},
+        ],
+    },
+    {"role": "user", "content": "Thanks."},
+]
+
 _OK_REPLY = {
     "id": "msg_ok",
     "type": "message",
@@ -97,6 +118,18 @@ def _envelope(message: str) -> dict:
         The error body Anthropic returns with a 400.
     """
     return {"type": "error", "error": {"type": "invalid_request_error", "message": message}}
+
+
+def _rejection_at(message_index: int) -> dict:
+    """Return Anthropic's invalid-signature rejection naming a given message.
+
+    Args:
+        message_index: The index the error path names.
+
+    Returns:
+        The error body.
+    """
+    return _envelope(f"messages.{message_index}.content.0: Invalid `signature` in `thinking` block")
 
 
 # ── R1: the detector ────────────────────────────────────────────────────────
@@ -485,33 +518,23 @@ async def test_rejections_beyond_the_strip_cap_are_surfaced_not_looped(stream):
     """R6 — three strips at most: two targeted, the third everything; a fourth rejection reaches the client.
 
     Each rejection names a later turn, as a history broken in several places would,
-    so every strip has something to remove and only the cap ends the recovery.
+    so every strip has something to remove.  The fourth signed turn is what makes
+    the count matter: only the third strip's escalation removes it, so a count that
+    never advanced would keep targeting and send a fifth request.
 
     Args:
         stream: Whether the client request streams.
     """
-    history = [
-        *copy.deepcopy(_LONG_HISTORY),
-        {
-            "role": "assistant",
-            "content": [
-                {"type": "thinking", "thinking": "Done.", "signature": "sig-5"},
-                {"type": "text", "text": "Both checked."},
-            ],
-        },
-        {"role": "user", "content": "Thanks."},
-    ]
-    rejections = [
-        (400, _envelope(f"messages.{index}.content.0: Invalid `signature` in `thinking` block"))
-        for index in (1, 3, 5, 5)
-    ]
+    rejections = [(400, _rejection_at(index)) for index in (1, 3, 5, 5)]
 
-    status, text, calls = await _drive(_native_server(), _NATIVE_URL, rejections, stream=stream, history=history)
+    status, text, calls = await _drive(
+        _native_server(), _NATIVE_URL, rejections, stream=stream, history=_FOUR_TURN_HISTORY
+    )
 
     assert status == 400, text
     assert len(calls) == 4
-    assert _thinking_types(calls[1][0]) == ["thinking", "thinking"]
-    assert _thinking_types(calls[2][0]) == ["thinking"]
+    assert _thinking_types(calls[1][0]) == ["thinking", "thinking", "thinking"]
+    assert _thinking_types(calls[2][0]) == ["thinking", "thinking"]
     assert _thinking_types(calls[3][0]) == []
 
 
@@ -542,28 +565,29 @@ async def test_the_retry_keeps_the_reasoning_after_the_rejected_turn(stream):
 async def test_a_failover_after_a_strip_lets_the_next_backend_recover_too():
     """R4b — strips are counted per serialized body: the next backend's rebuilt body gets its own recovery.
 
-    Member A is stripped, then rate-limits; the pool fails over, rebuilding the
-    body with its thinking restored.  Member B rejects it too.  Had the count
-    been per request, B would have been blamed and quarantined for kitty's history.
+    Member A uses all three strips, then rate-limits; the pool fails over and
+    rebuilds the body with its thinking restored.  Member B rejects it too.  Had
+    the count been per request, B would have had no strips left and been blamed
+    and quarantined for kitty's history.
     """
     server = _native_server(pool=True)
+    rate_limited = {"type": "error", "error": {"type": "rate_limit_error", "message": "slow down"}}
+    replies = [
+        (400, _rejection_at(1)),
+        (400, _rejection_at(3)),
+        (400, _rejection_at(5)),
+        (429, rate_limited),
+        (400, _rejection_at(1)),
+        (200, _sse_reply()),
+    ]
 
-    status, text, calls = await _drive(
-        server,
-        _NATIVE_URL,
-        [
-            (400, _envelope(_INVALID_SIGNATURE)),
-            (429, {"type": "error", "error": {"type": "rate_limit_error", "message": "slow down"}}),
-            (400, _envelope(_INVALID_SIGNATURE)),
-            (200, _sse_reply()),
-        ],
-        stream=True,
-    )
+    status, text, calls = await _drive(server, _NATIVE_URL, replies, stream=True, history=_FOUR_TURN_HISTORY)
 
     assert status == 200, text
-    assert len(calls) == 4
-    served_by = calls[-1][1].get("x-api-key")
-    assert calls[2][1].get("x-api-key") == served_by != calls[0][1].get("x-api-key")
+    assert len(calls) == 6
+    first, served_by = calls[0][1].get("x-api-key"), calls[-1][1].get("x-api-key")
+    assert calls[4][1].get("x-api-key") == served_by != first
+    assert _thinking_types(calls[4][0]) == ["thinking", "redacted_thinking", "thinking", "thinking", "thinking"]
     member = int(served_by.rsplit("-", 1)[1]) - 1
     assert server._backend_health[member]["healthy"]
 
