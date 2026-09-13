@@ -4298,8 +4298,10 @@ entire rationale has lived in module comments, which is why three tickets (KBR-1
 KBR-166) each re-derived the same reasoning from scratch. The invariants are recorded here so
 the next change to it has something to contradict.
 
-**I-C1 — Tier order is a cost ordering, not a specificity ordering.** `FATAL_PATTERNS` is
-consulted first, then quota, then credentials, then the generic-code tier, then transients.
+**I-C1 — Tier order is a cost ordering, not a specificity ordering.** Tier 1 is consulted
+first — since KBR-206, the context-management refusal and then `FATAL_PATTERNS`, and ahead of it
+the unattributable-record check (I-C5, D3) — then quota, then credentials, then the generic-code
+tier, then transients.
 "Generic loses to everything more specific" reads well and is wrong: `EXHAUSTED_PATTERNS`
 carries the bare words `timeout` and `capacity`, which a model can write in its own prose, so
 yielding to them would let a billed rejection be retried at full price. The order is justified
@@ -4324,8 +4326,12 @@ status and retry but lost the quota reason and top-up advice on 10 of 11 statuse
 402, which now names the quota itself); the anchor lost nothing. Its residual is that a
 quotation still leaks, and that Gemini sends the same sentence for a per-minute rate limit, so a
 free-tier throttle is advised to top up — status and retry still right. The rule is about the
-tiers that can **promote** a record to `exhausted`; `FATAL_PATTERNS` is weak and reads the full
-haystack too, and that is KBR-206's subject rather than this rule's. `CREDENTIAL_PATTERNS`'
+tiers that can **promote** a record to `exhausted`. KBR-206 added a second exception on the same
+terms — `your credit balance is too low`, the shared prefix of Anthropic's two spent-balance sentences
+(*"…to access the Anthropic API"* and *"…to access the Claude API"*, both in public reports); the longer
+prefix would lose one of them. It is needed for the same reason: the CLI's error line in `result` is
+the carrier no provider-scoped pattern reads. `FATAL_PATTERNS` no longer carries a weak entry — see
+I-C5. `CREDENTIAL_PATTERNS`'
 `model not found` / `authentication_failed` words are the same exposure and are KBR-217's.
 
 The four moved patterns kept every English body: Z.ai's own error table puts a stronger vendor
@@ -4335,15 +4341,25 @@ because a code survives translation and a phrase does not.
 **I-C3 — A numeric outcome field is admitted to the provider-scoped haystack only.** KBR-182.
 `api_error_status` is a JSON number and was discarded before any pattern saw it, so the field
 whose purpose is to report the provider's status was dead weight while looking live. It is now
-read — but it must never reach the haystack `_outcome_text` returns, because that one is read
-first by `FATAL_PATTERNS`, which carries `\b400\b`. Anthropic reports a spent balance as HTTP
-400, so a bare status in the tier-1 haystack turns an empty account into a "broken workflow"
-verdict with the re-run refused. The bound is at the field's own value: a number nested inside
-a provider's error object is a parameter, not a status.
+read — but it must never reach the haystack `_outcome_text` returns. When KBR-182 set this rule that
+haystack was read first by tier 1, which carried `\b400\b`, and the victim was Anthropic's spent
+balance, which is an HTTP 400. KBR-206 moved `\b400\b` to `FATAL_UNLESS_PROVIDER_NAMED_PATTERNS`,
+below the quota group, and the rule still holds for a different harm: that tier is consulted
+**before** `EXHAUSTED_PATTERNS` and `STRUCTURED_OUTPUT_PATTERNS`, so a status in the full haystack
+would turn a transient server error or a structured-output give-up beside a 400 into `fatal` with
+the re-run refused. `StatusMatrixTests.test_no_status_turns_a_record_into_a_workflow_fault` and
+`test_a_bare_400_is_not_promoted_to_a_workflow_fault` are the rows. The bound is at the field's own
+value: a number nested inside a provider's error object is a parameter, not a status.
+
+⚠️ **One consequence, accepted by name.** A 400 that names no cause reaches different verdicts by
+carrier: in the CLI's text (`API Error: 400`, bare or in `result`) the generic tier reads it and the
+record is `fatal`; as `api_error_status` alone it is not read there, and the record falls through to
+`exhausted` "no recognisable error" with a retry. Production usually writes both, so the text decides.
 
 ⚠️ Two qualifications, because the rule is easy to state more absolutely than it holds. It
 governs **parseable** records: when `_parse_events` fails, `classify` searches the raw text
-whole and always has, status text included. And `_provider_outcome_text` has a **second
+whole and always has, status text included — except that since KBR-206 (D3, I-C5) such a
+record carrying a `result` key is decided before every tier. And `_provider_outcome_text` has a **second
 consumer** — `_write_diagnostic`'s quota branch — so a numeric pattern added to
 `QUOTA_WORD_PATTERNS` would fire the top-up paragraph off a bare status, including under a
 `fatal` verdict. That is the door KBR-207 has to walk through carefully.
@@ -4365,7 +4381,9 @@ top-up. That is KBR-206's family — tier 1 reading text that is not a workflow 
 advice is the correct half, so it is pinned rather than hidden: gating the diagnostic on the
 verdict would suppress correct advice there and in KBR-206's own row. A pre-existing
 disagreement of a third kind — a quota verdict under the context-management paragraph — is not
-touched by this change.
+touched by this change. **KBR-206 closed the 400-carried instance of the first kind, including
+this 402 cell, and the whole of the third**; four cells of the first kind remain, and the second kind
+was never measured in its sweep (I-C5).
 
 **Residuals, stated so they read as decisions.** A non-English Z.ai body in `result` keeps
 `exhausted` and its retry but loses the quota reason and advice. A provider that writes `0.402`
@@ -4377,13 +4395,99 @@ fallback `_provider_outcome_text` already documents — no `result` key, so mode
 sites to `ValueError` and `RecursionError`: an integer over the interpreter's digit limit and a
 deeply nested document raised through the script, so the run that already failed wrote no
 status and no diagnostic. The cost is recorded: such a record takes the unparseable path, where
-`classify` searches the text whole — a crash traded for an unscoped verdict.
+`classify` searches the text whole — a crash traded for an unscoped verdict — unless it carries a
+`result` key, which since KBR-206 makes it unattributable (I-C5, D3).
 
 **I-C4 — The verdict, the `retryable` flag and the diagnostic's advice must agree.** They are
 computed by three different functions from three different inputs — pattern order, cost, and
 the evidence text — so they can disagree without any one of them being obviously wrong.
 KBR-145 was filed because they did: an operator was told to top up a balance and, one
 paragraph up, that the workflow was broken. Any change to the tier order re-checks all three.
+
+**I-C5 — Tier 1 names a workflow fault; it never carries a bare status or a generic code.** KBR-206.
+Tier 1 is consulted before any provider-named cause, so whatever it matches decides the verdict
+*and* refuses the retry. `\b400\b` sat there, and a 400 says the request was rejected, not **by what**:
+Anthropic bills a spent balance as a 400 (*"Your credit balance is too low…"*), and the CLI writes the
+status into its error line, so tier 1 called an empty account a broken workflow while the diagnostic,
+reading evidence, advised a top-up. KBR-145 moved `invalid[_ ]request` down for the identical reason;
+KBR-206 moves `\b400\b` beside it, into `FATAL_UNLESS_PROVIDER_NAMED_PATTERNS`, and adds Anthropic's
+sentence prefix to `QUOTA_PATTERNS` (I-C2) so the `result` carrier is read.
+
+*Why not simply demote it.* The context-management refusal is also a 400, and the wording this
+repository has carried since upstream adds *"No quota was consumed"* — a sentence KBR-206 found in no
+public report. The verbatim OpenRouter body (cc-switch#1929) carries no quota word, but its
+`"code":400` is nested and never read, so in the error-object carrier nothing except its wording can
+call it fatal. So the two 400s are separated by their **bodies**, not by tier order: `classify` reads
+`CONTEXT_MANAGEMENT_REFUSAL` — the constant `_write_diagnostic`'s refusal branch already reads — first.
+It is read **ahead of the schema patterns** because the diagnostic has a refusal branch and no schema
+branch, so a record carrying both is told one thing. Its reason is a **fixed string**, not the match:
+this pattern now decides the verdict, and echoing up to 80 characters of provider- or model-written
+text into a `reason=` line of `$GITHUB_OUTPUT` is a surface the other reasons never had. ⚠️ "One
+pattern" is not "one matcher": `classify` searches lowercased text and the diagnostic uses `re.I`, and
+the two can differ on a character whose lowercase is longer (`İ`) inside the phrase's 80-character
+window. The coverage of `CONTEXT_MANAGEMENT_REFUSAL` is what decides the verdict: a future refusal
+wording matching neither alternative falls to the tiers below.
+
+*The leak the move uncovered (D3).* An unparseable record is searched whole, tool results included.
+A `400` anywhere in it used to reach tier 1 first; with the status demoted, every full-haystack tier
+read what the reviewer read — `src/kitty/bridge/server.py` names `authentication_error`, the harness
+quotes the refusal's dated slug, and prose says `timeout` — and each granted a paid retry or gave advice
+drawn from it. The leak already existed for text without a `400`. **Scoping tiers one at a time was
+built first and failed review:** it removed the quota and credential votes, and the record fell to
+`EXHAUSTED_PATTERNS` or the fallthrough and was retried anyway, while a real spent balance in that
+shape lost its top-up advice. So `_record_is_unattributable` — not JSON per `_parse_events`, and
+carrying a `result` key — decides such a record before every tier: `fatal`, a fixed reason, no
+automatic retry, and a diagnostic paragraph that gives no advice drawn from unattributable text.
+
+*Measured*, `origin/main` @ `b902076` against the change: the 400-carrying module-level fixtures in
+`test_review_scripts.py`, the inline KBR-206 rows, `QUOTA_FIXTURES`, both schema rejections, four
+public-report bodies (the *"Claude API"* wording, claude-code#4283's malformed-request 400, a bare
+`HTTP 400 Bad Request`, OpenRouter's verbatim refusal) and the status-matrix bodies, × three carriers
+(bare CLI line, `result`, `error`) × every matrix status — 595 cells, 181 changed (reason-only changes
+included). Verdict/advice disagreements of the two kinds the sweep checks (top-up advice against a
+non-quota verdict; refusal advice against a non-`fatal` one) fell from **72 to 4**; the four are
+pre-existing (a schema rejection beside a `402` status) and are the named I-C4 exclusion. No quota
+fixture and no schema rejection changed verdict. The figure is a measurement, not a pinned test;
+`FourHundredCarrierTests` pins the verdicts it rests on, and fails when a new 400-carrying
+**module-level** fixture joins the file without a row.
+
+*Owner decisions (2026-09-13)*, recorded because each flips behaviour that was pinned or relied on:
+
+* **D1 — a 400 whose only cause evidence is a billing word is a spent balance.** Anthropic's real body
+  has exactly that shape (`Plans & Billing`), so no rule separates it from a synthetic *"the billing
+  account is not permitted to use this model"* except tier order, which this invariant forbids. The
+  cost is at most one re-run of a request that was rejected before the model ran.
+* **D2 — a record naming only the context-management slug is `fatal`.** Its advice already said
+  "re-running unchanged will not help"; the verdict now agrees. The cost is that a reviewer quoting the
+  dated slug in a non-schema-failure `result` loses its retry.
+* **D3 — a transcript too broken to attribute is `fatal`, not retried, full stop.** Closed in this
+  ticket rather than filed, because the move widened it. Chosen over deferring it to a ticket after
+  the narrower version was measured failing. The cost, accepted by name: a spent balance or a
+  transient outage in that shape is a workflow-level `fatal` and not retried — the PR notice, the job
+  summary and the `::error::` line say the workflow needs fixing, and only the embedded diagnostic
+  says the record was unreadable — and a spent balance whose top-up advice worked on `main` in that
+  shape now gets none.
+
+*Residuals.* **D3 is a text sentinel, and it does not reach three broken shapes.** (1) A transcript
+cut off before its result event carries no `result` key, is indistinguishable from raw CLI output,
+and is still searched whole — on `main` a `400` beside a quota phrase there was `fatal`, and it is now
+a paid retry with top-up advice (`test_a_transcript_cut_before_its_result_event_still_reads_what_was_read`).
+(2) A transcript whose result event is an error subtype — the Agent SDK's `SDKResultError` carries
+`errors` and no `result` — is the same case; with the dated refusal slug in a tool result it moved
+from `exhausted` to `fatal` with no retry (`test_an_error_subtype_transcript_is_not_unattributable`).
+Widening the sentinel to `"type": "result"` would refuse the truncated-401 record
+`test_a_result_value_is_not_a_result_key` keeps readable, so it is not done here. (3) `_parse_events`
+treats a record as readable if any line decodes, so an NDJSON record whose result line is corrupt is
+not unattributable and its lost result is never seen (`test_a_corrupt_ndjson_result_line_is_not_unattributable`).
+Conversely a raw provider body passed through unescaped that carries its own `"result":` key — e.g.
+Cloudflare's `{"result":null,"success":false,...}` wrapper — IS called unattributable; kitty's
+translated error escapes it, so the usual route is unaffected. OpenRouter's *"can only afford 400"* message stays `fatal` with no advice unless a 402 is
+in `api_error_status` or in the CLI's text outside `result`: a nested `"code":402` is never read, and
+`API Error: 402 …` inside `result` is read only by the anchored tiers, which carry no phrase of that
+message. A 401/402/403/404 status beside a malformed-request 400 body resolves to what the status
+names — credentials, or quota with the top-up paragraph — with `retryable` **true**, the incoherent-pair
+resolution `STATUS_MATRIX_MOVED` records for the generic code; that body comes from a run 27 turns
+deep, so the retry is priced, and `FourHundredCarrierTests` pins it.
 
 **How it is proven.** `.github/review/tests/test_review_scripts.py`, run directly by `ci.yml`
 rather than through `pytest`, so it is outside §8.1's marker matrix and carries no layer
