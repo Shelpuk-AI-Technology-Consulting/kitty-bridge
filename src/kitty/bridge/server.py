@@ -5546,6 +5546,16 @@ class BridgeServer:
             )
 
         self._log_usage(cc_response.get("usage"))
+        # KBR-228 part A: the reply's internal thinking carriage is consumed by
+        # the Messages translators; a Chat Completions client gets the CC body
+        # verbatim, so the key must not leave with it.  The Responses and
+        # Gemini handlers rebuild their replies from known fields and drop it
+        # there by construction.
+        choices = cc_response.get("choices")
+        if isinstance(choices, list):
+            for choice in choices:
+                if isinstance(choice, dict) and isinstance(choice.get("message"), dict):
+                    choice["message"].pop("_thinking_blocks", None)
         return web.json_response(cc_response)
 
     async def _stream_chat_completions(

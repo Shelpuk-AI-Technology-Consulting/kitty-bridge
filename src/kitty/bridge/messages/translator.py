@@ -548,10 +548,21 @@ class MessagesTranslator:
 
         content: list[dict] = []
 
-        # reasoning_content -> thinking block (must come before text)
-        reasoning = message.get("reasoning_content")
-        if reasoning:
-            content.append({"type": "thinking", "thinking": reasoning})
+        # KBR-228 part A: an Anthropic-family upstream's reply carries its
+        # thinking blocks verbatim under ``_thinking_blocks``; they are emitted
+        # as-is, signatures included, in wire order.  Thinking always precedes
+        # text and tool_use on that wire, so prepending them preserves the
+        # order the upstream produced.  The carriage wins over
+        # ``reasoning_content``, which mirrors the same text and would
+        # duplicate it as an unsigned block.
+        carried = message.get("_thinking_blocks")
+        if isinstance(carried, list) and carried:
+            content.extend(dict(block) for block in carried if isinstance(block, dict))
+        else:
+            # reasoning_content -> thinking block (must come before text)
+            reasoning = message.get("reasoning_content")
+            if reasoning:
+                content.append({"type": "thinking", "thinking": reasoning})
 
         # Text content -> text block
         text = self._extract_text_content(message.get("content"))

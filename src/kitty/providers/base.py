@@ -53,6 +53,12 @@ class ProviderAdapter(ABC):
             # `metadata` is a stored-completions tag map, a different concept, so
             # stripping it here keeps it off every other provider's wire.
             "_metadata",
+            # KBR-228: carries the Anthropic reply's thinking blocks (signatures
+            # included) to the Messages translators, and the agent's signed
+            # history back to the restoring adapters.  It rides message dicts in
+            # both directions; the message-level strip keeps it off every wire
+            # that does not consume it (KBR-228 parts A and B).
+            "_thinking_blocks",
             "base_url",  # F15 defense-in-depth — URL override goes through build_base_url(),
             # not the CC request body.  Stripping it here protects
             # adapters that rely on the default translate_to_upstream().

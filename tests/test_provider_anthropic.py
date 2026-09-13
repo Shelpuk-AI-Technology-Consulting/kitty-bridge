@@ -877,6 +877,61 @@ class TestPlaceholderThinkingInjection:
         assert thinking_blocks[0]["thinking"] == "Existing reasoning here."
 
 
+class TestResponseThinkingCarriage:
+    """KBR-228 part A: the Anthropic reply's thinking blocks ride the CC response.
+
+    ``translate_from_upstream`` used to keep only ``text`` and ``tool_use``:
+    ``thinking`` and ``redacted_thinking`` — signatures included — were dropped,
+    so the Messages client never saw the model's reasoning and the next turn had
+    nothing signed to send back.  The blocks now ride the CC response's message
+    under the internal ``_thinking_blocks`` key, verbatim and in wire order.
+    ``MessagesTranslator.translate_response`` consumes the key for a Messages
+    client; the Chat Completions handler strips it (KBR-228 part A).
+    """
+
+    def setup_method(self):
+        self.adapter = AnthropicAdapter()
+
+    def test_carries_thinking_and_redacted_blocks_verbatim_in_wire_order(self):
+        raw = {
+            "id": "msg_1",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-sonnet-4-6",
+            "content": [
+                {"type": "thinking", "thinking": "Need the weather.", "signature": "sig-1"},
+                {"type": "redacted_thinking", "data": "opaque"},
+                {"type": "text", "text": "Checking."},
+                {"type": "tool_use", "id": "toolu_1", "name": "get_weather", "input": {"city": "London"}},
+            ],
+            "stop_reason": "tool_use",
+            "usage": {"input_tokens": 10, "output_tokens": 5},
+        }
+        result = self.adapter.translate_from_upstream(raw)
+        message = result["choices"][0]["message"]
+        assert message["_thinking_blocks"] == [
+            {"type": "thinking", "thinking": "Need the weather.", "signature": "sig-1"},
+            {"type": "redacted_thinking", "data": "opaque"},
+        ]
+        # The existing halves of the translation are untouched.
+        assert message["content"] == "Checking."
+        assert message["tool_calls"][0]["function"]["name"] == "get_weather"
+        assert result["choices"][0]["finish_reason"] == "tool_calls"
+
+    def test_no_thinking_blocks_means_no_carriage_key(self):
+        raw = {
+            "id": "msg_2",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-sonnet-4-6",
+            "content": [{"type": "text", "text": "Hello."}],
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 1, "output_tokens": 1},
+        }
+        result = self.adapter.translate_from_upstream(raw)
+        assert "_thinking_blocks" not in result["choices"][0]["message"]
+
+
 class TestThinkingBudgetTokensUncapped:
     """budget_tokens must be max_tokens - 1, not a hardcoded cap."""
 

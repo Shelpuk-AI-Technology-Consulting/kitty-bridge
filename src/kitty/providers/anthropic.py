@@ -387,6 +387,20 @@ class AnthropicAdapter(ProviderAdapter):
                 for tu in tool_uses
             ]
 
+        # KBR-228 part A: the reply's thinking blocks ride the CC message under
+        # an internal key, verbatim and in wire order, so the Messages client
+        # sees the model's reasoning and the next turn has signed blocks to
+        # send back.  ``thinking`` always precedes ``text``/``tool_use`` on
+        # this wire, so prepending in ``translate_response`` preserves the
+        # order the upstream produced.
+        thinking_blocks = [
+            dict(block)
+            for block in content_blocks
+            if isinstance(block, dict) and block.get("type") in ("thinking", "redacted_thinking")
+        ]
+        if thinking_blocks:
+            message["_thinking_blocks"] = thinking_blocks
+
         stop_reason = raw_response.get("stop_reason")
         finish_reason = _STOP_REASON_MAP.get(stop_reason, "stop")
 

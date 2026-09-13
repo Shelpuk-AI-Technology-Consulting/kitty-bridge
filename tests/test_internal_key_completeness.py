@@ -71,6 +71,11 @@ _EXPECTED_KEYS: dict[str, set[str]] = {
         # converter and mints the same internal key the translator does.
         "_top_k",
     },
+    # KBR-228 part A: the reply's thinking blocks ride the CC response message
+    # into the Messages translators.  The same key carries the agent's signed
+    # history upstream in part B, which mints it in the two Messages -> CC
+    # converters as well.
+    "providers/anthropic.py": {"_thinking_blocks"},
     "providers/kimi.py": {"_thinking_enabled"},
 }
 

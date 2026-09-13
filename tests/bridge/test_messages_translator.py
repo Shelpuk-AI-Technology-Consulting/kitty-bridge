@@ -909,6 +909,86 @@ class TestTranslateResponse:
         assert "retry" in result["content"][1]["text"].lower()
 
 
+# ── translate_response: the thinking carriage (KBR-228 part A) ─────────────
+
+
+class TestTranslateResponseThinkingCarriage:
+    """Carried signed thinking blocks reach the Messages client verbatim.
+
+    An Anthropic-family upstream's reply arrives with its thinking blocks under
+    the internal ``_thinking_blocks`` key of the CC message; the Messages
+    client must receive them in wire order, signatures included, instead of an
+    unsigned rebuild from ``reasoning_content``.  Without the key, behaviour is
+    unchanged.
+    """
+
+    def setup_method(self):
+        self.t = MessagesTranslator()
+
+    @staticmethod
+    def _cc_response(message: dict) -> dict:
+        return {
+            "id": "chatcmpl-1",
+            "object": "chat.completion",
+            "model": "claude-sonnet-4-6",
+            "choices": [{"index": 0, "message": message, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 50, "total_tokens": 60},
+        }
+
+    def test_carried_blocks_are_emitted_verbatim_before_text(self):
+        result = self.t.translate_response(
+            self._cc_response(
+                {
+                    "content": "It is 18C.",
+                    "_thinking_blocks": [
+                        {"type": "thinking", "thinking": "I know this.", "signature": "sig-1"},
+                        {"type": "redacted_thinking", "data": "opaque"},
+                    ],
+                }
+            )
+        )
+        assert result["content"] == [
+            {"type": "thinking", "thinking": "I know this.", "signature": "sig-1"},
+            {"type": "redacted_thinking", "data": "opaque"},
+            {"type": "text", "text": "It is 18C."},
+        ]
+        assert self.t.response_was_empty is False
+
+    def test_carriage_wins_over_reasoning_content(self):
+        """The same reasoning rides both slots on this upstream; only one block may come out."""
+        result = self.t.translate_response(
+            self._cc_response(
+                {
+                    "content": "It is 18C.",
+                    "reasoning_content": "I know this.",
+                    "_thinking_blocks": [
+                        {"type": "thinking", "thinking": "I know this.", "signature": "sig-1"},
+                    ],
+                }
+            )
+        )
+        thinking_blocks = [b for b in result["content"] if b["type"] == "thinking"]
+        assert thinking_blocks == [
+            {"type": "thinking", "thinking": "I know this.", "signature": "sig-1"},
+        ]
+
+    def test_thinking_only_reply_still_takes_the_fallback(self):
+        """Carried thinking does not make a reply non-empty: M12 still fires (KBR-155's decision)."""
+        result = self.t.translate_response(
+            self._cc_response(
+                {
+                    "content": None,
+                    "_thinking_blocks": [
+                        {"type": "thinking", "thinking": "Truncated mid-thought.", "signature": "sig-1"},
+                    ],
+                }
+            )
+        )
+        assert self.t.response_was_empty is True
+        assert [b["type"] for b in result["content"]] == ["thinking", "text"]
+        assert "retry" in result["content"][1]["text"].lower()
+
+
 # ── translate_stream_chunk ─────────────────────────────────────────────────
 
 
