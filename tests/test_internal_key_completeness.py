@@ -49,6 +49,8 @@ _EXPECTED_KEYS: dict[str, set[str]] = {
         "_effort",
         "_reasoning_effort",
         "_thinking_adaptive",
+        # KBR-203: the agent's thinking `display`, restored by AnthropicAdapter.
+        "_thinking_display",
         "_thinking_enabled",
         # KBR-178: Chat Completions has no `top_k`, so the inbound value rides
         # an internal key to the Anthropic-family adapters that accept it.

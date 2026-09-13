@@ -61,6 +61,11 @@ class MiniMaxTokenAnthropicAdapter(AnthropicAdapter):
     raw Claude Code body to the upstream. See module docstring for caveats.
     """
 
+    #: MiniMax's Anthropic-compatible reference documents ``thinking`` but not
+    #: ``display``, and this route exists because MiniMax rejected Claude Code
+    #: fields before (module docstring).  KBR-203, decision D2.
+    forwards_thinking_display = False
+
     def __init__(
         self,
         *,

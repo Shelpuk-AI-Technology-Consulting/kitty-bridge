@@ -101,7 +101,17 @@ class AnthropicAdapter(ProviderAdapter):
     Anthropic's Messages API (``POST /v1/messages``).  Anthropic uses
     ``x-api-key`` authentication and a content-block based request/response
     format rather than CC's message/content structure.
+
+    Attributes:
+        forwards_thinking_display: Whether :meth:`translate_to_upstream`
+            restores the agent's thinking ``display`` onto ``thinking``.  True
+            here, because Anthropic's Messages API defines the field.  A
+            subclass whose upstream does not document it sets this to False, so
+            an unknown field cannot turn every thinking request into a 400
+            (KBR-203).
     """
+
+    forwards_thinking_display: bool = True
 
     @property
     def provider_type(self) -> str:
@@ -230,13 +240,16 @@ class AnthropicAdapter(ProviderAdapter):
             # Claude Code sent thinking: {type: "adaptive"} — forward it
             # verbatim to the Anthropic-compatible upstream.  This lets the
             # provider decide the budget automatically.
-            anthropic["thinking"] = {"type": "adaptive"}
+            anthropic["thinking"] = self._with_thinking_display({"type": "adaptive"}, cc_request)
         elif cc_request.get("_thinking_enabled"):
             # Anthropic requires budget_tokens >= 1024 and budget_tokens < max_tokens.
             max_tokens = max(anthropic.get("max_tokens", _DEFAULT_MAX_TOKENS), 1025)
             anthropic["max_tokens"] = max_tokens
-            anthropic["thinking"] = {"type": "enabled", "budget_tokens": max_tokens - 1}
+            anthropic["thinking"] = self._with_thinking_display(
+                {"type": "enabled", "budget_tokens": max_tokens - 1}, cc_request
+            )
         elif cc_request.get("_thinking_enabled") is False:
+            # No display here: Anthropic rejects `display` alongside `disabled`.
             anthropic["thinking"] = {"type": "disabled"}
 
         # Restore the effort parameter for Anthropic-compatible upstreams.
@@ -247,6 +260,27 @@ class AnthropicAdapter(ProviderAdapter):
             anthropic["effort"] = cc_request["_effort"]
 
         return anthropic
+
+    def _with_thinking_display(self, thinking: dict, cc_request: dict) -> dict:
+        """Add the agent's thinking ``display`` to *thinking* where this upstream documents it.
+
+        Restoring ``display`` keeps the request faithful to what the agent sent;
+        the translated route does not yet return thinking to the user (KBR-227,
+        KBR-228).  Sending it to an upstream that does not document the field
+        risks a 400 on every thinking request (KBR-203).  The value itself is
+        checked by the translator, the only writer of ``_thinking_display``.
+
+        Args:
+            thinking: The ``adaptive`` or ``enabled`` thinking object being built.
+            cc_request: The Chat Completions request, read for ``_thinking_display``.
+
+        Returns:
+            *thinking* itself, not a copy: ``display``, when added, is set in
+            place.  Callers pass a freshly built dict, so nothing is aliased.
+        """
+        if self.forwards_thinking_display and "_thinking_display" in cc_request:
+            thinking["display"] = cc_request["_thinking_display"]
+        return thinking
 
     def _translate_assistant_msg(self, msg: dict, cc_request: dict | None = None) -> dict:
         """Translate an assistant message with optional tool_calls to Anthropic content blocks.

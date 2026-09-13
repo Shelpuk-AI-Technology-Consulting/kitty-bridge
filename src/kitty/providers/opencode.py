@@ -106,6 +106,10 @@ class OpenCodeGoAdapter(AnthropicAdapter):
     instead of duplicating the translation helpers here.
     """
 
+    #: The Messages route serves MiniMax and Qwen models, whose upstreams do not
+    #: document ``display``.  KBR-203, decision D2.
+    forwards_thinking_display = False
+
     @property
     def provider_type(self) -> str:
         return "opencode_go"
