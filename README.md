@@ -684,8 +684,8 @@ distinguishable in logs from the ordinary "request too large" rejection.
 
 ### "Kitty Bridge received an empty reply from the upstream provider on every attempt"
 
-Applies to providers kitty talks to in Anthropic's own format (`custom_anthropic`, `zai_coding`, and `minimax_token`
-when configured for it). Kitty holds back the start of each streamed reply until it carries text or a tool call, so a
+Applies to providers kitty talks to in Anthropic's own format: `anthropic`, `custom_anthropic`, `zai_coding`,
+`minimax_token`, and `opencode_go` for the models it serves on Anthropic's format. Kitty holds back the start of each streamed reply until it carries text or a tool call, so a
 reply with nothing in it — or only thinking, up to 10 MiB of it — can be retried before your agent sees it. This error
 means every attempt kitty made came back empty. Nothing reached the agent, so simply resend; if it persists, the provider
 or model is misbehaving.

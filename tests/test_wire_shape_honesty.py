@@ -317,6 +317,27 @@ def test_bare_property_matches_the_per_model_form_at_the_default_route_model(pro
     assert adapter.upstream_wire_is_messages_api is adapter.upstream_wire_is_messages_api_for_model(default_model)
 
 
+def test_a_native_passthrough_adapter_speaks_messages_for_every_model():
+    """KBR-227 — ``use_native_messages`` implies a Messages wire, for every representative model.
+
+    ``BridgeServer._serves_messages_wire`` forwards a ``/v1/messages`` stream
+    unchanged when either is true, so a native adapter whose wire were anything
+    else would have a foreign stream forwarded to Claude Code.  Each provider is
+    built with ``native_messages`` on, which is how ``minimax_token`` opts in;
+    adapters that do not read the key ignore it.
+    """
+    native = {
+        provider_type: get_provider(provider_type, {"native_messages": True}) for provider_type in REPRESENTATIVE_MODELS
+    }
+    native = {provider_type: adapter for provider_type, adapter in native.items() if adapter.use_native_messages}
+
+    # Without this the loop below could pass over an empty set.
+    assert set(native) >= {"custom_anthropic", "minimax_token", "zai_coding"}
+    for provider_type, adapter in native.items():
+        for model in REPRESENTATIVE_MODELS[provider_type].models:
+            assert adapter.upstream_wire_is_messages_api_for_model(model), f"{provider_type} × {model!r}"
+
+
 # ── Guards on the guard ────────────────────────────────────────────────────
 
 
