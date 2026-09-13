@@ -104,6 +104,9 @@ _ALLOWLIST: dict[str, str] = {
     "Kitty Bridge received an empty reply from the upstream provider on every attempt. Retry the request.": (
         "downstream 502 body / SSE error when every native attempt was empty (KBR-155)"
     ),
+    "Kitty Bridge lost the upstream reply mid-stream and the retry came back empty. Retry the request.": (
+        "downstream SSE error ending an open native stream after an empty retry (KBR-155)"
+    ),
     "Kitty Bridge received a reply from the upstream provider that stopped (": (
         "downstream 400 body for a native reply truncated before content (KBR-155)"
     ),

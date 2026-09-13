@@ -704,6 +704,9 @@ _EMPTY_FINAL_DELAYS = [20.0, 40.0]  # final delays before emitting empty-respons
 _NATIVE_EMPTY_REPLY_MESSAGE = (
     "Kitty Bridge received an empty reply from the upstream provider on every attempt. Retry the request."
 )
+_NATIVE_EMPTY_AFTER_EMISSION_MESSAGE = (
+    "Kitty Bridge lost the upstream reply mid-stream and the retry came back empty. Retry the request."
+)
 # D3: stop reasons that truncate a reply, so no retry can improve one that arrives before content.
 _NATIVE_TRUNCATING_STOP_REASONS = frozenset({"max_tokens", "model_context_window_exceeded"})
 _MAX_LOGGED_HELD_BYTES = 2000  # bound on a discarded native reply's head in the DEBUG log
@@ -3831,6 +3834,15 @@ class BridgeServer:
                                 stream_ok = True
                                 break
 
+                            # This attempt wrote nothing, so its discarded bytes exist only here.
+                            logger.warning(
+                                "Native Messages stream ended with no content for %s (%d bytes held, stop_reason=%s)",
+                                message_id,
+                                hold.held_size,
+                                hold.stop_reason,
+                            )
+                            logger.debug("Discarded native reply head: %r", hold.head(_MAX_LOGGED_HELD_BYTES))
+
                             # An earlier attempt already wrote (the KBR-183 failover), so a JSON
                             # error cannot follow: per Q14(a) the open stream ends in an error event.
                             if sr is not None:
@@ -3839,20 +3851,14 @@ class BridgeServer:
                                     messages_format_error(
                                         {
                                             "type": "error",
-                                            "error": {"type": "api_error", "message": _NATIVE_EMPTY_REPLY_MESSAGE},
+                                            "error": {
+                                                "type": "api_error",
+                                                "message": _NATIVE_EMPTY_AFTER_EMISSION_MESSAGE,
+                                            },
                                         }
                                     ).encode(),
                                 )
                                 break
-
-                            # Nothing was written, so the discarded bytes exist only here.
-                            logger.warning(
-                                "Native Messages stream ended with no content for %s (%d bytes held, stop_reason=%s)",
-                                message_id,
-                                hold.held_size,
-                                hold.stop_reason,
-                            )
-                            logger.debug("Discarded native reply head: %r", hold.head(_MAX_LOGGED_HELD_BYTES))
 
                             # D3: a truncation before any content is not improved by a retry.
                             if hold.stop_reason in _NATIVE_TRUNCATING_STOP_REASONS:

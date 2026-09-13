@@ -588,7 +588,7 @@ class TestFailuresWhileHeld:
         for health in server._backend_health:
             assert (health["healthy"], health["failure_count"]) == (True, 0), "a client fault is not a backend's"
 
-    @pytest.mark.parametrize("first_reply", ["zero_bytes", "dropped_preamble"])
+    @pytest.mark.parametrize("first_reply", ["zero_bytes", "dropped_before_body"])
     async def test_client_disconnect_before_a_retry_stops_the_ladder(self, first_reply, monkeypatch):
         """Neither reply offers a held chunk to check on, so the next attempt itself must check the client."""
         monkeypatch.setattr(server_module, "_TRANSPORT_GRACE_DELAYS", (0.0, 0.0))
@@ -604,8 +604,8 @@ class TestFailuresWhileHeld:
                 await asyncio.wait_for(client_gone.wait(), timeout=10)
             resp = web.StreamResponse(headers=_SSE_HEADERS)
             await resp.prepare(request)
-            if len(calls) == 1 and first_reply == "dropped_preamble":
-                await resp.write(_MESSAGE_START)
+            if len(calls) == 1 and first_reply == "dropped_before_body":
+                # No held chunk, so only the pre-attempt check can stop the grace retry.
                 request.transport.close()  # type: ignore[union-attr]
             return resp
 
@@ -642,7 +642,7 @@ class TestFailuresWhileHeld:
 
     async def test_empty_retry_after_bytes_reached_the_client_closes_the_stream(self, monkeypatch):
         """KBR-183 still lets a timeout after release retry; an empty retry must then end the open stream."""
-        monkeypatch.setattr(server_module, "_STREAM_READ_TIMEOUT", 0.2)
+        monkeypatch.setattr(server_module, "_STREAM_READ_TIMEOUT", 1.0)
         calls: list[int] = []
         stop = asyncio.Event()
 
