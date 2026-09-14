@@ -1828,13 +1828,21 @@ class TestTheWindowsConsoleDetachment:
             "    print('GenerateConsoleCtrlEvent failed', file=sys.stderr)\n"
             "    sys.exit(4)\n"
             "# Waiting on the control child, not on a clock: its exit is the\n"
-            "# observable that the broadcast reached the console's members. If\n"
-            "# it never dies the launcher exits anyway, and the test's own\n"
-            "# poll names the broadcast as not lethal.\n"
-            f"control.wait({self._CONTROL_EXIT_SECONDS})\n"
-            "# The exit code names how the control child died; the test\n"
-            "# surfaces launcher stderr, so this lands in CI on any failure.\n"
-            "print('control child exit code', control.returncode, file=sys.stderr)\n"
+            "# observable that the broadcast reached the console's members. A\n"
+            "# child that outlives the wait is left running and reported: the\n"
+            "# launcher still exits 0, and the test's own poll names the\n"
+            "# broadcast as not lethal -- the failure path this test promises.\n"
+            "timed_out = False\n"
+            "try:\n"
+            f"    control.wait({self._CONTROL_EXIT_SECONDS})\n"
+            "except subprocess.TimeoutExpired:\n"
+            "    timed_out = True\n"
+            "if timed_out:\n"
+            f"    print('control child still alive after "
+            f"{self._CONTROL_EXIT_SECONDS}s', file=sys.stderr)\n"
+            "else:\n"
+            "    print('control child exit code', control.returncode,\n"
+            "        file=sys.stderr)\n"
             "time.sleep(0.5)\n"
         )
         launcher = subprocess.Popen(
@@ -1895,6 +1903,11 @@ class TestTheWindowsConsoleDetachment:
             self._cleanup(state_path, [])
             with contextlib.suppress(OSError, ValueError):
                 self._kill_pid(int(control_path.read_text()))
+            # A failed assertion above leaves the launcher parked in its
+            # go-file wait -- it would exit 3 by itself, but only after the
+            # whole wait budget. On the happy path this is a no-op.
+            with contextlib.suppress(OSError):
+                launcher.kill()
 
     @pytest.mark.skipif(sys.platform != "win32", reason="Windows console behaviour")
     def test_bridge_stop_still_ends_a_detached_bridge(self, tmp_path: Path):
