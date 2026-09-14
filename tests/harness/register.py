@@ -847,7 +847,10 @@ _PROVIDER_ROWS: tuple[MutationRow, ...] = (
         # CC-origin builder `_cc_to_responses` injects from the same key and
         # predates the ticket (KBR-149). At effort `"none"` the trigger is
         # met-but-inert (the P5c precedent), so the assertion-2 complement
-        # needs a corpus entry carrying an effort, not a `"none"` one.
+        # needs a corpus entry carrying an effort, not a `"none"` one. The
+        # enum carries the request-side clause only: the Responses-origin
+        # precedence gate (a caller-sent truthy `reasoning` wins) lives in
+        # the §3.2.2 trigger cell; the closed vocabulary has no member for it.
         paths=(c.extra_path("reasoning"),),
         conditional=True,
         design_ref="§3.2.2",
