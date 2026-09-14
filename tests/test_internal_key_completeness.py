@@ -83,6 +83,9 @@ _EXPECTED_KEYS: dict[str, set[str]] = {
         # carriages the translator does.
         "_anthropic_system",
         "_thinking_blocks",
+        # KBR-222: `_convert_native_to_cc_format` collects the agent's
+        # `document` blocks on the retry, the same key the translator mints.
+        "_documents",
         "_native_messages_request",
         "_original_body",
         "_provider_config",
