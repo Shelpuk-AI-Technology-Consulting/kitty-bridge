@@ -46,9 +46,18 @@ from harness import contract as c
 #: own wire key. Sourced from `openai/openai-openapi` master's
 #: ``CreateChatCompletionRequest`` (retrieved 2026-09-14), which folds the
 #: request properties of ``CreateModelResponseProperties`` into the CC surface.
+#:
 #: ``parallel_tool_calls`` is deliberately **not** in this set: §3.3.1b (KBR-205,
 #: closing G36) fixes a canonical address for the parallel-tool-use knob,
 #: and this reader is the first to *read* it directly rather than write it.
+#:
+#: ``audio`` carries the audio-output config (modalities=audio), ``moderation``
+#: is the moderation config (o-series, safety tooling), ``prompt_cache_options``
+#: is the request-wide cache TTL (`30m` only) — all §3.3.1b's "declared control
+#: field of the format" rule says goes to ``extra[<wire key>]`` rather than
+#: the residual. ``functions`` and ``function_call`` are the deprecated top-level
+#: spellings the older ``tools``/``tool_calls`` replaced; the bridge does not
+#: translate them and a body carrying one residualises with the field named.
 _PUBLISHED_EXTRA_KEYS = frozenset(
     {
         "store",
@@ -61,6 +70,10 @@ _PUBLISHED_EXTRA_KEYS = frozenset(
         "user",
         "web_search_options",
         "prompt_cache_options",
+        "audio",
+        "moderation",
+        "functions",
+        "function_call",
     }
 )
 
@@ -138,6 +151,16 @@ _TOOL_CHOICE_STRINGS: Mapping[str, str] = {
 #: Tool-choice object ``type`` spellings whose ``function``/``custom`` member
 #: carries a ``name`` — the named form §3.3.1b maps to ``tool:<name>``.
 _TOOL_CHOICE_BY_NAME = frozenset({"function", "custom"})
+
+#: The ``allowed_tools`` tool-choice shape — ``{"type": "allowed_tools",
+#: "allowed_tools": {"mode": "auto|required", "tools": [...]}}`` —
+#: selects one of a restricted set of declared tools. ``mode`` follows the
+#: same string-to-canonical mapping as the top-level ``tool_choice``: a
+#: missing ``mode`` defaults to ``auto``, ``required`` maps to ``any``.
+_TOOL_CHOICE_ALLOWED_MODES: Mapping[str, str] = {
+    "auto": "auto",
+    "required": "any",
+}
 
 #: A ``data:`` URL carrying base64 image bytes, with its media type.
 _DATA_URL = re.compile(r"^data:([^;,]+);base64,(.*)$", re.DOTALL)
@@ -444,6 +467,21 @@ def _read_one_message(
 
     if role == "assistant":
         parts: list[c.Part] = []
+        # The message-level `refusal` field (§7.4.1's `text_digest` rationale
+        # — "a CC refusal is a bare string on the message, so there is no
+        # block for T-A2 to hash"). Projects as the same `Opaque("refusal",
+        # digest=text_digest)` shape the content-part form uses, so the two
+        # representations of a refusal in the same format don't drift. An
+        # absent `refusal` (the common case) is the absent value — the turn's
+        # parts come from `content` and `tool_calls`.
+        refusal = message.get("refusal")
+        if refusal is not None:
+            if not isinstance(refusal, str):
+                raise c.UnreadableBodyError(
+                    f"{path} assistant.refusal must be a string when present"
+                )
+            parts.append(c.Opaque(kind="refusal", digest=c.text_digest(refusal)))
+
         tool_calls = message.get("tool_calls")
         if tool_calls is not None:
             if not isinstance(tool_calls, list):
@@ -606,16 +644,25 @@ def _read_content_part(
         return c.Text(text, cache_control=cache_control)
 
     if kind == "refusal":
-        # A refusal part carries the refusal's text in `refusal`. §7.4.1 pins
-        # "a CC refusal is a bare string on the message, so there is no block
-        # for T-A2 to hash" — the string form lands as `Text` with the
-        # refusal's text; the part form is the same shape one level down, and
-        # both project as text so the two spellings agree.
+        # A refusal is NOT collapsed into Text. T-A3 ships the same decision
+        # for Responses: unlike a plain text part, a refusal is not recoverable
+        # from the turn's role — an assistant refusal and an assistant answer
+        # would otherwise project identically, and a bridge that turned one
+        # into the other would be invisible to the oracle. `text_digest`, not
+        # `opaque_digest`: a refusal is identified by its text, and §7.4.1
+        # pins the two recipes separately because Chat Completions carries a
+        # refusal as a bare string with no block to hash — that is the same
+        # recipe applied one wrapper up, here to the content-part form the
+        # schema also publishes.
         refusal = part.get("refusal")
         if not isinstance(refusal, str):
             raise c.UnreadableBodyError(f"{path} refusal must be a string")
         _residualise(part, {"type", "refusal", *_CACHE_KEYS}, path, residual)
-        return c.Text(refusal, cache_control=_read_cache_control(part, path, residual))
+        return c.Opaque(
+            kind="refusal",
+            digest=c.text_digest(refusal),
+            cache_control=_read_cache_control(part, path, residual),
+        )
 
     if kind == "image_url":
         image = _read_image_part(part, path, residual)
@@ -887,6 +934,24 @@ def _read_tool_choice(value: Any) -> str:
                 f"tool_choice type {kind!r} requires a {member_key}.name string"
             )
         return f"tool:{name}"
+
+    if kind == "allowed_tools":
+        # A restricted set of tools the model may call. `mode` follows the
+        # top-level strings — CC's `required` maps to `any`, the same mapping
+        # KBR-214 fixed and T-A3 ships. The member's `tools` list is not
+        # projected (the canonical form names the *mode*, not the set), so
+        # the whole entry's presence is what the projection records.
+        allowed = value.get("allowed_tools")
+        if not isinstance(allowed, dict):
+            raise c.UnreadableBodyError(
+                "tool_choice type 'allowed_tools' requires an allowed_tools object"
+            )
+        mode = allowed.get("mode", "auto")
+        if mode not in _TOOL_CHOICE_ALLOWED_MODES:
+            raise c.UnreadableBodyError(
+                f"tool_choice.allowed_tools.mode must be one of {sorted(_TOOL_CHOICE_ALLOWED_MODES)}, got {mode!r}"
+            )
+        return _TOOL_CHOICE_ALLOWED_MODES[mode]
 
     raise c.UnreadableBodyError(f"unrecognised tool_choice type {kind!r}")
 

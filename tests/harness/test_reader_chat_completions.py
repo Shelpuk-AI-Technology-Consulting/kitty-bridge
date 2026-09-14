@@ -286,13 +286,42 @@ class TestToolChoice:
         assert projected.envelope.extra["tool_choice"] == "tool:qa"
         assert projected.residual == {}
 
+    def test_the_allowed_tools_form_maps_by_its_mode(self) -> None:
+        """R2.4 — ``{"type": "allowed_tools", "allowed_tools": {"mode": "required", …}}``
+        maps onto ``any``; ``mode: "auto"`` maps onto ``auto``. The member's
+        ``tools`` list is not projected — the canonical form names the mode,
+        not the set."""
+        for mode, expected in [("auto", "auto"), ("required", "any")]:
+            projected = _read(
+                _minimal(
+                    tool_choice={
+                        "type": "allowed_tools",
+                        "allowed_tools": {"mode": mode, "tools": [PUBLISHED_FUNCTION_TOOL]},
+                    }
+                )
+            )
+            assert projected.envelope.extra["tool_choice"] == expected, f"mode={mode!r}"
+            assert projected.residual == {}
+
+    def test_an_unrecognised_allowed_tools_mode_raises(self) -> None:
+        """R2.5 — ``mode`` is an enum; anything else is unreadable."""
+        with pytest.raises(c.UnreadableBodyError):
+            _read(
+                _minimal(
+                    tool_choice={
+                        "type": "allowed_tools",
+                        "allowed_tools": {"mode": "sometimes", "tools": []},
+                    }
+                )
+            )
+
     def test_an_unrecognised_tool_choice_string_raises(self) -> None:
-        """R2.4 — a string outside the schema is an unreadable body."""
+        """R2.6 — a string outside the schema is an unreadable body."""
         with pytest.raises(c.UnreadableBodyError):
             _read(_minimal(tool_choice="maybe"))
 
     def test_a_named_form_without_a_name_raises(self) -> None:
-        """R2.5 — classify before constructing, or the diagnosis is wrong."""
+        """R2.7 — classify before constructing, or the diagnosis is wrong."""
         with pytest.raises(c.UnreadableBodyError):
             _read(_minimal(tool_choice={"type": "function", "function": {}}))
 
@@ -517,6 +546,63 @@ class TestMessages:
                 }
             )
 
+    def test_a_message_level_refusal_projects_to_opaque(self) -> None:
+        """R3.12 — the message-level ``refusal`` field carries a refusal string and
+        projects as ``Opaque(kind="refusal", digest=text_digest(...))`` — the
+        same shape the content-part form uses, so the two representations
+        agree on an unchanged refusal (§7.4.1). T-A3 ships the same
+        decision for Responses, so the two readers agree across formats.
+        """
+        projected = _read(
+            {
+                "model": "gpt-6-astra",
+                "messages": [
+                    {"role": "user", "content": "do X"},
+                    {
+                        "role": "assistant",
+                        "content": None,
+                        "refusal": "I won't do X.",
+                    },
+                ],
+            }
+        )
+
+        assistant_turn = projected.conversation.turns[1]
+        assert any(
+            isinstance(p, c.Opaque) and p.kind == "refusal" for p in assistant_turn.parts
+        ), assistant_turn
+        # Same digest across CC's content-part form (covered by the
+        # content-part tests) and the message-level form.
+        refusal_part = next(
+            p for p in assistant_turn.parts if isinstance(p, c.Opaque) and p.kind == "refusal"
+        )
+        assert refusal_part.digest == c.text_digest("I won't do X.")
+
+    def test_a_refusal_content_part_projects_to_opaque_with_a_text_digest(self) -> None:
+        """R3.13 — refusal part (``{"type": "refusal", "refusal": "<text>"}``) projects as
+        ``Opaque(kind="refusal", digest=text_digest(text))``, not as ``Text``.
+        T-A3 ships the same decision; the two readers agree on a refusal
+        regardless of which wire shape carried it."""
+        projected = _read(
+            {
+                "model": "gpt-6-astra",
+                "messages": [
+                    {"role": "user", "content": "do X"},
+                    {
+                        "role": "assistant",
+                        "content": [
+                            {"type": "refusal", "refusal": "I won't do X."},
+                        ],
+                    },
+                ],
+            }
+        )
+
+        refusal_part = projected.conversation.turns[1].parts[0]
+        assert isinstance(refusal_part, c.Opaque)
+        assert refusal_part.kind == "refusal"
+        assert refusal_part.digest == c.text_digest("I won't do X.")
+
 
 # --------------------------------------------------------------------------
 # R4 — the merge rule
@@ -563,6 +649,53 @@ class TestMergeRule:
         assert isinstance(merged.parts[0], c.ToolResult)
         assert isinstance(merged.parts[1], c.Text)
         assert merged.parts[1].text == "thanks"
+
+    def test_interleaved_tool_calls_form_a_merged_turn_with_results_in_call_order(
+        self,
+    ) -> None:
+        """R4.3 — an interleaved CC body: ``tool(a) → user(text) → tool(b)``.
+
+        Clauses 1+2 build a ``ToolResult`` turn from each ``tool`` message and
+        absorb the user-text turn that follows; clause 4 then merges the
+        next ``tool`` message's ``ToolResult`` into the same user turn. The
+        final turn is the interleaved shape ``[ToolResultA, Text,
+        ToolResultB]`` — results in tool-call order, with the absorbed
+        user text in its position. The Messages-side encoding of the same
+        exchange (one user message ``[tool_result_a, text, tool_result_b]``)
+        produces the same shape — that is the convergence test's worked
+        exchange, R7.
+        """
+        projected = _read(
+            {
+                "model": "gpt-6-astra",
+                "messages": [
+                    {"role": "user", "content": "weather in SF and NYC?"},
+                    {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [
+                            {**PUBLISHED_TOOL_CALL, "id": "t1"},
+                            {**PUBLISHED_TOOL_CALL, "id": "t2"},
+                        ],
+                    },
+                    {"role": "tool", "tool_call_id": "t1", "content": "72 and sunny"},
+                    {"role": "user", "content": "and humidity?"},
+                    {"role": "tool", "tool_call_id": "t2", "content": "30 and cloudy"},
+                ],
+            }
+        )
+
+        # Three turns: user (ask), assistant (tool calls), user (merged:
+        # ToolResult t1, then the absorbed user text, then ToolResult t2).
+        assert len(projected.conversation.turns) == 3
+        assert projected.conversation.turns[0].role == "user"
+        assert projected.conversation.turns[1].role == "assistant"
+        merged = projected.conversation.turns[2]
+        assert merged.role == "user"
+        assert len(merged.parts) == 3
+        assert isinstance(merged.parts[0], c.ToolResult) and merged.parts[0].tool_use_id == "t1"
+        assert isinstance(merged.parts[1], c.Text) and merged.parts[1].text == "and humidity?"
+        assert isinstance(merged.parts[2], c.ToolResult) and merged.parts[2].tool_use_id == "t2"
 
     def test_two_tool_messages_form_one_user_turn_with_results_first(self) -> None:
         """R4.2 — clause 1's run of consecutive results; clause 3 vacuous here too."""
@@ -749,18 +882,130 @@ class TestConvergence:
     merge rule is shared.
     """
 
-    def test_the_standard_tool_exchange_projects_identically_to_messages(self) -> None:
-        """R7.1 — the published tool exchange. CC and Messages carry the same
-        conversation through different routes; the projections must agree."""
-        # Sampling must match across both encodings for ``conversation`` to
-        # compare equal. ``max_tokens`` is the only sampling key the
-        # Messages shape carries in this fixture; the CC side sets it the
-        # same way.
+    def test_an_interleaved_tool_exchange_documents_an_intentional_divergence(self) -> None:
+        """R7.1 — the **interleaved** tool exchange records an intentional asymmetry.
+
+        CC: ``user → assistant(tool_calls=[a,b]) → tool(a) → user("and humidity?") → tool(b)``
+        yields a single merged user turn ``[ToolResult(a), Text,
+        ToolResult(b)]`` — clauses 1+2+4; clause 3 is vacuous on CC because
+        results arrive in separate messages.
+
+        Messages: the same conversation encoded as one user message
+        ``[tool_result_a, text, tool_result_b]`` yields
+        ``[ToolResult(a), ToolResult(b), Text]`` — clause 3 hoists results
+        first within the user message, per §3.3.1b: "Anthropic Messages
+        carries text and results inside one message, so the run has no
+        natural boundary and clause 1 cannot do the work by splitting;
+        clause 3 does it instead".
+
+        The two projections are **deliberately** not equal. Each reader
+        applies the rule to the wire shape it sees. Recording that here so a
+        future task does not mistake the asymmetry for a defect, and so the
+        simple exchange (R7.2 below) is the one the convergence claim is
+        actually pinned against.
+        """
         cc_body = {
             "model": "gpt-6-astra",
             "max_tokens": 1024,
             "messages": [
-                {"role": "system", "content": "Be brief."},
+                {"role": "user", "content": "weather in SF and NYC?"},
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {**PUBLISHED_TOOL_CALL, "id": "t1"},
+                        {**PUBLISHED_TOOL_CALL, "id": "t2"},
+                    ],
+                },
+                {"role": "tool", "tool_call_id": "t1", "content": "72 and sunny"},
+                {"role": "user", "content": "and humidity?"},
+                {"role": "tool", "tool_call_id": "t2", "content": "30 and cloudy"},
+            ],
+        }
+        messages_body = {
+            "model": "claude-opus-5",
+            "max_tokens": 1024,
+            "messages": [
+                {"role": "user", "content": "weather in SF and NYC?"},
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "t1",
+                            "name": "get_weather",
+                            "input": {"city": "San Francisco"},
+                        },
+                        {
+                            "type": "tool_use",
+                            "id": "t2",
+                            "name": "get_weather",
+                            "input": {"city": "New York"},
+                        },
+                    ],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "t1",
+                            "content": "72 and sunny",
+                        },
+                        {"type": "text", "text": "and humidity?"},
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "t2",
+                            "content": "30 and cloudy",
+                        },
+                    ],
+                },
+            ],
+        }
+
+        cc_request = cc.ChatCompletionsProjection().read_request(_captured(cc_body))
+        messages_capture = c.CapturedRequest(
+            method="POST",
+            scheme="https",
+            host="api.anthropic.com",
+            path="/v1/messages",
+            query="",
+            headers=(("content-type", "application/json"),),
+            body=json.dumps(messages_body).encode("utf-8"),
+        )
+        messages_request = am.AnthropicMessagesProjection().read_request(messages_capture)
+
+        # Each reader's projection matches the documented shape on its side.
+        cc_merged = cc_request.conversation.turns[2]
+        assert [type(p).__name__ for p in cc_merged.parts] == [
+            "ToolResult",
+            "Text",
+            "ToolResult",
+        ]
+        messages_merged = messages_request.conversation.turns[2]
+        assert [type(p).__name__ for p in messages_merged.parts] == [
+            "ToolResult",
+            "ToolResult",
+            "Text",
+        ]
+
+        # And the two projections are deliberately not equal.
+        assert cc_request.conversation != messages_request.conversation
+
+    def test_the_standard_tool_exchange_projects_identically_to_messages(self) -> None:
+        """R7.1 — the canonical exchange: ``user → assistant(tool_calls=[call]) → tool → user follow-up``.
+
+        The two encodings carry the same conversation through different
+        routes and project to identical ``Conversation`` values, indices
+        included — — T-A2's proof that §3.3.1b's merge rule is shared, not
+        just stated. Sampling must match across both encodings for the
+        equality to hold; ``max_tokens`` is the one the Messages shape
+        carries in this fixture, so the CC side sets it the same way.
+        """
+        cc_body = {
+            "model": "gpt-6-astra",
+            "max_tokens": 1024,
+            "messages": [
                 {"role": "user", "content": "What's the weather in San Francisco?"},
                 {
                     "role": "assistant",
@@ -778,7 +1023,6 @@ class TestConvergence:
         messages_body = {
             "model": "claude-opus-5",
             "max_tokens": 1024,
-            "system": "Be brief.",
             "messages": [
                 {"role": "user", "content": "What's the weather in San Francisco?"},
                 {
@@ -799,10 +1043,10 @@ class TestConvergence:
                             "type": "tool_result",
                             "tool_use_id": "call_abc123",
                             "content": "72 and sunny",
-                        }
+                        },
+                        {"type": "text", "text": "Thanks!"},
                     ],
                 },
-                {"role": "user", "content": "Thanks!"},
             ],
         }
 
@@ -818,10 +1062,6 @@ class TestConvergence:
         )
         messages_request = am.AnthropicMessagesProjection().read_request(messages_capture)
 
-        # The two ``Conversation`` values must compare equal, field by field
-        # — including ``sampling``, ``tools`` (both empty here), and every
-        # turn's parts in their original indices. The contract's dataclass
-        # ``__eq__`` does this; the assertion is the convergence proof.
         assert cc_request.conversation == messages_request.conversation
 
     def test_the_merge_rule_mutation_pin(self) -> None:
