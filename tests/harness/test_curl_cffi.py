@@ -252,26 +252,38 @@ class TestTheSeams:
         assert original == oauth_session.OAUTH_TOKEN_URL
 
     async def test_a_seam_refuses_to_swap_a_name_nothing_defines(
-        self, transport_: CurlCffiTransport, monkeypatch: pytest.MonkeyPatch
+        self, transport_: CurlCffiTransport
     ) -> None:
         """A leg rewritten to read its endpoint elsewhere fails loudly.
 
+        The constants are deleted directly and restored in a ``finally``, not
+        through ``monkeypatch.delattr``: monkeypatch would record the
+        seam-swapped URL as the value to undo to, and its teardown can run
+        after the transport's own seam restore has already put the real
+        constant back — undoing the restore and leaking the recorder's URL
+        into the module. Every test that runs after this one would then see
+        the recorder's URL instead of the real endpoint.
+
         Args:
             transport_: A started transport; the seam reads its ``base_url``,
-                and the ``monkeypatch`` removes the constants the seams read.
-            monkeypatch: Removes the constants the seams read.
+                and the test body removes the constants the seams read.
         """
         from kitty.auth import oauth_session
         from kitty.providers import openai_subscription
 
         recorder = transport_.recorder
-        monkeypatch.delattr(oauth_session, "OAUTH_TOKEN_URL")
-        monkeypatch.delattr(openai_subscription, "_CODEX_BACKEND_URL")
-
-        with pytest.raises(AttributeError), oauth_refresh_endpoint(recorder):
-            pass  # pragma: no cover
-        with pytest.raises(AttributeError), codex_backend_url(recorder):
-            pass  # pragma: no cover
+        saved_url = openai_subscription._CODEX_BACKEND_URL
+        saved_token = oauth_session.OAUTH_TOKEN_URL
+        del openai_subscription._CODEX_BACKEND_URL
+        del oauth_session.OAUTH_TOKEN_URL
+        try:
+            with pytest.raises(AttributeError), oauth_refresh_endpoint(recorder):
+                pass  # pragma: no cover
+            with pytest.raises(AttributeError), codex_backend_url(recorder):
+                pass  # pragma: no cover
+        finally:
+            openai_subscription._CODEX_BACKEND_URL = saved_url
+            oauth_session.OAUTH_TOKEN_URL = saved_token
 
 
 class TestThroughARealBridge:
