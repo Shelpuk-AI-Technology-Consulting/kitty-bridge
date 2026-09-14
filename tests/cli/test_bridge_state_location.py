@@ -490,6 +490,23 @@ class TestBridgeConfigReportsTheEffectiveKeysFile:
         assert code == 0, f"kitty bridge config failed:\n{output}"
         assert f"Keys file: {default}" in output, output
 
+    def test_a_named_present_keys_file_displays_as_a_bare_path(self, kitty_install: KittyInstall):
+        """Row 1: a named keys file that exists prints as a bare path, no suffix (KBR-230).
+
+        Pins the trailing newline so a regression printing the not-found
+        suffix on a working configuration cannot pass.
+        """
+        install = kitty_install
+        named = install.root / "client-keys.txt"
+        named.write_text("another-e2e-client-key\n", encoding="utf-8")
+        (install.config_dir / "bridge.yaml").write_text(
+            f"host: 127.0.0.1\nport: 0\nkeys_file: {named}\n", encoding="utf-8"
+        )
+
+        code, output = install.kitty("bridge", "config")
+        assert code == 0, f"kitty bridge config failed:\n{output}"
+        assert f"Keys file: {named}\n" in output, output
+
     def test_a_named_missing_keys_file_is_flagged_in_the_display(self, kitty_install_without_keys: KittyInstall):
         """A named-but-missing keys file does not display like a working one (KBR-230).
 

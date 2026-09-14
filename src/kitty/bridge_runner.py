@@ -76,7 +76,8 @@ def main() -> None:
         # when it exists and auth stays off when it does not.
         if config.keys_file is not None and not Path(config.keys_file).exists():
             print(
-                f"Error: Keys file not found: {config.keys_file} (keys_file in {args.config})",
+                f"Error: Keys file not found: {config.keys_file} (keys_file in {args.config}) "
+                f"— create that file, or remove the keys_file line",
                 file=sys.stderr,
             )
             sys.exit(1)
