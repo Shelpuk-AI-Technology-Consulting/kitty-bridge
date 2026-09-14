@@ -782,8 +782,13 @@ def _read_image_part(
         # A non-base64 data URL — `data:image/png,abc` — cannot be digested
         # without inventing a decoding, and `ref` would make the two readers
         # disagree. Residualised at its own path, the run fails with the
-        # field named.
+        # field named. The `cache_control` residualises here too, for the
+        # same reason the base64-decode-failure branch does: the part has
+        # no `Image` to carry it on, and a silent drop would be the
+        # M16-shaped loss the residual rule exists to prevent.
         residual[f"{path}.image_url.url"] = url
+        if cache_control is not None:
+            residual[f"{path}.cache_control"] = cache_control
         return None
 
     return c.Image(ref=url, cache_control=cache_control)

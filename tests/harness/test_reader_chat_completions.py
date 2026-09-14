@@ -282,6 +282,58 @@ class TestEnvelope:
         assert projected.residual == {}
         c.verify_total(projected)
 
+    @pytest.mark.parametrize(
+        "key",
+        [
+            "store",
+            "metadata",
+            "service_tier",
+            "reasoning_effort",
+            "verbosity",
+            "modalities",
+            "prediction",
+            "user",
+            "web_search_options",
+            "prompt_cache_options",
+            "audio",
+            "moderation",
+            "function_call",
+        ],
+        ids=[
+            "store",
+            "metadata",
+            "service_tier",
+            "reasoning_effort",
+            "verbosity",
+            "modalities",
+            "prediction",
+            "user",
+            "web_search_options",
+            "prompt_cache_options",
+            "audio",
+            "moderation",
+            "function_call",
+        ],
+    )
+    def test_a_wrongly_typed_value_at_each_published_extra_key_is_carried_whole(
+        self, key: str
+    ) -> None:
+        """R1.6c — the wrongly-typed coverage R1.6b promised for all 13 keys.
+
+        Every key in :data:`_PUBLISHED_EXTRA_KEYS` is read with no type
+        check on the value (§3.3.1a: ``extra[<wire key>]`` is compared
+        whole). A wrongly-typed value lands at its wire key and is named
+        — the schema validator's job, not the reader's. Each parametrise
+        case carries a string, which is the wrong type for every key on
+        this list (a dict-shaped value, a list, a bool, a number), so the
+        pin covers the wrong-type case regardless of the schema's shape.
+        """
+        projected = _read(_minimal(**{key: "definitely the wrong type"}))
+
+        assert projected.envelope.extra[key] == "definitely the wrong type"
+        assert projected.residual == {}
+        c.verify_total(projected)
+
     def test_a_sampling_key_rides_at_its_canonical_spelling(self) -> None:
         """R1.7 — §3.3.1b: CC's spellings are the canonical spellings."""
         projected = _read(
@@ -1085,42 +1137,76 @@ class TestCacheBreakpoints:
         }
 
     def test_when_both_cache_spellings_are_present_first_fills_deterministically(self) -> None:
-        """R6.5 — the co-occurrence rule is not hash-seed-dependent.
+        """R6.5 — the co-occurrence rule is stable across PYTHONHASHSEED values.
 
-        `_CACHE_KEYS` is an ordered ``tuple``, so the "first non-null wins"
-        rule is stable across Python's hash randomisation. A reader whose
-        cache-key iteration order was a ``frozenset`` would flip which
-        spelling fills the slot between runs; the round-4 review named
-        this, and the pin ensures it stays deterministic.
+        A ``frozenset`` iteration is hash-seed-dependent; a ``tuple`` is
+        not. `_CACHE_KEYS` is an ordered tuple, so the "first non-null wins"
+        rule is stable across hash randomisation. This test runs the
+        reader under three different ``PYTHONHASHSEED`` values (0, 1, 2)
+        in subprocess invocations — a within-process assertion cannot
+        reach across the runtime's hash seed. If the reader's iteration
+        order ever regresses to a frozenset (or to any other
+        hash-dependent container), this test fails under at least one seed.
         """
-        # Run the projection twice and confirm the same shape both times.
-        for _ in range(2):
-            projected = _read(
-                {
-                    "model": "gpt-6-astra",
-                    "messages": [
-                        {
-                            "role": "user",
-                            "content": [
-                                {
-                                    "type": "text",
-                                    "text": "hi",
-                                    "prompt_cache_breakpoint": {"mode": "explicit"},
-                                    "cache_control": {"type": "ephemeral"},
-                                }
-                            ],
-                        }
-                    ],
-                }
-            )
+        import subprocess
+        import sys
+        import textwrap
 
-            text = projected.conversation.turns[0].parts[0]
-            assert isinstance(text, c.Text)
-            # `cache_control` is first in _CACHE_KEYS order, so it wins.
-            assert text.cache_control == {"type": "ephemeral"}
-            assert projected.residual == {
-                "messages[0].content[0].prompt_cache_breakpoint": {"mode": "explicit"}
+        runner = textwrap.dedent(
+            """
+            import json
+            from harness import contract as c
+            from harness import reader_chat_completions as cc
+
+            body = {
+                "model": "gpt-6-astra",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "hi",
+                                "prompt_cache_breakpoint": {"mode": "explicit"},
+                                "cache_control": {"type": "ephemeral"},
+                            }
+                        ],
+                    }
+                ],
             }
+            cap = c.CapturedRequest(
+                method="POST",
+                scheme="https",
+                host="api.openai.com",
+                path="/v1/chat/completions",
+                query="",
+                headers=(),
+                body=json.dumps(body).encode(),
+            )
+            projected = cc.ChatCompletionsProjection().read_request(cap)
+            text = projected.conversation.turns[0].parts[0]
+            assert text.cache_control == {"type": "ephemeral"}
+            assert (
+                projected.residual[
+                    "messages[0].content[0].prompt_cache_breakpoint"
+                ]
+                == {"mode": "explicit"}
+            )
+            """
+        ).strip()
+
+        for seed in (0, 1, 2):
+            result = subprocess.run(
+                [sys.executable, "-c", runner],
+                env={"PYTHONHASHSEED": str(seed), "PYTHONPATH": "tests"},
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            assert result.returncode == 0, (
+                f"PYTHONHASHSEED={seed} failed: stdout={result.stdout!r} "
+                f"stderr={result.stderr!r}"
+            )
 
 
 # --------------------------------------------------------------------------
