@@ -32,6 +32,7 @@ from kitty.providers.base import ProviderAdapter
 
 from .test_client_disconnect_health import (
     _CC_CONTENT_CHUNK,
+    _assert_all_backends_untouched,
     _make_server,
     _post_stream,
     _StubLauncher,
@@ -78,6 +79,26 @@ _CC_FULL_STREAM = (
     _CC_CONTENT_CHUNK + b'data: {"id":"c1","choices":[{"index":0,"delta":{},'
     b'"finish_reason":"stop"}],"model":"test-model","usage":null}\n\n'
     b"data: [DONE]\n\n"
+)
+
+# KBR-236: an empty finish chunk first — the translator judges the reply empty, buffers
+# its fallback events and resets — then content the client is written live.
+_CC_EMPTY_FINISH_THEN_CONTENT = (
+    b'data: {"id":"c1","choices":[{"index":0,"delta":{},'
+    b'"finish_reason":"stop"}],"model":"test-model","usage":null}\n\n'
+    + _CC_CONTENT_CHUNK
+    + b"data: [DONE]\n\n"
+)
+
+# The same shape with a tool call as the late content: the empty verdict precedes a live
+# tool_calls delta, so half-delivered arguments are on the wire when the turn ends.
+_CC_EMPTY_FINISH_THEN_TOOL = (
+    b'data: {"id":"c1","choices":[{"index":0,"delta":{},'
+    b'"finish_reason":"stop"}],"model":"test-model","usage":null}\n\n'
+    + b'data: {"id":"c1","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,'
+    b'"id":"call_1","type":"function","function":{"name":"lookup","arguments":"{\\"q\\":"}}]},'
+    b'"finish_reason":null}],"model":"test-model"}\n\n'
+    + b"data: [DONE]\n\n"
 )
 
 Responder = Callable[[web.Request, int], Awaitable[web.StreamResponse]]
@@ -412,6 +433,142 @@ class TestMessagesTimeoutAfterContent:
             body = await _run(_build(mode, base))
 
         assert [name for name, _ in _events(body)][-1] == "message_stop"
+
+
+class TestEmptyVerdictAfterContent:
+    """An empty-response verdict after content reached the client ends the turn (KBR-236).
+
+    An empty finish chunk sets ``response_was_empty``, buffers its fallback events
+    and resets the translator; content arriving after it is written to the client
+    live. The empty-response ladder must then read ``sr`` like every other
+    post-emission branch (§11 Q14(a)): one upstream request, one terminal error.
+    """
+
+    @staticmethod
+    async def _serve_stream(request: web.Request, stream: bytes) -> web.StreamResponse:
+        """Serve ``stream`` as one complete 200 SSE response.
+
+        Args:
+            request: The incoming upstream request.
+            stream: The SSE bytes to deliver.
+
+        Returns:
+            The completed response.
+        """
+        resp = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
+        await resp.prepare(request)
+        await resp.write(stream)
+        return resp
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("mode", ["balanced", "single"])
+    async def test_empty_verdict_after_content_sends_one_upstream_request(self, fast_stall, mode):
+        """No second attempt follows content the client already saw."""
+
+        async def _respond(request: web.Request, ordinal: int) -> web.StreamResponse:
+            """Serve the empty-verdict stream in full.
+
+            Args:
+                request: The incoming upstream request.
+                ordinal: The request's 0-based position, unused.
+
+            Returns:
+                The completed response.
+            """
+            return await self._serve_stream(request, _CC_EMPTY_FINISH_THEN_CONTENT)
+
+        upstream = _Upstream("/v1/chat/completions", _respond)
+        async with upstream as base:
+            server = _build(mode, base)
+            body = await _run(server)
+
+        assert upstream.requests == 1, f"the upstream was asked {upstream.requests} times after text was emitted"
+        assert body.count(b'"text": "Hi"') == 1
+        assert server._model_stats("test-model")["completions"] == 0, "the errored turn was counted as a completion"
+        names = [name for name, _ in _events(body)]
+        assert names.count("message_start") == 1
+        assert names[-1] == "error"
+        assert "message_stop" not in names
+        assert _events(body)[-1][1]["error"]["message"].startswith("Kitty Bridge received an empty response")
+
+    @pytest.mark.asyncio
+    async def test_empty_verdict_after_content_closes_the_block_then_errors(self, fast_stall):
+        """The open text block is closed, then one error ends the turn — the buffered fallback never runs."""
+
+        async def _respond(request: web.Request, ordinal: int) -> web.StreamResponse:
+            """Serve the empty-verdict stream in full.
+
+            Args:
+                request: The incoming upstream request.
+                ordinal: The request's 0-based position, unused.
+
+            Returns:
+                The completed response.
+            """
+            return await self._serve_stream(request, _CC_EMPTY_FINISH_THEN_CONTENT)
+
+        upstream = _Upstream("/v1/chat/completions", _respond)
+        async with upstream as base:
+            body = await _run(_build("balanced", base))
+
+        assert [(name, data.get("index")) for name, data in _events(body)] == [
+            ("message_start", None),
+            ("content_block_start", 0),
+            ("content_block_delta", 0),
+            ("content_block_stop", 0),
+            ("error", None),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_empty_verdict_after_content_quarantines_no_backend(self, fast_stall):
+        """An empty reply is a polite completion: the pool stays healthy and uncharged."""
+
+        async def _respond(request: web.Request, ordinal: int) -> web.StreamResponse:
+            """Serve the empty-verdict stream in full.
+
+            Args:
+                request: The incoming upstream request.
+                ordinal: The request's 0-based position, unused.
+
+            Returns:
+                The completed response.
+            """
+            return await self._serve_stream(request, _CC_EMPTY_FINISH_THEN_CONTENT)
+
+        upstream = _Upstream("/v1/chat/completions", _respond)
+        async with upstream as base:
+            server = _make_server(2, base_urls=[base, base])
+            body = await _run(server)
+
+        assert upstream.requests == 1, f"the pool was asked {upstream.requests} times after text was emitted"
+        assert [name for name, _ in _events(body)][-1] == "error"
+        _assert_all_backends_untouched(server)
+
+    @pytest.mark.asyncio
+    async def test_empty_verdict_after_content_closes_the_tool_block_then_errors(self, fast_stall):
+        """A half-delivered tool call is closed, not spliced or continued, then one error ends the turn."""
+
+        async def _respond(request: web.Request, ordinal: int) -> web.StreamResponse:
+            """Serve the empty-verdict stream whose late content is a tool call.
+
+            Args:
+                request: The incoming upstream request.
+                ordinal: The request's 0-based position, unused.
+
+            Returns:
+                The completed response.
+            """
+            return await self._serve_stream(request, _CC_EMPTY_FINISH_THEN_TOOL)
+
+        upstream = _Upstream("/v1/chat/completions", _respond)
+        async with upstream as base:
+            body = await _run(_build("balanced", base))
+
+        assert [(name, data.get("index")) for name, data in _events(body)][-2:] == [
+            ("content_block_stop", 0),
+            ("error", None),
+        ]
+        assert body.count(b"input_json_delta") == 1
 
 
 # ── /v1/responses and Gemini, custom-transport providers ─────────────────

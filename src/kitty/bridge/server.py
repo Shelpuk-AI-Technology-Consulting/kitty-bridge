@@ -913,8 +913,15 @@ _EMPTY_FINAL_DELAYS = [20.0, 40.0]  # final delays before emitting empty-respons
 _NATIVE_EMPTY_REPLY_MESSAGE = (
     "Kitty Bridge received an empty reply from the upstream provider on every attempt. Retry the request."
 )
-_NATIVE_EMPTY_AFTER_EMISSION_MESSAGE = (
-    "Kitty Bridge lost the upstream reply mid-stream and the retry came back empty. Retry the request."
+# The post-emission empty verdict's terminal error, shared by the preamble hold's
+# guarded-dead arm and the translated branch's empty-response check (KBR-236). Downstream
+# only, so it names the product (Q9). It reports an empty response arriving after content,
+# not a retry: since KBR-183 (timeouts) and KBR-236 (the translated empty-response retry)
+# no route can put a second attempt on an open client stream, so the previous "the retry
+# came back empty" wording described a mechanism that no longer exists.
+_EMPTY_RESPONSE_AFTER_EMISSION_MESSAGE = (
+    "Kitty Bridge received an empty response from the upstream provider after content had "
+    "already been sent. Retry the request."
 )
 # KBR-241: the error variant's kitty wording, for attempts whose error payload was too
 # malformed to deliver. Names the product (Q9) and reports what happened — an upstream
@@ -4423,7 +4430,12 @@ class BridgeServer:
                             # An earlier attempt already wrote (the KBR-183 failover), so a JSON
                             # error cannot follow: per Q14(a) the open stream ends in an error event.
                             if sr is not None:
-                                # Guarded-dead post-KBR-183; if it ever runs, the terminal error is
+                                # Guarded-dead post-KBR-183, and post-KBR-236 again (that fix
+                                # removed the translated empty-response retry, the last route
+                                # that could hand an open stream here); kept because a future
+                                # route that reached it must not fall through to the
+                                # pre-emission ladder, which would retry with sr open — the
+                                # exact hazard. If it ever runs, the terminal error is
                                 # the provider's own when this attempt carried a usable one, and
                                 # kitty's error wording otherwise — never the empty-reply message,
                                 # which would misreport an errored attempt as an empty one.
@@ -4442,7 +4454,7 @@ class BridgeServer:
                                         "type": "error",
                                         "error": {
                                             "type": "api_error",
-                                            "message": _NATIVE_EMPTY_AFTER_EMISSION_MESSAGE,
+                                            "message": _EMPTY_RESPONSE_AFTER_EMISSION_MESSAGE,
                                         },
                                     }
                                 await _write_client(sr, messages_format_error(terminal_error).encode())
@@ -4717,6 +4729,48 @@ class BridgeServer:
                         # (finish_reason but no content), buffer the fallback events and retry
                         # instead of sending them to the client.
                         if translator.response_was_empty and finish_events:
+                            if sr is not None:
+                                # Content from this attempt already reached the client: the
+                                # empty finish chunk judged the reply and reset the
+                                # translator, so content arriving after it was written live
+                                # (§11 Q14(a), KBR-236). No second attempt may follow what
+                                # the client saw: close the blocks it saw open, drop the
+                                # buffered fallback events, and end in one terminal error.
+                                # The stop fallback mirrors the post-emission failure arm
+                                # below; nothing reaches it today, because every live
+                                # emitting write re-opens a block after the verdict's reset.
+                                # No health charge: a polite empty reply keeps the empty
+                                # ladder's no-quarantine model.
+                                logger.warning(
+                                    "Messages stream empty response after content was emitted for %s; ending the turn",
+                                    message_id,
+                                )
+                                block_stops = translator.close_open_blocks()
+                                if not block_stops:
+                                    block_stops = _stops_for_blocks_the_client_saw(finish_events)
+                                try:
+                                    for stop in block_stops:
+                                        stop_bytes = stop.encode()
+                                        await _write_client(sr, stop_bytes)
+                                        auditor.feed(stop_bytes)
+                                except ClientDisconnectedError:
+                                    logger.debug(
+                                        "Client disconnected before open blocks were closed for %s", message_id
+                                    )
+                                auditor.finish()
+                                await _write_client(
+                                    sr,
+                                    messages_format_error(
+                                        {
+                                            "type": "error",
+                                            "error": {
+                                                "type": "api_error",
+                                                "message": _EMPTY_RESPONSE_AFTER_EMISSION_MESSAGE,
+                                            },
+                                        }
+                                    ).encode(),
+                                )
+                                break
                             retried = False
                             if self._backends and self._current_backend_idx >= 0:
                                 if self._any_healthy_backend() and attempt < max_attempts - 1:
