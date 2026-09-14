@@ -239,17 +239,23 @@ class TestEnableClaudeAiMcpServersInSessionFile:
         assert settings_path.read_text(encoding="utf-8") == original
         assert "ENABLE_CLAUDEAI_MCP_SERVERS" not in json.loads(original)["env"]
 
-    def test_user_scope_disableClaudeAiConnectors_false_does_not_override_session(self, tmp_path: Path):
-        """KBR-245 AC: the per-session env var wins over user-scope ``disableClaudeAiConnectors``.
+    def test_user_scope_disableClaudeAiConnectors_top_level_is_not_merged(self, tmp_path: Path):
+        """KBR-245: the launcher ignores user-scope top-level ``disableClaudeAiConnectors``.
 
-        Per the Claude Code settings-reference, "whichever of the two turns them
-        off, the other can't turn them back on": setting
-        ``disableClaudeAiConnectors: false`` at user scope cannot re-enable
-        claude.ai connectors when the per-session env var carries the opt-out.
-        The structural assertion here is that ``prepare_launch`` writes the env
-        var into the session file regardless of what the user-scope file says
-        at top level — the regression pin is that ``prepare_launch`` does not
-        start *reading* and merging top-level keys.
+        Pinned by this test (structural): ``prepare_launch`` writes the env
+        var into the session file and never copies a user-scope top-level
+        ``disableClaudeAiConnectors`` key into the session payload. A future
+        change that made ``prepare_launch`` start reading and merging
+        top-level user-scope keys would land the opt-out beside (or instead
+        of) our injected env var; the second assertion catches that.
+
+        Not pinned here (behavioral, would require live Claude Code): that
+        Claude Code's runtime precedence — "whichever of the two turns them
+        off, the other can't turn them back on" (settings-reference) — honours
+        the env var over a user-scope ``disableClaudeAiConnectors`` override.
+        That guarantee comes from Claude Code and its docs; if it ever
+        reverses, this test still passes (we still inject the env var). The
+        user-visible regression belongs to the live integration seam.
         """
         import uuid
 
