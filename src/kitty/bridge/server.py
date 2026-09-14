@@ -1447,6 +1447,11 @@ class BridgeServer:
         # garbage" from "200 and clean" in an ordinary run.  Counting only —
         # it never influences health, cooldown or routing.
         self._stats_malformed_tool_use: dict[int, int] = {}
+        # KBR-228 (ticket comment 4): every M17 thinking strip, per backend.
+        # After the KBR-228 restore a strip means the history was edited and
+        # valid reasoning was lost, so a compaction-heavy session's reasoning
+        # loss must be visible in /stats, not only in a WARNING log line.
+        self._stats_thinking_stripped: dict[int, int] = {}
         self._stats_models: dict[str, dict[str, int]] = {}
         self._started_at: str | None = None
 
@@ -2274,6 +2279,7 @@ class BridgeServer:
                         "remaining_cooldown": remaining,
                         "cooldown_events": health.get("failure_count", 0),
                         "malformed_tool_use": self._stats_malformed_tool_use.get(idx, 0),
+                        "thinking_stripped": self._stats_thinking_stripped.get(idx, 0),
                     }
                 )
         else:
@@ -2290,6 +2296,7 @@ class BridgeServer:
                     "remaining_cooldown": 0,
                     "cooldown_events": 0,
                     "malformed_tool_use": self._stats_malformed_tool_use.get(-1, 0),
+                    "thinking_stripped": self._stats_thinking_stripped.get(-1, 0),
                 }
             )
         return {
@@ -2308,6 +2315,7 @@ class BridgeServer:
             "retries": self._stats_retries,
             "all_backends_unhealthy": self._stats_all_unhealthy,
             "malformed_tool_use": sum(self._stats_malformed_tool_use.values()),
+            "thinking_stripped": sum(self._stats_thinking_stripped.values()),
             "models_served": {model: dict(record) for model, record in self._stats_models.items()},
             "backends": backends,
         }
@@ -2321,6 +2329,16 @@ class BridgeServer:
         """
         idx = self._current_backend_idx
         self._stats_malformed_tool_use[idx] = self._stats_malformed_tool_use.get(idx, 0) + 1
+
+    def _record_thinking_stripped(self) -> None:
+        """Count one M17 thinking strip against the serving backend.
+
+        Surfaced by ``GET /stats`` and the shutdown summary next to
+        ``malformed_tool_use`` (KBR-228, ticket comment 4, item 2). Diagnostics
+        only: never consulted for health or routing.
+        """
+        idx = self._current_backend_idx
+        self._stats_thinking_stripped[idx] = self._stats_thinking_stripped.get(idx, 0) + 1
 
     def _backend_label(self) -> str:
         """Return a short identifier for the backend currently serving.
@@ -3988,6 +4006,7 @@ class BridgeServer:
                             ):
                                 strip_body, strip_count = upstream_body, strips_done + 1
                                 strip_retries = min(strip_retries + 1, _MAX_THINKING_STRIPS)
+                                self._record_thinking_stripped()
                                 logger.warning(
                                     "Backend rejected a thinking signature (status %d) — stripped thinking "
                                     "and retrying the same backend (strip %d, attempt %d/%d)",
@@ -7452,6 +7471,7 @@ class BridgeServer:
                         upstream_body, last_body, thinking_strips
                     ):
                         thinking_strips += 1
+                        self._record_thinking_stripped()
                         logger.warning(
                             "Backend rejected a thinking signature (status %d) — stripped, retrying (strip %d)",
                             last_status,

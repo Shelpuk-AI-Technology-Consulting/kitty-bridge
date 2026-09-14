@@ -501,6 +501,31 @@ async def test_a_pool_retries_the_same_backend_and_keeps_it_healthy():
 
 
 @pytest.mark.asyncio
+async def test_every_strip_is_counted_per_backend_for_the_operator():
+    """R6 (KBR-228 comment 4) — each strip lands in ``/stats``' per-backend counter.
+
+    After KBR-228 a strip means the history was edited and valid reasoning was
+    lost; the counter is how a compaction-heavy session shows that in
+    ``/stats`` instead of only a WARNING log line.  Three rejections give each
+    of the three strips something to remove; the fourth call ships the fully
+    stripped body and succeeds.
+    """
+    server = _native_server()
+
+    rejections = [(400, _rejection_at(index)) for index in (1, 3, 5)]
+    status, text, calls = await _drive(
+        server, _NATIVE_URL, [*rejections, (200, _OK_REPLY)], history=_FOUR_TURN_HISTORY
+    )
+
+    assert status == 200, text
+    assert len(calls) == 4
+    stats = server._session_stats()
+    assert stats["thinking_stripped"] == 3
+    # All three strips hit the same backend: the retry never failed over.
+    assert stats["backends"][0]["thinking_stripped"] == 3
+
+
+@pytest.mark.asyncio
 async def test_streaming_signature_rejection_is_stripped_and_retried_once():
     """R5 — the streaming Messages handler recovers the same way."""
     status, text, calls = await _drive(
