@@ -481,7 +481,8 @@ class ProviderAdapter(ABC):
         result = {k: v for k, v in cc_request.items() if k not in self._INTERNAL_KEYS}
         # KBR-228: message-level internal keys ride inside ``messages``, where
         # the top-level strip above cannot reach them.
-        result["messages"] = self._strip_internal_message_keys(result.get("messages"))
+        if "messages" in result:
+            result["messages"] = self._strip_internal_message_keys(result["messages"])
         return result
 
     def _inject_empty_reasoning_content(self, messages: list[dict]) -> list[dict]:

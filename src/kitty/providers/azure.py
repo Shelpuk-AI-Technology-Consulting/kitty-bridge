@@ -87,7 +87,8 @@ class AzureOpenAIAdapter(ProviderAdapter):
         # Shallow copy to avoid mutating the original
         strip = self._INTERNAL_KEYS | {"model"}
         result = {k: v for k, v in cc_request.items() if k not in strip}
-        result["messages"] = self._strip_internal_message_keys(result.get("messages"))
+        if "messages" in result:
+            result["messages"] = self._strip_internal_message_keys(result["messages"])
         return result
 
     def translate_from_upstream(self, raw_response: dict) -> dict:

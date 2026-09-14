@@ -108,6 +108,32 @@ class _StubCCLauncher(_StubLauncher):
         return BridgeProtocol.CHAT_COMPLETIONS_API
 
 
+class _StubResponsesLauncher(_StubLauncher):
+    """Launcher variant whose protocol mounts the Responses endpoint."""
+
+    @property
+    def bridge_protocol(self) -> BridgeProtocol:
+        """Return the protocol the bridge serves.
+
+        Returns:
+            :attr:`BridgeProtocol.RESPONSES_API`.
+        """
+        return BridgeProtocol.RESPONSES_API
+
+
+class _StubGeminiLauncher(_StubLauncher):
+    """Launcher variant whose protocol mounts the Gemini endpoint."""
+
+    @property
+    def bridge_protocol(self) -> BridgeProtocol:
+        """Return the protocol the bridge serves.
+
+        Returns:
+            :attr:`BridgeProtocol.GEMINI_API`.
+        """
+        return BridgeProtocol.GEMINI_API
+
+
 def _translated_server(protocol_launcher: LauncherAdapter | None = None) -> BridgeServer:
     """Build the default ``anthropic`` bridge: the translated Messages route.
 
@@ -136,6 +162,7 @@ async def _drive(
     stream: bool = False,
     history: list[dict] | None = None,
     system: object = None,
+    request_body: dict | None = None,
 ):
     """Serve scripted upstream replies in order and return what the client and upstream saw.
 
@@ -146,6 +173,8 @@ async def _drive(
         stream: Whether the client request streams.
         history: The agent's transcript; one user turn when omitted.
         system: The agent's ``system`` value; omitted when ``None``.
+        request_body: The client request to post verbatim, in the endpoint's
+            own protocol; built from ``history``/``system`` when omitted.
 
     Returns:
         ``(status, client_body_text, upstream_calls)`` where each call is
@@ -177,6 +206,8 @@ async def _drive(
     }
     if system is not None:
         request["system"] = copy.deepcopy(system)
+    if request_body is not None:
+        request = copy.deepcopy(request_body)
     with aioresponses(passthrough=["http://127.0.0.1"]) as mocked:
         mocked.post(_UPSTREAM_URL, callback=respond, repeat=True)
         await server.start_async()
@@ -317,13 +348,40 @@ class TestFollowUpTurnRestoresTheSignedHistory:
 
 
 class TestChatCompletionsContainment:
-    """No downstream client except Messages sees the internal carriage (AC-3, response half)."""
+    """No downstream client except Messages sees the internal carriage (AC-3, response half).
 
+    The Chat Completions handler writes the CC body verbatim and must strip
+    the key; the Responses and Gemini handlers rebuild their replies from
+    known fields and drop it by construction — asserted here, not assumed.
+    """
+
+    @pytest.mark.parametrize(
+        ("launcher_cls", "path", "body"),
+        [
+            pytest.param(
+                _StubCCLauncher,
+                "/v1/chat/completions",
+                {"model": "claude-sonnet-4-6", "max_tokens": 64, "messages": [{"role": "user", "content": "hi"}]},
+                id="chat-completions",
+            ),
+            pytest.param(
+                _StubResponsesLauncher,
+                "/v1/responses",
+                {"model": "claude-sonnet-4-6", "input": "hi", "max_output_tokens": 64},
+                id="responses",
+            ),
+            pytest.param(
+                _StubGeminiLauncher,
+                "/v1beta/models/claude-sonnet-4-6:generateContent",
+                {"contents": [{"parts": [{"text": "hi"}]}]},
+                id="gemini",
+            ),
+        ],
+    )
     @pytest.mark.asyncio
-    async def test_chat_completions_client_never_sees_the_carriage_key(self):
+    async def test_non_messages_clients_never_see_the_carriage_key(self, launcher_cls, path, body):
         status, text, _calls = await _drive(
-            _translated_server(_StubCCLauncher()), [(200, _SIGNED_REPLY)], path="/v1/chat/completions"
+            _translated_server(launcher_cls()), [(200, _SIGNED_REPLY)], path=path, request_body=body
         )
-        assert status == 200
-        body = json.loads(text)
-        assert "_thinking_blocks" not in body["choices"][0]["message"]
+        assert status == 200, text
+        assert "_thinking_blocks" not in text

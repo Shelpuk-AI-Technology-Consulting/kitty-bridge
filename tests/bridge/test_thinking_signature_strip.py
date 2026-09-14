@@ -527,15 +527,19 @@ async def test_every_strip_is_counted_per_backend_for_the_operator():
 
 @pytest.mark.asyncio
 async def test_streaming_signature_rejection_is_stripped_and_retried_once():
-    """R5 — the streaming Messages handler recovers the same way."""
+    """R5 — the streaming Messages handler recovers the same way, and counts the strip."""
+    server = _native_server()
     status, text, calls = await _drive(
-        _native_server(), _NATIVE_URL, [(400, _envelope(_MISSING_SIGNATURE)), (200, _sse_reply())], stream=True
+        server, _NATIVE_URL, [(400, _envelope(_MISSING_SIGNATURE)), (200, _sse_reply())], stream=True
     )
 
     assert status == 200, text
     assert "It is 18C." in text
     assert len(calls) == 2
     assert _thinking_types(calls[1][0]) == []
+    stats = server._session_stats()
+    assert stats["thinking_stripped"] == 1
+    assert stats["backends"][0]["thinking_stripped"] == 1
 
 
 @pytest.mark.parametrize("stream", [False, True], ids=["non-streaming", "streaming"])
