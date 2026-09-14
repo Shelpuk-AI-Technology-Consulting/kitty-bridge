@@ -596,10 +596,12 @@ block and P8 an empty `reasoning_content`; P8's trigger is conditional and *infe
 assertion 2 needs its absence to be observable. `Thinking.signature` carries what M8's carrier
 repair manipulates.
 
-**`Image.digest` is the lowercase hex SHA-256 of the decoded bytes**, with `media_type` excluded
-from it and carried separately, so a changed media type is its own delta. Gemini's
-`fileData.fileUri` has no bytes: `digest` is then absent and `ref` holds the URI. Unpinned, the
-Messages reader and the Chat Completions reader would produce different digests for one image.
+**`Image.digest` is the lowercase hex SHA-256 of the decoded bytes** — or, when the payload
+cannot be decoded, of the raw encoded bytes the wire carried (see §7.4 rule 7 row 3; the second
+of `image_digest`'s recipes, KBR-192). `media_type` is excluded from it and carried separately,
+so a changed media type is its own delta. Gemini's `fileData.fileUri` has no bytes: `digest`
+is then absent and `ref` holds the URI. Unpinned, the Messages reader and the Chat Completions
+reader would produce different digests for one image.
 
 The contract lives in `tests/harness/contract.py` (T-W2). The **package** `tests/harness/` is the
 home of T-W4's recorder, T-W5's proxy fixture, T-W6's corpus loader and T-W8's bridge fixture, each
@@ -3162,8 +3164,8 @@ The distinction is **what the bad value is a value *of***:
 | The wrong value is… | Outcome | Because |
 |---|---|---|
 | the value that **is** the part — `Part.text`, a `Thinking`'s text, `Opaque.kind` | **raise** `UnreadableBodyError` | the grammar has no absent value to fall back to, and `Text("")` fabricates an empty part — which is *meaningful* here, since P5e and P8 both inject one |
-| a **required field** of a part — a tool `name` | **residualise**, project the part with `""` | §3.3.1b settles it in those words: "an absent `name` *does* residualise … a call nobody can name cannot be paired or addressed" |
-| a **payload** the reader cannot canonicalise — base64 that does not decode | **residualise the leaf**, project the part with the grammar's absent value | `Image.digest` is `str \| None`, so an absent value exists, and §7.4.1: "raising is the other wrong answer: it blinds the oracle to everything else in a request it could otherwise diff" |
+| a **required field** of a part — a tool `name`, `fileData.fileUri` | **residualise**, project the part: a tool `name` projects `ToolUse(name="")`; `fileData.fileUri` projects with the canonical-JSON digest of the blob as identity | §3.3.1b settles it in those words: "an absent `name` *does* residualise … a call nobody can name cannot be paired or addressed". `Image.__post_init__` now enforces XOR (KBR-192), so a missing `fileUri` cannot project `Image(ref=None)`; the part keeps its position with the `opaque_digest` recipe as identity, and the residual records the missing or wrongly-typed value. |
+| a **payload** the reader cannot canonicalise — base64 that does not decode | **residualise the leaf**, project the part with the raw-bytes digest | `Image.__post_init__` enforces XOR (KBR-192), so a bare `None` digest is illegal. The reader digests the wire's own raw bytes (`image_digest(raw.encode("utf-8"))`), giving the part a distinguishing identity; §7.4.1: "raising is the other wrong answer: it blinds the oracle to everything else in a request it could otherwise diff". |
 | the **member itself**, where the schema declares an object and the wire sent a scalar — `{"functionCall": 7}` | **raise** | there is no value to put in the position, and the position cannot be vacated |
 
 **The line between the last two rows is where the member sits, not how bad the value is.** A
@@ -4916,6 +4918,8 @@ answered question keeps its place in the list and carries its answer in the head
 
 Q12 was in that set until 2026-09-12 (KBR-216). Its entry below records the answer, and what the
 answer does not settle.
+
+**Q-image-digest-ref — ANSWERED by the product owner, 2026-09-14 (KBR-192).** Yes — `Image.__post_init__` enforces a strict XOR between `digest` and `ref`. Construction with both `None` raises (the blindness KBR-179 names for `Opaque`); construction with both set raises (a phantom delta two readers could populate the pair differently for one image and report on content neither altered). The legitimate reader paths that today produced neither — Gemini's undecodable inlineData base64, Gemini's missing or wrongly-typed `fileData.fileUri`, and Anthropic's missing or wrongly-typed `url` / `file_id` — now give the part identity: the raw-encoded-bytes digest for the first case (the second of `image_digest`'s recipes), and the `opaque_digest` canonical-JSON digest of the malformed blob for the others. The residual still records the bad/missing value, so the run fails visibly at the right path. Dependent passages re-derived: §3.3.1 line 599-602 (the `Image.digest` recipe paragraph, now mentions the raw-bytes second recipe); §7.4 rule 7 row 2 (line 3167) and row 3 (line 3168) (the absent-value table now describes the canonical-JSON and raw-bytes outcomes respectively). Out of scope: the reconciliation ticket for the two earlier reader divergences (§7.4 "Reconciliation owed" line 3183-3186) — KBR-192 unblocks it by giving both branches a compatible answer to the "what identity does an unreadable image carry?" question.
 
 **Q1 — How faithful should the agent's identity be (F1, G3, KBR-8)?** Three options, materially
 different: (a) forward a curated allowlist of the agent's real headers, uniformly, so every

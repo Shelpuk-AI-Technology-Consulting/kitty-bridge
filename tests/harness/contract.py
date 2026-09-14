@@ -297,11 +297,21 @@ class Opaque:
 class Image:
     """An image, identified by digest rather than carried as bytes.
 
+    **The pairing is enforced, both ways.** ``digest`` is ``None`` iff ``ref``
+    is not ``None``: neither set projects every image identically (KBR-179's
+    blindness for ``Opaque``); both set lets two readers populate the pair
+    differently for one image and report a phantom delta on content neither
+    altered. Closed means enforced — the same posture :class:`Turn` takes on
+    roles and :class:`Conversation` on sampling keys, and the analogue of
+    :class:`Reply`'s "``stop_reason_raw`` is only for ``'other'``".
+
     Attributes:
-        digest: Lowercase hex SHA-256 of the *decoded* image bytes, or ``None``
-            when the format carries a reference instead. ``media_type`` is
-            deliberately **not** part of the digest, so a changed media type is
-            its own delta rather than an unexplained digest change.
+        digest: Lowercase hex SHA-256 of the *decoded* image bytes, or of
+            the *raw encoded* bytes when the wire payload cannot be decoded
+            (see :func:`image_digest` and §7.4 rule 7 row 3 — KBR-192).
+            ``media_type`` is deliberately **not** part of the digest, so a
+            changed media type is its own delta rather than an unexplained
+            digest change.
         media_type: The declared media type, when the format states one.
         ref: The URI, for Gemini's ``fileData.fileUri`` which carries no bytes.
         cache_control: The cache breakpoint the agent set on this block, as the
@@ -320,7 +330,25 @@ class Image:
     __hash__ = None  # type: ignore[assignment]
 
     def __post_init__(self) -> None:
-        """Freeze the cache breakpoint in place."""
+        """Enforce the digest/ref XOR and freeze the cache breakpoint in place.
+
+        Raises:
+            ValueError: When ``digest`` and ``ref`` are both ``None`` or both
+                set. A vocabulary or pairing declared but checked nowhere is a
+                comment, not a rule — the same posture this module takes on
+                every other closed invariant.
+        """
+        # Both-None projects every image identically (KBR-179's blindness for
+        # Opaque); both-set lets two readers populate the pair differently and
+        # report a phantom delta on content neither altered.
+        if (self.digest is None) == (self.ref is None):
+            raise ValueError(
+                "Image.digest and Image.ref must be set together — exactly one "
+                "of them must be None. Both-None is the blindness KBR-179 names "
+                "for Opaque; both-set lets two readers populate the pair "
+                f"differently for one image (got digest={self.digest!r}, ref={self.ref!r})."
+            )
+
         object.__setattr__(self, "cache_control", _freeze_optional(self.cache_control))
 
 
@@ -645,7 +673,7 @@ class CapturedReply:
 
 
 def image_digest(raw: bytes) -> str:
-    """Return the canonical digest of decoded image bytes.
+    """Return the canonical digest of image bytes.
 
     Pinned so that six independently written readers agree.  Anthropic sends
     base64 plus a media type, Chat Completions a data URL, Converse raw bytes
@@ -653,9 +681,23 @@ def image_digest(raw: bytes) -> str:
     reader and the Chat Completions reader would produce different digests for
     the same image and §7.1's image corpus entry would fail on every run.
 
+    Two recipes are carried by the one function, distinguished by what the
+    caller passes rather than by the algorithm:
+
+    * **Decoded image bytes** — the canonical case, when the base64 payload
+      decoded cleanly.
+    * **Raw encoded bytes** — when the payload cannot be decoded, the reader
+      digests the wire's own bytes (e.g. ``raw.encode("utf-8")`` of the wrapped
+      base64 string) so the part keeps its identity and its position
+      (§7.4 rule 7 row 3; KBR-192). Two differently-wrapped blobs of one payload
+      digest differently — the compromise is pinned by
+      ``TestImageDigestRecipe``.
+
     Args:
-        raw: The decoded image bytes. The media type is deliberately excluded,
-            so a changed media type shows as its own delta.
+        raw: The image bytes to digest — decoded for the canonical case, raw
+            encoded bytes when the payload cannot be decoded. The media type is
+            deliberately excluded, so a changed media type shows as its own
+            delta.
 
     Returns:
         Lowercase hex SHA-256 of ``raw``.
