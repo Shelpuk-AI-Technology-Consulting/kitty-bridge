@@ -192,6 +192,109 @@ class TestSessionFileIsolation:
         assert "UNRELATED_VAR" not in _session_file_env(prepared)
 
 
+class TestEnableClaudeAiMcpServersInSessionFile:
+    """KBR-245: the per-session settings file carries the connector opt-out.
+
+    Claude Code >= 2.1.63 honours ``ENABLE_CLAUDEAI_MCP_SERVERS=false`` as a
+    per-session opt-out from claude.ai MCP connectors, which is what stops the
+    "claude.ai connectors are disabled" banner on ``kitty claude`` runs. The
+    chain proven here is the real launch chain: ``build_spawn_config`` emits
+    the env var, ``prepare_launch`` writes it into the session file, and the
+    user-global file is untouched.
+    """
+
+    def test_spawn_config_env_reaches_the_session_file(self, tmp_path: Path):
+        """The env var produced by build_spawn_config lands in the session file."""
+        import uuid
+
+        from kitty.profiles.schema import Profile
+
+        settings_path = tmp_path / ".claude" / "settings.json"
+        _write_user_settings(settings_path)
+        adapter = ClaudeAdapter()
+        profile = Profile(
+            name="test-profile",
+            provider="zai_regular",
+            model="glm-5.3",
+            auth_ref=str(uuid.uuid4()),
+        )
+        spawn = adapter.build_spawn_config(profile, bridge_port=10001, resolved_key="sk-test")
+
+        prepared = adapter.prepare_launch(spawn.env_overrides, settings_path=settings_path)
+
+        assert _session_file_env(prepared)["ENABLE_CLAUDEAI_MCP_SERVERS"] == "false"
+
+    def test_opt_out_does_not_reach_the_user_global_file(self, tmp_path: Path):
+        """The opt-out is per-session: the user's own settings stay untouched."""
+        settings_path = tmp_path / ".claude" / "settings.json"
+        original = _write_user_settings(settings_path)
+        adapter = ClaudeAdapter()
+
+        prepared = adapter.prepare_launch(
+            {**_session_env(10001), "ENABLE_CLAUDEAI_MCP_SERVERS": "false"},
+            settings_path=settings_path,
+        )
+        adapter.cleanup_launch(prepared, settings_path=settings_path)
+
+        assert settings_path.read_text(encoding="utf-8") == original
+        assert "ENABLE_CLAUDEAI_MCP_SERVERS" not in json.loads(original)["env"]
+
+    def test_user_scope_disableClaudeAiConnectors_false_does_not_override_session(self, tmp_path: Path):
+        """KBR-245 AC: the per-session env var wins over user-scope ``disableClaudeAiConnectors``.
+
+        Per the Claude Code settings-reference, "whichever of the two turns them
+        off, the other can't turn them back on": setting
+        ``disableClaudeAiConnectors: false`` at user scope cannot re-enable
+        claude.ai connectors when the per-session env var carries the opt-out.
+        The structural assertion here is that ``prepare_launch`` writes the env
+        var into the session file regardless of what the user-scope file says
+        at top level — the regression pin is that ``prepare_launch`` does not
+        start *reading* and merging top-level keys.
+        """
+        import uuid
+
+        from kitty.profiles.schema import Profile
+
+        settings_path = tmp_path / ".claude" / "settings.json"
+        settings_path.parent.mkdir(parents=True, exist_ok=True)
+        settings_path.write_text(
+            json.dumps(
+                {
+                    "env": {"ANTHROPIC_AUTH_TOKEN": "user-token"},
+                    "disableClaudeAiConnectors": False,
+                }
+            ),
+            encoding="utf-8",
+        )
+        adapter = ClaudeAdapter()
+        profile = Profile(
+            name="test-profile",
+            provider="zai_regular",
+            model="glm-5.3",
+            auth_ref=str(uuid.uuid4()),
+        )
+        spawn = adapter.build_spawn_config(profile, bridge_port=10001, resolved_key="sk-test")
+
+        prepared = adapter.prepare_launch(spawn.env_overrides, settings_path=settings_path)
+
+        assert _session_file_env(prepared)["ENABLE_CLAUDEAI_MCP_SERVERS"] == "false"
+        # The user-scope file's top-level key is never read into the session file.
+        session_payload = json.loads(Path(prepared).read_text(encoding="utf-8"))
+        assert "disableClaudeAiConnectors" not in session_payload
+        settings_path = tmp_path / ".claude" / "settings.json"
+        original = _write_user_settings(settings_path)
+        adapter = ClaudeAdapter()
+
+        prepared = adapter.prepare_launch(
+            {**_session_env(10001), "ENABLE_CLAUDEAI_MCP_SERVERS": "false"},
+            settings_path=settings_path,
+        )
+        adapter.cleanup_launch(prepared, settings_path=settings_path)
+
+        assert settings_path.read_text(encoding="utf-8") == original
+        assert "ENABLE_CLAUDEAI_MCP_SERVERS" not in json.loads(original)["env"]
+
+
 class TestRoutingWithoutUserSettings:
     """AC6: a machine with no ~/.claude/settings.json must still be routed."""
 
