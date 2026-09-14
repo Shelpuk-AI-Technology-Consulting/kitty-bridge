@@ -88,8 +88,7 @@ class Exemption:
 # list is supposed to trend towards zero.
 #
 # It shipped EMPTY until KBR-164. KBR-188's five Windows rows and KBR-189's row
-# came out with their defect's fixes; KBR-249's two rows below name a live
-# defect. Deliberately not counted in this comment:
+# came out with their defect's fixes. Deliberately not counted in this comment:
 # a count in prose is wrong the moment the next row lands, and nothing checks
 # it -- the rule §8's own header states about naming things rather than
 # counting them.
@@ -134,35 +133,7 @@ class Exemption:
 #: statement runs, so a mid-stream abort sent headers and no body. It now uses
 #: `transport.close()`, which flushes first; the Windows leg of the PR that
 #: removed the row is the evidence. The registry is empty again.
-EXEMPTIONS: Mapping[str, Exemption] = MappingProxyType(
-    {
-        "kbr-249-failover-plain-post-status": Exemption(
-            assertion=(
-                "The reply a client receives after a streaming failover to the "
-                "stream-capable backend answers 200"
-            ),
-            condition=(
-                "While a streaming failover can hand the request to a custom-transport backend that only "
-                "the plain-POST streaming branch is driving: that branch POSTs over HTTP to a provider "
-                "that serves over its own transport, the answer is contentless, and the KBR-235 "
-                "emptiness ladder ends the turn in the D4 502. KBR-249 owns the dispatch fix; on the "
-                "day it lands this assertion passes and the row must be deleted."
-            ),
-            issue="KBR-249",
-        ),
-        "kbr-249-failover-plain-post-sse": Exemption(
-            assertion=(
-                "The reply a client receives after a streaming failover to the "
-                "stream-capable backend is an SSE stream"
-            ),
-            condition=(
-                "Same cause as kbr-249-failover-plain-post-status: the terminal outcome on this path is "
-                "the D4 502, a JSON error response, not the event stream the branch was chosen to produce."
-            ),
-            issue="KBR-249",
-        ),
-    }
-)
+EXEMPTIONS: Mapping[str, Exemption] = MappingProxyType({})
 
 
 class UnknownExemption(Exception):
