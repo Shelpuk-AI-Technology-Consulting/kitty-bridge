@@ -1,0 +1,49 @@
+{
+  "id": "system_prompt_over_window_compacts_normally",
+  "description": "Post-KBR-5 positive control: a system prompt over the window plus an ordinary user turn compacts normally, without raising",
+  "origin": "synthetic",
+  "origin_note": "Synthetic, not captured: a system prompt alone over the window does not occur in a real Claude Code session on demand. The size is constructed: a small hand-written core padded with deterministic filler past the window. Recorded as the KBR-5 correction asks: this shape compacts normally (the guaranteed-fit fallback keeps the user turn), so it is the complement of the compaction-failure path, not a recovery fixture. The mandatory human-review step is replaced by code-review of the builder (this script), the scrubber's full-byte scan in CI, and a bounded head/tail human read of the committed .body file, per TEST_SUITE.md section 7.1.1.",
+  "captured_from": "",
+  "captured_at": "",
+  "method": "POST",
+  "scheme": "http",
+  "host": "127.0.0.1",
+  "path": "/v1/messages",
+  "query": "",
+  "headers": [
+    [
+      "Host",
+      "127.0.0.1"
+    ],
+    [
+      "Accept",
+      "application/json"
+    ],
+    [
+      "Content-Type",
+      "application/json"
+    ],
+    [
+      "X-Api-Key",
+      "<redacted:credential_header>"
+    ],
+    [
+      "anthropic-version",
+      "2023-06-01"
+    ],
+    [
+      "anthropic-beta",
+      "claude-code-20250219"
+    ],
+    [
+      "Content-Length",
+      "600254"
+    ]
+  ],
+  "body_file": "system_prompt_over_window_compacts_normally.body",
+  "body_sha256": "2c3f600674a7652f11169719e05df196ef13c9cb0e2e72b58608186c2ca338a7",
+  "wire_format": "anthropic_messages",
+  "known_non_secrets": [],
+  "triggers_met": [],
+  "triggers_absent": []
+}
