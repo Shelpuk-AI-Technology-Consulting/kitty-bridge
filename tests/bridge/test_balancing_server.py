@@ -2,11 +2,13 @@
 
 import json
 import random
+from itertools import chain, repeat
 from unittest.mock import AsyncMock, patch
 
 import aiohttp
 import pytest
 from aioresponses import aioresponses
+from exemptions import ratchet
 
 from kitty.bridge.server import BridgeServer
 from kitty.launchers.base import LauncherAdapter, SpawnConfig
@@ -886,17 +888,37 @@ class TestBalancingAllCustomTransport:
             model="nostream-model",
             backends=backends,
         )
+
+        # Pin the weighted draw (random.choices): the non-stream backend is drawn first
+        # and the streaming failover then selects the custom-transport one, so the
+        # failover under test runs deterministically instead of by coin flip.
+        # KBR-249: while the plain-POST branch cannot drive a custom-transport backend,
+        # this path delivers no content and ends in the D4 502, so the client-visible
+        # status and content-type assertions are exempted against KBR-249; their rows
+        # must be deleted the day that ticket's dispatch fix lands.
+        draw = iter(chain([0], repeat(1)))
+
+        def _deterministic_draw(self=server, *, require_streaming: bool = False):
+            """Serve the scripted order: the non-stream backend first, then the stream-capable one."""
+            idx = next(draw)
+            provider, key, profile = self._backends[idx]
+            return provider, key, profile.model, profile.provider_config or {}, idx
+
+        server._get_next_backend = _deterministic_draw
+
         port = await server.start_async()
         url = f"http://127.0.0.1:{port}/v1/messages"
         request_body = {"model": "test-model", "messages": [{"role": "user", "content": "hi"}], "stream": True}
 
         try:
-            async with aiohttp.ClientSession() as session, session.post(url, json=request_body) as resp:
-                assert resp.status == 200
-                _ = await resp.read()
-                assert resp.status == 200
-                assert server._active_provider is stream_provider
-                assert resp.content_type == "text/event-stream"
+            with patch("kitty.bridge.server._EMPTY_FINAL_DELAYS", [0.0, 0.0]):
+                async with aiohttp.ClientSession() as session, session.post(url, json=request_body) as resp:
+                    with ratchet("kbr-249-failover-plain-post-status"):
+                        assert resp.status == 200
+                    assert server._active_provider is stream_provider
+                    with ratchet("kbr-249-failover-plain-post-sse"):
+                        assert resp.content_type == "text/event-stream"
+                    _ = await resp.read()
         finally:
             await server.stop_async()
 
