@@ -453,6 +453,54 @@ class TestPrepareResponsesBody:
         assert "only_on_the_client_body" in dropped[0]
         assert "only_on_the_request" not in dropped[0]
 
+    def test_an_empty_include_is_dropped(self) -> None:
+        """Drop ``include: []`` — register row P25's mutation, pinned so it cannot drift
+
+        The branch tests truthiness, so a legal ``CreateResponse`` body carrying
+        an empty ``include`` ships without the key while the inbound projection
+        carries it.  Register row P25 claims exactly this delta (KBR-185); if
+        the branch ever starts forwarding the empty value, this test and the
+        row must move together.
+        """
+        result = OpenAISubscriptionAdapter._prepare_responses_body({}, {"include": []})
+        assert "include" not in result
+
+    def test_an_empty_reasoning_is_dropped_when_no_effort_signal_replaces_it(self) -> None:
+        """Drop ``reasoning: {}`` for the same reason, with no injection behind it
+
+        The ``elif`` injects from ``_reasoning_effort`` only when present and
+        not ``"none"``; with neither, the falsy value is dropped and nothing
+        replaces it — the state register row P25's trigger case describes.
+        """
+        result = OpenAISubscriptionAdapter._prepare_responses_body({}, {"reasoning": {}})
+        assert "reasoning" not in result
+
+    def test_truthy_include_and_reasoning_ship_verbatim(self) -> None:
+        """The complement's in-code counterpart: non-empty values are not the row's
+
+        A truthy ``include`` and a truthy ``reasoning`` pass the truthiness
+        tests and ship verbatim, so the delta P25 claims is provably absent —
+        the shape §3.3.2 assertion 2's corpus complement must show.
+        """
+        original = {
+            "include": ["reasoning.encrypted_content"],
+            "reasoning": {"effort": "high"},
+        }
+        result = OpenAISubscriptionAdapter._prepare_responses_body({}, original)
+        assert result["include"] == original["include"]
+        assert result["reasoning"] == original["reasoning"]
+
+    def test_parallel_tool_calls_false_ships_despite_being_falsy(self) -> None:
+        """The presence-test contrast the row's trigger wording rests on
+
+        ``parallel_tool_calls: false`` is falsy and ships anyway, because its
+        branch tests presence with ``is not None`` — the asymmetry that makes
+        the truthiness branches a *choice* rather than an accident, and the
+        reason P25's paths name two keys and not three.
+        """
+        result = OpenAISubscriptionAdapter._prepare_responses_body({}, {"parallel_tool_calls": False})
+        assert result["parallel_tool_calls"] is False
+
 
 class TestCcToResponses:
     def test_converts_system_message_to_instructions(self, adapter: OpenAISubscriptionAdapter) -> None:
