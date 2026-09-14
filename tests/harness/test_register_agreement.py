@@ -201,7 +201,7 @@ class TestTheParserReadsTheDesignDocument:
     def test_the_parser_reads_both_tables(self, markdown: str) -> None:
         """A parser that read only §3.2.1 would still look healthy on the M rows."""
         assert len([i for i in r.parse_register_markdown(markdown).live_ids if i.startswith("M")]) == 16
-        assert len([i for i in r.parse_register_markdown(markdown).live_ids if i.startswith("P")]) == 29
+        assert len([i for i in r.parse_register_markdown(markdown).live_ids if i.startswith("P")]) == 30
 
     def test_the_parser_reads_the_unconditional_list(self, markdown: str) -> None:
         """§3.2.2's closing paragraph is the only place the exemption is written down."""
@@ -610,7 +610,7 @@ class TestP23ClaimsTheControlFieldsOutsideTheCodexAllowlist:
         ``include: []`` — a legal ``CreateResponse`` body — is dropped while
         sitting *inside* the allowlist.  The delta is real and P23 does not claim
         it, which is deliberate: the mutation is conditional on the value, and
-        the same shape at ``reasoning`` would swallow G23's address.  Asserted
+        the same shape at ``reasoning`` would swallow P22's address.  Asserted
         rather than left to a comment, because the cheapest wrong fix to that
         report is to add the key here.
 
