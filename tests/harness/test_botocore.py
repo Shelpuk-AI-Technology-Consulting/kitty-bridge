@@ -7,8 +7,8 @@
 Two products are under observation here and they are driven differently, because
 they are reached differently. ``bedrock`` is driven through a real
 ``BridgeServer`` on T-W8's fixture; the EventStream encoder is round-tripped
-through the pinned ``botocore.eventstream`` parser only — see the NOTE
-block below for why no live-boto3 round-trip is exercised here.
+through the pinned ``botocore.eventstream`` parser only (see below for why no
+live-boto3 round-trip is exercised here).
 
 **A live ``boto3.client(...).converse_stream(...)`` round-trip is not exercised
 in this module.** Measured: boto3's synchronous ``urllib3.PoolManager``
