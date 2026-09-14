@@ -205,6 +205,8 @@ class TestEnvelope:
             ("moderation", {"model": "omni-moderation-latest"}),
             ("functions", [{"name": "old_f", "parameters": {}}]),  # deprecated top-level
             ("function_call", "auto"),  # deprecated top-level
+            ("store", True),
+            ("user", "session-abc-123"),
             ("prediction", {"type": "content", "content": []}),
             ("modalities", ["text", "audio"]),
             ("verbosity", "low"),
@@ -217,6 +219,8 @@ class TestEnvelope:
             "moderation",
             "functions-deprecated",
             "function_call-deprecated",
+            "store",
+            "user",
             "prediction",
             "modalities",
             "verbosity",
@@ -229,16 +233,15 @@ class TestEnvelope:
         self, key: str, value: Any
     ) -> None:
         """R1.6a — every key in :data:`_PUBLISHED_EXTRA_KEYS` rides at its wire key
-        (the B1 closure). The closure's six unclassified fields (`audio`,
-        `moderation`, `functions`, `function_call` deprecated) plus the
-        others the system-design-reviewer named that already shipped
-        (`prediction`, `modalities`, `verbosity`, `reasoning_effort`,
-        `prompt_cache_options`, `web_search_options`) all carry the
-        §3.3.1a "declared control field of the format maps to
-        ``envelope.extra[<wire key>]``" rule. A residual entry on any of
-        them is the wrong shape — G26 binds the row-plan for the
-        downstream register, and a body carrying any of them is one real
-        Codex / OpenAI / OpenAI-compat traffic sends.
+        (the B1 closure). The four B1 keys (`audio`, `moderation`,
+        `functions`, `function_call`, all deprecated) plus the eight that
+        shipped earlier (`store`, `user`, `prediction`, `modalities`,
+        `verbosity`, `reasoning_effort`, `prompt_cache_options`,
+        `web_search_options`) all carry the §3.3.1a "declared control field
+        of the format maps to ``envelope.extra[<wire key>]``" rule. A
+        residual entry on any of them is the wrong shape — G26 binds the
+        row-plan for the downstream register, and a body carrying any of
+        them is one real Codex / OpenAI / OpenAI-compat traffic sends.
         """
         projected = _read(_minimal(**{key: value}))
 
@@ -720,7 +723,7 @@ class TestMergeRule:
     def test_interleaved_tool_calls_form_a_merged_turn_with_results_in_call_order(
         self,
     ) -> None:
-        """R4.3 — an interleaved CC body: ``tool(a) → user(text) → tool(b)``.
+        """R4.2 — an interleaved CC body: ``tool(a) → user(text) → tool(b)``.
 
         Clauses 1+2 build a ``ToolResult`` turn from each ``tool`` message and
         absorb the user-text turn that follows; clause 4 then merges the
@@ -765,7 +768,7 @@ class TestMergeRule:
         assert isinstance(merged.parts[2], c.ToolResult) and merged.parts[2].tool_use_id == "t2"
 
     def test_two_tool_messages_form_one_user_turn_with_results_first(self) -> None:
-        """R4.2 — clause 1's run of consecutive results; clause 3 vacuous here too."""
+        """R4.3 — clause 1's run of consecutive results; clause 3 vacuous here too."""
         projected = _read(
             {
                 "model": "gpt-6-astra",
@@ -919,8 +922,16 @@ class TestCacheBreakpoints:
         assert text.cache_control == {"mode": "explicit"}
         assert projected.residual == {}
 
-    def test_a_wrongly_typed_cache_breakpoint_residualises(self) -> None:
-        """R6.3 — §7.4.1: a string value at either spelling residualises at its own path."""
+    def test_a_wrongly_typed_cache_control_residualises(self) -> None:
+        """R6.3 — §7.4.1: a string value at the ``cache_control`` spelling residualises at its own path.
+
+        The ``prompt_cache_breakpoint`` spelling behaves the same way: both
+        are read by :func:`_read_cache_control` and residualised through
+        the same path on a non-object value, so the test for one is the
+        test for the other. The same test exists for ``prompt_cache_breakpoint``
+        as a re-spelled-sibling pin in :func:`test_a_respelled_sibling_of_an_ignored_field_still_residualises`
+        — see there for the wrong-typed and re-spelled coverage on that spelling.
+        """
         projected = _read(
             {
                 "model": "gpt-6-astra",
@@ -936,6 +947,42 @@ class TestCacheBreakpoints:
         )
 
         assert projected.residual == {"messages[0].content[0].cache_control": "yes"}
+
+    def test_when_both_cache_spellings_are_present_first_fills_the_slot_and_second_residualises(self) -> None:
+        """R6.4 — the co-occurrence case §11 Q16 names.
+
+        The schema forbids ``cache_control`` and ``prompt_cache_breakpoint``
+        on the same part, so a body carrying both is a mutation the bridge
+        is obliged to name. The reader's contract: the first spelling
+        (per :data:`_CACHE_KEYS` order) fills the slot, the second
+        residualises at its own path. Silent drop is the shape M16 and G37
+        exist to prevent — a strip the bridge did not register.
+        """
+        projected = _read(
+            {
+                "model": "gpt-6-astra",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "hi",
+                                "cache_control": {"type": "ephemeral"},
+                                "prompt_cache_breakpoint": {"mode": "explicit"},
+                            }
+                        ],
+                    }
+                ],
+            }
+        )
+
+        text = projected.conversation.turns[0].parts[0]
+        assert isinstance(text, c.Text)
+        assert text.cache_control == {"type": "ephemeral"}
+        assert projected.residual == {
+            "messages[0].content[0].prompt_cache_breakpoint": {"mode": "explicit"}
+        }
 
 
 # --------------------------------------------------------------------------
@@ -1222,8 +1269,15 @@ class TestFailures:
                 _captured({"model": "x", "messages": ["not a dict"]})
             )
 
-    def test_a_wrongly_typed_content_part_type_raises(self) -> None:
-        """R8.4 — a ``type`` outside the role's part set is unreadable."""
+    def test_a_user_role_with_a_refusal_part_type_is_unreadable(self) -> None:
+        """R8.4 — a content-part ``type`` outside the role's part set is unreadable.
+
+        User messages admit ``text`` / ``image_url`` / ``input_audio`` /
+        ``file``; assistant messages admit ``text`` / ``refusal``. A
+        ``refusal`` part on a user message is a role/type mismatch, and
+        the reader raises ``UnreadableBodyError`` rather than forcing the
+        part into a kind it does not name.
+        """
         with pytest.raises(c.UnreadableBodyError):
             _read(
                 {

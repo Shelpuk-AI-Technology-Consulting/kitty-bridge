@@ -56,8 +56,11 @@ from harness import contract as c
 #: is the request-wide cache TTL (`30m` only) — all §3.3.1b's "declared control
 #: field of the format" rule says goes to ``extra[<wire key>]`` rather than
 #: the residual. ``functions`` and ``function_call`` are the deprecated top-level
-#: spellings the older ``tools``/``tool_calls`` replaced; the bridge does not
-#: translate them and a body carrying one residualises with the field named.
+#: spellings the older ``tools``/``tool_calls`` replaced; they map onto
+#: ``extra[<wire key>]`` the same way (a residual entry would force the
+#: schema validator to accept the spelling, which the bridge does not do —
+#: the row plan for the deprecated spellings is owed to M16's twin and
+#: arrives with the next register pass).
 _PUBLISHED_EXTRA_KEYS = frozenset(
     {
         "store",
@@ -78,10 +81,13 @@ _PUBLISHED_EXTRA_KEYS = frozenset(
 )
 
 #: Sampling parameters, mapped onto the canonical Chat Completions spelling
-#: (§3.3.1b). Chat Completions **is** the spelling the closed set was derived
-#: from, so this table is the identity — no rename, no shift. ``max_tokens``
-#: (the older spelling) and ``max_completion_tokens`` both map onto themselves,
-#: and P13 drops the two in their own right, so a reader that collapsed them
+#: (§3.3.1b). CC **is** the spelling the closed set was derived from for
+#: thirteen of the fifteen keys, and the table is therefore the identity for
+#: those thirteen. Two keys renames: ``stop_sequences`` (Anthropic) → ``stop``
+#: is the spelling-only case; ``top_k`` is the one Chat Completions does
+#: *not* carry — it is in SAMPLING_KEYS as the closed set, but excluded from
+#: this reader because no CC body can carry it. P13 drops the closed set's
+#: other fourteen; collapsing ``max_tokens`` and ``max_completion_tokens``
 #: would hide a P13 delta.
 _SAMPLING_KEYS = frozenset(
     {
@@ -269,10 +275,18 @@ def _project(body: Mapping[str, Any]) -> c.Request:
             extra[c.TOOL_CHOICE_KEY] = _read_tool_choice(value)
             consumed.add(key)
         elif key == "parallel_tool_calls":
-            parallel = _typed_leaf(body, "parallel_tool_calls", bool, "", residual)
-            if parallel is not None:
-                extra[c.PARALLEL_TOOL_CALLS_KEY] = parallel
-            consumed.add(key)
+            # Conditional on the value type, mirroring the Anthropic
+            # reader's analogous site for `disable_parallel_tool_use`: a
+            # wrongly-typed value is *not* consumed by this branch — the
+            # fall-through ``else: residual[key] = value`` puts it in the
+            # residual at its bare name, the run fails closed, and the
+            # cross-reader comparison sees the same answer either side.
+            raw = body.get("parallel_tool_calls")
+            if isinstance(raw, bool):
+                extra[c.PARALLEL_TOOL_CALLS_KEY] = raw
+                consumed.add(key)
+            elif raw is not None:
+                residual["parallel_tool_calls"] = raw
         elif key in _PUBLISHED_EXTRA_KEYS:
             # Keyed by the wire key, never nested (§3.3.1a). `store` joins
             # this set for the same reason: the canonical address is the wire
@@ -1001,15 +1015,24 @@ def _read_cache_control(
     with: a flattened form would make a vendor's future TTL invisible, and a
     normalised form would put a vendor spelling into a wire-independent value.
 
+    When **both** spellings are present on one part (the schema forbids it,
+    so a body carrying both is a mutation the reader is obliged to name), the
+    first one in :data:`_CACHE_KEYS` order fills the slot and the second
+    residualises at its own path. A silent drop of the second is exactly the
+    shape M16 and G37 exist to prevent — a strip the bridge did not
+    register.
+
     Args:
         part: The content part or tool declaration being read.
         path: The object's path from the body root, for the residual key.
         residual: The residual mapping, extended in place when the value is
-            not an object.
+            not an object, or when both spellings are present.
 
     Returns:
-        The breakpoint as the wire mapping, or ``None`` when absent or unusable.
+        The first spelling's value as the wire mapping, or ``None`` when
+        absent or unusable.
     """
+    filled: Mapping[str, Any] | None = None
     for key in _CACHE_KEYS:
         value = part.get(key)
         if value is None:
@@ -1017,8 +1040,11 @@ def _read_cache_control(
         if not isinstance(value, dict):
             residual[f"{path}.{key}"] = value
             continue
-        return value
-    return None
+        if filled is None:
+            filled = value
+        else:
+            residual[f"{path}.{key}"] = value
+    return filled
 
 
 def _residualise(
