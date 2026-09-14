@@ -267,15 +267,18 @@ class TestEnvelope:
         self, key: str, value: Any
     ) -> None:
         """R1.6a — every key in :data:`_PUBLISHED_EXTRA_KEYS` rides at its wire key
-        (the B1 closure). The four B1 keys (`audio`, `moderation`,
-        `functions`, `function_call`, all deprecated) plus the eight that
-        shipped earlier (`store`, `user`, `prediction`, `modalities`,
-        `verbosity`, `reasoning_effort`, `prompt_cache_options`,
-        `web_search_options`) all carry the §3.3.1a "declared control field
-        of the format maps to ``envelope.extra[<wire key>]``" rule. A
-        residual entry on any of them is the wrong shape — G26 binds the
-        row-plan for the downstream register, and a body carrying any of
-        them is one real Codex / OpenAI / OpenAI-compat traffic sends.
+        (the B1 closure). Fourteen keys total: ten current
+        (``store``, ``metadata``, ``service_tier``, ``reasoning_effort``,
+        ``verbosity``, ``modalities``, ``prediction``, ``user``,
+        ``web_search_options``, ``prompt_cache_options``) plus two
+        current-shape-but-peripheral (``audio``, ``moderation``) plus
+        two deprecated top-level spellings (``functions``,
+        ``function_call``) the older ``tools``/``tool_calls`` replaced.
+        All carry the §3.3.1a "declared control field of the format
+        maps to ``envelope.extra[<wire key>]``" rule. A residual entry
+        on any of them is the wrong shape — G26 binds the row-plan for
+        the downstream register, and a body carrying any of them is one
+        real Codex / OpenAI / OpenAI-compat traffic sends.
         """
         projected = _read(_minimal(**{key: value}))
 
@@ -341,21 +344,15 @@ class TestEnvelope:
     ) -> None:
         """R1.6c — the wrongly-typed coverage R1.6b promised for all 14 keys.
 
-        Every key in :data:`_PUBLISHED_EXTRA_KEYS` (all 14 members
-        including the two deprecated top-level spellings, ``functions``
-        and ``function_call``) is read with no type check on the value
-        (§3.3.1a: ``extra[<wire key>]`` is compared whole). The pin value
-        is a string — the wrong type for the nine dict-shaped keys
-        (``metadata``, ``moderation``, ``audio``, ``prediction``,
-        ``service_tier``, ``modalities``, ``user``, ``verbosity``,
-        ``reasoning_effort``, ``web_search_options``,
-        ``prompt_cache_options``, ``function_call``, ``functions``, plus
-        ``store``) and the **right** type for the string-shaped keys the
-        schema names; the test pins the carried-whole behaviour either
-        way — wrong-type on dict-shaped keys is the case R1.6b names;
-        right-type on string-shaped keys confirms the reader does not
-        enforce a type contract it was never asked to enforce. Both
-        paths land at ``extra[<key>]`` and ``verify_total`` passes.
+        Every key in :data:`_PUBLISHED_EXTRA_KEYS` (all 14 members) is
+        read with no type check on the value (§3.3.1a: ``extra[<wire
+        key>]`` is compared whole). The pin value is a string. Whether
+        the string is the schema's right type for the key is beside the
+        point: a wrongly-typed value lands at the wire key and is named,
+        and a right-typed value lands at the wire key and is named —
+        the reader does not enforce a type contract it was never asked to
+        enforce. The test pins the carried-whole behaviour for every key,
+        which is what the §3.3.1a rule requires.
         """
         projected = _read(_minimal(**{key: "definitely the wrong type"}))
 
