@@ -142,8 +142,13 @@ _TOOL_PART_TYPES = frozenset({"text"})
 #: (§11 Q16, closing G37): the slot is ``Mapping[str, Any] | None``, and §3.3.1's
 #: "carried whole, not reduced" rule applies to a spelling with no TTL
 #: (``prompt_cache_breakpoint``, request-wide TTL in ``prompt_cache_options``)
-#: the same way it applies to one with.
-_CACHE_KEYS = frozenset({"cache_control", "prompt_cache_breakpoint"})
+#: the same way it applies to one with. An **ordered** ``tuple``, not a
+#: ``frozenset`` — when both spellings are present on one part the first
+#: wins, the second residualises (R6.4); the rule is "first non-null wins",
+#: and a hash-randomised iteration order would make that rule
+#: hash-seed-dependent. The CC spelling (``cache_control``) is checked
+#: first — OpenRouter's CC dialect carries Anthropic's own field.
+_CACHE_KEYS: tuple[str, ...] = ("cache_control", "prompt_cache_breakpoint")
 
 #: Tool-choice strings whose canonical values already agree — CC's ``required``
 #: maps to ``any`` because both name "the model must call one or more tools",
@@ -272,7 +277,7 @@ def _project(body: Mapping[str, Any]) -> c.Request:
             sampling[key] = value
             consumed.add(key)
         elif key == "tool_choice":
-            extra[c.TOOL_CHOICE_KEY] = _read_tool_choice(value)
+            extra[c.TOOL_CHOICE_KEY] = _read_tool_choice(value, residual)
             consumed.add(key)
         elif key == "parallel_tool_calls":
             # Conditional on the value type, mirroring the Anthropic
@@ -281,11 +286,22 @@ def _project(body: Mapping[str, Any]) -> c.Request:
             # fall-through ``else: residual[key] = value`` puts it in the
             # residual at its bare name, the run fails closed, and the
             # cross-reader comparison sees the same answer either side.
+            # ``None`` is treated as absent (the cache_control precedent):
+            # the wire key carries no instruction, and the bridge does
+            # not invent one. ``True``/``False`` are read; ``True`` is the
+            # CC default so a body carrying ``false`` is a non-default
+            # delta the oracle names.
             raw = body.get("parallel_tool_calls")
-            if isinstance(raw, bool):
+            if raw is None:
+                # Absent — the key is present in the body but the value is
+                # null. Treat as no-op (the cache_control precedent) but
+                # *consume* the key for totality: a body that explicitly
+                # sent ``null`` has named its intent to omit the field.
+                consumed.add(key)
+            elif isinstance(raw, bool):
                 extra[c.PARALLEL_TOOL_CALLS_KEY] = raw
                 consumed.add(key)
-            elif raw is not None:
+            else:
                 residual["parallel_tool_calls"] = raw
         elif key in _PUBLISHED_EXTRA_KEYS:
             # Keyed by the wire key, never nested (§3.3.1a). `store` joins
@@ -507,7 +523,16 @@ def _read_one_message(
 
         _residualise(
             message,
-            {"role", "content", "tool_calls", "name", "refusal", "audio", "function_call"},
+            # `audio` and `function_call` are NOT in the mapped set: they
+            # are recognised CC fields (assistant-level `audio` for audio
+            # responses, deprecated `function_call` for the older tool-call
+            # spelling), but neither is carried by the projection today.
+            # Residualising them at the message's path names the field,
+            # the run fails closed, and a future reader that grows an
+            # `Audio` part or a `function_call` mapping has the residual
+            # entry to consult. A silent drop would be exactly the totality
+            # violation the residual rule exists to prevent.
+            {"role", "content", "tool_calls", "name", "refusal"},
             path,
             residual,
         )
@@ -737,6 +762,15 @@ def _read_image_part(
             decoded = base64.b64decode(encoded, validate=True)
         except (ValueError, TypeError):
             residual[f"{path}.image_url.url"] = url
+            # A `cache_control` on a part whose bytes failed to decode
+            # cannot survive — the part has no Image to carry it on, and
+            # an `Opaque` or `Text` substitute would invent a carrier the
+            # schema does not name. Residualising at the field's own path
+            # names it, the run fails closed, and a body carrying a
+            # undecodable image with a cache breakpoint is one the bridge
+            # cannot faithfully forward.
+            if cache_control is not None:
+                residual[f"{path}.cache_control"] = cache_control
             return None
 
         return c.Image(
@@ -898,7 +932,7 @@ def _read_tools(value: Any, residual: dict[str, Any]) -> tuple[c.ToolDecl, ...]:
     return tuple(declared)
 
 
-def _read_tool_choice(value: Any) -> str:
+def _read_tool_choice(value: Any, residual: dict[str, Any]) -> str:
     """Normalise a ``tool_choice`` onto its canonical value.
 
     Four wire keys across the formats name one concept, so §3.3.1b makes the
@@ -954,7 +988,10 @@ def _read_tool_choice(value: Any) -> str:
         # top-level strings — CC's `required` maps to `any`, the same mapping
         # KBR-214 fixed and T-A3 ships. The member's `tools` list is not
         # projected (the canonical form names the *mode*, not the set), so
-        # the whole entry's presence is what the projection records.
+        # the whole entry's presence is what the projection records. The
+        # list itself residuals at its own path: a body that names a
+        # specific toolset is one the bridge does not silently swallow,
+        # and the residual entry names what was sent.
         allowed = value.get("allowed_tools")
         if not isinstance(allowed, dict):
             raise c.UnreadableBodyError(
@@ -965,6 +1002,11 @@ def _read_tool_choice(value: Any) -> str:
             raise c.UnreadableBodyError(
                 f"tool_choice.allowed_tools.mode must be one of {sorted(_TOOL_CHOICE_ALLOWED_MODES)}, got {mode!r}"
             )
+        if "tools" in allowed:
+            # The list is part of the wire shape but not the canonical
+            # form; residualising at the member's path keeps totality and
+            # names what was sent rather than silently swallowing it.
+            residual["tool_choice.allowed_tools.tools"] = allowed["tools"]
         return _TOOL_CHOICE_ALLOWED_MODES[mode]
 
     raise c.UnreadableBodyError(f"unrecognised tool_choice type {kind!r}")

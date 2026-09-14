@@ -5575,10 +5575,11 @@ whole-slot rule exists to prevent.
 "the cache breakpoint this block carries"; the wire's spelling is a property of the
 dialect, not of the concept. Two slots would put the dialect into the wire-independent
 form (§3.3.1's P16 objection), and the two spellings cannot co-occur on one block (the
-schema forbids it; if one ever appears, the second fills the slot and the first
-residualises — the T-A2 reader reads both, fills the first non-null one, and residualises
-the other at its own path, asserted in `test_reader_chat_completions.
-TestCacheBreakpoints.test_a_wrongly_typed_cache_breakpoint_residualises`).
+schema forbids it; if one ever appears, the first non-null spelling in
+`_CACHE_KEYS` order — `cache_control` first — fills the slot and the other
+residualises at its own path; a silent drop is the shape M16 and G37 exist
+to prevent, asserted in `test_reader_chat_completions.TestCacheBreakpoints.
+test_when_both_cache_spellings_are_present_first_fills_the_slot_and_second_residualises`).
 
 **Converse does not inherit this.** Bedrock Converse's `cachePoint` is a *separate block*
 in the content list, not a field on one (§3.3.1 records the shape); a T-A5 reader that

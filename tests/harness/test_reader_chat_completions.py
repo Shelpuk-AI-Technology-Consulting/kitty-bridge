@@ -190,6 +190,21 @@ class TestEnvelope:
         with pytest.raises(c.ResidualFieldsError):
             c.verify_total(projected)
 
+    def test_parallel_tool_calls_null_is_treated_as_absent(self) -> None:
+        """R1.5b — ``null`` follows the ``cache_control`` precedent: absent.
+
+        ``True``/``False`` map onto the canonical address; ``null`` is
+        treated as no-op (the wire key carries no instruction). The key is
+        consumed for totality so a body that explicitly sent ``null`` is
+        accounted for, not silently dropped.
+        """
+        projected = _read(_minimal(parallel_tool_calls=None))
+
+        assert c.PARALLEL_TOOL_CALLS_KEY not in projected.envelope.extra
+        assert "parallel_tool_calls" in projected.consumed
+        assert projected.residual == {}
+        c.verify_total(projected)
+
     def test_a_published_extra_key_rides_at_its_wire_key(self) -> None:
         """R1.6 — every other CC control field lands at its wire key, the §3.3.1a rule."""
         projected = _read(_minimal(metadata={"trace": "abc"}, service_tier="auto"))
@@ -252,13 +267,14 @@ class TestEnvelope:
         c.verify_total(projected)
 
     def test_audio_with_a_wrongly_typed_value_is_carried_whole(self) -> None:
-        """R1.6b — §3.3.1a: ``extra[<wire key>]`` is compared **whole**, and the value's
-        shape is not type-checked today (the posture T-A1 ships for its
-        published-extra set). The value's own type is the schema's problem —
-        the reader's job is to name the wire field, which a wrongly-typed
-        value still does. A stricter rule is a separate ticket's worth of
-        work; the behaviour is documented here so a future test pins the
-        next decision.
+        """R1.6b — the value at a published-extra key is carried whole, not type-checked.
+
+        §3.3.1a: ``extra[<wire key>]`` is compared **whole**. The reader's
+        job is to name the wire field; the value's shape is not the
+        reader's job to enforce. A wrongly-typed value lands at its wire
+        key and is named — a future type check, or the schema validator,
+        owns the shape, not the reader. This matches the posture T-A1
+        ships for its ``_PUBLISHED_EXTRA_KEYS``.
         """
         projected = _read(_minimal(audio="not an audio config"))
 
@@ -356,20 +372,43 @@ class TestToolChoice:
 
     def test_the_allowed_tools_form_maps_by_its_mode(self) -> None:
         """R2.4 — ``{"type": "allowed_tools", "allowed_tools": {"mode": "required", …}}``
-        maps onto ``any``; ``mode: "auto"`` maps onto ``auto``. The member's
-        ``tools`` list is not projected — the canonical form names the mode,
-        not the set."""
+        maps onto ``any``; ``mode: "auto"`` maps onto ``auto``."""
         for mode, expected in [("auto", "auto"), ("required", "any")]:
             projected = _read(
                 _minimal(
                     tool_choice={
                         "type": "allowed_tools",
-                        "allowed_tools": {"mode": mode, "tools": [PUBLISHED_FUNCTION_TOOL]},
+                        "allowed_tools": {"mode": mode},
                     }
                 )
             )
             assert projected.envelope.extra["tool_choice"] == expected, f"mode={mode!r}"
             assert projected.residual == {}
+
+    def test_the_allowed_tools_member_tools_list_residualises_whole(self) -> None:
+        """R2.4b — the ``tools`` list is part of the wire shape but not the canonical
+        form. The reader residualises the list at its own path: a body
+        that names a specific toolset is one the bridge does not silently
+        swallow, and the residual entry names what was sent.
+        """
+        projected = _read(
+            _minimal(
+                tool_choice={
+                    "type": "allowed_tools",
+                    "allowed_tools": {
+                        "mode": "auto",
+                        "tools": [PUBLISHED_FUNCTION_TOOL],
+                    },
+                }
+            )
+        )
+
+        assert projected.envelope.extra["tool_choice"] == "auto"
+        assert projected.residual == {
+            "tool_choice.allowed_tools.tools": [PUBLISHED_FUNCTION_TOOL]
+        }
+        with pytest.raises(c.ResidualFieldsError):
+            c.verify_total(projected)
 
     def test_an_unrecognised_allowed_tools_mode_raises(self) -> None:
         """R2.5 — ``mode`` is an enum; anything else is unreadable."""
@@ -537,6 +576,66 @@ class TestMessages:
         assert call.arguments == {"city": "San Francisco"}
         assert call.id == "call_abc123"
         assert projected.residual == {}
+
+    def test_an_assistant_message_audio_and_function_call_residualise(self) -> None:
+        """R3.7b — the assistant message's ``audio`` and ``function_call`` are
+        recognised CC fields that the projection does not model today.
+        They residualise at the message's path — a silent drop would be
+        the totality violation the residual rule exists to prevent, and
+        the residual entry is the hook a future reader that grows an
+        ``Audio`` part or a ``function_call`` mapping consults."""
+        projected = _read(
+            {
+                "model": "gpt-6-astra",
+                "messages": [
+                    {
+                        "role": "assistant",
+                        "content": "hi",
+                        "audio": {"id": "audio-1"},
+                        "function_call": {"name": "legacy", "arguments": "{}"},
+                    }
+                ],
+            }
+        )
+
+        assert projected.residual == {
+            "messages[0].audio": {"id": "audio-1"},
+            "messages[0].function_call": {"name": "legacy", "arguments": "{}"},
+        }
+        with pytest.raises(c.ResidualFieldsError):
+            c.verify_total(projected)
+
+    def test_a_cache_control_on_an_undecodable_image_residualises(self) -> None:
+        """R6.3b — the image's ``cache_control`` survives the decode failure.
+
+        A base64 data URL whose bytes fail to decode residualises the URL
+        at its own path; the part's ``cache_control`` is also residualised
+        because the reader has no ``Image`` to carry it on. A silent drop
+        would be the M16-shaped loss — a strip the bridge did not
+        register.
+        """
+        projected = _read(
+            {
+                "model": "gpt-6-astra",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image_url",
+                                "image_url": {"url": "data:image/png;base64,!!!not-base64!!!"},
+                                "cache_control": {"type": "ephemeral"},
+                            }
+                        ],
+                    }
+                ],
+            }
+        )
+
+        assert projected.residual == {
+            "messages[0].content[0].image_url.url": "data:image/png;base64,!!!not-base64!!!",
+            "messages[0].content[0].cache_control": {"type": "ephemeral"},
+        }
 
     def test_a_non_json_arguments_string_residualises_at_its_path(self) -> None:
         """R3.8 — the shared ``decode_arguments`` rule: a non-JSON string residualises at its path."""
@@ -925,12 +1024,12 @@ class TestCacheBreakpoints:
     def test_a_wrongly_typed_cache_control_residualises(self) -> None:
         """R6.3 — §7.4.1: a string value at the ``cache_control`` spelling residualises at its own path.
 
-        The ``prompt_cache_breakpoint`` spelling behaves the same way: both
-        are read by :func:`_read_cache_control` and residualised through
+        The ``prompt_cache_breakpoint`` spelling behaves the same way:
+        both are read by :func:`_read_cache_control` and residualised through
         the same path on a non-object value, so the test for one is the
-        test for the other. The same test exists for ``prompt_cache_breakpoint``
-        as a re-spelled-sibling pin in :func:`test_a_respelled_sibling_of_an_ignored_field_still_residualises`
-        — see there for the wrong-typed and re-spelled coverage on that spelling.
+        test for the other. R6.4 covers the co-occurrence case where both
+        spellings appear on one part — the first fills the slot, the second
+        residualises.
         """
         projected = _read(
             {
@@ -954,7 +1053,8 @@ class TestCacheBreakpoints:
         The schema forbids ``cache_control`` and ``prompt_cache_breakpoint``
         on the same part, so a body carrying both is a mutation the bridge
         is obliged to name. The reader's contract: the first spelling
-        (per :data:`_CACHE_KEYS` order) fills the slot, the second
+        (per :data:`_CACHE_KEYS` order — an ordered ``tuple``, so the rule
+        is not hash-seed-dependent) fills the slot, the second
         residualises at its own path. Silent drop is the shape M16 and G37
         exist to prevent — a strip the bridge did not register.
         """
@@ -983,6 +1083,44 @@ class TestCacheBreakpoints:
         assert projected.residual == {
             "messages[0].content[0].prompt_cache_breakpoint": {"mode": "explicit"}
         }
+
+    def test_when_both_cache_spellings_are_present_first_fills_deterministically(self) -> None:
+        """R6.5 — the co-occurrence rule is not hash-seed-dependent.
+
+        `_CACHE_KEYS` is an ordered ``tuple``, so the "first non-null wins"
+        rule is stable across Python's hash randomisation. A reader whose
+        cache-key iteration order was a ``frozenset`` would flip which
+        spelling fills the slot between runs; the round-4 review named
+        this, and the pin ensures it stays deterministic.
+        """
+        # Run the projection twice and confirm the same shape both times.
+        for _ in range(2):
+            projected = _read(
+                {
+                    "model": "gpt-6-astra",
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": "hi",
+                                    "prompt_cache_breakpoint": {"mode": "explicit"},
+                                    "cache_control": {"type": "ephemeral"},
+                                }
+                            ],
+                        }
+                    ],
+                }
+            )
+
+            text = projected.conversation.turns[0].parts[0]
+            assert isinstance(text, c.Text)
+            # `cache_control` is first in _CACHE_KEYS order, so it wins.
+            assert text.cache_control == {"type": "ephemeral"}
+            assert projected.residual == {
+                "messages[0].content[0].prompt_cache_breakpoint": {"mode": "explicit"}
+            }
 
 
 # --------------------------------------------------------------------------
