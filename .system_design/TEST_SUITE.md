@@ -3220,10 +3220,29 @@ and an undecodable data URL, which drops the part and shifts every later part's 
 warning that "that invented delta lands on every part of the turn and on every turn after it". A
 reader that cannot read a part must still *occupy its position*.
 
-> **Reconciliation owed.** `reader_anthropic_messages.py` raises on undecodable base64 where this
-> rule residualises, and `reader_responses.py` drops a part where this rule keeps it. Both predate
-> this section. T-A4 is the reference implementation; the two landed readers need conforming, and
-> that is a change to shipped code rather than a note, so it is tracked as its own ticket.
+> **Reconciliation owed — paid 2026-09-14 (KBR-251).** The undecodable-base64 shape this rule names
+> is now conformed across all three shipped readers. `reader_anthropic_messages._read_image`
+> residualises the `…source.data` leaf and projects the part under
+> `image_digest(raw.encode("utf-8"))` — the second of `image_digest`'s recipes (KBR-192) — with
+> the media type and breakpoint carried as before. `reader_responses._read_image` never returns
+> *no part*: both data-URL branches residualise the `…image_url` leaf (digest of the payload
+> string where the base64 grammar parsed, digest of the payload after the first comma where it
+> did not — with the media segment parsed from the URL prefix and carried separately, keeping
+> `image_digest`'s "media type excluded" rule), and the no-`image_url`-no-`file_id` branch
+> carries the `opaque_digest(part)` identity Gemini's missing-`fileUri` shape already used, the
+> residual naming the absent or wrongly-typed key (a present-but-wrongly-typed `image_url`
+> residualises even when a usable `file_id` carries the part). `reader_gemini.py` remains the
+> reference implementation.
+>
+> **What still diverges, and is owed elsewhere.** Anthropic's missing/wrongly-typed
+> `source.data` (`KeyError` / `TypeError` from `b64decode`) still escapes the reader; the
+> sibling sweep over `input_file` parts (OpenAI's `detail`, future siblings) is not in scope
+> for this ticket; the `_DATA_URL` regex `^data:([^;,]+);base64,(.*)$` rejects
+> `data:;base64,…` (empty media segment) and a case-variant `;BASE64,` marker, routing both to
+> the non-base64 branch — pre-existing defects in the regex, separate ticket. The broader sweep
+> this note once implied — the
+> Responses dispatcher's other `return None` paths for wrongly-typed text and refusal parts —
+> stays tracked under KBR-196, consolidated here.
 
 > **What this reader leaves on the record — and when it was paid.** Six fields the format
 > publishes, real clients send, and the grammar could not carry residualised and so **failed the

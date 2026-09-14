@@ -853,6 +853,62 @@ class TestContentBlocks:
         assert projected.residual == {"messages[0].content[0].source.unknown": 1}
 
 
+class TestUndecodableImagePayloads:
+    """An undecodable base64 payload residualises the leaf and keeps its part.
+
+    §7.4 rule 7 row 3 (KBR-251). The reader used to raise `UnreadableBodyError`
+    here, which §7.4.1 calls "the other wrong answer: it blinds the oracle to
+    everything else in a request it could otherwise diff" — and the case is
+    real traffic, not a hypothetical: `validate=True` rejects every RFC 2045
+    line break, and Google's own image-understanding sample passes `-w0` to
+    `base64(1)` precisely because its default output is wrapped.
+    `reader_gemini._read_inline_data` is the reference implementation;
+    `contract.image_digest`'s second recipe (KBR-192) gives the part its
+    identity.
+    """
+
+    def test_wrapped_base64_residualises_instead_of_killing_the_request(self) -> None:
+        """A single newline in one blob must not abort the whole projection."""
+        wrapped = base64.b64encode(b"hello world" * 8).decode("ascii")
+        wrapped = wrapped[:20] + "\n" + wrapped[20:]
+        block = {
+            "type": "image",
+            "source": {"type": "base64", "media_type": "image/png", "data": wrapped},
+            "cache_control": {"type": "ephemeral"},
+        }
+
+        projected = _read(_minimal(messages=[{"role": "user", "content": [block, {"type": "text", "text": "and"}]}]))
+
+        # The part keeps its place, the later part keeps its index, and the
+        # digest is the raw wire bytes per `image_digest`'s second recipe —
+        # the breakpoint the block carried travels with it either way.
+        assert projected.conversation.turns[0].parts == (
+            c.Image(
+                digest=c.image_digest(wrapped.encode("utf-8")),
+                media_type="image/png",
+                cache_control={"type": "ephemeral"},
+            ),
+            c.Text("and"),
+        )
+        assert projected.residual == {"messages[0].content[0].source.data": wrapped}
+        with pytest.raises(c.ResidualFieldsError):
+            c.verify_total(projected)
+
+    def test_no_failure_branch_drops_a_part_and_shifts_the_later_indices(self) -> None:
+        """The claim all undecodable-payload branches share, asserted as one fact.
+
+        A reader that dropped the part would shift every later part's index —
+        §7.4.1: "that invented delta lands on every part of the turn and on
+        every turn after it".
+        """
+        block = {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "@@not-b64@@"}}
+        projected = _read(_minimal(messages=[{"role": "user", "content": [block, {"type": "text", "text": "last"}]}]))
+
+        parts = projected.conversation.turns[0].parts
+        assert len(parts) == 2
+        assert parts[1] == c.Text("last")
+
+
 # --------------------------------------------------------------------------
 # R4.7–R4.9 — turn normalisation
 # --------------------------------------------------------------------------
