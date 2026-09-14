@@ -2062,7 +2062,15 @@ recovers silently, the other three are post-emission and terminate.
 
 Since KBR-183 closed gap G26 (2026-09-13) that is the choice the bridge makes for **every**
 post-emission failure: no retry and no failover on `/v1/messages`, on the Responses and Gemini
-custom-transport branches, and inside `openai_subscription`'s own stream-reset retry. One residual
+custom-transport branches, and inside `openai_subscription`'s own stream-reset retry. KBR-236
+(2026-09-14) closed the site that claim was missing on `/v1/messages` itself: the translated
+branch's empty-response retry (`translator.response_was_empty`) read no emission state, and
+because an empty finish chunk resets the translator, content arriving after the verdict was
+written live — so the ladder put a second attempt on the stream that already carried it (its
+exhaustion failing over onto a Messages-wire backend ended in the "retry came back empty" error
+the ticket reproduced). It now reads `sr` and ends the turn like every other post-emission
+failure, under row 2's oracle; no backend is charged, keeping the empty ladder's no-quarantine
+health model. One residual
 differs in its *ending*, not in its recovery: a post-emission **transport** drop on the translated
 `/v1/messages` path still closes with `end_turn` + `message_stop` rather than the error event
 (KBR-183's decision D2, carried as a scope addition on KBR-99, so the second, third and fourth rows
@@ -5173,9 +5181,15 @@ found cases they did not reach and one they understated. Each is decided here, w
   promises ("the backend that produced the first byte of the response"). (iii) Each discarded attempt is logged at WARNING with
   its held byte count and stop reason, and a bounded head of the held bytes at DEBUG — a `200`
   carrying a non-SSE body is otherwise undiagnosable, because nothing of it was written.
-  (iv) Until KBR-183 lands, a timeout *after* release can still start another attempt; if that
-  attempt comes back empty the stream is already open, so the branch reads `sr` — as G26 requires of
-  every new branch — and ends the stream with one SSE `error` event instead of a JSON `502`.
+  (iv) The `sr is not None` arm that ends an already-open stream with one SSE `error` event
+  instead of a JSON `502` is defence in depth, twice over. It was written for the pre-KBR-183
+  route — a timeout *after* release starting another attempt — which KBR-183 closed; KBR-236
+  (2026-09-14) closed the other route into it, the translated branch's empty-response retry
+  failing over onto a Messages-wire backend (§6.3.1's recovery paragraph records the site).
+  Kept rather than deleted because a future route that reached it must not fall through to the
+  pre-emission ladder — that would put a second attempt on the open stream, the exact hazard
+  the arm exists to stop — and its message now reports an empty response arriving after
+  content, not "the retry came back empty": no such retry can exist.
 
 **Why, and not the obvious alternative.** Three reasons, in decreasing order of how much they
 would cost to be wrong about.
