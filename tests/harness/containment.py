@@ -17,9 +17,12 @@ What this module owns:
   hostname, deferring every other name to the real resolver. It patches
   ``getaddrinfo`` rather than an aiohttp ``Resolver`` instance because
   ``_build_client_session`` builds its own ``TCPConnector`` with no injection
-  point (§5.3), and ``DefaultResolver`` reaches ``getaddrinfo`` in a worker
-  thread either way. ``/etc/hosts`` is left alone — no administrator rights on
-  CI runners.
+  point (§5.3). The default (no-``aiodns``) build selects ``ThreadedResolver``
+  as ``DefaultResolver``, which reaches ``getaddrinfo`` in a worker thread; if
+  ``aiodns`` is ever added, ``AsyncResolver`` is chosen instead and this
+  patch has no effect — ``pyproject.toml`` pins no ``aiodns`` extra, so the
+  seam holds today. ``/etc/hosts`` is left alone — no administrator rights
+  on CI runners.
 * **The per-transport capability report** — :class:`CapabilityReport` initialised
   with the four §5.5 transports (``bridge_aiohttp``, ``provider_aiohttp``,
   ``curl_cffi``, ``botocore``), every entry ``not_attempted``; ``record``
@@ -249,15 +252,13 @@ class CapabilityReport:
         Raises:
             AssertionError: When at least one transport is still
                 ``not_attempted``. The message names every pending transport
-                in registration order so a CI failure is diagnosable without
+                (sorted for a deterministic diff against the report's
+                registration order) so a CI failure is diagnosable without
                 a re-run.
         """
         pending = self.not_attempted_names()
         if pending:
-            raise AssertionError(
-                f"containment completeness gate failed; verdicts still pending: {sorted(pending)}"
-            )
-        return tuple(name for name, entry in self._entries.items() if entry.outcome is Outcome.NOT_ATTEMPTED)
+            raise AssertionError(f"containment completeness gate failed; verdicts still pending: {sorted(pending)}")
 
 
 #: The in-process singleton T-E2..T-E5 reach through and T-E9 reads.
@@ -302,11 +303,14 @@ def monkeypatched_aiohttp_resolver(mp: pytest.MonkeyPatch, host: str, port: int)
         every other name falls through to the un-patched resolver.
 
     The patch is process-wide and broad — the bridge's ``_build_client_session``
-    builds its own ``TCPConnector`` with no injection point (§5.3), and the
-    connector reaches ``socket.getaddrinfo`` in a worker thread regardless of
-    the ``Resolver`` class the connector picks. Patching ``getaddrinfo`` is
-    the one seam that works for every supported aiohttp version without
-    reaching into the connector's constructor.
+    builds its own ``TCPConnector`` with no injection point (§5.3). In the
+    default (no-``aiodns``) build the connector's ``DefaultResolver`` is
+    ``ThreadedResolver``, which reaches ``socket.getaddrinfo`` in a worker
+    thread — the seam this patch takes. If ``aiodns`` is ever installed,
+    ``DefaultResolver`` becomes ``AsyncResolver``, which bypasses
+    ``socket.getaddrinfo`` entirely and the patch has no effect; a guard
+    against that regression is a deliberate next change, not something this
+    seam quietly absorbs (``pyproject.toml`` pins no ``aiodns`` extra today).
 
     ``monkeypatch.setattr(socket, "getaddrinfo", ...)`` reverts when ``mp``
     finalises, so the context manager is re-entry safe across the suite.
@@ -581,7 +585,7 @@ class ContainmentTransport(Protocol):
 
     name: str
 
-    def direct_route(self, harness: SealedNetwork) -> Iterator[None]:
+    def direct_route(self, harness: SealedNetwork) -> contextlib.AbstractContextManager[None]:
         """Return a context manager that puts the **direct**-leg override in scope.
 
         The bridge-aiohttp default is a no-op ``yield`` — its own direct-route
@@ -594,11 +598,18 @@ class ContainmentTransport(Protocol):
         ``self.direct_route(harness)`` so the override is in scope for the
         drive's outbound call.
 
+        The return type is a context manager, not the bare iterator a
+        ``@contextmanager``-decorated function yields: every natural
+        implementation is ``@contextlib.contextmanager``-decorated, and that
+        decorator's return type is a ``_GeneratorContextManager``, not the
+        generator itself. Declaring ``Iterator[None]`` here would make the
+        decorator shape a mypy error in every sibling that follows.
+
         Args:
             harness: The sealed network the request will be driven against.
 
-        Yields:
-            ``None``. The body of the with-block is the drive.
+        Returns:
+            The context manager to enter around the drive.
         """
 
     async def drive_phase_1(

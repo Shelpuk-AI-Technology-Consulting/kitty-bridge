@@ -36,11 +36,13 @@ from __future__ import annotations
 
 import contextlib
 import socket
+import ssl
 from collections.abc import AsyncGenerator
 
 import pytest
 
-from harness.connect_proxy import HARNESS_UPSTREAM_HOST, CertFiles
+from harness import containment
+from harness.connect_proxy import HARNESS_UPSTREAM_HOST, CertFiles, ConnectProxy
 from harness.containment import (
     BridgeAiohttpContainment,
     CapabilityReport,
@@ -56,6 +58,7 @@ from harness.containment import (
     instance as report_instance,
 )
 from harness.contract import WireFormat
+from harness.recorder import RecordingUpstream
 
 # ── Fixtures ───────────────────────────────────────────────────────────────
 
@@ -129,9 +132,7 @@ class TestMonkeypatchedResolver:
         with pytest.raises(socket.gaierror):
             socket.getaddrinfo("upstream.kitty-test.invalid", 9001, type=socket.SOCK_STREAM)
 
-    def test_deferral_passes_a_hostname_through_to_the_real_resolver(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_deferral_passes_a_hostname_through_to_the_real_resolver(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """A hostname-shaped deferral under the patch lands on the real resolver.
 
         AC-R2's "example.com returns the real result" maps cleanly to this:
@@ -192,7 +193,15 @@ class TestCapabilityReport:
             capability_report.record("bridge_aiohttp", "passed")  # type: ignore[arg-type]
 
     def test_singleton_exposes_every_transport_not_attempted(self) -> None:
-        """``report_singleton`` (a.k.a. ``instance``) hands back the same four rows on call."""
+        """``instance()`` hands back the same four rows on call.
+
+        The all-``not_attempted`` assertion is scoped to **T-E1's** run: it
+        states the report's *initial* state, which is what this ticket ships
+        and what the future T-E9 gate reads. T-E2's own obligation is to
+        record the first verdict into this singleton — from that commit
+        onward, the assertion below is T-E2's to narrow, not T-E1's to
+        defend.
+        """
         report = report_instance()
         names = sorted(report.entries())
         assert names == ["botocore", "bridge_aiohttp", "curl_cffi", "provider_aiohttp"]
@@ -202,9 +211,7 @@ class TestCapabilityReport:
         # wire T-E2..T-E5 record into and T-E9's gate reads.
         assert report_instance() is report
 
-    def test_require_completeness_raises_when_any_transport_pending(
-        self, capability_report: CapabilityReport
-    ) -> None:
+    def test_require_completeness_raises_when_any_transport_pending(self, capability_report: CapabilityReport) -> None:
         """``require_completeness`` is what the future T-E9 completeness gate calls."""
         capability_report.record("bridge_aiohttp", Outcome.PROVEN)
         capability_report.record("curl_cffi", Outcome.PROVEN)
@@ -267,9 +274,7 @@ class TestSealedNetwork:
         finally:
             await net.stop()  # Idempotent (T-W5's contract).
 
-    async def test_stop_releases_the_recorder_even_if_the_proxy_stop_raises(
-        self, certs: CertFiles
-    ) -> None:
+    async def test_stop_releases_the_recorder_even_if_the_proxy_stop_raises(self, certs: CertFiles) -> None:
         """The recorder stops even when the proxy's ``stop()`` raised (review M3).
 
         ``ConnectProxy.stop`` can raise ``TimeoutError`` on a stuck client. A
@@ -297,6 +302,41 @@ class TestSealedNetwork:
         with pytest.raises(RuntimeError, match="not running"):
             _ = recorder.port
 
+    async def test_start_releases_the_recorder_when_the_proxy_start_raises(
+        self, certs: CertFiles, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The recorder is released when the proxy's ``start()`` raised (review M3/N4).
+
+        ``__aenter__`` propagates a failure and ``__aexit__`` is never called
+        on the failed entry, so without the guard the recorder would hold its
+        port for the rest of the session. The twin of the stop-side test
+        above: inject a raising ``ConnectProxy.start``, capture the recorder
+        ``SealedNetwork.start`` built, and observe that its runner is gone —
+        the distinction between "harness forgot about it" and "it really
+        stopped" is made by holding the recorder handle directly.
+        """
+        net = SealedNetwork(WireFormat.ANTHROPIC_MESSAGES, certs=certs)
+        started: list[RecordingUpstream] = []
+
+        class _CapturingRecorder(RecordingUpstream):
+            async def start(self) -> None:
+                await super().start()
+                started.append(self)
+
+        monkeypatch.setattr(containment, "RecordingUpstream", _CapturingRecorder)
+
+        async def _raising_start(_proxy: ConnectProxy, ssl_context: ssl.SSLContext) -> None:
+            raise OSError("forced by test")
+
+        monkeypatch.setattr(ConnectProxy, "start", _raising_start)
+
+        with pytest.raises(OSError):
+            await net.start()
+
+        assert len(started) == 1, "the recorder SealedNetwork built was not observed"
+        with pytest.raises(RuntimeError, match="not running"):
+            _ = started[0].port
+
 
 # ── R4: the containment transport extension interface ──────────────────────
 
@@ -323,9 +363,7 @@ class TestContainmentRegistry:
 class TestBridgeAiohttpContainment:
     """``BridgeAiohttpContainment.drive_phase_1`` — the direct leg T-E2 builds on."""
 
-    def test_direct_route_is_a_context_manager_over_sealed_network(
-        self, sealed_network: SealedNetwork
-    ) -> None:
+    def test_direct_route_is_a_context_manager_over_sealed_network(self, sealed_network: SealedNetwork) -> None:
         """The protocol exposes ``direct_route``; the default implementation yields once.
 
         T-E3..T-E5 override this with their own transport-specific override

@@ -4011,8 +4011,8 @@ business, together with the job that runs them; doing it earlier would remove th
 gate. T-H1 must take that reclassification into account before it measures a mutation
 baseline, because it selects on `l1`.
 
-**Ten modules are bulleted below — in eight bullets, since the T-W4 and T-W8 rows name two
-modules each — and `tests/cli/test_stream_encoding.py` (KBR-10) is described after them, eleven in
+**Eleven modules are bulleted below — in nine bullets, since the T-W4 and T-W8 rows name two
+modules each — and `tests/cli/test_stream_encoding.py` (KBR-10) is described after them, twelve in
 all, named here so T-K6 inherits a list rather than a search** — the count
 is what T-K6 and T-H1 plan against. (The bullet count and the KBR-10 paragraph were already
 drifting apart before T-W8 added two; spelling out both is what stops the next addition
@@ -4056,7 +4056,8 @@ separately.)
   falsification is driven through the adapter rather than through the bridge.
 - **T-E1 (KBR-61):** `tests/harness/test_containment.py` drives a real `BridgeServer` against the
   sealed-network harness (`ConnectProxy` + recording upstream) in two cases — one green, one
-  falsification. The 17 unit cases run in well under a second. The falsification case
+  falsification. The 21 unit cases run in **~1.4–2.1 s**, measured, of which the slowest is one
+  `sealed_network` setup at ~1.0–1.75 s (recorder + proxy + TLS certs). The falsification case
   (`test_drive_phase_1_with_a_broken_resolver_records_zero_connections`) takes **~30 s** because
   the bridge's outbound connect-retry ladder (`_EMPTY_RETRY_DELAYS = [5.0, 15.0]`,
   `server.py:924`) plus `stop_async` drain cost is the price of driving a real bridge against a
