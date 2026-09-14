@@ -315,6 +315,17 @@ class TestStreamState:
         raw = b"data: not-json\n\n"
         assert converter.feed(raw) == [raw]
 
+    def test_done_sentinel_passes_through(self) -> None:
+        """A ``[DONE]`` line is passed through unchanged.
+
+        On a converted Chat Completions stream the handler's ``[DONE]`` branch
+        re-enters the per-event translator with the converter's sentinel line;
+        the identity here is what makes that delegation harmless (KBR-232).
+        """
+        converter = AnthropicCCStreamConverter()
+        raw = b"data: [DONE]\n\n"
+        assert converter.feed(raw) == [raw]
+
     def test_empty_input_yields_nothing(self) -> None:
         """Empty bytes yield nothing."""
         assert AnthropicCCStreamConverter().feed(b"") == []

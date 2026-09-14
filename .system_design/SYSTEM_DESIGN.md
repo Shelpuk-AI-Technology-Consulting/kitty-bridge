@@ -277,3 +277,54 @@ prints `kitty exited with code N - press Enter to close` and waits for a line or
   later Claude release; the cost of drift is a name mismatch, not a failure.
 - If the inner Python cannot start at all (e.g. the interpreter was removed), nothing holds the
   pane; the outer kitty still deletes the environment file.
+
+---
+
+## 4. Response translation: the four stream handlers
+
+Traces to [KBR-227](https://shelpuk.atlassian.net/browse/KBR-227) and
+[KBR-232](https://shelpuk.atlassian.net/browse/KBR-232). What the suite must prove about this
+area is in `TEST_SUITE.md` (invariant I1 and register rows M12/M17); this section is the
+components and the rule.
+
+### 4.1 Components
+
+| Component | Role |
+|---|---|
+| `BridgeServer._stream_messages` | The `/v1/messages` inbound stream. On a Messages-wire upstream it forwards the raw SSE (KBR-227); otherwise it translates CC chunks to Messages events. |
+| `BridgeServer._stream_responses` / `_stream_chat_completions` / `_stream_gemini` | The Codex, Chat Completions and Gemini inbound streams. On a Messages-wire upstream they convert (KBR-232); otherwise they translate CC chunks to their protocol. |
+| `BridgeServer._serves_messages_wire` | The one answer to "does this request's upstream speak Anthropic Messages?". Every branch that decides how a Messages-wire stream is handled asks it — a change to the rule cannot reach one site and miss another. |
+| `AnthropicCCStreamConverter` (`kitty.providers.anthropic`) | The stateful Anthropic-SSE → Chat Completions-chunk converter. One instance per upstream attempt. |
+| `MessagesTranslator` / `ResponsesTranslator` / `GeminiTranslator` | The CC-chunk → client-protocol translators. They never see Anthropic events: the converter or the raw forward sits upstream of them. |
+
+### 4.2 The rule
+
+Each handler asks `_serves_messages_wire(cc_request)` **once per attempt**, after backend
+selection. On `/v1/messages` a yes means forward the upstream's bytes unchanged — the client
+already speaks the upstream's protocol, and conversion would drop thinking signatures
+(KBR-227). On the other three a yes means feed every `data:` line through
+`AnthropicCCStreamConverter` and let the converted lines re-enter the same per-line body a
+Chat Completions upstream's would: finish buffering, the empty-response ladder, usage
+attribution and in-stream error detection are all the handler's existing, already-proven
+logic. A no means byte-identical to the pre-KBR-232 behaviour.
+
+### 4.3 Decisions, and why
+
+| # | Decision | Why, and the rejected alternative |
+|---|---|---|
+| S1 | Convert on the three non-Messages protocols; forward only on `/v1/messages` | Only `/v1/messages` shares the upstream's wire. Conversion there would lose signatures (KBR-227); forwarding on the other three would hand clients Anthropic SSE they cannot read. |
+| S2 | A stateful converter class, not a stateless per-event map | A `tool_use` block's `input_json_delta` fragments have no meaning without the `content_block_start` that allocated the block's `tool_calls` index. The stateless map is precisely why every tool call was lost (KBR-232). |
+| S3 | Converted lines re-enter the handler's existing per-line body | The alternative — a parallel write path — forks the finish/empty/usage/error logic per protocol. The converter's `[DONE]` sentinel and malformed-line passthrough are byte-identical outputs, so the body's residual `translate_upstream_stream_event` call sites stay harmless; an L1 test pins that identity as a contract, not a coincidence. |
+| S4 | Gate and converter re-evaluated per attempt | A failover can land on a Chat Completions-wire backend mid-handler; a stale converter would mangle its Chat Completions stream. |
+| S5 | `thinking_delta` → `reasoning_content`; signatures dropped | The Chat Completions wire has no signature slot, so preservation is impossible; M17's strip-and-retry recovers the round-trip rejection instead (KBR-238). |
+| S6 | The three loops run wider by the strip budget, with an attempt correction | Same rationale KBR-238 recorded on `_stream_messages`: a strip gets its attempt back, so the empty-response schedule is not pulled forward. |
+
+### 4.4 Known limits
+
+- On `/v1/chat/completions` a converted stream's role chunk sets `has_content`, so a
+  content-less completion reaches the client as a well-formed skeleton rather than triggering
+  the empty-response ladder — as before KBR-232. A CC-side preamble hold would be the
+  KBR-155 counterpart and is not built.
+- In-stream error failover on `/v1/chat/completions` needs a backend pool; pool-less the
+  error surfaces to the client (which is still the fix: the per-event translator used to
+  swallow the error and deliver a truncated success).
