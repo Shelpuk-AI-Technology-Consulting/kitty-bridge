@@ -708,6 +708,10 @@ or model is misbehaving.
 The response is a `502` carrying `"reason": "empty_response"`. One visible cost of the hold: on reasoning models the
 agent shows its spinner, not live thinking, until the first text or tool call arrives.
 
+### "Kitty Bridge received an empty response from the upstream provider after content had already been sent"
+
+Applies to streamed `/v1/messages` requests on providers kitty talks to in Chat Completions format. The provider's reply opened with an "empty" verdict and produced its words only after it, so part of the answer had already reached your agent. Kitty ends the turn there instead of asking the provider again — a second attempt would append a second answer to text you have already seen. Simply resend the turn; if it keeps happening, the provider is misbehaving.
+
 ### A 502 whose error carries `"reason": "upstream_error"`
 
 Same providers. The provider answered kitty's request with its own error event before producing any content —
