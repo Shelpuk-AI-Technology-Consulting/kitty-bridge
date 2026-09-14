@@ -100,6 +100,33 @@ class TestImageRestore:
         )
         assert wire["messages"][0]["content"] == [{"type": "image", "source": _PNG_SOURCE}]
 
+    def test_image_url_part_carries_its_cache_control_onto_the_block(self):
+        """The one member the image rebuild carries besides the source is ``cache_control``.
+
+        A rebuilt ``text`` part keeps every member verbatim (the KBR-199 suite
+        pins that); an ``image_url`` part changes shape, so its cross-wire
+        ``cache_control`` is carried explicitly and the CC ``image_url`` object
+        is not. Pins the asymmetry the rebuild chose.
+        """
+        part = {
+            "type": "image_url",
+            "image_url": {"url": "data:image/png;base64,aWNvbg=="},
+            "cache_control": {"type": "ephemeral", "ttl": "1h"},
+        }
+        cc = {
+            "model": "claude-sonnet-5",
+            "max_tokens": 64,
+            "messages": [{"role": "user", "content": [dict(part)]}],
+        }
+        wire = AnthropicAdapter().translate_to_upstream(cc)
+        assert wire["messages"][0]["content"] == [
+            {
+                "type": "image",
+                "source": _PNG_SOURCE,
+                "cache_control": {"type": "ephemeral", "ttl": "1h"},
+            }
+        ]
+
 
 class TestDocumentRestore:
     """``_documents`` entries are spliced back into their own turn."""
