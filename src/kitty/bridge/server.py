@@ -952,7 +952,17 @@ _CAUSE_HEADLINES: dict[str, str] = {
 
 
 class AllBackendsUnhealthyError(Exception):
-    """Raised when all backends are unhealthy and the soonest retry exceeds the fast-fail threshold."""
+    """Raised when all backends are unhealthy and the soonest retry exceeds the fast-fail threshold.
+
+    Attributes:
+        backends: Per-backend status dicts (name, reason, remaining_cooldown).
+        retry_after: Soonest cooldown expiry, in seconds.
+        recoverable: True when ``retry_after`` is a real cooldown expiry the
+            arrival recovery hold may sleep on (KBR-243). Only the
+            no-stream-capable raise sets False: its 300 is fabricated, not a
+            recovery time, so waiting would stall a request no backend can
+            ever serve.
+    """
 
     def __init__(self, backends: list[dict], retry_after: int, *, recoverable: bool = True) -> None:
         self.backends = backends
