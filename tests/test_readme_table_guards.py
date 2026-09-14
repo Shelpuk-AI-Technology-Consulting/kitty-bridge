@@ -23,9 +23,10 @@ The four guards one at a time:
   ``src/kitty/`` (forward direction only — the README is silent on
   internal/operational keys by design).
 * **Logging-flag table.** README "Logging" flag table ↔ the four flags
-  in ``kitty.cli.main._build_parser`` plus the two default paths in
-  ``BridgeServer._DEBUG_LOG_DIR`` and the per-instance default usage
-  path.
+  in ``kitty.cli.main._build_parser`` plus the two default paths the
+  bridge uses: the ``BridgeServer._DEBUG_LOG_PATH`` module constant for
+  debug, and the per-instance ``_usage_log_path`` default (derived from
+  ``_DEBUG_LOG_DIR``) for usage.
 
 **The one exemption.** KBR-9 documents the endpoint table's drift: the
 README names ``POST /v1/gemini/generateContent`` (no such route) and
@@ -369,9 +370,6 @@ def check_endpoint_agreement(
 # ── Guard 2 — Attribution headers ──────────────────────────────────────────
 
 
-_ATTRIBUTION_HEADER_NAMES = frozenset({"X-Kitty-Backend", "X-Kitty-Model", "X-Kitty-Tier"})
-
-
 def attribution_header_names(source: str) -> set[str]:
     """Return the ``X-Kitty-*`` constants used inside ``_attribution_headers``.
 
@@ -535,9 +533,6 @@ def check_env_register(documented: Iterable[str], constants: set[str]) -> list[s
 
 # ── Guard 4 — Logging-flag table ────────────────────────────────────────────
 
-
-_DEFAULT_USAGE_LOG_FRAGMENT = "usage.log"
-_DEFAULT_DEBUG_LOG_FRAGMENT = "bridge.log"
 
 _KNOWN_LOGGING_FLAGS = ("--logging", "--debug", "--log-file", "--debug-file")
 
