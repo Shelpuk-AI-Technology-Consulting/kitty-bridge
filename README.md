@@ -719,8 +719,20 @@ before your agent sees it; on the translated side a streamed reply that carries 
 takes the same ladder. This error means every attempt kitty made came back empty. Nothing reached the agent, so simply
 resend; if it persists, the provider or model is misbehaving.
 
-The response is a `502` carrying `"reason": "empty_response"`. One visible cost of the hold, on the Anthropic-format
-side: on reasoning models the agent shows its spinner, not live thinking, until the first text or tool call arrives.
+The response is a `502` carrying `"reason": "empty_response"` for clients that expect JSON
+(`/v1/messages` non-stream and streamed). For streaming clients that expect SSE
+(`/v1/responses` to Codex CLI; `/v1beta/...:streamGenerateContent` to Gemini CLI) the
+exhaustion is delivered inside the open stream as an SSE error event carrying the
+route-specific D4 discriminator — `code: "empty_response"` on the Responses wire,
+`reason: "empty_response"` inside the nested `error` object on the Gemini wire
+(where the integer `code: 502` matches the messages branch's exhaustion status,
+mirroring its timeout/exception `code: 504`/`code: 500` precedent) —
+followed by the stream's normal lifecycle closer. The HTTP status stays
+`200 text/event-stream` throughout; the discriminator inside the payload marks the
+stream as an exhausted-empty one, distinguishable from any other terminal event.
+
+One visible cost of the hold, on the Anthropic-format side: on reasoning models the
+agent shows its spinner, not live thinking, until the first text or tool call arrives.
 
 ### "Kitty Bridge received an empty response from the upstream provider after content had already been sent"
 
@@ -737,6 +749,13 @@ the agent; the error shown is the provider's own, with kitty's `"reason": "upstr
 it apart — or, if the provider's error payload was too malformed to deliver, kitty's own message saying so, with
 the same `"reason": "upstream_error"`. Either way an errored ladder is never reported as an empty one. Simply
 resend; if it persists, the provider is failing outright — switch backend or wait it out.
+
+### A 502 whose error carries `"reason": "cross_class_exhaustion"`
+
+Balanced profiles only, streaming `/v1/messages` only. Every backend in the pool failed and the bridge could not
+find a usable one — including backends it tried but could not drive because the two halves of the pool speak
+different protocols. Nothing reached the agent; simply resend. If it persists, the pool is failing outright —
+check the backends' own health or add a backend of the protocol that is not represented.
 
 ### "Kitty Bridge received a reply from the upstream provider that stopped (max_tokens) before producing any content"
 
