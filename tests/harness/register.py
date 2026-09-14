@@ -154,6 +154,12 @@ class Trigger(Enum):
     RESPONSES_ORIGIN_PATH = "responses_origin_path"
     NON_ENTRA_CREDENTIAL = "non_entra_credential"
     CHATGPT_ACCOUNT_ID_PRESENT = "chatgpt_account_id_present"
+    # Both sit on the credential side of the G21 line — neither is decidable
+    # from the inbound request: NON_ENTRA_CREDENTIAL reads the profile's
+    # credential, CHATGPT_ACCOUNT_ID_PRESENT the `id_token` the
+    # openai_subscription profile authenticates with. NOT_CORPUS_DECIDABLE
+    # classifies neither — that classification is KBR-186's, filed rather
+    # than guessed.
 
 
 # --------------------------------------------------------------------------
