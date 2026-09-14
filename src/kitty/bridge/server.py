@@ -3969,6 +3969,13 @@ class BridgeServer:
         KBR-155). Once a byte has reached the client, failures close the stream
         rather than retry (``TEST_SUITE.md`` §11 Q14).
 
+        The two transport branches sit inside a dispatch loop (KBR-249,
+        §5.3 S7 of ``SYSTEM_DESIGN.md``): when a branch's failover selects a
+        provider of the other transport class, the loop re-enters the branch
+        that provider's class requires, reusing the failover's selection. A
+        per-request hop cap of ``(2 * n_backends) + 1`` bounds pathological
+        cooldown ping-pong and surfaces a JSON ``502`` when exceeded.
+
         Args:
             request: The inbound client request.
             body: The client's Messages API request body.
@@ -5375,8 +5382,8 @@ class BridgeServer:
                         "error": {
                             "type": "api_error",
                             "message": (
-                                "Upstream backends exhausted (cross-class "
-                                "re-dispatch cap reached)"
+                                "Upstream backends exhausted (the bridge could not "
+                                "land on a usable backend on this request)"
                             ),
                         },
                     },

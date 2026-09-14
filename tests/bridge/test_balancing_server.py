@@ -929,6 +929,140 @@ class TestBalancingAllCustomTransport:
             "called via cross-mode re-dispatch (KBR-249); got 0 calls."
         )
 
+    @pytest.mark.asyncio
+    async def test_streaming_re_dispatch_cap_surfaces_502(self):
+        """Hit the cross-class re-dispatch hop cap — KBR-249 §S7.
+
+        The pool alternates between a plain and a custom-transport provider,
+        every failover crosses class, the per-request hop cap
+        ``(2 * n_backends) + 1`` should fire and surface a JSON 502 with the
+        ``no usable backend`` wording. The path is otherwise unreachable
+        on the production 2-backend pool because cooldowns expire slowly;
+        here we patch `_mark_backend_unhealthy` to a no-op (so the pool
+        never drains) and shorten transport grace so each attempt fails
+        through quickly.
+        """
+        import uuid
+
+        from kitty.profiles.schema import Profile
+
+        # Same provider skeleton as the test above, so we don't depend on
+        # the broader module's NoStreamProvider not leaking between tests.
+        class NoStreamProvider(ProviderAdapter):
+            def __init__(self):
+                self._provider_type = "nostream"
+
+            @property
+            def provider_type(self) -> str:
+                return self._provider_type
+
+            @property
+            def default_base_url(self) -> str:
+                return "https://api.nostream.example.com/v1"
+
+            def build_request(self, model, messages, **kwargs):
+                return {"model": model, "messages": messages, **kwargs}
+
+            def translate_to_upstream(self, cc_request):
+                return {
+                    "model": cc_request["model"],
+                    "messages": cc_request["messages"],
+                    "stream": True,
+                }
+
+            def parse_response(self, response_data):
+                return response_data
+
+            def map_error(self, status_code, body):
+                return Exception(f"Error {status_code}")
+
+            def make_request(self, cc_request):
+                return UPSTREAM_RESPONSE
+
+        # Pool: one plain, one custom-transport. Marking is patched to a no-op
+        # so the pool never drains — the cap is the only stop.
+        plain = NoStreamProvider()
+        custom = BedrockAdapter()
+
+        async def _poison(req, write):
+            raise ConnectionResetError("poisoned")
+
+        custom.stream_request = AsyncMock(side_effect=_poison)
+
+        backends = [
+            (
+                plain,
+                "k0",
+                Profile(name="p", provider="openai", model="m", auth_ref=str(uuid.uuid4())),
+            ),
+            (
+                custom,
+                "k1",
+                Profile(name="c", provider="bedrock", model="m", auth_ref=str(uuid.uuid4())),
+            ),
+        ]
+        server = BridgeServer(
+            adapter=None,
+            provider=backends[0][0],
+            resolved_key="k0",
+            model="m",
+            backends=backends,
+        )
+
+        # First call (initial selection) returns the plain provider. After that,
+        # alternate: even calls return idx 1 (custom), odd calls return idx 0
+        # (plain). With `_mark_backend_unhealthy` patched to a no-op the
+        # pool never drains, and the require_streaming filter patched to
+        # False forces the custom branch's cross-mode fall-through to fire,
+        # so every iteration crosses class.
+        _call_count = [0]
+
+        def _alternate(self=server, **kwargs):
+            n = _call_count[0]
+            _call_count[0] += 1
+            idx = 0 if n == 0 else (1 if n % 2 == 1 else 0)
+            provider, key, profile = self._backends[idx]
+            return provider, key, profile.model, {}, idx
+
+        server._get_next_backend = _alternate
+
+        port = await server.start_async()
+        url = f"http://127.0.0.1:{port}/v1/messages"
+        request_body = {
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": True,
+        }
+
+        # Force the cross-mode fall-through in the custom branch by making
+        # `_any_healthy_backend(require_streaming=True)` always return False,
+        # while leaving the no-filter call (the plain branch's failover
+        # and the custom branch's cross-mode line) seeing healthy peers.
+        def _any_healthy(*, require_streaming=False):
+            return not require_streaming
+
+        try:
+            with (
+                patch("kitty.bridge.server._EMPTY_FINAL_DELAYS", []),
+                patch("kitty.bridge.server._TRANSPORT_GRACE_DELAYS", (0.0,)),
+                patch.object(server, "_mark_backend_unhealthy", lambda *a, **k: None),
+                patch.object(server, "_any_healthy_backend", _any_healthy),
+            ):
+                async with aiohttp.ClientSession() as session, session.post(
+                    url, json=request_body
+                ) as resp:
+                    assert resp.status == 502, (
+                        f"cap-hit should surface 502, got {resp.status}"
+                    )
+                    body = await resp.json()
+                    msg = body.get("error", {}).get("message", "").lower()
+                    assert "usable backend" in msg, (
+                        f"cap-hit message should mention a usable-backend "
+                        f"exhaustion, got {msg!r}"
+                    )
+        finally:
+            await server.stop_async()
+
 
 class TestCustomTransportCloudflareClassification:
     """Verify that ProviderError with is_cloudflare=True triggers
@@ -1250,7 +1384,7 @@ class TestCrossModeFailover:
     @pytest.mark.asyncio
     async def test_messages_stream_cross_mode_failover(self):
         """Messages API: custom transport 400 → standard backend succeeds."""
-        server, _ = self._make_cross_mode_server()
+        server, backends = self._make_cross_mode_server()
         self._patch_selection_order(server)
         port = await server.start_async()
         url = f"http://127.0.0.1:{port}/v1/messages"
@@ -1274,8 +1408,12 @@ class TestCrossModeFailover:
             finally:
                 await server.stop_async()
 
-        # Verify cross-mode failover: failing backend was used first (failure_count increased).
+        # Verify cross-mode failover: failing backend was used first (failure_count increased)
+        # AND the standard (plain) backend served the response. The latter is the
+        # dedicated oracle for the symmetric custom→plain fall-through at
+        # `src/kitty/bridge/server.py:4254-4259` (KBR-249 §S7).
         assert server._backend_health[0]["failure_count"] >= 1
+        assert server._active_provider is backends[1][0]
 
     @pytest.mark.asyncio
     async def test_responses_stream_cross_mode_failover(self):
