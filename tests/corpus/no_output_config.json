@@ -32,6 +32,7 @@
   "triggers_absent": [
     "adaptive_thinking_keys_present",
     "max_tokens_absent",
+    "multiple_system_blocks",
     "non_streaming_max_tokens_over_4096",
     "orphan_tool_result",
     "output_config_present",

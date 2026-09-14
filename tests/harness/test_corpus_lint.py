@@ -90,6 +90,42 @@ TC4_ENTRY_IDS = (
     "system_prompt_over_window_compacts_normally",
 )
 
+#: The five T-C1 entries (KBR-44). Four captured from real Claude Code 2.1.238
+#: driven against the local recorder; the fifth (`no_output_config`) is the
+#: P5f synthetic complement. Their wiring-level claims (what each entry's
+#: triggers_met/triggers_absent declare, and how they were scrubbed) live in
+#: this module's freshness + manifest tests, not in a per-task wiring module —
+#: T-C1's entries are oracle *input*, not behaviour triggers, so the L2 lint
+#: is the right home for their contract-level claims.
+TC1_ENTRY_IDS = (
+    "plain_turn",
+    "tools_declared",
+    "tool_use_and_tool_result",
+    "effort_configured",
+    "no_output_config",
+)
+
+#: The two P25 synthetic entries (KBR-185 / KBR-44's capture pass). The
+#: `ALLOWLISTED_FIELD_IS_FALSY` trigger case and complement for a Responses-
+#: wire body — synthetic because no Responses-format client exists in this
+#: repository's capture environment.
+P25_ENTRY_IDS = (
+    "allowlisted_field_falsy",
+    "allowlisted_field_absent",
+)
+
+#: Every committed entry must be owned by a documented task. `format_example`
+#: is T-W6's worked example and stays (its own origin_note records why).
+#: When a new task adds entries, add its IDs here AND to its wiring/lint
+#: module — an entry in the corpus without an owner here is fixture data no
+#: test loads, no lint scans by id, and no task owns.
+OWNED_ENTRY_IDS = {
+    "format_example",
+    *TC4_ENTRY_IDS,
+    *TC1_ENTRY_IDS,
+    *P25_ENTRY_IDS,
+}
+
 
 class TestTheTc4Entries:
     """KBR-47's manifest-level claims, per the ticket's second comment."""
@@ -376,6 +412,54 @@ class TestTheCommittedCorpusIsFresh:
         pin = self._pin_from(review)
 
         k.assert_captured_from_matches_pin(k.load_corpus(CORPUS), pin)
+
+
+class TestTheCommittedCorpusHasNoOrphanEntries:
+    """Every committed entry must be owned by a documented task.
+
+    The per-task wiring tests (T-C1's L2 lint here, T-C4's
+    ``tests/bridge/test_tc4_corpus_wiring.py``, P25's manifest checks)
+    each assert *their* entries are committed. The complementary
+    guarantee — that *no* other entry is — has to live somewhere with a
+    cross-task allowlist, which is here.
+
+    An entry in the corpus without an owner is fixture data no test loads,
+    no lint scans by id, and no task owns — exactly the shape
+    ``format_example``'s own origin_note warns about. ``OWNED_ENTRY_IDS``
+    is the allowlist; adding a new task's entries goes there AND to that
+    task's own wiring or lint module.
+    """
+
+    def test_every_committed_entry_is_owned(self) -> None:
+        """No orphan entries — the corpus is the union of known task sets.
+
+        The negation of this assertion (``unexpected: [...]``) names the
+        orphans so the maintainer can decide whether to add them to the
+        allowlist or delete them.
+        """
+        committed = {entry.id for entry in k.load_corpus(CORPUS)}
+
+        orphans = sorted(committed - OWNED_ENTRY_IDS)
+        assert orphans == [], (
+            f"orphan corpus entries (no documented task owns them): {orphans}; "
+            "either add them to OWNED_ENTRY_IDS in tests/harness/test_corpus_lint.py "
+            "or delete them from tests/corpus/"
+        )
+
+    def test_every_owned_entry_is_committed(self) -> None:
+        """No entry on the allowlist is missing from the corpus.
+
+        The inverse check catches a task that documented entries in the
+        allowlist but forgot to commit them — the wiring would still pass
+        otherwise.
+        """
+        committed = {entry.id for entry in k.load_corpus(CORPUS)}
+
+        missing = sorted(OWNED_ENTRY_IDS - committed)
+        assert missing == [], (
+            f"owned entries not committed: {missing}; an entry in OWNED_ENTRY_IDS "
+            "but not in tests/corpus/ is a documented entry with no fixture"
+        )
 
 
 class TestTheCorpusIsAnIndependentOracle:
