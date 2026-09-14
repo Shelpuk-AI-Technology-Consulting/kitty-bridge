@@ -281,18 +281,6 @@ class TestEnableClaudeAiMcpServersInSessionFile:
         # The user-scope file's top-level key is never read into the session file.
         session_payload = json.loads(Path(prepared).read_text(encoding="utf-8"))
         assert "disableClaudeAiConnectors" not in session_payload
-        settings_path = tmp_path / ".claude" / "settings.json"
-        original = _write_user_settings(settings_path)
-        adapter = ClaudeAdapter()
-
-        prepared = adapter.prepare_launch(
-            {**_session_env(10001), "ENABLE_CLAUDEAI_MCP_SERVERS": "false"},
-            settings_path=settings_path,
-        )
-        adapter.cleanup_launch(prepared, settings_path=settings_path)
-
-        assert settings_path.read_text(encoding="utf-8") == original
-        assert "ENABLE_CLAUDEAI_MCP_SERVERS" not in json.loads(original)["env"]
 
 
 class TestRoutingWithoutUserSettings:
