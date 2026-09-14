@@ -194,10 +194,23 @@ async def test_prose_then_tool_call_gets_distinct_output_indices():
     events = _parse_sse(body)
     names = [name for name, _ in events]
 
-    # The stream ends with the completed event. (It does not *open* with
-    # response.created: the server buffers the start events for the
-    # empty-response failover and never writes them — a separate, pre-existing
-    # finding recorded on the ticket, not part of KBR-240.)
+    # KBR-242: the stream opens with response.created / response.in_progress,
+    # then the first output_item.added. The opening is written on the first
+    # non-finish write of each attempt — the speculative-per-attempt design —
+    # so a purely-empty attempt never publishes a half-open lifecycle across
+    # the empty-response failover.
+    assert names[:2] == ["response.created", "response.in_progress"]
+    assert names[2] == "response.output_item.added"
+
+    # Every event carries sequence_number, exactly 0..len-1 across the whole
+    # stream: monotonic, gapless, duplicate-free. This kills both the missing-
+    # lifecycle regression (no 0 or 1 at all) and a write-time-materialization
+    # regression (the lifecycle would consume 3 and 4 and be written ahead of
+    # the chunk's 0, 1, 2 — a decreasing sequence).
+    seqs = [d["sequence_number"] for _, d in events]
+    assert seqs == list(range(len(events)))
+
+    # The stream ends with the completed event.
     assert names[-1] == "response.completed"
 
     # Each output item opens exactly once, at a distinct increasing index,
