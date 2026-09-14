@@ -153,11 +153,14 @@ def _streaming_response() -> unittest.mock.MagicMock:
     return resp
 
 
-def _make_server(session_path: Path) -> BridgeServer:
+def _make_server(session_path: Path, provider_config: dict | None = None) -> BridgeServer:
     """Build a bridge-mode server whose profile sets a model of its own.
 
     Args:
         session_path: The OAuth session file standing in for the resolved key.
+        provider_config: Profile provider configuration. The compaction tests
+            use ``context_window`` — the product's own knob — to shrink the
+            model-derived compaction budget so a small body crosses it.
 
     Returns:
         A server bound to an ephemeral port, not yet started.
@@ -167,7 +170,7 @@ def _make_server(session_path: Path) -> BridgeServer:
         provider=OpenAISubscriptionAdapter(),
         resolved_key=str(session_path),
         model=_PROFILE_MODEL,
-        provider_config={},
+        provider_config=provider_config or {},
         host="127.0.0.1",
         port=0,
     )
@@ -285,3 +288,343 @@ class TestTheProfileModelReachesTheProvider:
         body = _shipped_body(mock_session)
         assert body["instructions"] == "You are helpful."
         assert json.dumps(body["input"]).count("Hello") == 1
+
+
+#: An oversized tool output. Must exceed the bridge's 50,000-char truncation
+#: limit (``_TOOL_RESULT_TRUNCATION_LIMIT``) — written as a literal, not derived
+#: from the constant, so a fixture cannot silently shrink along with it.
+_OVERSIZED_OUTPUT = "x" * 60_000
+
+#: The notice the bridge substitutes for an oversized tool result, in the exact
+#: spelling every route ships.
+_TRUNCATION_NOTICE = "[Tool output truncated — original size: 60,000 chars]"
+
+
+def _function_call(call_id: str) -> dict:
+    """Build a Responses ``function_call`` input item.
+
+    Args:
+        call_id: The client-chosen call identifier outputs reference.
+
+    Returns:
+        The input item dict.
+    """
+    return {"type": "function_call", "call_id": call_id, "name": "report", "arguments": "{}"}
+
+
+def _function_call_output(call_id: str, output: str) -> dict:
+    """Build a Responses ``function_call_output`` input item.
+
+    Args:
+        call_id: The call identifier this output answers.
+        output: The tool's output text.
+
+    Returns:
+        The input item dict.
+    """
+    return {"type": "function_call_output", "call_id": call_id, "output": output}
+
+
+def _user_message(text: str) -> dict:
+    """Build a Responses user-message input item.
+
+    Args:
+        text: The message text.
+
+    Returns:
+        The input item dict.
+    """
+    return {"type": "message", "role": "user", "content": [{"type": "input_text", "text": text}]}
+
+
+def _reasoning_item(text: str) -> dict:
+    """Build a Responses reasoning input item as a Codex client sends it.
+
+    Args:
+        text: The reasoning summary text.
+
+    Returns:
+        The input item dict.
+    """
+    return {"type": "reasoning", "summary": [{"type": "summary_text", "text": text}]}
+
+
+def _shipped_input(mock_session: unittest.mock.MagicMock) -> list:
+    """Return the ``input`` array the adapter posted to the Codex backend.
+
+    Args:
+        mock_session: The recording session yielded by :func:`_recording_transport`.
+
+    Returns:
+        The shipped body's ``input`` list.
+
+    Raises:
+        AssertionError: If the shipped body carries no ``input`` at all.
+    """
+    body = _shipped_body(mock_session)
+    assert "input" in body, f"shipped body carries no input: {sorted(body)}"
+    return body["input"]
+
+
+class TestTheOversizedRequestProtectionsReachTheProvider:
+    """Register rows M3, M5 and M7 must hold on the wire, not only on the copy.
+
+    KBR-169: the handler computes all three protections on the translated CC
+    conversation and then attaches the raw inbound body as ``_original_body``,
+    so the subscription adapter shipped the *unprotected* conversation. Each
+    test reads the body at the transport — the wiring a stub would remove is
+    the thing under test.
+    """
+
+    @pytest.mark.asyncio()
+    async def test_oversized_tool_output_is_truncated_on_the_non_streaming_path(
+        self, tmp_path: Path
+    ) -> None:
+        """Ship the truncation notice, not the oversized string, when not streaming."""
+        server = _make_server(_write_oauth_session(tmp_path))
+        with _recording_transport(_non_streaming_response()) as mock_session:
+            port = await server.start_async()
+            try:
+                async with (
+                    aiohttp.ClientSession() as client,
+                    client.post(
+                        f"http://127.0.0.1:{port}/v1/responses",
+                        json={
+                            "model": _CLIENT_MODEL,
+                            "input": [
+                                _user_message("Run the report"),
+                                _function_call("call_1"),
+                                _function_call_output("call_1", _OVERSIZED_OUTPUT),
+                                _user_message("Thanks"),
+                            ],
+                            "stream": False,
+                        },
+                    ) as resp,
+                ):
+                    assert resp.status == 200, await resp.text()
+            finally:
+                await server.stop_async()
+
+        shipped = _shipped_input(mock_session)
+        outputs = [i for i in shipped if i.get("type") == "function_call_output"]
+        assert len(outputs) == 1
+        assert outputs[0]["output"] == _TRUNCATION_NOTICE
+        assert _OVERSIZED_OUTPUT not in json.dumps(shipped)
+
+    @pytest.mark.asyncio()
+    async def test_oversized_tool_output_is_truncated_on_the_streaming_path(
+        self, tmp_path: Path
+    ) -> None:
+        """Ship the truncation notice on the streaming path a Codex client takes."""
+        server = _make_server(_write_oauth_session(tmp_path))
+        with _recording_transport(_streaming_response()) as mock_session:
+            port = await server.start_async()
+            try:
+                async with (
+                    aiohttp.ClientSession() as client,
+                    client.post(
+                        f"http://127.0.0.1:{port}/v1/responses",
+                        json={
+                            "model": _CLIENT_MODEL,
+                            "input": [
+                                _user_message("Run the report"),
+                                _function_call("call_1"),
+                                _function_call_output("call_1", _OVERSIZED_OUTPUT),
+                                _user_message("Thanks"),
+                            ],
+                            "stream": True,
+                        },
+                    ) as resp,
+                ):
+                    assert resp.status == 200, await resp.text()
+                    await resp.read()
+            finally:
+                await server.stop_async()
+
+        shipped = _shipped_input(mock_session)
+        outputs = [i for i in shipped if i.get("type") == "function_call_output"]
+        assert len(outputs) == 1
+        assert outputs[0]["output"] == _TRUNCATION_NOTICE
+
+    @pytest.mark.asyncio()
+    async def test_orphan_tool_output_does_not_ship_but_a_paired_one_does(
+        self, tmp_path: Path
+    ) -> None:
+        """Drop the orphan whose call was never declared; keep the paired output."""
+        server = _make_server(_write_oauth_session(tmp_path))
+        with _recording_transport(_non_streaming_response()) as mock_session:
+            port = await server.start_async()
+            try:
+                async with (
+                    aiohttp.ClientSession() as client,
+                    client.post(
+                        f"http://127.0.0.1:{port}/v1/responses",
+                        json={
+                            "model": _CLIENT_MODEL,
+                            "input": [
+                                _user_message("hi"),
+                                _function_call("call_1"),
+                                _function_call_output("call_1", "paired result"),
+                                _function_call_output("call_orphan", "orphan result"),
+                                _user_message("bye"),
+                            ],
+                            "stream": False,
+                        },
+                    ) as resp,
+                ):
+                    assert resp.status == 200, await resp.text()
+            finally:
+                await server.stop_async()
+
+        shipped = _shipped_input(mock_session)
+        shipped_ids = [i.get("call_id") for i in shipped if i.get("type") == "function_call_output"]
+        assert shipped_ids == ["call_1"]
+        assert "orphan result" not in json.dumps(shipped)
+
+    @pytest.mark.asyncio()
+    async def test_tool_output_without_call_id_is_dropped_not_a_500(
+        self, tmp_path: Path
+    ) -> None:
+        """Treat a missing ``call_id`` as undeclared and drop the output.
+
+        Before the orphan pass this item reached ``_translate_input_item``, which
+        subscripts ``call_id``, and the handler rendered the ``KeyError`` as a 500.
+        """
+        server = _make_server(_write_oauth_session(tmp_path))
+        with _recording_transport(_non_streaming_response()) as mock_session:
+            port = await server.start_async()
+            try:
+                async with (
+                    aiohttp.ClientSession() as client,
+                    client.post(
+                        f"http://127.0.0.1:{port}/v1/responses",
+                        json={
+                            "model": _CLIENT_MODEL,
+                            "input": [
+                                _user_message("hi"),
+                                {"type": "function_call_output", "output": "no id"},
+                                _user_message("bye"),
+                            ],
+                            "stream": False,
+                        },
+                    ) as resp,
+                ):
+                    assert resp.status == 200, await resp.text()
+            finally:
+                await server.stop_async()
+
+        shipped = _shipped_input(mock_session)
+        assert [i.get("type") for i in shipped if i.get("type") == "function_call_output"] == []
+        assert len([i for i in shipped if i.get("role") == "user"]) == 2
+
+    @pytest.mark.asyncio()
+    async def test_below_threshold_input_ships_unchanged(self, tmp_path: Path) -> None:
+        """Leave a small, well-formed conversation byte-identical on the wire.
+
+        The three protections are conditional mutations; below their triggers
+        the shipped ``input`` must equal what the agent sent. None of these
+        items carry assistant content parts, so the registered content-type
+        rewrite (P16) has nothing to flip either.
+        """
+        original = [
+            _user_message("hello"),
+            _reasoning_item("thinking about it"),
+            _function_call("call_1"),
+            _function_call_output("call_1", "small result"),
+            _user_message("done"),
+        ]
+        server = _make_server(_write_oauth_session(tmp_path))
+        with _recording_transport(_non_streaming_response()) as mock_session:
+            port = await server.start_async()
+            try:
+                async with (
+                    aiohttp.ClientSession() as client,
+                    client.post(
+                        f"http://127.0.0.1:{port}/v1/responses",
+                        json={
+                            "model": _CLIENT_MODEL,
+                            "input": original,
+                            "stream": False,
+                        },
+                    ) as resp,
+                ):
+                    assert resp.status == 200, await resp.text()
+            finally:
+                await server.stop_async()
+
+        assert _shipped_input(mock_session) == original
+
+    @pytest.mark.asyncio()
+    async def test_over_budget_history_ships_compacted(self, tmp_path: Path) -> None:
+        """Ship the compacted conversation when the history exceeds the budget.
+
+        ``context_window`` is the product's own knob for the model-derived
+        budget; 8,000 tokens puts the messages budget near 22K chars, so this
+        ~44K-char body must compact. A tool hop in the middle of the history
+        must go with its pruned turn — its riding reasoning item included —
+        while a hop in the preserved tail ships whole, reasoning item too.
+        """
+        filler: list[dict] = []
+        for i in range(50):
+            filler.append(_user_message(f"user filler {i} " + "p" * 600))
+            filler.append(
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": f"assistant filler {i}"}],
+                }
+            )
+        mid_hop = [
+            _reasoning_item("mid reasoning"),
+            _function_call("call_mid"),
+            _function_call_output("call_mid", "mid result"),
+        ]
+        tail_hop = [
+            _reasoning_item("tail reasoning"),
+            _function_call("call_tail"),
+            _function_call_output("call_tail", "tail result"),
+        ]
+        # The mid hop sits one third in, deep inside the window compaction
+        # prunes; the tail hop rides the preserved end.
+        sent = filler[:33] + mid_hop + filler[33:] + tail_hop
+
+        server = _make_server(_write_oauth_session(tmp_path), {"context_window": 8000})
+        with _recording_transport(_non_streaming_response()) as mock_session:
+            port = await server.start_async()
+            try:
+                async with (
+                    aiohttp.ClientSession() as client,
+                    client.post(
+                        f"http://127.0.0.1:{port}/v1/responses",
+                        json={
+                            "model": _CLIENT_MODEL,
+                            "instructions": "You are helpful.",
+                            "input": sent,
+                            "stream": False,
+                        },
+                    ) as resp,
+                ):
+                    assert resp.status == 200, await resp.text()
+            finally:
+                await server.stop_async()
+
+        shipped = _shipped_input(mock_session)
+        dumped = json.dumps(shipped)
+        # The conversation got smaller, and the shrink is compaction's, not a
+        # total loss: head and tail survive.
+        assert len(shipped) < len(sent)
+        assert dumped.count("user filler 0 ") == 1
+        assert "assistant filler 49" in dumped
+        # The pruned mid hop is gone whole — call, output, and its riding
+        # reasoning item.
+        assert "mid reasoning" not in dumped
+        assert "call_mid" not in dumped
+        assert "mid result" not in dumped
+        # The preserved tail keeps its hop complete, reasoning item included.
+        assert "tail reasoning" in dumped
+        assert "tail result" in dumped
+        # Whatever survived pairs up: no shipped output without its call.
+        call_ids = [i["call_id"] for i in shipped if i.get("type") == "function_call"]
+        for item in shipped:
+            if item.get("type") == "function_call_output":
+                assert item["call_id"] in call_ids

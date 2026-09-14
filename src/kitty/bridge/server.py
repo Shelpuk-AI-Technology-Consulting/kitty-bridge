@@ -235,6 +235,46 @@ def _user_has_tool_result(msg: dict) -> bool:
     return bool(_user_native_tool_result_ids(msg))
 
 
+def _drop_orphan_response_outputs(items: list) -> tuple[list, list]:
+    """Split a Responses ``input`` array into kept items and orphan outputs.
+
+    The Responses-shape pairing rule, mirroring
+    :meth:`BridgeServer._validate_tool_call_pairing`'s Chat-Completions half: a
+    ``function_call_output`` survives only when a **preceding**
+    ``function_call`` declared its ``call_id`` — an output before its call is
+    an orphan, and a missing or falsy ``call_id`` is undeclared. Everything
+    else passes through in order.
+
+    Args:
+        items: The Responses ``input`` items.
+
+    Returns:
+        A ``(kept, dropped_ids)`` pair; ``kept`` preserves the input order.
+    """
+    seen_call_ids: set = set()
+    kept: list = []
+    dropped_ids: list = []
+    for item in items:
+        if not isinstance(item, dict):
+            kept.append(item)
+            continue
+        item_type = item.get("type")
+        if item_type == "function_call":
+            call_id = item.get("call_id")
+            if call_id:
+                seen_call_ids.add(call_id)
+            kept.append(item)
+        elif item_type == "function_call_output":
+            call_id = item.get("call_id")
+            if call_id and call_id in seen_call_ids:
+                kept.append(item)
+            else:
+                dropped_ids.append(call_id)
+        else:
+            kept.append(item)
+    return kept, dropped_ids
+
+
 def _is_tool_use_format_error(status: int, body: object) -> bool:
     """Return True if the upstream error indicates a tool_use format mismatch.
 
@@ -2959,7 +2999,20 @@ class BridgeServer:
 
         try:
             translator = ResponsesTranslator()
+            # KBR-169: on a custom-transport provider the shipped body is built
+            # from `_original_body` — this very dict — so the route's M3 and M7
+            # protections must run on it directly; the CC-shape passes below
+            # rewrite a copy that never ships on this route.
+            if self._active_provider.use_custom_transport:
+                self._truncate_oversized_responses_outputs(body)
+                self._drop_orphan_responses_tool_outputs(body)
             cc_request = translator.translate_request(body)
+            # The selector's baseline: identity-matched against the
+            # post-compaction list to prune this body to the surviving
+            # conversation (KBR-169). Empty when the body will not ship raw.
+            pre_compaction_messages = (
+                list(cc_request["messages"]) if self._active_provider.use_custom_transport else []
+            )
             self._normalize_model(cc_request)
             self._active_provider.normalize_request(cc_request)
 
@@ -2973,6 +3026,13 @@ class BridgeServer:
                 self._apply_compaction(cc_request)
             except CompactionFailedError:
                 return self._compaction_failed_response(style="openai_responses")
+
+            # KBR-169: compaction pruned the CC copy — prune the Responses body
+            # to the surviving conversation, or the wire ships un-compacted.
+            if self._active_provider.use_custom_transport and pre_compaction_messages:
+                self._prune_compacted_responses_input(
+                    body, pre_compaction_messages, cc_request["messages"], translator
+                )
 
             # P4: Context size guardrail
             size_error = self._check_request_size(cc_request)
@@ -6860,6 +6920,178 @@ class BridgeServer:
                         count += 1
 
         return count
+
+    def _truncate_oversized_responses_outputs(self, body: dict) -> int:
+        """Shrink any oversized ``function_call_output`` string in a Responses body.
+
+        The Responses-route twin of :meth:`_truncate_oversized_tool_results`
+        (register row **M3**): on ``openai_subscription`` the adapter builds the
+        shipped body from the raw inbound Responses body, so the CC-shape pass
+        truncates a copy that never leaves the machine there (KBR-169). Same
+        limit, same notice text.
+
+        Only string outputs are truncated; list-form outputs are left
+        untouched, exactly like the CC-shape pass.
+
+        Args:
+            body: The normalized Responses request, mutated in place.
+
+        Returns:
+            The number of oversized outputs truncated.
+        """
+        count = 0
+        for item in body.get("input") or []:
+            if (
+                isinstance(item, dict)
+                and item.get("type") == "function_call_output"
+                and isinstance(item.get("output"), str)
+                and len(item["output"]) > _TOOL_RESULT_TRUNCATION_LIMIT
+            ):
+                original_len = len(item["output"])
+                item["output"] = f"[Tool output truncated — original size: {original_len:,} chars]"
+                count += 1
+        return count
+
+    def _drop_orphan_responses_tool_outputs(self, body: dict) -> int:
+        """Drop ``function_call_output`` items whose call was never declared.
+
+        The Responses-route twin of :meth:`_validate_tool_call_pairing`
+        (register row **M7**): an orphan output triggers upstream error 2013,
+        and on ``openai_subscription`` the CC-shape pass validates a copy that
+        never ships (KBR-169). The rule lives in
+        :func:`_drop_orphan_response_outputs`; this wrapper applies it to the
+        request body and logs what it dropped, as the CC-shape pass does.
+
+        Args:
+            body: The normalized Responses request, mutated in place.
+
+        Returns:
+            The number of orphan outputs dropped.
+        """
+        items = body.get("input")
+        if not items:
+            return 0
+        kept, dropped = _drop_orphan_response_outputs(items)
+        if dropped:
+            body["input"] = kept
+            logger.warning(
+                "Responses tool-call pairing: dropped %d orphan tool output(s) with "
+                "call id(s) not matching any preceding function_call: %s",
+                len(dropped),
+                dropped,
+            )
+        return len(dropped)
+
+    def _prune_compacted_responses_input(
+        self,
+        body: dict,
+        pre_compaction_messages: list[dict],
+        compacted_messages: list[dict],
+        translator: ResponsesTranslator,
+    ) -> int:
+        """Prune a Responses body's ``input`` to the conversation compaction kept.
+
+        The Responses-route arm of register row **M5** (KBR-169): on
+        ``openai_subscription`` the shipped body is built from the raw inbound
+        Responses body, so ``_apply_compaction``'s decision must be carried
+        back onto it or the wire ships the un-compacted conversation.
+
+        The decision itself is never re-made here — this method consumes the
+        compaction that already ran. Survival is matched by message **identity**
+        against the pre-compaction snapshot, never by position, so an edited
+        message matches nothing and its items are dropped: the failure mode is
+        over-compaction, never an unprotected oversized body. Two pieces of
+        selection policy do live here, because they exist nowhere else:
+
+        * **Riding items** (``reasoning`` and types the translation skips) are
+          owned by the next assistant message,
+          :meth:`ResponsesTranslator.walk_input_items` reports the ownership.
+        * **Wire-group atomicity**: a run of riding items plus the run of
+          ``function_call`` items after it plus the run of
+          ``function_call_output`` items after that moves as one group. The
+          CC-shape grouper translates each call to its own assistant message
+          and can split one wire hop across the pruning boundary; shipping a
+          call without its riding reasoning (or leaving a reasoning item
+          stranded after its group) is a hard 400 from the Responses API, in
+          both directions.
+
+        A final idempotent sweep of the orphan rule drops outputs whose
+        declaring call was pruned from an earlier wire group.
+
+        Args:
+            body: The normalized Responses request, whose ``input`` is pruned
+                in place.
+            pre_compaction_messages: The translated message list as it was
+                before compaction, shared dicts with ``compacted_messages``.
+            compacted_messages: The post-compaction message list.
+            translator: The translator that produced the CC request from
+                ``body``; its walk supplies the item ownership.
+
+        Returns:
+            The number of input items removed.
+        """
+        items = body.get("input")
+        if not items or len(compacted_messages) >= len(pre_compaction_messages):
+            return 0
+
+        _, owners = translator.walk_input_items(body)
+
+        def _kind(item: object) -> str:
+            if isinstance(item, dict):
+                item_type = item.get("type")
+                if item_type == "function_call":
+                    return "call"
+                if item_type == "function_call_output":
+                    return "output"
+                if item_type == "reasoning" or "role" not in item:
+                    return "riding"
+            return "message"
+
+        # A message survived iff its exact object is in the compacted list;
+        # an item survives iff the message carrying it did.
+        survived = {id(m) for m in compacted_messages}
+        keep: list[bool] = []
+        for owner in owners:
+            keep.append(owner is not None and id(pre_compaction_messages[owner]) in survived)
+
+        # Wire-group atomicity: any survivor keeps its whole group.
+        def _absorb_hop(start: int) -> int:
+            end = start
+            while end < len(items) and _kind(items[end]) == "call":
+                end += 1
+            while end < len(items) and _kind(items[end]) == "output":
+                end += 1
+            return end
+
+        i = 0
+        while i < len(items):
+            start_kind = _kind(items[i])
+            end = i + 1
+            if start_kind == "riding":
+                while end < len(items) and _kind(items[end]) == "riding":
+                    end += 1
+                if end < len(items) and _kind(items[end]) == "call":
+                    end = _absorb_hop(end)
+            elif start_kind == "call":
+                end = _absorb_hop(i)
+            if any(keep[g] for g in range(i, end)):
+                for g in range(i, end):
+                    keep[g] = True
+            i = end
+
+        # Final pairing sweep: an output whose call was pruned from an earlier
+        # group must not ship either.
+        kept, _dropped = _drop_orphan_response_outputs(
+            [item for item, kept_flag in zip(items, keep, strict=True) if kept_flag]
+        )
+        if len(kept) < len(items):
+            body["input"] = kept
+            logger.info(
+                "Responses input pruned to match compaction: %d -> %d items",
+                len(items),
+                len(kept),
+            )
+        return len(items) - len(kept)
 
     @staticmethod
     def _is_oversized_request(cc_request: dict) -> bool:
