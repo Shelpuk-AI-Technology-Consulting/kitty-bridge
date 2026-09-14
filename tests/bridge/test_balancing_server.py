@@ -915,12 +915,10 @@ class TestBalancingAllCustomTransport:
                 async with aiohttp.ClientSession() as session, session.post(url, json=request_body) as resp:
                     with ratchet("kbr-249-failover-plain-post-status"):
                         assert resp.status == 200
-                    _ = await resp.read()
-                    with ratchet("kbr-249-failover-plain-post-status"):
-                        assert resp.status == 200
                     assert server._active_provider is stream_provider
                     with ratchet("kbr-249-failover-plain-post-sse"):
                         assert resp.content_type == "text/event-stream"
+                    _ = await resp.read()
         finally:
             await server.stop_async()
 

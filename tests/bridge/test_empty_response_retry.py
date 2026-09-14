@@ -1097,6 +1097,43 @@ class TestD3TruncationBeforeContent:
         await server.stop_async()
 
     @pytest.mark.asyncio
+    async def test_truncation_after_the_compaction_retry_ends_the_ladder(self):
+        """The inline same-backend retry after a tighter compaction stops on a truncation."""
+        server = _make_balancing_server(1)
+        # Force the oversized path deterministically: the compact-retry only
+        # fires for genuinely large requests (see test_stage11_oversized.py).
+        server._is_oversized_request = lambda cc_request: True  # noqa: E731
+        port = await server.start_async()
+        url = f"http://127.0.0.1:{port}/v1/messages"
+        request_body = {
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": False,
+        }
+
+        with aioresponses(passthrough=["http://127.0.0.1"]) as m:
+            # First attempt: context-too-large, triggering the tighter compaction
+            # and the inline retry on the same backend. That retry truncates.
+            m.post(
+                "https://api0.example.com/v1/chat/completions",
+                status=400,
+                payload={"error": {"code": "1261", "message": "prompt exceeds max length"}},
+            )
+            m.post(
+                "https://api0.example.com/v1/chat/completions",
+                payload=self._truncating_reply("max_tokens"),
+            )
+
+            async with aiohttp.ClientSession() as session, session.post(url, json=request_body) as resp:
+                assert resp.status == 400
+                body = await resp.json()
+                posts = _posts(m)
+
+        assert posts == 2, "the compaction retry ended on the truncation, with no further attempt"
+        assert body["error"]["reason"] == "max_tokens_before_content"
+        await server.stop_async()
+
+    @pytest.mark.asyncio
     async def test_truncation_in_the_final_retry_loop_ends_it(self):
         """The balancing final-retry loop stops at once on a truncating reply."""
         server = _make_balancing_server(2)
