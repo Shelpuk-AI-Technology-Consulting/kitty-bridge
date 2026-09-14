@@ -999,6 +999,49 @@ class TestResponsesEmptyVerdictAfterContent:
         assert names[-1] == "response.completed"
         assert b'"status": "incomplete"' not in body, "the successful retry must complete, not error"
 
+    @pytest.mark.asyncio
+    async def test_empty_verdict_then_in_stream_error_emits_one_error(self):
+        """The empty-then-content + post-content in-stream error shape writes exactly one error event.
+
+        Q14(a) (KBR-247 design-review): on `_stream_responses` the in-stream
+        error exhaustion arm used to fall through to the empty-verdict check,
+        so with KBR-247 in place it would have produced two terminal error
+        events on the same stream. The fix is a `break` inside the
+        `events_emitted` branch of the exhaustion arm. This test pins the
+        invariant: one error event, then `response.completed status:
+        "incomplete"` from the post-loop synthesize.
+        """
+        # empty finish chunk → content chunk → in-stream error chunk → [DONE].
+        # The in-stream error chunk is `_is_upstream_stream_error` matching,
+        # so `_stream_responses` will mark `stream_error=True` while
+        # `events_emitted` is also True from the late content.
+        empty_then_content_then_error = (
+            b'data: {"id":"c1","choices":[{"index":0,"delta":{},'
+            b'"finish_reason":"stop"}],"model":"test-model","usage":null}\n\n'
+            + _CC_CONTENT_CHUNK
+            + b'data: {"error":{"code":"upstream_error","message":"upstream hiccup"}}\n\n'
+            b"data: [DONE]\n\n"
+        )
+        server = _make_responses_server(2)
+        body, posts = await _drive_stream(
+            server,
+            "/v1/responses",
+            _RESPONSES_REQUEST,
+            empty_then_content_then_error,
+        )
+
+        assert posts == 1, f"the upstream was asked {posts} times after content was emitted"
+        # Exactly one error event: the exhaustion arm's terminal write.
+        error_events = [data for name, data in _events(body) if name == "error"]
+        assert len(error_events) == 1, f"the body should carry one error event, found {len(error_events)}"
+        # The synthesized completion closed the turn under status="incomplete".
+        names = [name for name, _ in _events(body)]
+        assert names[-1] == "response.completed"
+        assert body.count(b'"status": "incomplete"') >= 1
+        # The late text reached the client once and was never spliced with a
+        # second attempt's bytes.
+        assert body.count(b'"delta": "Hi"') == 1
+
 
 class TestGeminiEmptyVerdictAfterContent:
     """An empty-response verdict on /v1/gemini after content reached the client ends the turn (KBR-247)."""
@@ -1059,3 +1102,50 @@ class TestGeminiEmptyVerdictAfterContent:
             if block.startswith(b"data: {") and b'"error":' in block
         ]
         assert len(error_payloads) == 1
+
+    @pytest.mark.asyncio
+    async def test_empty_verdict_after_text_does_not_deliver_a_late_tool_call(self):
+        """A late tool-call delta after the empty verdict is never spliced onto the wire.
+
+        Gemini's translator buffers tool-call arguments into `_tool_call_buffers`
+        and only emits a `functionCall` part in the finish chunk. With the
+        empty finish chunk first, the post-reset translator starts a new
+        buffer for the late tool-call delta; that buffer never crosses the
+        wire because no subsequent finish chunk arrives. The guard's terminal
+        shape is the same one the empty-text shape produces, and the late
+        tool-call bytes are lost rather than spliced from a second attempt.
+        """
+        # empty finish chunk → live text delta (sets `_request_emitted=True`)
+        # → late tool-call delta (buffered, no live SSE event) → [DONE].
+        empty_then_text_then_tool = (
+            b'data: {"id":"c1","choices":[{"index":0,"delta":{},'
+            b'"finish_reason":"stop"}],"model":"test-model","usage":null}\n\n'
+            + _CC_CONTENT_CHUNK
+            + b'data: {"id":"c1","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,'
+            b'"id":"call_1","type":"function","function":{"name":"lookup","arguments":"{\\"q\\":"}}]},'
+            b'"finish_reason":null}],"model":"test-model"}\n\n'
+            b"data: [DONE]\n\n"
+        )
+        server = _make_responses_server(2)
+        body, posts = await _drive_stream(
+            server,
+            "/v1beta/models/test-model:streamGenerateContent",
+            _GEMINI_REQUEST,
+            empty_then_text_then_tool,
+        )
+
+        assert posts == 1, f"the upstream was asked {posts} times after text was emitted"
+        # The text crossed the wire once. The tool-call bytes did not.
+        assert body.count(b'"Hi"') == 1
+        assert b"functionCall" not in body
+        # Exactly one terminal error, in the route's own convention.
+        error_blocks = body.split(b"\n\n")
+        error_payloads = [
+            json.loads(block.split(b"data: ", 1)[1].decode())
+            for block in error_blocks
+            if block.startswith(b"data: {") and b'"error":' in block
+        ]
+        assert len(error_payloads) == 1
+        assert error_payloads[0]["error"]["code"] == 502
+        # AC-1: the errored turn is not counted as a completion.
+        assert server._model_stats("test-model")["completions"] == 0

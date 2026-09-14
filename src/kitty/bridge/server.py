@@ -3740,6 +3740,33 @@ class BridgeServer:
                     if stream_error:
                         if events_emitted:
                             logger.warning("Responses stream error after client events emitted; not retrying")
+                            # Q14(a) (KBR-247): the exhaustion arm below writes a
+                            # terminal error event, then falls through to the
+                            # empty-verdict check. The KBR-247 guard would then
+                            # fire a second error event on the same stream
+                            # (the post-emission empty verdict still holds
+                            # here because the original empty finish chunk
+                            # reset the translator). Mark the turn incomplete
+                            # for the post-loop synthesize, write the terminal
+                            # error event once, and break — the same shape
+                            # `_stream_messages` and `_stream_gemini` already
+                            # produce on the events_emitted branch.
+                            terminal_status = "incomplete"
+                            error_event = responses_format_error(
+                                {
+                                    "code": "upstream_error",
+                                    "message": "All upstream providers returned errors",
+                                },
+                                seq=translator._next_seq(),
+                            )
+                            try:
+                                await sr.write(error_event.encode())
+                            except (ConnectionResetError, BrokenPipeError, OSError):
+                                logger.debug(
+                                    "Client disconnected before error could be sent for %s",
+                                    response_id,
+                                )
+                            break
                         elif attempt < max_attempts - 1:
                             translator.reset()
                             finish_events.clear()

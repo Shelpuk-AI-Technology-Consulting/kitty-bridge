@@ -5319,6 +5319,21 @@ KBR-247 to KBR-242's shape decision), and a Messages-uniform error-only ending o
 route exists to serve). Pre-emission empty verdicts keep today's ladder on both routes, pinned by
 `tests/bridge/test_empty_response_retry.py`.
 
+**The post-content in-stream error shape** (Q14(a), design-review 2026-09-14). When the
+empty-finish-then-content path is followed by an upstream error chunk matching
+`_is_upstream_stream_error`, `_stream_responses`'s in-stream-error exhaustion arm would
+historically fall through to the empty-verdict check, and KBR-247 would then have fired its
+post-emission guard on top of the exhaustion arm's terminal error event — two `error` events
+followed by `response.completed`, violating the "one terminal error" property above. The fix is
+a `break` inside the `events_emitted` branch of the exhaustion arm (`server.py` ~3749), matching
+`_stream_messages` (which always broke after `finalize_interrupted_stream`) and
+`_stream_gemini` (which already broke on `events_emitted` at its exhaustion arm). The no-events
+branch is untouched: a pre-emission exhausted attempt still falls through to the empty ladder,
+which is what AC-2 requires. Regression: `tests/bridge/test_post_emission_no_failover.py`
+`TestResponsesEmptyVerdictAfterContent::test_empty_verdict_then_in_stream_error_emits_one_error`
+pins exactly one `error` event followed by `response.completed` with `status: "incomplete"` for
+the empty-then-content-then-error sequence.
+
 **Why, and not the obvious alternative.** Three reasons, in decreasing order of how much they
 would cost to be wrong about.
 
