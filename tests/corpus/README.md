@@ -269,6 +269,13 @@ that belongs to the task capturing those entries: **T-C3 and T-C4 decide** wheth
 real thing or to synthesise a padded construction — plan §6 already blesses synthesis for exactly
 those two entries — and to record what replaces the review step either way.
 
+T-C4's decision (KBR-47): its three entries are **synthesised padded constructions**. Each
+entry's `origin_note` records both that the size is constructed and what replaces the review step
+— code-review of the builder, the scrubber's full-byte scan in CI, and a bounded head/tail human
+read of the committed `.body` file. The construction itself lives beside the task's requirements
+(`.requirements/20260914T184942Z_kbr47_tc4_corpus_entries/author_entries.py`), so the entries are
+re-derivable from their notes.
+
 **Who reviewed.** A `reviewed_by` field was considered and rejected: an unverifiable
 self-attestation creates the appearance of an audit trail without the substance. Git already
 records who authored the commit that adds an entry, and the pull request records who approved it.
