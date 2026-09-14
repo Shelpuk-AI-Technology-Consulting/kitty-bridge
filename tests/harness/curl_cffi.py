@@ -60,6 +60,7 @@ __all__ = [
     "codex_backend_url",
     "oauth_refresh_endpoint",
     "redact_oauth_form_body",
+    "seed_oauth_session",
 ]
 
 
@@ -146,6 +147,12 @@ class CurlCffiTransport:
     _adapter: OpenAISubscriptionAdapter | None = field(init=False, default=None, repr=False)
     _codex_seam: Any = field(init=False, default=None, repr=False)
     _refresh_seam: Any = field(init=False, default=None, repr=False)
+    #: Environment-variable state at the moment :meth:`bind` ran. A mapping
+    #: of variable name to its pre-bind value (or :data:`_UNSET` when the
+    #: variable was not set) so :meth:`stop` can restore exactly what was
+    #: there — a transport that never called :meth:`bind` does not
+    #: silently clobber a value another test set.
+    _env_state: dict[str, Any] = field(init=False, default_factory=dict, repr=False)
 
     def __post_init__(self) -> None:
         """Build the recorder eagerly, so an unserved format fails here.
@@ -176,21 +183,34 @@ class CurlCffiTransport:
         redirect mechanism. With the seams inside ``start``, the conformance
         check works unchanged, and so does every fixture consumer.
 
+        The two seams enter in a nested try: a failure entering the second
+        rolls the first back, and only a fully-entered pair is published on
+        the transport — ``stop()`` then always exits seams this transport
+        owns, and never runs ``__exit__`` on a context manager whose
+        ``__enter__`` did not complete (which would resume a fresh
+        generator and raise ``RuntimeError`` from inside the cleanup,
+        masking the original failure).
+
         Raises:
-            RuntimeError: When called on an already-started recorder.
             Exception: Whatever the seams' entry raised, after releasing the
-                recorder. A partially-entered pair of context managers must
-                not leave a constant swapped when the transport fails to start.
+                recorder.
         """
         await self._recorder.start()
+        codex_seam: Any = None
+        refresh_seam: Any = None
         try:
-            self._codex_seam = codex_backend_url(self._recorder)
-            self._refresh_seam = oauth_refresh_endpoint(self._recorder)
-            self._codex_seam.__enter__()
-            self._refresh_seam.__enter__()
+            codex_seam = codex_backend_url(self._recorder)
+            codex_seam.__enter__()
+            refresh_seam = oauth_refresh_endpoint(self._recorder)
+            refresh_seam.__enter__()
         except BaseException:
-            await self.stop()
+            for seam in (refresh_seam, codex_seam):
+                if seam is not None:
+                    seam.__exit__(None, None, None)
+            await self._recorder.stop()
             raise
+        self._codex_seam = codex_seam
+        self._refresh_seam = refresh_seam
 
     async def stop(self) -> None:
         """Close the adapter's sessions, restore the env, then release the port.
@@ -199,10 +219,11 @@ class CurlCffiTransport:
         serving leg's and the OAuth refresh leg's
         (:attr:`~kitty.providers.openai_subscription.OpenAISubscriptionAdapter._oauth_curl_session`)
         — and :meth:`~kitty.providers.base.ProviderAdapter.aclose` releases
-        both. The ``CODEX_CA_CERTIFICATE`` environment variable the adapter
-        reads is unset so a test that runs after this one is not poisoned by
-        the harness CA. The recorder is stopped in a ``finally``: a transport
-        that fails to close must not leave a port bound, because the next
+        both. Any environment variable :meth:`bind` set is restored to its
+        pre-bind value (removed when it was unset), so a transport that
+        never called :meth:`bind` does not clobber a value another test
+        set. The recorder is stopped in a ``finally``: a transport that
+        fails to close must not leave a port bound, because the next
         test's ephemeral port allocation is the only thing that would notice.
         """
         # The seams exit before anything can observe a half-restored state.
@@ -215,7 +236,12 @@ class CurlCffiTransport:
             if self._adapter is not None:
                 await self._adapter.aclose()
         finally:
-            _set_env("CODEX_CA_CERTIFICATE", None)
+            for name, previous in self._env_state.items():
+                if previous is _UNSET:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = previous
+            self._env_state.clear()
             await self._recorder.stop()
 
     def bind(self) -> Binding:
@@ -227,9 +253,10 @@ class CurlCffiTransport:
         The adapter reads its CA from the ``CODEX_CA_CERTIFICATE`` environment
         variable (Codex CLI's ``custom_ca.rs`` precedence: it wins over
         ``SSL_CERT_FILE``), not from ``provider_config`` — so ``bind()`` exports
-        the harness CA to that variable before the adapter's first request.
-        The upstream URL itself is **not** in the config (the adapter ignores
-        ``base_url``) and is pointed at the recorder by
+        the harness CA to that variable before the adapter's first request,
+        recording the previous value so :meth:`stop` can restore it (or unset
+        it). The upstream URL itself is **not** in the config (the adapter
+        ignores ``base_url``) and is pointed at the recorder by
         :func:`codex_backend_url`, which the test drives for the lifetime of
         the transport.
 
@@ -239,13 +266,15 @@ class CurlCffiTransport:
             ``CODEX_CA_CERTIFICATE`` environment variable above, and ignores
             ``provider_config["base_url"]`` (§7.5.2's custom-transport rule),
             so there is nothing for a config dict to carry.
-
-        Raises:
-            RuntimeError: When the transport has not been started, because the
-                recorder has no port until then.
         """
         if self.ca_cert is not None:
-            _set_env("CODEX_CA_CERTIFICATE", str(self.ca_cert))
+            # Record the pre-bind value only on the first bind so a second
+            # bind does not overwrite it with the seam's own previous value.
+            if "CODEX_CA_CERTIFICATE" not in self._env_state:
+                self._env_state["CODEX_CA_CERTIFICATE"] = os.environ.get(
+                    "CODEX_CA_CERTIFICATE", _UNSET
+                )
+            os.environ["CODEX_CA_CERTIFICATE"] = str(self.ca_cert)
         if self._adapter is None:
             self._adapter = OpenAISubscriptionAdapter()
         return self._adapter, {}
@@ -325,20 +354,51 @@ def _with_redacted_body(captured: CapturedRequest) -> CapturedRequest:
     return replace(captured, body=redact_oauth_form_body(captured.body))
 
 
-def _set_env(name: str, value: str | None) -> None:
-    """Set ``name`` to ``value`` in the process environment.
+#: Sentinel for ``_env_state``: "the variable was not set, so :meth:`stop`
+#: should pop it rather than write a value". Anything else in ``_env_state``
+#: is the pre-bind value ``stop`` writes back.
+_UNSET = object()
 
-    ``None`` deletes the variable — used by ``stop`` to undo what ``bind``
-    did, so a test that runs after this one is not poisoned by the harness CA.
+
+def seed_oauth_session(tmp_path: Path, *, stale: bool = False) -> str:
+    """Write a seeded OAuth session file at ``tmp_path/oauth_session.json``.
+
+    The OpenAI subscription adapter reads ``cc_request["_resolved_key"]`` as a
+    path to :class:`~kitty.auth.oauth_session.OAuthSession`'s JSON load —
+    the fixture's literal ``harness-key`` would crash there. This helper
+    writes a fresh-session file whose tokens are not due to refresh
+    (``stale=False``) or whose access token is already past expiry
+    (``stale=True``, forcing the refresh leg's POST on the next request).
+    Tests that drive the bridge use the returned path as
+    ``BridgeFixture(..., key=<path>)``.
 
     Args:
-        name: The variable name.
-        value: The value, or ``None`` to unset.
+        tmp_path: Pytest-provided temp directory.
+        stale: When ``True``, ``access_token_expires_at`` and
+            ``api_key_expires_at`` are 1 s in the past, which forces
+            :meth:`~kitty.auth.oauth_session.OAuthSession.get_valid_api_key`
+            down the refresh path.
+
+    Returns:
+        The path written; the bridge carries this as its resolved key.
     """
-    if value is None:
-        os.environ.pop(name, None)
-    else:
-        os.environ[name] = value
+    import time
+
+    from kitty.auth.oauth_session import OAuthSession
+
+    now = time.time()
+    session = OAuthSession(
+        client_id="app_test",
+        access_token="at_fresh",
+        refresh_token="rt_original",
+        id_token="eyJhbGciOiJIUzI1NiJ9.e30.fake_sig",
+        api_key=None,
+        access_token_expires_at=now + (-(1 if stale else -3600)),
+        api_key_expires_at=now + (-(1 if stale else -3600)),
+        _file_path=str(tmp_path / "oauth_session.json"),
+    )
+    session.save()
+    return session._file_path
 
 
 register_transport(CurlCffiTransport.name, CurlCffiTransport)

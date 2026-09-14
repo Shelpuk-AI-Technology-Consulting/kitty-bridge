@@ -29,6 +29,7 @@ import contextlib
 import json
 import socket
 import ssl
+import time
 
 import pytest
 
@@ -189,6 +190,30 @@ class TestTheRecorderPassesEveryConformanceCheck:
         check(recording, [first, second], [silent])
 
 
+async def _wait_until(recorder: CurlRecordingUpstream, predicate, *, timeout: float = 2.0) -> bool:
+    """Poll ``recorder`` until ``predicate(recorder)`` is true, or give up.
+
+    The connection log's entries appear asynchronously — a failed handshake
+    completes on a later loop iteration, and a request's count increments only
+    once the handler has read the body — so a test asserting on the log waits
+    on a **condition**, with a bounded timeout, rather than on a fixed sleep.
+
+    Args:
+        recorder: The recorder whose connection log the predicate reads.
+        predicate: A callable taking the recorder and returning truthiness.
+        timeout: Seconds to wait before giving up.
+
+    Returns:
+        Whether the predicate held before the timeout.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate(recorder):
+            return True
+        await asyncio.sleep(0.005)
+    return predicate(recorder)
+
+
 def _open_only(recorder: CurlRecordingUpstream, *, ssl_context: ssl.SSLContext) -> int:
     """Open one TLS connection, send nothing, close it, and report its source port.
 
@@ -298,7 +323,10 @@ class TestSocketLevelConnectionLogging:
             recorder: The started recorder.
         """
         await asyncio.to_thread(_start_and_drop_handshake, recorder.host, recorder.port)
-        await asyncio.sleep(0.05)
+
+        assert await _wait_until(
+            recorder, lambda r: len(r.connections) >= 1, timeout=2.0
+        ), "the failed handshake must produce a record within the timeout"
 
         assert len(recorder.connections) == 1, (
             "a connection that failed the TLS handshake is §7.2.1's bypass shape "
@@ -321,7 +349,12 @@ class TestSocketLevelConnectionLogging:
         sent = await send(
             recorder.host, recorder.port, _RESPONSES_PROBE, marker="one", ssl_context=verifying_client_context
         )
-        await asyncio.sleep(0.05)
+
+        assert await _wait_until(
+            recorder,
+            lambda r: len(r.connections) >= 1 and r.connections[0].requests >= 1,
+            timeout=2.0,
+        ), "the request must reach the recorder's body within the timeout"
 
         assert len(recorder.connections) == 1, (
             "one request-bearing connection must produce one record — an accept-time "

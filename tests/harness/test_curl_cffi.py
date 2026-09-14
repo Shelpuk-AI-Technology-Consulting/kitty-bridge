@@ -34,6 +34,7 @@ from harness.curl_cffi import (
     codex_backend_url,
     oauth_refresh_endpoint,
     redact_oauth_form_body,
+    seed_oauth_session,
 )
 
 pytestmark = pytest.mark.usefixtures("certs")
@@ -54,6 +55,26 @@ def server_context(certs) -> ssl.SSLContext:  # noqa: F811
     return server_ssl_context(certs.target_cert, certs.target_key)
 
 
+def _build_transport(server_context: ssl.SSLContext, tmp_path: Path, certs) -> CurlCffiTransport:
+    """Build an unstarted curl_cffi transport with TLS and the harness CA wired.
+
+    Args:
+        server_context: The TLS context the recorder terminates with.
+        tmp_path: Where the harness CA file lives.
+        certs: The session-scoped fixture, used to read the CA bytes.
+
+    Returns:
+        An unstarted transport; the caller owns its lifecycle.
+    """
+    ca_path = tmp_path / "kbr41-ca.pem"
+    ca_path.write_bytes(Path(str(certs.ca)).read_bytes())
+    return CurlCffiTransport(
+        format=WireFormat.OPENAI_RESPONSES,
+        ssl_context=server_context,
+        ca_cert=ca_path,
+    )
+
+
 @pytest.fixture
 async def transport_(
     server_context: ssl.SSLContext, tmp_path: Path, certs
@@ -69,31 +90,12 @@ async def transport_(
     Yields:
         The started transport; stopped after the test.
     """
-    ca_path = tmp_path / "kbr41-ca.pem"
-    ca_path.write_bytes(_ca_bytes(certs))
-    t = CurlCffiTransport(
-        format=WireFormat.OPENAI_RESPONSES,
-        ssl_context=server_context,
-        ca_cert=ca_path,
-    )
+    t = _build_transport(server_context, tmp_path, certs)
     await t.start()
     try:
         yield t
     finally:
         await t.stop()
-
-
-def _ca_bytes(certs: object) -> bytes:
-    """Return the harness CA's PEM bytes.
-
-    Args:
-        certs: The session-scoped fixture.
-
-    Returns:
-        The CA file's bytes — the same bytes the connecting adapter must
-        trust for its ``verify=``.
-    """
-    return Path(str(certs.ca)).read_bytes()
 
 
 class TestTheTransport:
@@ -317,21 +319,16 @@ class TestThroughARealBridge:
             certs: The session-scoped fixture, for the real CA bytes.
         """
         sent = marker()
-        oauth_key = _seed_oauth_session(tmp_path)
-        ca_path = tmp_path / "kbr41-ca.pem"
-        ca_path.write_bytes(_ca_bytes(certs))
-        t = CurlCffiTransport(
-            format=WireFormat.OPENAI_RESPONSES,
-            ssl_context=server_context,
-            ca_cert=ca_path,
-        )
-
-        async with BridgeFixture(t, key=oauth_key) as fixture:
+        async with BridgeFixture(
+            _build_transport(server_context, tmp_path, certs),
+            key=seed_oauth_session(tmp_path),
+        ) as fixture:
             status, body = await fixture.post(
                 inbound_path(InboundProtocol.RESPONSES),
                 minimal_inbound_body(InboundProtocol.RESPONSES, sent),
             )
 
+        t = fixture.transport
         assert status == 200, f"inbound response: {status} {body[:200]!r}"
         assert any(sent.encode() in c.body for c in t.captures), "the marker must reach the recorder's body"
 
@@ -346,22 +343,16 @@ class TestThroughARealBridge:
             certs: The session-scoped fixture, for the real CA bytes.
         """
         sent = marker()
-        oauth_key = _seed_oauth_session(tmp_path)
-        ca_path = tmp_path / "kbr41-ca.pem"
-        ca_path.write_bytes(_ca_bytes(certs))
-        t = CurlCffiTransport(
-            format=WireFormat.OPENAI_RESPONSES,
-            ssl_context=server_context,
-            ca_cert=ca_path,
-        )
-
-        async with BridgeFixture(t, key=oauth_key) as fixture:
+        async with BridgeFixture(
+            _build_transport(server_context, tmp_path, certs),
+            key=seed_oauth_session(tmp_path),
+        ) as fixture:
             await fixture.post(
                 inbound_path(InboundProtocol.RESPONSES),
                 minimal_inbound_body(InboundProtocol.RESPONSES, sent),
             )
 
-        for capture in t.captures:
+        for capture in fixture.transport.captures:
             assert sent.encode() in capture.body
 
     async def test_a_stale_token_refresh_reaches_the_recorder(
@@ -381,21 +372,16 @@ class TestThroughARealBridge:
             certs: The session-scoped fixture, for the real CA bytes.
         """
         sent = marker()
-        oauth_key = _seed_oauth_session(tmp_path, stale=True)
-        ca_path = tmp_path / "kbr41-ca.pem"
-        ca_path.write_bytes(_ca_bytes(certs))
-        t = CurlCffiTransport(
-            format=WireFormat.OPENAI_RESPONSES,
-            ssl_context=server_context,
-            ca_cert=ca_path,
-        )
-
-        async with BridgeFixture(t, key=oauth_key) as fixture:
+        async with BridgeFixture(
+            _build_transport(server_context, tmp_path, certs),
+            key=seed_oauth_session(tmp_path, stale=True),
+        ) as fixture:
             status, _body = await fixture.post(
                 inbound_path(InboundProtocol.RESPONSES),
                 minimal_inbound_body(InboundProtocol.RESPONSES, sent),
             )
 
+        t = fixture.transport
         assert status == 200, "the serving request must reach the recorder"
         refresh_captures = [c for c in t.captures if c.path.endswith("/oauth/token")]
         assert refresh_captures, (
@@ -406,35 +392,3 @@ class TestThroughARealBridge:
         # The transport's view masks credentials; the recorder's own list does not.
         assert b"rt_original" in t.recorder.requests[0].body
         assert b"refresh_token=***" in grant.body
-
-
-def _seed_oauth_session(tmp_path: Path, *, stale: bool = False) -> str:
-    """Write a seeded OAuth session file and return its path.
-
-    Args:
-        tmp_path: Where to write it.
-        stale: When true, the access token is already expired, which forces
-            :meth:`~kitty.auth.oauth_session.OAuthSession.get_valid_api_key`
-            down the refresh path — and with it the refresh POST the recorder
-            captures.
-
-    Returns:
-        The absolute path; the bridge carries this as its resolved key.
-    """
-    import time
-
-    from kitty.auth.oauth_session import OAuthSession
-
-    now = time.time()
-    session = OAuthSession(
-        client_id="app_test",
-        access_token="at_fresh",
-        refresh_token="rt_original",
-        id_token="eyJhbGciOiJIUzI1NiJ9.e30.fake_sig",
-        api_key=None,
-        access_token_expires_at=now + (-(1 if stale else -3600)),
-        api_key_expires_at=now + (-(1 if stale else -3600)),
-        _file_path=str(tmp_path / "oauth_session.json"),
-    )
-    session.save()
-    return session._file_path

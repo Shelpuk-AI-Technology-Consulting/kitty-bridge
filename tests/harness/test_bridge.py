@@ -20,7 +20,6 @@ import ast
 import asyncio
 import json
 import socket
-import time
 import uuid
 from pathlib import Path
 from typing import Any
@@ -77,7 +76,7 @@ def _curl_cffi_setup(certs, tmp_path: Path) -> tuple[dict[str, Any], str]:
         adapter can load.
     """
     from harness.connect_proxy import server_ssl_context
-    from harness.curl_cffi import CurlCffiTransport  # noqa: F401  (import registers the transport)
+    from harness.curl_cffi import seed_oauth_session
 
     ca_path = tmp_path / "kbr41-ca.pem"
     ca_path.write_bytes(Path(str(certs.ca)).read_bytes())
@@ -85,34 +84,7 @@ def _curl_cffi_setup(certs, tmp_path: Path) -> tuple[dict[str, Any], str]:
         "ssl_context": server_ssl_context(certs.target_cert, certs.target_key),
         "ca_cert": ca_path,
     }
-    return kwargs, _seed_oauth_session(tmp_path)
-
-
-def _seed_oauth_session(tmp_path: Path) -> str:
-    """Write an OAuth session file whose tokens are not due to refresh.
-
-    Args:
-        tmp_path: Where to write the file.
-
-    Returns:
-        The path to the saved session JSON. Fresh tokens keep the refresh
-        path — and with it the clock — out of the conformance check.
-    """
-    from kitty.auth.oauth_session import OAuthSession
-
-    now = time.time()
-    session = OAuthSession(
-        client_id="app_test",
-        access_token="at_fresh",
-        refresh_token="rt_fresh",
-        id_token="eyJhbGciOiJIUzI1NiJ9.e30.fake_sig",
-        api_key=None,
-        access_token_expires_at=now + 3600,
-        api_key_expires_at=now + 3600,
-        _file_path=str(tmp_path / "oauth_session.json"),
-    )
-    session.save()
-    return str(session._file_path)
+    return kwargs, seed_oauth_session(tmp_path)
 
 #: One row per registered transport: the module that registers it, its registry
 #: name, the upstream format to construct it with, and **the inbound route that
