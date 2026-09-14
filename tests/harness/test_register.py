@@ -99,11 +99,11 @@ _SHAPES: tuple[tuple[str, str], ...] = (
 
 
 class TestTheRowsThemselves:
-    """§3.2 publishes 46 live rows; the data must be those rows and no others."""
+    """§3.2 publishes 51 live rows; the data must be those rows and no others."""
 
     def test_the_register_holds_every_live_row(self) -> None:
-        """17 bridge-level rows less the withdrawn M13, plus 30 provider-level."""
-        assert len(r.REGISTER) == 46
+        """17 bridge-level rows less the withdrawn M13, plus 35 provider-level."""
+        assert len(r.REGISTER) == 51
 
     def test_the_register_is_a_tuple_and_not_a_list(self) -> None:
         """`mypy` does not run over `tests/`, so the annotation is not enforcement.
@@ -594,6 +594,8 @@ class TestTheTriggerArrangingBy:
             r.Trigger.THINKING_SIGNALLED_OR_INFERRED: r.ArrangingBy.REQUEST,
             r.Trigger.CC_ORIGIN_PATH: r.ArrangingBy.ROUTE,
             r.Trigger.RESPONSES_ORIGIN_PATH: r.ArrangingBy.REQUEST,
+            r.Trigger.NON_ENTRA_CREDENTIAL: r.ArrangingBy.PROFILE,
+            r.Trigger.CHATGPT_ACCOUNT_ID_PRESENT: r.ArrangingBy.PROFILE,
             r.Trigger.THINKING_SIGNATURE_REJECTED: r.ArrangingBy.RESPONSE,
         }
 

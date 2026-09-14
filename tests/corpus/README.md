@@ -120,8 +120,8 @@ rejected thinking round trip, `M9`'s upstream tool-use format error, `M12`'s emp
 response, `M17`'s rejected thinking signature) are properties of the upstream response,
 arranged by a scripted recorder. `ROUTE` triggers (`M2`/`M16` non-native upstream wire, `M10`
 Gemini protocol, `P13` CC-origin path) and `PROFILE` triggers (`M1` profile sets model, `M4`
-compaction ran with oversized tool result, `M5` over compaction budget) are decided at the
-route or the profile. The loader refuses all of them — `ALWAYS` and every non-`REQUEST`
+compaction ran with oversized tool result, `M5` over compaction budget, `P9g` non-Entra
+credential, `P9d` ChatGPT account id present) are decided at the route or the profile. The loader refuses all of them — `ALWAYS` and every non-`REQUEST`
 trigger — in both lists. §9.2's gap **G21** is the reason — an over-declaring entry makes the
 oracle's first assertion claim every delta and pass over a broken bridge, and "the same author
 writes the entry and its trigger index, so the mechanism has no second reader". This is that

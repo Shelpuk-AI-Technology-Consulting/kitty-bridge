@@ -1093,19 +1093,33 @@ class Envelope:
     __hash__ = None  # type: ignore[assignment]
 
     def __post_init__(self) -> None:
-        """Validate any tool choice and freeze the extra mapping.
+        """Validate the extra keys, any tool choice, then freeze the extra mapping.
 
-        ``extra`` is otherwise open by design — it holds whatever control
-        fields a format defines, keyed by the wire key. ``tool_choice`` is the
-        one entry with a *canonical* value (R8.6), so it is the one entry worth
-        checking; leaving it unchecked would make :data:`TOOL_CHOICE_VALUES` a
-        comment rather than a rule.
+        ``extra`` is keyed by the wire key and compared whole (§3.3.1a) — no
+        ``.`` allowed in a key, with one canonical-value exception: ``tool_choice``.
+        ``tool_choice`` is the one entry with a *canonical* value (R8.6), so it
+        is the one entry worth checking at the value level; leaving it unchecked
+        would make :data:`TOOL_CHOICE_VALUES` a comment rather than a rule.
+        The key-shape check is enforced here rather than only on the path builder
+        so a reader cannot emit a nested key by accident; the harness-internal
+        nature of this construction makes the raise the reader-bug posture
+        ``contract`` already names. The guard short-circuits on the first dotted
+        key — an asymmetry with :meth:`Conversation.__post_init__`, which lists
+        every unknown sampling key in one message — kept because
+        :func:`extra_path` raises on the same single key and this guard mirrors it.
 
         Raises:
-            ValueError: When ``extra["tool_choice"]`` is outside
-                :data:`TOOL_CHOICE_VALUES` and is not a ``tool:<name>``
-                selection.
+            ValueError: When an ``extra`` key contains ``.`` (KBR-191), or when
+                ``extra["tool_choice"]`` is outside :data:`TOOL_CHOICE_VALUES`
+                and is not a ``tool:<name>`` selection.
         """
+        for key in (self.extra or {}):
+            if "." in key:
+                raise ValueError(
+                    f"envelope.extra is keyed by wire key and compared whole (§3.3.1a); "
+                    f"{key!r} names a nested value; nesting belongs in the residual (§3.3.1a)"
+                )
+
         choice = (self.extra or {}).get(TOOL_CHOICE_KEY)
         if choice is not None and not (
             choice in TOOL_CHOICE_VALUES or (isinstance(choice, str) and choice.startswith("tool:"))
@@ -1582,7 +1596,7 @@ def tool_path(name: str, field_name: str | None = None) -> str:
 def header_path(name: str) -> str:
     """Return the path naming one request header.
 
-    P9a, P9b and P9c change headers rather than the body, and §4.3 C1 asserts on
+    The P9 header rows change headers rather than the body, and §4.3 C1 asserts on
     the exact header set.
 
     Args:
