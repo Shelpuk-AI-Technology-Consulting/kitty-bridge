@@ -10,11 +10,15 @@ Without this fix, the bridge returned a generic 500 with no timing info.
 from __future__ import annotations
 
 import json
-from unittest.mock import patch
+from contextlib import ExitStack
+from types import SimpleNamespace
+from typing import Any
+from unittest.mock import Mock, patch
 
 import aiohttp
 import pytest
 
+import kitty.bridge.server as server_module
 from kitty.bridge.server import AllBackendsUnhealthyError, BridgeServer
 from kitty.launchers.base import LauncherAdapter, SpawnConfig
 from kitty.providers.base import ProviderAdapter
@@ -135,6 +139,8 @@ class TestAllBackendsUnhealthyErrorType:
 class TestMessagesHandlerReturns503:
     @pytest.mark.asyncio
     async def test_returns_503_with_retry_after_header(self):
+        # retry_after=400 sits beyond the KBR-243 recovery window, so the 503 is
+        # immediate; a value inside the window would make this test really-hold.
         server = _make_server()
         port = await server.start_async()
         try:
@@ -143,7 +149,7 @@ class TestMessagesHandlerReturns503:
                 "_select_backend",
                 side_effect=AllBackendsUnhealthyError(
                     [{"name": "stub"}],
-                    retry_after=264,
+                    retry_after=400,
                 ),
             ):
                 async with (
@@ -157,7 +163,7 @@ class TestMessagesHandlerReturns503:
                     assert resp.status == 503, f"Expected 503, got {resp.status}"
                     retry_after = resp.headers.get("Retry-After")
                     assert retry_after is not None, "Missing Retry-After header"
-                    assert int(retry_after) == 264
+                    assert int(retry_after) == 400
         finally:
             await server.stop_async()
 
@@ -171,7 +177,7 @@ class TestMessagesHandlerReturns503:
                 "_select_backend",
                 side_effect=AllBackendsUnhealthyError(
                     [{"name": "stub"}],
-                    retry_after=120,
+                    retry_after=400,
                 ),
             ):
                 async with (
@@ -209,7 +215,7 @@ class TestMessagesHandlerReturns503:
                 "_select_backend",
                 side_effect=AllBackendsUnhealthyError(
                     [{"name": "stub"}],
-                    retry_after=120,
+                    retry_after=400,
                 ),
             ):
                 async with (
@@ -241,7 +247,7 @@ class TestResponsesHandlerReturns503:
                 "_select_backend",
                 side_effect=AllBackendsUnhealthyError(
                     [{"name": "stub"}],
-                    retry_after=180,
+                    retry_after=400,
                 ),
             ):
                 async with (
@@ -255,7 +261,7 @@ class TestResponsesHandlerReturns503:
                     assert resp.status == 503
                     retry_after = resp.headers.get("Retry-After")
                     assert retry_after is not None
-                    assert int(retry_after) == 180
+                    assert int(retry_after) == 400
         finally:
             await server.stop_async()
 
@@ -274,7 +280,7 @@ class TestChatCompletionsHandlerReturns503:
                 "_select_backend",
                 side_effect=AllBackendsUnhealthyError(
                     [{"name": "stub"}],
-                    retry_after=90,
+                    retry_after=400,
                 ),
             ):
                 async with (
@@ -297,6 +303,8 @@ class TestChatCompletionsHandlerReturns503:
 class TestGeminiHandlerReturns503:
     @pytest.mark.asyncio
     async def test_returns_503_with_retry_after(self):
+        # retry_after=300 pins the strict KBR-243 boundary over HTTP: exactly
+        # 300 is beyond the window, so the 503 is immediate.
         server = _make_bridge_mode_server()
         port = await server.start_async()
         try:
@@ -318,6 +326,32 @@ class TestGeminiHandlerReturns503:
                 ):
                     assert resp.status == 503
                     assert resp.headers.get("Retry-After") is not None
+        finally:
+            await server.stop_async()
+
+    @pytest.mark.asyncio
+    async def test_returns_503_immediately_beyond_window(self):
+        server = _make_bridge_mode_server()
+        port = await server.start_async()
+        try:
+            with patch.object(
+                server,
+                "_select_backend",
+                side_effect=AllBackendsUnhealthyError(
+                    [{"name": "stub"}],
+                    retry_after=400,
+                ),
+            ):
+                async with (
+                    aiohttp.ClientSession() as session,
+                    session.post(
+                        f"http://127.0.0.1:{port}/v1beta/models/test:generateContent",
+                        json={"contents": [{"parts": [{"text": "hi"}]}]},
+                        headers={"content-type": "application/json"},
+                    ) as resp,
+                ):
+                    assert resp.status == 503
+                    assert int(resp.headers["Retry-After"]) == 400
         finally:
             await server.stop_async()
 
@@ -543,10 +577,10 @@ class TestAllUnhealthyResponseNamesCause:
                 "_select_backend",
                 side_effect=AllBackendsUnhealthyError(
                     [
-                        {"name": "secondary", "reason": "rate_limit", "remaining_cooldown": 196},
-                        {"name": "zai_coding", "reason": "rate_limit", "remaining_cooldown": 180},
+                        {"name": "secondary", "reason": "rate_limit", "remaining_cooldown": 400},
+                        {"name": "zai_coding", "reason": "rate_limit", "remaining_cooldown": 380},
                     ],
-                    retry_after=196,
+                    retry_after=400,
                 ),
             ):
                 async with (
@@ -558,7 +592,7 @@ class TestAllUnhealthyResponseNamesCause:
                     ) as resp,
                 ):
                     assert resp.status == 503
-                    assert resp.headers["Retry-After"] == "196"
+                    assert resp.headers["Retry-After"] == "400"
                     body = await resp.json()
                     assert body["error"]["type"] == "api_error"
                     assert "rate-limited by the upstream provider" in body["error"]["message"]
@@ -574,8 +608,8 @@ class TestAllUnhealthyResponseNamesCause:
                 server,
                 "_select_backend",
                 side_effect=AllBackendsUnhealthyError(
-                    [{"name": "stub", "reason": "transport", "remaining_cooldown": 90}],
-                    retry_after=90,
+                    [{"name": "stub", "reason": "transport", "remaining_cooldown": 400}],
+                    retry_after=400,
                 ),
             ):
                 async with (
@@ -632,5 +666,439 @@ class TestHappyPathNotAffected:
                     assert resp.status == 200
                     data = await resp.json()
                     assert data["role"] == "assistant"
+        finally:
+            await server.stop_async()
+
+
+# ── KBR-243: arrival recovery hold ────────────────────────────────────────
+
+
+class _SteppedClock:
+    """Fake ``time.monotonic`` advanced only by the fake ``asyncio.sleep``.
+
+    Stepping the clock on sleep (house precedent: ``tests/harness/test_recorder.py``)
+    makes the hold loop's deadline arithmetic deterministic — a clock derived from
+    real time would race the loop instead.
+    """
+
+    def __init__(self, start: float) -> None:
+        self.now = start
+
+    def monotonic(self) -> float:
+        return self.now
+
+
+def _gone_request(gone: bool) -> SimpleNamespace:
+    """Return a request stub whose transport reports the given state.
+
+    A plain Mock would read as a gone client (``is_closing()`` returns a truthy
+    Mock), so every hold test pins the transport state explicitly.
+    """
+    return SimpleNamespace(transport=SimpleNamespace(is_closing=lambda: gone))
+
+
+def _cool_backend(server: BridgeServer, idx: int, *, cooldown: int, failed_at: float) -> None:
+    """Put backend ``idx`` into cooldown as a rate-limit failure at ``failed_at``."""
+    server._backend_health[idx].update(
+        healthy=False,
+        failed_at=failed_at,
+        cooldown=cooldown,
+        last_failure_kind="rate_limit",
+    )
+
+
+class TestRecoveryHold:
+    """Unit tests for ``_select_backend_or_hold`` (KBR-243): hold the request
+    while the soonest cooldown expiry falls strictly inside 300 s from arrival,
+    wake at the expiry, re-select, and never keep holding a gone client."""
+
+    def _make_two_backend_server(self) -> BridgeServer:
+        import uuid
+
+        from kitty.profiles.schema import Profile
+
+        provider = _StubProvider()
+        profiles = [
+            Profile(name=f"hold-{i}", provider="openai", model="m", auth_ref=str(uuid.uuid4()))
+            for i in range(2)
+        ]
+        return BridgeServer(
+            _StubLauncher(),
+            provider,
+            "test-key",
+            backends=[(provider, "test-key", profile) for profile in profiles],
+            backend_cooldown=300,
+        )
+
+    async def _run_hold(
+        self,
+        server: BridgeServer,
+        *,
+        request: SimpleNamespace | None = None,
+        select_side_effect: Any = None,
+        jitter: float = 0.0,
+    ) -> tuple[Any, list[float]]:
+        """Run one hold call under the stepped fake clock.
+
+        Returns ``(result, sleeps)`` where ``sleeps`` records each sleep argument
+        in order.  The fake sleep steps the fake clock by its argument, so the
+        loop's deadline arithmetic is deterministic.  Patching ``asyncio.sleep``
+        is safe here: no live server or competing task runs inside these unit
+        tests.
+
+        Args:
+            server: The server under test.
+            request: Client stub; defaults to a connected one.
+            select_side_effect: When not None, replaces ``_select_backend``.
+            jitter: Value returned by the patched jitter helper.
+        """
+        clock = _SteppedClock(1000.0)
+        sleeps: list[float] = []
+
+        async def fake_sleep(seconds: float) -> None:
+            sleeps.append(seconds)
+            clock.now += seconds
+
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(server_module.time, "monotonic", clock.monotonic))
+            stack.enter_context(patch.object(server_module.asyncio, "sleep", fake_sleep))
+            stack.enter_context(patch.object(server_module, "_recovery_hold_jitter", lambda: jitter))
+            if select_side_effect is not None:
+                stack.enter_context(
+                    patch.object(server, "_select_backend", side_effect=select_side_effect)
+                )
+            result = await server._select_backend_or_hold(
+                request if request is not None else _gone_request(False)
+            )
+        return result, sleeps
+
+    @pytest.mark.asyncio
+    async def test_holds_then_succeeds_when_recovery_is_inside_window(self):
+        """All backends cooling with 100 s to recovery: one 100 s hold, then success."""
+        server = self._make_two_backend_server()
+        _cool_backend(server, 0, cooldown=100, failed_at=1000.0)
+        _cool_backend(server, 1, cooldown=150, failed_at=1000.0)
+        result, sleeps = await self._run_hold(server)
+        assert result is None
+        # Asserted count AND argument: this kills the no-op-sleep mutant by
+        # assertion instead of by hanging.
+        assert sleeps == [100.0]
+
+    @pytest.mark.asyncio
+    async def test_beyond_window_returns_immediately(self):
+        server = self._make_two_backend_server()
+        _cool_backend(server, 0, cooldown=400, failed_at=1000.0)
+        _cool_backend(server, 1, cooldown=400, failed_at=1000.0)
+        result, sleeps = await self._run_hold(server)
+        assert isinstance(result, AllBackendsUnhealthyError)
+        assert result.retry_after == 400
+        assert sleeps == []
+
+    @pytest.mark.asyncio
+    async def test_boundary_300_does_not_hold(self):
+        """The window is strict: a recovery exactly 300 s away returns at once."""
+        server = self._make_two_backend_server()
+        _cool_backend(server, 0, cooldown=300, failed_at=1000.0)
+        _cool_backend(server, 1, cooldown=300, failed_at=1000.0)
+        result, sleeps = await self._run_hold(server)
+        assert isinstance(result, AllBackendsUnhealthyError)
+        assert result.retry_after == 300
+        assert sleeps == []
+
+    @pytest.mark.asyncio
+    async def test_non_recoverable_raise_is_returned_without_sleep(self):
+        """The no-stream-capable shape must never stall the arrival path."""
+        server = self._make_two_backend_server()
+        exc = AllBackendsUnhealthyError([{"name": "a"}], retry_after=100, recoverable=False)
+        result, sleeps = await self._run_hold(server, select_side_effect=exc)
+        assert result is exc
+        assert sleeps == []
+
+    @pytest.mark.asyncio
+    async def test_repeated_holds_stop_at_the_window(self):
+        """Fresh 100 s cooldowns after every wake: holds at t=0 and t=100 only;
+        at t=200 the next hold would not fit inside 300 s, so the latest
+        exception comes back."""
+        server = self._make_two_backend_server()
+        first = AllBackendsUnhealthyError([{"name": "a"}], retry_after=100)
+        second = AllBackendsUnhealthyError([{"name": "b"}], retry_after=100)
+        third = AllBackendsUnhealthyError([{"name": "late"}], retry_after=100)
+        result, sleeps = await self._run_hold(server, select_side_effect=[first, second, third])
+        assert result is third
+        assert sleeps == [100.0, 100.0]
+
+    @pytest.mark.asyncio
+    async def test_recovers_on_second_wake(self):
+        server = self._make_two_backend_server()
+        first = AllBackendsUnhealthyError([{"name": "a"}], retry_after=100)
+        result, sleeps = await self._run_hold(server, select_side_effect=[first, Mock()])
+        assert result is None
+        assert sleeps == [100.0]
+
+    @pytest.mark.asyncio
+    async def test_auth_sized_cooldown_returns_immediately(self):
+        server = self._make_two_backend_server()
+        exc = AllBackendsUnhealthyError([{"name": "a"}], retry_after=900)
+        result, sleeps = await self._run_hold(server, select_side_effect=exc)
+        assert result is exc
+        assert sleeps == []
+
+    @pytest.mark.asyncio
+    async def test_client_gone_at_arrival_never_sleeps(self):
+        server = self._make_two_backend_server()
+        exc = AllBackendsUnhealthyError([{"name": "a"}], retry_after=100)
+        result, sleeps = await self._run_hold(
+            server, request=_gone_request(True), select_side_effect=exc
+        )
+        assert result is exc
+        assert sleeps == []
+
+    @pytest.mark.asyncio
+    async def test_client_gone_mid_hold_stops_holding(self):
+        """The client vanishes during the first hold: the wake poll returns the
+        pending exception without re-selecting — no upstream request for a gone
+        reader."""
+        server = self._make_two_backend_server()
+        exc = AllBackendsUnhealthyError([{"name": "a"}], retry_after=100)
+        request = _gone_request(False)
+        select_mock = Mock(side_effect=exc)
+        clock = _SteppedClock(1000.0)
+        sleeps: list[float] = []
+
+        async def fake_sleep(seconds: float) -> None:
+            # The client disconnects while the request is being held.
+            request.transport.is_closing = lambda: True
+            sleeps.append(seconds)
+            clock.now += seconds
+
+        with (
+            patch.object(server_module.time, "monotonic", clock.monotonic),
+            patch.object(server_module.asyncio, "sleep", fake_sleep),
+            patch.object(server_module, "_recovery_hold_jitter", lambda: 0.0),
+            patch.object(server, "_select_backend", select_mock),
+        ):
+            result = await server._select_backend_or_hold(request)
+        assert result is exc
+        assert sleeps == [100.0]
+        select_mock.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_sleep_clamps_jitter_inside_the_window(self):
+        """Jitter 1.5 on a 1 s expiry sleeps 2.5; on a 299 s expiry the clamp
+        caps the sleep at the remaining window (300)."""
+        server = self._make_two_backend_server()
+        near = AllBackendsUnhealthyError([{"name": "a"}], retry_after=1)
+        result, sleeps = await self._run_hold(
+            server, select_side_effect=[near, Mock()], jitter=1.5
+        )
+        assert result is None
+        assert sleeps == [2.5]
+
+        late = AllBackendsUnhealthyError([{"name": "a"}], retry_after=299)
+        result, sleeps = await self._run_hold(
+            server, select_side_effect=[late, Mock()], jitter=1.5
+        )
+        assert result is None
+        assert sleeps == [300.0]
+
+    @pytest.mark.asyncio
+    async def test_clamp_bites_after_elapsed_time(self):
+        """A 49 s hold (plus 1.5 jitter) burns 50.5 s; a 249 s expiry then
+        leaves 249.5 s of window, so the clamp caps the sleep at 249.5 — not
+        the 250.5 an unclamped jitter would sleep, and not a formula check the
+        loop would reject outright (50.5+249 = 299.5 < 300)."""
+        server = self._make_two_backend_server()
+        first = AllBackendsUnhealthyError([{"name": "a"}], retry_after=49)
+        second = AllBackendsUnhealthyError([{"name": "b"}], retry_after=249)
+        result, sleeps = await self._run_hold(
+            server, select_side_effect=[first, second, Mock()], jitter=1.5
+        )
+        assert result is None
+        assert sleeps == [50.5, 249.5]
+
+    @pytest.mark.asyncio
+    async def test_mid_loop_recoverable_transition_stops_holding(self):
+        """A raise that turns non-recoverable after a successful hold exits at
+        the next loop check: one sleep, then the exception returns."""
+        server = self._make_two_backend_server()
+        first = AllBackendsUnhealthyError([{"name": "a"}], retry_after=100)
+        second = AllBackendsUnhealthyError([{"name": "b"}], retry_after=100, recoverable=False)
+        result, sleeps = await self._run_hold(server, select_side_effect=[first, second])
+        assert result is second
+        assert sleeps == [100.0]
+
+    @pytest.mark.asyncio
+    async def test_truncated_wake_exits_through_the_near_expiry_gamble(self):
+        """The integer truncation in ``remaining`` shortens the first hold
+        (99.4 -> 99), so the wake lands while the cooldown is still live; the
+        re-selection must then exit through the 60 s near-expiry gamble instead
+        of raising again (SYSTEM_DESIGN.md §6.2)."""
+        server = self._make_two_backend_server()
+        _cool_backend(server, 0, cooldown=100, failed_at=999.4)
+        _cool_backend(server, 1, cooldown=100, failed_at=999.4)
+        result, sleeps = await self._run_hold(server)
+        assert result is None
+        assert sleeps == [99.0]
+
+    @pytest.mark.asyncio
+    async def test_counts_each_hold_start(self):
+        server = self._make_two_backend_server()
+        exc = AllBackendsUnhealthyError([{"name": "a"}], retry_after=100)
+        result, sleeps = await self._run_hold(server, select_side_effect=exc)
+        assert result is exc
+        assert sleeps == [100.0, 100.0]
+        assert server._stats_recovery_holds == 2
+        # The counter must reach the /stats document, not just the attribute.
+        assert server._session_stats()["recovery_holds"] == 2
+
+
+class TestArrivalHoldWiring:
+    """KBR-243 wiring: each protocol's arrival selection runs the recovery
+    hold, and a 503 after the window names the *latest* cooldown.  The full
+    success path (hold, wake, serve) is proven over ``/v1/messages`` where the
+    happy-path pipeline already has fixtures."""
+
+    @pytest.mark.asyncio
+    async def test_messages_completes_after_hold(self):
+        from aioresponses import aioresponses
+
+        # Non-streaming CC response — same shape as the happy-path test above.
+        body = json.dumps(
+            {
+                "id": "test-1",
+                "object": "chat.completion",
+                "choices": [{"message": {"role": "assistant", "content": "hi"}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 5, "completion_tokens": 3, "total_tokens": 8},
+            }
+        ).encode()
+
+        server = _make_server()
+        port = await server.start_async()
+        try:
+            first = AllBackendsUnhealthyError([{"name": "stub"}], retry_after=1)
+            with (
+                aioresponses(passthrough=["http://127.0.0.1"]) as m,
+                patch.object(server_module, "_recovery_hold_jitter", lambda: 0.0),
+                patch.object(server, "_select_backend", side_effect=[first, Mock()]),
+            ):
+                m.post("https://api.example.com/v1/chat/completions", status=200, body=body)
+                async with (
+                    aiohttp.ClientSession() as session,
+                    session.post(
+                        f"http://127.0.0.1:{port}/v1/messages",
+                        json=_messages_request(),
+                        headers={"content-type": "application/json"},
+                    ) as resp,
+                ):
+                    assert resp.status == 200
+                    data = await resp.json()
+                    assert data["role"] == "assistant"
+        finally:
+            await server.stop_async()
+
+    @pytest.mark.parametrize(
+        ("path", "payload"),
+        [
+            (
+                "/v1/responses",
+                {"model": "test-model", "input": [{"role": "user", "content": "hi"}], "stream": False},
+            ),
+            (
+                "/v1/chat/completions",
+                {"model": "test-model", "messages": [{"role": "user", "content": "Hi"}], "stream": False},
+            ),
+            ("/v1beta/models/test:generateContent", {"contents": [{"parts": [{"text": "hi"}]}]}),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_held_request_completes_after_recovery(self, path, payload):
+        """AC-1 for the remaining protocols: a request held on arrival at a
+        1 s-away recovery completes with the normal (non-503) response once a
+        backend is selectable again."""
+        from aioresponses import aioresponses
+
+        # Non-streaming CC response — every protocol's pipeline consumes this
+        # upstream shape through its own translation.
+        body = json.dumps(
+            {
+                "id": "test-1",
+                "object": "chat.completion",
+                "choices": [{"message": {"role": "assistant", "content": "hi"}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 5, "completion_tokens": 3, "total_tokens": 8},
+            }
+        ).encode()
+
+        server = _make_bridge_mode_server()
+        port = await server.start_async()
+        try:
+            first = AllBackendsUnhealthyError([{"name": "stub"}], retry_after=1)
+            with (
+                aioresponses(passthrough=["http://127.0.0.1"]) as m,
+                patch.object(server_module, "_recovery_hold_jitter", lambda: 0.0),
+                patch.object(server, "_select_backend", side_effect=[first, Mock()]),
+            ):
+                m.post("https://api.example.com/v1/chat/completions", status=200, body=body)
+                async with (
+                    aiohttp.ClientSession() as session,
+                    session.post(
+                        f"http://127.0.0.1:{port}{path}",
+                        json=payload,
+                        headers={"content-type": "application/json"},
+                    ) as resp,
+                ):
+                    assert resp.status == 200
+        finally:
+            await server.stop_async()
+
+    @pytest.mark.parametrize(
+        ("path", "payload"),
+        [
+            (
+                "/v1/messages",
+                {"model": "test-model", "messages": [{"role": "user", "content": "Hello"}], "stream": False},
+            ),
+            (
+                "/v1/responses",
+                {"model": "test-model", "input": [{"role": "user", "content": "hi"}], "stream": False},
+            ),
+            (
+                "/v1/chat/completions",
+                {"model": "test-model", "messages": [{"role": "user", "content": "Hi"}], "stream": False},
+            ),
+            ("/v1beta/models/test:generateContent", {"contents": [{"parts": [{"text": "hi"}]}]}),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_503_names_latest_cooldown_after_hold(self, path, payload):
+        """Selection fails again inside the window, then the window dies: the
+        503 carries the second exception's cooldown, not the first's."""
+        server = _make_bridge_mode_server()
+        port = await server.start_async()
+        try:
+            early = AllBackendsUnhealthyError(
+                [{"name": "early", "reason": "rate_limit", "remaining_cooldown": 1}],
+                retry_after=1,
+            )
+            late = AllBackendsUnhealthyError(
+                [{"name": "late", "reason": "rate_limit", "remaining_cooldown": 400}],
+                retry_after=400,
+            )
+            with (
+                patch.object(server_module, "_recovery_hold_jitter", lambda: 0.0),
+                patch.object(server, "_select_backend", side_effect=[early, late]),
+            ):
+                async with (
+                    aiohttp.ClientSession() as session,
+                    session.post(
+                        f"http://127.0.0.1:{port}{path}",
+                        json=payload,
+                        headers={"content-type": "application/json"},
+                    ) as resp,
+                ):
+                    assert resp.status == 503
+                    assert resp.headers["Retry-After"] == "400"
+                    data = json.dumps(await resp.json())
+                    assert "late" in data
+                    assert "early" not in data
         finally:
             await server.stop_async()

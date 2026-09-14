@@ -14,7 +14,8 @@ Symbols are named, not line-numbered, for the reason `TEST_SUITE.md` gives.
 
 Traces to [KBR-220](https://shelpuk.atlassian.net/browse/KBR-220) and the Windows stop-handler
 defect fixed with it. Related: KBR-154, KBR-176 and KBR-219 (how `start` reads and waits on the
-child), and KBR-180 (probing a PID on Windows).
+child), KBR-180 (probing a PID on Windows), and KBR-231 (detaching the child from the launching
+console on Windows).
 
 ### 1.1 Components
 
@@ -72,11 +73,10 @@ Numbered as in the KBR-220 requirements and PR. D4 there, which folded the Windo
 | D5 | Where a loop cannot register signal handlers, register nothing: no `signal.signal` fallback | On Windows, `kitty bridge stop` ends the process with `TerminateProcess`, which no handler can intercept, and `stop_bridge` removes the state file itself. Ctrl+C in a foreground bridge still raises `KeyboardInterrupt`, which `asyncio.run` turns into cancellation, so `finally: stop_async()` still runs. A thread-to-loop signal bridge would add complexity for no visible gain. |
 | D6 | `stop_signals` lives in `kitty.bridge`, not a top-level leaf | Both callers (`kitty.cli.main`, `kitty.bridge_runner`) may already import `kitty.bridge`. A top-level leaf would need its own import-linter contract and an entry in every "every sibling" list. |
 | D7 | A missing keys file means auth off; a named-but-missing one refuses to start with a clear error | Before the fix a fresh install could not start a background bridge at all (`parse_keys_file`'s `FileNotFoundError`). Auth off matches the foreground bridge, `kitty claude` and the README; the default file still enables auth when it exists, so installs relying on it keep exactly the behaviour they had. Rejected: requiring a keys file — background would be the only mode demanding a hand-created secrets file. *Product owner, 2026-09-14 (KBR-230).* |
+| D8 | On Windows the background bridge child is started detached: `DETACHED_PROCESS \| CREATE_NEW_PROCESS_GROUP` | `start_new_session=True` is POSIX-only, and CPython's Windows `Popen` accepts it and ignores it, so a "background" bridge kept the launcher's console: Ctrl+C there, or closing the window, ended a bridge the user was told runs in the background (KBR-231). Observed on the Windows leg first, per the ticket's first acceptance criterion; the probe lives beside its guard in `tests/bridge/test_bridge_management.py::TestTheWindowsConsoleDetachment`. `DETACHED_PROCESS` gives the child no console at all, so no console event of any console can reach it — the Windows analogue of the `setsid()` `start_new_session` runs on POSIX. `CREATE_NEW_PROCESS_GROUP` additionally disables Ctrl+C group-wide — scoped claim, since `CTRL_BREAK` is always delivered, but a detached child has no console to receive any of it on. `CREATE_NO_WINDOW` (the ticket's alternative) was rejected: it detaches the child from the launcher's console but gives it a hidden console of its own -- a `conhost.exe` per bridge for a daemon that needs no console at all -- and beside `DETACHED_PROCESS` the vendor docs state it is ignored anyway. The flags are integer literals in `manage.py` because `subprocess` imports those names from `_winapi` on Windows only, and the decision (`background_spawn_kwargs`) returns key-disjoint dicts because POSIX `Popen` raises `ValueError` on a nonzero `creationflags`. Scope: `start_bridge` only — service units run `bridge_runner` directly under a manager that already detaches them. |
 
 ### 1.5 Known limits (recorded, not fixed here)
 
-- **A Windows "background" bridge shares the user's console.** `start_new_session=True` is
-  POSIX-only, so closing that console or pressing Ctrl+C in it ends the bridge.
 - **A Windows bridge never shuts down gracefully when stopped.** `TerminateProcess` skips
   `stop_async`, so an opt-in session summary (`KITTY_SESSION_SUMMARY`) is not written.
 - **Services running as another account are outside the contract.** The NSSM script sets no
@@ -402,3 +402,81 @@ logic. A no means byte-identical to the pre-KBR-232 behaviour.
 - In-stream error failover on `/v1/chat/completions` needs a backend pool; pool-less the
   error surfaces to the client (which is still the fix: the per-event translator used to
   swallow the error and deliver a truncated success).
+## 6. Backend health, cooldowns, and the arrival recovery hold
+
+### 6.1 The state machine as it stands
+
+Each backend of a balancing pool carries a health record
+(`BridgeServer._backend_health`). A failure marks it unhealthy for a cooldown whose
+length depends on the kind: `rate_limit` from the provider's own retry hint,
+`hard`/`cloudflare` from `backend_cooldown` (default 300 s; capped at 30 s for a
+one-backend pool), `transport`/`stream` on an escalating ladder, `auth` for 900 s,
+`entitlement` for 24 h. On request arrival `_select_backend()` picks among healthy
+backends (backup tier held out while a primary lives); when **every** backend is
+cooling it either gambles on a near-expiry backend (soonest recovery ≤ 60 s,
+`_ALL_UNHEALTHY_FAST_FAIL_THRESHOLD`) or raises `AllBackendsUnhealthyError`, which the
+four protocol handlers answer with an immediate per-protocol 503 carrying
+`Retry-After` and the per-backend causes.
+
+### 6.2 KBR-243: hold the arrival while recovery fits inside the window
+
+An immediate 503 makes Claude Code abandon the turn even when the outage is seconds
+from ending; the operator's session then stalls until a human re-sends. **To Be:**
+when selection fails on arrival, `_select_backend_or_hold()` holds the request while
+the soonest expiry fits strictly inside `_RECOVERY_HOLD_WINDOW` (300 s) of the arrival
+— sleep to the expiry, re-select, proceed — and answers with the today-shaped 503
+built from the **latest** failure only once no recovery fits. `/stats` gains
+`recovery_holds` (hold starts; `all_backends_unhealthy` keeps counting raise events,
+including raises a hold then recovers). Decisions, and why:
+
+- **Arrival only.** The reported failure mode is the arrival 503 (the ticket's log:
+  the agent quits at second zero). Mid-ladder exhaustion is a different path whose
+  post-emission side is governed by the Q14/KBR-163 rule that the bridge never retries
+  or holds once bytes reached the client; blanket mid-ladder holds would have to be
+  proven per transport and are deliberately out of scope.
+- **Uniform across cooldown kinds.** The hold does not filter `rate_limit` from
+  `hard`/`transport`/`cloudflare` — the same uniformity as the existing 60 s
+  near-expiry gamble, which also does not care why a backend cools. `auth` (900 s)
+  and `entitlement` (24 h) exceed the window and 503 immediately; in the narrow band
+  where their *remainder* fits, one ≤300 s hold precedes the 503 — acceptable for a
+  session that is already dead.
+- **No polling: sleep exactly to the expiry.** Cooldown expiry is deterministic
+  monotonic arithmetic, so waking at `retry_after` wastes nothing. The integer
+  truncation in `remaining` can wake the loop ≤1 s early; the re-selection then exits
+  through the existing near-expiry gamble, which is what that branch is for.
+- **Strict window.** A recovery exactly 300 s away 503s immediately: a 300 s silent
+  hold sits on common client idle-timeout edges and buys nothing over an immediate
+  503 carrying `Retry-After: 300`. The window is hard-coded from the ticket
+  ("within the next 300 seconds"); a configuration knob waits for an operator asking
+  for one.
+- **`recoverable=False` on the no-stream-capable raise.** That raise fabricates
+  `retry_after=300` (§6.1's streaming filter — unreachable at arrival today, kept as
+  hardening): its number is not a recovery time, so the hold must never sleep on it.
+- **Jitter, clamped.** Each hold sleeps `min(retry_after + jitter, window − elapsed)`
+  with a 0–2 s jitter so a herd of held sessions does not converge on the one
+  just-recovered backend in a single instant; the clamp keeps every hold inside the
+  window the formula promised.
+- **The client is protected while it waits.** Before each hold the request body
+  is drained best-effort (aiohttp caches it, so the handler's later parse is
+  unchanged and later iterations are no-ops) so the client is not left stalled
+  mid-upload; the transport is polled
+  before the first sleep and after each wake — aiohttp runs with
+  `handler_cancellation` off, so this is the only way to notice a hang-up
+  (the `_raise_if_client_gone` pattern, KBR-241's `PreambleHold` being the sibling
+  hold) — and a gone client ends the hold with no upstream request fired for it.
+- **Client-side deadlines.** The binding deadline for a held request is Claude Code's
+  streaming first-byte watchdog (~5 min unset default); `API_TIMEOUT_MS` (10 min
+  default) is the outer cap. A client that aborts re-sends, and the re-sent request
+  re-enters the hold benignly — a new arrival under the same formula. SSE keep-alive
+  pings would let holds run longer still, but are deferred as an accepted cost
+  (keep-alive semantics differ across the four served protocols, and inventing bytes
+  on three of them is an I2 exposure); revisit if field reports show clients idling
+  out mid-hold.
+- **Empty-pool profiles are untouched.** A profile without a backends list never
+  raises on arrival and never holds; a one-element balancing list holds like any
+  pool. Graceful shutdown may wait behind held sessions up to aiohttp's
+  `shutdown_timeout` (60 s default) — accepted, bounded.
+
+Tests: `tests/bridge/test_all_backends_unhealthy.py` — `TestRecoveryHold` (L1, the
+stepped-on-sleep fake clock) and `TestArrivalHoldWiring` (HTTP against the real app;
+a real 1 s hold, jitter patched).
