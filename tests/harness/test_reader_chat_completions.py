@@ -266,19 +266,22 @@ class TestEnvelope:
     def test_each_published_extra_key_is_consumed_at_its_wire_key(
         self, key: str, value: Any
     ) -> None:
-        """R1.6a — every key in :data:`_PUBLISHED_EXTRA_KEYS` rides at its wire key
-        (the B1 closure). Fourteen keys total: ten current
-        (``store``, ``metadata``, ``service_tier``, ``reasoning_effort``,
-        ``verbosity``, ``modalities``, ``prediction``, ``user``,
-        ``web_search_options``, ``prompt_cache_options``) plus two
-        current-shape-but-peripheral (``audio``, ``moderation``) plus
-        two deprecated top-level spellings (``functions``,
-        ``function_call``) the older ``tools``/``tool_calls`` replaced.
-        All carry the §3.3.1a "declared control field of the format
-        maps to ``envelope.extra[<wire key>]``" rule. A residual entry
-        on any of them is the wrong shape — G26 binds the row-plan for
-        the downstream register, and a body carrying any of them is one
-        real Codex / OpenAI / OpenAI-compat traffic sends.
+        """R1.6a — twelve of :data:`_PUBLISHED_EXTRA_KEYS`' fourteen members ride at their wire key
+        (the B1 closure). ``metadata`` and ``service_tier`` are covered by
+        the separate R1.6 test
+        (:func:`test_a_published_extra_key_rides_at_its_wire_key`), so the
+        union of R1.6 + R1.6a is the full set. Ten of these twelve are
+        current-shape-but-peripheral or modern spelling (``store``,
+        ``user``, ``prediction``, ``modalities``, ``verbosity``,
+        ``reasoning_effort``, ``prompt_cache_options``,
+        ``web_search_options``, ``audio``, ``moderation``); two are the
+        deprecated top-level spellings ``functions`` and ``function_call``
+        the older ``tools``/``tool_calls`` replaced. All carry the
+        §3.3.1a "declared control field of the format maps to
+        ``envelope.extra[<wire key>]``" rule. A residual entry on any of
+        them is the wrong shape — G26 binds the row-plan for the
+        downstream register, and a body carrying any of them is one real
+        Codex / OpenAI / OpenAI-compat traffic sends.
         """
         projected = _read(_minimal(**{key: value}))
 
@@ -712,6 +715,38 @@ class TestMessages:
 
         assert projected.residual == {
             "messages[0].content[0].image_url.url": "data:image/png;base64,!!!not-base64!!!",
+            "messages[0].content[0].cache_control": {"type": "ephemeral"},
+        }
+
+    def test_a_cache_control_on_a_non_base64_data_url_image_residualises(self) -> None:
+        """R6.3c — the parallel branch of R6.3b: a non-base64 data URL.
+
+        ``data:image/png,abc`` cannot be digested without inventing a
+        decoding, and the reader residualises the URL at its own path —
+        the same branch that runs the base64-decode-failure case, with
+        the same treatment for ``cache_control``. The two branches share
+        the code path; pinning both proves neither regressed away.
+        """
+        projected = _read(
+            {
+                "model": "gpt-6-astra",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image_url",
+                                "image_url": {"url": "data:image/png,abc"},
+                                "cache_control": {"type": "ephemeral"},
+                            }
+                        ],
+                    }
+                ],
+            }
+        )
+
+        assert projected.residual == {
+            "messages[0].content[0].image_url.url": "data:image/png,abc",
             "messages[0].content[0].cache_control": {"type": "ephemeral"},
         }
 
@@ -1441,14 +1476,14 @@ class TestConvergence:
         results after merge would fail (2); a reader that broke the
         invariant the merger produces would fail (1).
         """
-        wrong_merged = c.Turn(
+        correct_merged = c.Turn(
             role="user",
             parts=(
                 c.ToolResult(content=(c.Text("72 and sunny"),), tool_use_id="call_abc123"),
                 c.Text("Thanks!"),
             ),
         )
-        right_merged = c.Turn(
+        re_sorted = c.Turn(
             role="user",
             parts=(
                 c.Text("Thanks!"),
@@ -1457,7 +1492,7 @@ class TestConvergence:
         )
 
         # (1) Dataclass-level: the merge-rule invariant.
-        assert wrong_merged != right_merged
+        assert correct_merged != re_sorted
 
         # (2) Reader-level: the canonical exchange from R7.1 produces a
         # merged user turn whose parts are ``[ToolResult, Text("Thanks!")]``

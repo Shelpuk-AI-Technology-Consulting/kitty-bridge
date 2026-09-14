@@ -285,25 +285,30 @@ def _read_tool_choice(
     # canonical address. Absent and `false` are both the default and produce
     # no entry, so neither side carries a delta. Writing on the absent case
     # would force the CC reader to compare a default the wire never wrote.
-    # A wrongly-typed value (not a bool) is *not* added to the mapped set, so
-    # `_residualise` puts it in the residual — §7.4.1's wrongly-typed-leaf
-    # rule, applied here because the registry is not the right home for a
-    # mapped field.
+    # A wrongly-typed value (not a bool, not null) is *not* added to the
+    # mapped set, so `_residualise` puts it in the residual — §7.4.1's
+    # wrongly-typed-leaf rule, applied here because the registry is not the
+    # right home for a mapped field. ``null`` is treated as absent (the
+    # cache_control precedent), matching the CC reader's
+    # ``parallel_tool_calls: null`` branch — six readers cannot quietly
+    # disagree about what a null flag means, and a cross-format corpus
+    # entry carrying one would otherwise fail on the Anthropic wire while
+    # projecting green on the CC wire.
     flag = value.get("disable_parallel_tool_use")
     mapped_disable: set[str] = set()
-    if isinstance(flag, bool):
+    if flag is None or isinstance(flag, bool):
         mapped_disable = {"disable_parallel_tool_use"}
-        if flag:
+        if flag is True:
             extra[c.PARALLEL_TOOL_CALLS_KEY] = False
 
     # `name` is accounted for only on the branch that read it: a stale `name`
     # beside `type: "auto"` is exactly the mutation the oracle should report, and
     # excluding it unconditionally would drop it silently.
-    # `disable_parallel_tool_use` joins the mapped set only when its value is a
+    # `disable_parallel_tool_use` joins the mapped set when its value is a
     # bool (read, either mapped onto `extra[parallel_tool_calls]` or silently
-    # the default) — a typo'd sibling (``disable_parallel_tool_usee: true``) is
-    # not in the set and residualises, the unregistered-mutation guard §3.3.1
-    # names.
+    # the default) or null (treated as absent, for totality) — a typo'd
+    # sibling (``disable_parallel_tool_usee: true``) is not in the set and
+    # residualises, the unregistered-mutation guard §3.3.1 names.
     _residualise(
         value,
         {"type", "name", *mapped_disable} if kind == "tool" else {"type", *mapped_disable},
