@@ -67,6 +67,10 @@ class PreambleHold:
         error_event: The parsed ``data:`` object of the last error event seen
             while held, as received, or ``None``. Callers use it only when its
             ``error`` value is a dict.
+
+    The :attr:`error_seen` and :attr:`error_event_complete` properties report
+    whether an error event arrived while held and whether its lines have all
+    been seen; the caller that stops reading on an error waits for the latter.
     """
 
     def __init__(self, *, max_held_bytes: int = MAX_HELD_BYTES) -> None:

@@ -1090,6 +1090,25 @@ def _stops_for_blocks_the_client_saw(buffered_events: list[str]) -> list[str]:
     ]
 
 
+def _usable_upstream_error_payload(hold: PreambleHold) -> dict | None:
+    """Return the hold's recorded error payload when its ``error`` value is a dict.
+
+    Recognition on the hold admits any JSON object an error event carries, but
+    only this shape is deliverable to the client (D2 as amended by KBR-241);
+    everything else keeps the bridge's own fallback bodies.
+
+    Args:
+        hold: The preamble hold whose attempt ended unreleased.
+
+    Returns:
+        The recorded payload, or ``None`` when it is absent or unusable.
+    """
+    payload = hold.error_event
+    if isinstance(payload, dict) and isinstance(payload.get("error"), dict):
+        return payload
+    return None
+
+
 def _is_retryable_exception(exc: Exception) -> bool:
     """Return True for transient network exceptions that should be retried."""
     # A gone client is not an upstream fault: retrying has nobody to serve.
@@ -4090,18 +4109,20 @@ class BridgeServer:
                                 break
 
                             # This attempt wrote nothing, so its discarded bytes exist only here.
-                            held_error_type: str | None = None
-                            if hold.error_seen and isinstance(hold.error_event, dict):
-                                err = hold.error_event.get("error")
-                                if isinstance(err, dict) and isinstance(err.get("type"), str):
-                                    held_error_type = err["type"]
+                            usable_payload = _usable_upstream_error_payload(hold)
+                            held_error_type = (
+                                usable_payload["error"].get("type") if usable_payload is not None else None
+                            )
+                            if not isinstance(held_error_type, str):
+                                held_error_type = None
+                            error_note = f", upstream_error={held_error_type}" if held_error_type else ""
                             logger.warning(
                                 "Native Messages stream ended with no content for %s (%d bytes held, "
                                 "stop_reason=%s%s)",
                                 message_id,
                                 hold.held_size,
                                 hold.stop_reason,
-                                f", upstream_error={held_error_type}" if held_error_type else "",
+                                error_note,
                             )
                             logger.debug("Discarded native reply head: %r", hold.head(_MAX_LOGGED_HELD_BYTES))
 
@@ -4110,10 +4131,8 @@ class BridgeServer:
                             if sr is not None:
                                 # Guarded-dead post-KBR-183; if it ever runs, the terminal error is
                                 # the provider's own when this attempt carried one.
-                                if isinstance(hold.error_event, dict) and isinstance(
-                                    hold.error_event.get("error"), dict
-                                ):
-                                    terminal_error = hold.error_event
+                                if usable_payload is not None:
+                                    terminal_error = usable_payload
                                 else:
                                     terminal_error = {
                                         "type": "error",
@@ -4174,10 +4193,10 @@ class BridgeServer:
                             # the client is written against (D2's rationale at exhaustion), so it is
                             # re-embedded with only the reason marker added; anything unusable
                             # keeps D4's body.
-                            if isinstance(hold.error_event, dict) and isinstance(hold.error_event.get("error"), dict):
+                            if usable_payload is not None:
                                 exhaustion_error = {
-                                    **hold.error_event,
-                                    "error": {**hold.error_event["error"], "reason": "upstream_error"},
+                                    **usable_payload,
+                                    "error": {**usable_payload["error"], "reason": "upstream_error"},
                                 }
                             else:
                                 exhaustion_error = {
