@@ -4654,6 +4654,20 @@ names — credentials, or quota with the top-up paragraph — with `retryable` *
 resolution `STATUS_MATRIX_MOVED` records for the generic code; that body comes from a run 27 turns
 deep, so the retry is priced, and `FourHundredCarrierTests` pins it.
 
+*Closed by KBR-217 (2026-09-14).* D3's three broken shapes are closed (KBR-217,
+`fix/kbr-217-credential-prose-retry`): shape (1) — `<truncated` marker with no
+result-event marker — and shape (3) — a dropped corrupt NDJSON result line — are now
+decided before every tier as unattributable-fatal. Shape (2) needs no change: the
+salvage the ticket sketched would BREAK the pinned refusal verdict (the parseable
+variant loses the refusal because `_outcome_text` excludes `tool_result` content), so
+the whole-record search path remains. The truncated-401 control
+`test_a_result_value_is_not_a_result_key` stays unchanged. The Cloudflare wrapper
+sentinel is tightened to require a string-opener (`r'"result"\s*:\s*"'`), excluding
+`"result":null`. OpenRouter's *"but can only afford"* phrase is now read by the
+provider-scoped `QUOTA_WORD_PATTERNS`; the `API Error: 402 … in result` carrier stays
+`fatal`-with-no-advice and is the named residual (Z.ai's reset-time-in-result carrier
+is the same boundary, closed by the reset-time capture via `RESET_PATTERN`).
+
 **How it is proven.** `.github/review/tests/test_review_scripts.py`, run directly by `ci.yml`
 rather than through `pytest`, so it is outside §8.1's marker matrix and carries no layer
 marker. That is deliberate: the suite must stay runnable with a bare interpreter and no
