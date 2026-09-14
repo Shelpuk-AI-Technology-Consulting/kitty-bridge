@@ -41,6 +41,20 @@ class ZaiAnthropicAdapter(AnthropicAdapter):
     #: was translated.  KBR-203, decision D2.
     forwards_thinking_display = False
 
+    #: Keeps the empty placeholder thinking block (register row P5e): whether
+    #: Z.AI accepts a history with no thinking block is unverified, and the
+    #: route must not change wire behaviour without evidence (KBR-228 part C).
+    injects_placeholder_thinking = True
+
+    #: Restores the agent's signed thinking blocks and original system
+    #: verbatim (KBR-228 part B) — inherited ``True`` deliberately, spelled out
+    #: here so the choice is visible next to its neighbours' opt-outs.  This
+    #: adapter's primary path is native passthrough, which already ships the
+    #: agent's raw signed blocks unchanged; the translated rebuild (used for
+    #: non-native clients and balancing re-serialization) restoring the same
+    #: bytes only matches what the upstream already receives.
+    forwards_thinking_signature = True
+
     #: Z.AI's reference does not document ``output_config`` either; the same
     #: failover path is where the translated branch would restore it.  KBR-224.
     forwards_output_config = False
@@ -70,7 +84,10 @@ class ZaiAnthropicAdapter(AnthropicAdapter):
 
     def translate_to_upstream(self, cc_request: dict) -> dict:
         if cc_request.get("_native_messages_request"):
-            return {k: v for k, v in cc_request.items() if k not in self._INTERNAL_KEYS}
+            result = {k: v for k, v in cc_request.items() if k not in self._INTERNAL_KEYS}
+            if "messages" in result:
+                result["messages"] = self._strip_internal_message_keys(result["messages"])
+            return result
         return super().translate_to_upstream(cc_request)
 
     def translate_from_upstream(self, raw_response: dict) -> dict:

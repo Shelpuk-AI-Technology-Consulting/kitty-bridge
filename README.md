@@ -6,7 +6,7 @@
     <img src="https://img.shields.io/pypi/pyversions/kitty-bridge.svg" alt="Python version">
   </a>
   <img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT">
-  <img src="https://img.shields.io/github/actions/workflow/status/Shelpuk-AI-Technology-Consulting/kitty-bridge/ci.yml?branch=main" alt="CI">
+  <img src="https://img.shields.io/github/actions/workflow/status/Shelpuk-AI-Technology-Consulting/kitty-bridge/publish.yml" alt="Publish to PyPI">
   <a href="https://pepy.tech/projects/kitty-bridge" target="_blank" rel="noopener noreferrer">
     <img src="https://static.pepy.tech/badge/kitty-bridge" alt="Total PyPI downloads">
   </a>
@@ -384,6 +384,12 @@ backend and as a session total, so a pool member returning well-formed-looking g
 under `--debug`. It is a diagnostic only: it never marks a backend unhealthy or triggers failover. Run with `--debug`
 and `grep 'tool_use audit:'` for the offending payloads.
 
+`thinking_stripped` counts the thinking blocks the bridge had to strip and retry because the upstream rejected their
+signatures — which, since the signed history is carried through, means the conversation history was edited (by
+compaction or truncation) and the model lost reasoning that was still valid. It is reported per backend and as a
+session total, next to `malformed_tool_use`, and is likewise a diagnostic only: it never marks a backend unhealthy.
+A compaction-heavy session whose reasoning keeps degrading shows up here.
+
 **After the run.** `--session-summary PATH` (or `KITTY_SESSION_SUMMARY`) writes the same document to a file when the
 bridge shuts down — a small artifact CI can upload, instead of a multi-megabyte debug log:
 
@@ -701,6 +707,16 @@ or model is misbehaving.
 
 The response is a `502` carrying `"reason": "empty_response"`. One visible cost of the hold: on reasoning models the
 agent shows its spinner, not live thinking, until the first text or tool call arrives.
+
+### A 502 whose error carries `"reason": "upstream_error"`
+
+Same providers. The provider answered kitty's request with its own error event before producing any content —
+an `overloaded_error`, say. Kitty retries the attempt on the same ladder as an empty reply (and fails over on a
+balancing profile), so you see this only when every attempt came back with the provider's error. Nothing reached
+the agent; the error shown is the provider's own, with kitty's `"reason": "upstream_error"` added so logs can tell
+it apart — or, if the provider's error payload was too malformed to deliver, kitty's own message saying so, with
+the same `"reason": "upstream_error"`. Either way an errored ladder is never reported as an empty one. Simply
+resend; if it persists, the provider is failing outright — switch backend or wait it out.
 
 ### "Kitty Bridge received a reply from the upstream provider that stopped (max_tokens) before producing any content"
 

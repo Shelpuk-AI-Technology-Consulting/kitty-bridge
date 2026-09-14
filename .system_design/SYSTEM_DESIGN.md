@@ -14,7 +14,8 @@ Symbols are named, not line-numbered, for the reason `TEST_SUITE.md` gives.
 
 Traces to [KBR-220](https://shelpuk.atlassian.net/browse/KBR-220) and the Windows stop-handler
 defect fixed with it. Related: KBR-154, KBR-176 and KBR-219 (how `start` reads and waits on the
-child), and KBR-180 (probing a PID on Windows).
+child), KBR-180 (probing a PID on Windows), and KBR-231 (detaching the child from the launching
+console on Windows).
 
 ### 1.1 Components
 
@@ -72,11 +73,10 @@ Numbered as in the KBR-220 requirements and PR. D4 there, which folded the Windo
 | D5 | Where a loop cannot register signal handlers, register nothing: no `signal.signal` fallback | On Windows, `kitty bridge stop` ends the process with `TerminateProcess`, which no handler can intercept, and `stop_bridge` removes the state file itself. Ctrl+C in a foreground bridge still raises `KeyboardInterrupt`, which `asyncio.run` turns into cancellation, so `finally: stop_async()` still runs. A thread-to-loop signal bridge would add complexity for no visible gain. |
 | D6 | `stop_signals` lives in `kitty.bridge`, not a top-level leaf | Both callers (`kitty.cli.main`, `kitty.bridge_runner`) may already import `kitty.bridge`. A top-level leaf would need its own import-linter contract and an entry in every "every sibling" list. |
 | D7 | A missing keys file means auth off; a named-but-missing one refuses to start with a clear error | Before the fix a fresh install could not start a background bridge at all (`parse_keys_file`'s `FileNotFoundError`). Auth off matches the foreground bridge, `kitty claude` and the README; the default file still enables auth when it exists, so installs relying on it keep exactly the behaviour they had. Rejected: requiring a keys file — background would be the only mode demanding a hand-created secrets file. *Product owner, 2026-09-14 (KBR-230).* |
+| D8 | On Windows the background bridge child is started detached: `DETACHED_PROCESS \| CREATE_NEW_PROCESS_GROUP` | `start_new_session=True` is POSIX-only, and CPython's Windows `Popen` accepts it and ignores it, so a "background" bridge kept the launcher's console: Ctrl+C there, or closing the window, ended a bridge the user was told runs in the background (KBR-231). Observed on the Windows leg first, per the ticket's first acceptance criterion; the probe lives beside its guard in `tests/bridge/test_bridge_management.py::TestTheWindowsConsoleDetachment`. `DETACHED_PROCESS` gives the child no console at all, so no console event of any console can reach it — the Windows analogue of the `setsid()` `start_new_session` runs on POSIX. `CREATE_NEW_PROCESS_GROUP` additionally disables Ctrl+C group-wide — scoped claim, since `CTRL_BREAK` is always delivered, but a detached child has no console to receive any of it on. `CREATE_NO_WINDOW` (the ticket's alternative) was rejected: it detaches the child from the launcher's console but gives it a hidden console of its own -- a `conhost.exe` per bridge for a daemon that needs no console at all -- and beside `DETACHED_PROCESS` the vendor docs state it is ignored anyway. The flags are integer literals in `manage.py` because `subprocess` imports those names from `_winapi` on Windows only, and the decision (`background_spawn_kwargs`) returns key-disjoint dicts because POSIX `Popen` raises `ValueError` on a nonzero `creationflags`. Scope: `start_bridge` only — service units run `bridge_runner` directly under a manager that already detaches them. |
 
 ### 1.5 Known limits (recorded, not fixed here)
 
-- **A Windows "background" bridge shares the user's console.** `start_new_session=True` is
-  POSIX-only, so closing that console or pressing Ctrl+C in it ends the bridge.
 - **A Windows bridge never shuts down gracefully when stopped.** `TerminateProcess` skips
   `stop_async`, so an opt-in session summary (`KITTY_SESSION_SUMMARY`) is not written.
 - **Services running as another account are outside the contract.** The NSSM script sets no
@@ -277,3 +277,128 @@ prints `kitty exited with code N - press Enter to close` and waits for a line or
   later Claude release; the cost of drift is a name mismatch, not a failure.
 - If the inner Python cannot start at all (e.g. the interpreter was removed), nothing holds the
   pane; the outer kitty still deletes the environment file.
+
+---
+
+## 4. Protocol translators: stream item positioning
+
+Traces to [KBR-226](https://shelpuk.atlassian.net/browse/KBR-226) and
+[KBR-240](https://shelpuk.atlassian.net/browse/KBR-240). Related: KBR-221, KBR-232 (the
+Anthropic-*upstream* translated adapters — a different seam, §5). This section is seeded by
+KBR-240's area and grows as later work reaches the rest of the translator layer.
+
+### 4.1 Components
+
+| Component | Role |
+|---|---|
+| `MessagesTranslator` (`kitty.bridge.messages.translator`) | Claude Code's Messages wire ⇄ Chat Completions. Streams Anthropic SSE; positions content blocks by **index**. |
+| `ResponsesTranslator` (`kitty.bridge.responses.translator`) | Codex's Responses wire ⇄ Chat Completions. Streams Responses SSE (`kitty.bridge.responses.events` formatters); positions output items by **`output_index`**. |
+| `GeminiTranslator` | Gemini CLI's wire ⇄ Chat Completions. Positional `parts[]` — no index in its grammar, so no allocation contract (checked by KBR-226's sibling audit). |
+| `kitty.bridge.engine.ToolCallBuffer` | Assembles streamed tool-call arguments; one per upstream call. |
+
+On these routes the upstream always speaks Chat Completions (native-Anthropic providers skip
+the translators entirely — see the M2 row of `TEST_SUITE.md` §3.2). CC's stream carries its
+own authorial `tool_calls[].index`; the *inbound* wire's positional slots are kitty's to
+allocate — the upstream authorial number and the downstream positional slot are different
+things that happen to look alike when both start at 0.
+
+### 4.2 The To Be contract: one counter per translator, allocated at open
+
+Each streaming translator owns **one counter** for its wire's positional slot. A slot is
+allocated when an output item **opens** — the first reasoning delta, the first content
+delta, each newly seen tool-call id — and every event referencing that item carries the
+recorded slot, on both the streaming path and the two closing paths (the finish chunk, and
+the EOF-without-finish fallback: `finalize_interrupted_stream` /
+`synthesize_completed_events`).
+
+- Every opened item gets the next distinct, increasing slot; one added/done pair per item.
+- **The CC `tool_calls[].index` is a routing key only** — which `ToolCallBuffer` and meta an
+  argument delta lands in — never the downstream slot.
+- **Decided stream shape** (G39, and KBR-240 keeps it): items opened out of order may
+  overlap in time and need not close in order — clients key items by id and position by
+  slot — but each slot opens once, closes once, closes only after it opened, and carries no
+  delta outside its own window.
+- **Responses specifics** (KBR-240): `response.function_call_arguments.delta` /
+  `...done` carry the owning call's `output_index` — the vendor grammar defines it as a
+  required field (OpenAI SDK types, verified 2026-09-14); kitty omitted it. And
+  `response.completed`'s `output` array is ordered by allocated `output_index`, so a client
+  aligning array position with indices reads it correctly.
+
+### 4.3 Decisions, and why
+
+| # | Decision | Why, and the rejected alternative |
+|---|---|---|
+| X1 | A shared per-translator counter allocated at open, not a slot derived from upstream numbers | Deriving the Responses `output_index` from CC's tool-call index (the pre-fix behaviour) collides the moment two item kinds are live: text and reasoning were pinned to 0 and the first call took CC's 0, so any pair of the three item kinds claimed one slot and two `output_item.done` events closed it. The downstream slot positions *our* items; anchoring it to an upstream authorial number leaves it undefined whenever an item opens outside the anchor's frame. Mirrors KBR-226's Messages fix — one mechanism per wire, not one per defect. |
+| X2 | `output_index` added to the arguments events rather than left omitted | The vendor grammar requires the field on both events (verified against the generated SDK types). A client positioning by `output_index` — the client class the defect is about — needs it there as much as on `output_item.*`. Additive: existing clients tolerate the extra field. |
+| X3 | `response.completed`'s `output` sorted by slot, not by emission order | Opening order and slot order diverge once text can open before reasoning (or a call before text). The completed array is the client's canonical final view; positional clients read it by position. Two lines; removes the last positional surprise. |
+
+### 4.4 Verification
+
+- **L1** (`tests/bridge/test_messages_translator.py::TestParallelToolCallBlockIndices`,
+  `tests/bridge/test_responses_translator.py`): distinct increasing slots, interleaved
+  argument routing by per-call meta, one close per slot at its own slot, a later item at
+  the next free slot, EOF fallback, reset.
+- **Server-level** (`tests/bridge/test_parallel_tool_use_stream.py`,
+  `tests/bridge/test_responses_output_index_stream.py`): the client-visible byte stream
+  walked end to end against the decided shape.
+
+### 4.5 Known limits (recorded, not fixed here)
+
+- A repeated id-chunk for an already-open CC tool-call index re-enters the open branch and
+  stays malformed (G39's scope-out, shared with the Responses translator).
+- The server buffers `response.created` / `response.in_progress`
+  (`translate_stream_start`) for the empty-response failover and **never writes them**, so
+  every translated `/v1/responses` stream opens at `output_item.added`, mid-sentence.
+  Found by KBR-240's server-level walk; owned by
+  [KBR-242](https://shelpuk.atlassian.net/browse/KBR-242) (gap **G41**).
+
+---
+
+## 5. Response translation: the four stream handlers
+
+Traces to [KBR-227](https://shelpuk.atlassian.net/browse/KBR-227) and
+[KBR-232](https://shelpuk.atlassian.net/browse/KBR-232). What the suite must prove about this
+area is in `TEST_SUITE.md` (invariant I1 and register rows M12/M17); this section is the
+components and the rule — the *upstream* seam that feeds §4's translators.
+
+### 5.1 Components
+
+| Component | Role |
+|---|---|
+| `BridgeServer._stream_messages` | The `/v1/messages` inbound stream. On a Messages-wire upstream it forwards the raw SSE (KBR-227); otherwise it translates CC chunks to Messages events. |
+| `BridgeServer._stream_responses` / `_stream_chat_completions` / `_stream_gemini` | The Codex, Chat Completions and Gemini inbound streams. On a Messages-wire upstream they convert (KBR-232); otherwise they translate CC chunks to their protocol. |
+| `BridgeServer._serves_messages_wire` | The one answer to "does this request's upstream speak Anthropic Messages?". Every branch that decides how a Messages-wire stream is handled asks it — a change to the rule cannot reach one site and miss another. |
+| `AnthropicCCStreamConverter` (`kitty.providers.anthropic`) | The stateful Anthropic-SSE → Chat Completions-chunk converter. One instance per upstream attempt. |
+| `MessagesTranslator` / `ResponsesTranslator` / `GeminiTranslator` | The CC-chunk → client-protocol translators. They never see Anthropic events: the converter or the raw forward sits upstream of them. |
+
+### 5.2 The rule
+
+Each handler asks `_serves_messages_wire(cc_request)` **once per attempt**, after backend
+selection. On `/v1/messages` a yes means forward the upstream's bytes unchanged — the client
+already speaks the upstream's protocol, and conversion would drop thinking signatures
+(KBR-227). On the other three a yes means feed every `data:` line through
+`AnthropicCCStreamConverter` and let the converted lines re-enter the same per-line body a
+Chat Completions upstream's would: finish buffering, the empty-response ladder, usage
+attribution and in-stream error detection are all the handler's existing, already-proven
+logic. A no means byte-identical to the pre-KBR-232 behaviour.
+
+### 5.3 Decisions, and why
+
+| # | Decision | Why, and the rejected alternative |
+|---|---|---|
+| S1 | Convert on the three non-Messages protocols; forward only on `/v1/messages` | Only `/v1/messages` shares the upstream's wire. Conversion there would lose signatures (KBR-227); forwarding on the other three would hand clients Anthropic SSE they cannot read. |
+| S2 | A stateful converter class, not a stateless per-event map | A `tool_use` block's `input_json_delta` fragments have no meaning without the `content_block_start` that allocated the block's `tool_calls` index. The stateless map is precisely why every tool call was lost (KBR-232). |
+| S3 | Converted lines re-enter the handler's existing per-line body | The alternative — a parallel write path — forks the finish/empty/usage/error logic per protocol. The converter's `[DONE]` sentinel and malformed-line passthrough are byte-identical outputs, so the body's residual `translate_upstream_stream_event` call sites stay harmless; an L1 test pins that identity as a contract, not a coincidence. |
+| S4 | Gate and converter re-evaluated per attempt | A failover can land on a Chat Completions-wire backend mid-handler; a stale converter would mangle its Chat Completions stream. |
+| S5 | `thinking_delta` → `reasoning_content`; signatures dropped | The Chat Completions wire has no signature slot, so preservation is impossible; M17's strip-and-retry recovers the round-trip rejection instead (KBR-238). |
+| S6 | The three loops run wider by the strip budget, with an attempt correction | Same rationale KBR-238 recorded on `_stream_messages`: a strip gets its attempt back, so the empty-response schedule is not pulled forward. |
+
+### 5.4 Known limits
+
+- On `/v1/chat/completions` a converted stream's role chunk sets `has_content`, so a
+  content-less completion reaches the client as a well-formed skeleton rather than triggering
+  the empty-response ladder — as before KBR-232. A CC-side preamble hold would be the
+  KBR-155 counterpart and is not built.
+- In-stream error failover on `/v1/chat/completions` needs a backend pool; pool-less the
+  error surfaces to the client (which is still the fix: the per-event translator used to
+  swallow the error and deliver a truncated success).

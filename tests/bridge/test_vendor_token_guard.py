@@ -110,6 +110,17 @@ _ALLOWLIST: dict[str, str] = {
     "Kitty Bridge received a reply from the upstream provider that stopped (": (
         "downstream 400 body for a native reply truncated before content (KBR-155)"
     ),
+    # KBR-241's upstream-error variant. Downstream only, by construction: like the
+    # KBR-155 pair it is built in _stream_messages' native branch after the upstream
+    # reply has ended, and goes only to _make_error_response() or an SSE error event
+    # written to `sr`.
+    (
+        "Kitty Bridge received an error from the upstream provider before any content, on every "
+        "attempt, but the provider's error payload could not be delivered. Retry the request."
+    ): (
+        "downstream 502 body / SSE error when every native attempt errored with an "
+        "unusable payload (KBR-241)"
+    ),
 }
 
 #: The string this ticket deleted. The scanner must still be able to see it.
