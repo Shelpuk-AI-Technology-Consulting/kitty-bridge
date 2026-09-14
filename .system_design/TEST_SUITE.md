@@ -2669,8 +2669,8 @@ of the three was KBR-155's; each was a candidate for its own ticket. **All three
 under KBR-235**: the no-finish translated stream takes the same ladder as any empty reply and ends
 it in the D4 error (owner decision, recorded under Q14 below); `_is_empty_cc_response`'s
 Messages-shaped arm now mirrors `PreambleHold`'s release rule — D1 judges by block type, D3 ends
-the non-streaming ladder at once with the `400` at every gate the judgement feeds. Still open,
-recorded rather than smoothed over: the translated route's **exhaustion is split** — a contentless
+the non-streaming ladder at once with the `400` at every gate the judgement feeds. The remainder
+is recorded rather than smoothed over: the translated route's **exhaustion is split** — a contentless
 reply *with* `finish_reason` still exhausts into the M12 fallback text while a no-finish stream
 exhausts into the D4 error, until the owner unifies them; the translated route has **no streaming
 D3** — a `max_tokens` finish-chunk empty stream is still retried and fallback-ized, the route's
