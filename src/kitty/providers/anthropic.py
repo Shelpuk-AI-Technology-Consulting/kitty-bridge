@@ -94,6 +94,194 @@ def _safe_json_load_args(arguments: str | None) -> dict:
         return {}
 
 
+class AnthropicCCStreamConverter:
+    """Convert one Anthropic Messages SSE stream into Chat Completions chunks.
+
+    Stateful where :meth:`AnthropicAdapter.translate_upstream_stream_event`
+    cannot be: that method maps each event in isolation, so a ``tool_use``
+    block's ``input_json_delta`` fragments have nowhere to land and every
+    tool call was lost (KBR-232).  Here a block's Chat Completions
+    ``tool_calls`` index is allocated when the block opens and every
+    fragment of its JSON is forwarded under it, thinking deltas cross as
+    ``reasoning_content``, and the finish chunk carries usage accumulated
+    from both ends of the stream.
+
+    One instance serves one upstream attempt: ``kitty.bridge`` creates it
+    when the selected backend's upstream wire is Anthropic Messages for the
+    routed model (:meth:`BridgeServer._serves_messages_wire`) and feeds it
+    each ``data:`` line before the per-chunk logic it already runs for
+    Chat Completions upstreams.  An ``error`` event passes through
+    unchanged so the handlers' in-stream error detection sees it.
+    """
+
+    def __init__(self) -> None:
+        # One id per stream: Chat Completions clients correlate a reply's
+        # chunks by it, and the old per-event ids made every chunk an orphan.
+        self._chunk_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
+        self._model = ""
+        self._input_tokens = 0
+        self._output_tokens = 0
+        # Anthropic block index → Chat Completions tool_calls index.
+        self._tool_indices: dict[int, int] = {}
+        # Blocks whose arguments arrived whole in content_block_start; their
+        # input_json_delta fragments are suppressed so arguments are not doubled.
+        self._arguments_complete: set[int] = set()
+
+    def feed(self, raw_bytes: bytes) -> list[bytes]:
+        """Convert one upstream SSE line into Chat Completions SSE lines.
+
+        Args:
+            raw_bytes: One SSE line as the handler read it, e.g.
+                ``b'event: content_block_delta\\ndata: {...}\\n\\n'``.
+
+        Returns:
+            Full ``data: `` SSE lines — Chat Completions chunks, the
+            ``data: [DONE]`` sentinel on ``message_stop``, or the input
+            unchanged for a non-JSON line and for an ``error`` event.
+            Empty when the event has no Chat Completions counterpart.
+        """
+        raw_str = raw_bytes.decode("utf-8", errors="replace").strip()
+        if not raw_str:
+            return []
+
+        # The handlers hand us one event's SSE, but an ``event:`` line may
+        # precede the payload; only the ``data:`` line is interpreted.
+        data_str = None
+        for line in raw_str.split("\n"):
+            line = line.strip()
+            if line.startswith("data:"):
+                data_str = line[5:].strip()
+
+        if data_str is None:
+            return []
+        try:
+            event = json.loads(data_str)
+        except json.JSONDecodeError:
+            return [raw_bytes]
+        if not isinstance(event, dict):
+            return [raw_bytes]
+
+        event_type = event.get("type", "")
+
+        # An in-stream failure rides a 200 on Anthropic's wire; the handlers'
+        # error detection keys on the ``type``, so the event must cross as-is.
+        if event_type == "error":
+            return [raw_bytes]
+
+        if event_type == "message_start":
+            message = event.get("message", {})
+            self._model = message.get("model", "")
+            self._input_tokens = message.get("usage", {}).get("input_tokens", 0)
+            return [self._sse_chunk({"role": "assistant"})]
+
+        if event_type == "content_block_start":
+            block = event.get("content_block", {})
+            if block.get("type") != "tool_use":
+                return []
+            index = event.get("index", 0)
+            cc_index = len(self._tool_indices)
+            self._tool_indices[index] = cc_index
+            # A populated ``input`` at the block start is the whole arguments
+            # object for providers that do not stream the JSON; Anthropic
+            # itself starts empty and streams ``input_json_delta``.
+            tool_input = block.get("input")
+            if tool_input:
+                self._arguments_complete.add(index)
+                arguments = json.dumps(tool_input)
+            else:
+                arguments = ""
+            return [
+                self._sse_chunk(
+                    {
+                        "tool_calls": [
+                            {
+                                "index": cc_index,
+                                "id": block.get("id", ""),
+                                "type": "function",
+                                "function": {"name": block.get("name", ""), "arguments": arguments},
+                            }
+                        ]
+                    }
+                )
+            ]
+
+        if event_type == "content_block_delta":
+            delta = event.get("delta", {})
+            delta_type = delta.get("type", "")
+            if delta_type == "text_delta":
+                return [self._sse_chunk({"content": delta.get("text", "")})]
+            if delta_type == "thinking_delta":
+                return [self._sse_chunk({"reasoning_content": delta.get("thinking", "")})]
+            if delta_type == "input_json_delta":
+                index = event.get("index", 0)
+                # An unknown block has no allocated index; a completed one
+                # must not grow a second copy of its arguments.
+                if index not in self._tool_indices or index in self._arguments_complete:
+                    return []
+                return [
+                    self._sse_chunk(
+                        {
+                            "tool_calls": [
+                                {
+                                    "index": self._tool_indices[index],
+                                    "function": {"arguments": delta.get("partial_json", "")},
+                                }
+                            ]
+                        }
+                    )
+                ]
+            # signature_delta and other block deltas have no CC counterpart.
+            return []
+
+        if event_type == "message_delta":
+            # Anthropic's message_delta usage is the running output total.
+            self._output_tokens = event.get("usage", {}).get("output_tokens", self._output_tokens)
+            finish_reason = _STOP_REASON_MAP.get(event.get("delta", {}).get("stop_reason"), "stop")
+            chunk = self._chunk({}, finish_reason=finish_reason)
+            chunk["usage"] = {
+                "prompt_tokens": self._input_tokens,
+                "completion_tokens": self._output_tokens,
+                "total_tokens": self._input_tokens + self._output_tokens,
+            }
+            return [f"data: {json.dumps(chunk)}\n\n".encode()]
+
+        if event_type == "message_stop":
+            return [b"data: [DONE]\n\n"]
+
+        # ping, content_block_stop, anything unknown.
+        return []
+
+    def _chunk(self, delta: dict, finish_reason: str | None = None) -> dict:
+        """Build one Chat Completions chunk payload for this stream.
+
+        Args:
+            delta: The choice delta.
+            finish_reason: The finish reason, or ``None`` mid-stream.
+
+        Returns:
+            The chunk payload, not yet SSE-wrapped.
+        """
+        return {
+            "id": self._chunk_id,
+            "object": "chat.completion.chunk",
+            "created": 0,
+            "model": self._model,
+            "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}],
+        }
+
+    def _sse_chunk(self, delta: dict, finish_reason: str | None = None) -> bytes:
+        """Wrap one chunk payload as a ``data: `` SSE line.
+
+        Args:
+            delta: The choice delta.
+            finish_reason: The finish reason, or ``None`` mid-stream.
+
+        Returns:
+            The encoded SSE line, trailing blank line included.
+        """
+        return f"data: {json.dumps(self._chunk(delta, finish_reason))}\n\n".encode()
+
+
 class AnthropicAdapter(ProviderAdapter):
     """Anthropic Messages API adapter.
 
