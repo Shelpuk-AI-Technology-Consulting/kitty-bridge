@@ -73,12 +73,13 @@ unexercised — §1.4 again.  Recorded as gap G21 in §9.2 and carried by `KBR-1
 
 **These guards prove the register is *well-formed*, never that it is *complete*.**  A mutation the
 product performs that neither §3.2 nor this module records is invisible to all of them; only the
-wire-level guard (§6.2.3, T-G2) can catch that.  Four omissions are already known and filed —
-`KBR-148` (headers), `KBR-149` (`openai_subscription` injecting `reasoning` from
-`_reasoning_effort`, which P4 cannot cover because `translate_to_upstream` never runs on that
-adapter's request path), `KBR-184` (P13's CC-origin twin) and `KBR-185` (an allowlisted field
-dropped for being falsy).  Every one was found by reading the code by hand; none was found by a
-guard.  Do not read a green suite as "the register is the whole truth".
+wire-level guard (§6.2.3, T-G2) can catch that.  One omission is already known and filed —
+`KBR-184` (P13's CC-origin twin).  The other three on this list have since landed: `KBR-148`
+(headers) closed with rows P9d–P9h, `KBR-149` (the `openai_subscription` reasoning injection)
+with P22, and `KBR-185` (an allowlisted field dropped for being falsy) with P25.  The list is
+kept to the still-open ticket so it does not disagree with §9.2's struck-through rows.  Every
+one was found by reading the code by hand; none was found by a guard.  Do not read a green
+suite as "the register is the whole truth".
 
 ⚠️ **Anchoring discipline.**  §3.3.1a: a path pattern is a **prefix**, claiming
 its node and everything beneath it.  A row must therefore be anchored at the
@@ -151,6 +152,15 @@ class Trigger(Enum):
     THINKING_SIGNALLED_OR_INFERRED = "thinking_signalled_or_inferred"
     CC_ORIGIN_PATH = "cc_origin_path"
     RESPONSES_ORIGIN_PATH = "responses_origin_path"
+    ALLOWLISTED_FIELD_IS_FALSY = "allowlisted_field_is_falsy"
+    NON_ENTRA_CREDENTIAL = "non_entra_credential"
+    CHATGPT_ACCOUNT_ID_PRESENT = "chatgpt_account_id_present"
+    # Both sit on the credential side of the G21 line — neither is decidable
+    # from the inbound request: NON_ENTRA_CREDENTIAL reads the profile's
+    # credential, CHATGPT_ACCOUNT_ID_PRESENT the `id_token` the
+    # openai_subscription profile authenticates with. NOT_CORPUS_DECIDABLE
+    # classifies neither — that classification is KBR-186's, filed rather
+    # than guessed.
 
 
 # --------------------------------------------------------------------------
@@ -269,7 +279,7 @@ _ALWAYS = Trigger.ALWAYS
 #: DEBUG log; the body is an explicit `if` chain, and six of its branches test
 #: truthiness rather than presence (only `parallel_tool_calls` tests presence),
 #: so an *allowlisted* field with a falsy value is dropped as well and is **not**
-#: claimed here. That residue is G27 / `KBR-185`.
+#: claimed here. That residue is claimed by P25 (G27 / `KBR-185`).
 _CODEX_DROPPED_CONTROL_FIELDS: tuple[str, ...] = (
     "background",
     "context_management",
@@ -752,9 +762,93 @@ _PROVIDER_ROWS: tuple[MutationRow, ...] = (
         # `Authorization` are *not* P9c effects: both match §3.2.2's base header
         # set in name, casing and value shape, and substituting the profile's
         # credential for the agent's is M14, not a per-adapter mutation. The
-        # conditional `ChatGPT-Account-Id` this site also sets needs its own row
-        # and its own complement fixture — gap G22.
+        # conditional `ChatGPT-Account-Id` this site also sets is P9d — its own
+        # row because it is conditional, which P9c, an ALWAYS row, cannot be.
         paths=(c.header_path("user-agent"), c.header_path("version"), c.header_path("accept")),
+        conditional=False,
+        design_ref="§3.2.2 · §4.3 C1",
+    ),
+    MutationRow(
+        id="P9d",
+        site=(f"{_SUBSCRIPTION}:OpenAISubscriptionAdapter._build_codex_headers",),
+        trigger=Trigger.CHATGPT_ACCOUNT_ID_PRESENT,
+        # The header ships only when the profile's `id_token` yields an account
+        # id. `_extract_account_id` returns None when the claim is absent and
+        # when the token fails to parse (`except Exception`); an empty claim
+        # survives extraction and is dropped by `if account_id:` in
+        # `_build_codex_headers`. So the header's absence is also the
+        # unparseable-token signature. §3.3.2 assertion 2 therefore owes a
+        # complement — a corpus entry whose `id_token` carries no claim. The L1
+        # pins live in `tests/providers/test_openai_subscription.py`; the
+        # corpus fixture arrives with T-D5.
+        paths=(c.header_path("chatgpt-account-id"),),
+        conditional=True,
+        design_ref="§3.2.2 · §4.3 C1",
+    ),
+    MutationRow(
+        id="P9e",
+        site=(
+            "kitty/providers/anthropic.py:AnthropicAdapter.build_upstream_headers",
+            "kitty/providers/opencode.py:OpenCodeGoAdapter.build_upstream_headers_for_model",
+        ),
+        trigger=_ALWAYS,
+        # An auth-scheme change plus an addition: `Authorization` leaves and
+        # `x-api-key` and `anthropic-version` arrive, so all three are named —
+        # naming only the additions would leave the removal unclaimed (P9b's
+        # rule). The lowercase `content-type` re-spelling has no address:
+        # `contract.header_path` lowercases for matching, so a casing-only
+        # difference is not claimable, and this comment is its record.
+        # `custom_anthropic` and `minimax_token` inherit the first site;
+        # `opencode_go` reaches the same set only on its Messages-routed
+        # models — its default `build_upstream_headers` is the baseline Bearer
+        # set, so that hook is deliberately not a site.
+        paths=(
+            c.header_path("authorization"),
+            c.header_path("x-api-key"),
+            c.header_path("anthropic-version"),
+        ),
+        conditional=False,
+        design_ref="§3.2.2 · §4.3 C1",
+    ),
+    MutationRow(
+        id="P9f",
+        site=("kitty/providers/zai_anthropic.py:ZaiAnthropicAdapter.build_upstream_headers",),
+        trigger=_ALWAYS,
+        # Kept apart from P9e because a row's paths must be true of every site
+        # it names: this adapter adds `anthropic-version` and re-spells
+        # `content-type` lowercase, but its auth stays `Authorization: Bearer`
+        # — the baseline shape — so claiming `authorization` or `x-api-key`
+        # here would lie. The casing re-spelling has no address
+        # (`contract.header_path` lowercases); this comment is its record.
+        paths=(c.header_path("anthropic-version"),),
+        conditional=False,
+        design_ref="§3.2.2 · §4.3 C1",
+    ),
+    MutationRow(
+        id="P9g",
+        site=("kitty/providers/azure.py:AzureOpenAIAdapter.build_upstream_headers",),
+        trigger=Trigger.NON_ENTRA_CREDENTIAL,
+        # An auth-scheme change on the key-based credential: `Authorization`
+        # leaves and `api-key` arrives, so both are named (P9b's rule). The
+        # Entra branch of the same hook sends the baseline
+        # `Authorization: Bearer`, which is why the trigger is named rather
+        # than ALWAYS. The credential is profile config, not request content,
+        # so no corpus entry can vary it — the row is unconditional in
+        # §3.3.2's sense, M16's shape: a named trigger that is a property of
+        # the route, not of the request.
+        paths=(c.header_path("authorization"), c.header_path("api-key")),
+        conditional=False,
+        design_ref="§3.2.2 · §4.3 C1",
+    ),
+    MutationRow(
+        id="P9h",
+        site=("kitty/providers/ollama.py:OllamaAdapter.build_upstream_headers",),
+        trigger=_ALWAYS,
+        # The P9b shape minus the addition: local Ollama requires no auth and
+        # ignores the header, so only the removal is named. `OllamaCloudAdapter`
+        # overrides the hook and keeps Bearer auth — the baseline set — so it
+        # is deliberately not a site.
+        paths=(c.header_path("authorization"),),
         conditional=False,
         design_ref="§3.2.2 · §4.3 C1",
     ),
@@ -867,6 +961,37 @@ _PROVIDER_ROWS: tuple[MutationRow, ...] = (
         # precedence gate (a caller-sent truthy `reasoning` wins) lives in
         # the §3.2.2 trigger cell; the closed vocabulary has no member for it.
         paths=(c.extra_path("reasoning"),),
+        conditional=True,
+        design_ref="§3.2.2",
+    ),
+    MutationRow(
+        id="P25",
+        site=(f"{_SUBSCRIPTION}:OpenAISubscriptionAdapter._prepare_responses_body",),
+        trigger=Trigger.ALLOWLISTED_FIELD_IS_FALSY,
+        # The allowlist's residue: membership is not what carries a field
+        # through, so an *allowlisted* field whose value is falsy is dropped
+        # anyway by the truthiness branches (`include: []`, `reasoning: {}` --
+        # both legal under `CreateResponse`; the reader projects by presence,
+        # so each is a present-inbound, absent-upstream delta). Enumerated in
+        # data but NOT derived the way P23's are: that derivation recomputes
+        # allowlist minus reader table, while this set needs "whose falsy form
+        # is legal", which is a vendor-schema judgment no artifact in the tree
+        # holds (G24's posture -- nothing detects a revision).
+        #
+        # `tool_choice` is truthiness-gated on the same chain and is an extra
+        # key, but it is deliberately NOT claimed: `tool_choice: ""` is not a
+        # legal `CreateResponse` value, so that branch is unreachable with a
+        # falsy value today. The `instructions`/`input`/`tools` branches are
+        # likewise truthiness-gated but project to no `envelope.extra` path.
+        #
+        # P22's interaction: the two triggers are predicates on different
+        # request fields and can co-occur (falsy `reasoning` beside a
+        # non-`none` effort). In that state the `elif` injects
+        # `{"effort": ...}`, so the upstream projection carries a `reasoning`
+        # key with the injected value and P22's injection claims the address;
+        # P25's drop is provably absent there. The rows' claims on
+        # `envelope.extra[reasoning]` do not overlap.
+        paths=(c.extra_path("include"), c.extra_path("reasoning")),
         conditional=True,
         design_ref="§3.2.2",
     ),

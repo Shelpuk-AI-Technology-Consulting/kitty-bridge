@@ -201,13 +201,13 @@ class TestTheParserReadsTheDesignDocument:
     def test_the_parser_reads_both_tables(self, markdown: str) -> None:
         """A parser that read only §3.2.1 would still look healthy on the M rows."""
         assert len([i for i in r.parse_register_markdown(markdown).live_ids if i.startswith("M")]) == 16
-        assert len([i for i in r.parse_register_markdown(markdown).live_ids if i.startswith("P")]) == 30
+        assert len([i for i in r.parse_register_markdown(markdown).live_ids if i.startswith("P")]) == 36
 
     def test_the_parser_reads_the_unconditional_list(self, markdown: str) -> None:
         """§3.2.2's closing paragraph is the only place the exemption is written down."""
         parsed = r.parse_register_markdown(markdown)
 
-        assert len(parsed.unconditional_ids) == 24
+        assert len(parsed.unconditional_ids) == 28
         assert {"M14", "P20", "P21"} <= set(parsed.unconditional_ids)
 
     def test_a_document_with_no_register_tables_is_an_error_not_an_empty_result(self) -> None:
@@ -495,7 +495,8 @@ class TestP23ClaimsTheControlFieldsOutsideTheCodexAllowlist:
     membership of the allowlist is *not* what carries a field through, since the
     literal feeds only a DEBUG log while the shipped body is an explicit ``if``
     chain testing truthiness.  An allowlisted field with a falsy value is dropped
-    as well, sits outside P23 by construction, and is `KBR-185` / G27.
+    as well, sits outside P23 by construction, and is claimed by **P25**
+    (`KBR-185` / G27).
 
     The reader's table is a sound left-hand side because it is itself pinned:
     ``test_reader_responses`` asserts it covers the published schema's 31 keys
@@ -604,7 +605,7 @@ class TestP23ClaimsTheControlFieldsOutsideTheCodexAllowlist:
             _allowlisted_responses_params('_ALLOWED_RESPONSES_PARAMS = frozenset(_BASE | {"model"})\n')
 
     def test_an_allowlisted_field_dropped_for_being_falsy_is_outside_this_row(self) -> None:
-        """The boundary G27 / `KBR-185` owns, pinned so widening P23 cannot be accidental.
+        """The boundary P25 owns, pinned so widening P23 cannot be accidental.
 
         ``_prepare_responses_body`` copies ``include`` only when it is truthy, so
         ``include: []`` — a legal ``CreateResponse`` body — is dropped while
@@ -625,3 +626,65 @@ class TestP23ClaimsTheControlFieldsOutsideTheCodexAllowlist:
         # the test passes for a key the reader never classified in the first place.
         assert {"include", "reasoning"} <= allowlist & reader._EXTRA_KEYS
         assert not any(c.path_matches(path, c.extra_path("include")) for path in p23.paths)
+
+
+class TestP25ClaimsTheFalsyAllowlistedDrop:
+    """KBR-185 — P25 claims the falsy-value drop the allowlist permits and the `if` chain loses.
+
+    ``_ALLOWED_RESPONSES_PARAMS`` is read only by ``_prepare_responses_body``'s
+    DEBUG log; the shipped body is an explicit ``if`` chain, and six of its
+    branches test truthiness rather than presence (only ``parallel_tool_calls``
+    tests presence).  An allowlisted field with a falsy value — ``include: []``,
+    ``reasoning: {}``, both legal under ``CreateResponse`` — is therefore
+    dropped, present inbound and absent upstream, and the projection's
+    presence-based reader reports it as an ``envelope.extra`` delta nothing
+    claimed until P25.  P23 excludes both keys by construction (they sit inside
+    the allowlist); P14 reaches no ``extra`` path; P22's trigger is not met by
+    this case.
+    """
+
+    def _p25(self) -> r.MutationRow:
+        """Return the P25 row, failing with a named message when it is absent.
+
+        Returns:
+            The register row whose id is ``P25``.
+
+        Raises:
+            AssertionError: When P25 is not in the register data — the falsy
+                allowlisted drops are then unclaimed and T-D5 reports a false
+                I1 breach on the first corpus entry that carries one.
+        """
+        rows = [row for row in r.REGISTER if row.id == "P25"]
+        assert rows, "P25 is not in the register data — the falsy allowlisted drops are unclaimed (KBR-185)"
+        return rows[0]
+
+    def test_the_row_exists_with_the_expected_shape(self, symbols: frozenset[str]) -> None:
+        """The whole spec in one place: site, trigger, paths, conditionality."""
+        row = self._p25()
+
+        assert row.site == (
+            "kitty/providers/openai_subscription.py:OpenAISubscriptionAdapter._prepare_responses_body",
+        )
+        assert row.trigger is r.Trigger.ALLOWLISTED_FIELD_IS_FALSY
+        assert row.paths == (c.extra_path("include"), c.extra_path("reasoning"))
+        assert row.conditional is True
+        assert row.design_ref.startswith("§")
+        assert r.row_shape_problems(row) == ()
+        assert not r.unresolved_sites((row,), symbols)
+
+    def test_the_trigger_member_is_in_the_closed_vocabulary_with_its_value(self) -> None:
+        """T-W6 indexes the corpus by these names, so the spelling is load-bearing."""
+        assert r.Trigger.ALLOWLISTED_FIELD_IS_FALSY.value == "allowlisted_field_is_falsy"
+
+    def test_the_published_mutation_cell_names_no_key(self, markdown: str) -> None:
+        """The §3.2.4 obligation travels with the shape, and this row's shape is prose.
+
+        P23's Mutation cell enumerates its sixteen keys and therefore inherits
+        both reconciliation exceptions.  P25's cell describes the row instead;
+        the moment someone backticks ``include`` or ``reasoning`` into it, it
+        becomes a second copy of the path data that nothing compares — so the
+        absence itself is pinned here.
+        """
+        cell = published_row_cell(markdown, "P25", "Mutation")
+
+        assert set(re.findall(r"`(\w+)`", cell)) == set()

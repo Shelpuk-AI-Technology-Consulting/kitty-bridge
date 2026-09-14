@@ -610,15 +610,24 @@ def _read_image(
 
     if kind == "url":
         _residualise(source, {"type", "url"}, c.residual_key(path, "source"), residual)
+        ref = _typed_leaf(source, "url", str, c.residual_key(path, "source"), residual)
+        # `url` is a required field of a url-sourced image (§7.4 rule 7 row 2):
+        # if it is missing or wrongly typed the part keeps its position with
+        # identity from the canonical-JSON digest of the source dict (the
+        # `opaque_digest` recipe; `type` is excluded). The residual still
+        # records the bad/missing url, so the run fails visibly.
         return c.Image(
-            ref=_typed_leaf(source, "url", str, c.residual_key(path, "source"), residual),
+            ref=ref,
+            digest=None if ref is not None else c.opaque_digest(source),
             cache_control=cache_control,
         )
 
     if kind == "file":
         _residualise(source, {"type", "file_id"}, c.residual_key(path, "source"), residual)
+        ref = _typed_leaf(source, "file_id", str, c.residual_key(path, "source"), residual)
         return c.Image(
-            ref=_typed_leaf(source, "file_id", str, c.residual_key(path, "source"), residual),
+            ref=ref,
+            digest=None if ref is not None else c.opaque_digest(source),
             cache_control=cache_control,
         )
 
