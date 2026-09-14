@@ -3279,8 +3279,14 @@ class BridgeServer:
                             )
                             continue
 
-                        # In balancing mode: mark unhealthy, try next backend
-                        if self._backends and self._current_backend_idx >= 0:
+                        # In balancing mode: mark unhealthy and try next backend for ANY error —
+                        # except a signature rejection recovery could not fix: that history fails
+                        # on every member alike, so it surfaces without cooling a backend (M17).
+                        if (
+                            self._backends
+                            and self._current_backend_idx >= 0
+                            and not _is_thinking_signature_error(upstream.status, error_body)
+                        ):
                             kind = (
                                 "auth"
                                 if upstream.status in _AUTH_FAILURE_STATUSES
@@ -5133,8 +5139,14 @@ class BridgeServer:
                             )
                             continue
 
-                        # In balancing mode: mark unhealthy, try next backend
-                        if self._backends and self._current_backend_idx >= 0:
+                        # In balancing mode: mark unhealthy and try next backend for ANY error —
+                        # except a signature rejection recovery could not fix: that history fails
+                        # on every member alike, so it surfaces without cooling a backend (M17).
+                        if (
+                            self._backends
+                            and self._current_backend_idx >= 0
+                            and not _is_thinking_signature_error(upstream.status, error_body)
+                        ):
                             kind = (
                                 "auth"
                                 if upstream.status in _AUTH_FAILURE_STATUSES
@@ -6132,8 +6144,14 @@ class BridgeServer:
                             )
                             continue
 
-                        # In balancing mode: mark unhealthy, try next backend
-                        if self._backends and self._current_backend_idx >= 0:
+                        # In balancing mode: mark unhealthy and try next backend for ANY error —
+                        # except a signature rejection recovery could not fix: that history fails
+                        # on every member alike, so it surfaces without cooling a backend (M17).
+                        if (
+                            self._backends
+                            and self._current_backend_idx >= 0
+                            and not _is_thinking_signature_error(upstream.status, error_body)
+                        ):
                             kind = (
                                 "auth"
                                 if upstream.status in _AUTH_FAILURE_STATUSES
