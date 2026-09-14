@@ -188,7 +188,9 @@ class TestResolveKeysFile:
     def test_named_file_wins_even_when_missing(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setattr("kitty.bridge.config._DEFAULT_KEYS_FILE", str(tmp_path / "default.txt"))
         named = tmp_path / "named" / "keys.txt"
-        _write_yaml(tmp_path / "bridge.yaml", f'keys_file: "{named}"')
+        # Single-quoted YAML style: on Windows the path's backslashes are
+        # literal here, where double quotes would read them as escapes.
+        _write_yaml(tmp_path / "bridge.yaml", f"keys_file: '{named}'")
         config = load_bridge_config(tmp_path / "bridge.yaml")
         # The named path is returned as-is even though it does not exist: deciding
         # how a named-but-missing file fails is the runner's job, not the resolver's.
