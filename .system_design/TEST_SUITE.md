@@ -335,10 +335,44 @@ job is to name the conditions and the test that drove the request declares which
 
 **`conditional` is a second field, not a consequence of the trigger.** It answers one question:
 does §3.3.2 assertion 2 apply — must a corpus entry exist in which this row's mutation is provably
-**absent**. A trigger is either a property of the *route* or a property of the *request*, and only
-the second can be varied by a corpus entry. P13's `CC_ORIGIN_PATH` is a route property; every
-request on that route meets it, so there is no complement to write. M2 and M10 are the same shape
-and were already exempt, which is why this reads as a rule rather than a P-row exception.
+**absent**. The trigger's *kind* — how its condition is decided — is the second dimension that
+shapes that question, and it is one of four:
+
+* **`REQUEST`** — a property of the inbound request; the corpus entry that carries the request
+  decides it. Only this kind can be varied by a corpus entry, so only REQUEST rows have a
+  complement case the corpus can carry.
+* **`ROUTE`** — a property of the adapter/route dispatch. Every request on that route meets it
+  (or none does); a corpus entry cannot vary it. The complement is therefore off-route rather
+  than on-route, and the rule the §3.2.2 unconditional list enforces (no complement to write) is
+  why rows like M2 and M10 are exempt. `P13` ``CC_ORIGIN_PATH`` is the canonical case: under
+  reading (2) — the body reaching ``_cc_to_responses``, regardless of inbound wire — it is met
+  when ``provider.dispatch == "_cc_to_responses"``, decided by the adapter's routing. Its
+  mirror-image ``P14``/``P15``/``P16``/``P23`` ``RESPONSES_ORIGIN_PATH`` is the deliberate
+  asymmetric — ``inbound_format == RESPONSES`` is REQUEST, not ROUTE, because the inbound wire
+  (not the provider's dispatch) decides it. The two names look symmetric; the asymmetry is
+  load-bearing.
+* **`RESPONSE`** — a property of the **upstream response**, arranged by a scripted recorder
+  (``M6``, ``M8``, ``M9``, ``M12``, ``M17``). T-D8 discharges these from a named
+  scripted-recorder test, not from the corpus.
+* **`PROFILE`** — derived from the profile (the compaction budget from the profile's model, and
+  on a balancing profile from the smallest context in the pool — ``M1`` additionally: the
+  profile sets the model). Declared at the call site that resolves the profile.
+
+Compound triggers — `GEMINI_NON_STREAMING` is the canonical case (``GEMINI_PROTOCOL`` ROUTE
+on the route, then the request's stream flag — REQUEST there) — classify on the
+corpus-decidability of the discriminating component. A compound whose discriminating axis
+cannot be varied on-route is ROUTE; one that can is REQUEST. This is the rule, not abstract
+purity.
+
+`ALWAYS` is the absence of a condition, carries no kind, and is unconditional by design.
+
+**The T-D8 quantification rule.** Stated so the implementation does not have to
+re-derive it: every `conditional` row with a `REQUEST` trigger needs both a trigger
+case and a complement in the corpus; every `conditional` row with `RESPONSE` / `ROUTE`
+/ `PROFILE` is discharged outside the corpus (scripted recorder / on-route
+unconditionally met / declared at the call site that resolves the profile). The
+classification on `Trigger` (KBR-186) lets `NOT_CORPUS_DECIDABLE` be derived from this
+table, so the corpus rule and the register classification cannot drift.
 
 **Two fields that must agree are cross-checked in the data**, because leaving them uncompared
 reproduces the D1 defect inside `register.py`: a row carrying `ALWAYS` may not be conditional, and
@@ -2446,16 +2480,23 @@ assertion 2 is only as good as the complement it runs against, so a complement m
 if absence were inferred, every entry whose author never considered a trigger would be silently
 offered as its complement and the assertion would run over entries nobody vetted.
 
-**§3.2.4's binary is incomplete.** A trigger is described there as "a route property or a request
-property", but five conditional rows are decided by neither: M6 fires on an upstream 400, M8 on a
-rejected thinking round-trip, M9 on an upstream tool-use format error, M12 on an empty upstream
-response, M17 on a rejected thinking signature — all properties of the **upstream response**,
-arranged by a scripted recorder. The loader refuses those five and `ALWAYS` in a manifest, which closes gap **G21**'s over-declaration
-hazard for the cases the repository already proves in text. Classifying the whole 26-trigger
-vocabulary is **KBR-186**, filed rather than guessed, for the reason T-W3 gave for deferring
-trigger predicates: data nothing in the change could prove wrong is what plan §1.4 forbids. Until
-it lands, **T-D8 cannot read corpus coverage for M6, M8, M9 and M12**; those are discharged by a
-scripted-recorder test instead.
+**§3.2.4's binary, expanded to four kinds.** `register.py` now carries an
+`ArrangingBy` enum (`REQUEST`/`ROUTE`/`RESPONSE`/`PROFILE`) on every non-`ALWAYS`
+trigger, and `corpus.NOT_CORPUS_DECIDABLE` is *derived* from that classification
+rather than hand-listed (KBR-186). Five RESPONSE rows (`M6`/`M8`/`M9`/`M12`/`M17`)
+are discharged by a named scripted-recorder test, not by an entry; four ROUTE
+rows (`M2`/`M16` non-native upstream wire, `M10` Gemini protocol, `P13` CC-origin
+path) and three PROFILE rows (`M1` profile sets model, `M4`/`M5` compaction
+budget) are likewise declined in the manifest — every one is met at the route
+or profile that resolves it, not by the inbound request. The loader refuses all
+eleven plus `ALWAYS` in both lists; the earlier hand list stopped at the five
+RESPONSE rows plus `ALWAYS`, which is the drift the derivation removes. With
+the classification in place, **T-D8 *can* now read corpus coverage** for every
+conditional REQUEST row (the set T-C1–T-C6 populate), with the RESPONSE rows
+discharged by the scripted-recorder test and ROUTE/PROFILE rows having no
+corpus complement to find. G21's over-declaration hazard is closed for the
+whole vocabulary rather than the cases the repository happened to prove in
+text.
 
 **T-C7's connection-pattern baseline is a different artifact.** This format carries the *header*
 half — a single request whose `host` is the real one. C5 counts distinct TCP connections across an

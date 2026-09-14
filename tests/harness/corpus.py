@@ -44,7 +44,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from harness.contract import REDACTED_HEADERS, REDACTED_QUERY_KEYS, CapturedRequest, WireFormat
-from harness.register import Trigger
+from harness.register import ArrangingBy, Trigger
 
 # --------------------------------------------------------------------------
 # Errors
@@ -814,39 +814,33 @@ def _checked_id(entry_id: str) -> str:
 
 #: Triggers a corpus entry may not declare in either direction.
 #:
-#: :mod:`harness.register` states the model as a binary — "a trigger is a *route*
-#: property or a *request* property, and only the second can be varied by a
-#: corpus entry" — but its own docstring names a **third** kind twenty lines
-#: earlier: "M6 fires on *an upstream 400*, M8 on *a rejected thinking
-#: round-trip*, M9 on *an upstream tool-use format error*, M12 on *an empty
-#: upstream response*."  Those are properties of the **upstream response**,
-#: arranged by a scripted recorder.  An entry that claimed one would be claiming
-#: something it is not the thing that decides — precisely the over-declaration
-#: §9.2's gap **G21** warns about, where "assertion 1 claims every delta and the
-#: oracle passes over a broken bridge", with the aggravation that "the same
-#: author writes the entry and its trigger index, so the mechanism has no second
-#: reader".  This is that second reader.
+#: KBR-186. Derived from :class:`~harness.register.ArrangingBy` rather than
+#: hand-listed: ``ALWAYS`` (the absence of a condition, not a condition — every
+#: request meets it, so declaring it met is noise and declaring it absent is
+#: false) plus every trigger whose ``arranged_by`` is not
+#: :attr:`~ArrangingBy.REQUEST`. Only REQUEST triggers are corpus-decidable; a
+#: ROUTE trigger is met by every request on its route (or none is), a RESPONSE
+#: trigger is arranged by the scripted recorder, and a PROFILE trigger is
+#: declared at the call site that resolves the profile — a manifest claiming
+#: any of them would be claiming something it is not the thing that decides,
+#: the over-declaration §9.2's gap **G21** warns about. This derivation is the
+#: second reader that mechanism has.
 #:
-#: :attr:`~harness.register.Trigger.ALWAYS` is here because the register calls it
-#: "the absence of a condition, not a condition": every request meets it, so
-#: declaring it met is noise and declaring it absent is false.
-#:
-#: **This set is the subset that is *provable* from text already in the
-#: repository, not a classification of the whole vocabulary.**  Classifying all
-#: 26 triggers is `KBR-186`, filed rather than guessed, for the reason T-W3 gave
-#: for deferring trigger predicates: data nothing in this change could prove
-#: wrong is what plan §1.4 forbids.  Until it lands, T-D8 cannot read corpus
-#: coverage for M6, M8, M9, M12 and M17 — they are discharged by a scripted-recorder
-#: test, not by an entry.
+#: The derived set replaced a hand list of six members (ALWAYS plus the five
+#: RESPONSE triggers) which the register's classification could outgrow
+#: silently; the test ``TestNotCorpusDecidableIsDerivedFromArrangingBy`` in
+#: :mod:`tests.harness.test_corpus` pins the derivation (F2 of the ticket), so
+#: a reclassification updates the refusal set automatically and a hand-edited
+#: second copy cannot come back.
 NOT_CORPUS_DECIDABLE: frozenset[Trigger] = frozenset(
-    {
+    (
         Trigger.ALWAYS,
-        Trigger.UPSTREAM_REJECTED_OVERSIZED_ON_BALANCING,
-        Trigger.THINKING_ROUNDTRIP_REJECTED,
-        Trigger.THINKING_SIGNATURE_REJECTED,
-        Trigger.NATIVE_TOOL_USE_FORMAT_ERROR,
-        Trigger.UPSTREAM_EMPTY_RESPONSE,
-    }
+        *(
+            t
+            for t in Trigger
+            if t is not Trigger.ALWAYS and getattr(t, "arranged_by", None) is not ArrangingBy.REQUEST
+        ),
+    )
 )
 
 

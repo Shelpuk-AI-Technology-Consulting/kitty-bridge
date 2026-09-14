@@ -108,22 +108,25 @@ Declare triggers after `write_entry`, by reading what landed.
 **And it is a claim about the entry *under the profile the test resolves*.** `M5`'s compaction
 budget is derived from the profile's model (and on a balancing profile from the smallest context
 in the pool), so one transcript is a trigger case on a 200K-context model and a complement on a
-1M one. `M4` is worse: its trigger is a pipeline state, not a request property at all. Those two
+1M one. `M4` is worse: its trigger is a pipeline state, not a request property at all. `M1`
+(`PROFILE_SETS_MODEL`) is profile-shaped too — the agent's model is the profile's. All three
 are declared at the call site that resolves the profile, not in the manifest.
 
-It also keeps entries honest about what they cannot know. `register.py` records that a trigger is
-either a *route* property or a *request* property, and only the second kind can be varied by a
-corpus entry; several more (M6's upstream 400, M8's rejected thinking round trip, M12's empty
-upstream response) are properties of the **upstream response**, arranged by a scripted recorder.
-An entry declares neither state for those, and the loader **rejects** a manifest that tries:
-`upstream_empty_response`, `thinking_roundtrip_rejected`, `thinking_signature_rejected`,
-`native_tool_use_format_error`, `upstream_rejected_oversized_on_balancing` and `always` are refused in both lists. §9.2's gap
-**G21** is the reason — an over-declaring entry makes the oracle's first assertion claim every
-delta and pass over a broken bridge, and "the same author writes the entry and its trigger index,
-so the mechanism has no second reader". This is that second reader, for the six cases the
-repository already proves. Classifying the whole 26-trigger vocabulary is **KBR-186**, filed
-rather than guessed; until it lands, T-D8 cannot read corpus coverage for M6, M8, M9, M12 and M17, and
-those five are discharged by a scripted-recorder test instead.
+It also keeps entries honest about what they cannot know. `register.py` classifies every
+non-`ALWAYS` trigger by how it is decided — one of four `ArrangingBy` kinds
+(`REQUEST`/`ROUTE`/`RESPONSE`/`PROFILE`); only `REQUEST` can be varied by a corpus entry,
+which is the kind the corpus is *for*. `RESPONSE` triggers (`M6`'s upstream 400, `M8`'s
+rejected thinking round trip, `M9`'s upstream tool-use format error, `M12`'s empty upstream
+response, `M17`'s rejected thinking signature) are properties of the upstream response,
+arranged by a scripted recorder. `ROUTE` triggers (`M2`/`M16` non-native upstream wire, `M10`
+Gemini protocol, `P13` CC-origin path) and `PROFILE` triggers (`M1` profile sets model, `M4`
+compaction ran with oversized tool result, `M5` over compaction budget) are decided at the
+route or the profile. The loader refuses all of them — `ALWAYS` and every non-`REQUEST`
+trigger — in both lists. §9.2's gap **G21** is the reason — an over-declaring entry makes the
+oracle's first assertion claim every delta and pass over a broken bridge, and "the same author
+writes the entry and its trigger index, so the mechanism has no second reader". This is that
+second reader, and the set it refuses is *derived* from the register's classification
+(KBR-186) rather than hand-listed — so the two cannot drift.
 
 ---
 

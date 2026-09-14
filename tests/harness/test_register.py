@@ -514,3 +514,139 @@ class TestTheModuleStandsAlone:
         ]
 
         assert [line for line in innocent if _KITTY_IMPORT.search(line)] == []
+
+
+class TestTheTriggerArrangingBy:
+    """KBR-186 — every non-ALWAYS trigger declares how it is arranged.
+
+    The classification table is the spec.  Moving any trigger to the wrong kind
+    fails exactly the test that pins that trigger (``F1``); the falsification
+    cases below are the design's adversarial twins for plan §1.4.
+    """
+
+    def test_arranging_by_is_a_four_value_enum(self) -> None:
+        """The four kinds the ticket names — no fifth, no fourth.
+
+        ``ALWAYS`` is the absence of a condition (per the register docstring) and
+        does not carry an ``arranged_by``; the four real kinds are what the
+        enum enumerates.
+        """
+        assert {member.name for member in r.ArrangingBy} == {
+            "REQUEST",
+            "ROUTE",
+            "RESPONSE",
+            "PROFILE",
+        }
+
+    def test_always_does_not_carry_an_arranging_by(self) -> None:
+        """``ALWAYS`` is "the absence of a condition, not a condition".
+
+        Attaching an ``arranged_by`` to it would classify something the register
+        says is un-classifiable, and the derived ``NOT_CORPUS_DECIDABLE`` rule
+        (REQUEST is the only corpus-decidable kind) would have to special-case
+        it again.  Both halves of that are the drift this ticket exists to kill.
+        """
+        assert "arranged_by" not in vars(r.Trigger.ALWAYS)
+
+    def test_every_non_always_trigger_has_an_arranging_by(self) -> None:
+        """The positive control on the schema.
+
+        A trigger without ``arranged_by`` would not be picked up by the
+        derivation, and the corpus loader would silently treat it as
+        corpus-decidable — the under-claiming hazard §3.3.1a calls unrecoverable.
+        """
+        for trigger in r.Trigger:
+            if trigger is r.Trigger.ALWAYS:
+                continue
+            assert hasattr(trigger, "arranged_by"), f"{trigger.name} has no arranged_by"
+            assert trigger.arranged_by in set(r.ArrangingBy), (
+                f"{trigger.name}.arranged_by is {trigger.arranged_by!r}"
+            )
+
+    def test_classification_matches_the_specified_table(self) -> None:
+        """F1 — the full (trigger → arranged_by) table, per the ticket.
+
+        Any member moved to the wrong kind fails this test by name.  The table
+        is the spec; the test is the guard.
+        """
+        expected: dict[r.Trigger, r.ArrangingBy] = {
+            r.Trigger.PROFILE_SETS_MODEL: r.ArrangingBy.PROFILE,
+            r.Trigger.NON_NATIVE_UPSTREAM_WIRE: r.ArrangingBy.ROUTE,
+            r.Trigger.TOOL_RESULT_OVER_LIMIT: r.ArrangingBy.REQUEST,
+            r.Trigger.COMPACTION_RAN_WITH_OVERSIZED_TOOL_RESULT: r.ArrangingBy.PROFILE,
+            r.Trigger.OVER_COMPACTION_BUDGET: r.ArrangingBy.PROFILE,
+            r.Trigger.UPSTREAM_REJECTED_OVERSIZED_ON_BALANCING: r.ArrangingBy.RESPONSE,
+            r.Trigger.ORPHAN_TOOL_RESULT: r.ArrangingBy.REQUEST,
+            r.Trigger.THINKING_ROUNDTRIP_REJECTED: r.ArrangingBy.RESPONSE,
+            r.Trigger.NATIVE_TOOL_USE_FORMAT_ERROR: r.ArrangingBy.RESPONSE,
+            r.Trigger.GEMINI_PROTOCOL: r.ArrangingBy.ROUTE,
+            r.Trigger.GEMINI_NON_STREAMING: r.ArrangingBy.REQUEST,
+            r.Trigger.UPSTREAM_EMPTY_RESPONSE: r.ArrangingBy.RESPONSE,
+            r.Trigger.ZAI_THINKING_ENABLED: r.ArrangingBy.REQUEST,
+            r.Trigger.ZAI_THINKING_DISABLED: r.ArrangingBy.REQUEST,
+            r.Trigger.REASONING_EFFORT_PRESENT: r.ArrangingBy.REQUEST,
+            r.Trigger.MAX_TOKENS_ABSENT: r.ArrangingBy.REQUEST,
+            r.Trigger.MULTIPLE_SYSTEM_BLOCKS: r.ArrangingBy.REQUEST,
+            r.Trigger.ANTHROPIC_THINKING_ENABLED: r.ArrangingBy.REQUEST,
+            r.Trigger.ADAPTIVE_THINKING_KEYS_PRESENT: r.ArrangingBy.REQUEST,
+            r.Trigger.ASSISTANT_TURN_LACKS_THINKING_BLOCK: r.ArrangingBy.REQUEST,
+            r.Trigger.NON_STREAMING_MAX_TOKENS_OVER_4096: r.ArrangingBy.REQUEST,
+            r.Trigger.THINKING_SIGNALLED_OR_INFERRED: r.ArrangingBy.REQUEST,
+            r.Trigger.CC_ORIGIN_PATH: r.ArrangingBy.ROUTE,
+            r.Trigger.RESPONSES_ORIGIN_PATH: r.ArrangingBy.REQUEST,
+            r.Trigger.THINKING_SIGNATURE_REJECTED: r.ArrangingBy.RESPONSE,
+        }
+
+        assert set(expected) == set(r.Trigger) - {r.Trigger.ALWAYS}, (
+            "the classification table and the vocabulary drifted — either a "
+            "trigger was added without a row in expected or vice versa"
+        )
+
+        for trigger, want in expected.items():
+            assert trigger.arranged_by is want, (
+                f"{trigger.name} is classified as {trigger.arranged_by.name!r}; "
+                f"the spec says {want.name!r}"
+            )
+
+    def test_cc_origin_path_docstring_states_route_through_cc_to_responses(self) -> None:
+        """F4 — the docstring on ``CC_ORIGIN_PATH`` settles the KBR-178 ambiguity.
+
+        KBR-178 made the ambiguity observable for the first time by carrying
+        ``stop`` from the Messages ingress into the CC body.  The docstring must
+        state reading (2) explicitly so an oracle run that meets the trigger on
+        a Messages-origin entry does not report a false I1 breach.
+        """
+        doc = r.Trigger.CC_ORIGIN_PATH.__doc__ or ""
+        assert "_cc_to_responses" in doc, (
+            "the docstring must name the dispatch site, not the inbound wire"
+        )
+        # 'regardless of' or 'any non-Responses origin' — both forms name reading (2).
+        assert ("regardless of" in doc.lower()) or ("non-responses origin" in doc.lower()), (
+            "the docstring must explicitly state reading (2): the body reaching "
+            "_cc_to_responses regardless of inbound wire"
+        )
+
+    def test_cc_origin_path_is_route_responses_origin_path_is_request(self) -> None:
+        """The asymmetry, recorded as a test.
+
+        The two triggers look like a symmetric pair — they share an adapter and
+        the dispatch is the same single bit (``_original_body``).  The
+        classification is asymmetric because the ticket says CC_ORIGIN_PATH is
+        ROUTE (the provider decides) and RESPONSES_ORIGIN_PATH is REQUEST (the
+        inbound wire is Responses).  A future reader who notices the symmetry
+        must not silently unify them.
+        """
+        assert r.Trigger.CC_ORIGIN_PATH.arranged_by is r.ArrangingBy.ROUTE
+        assert r.Trigger.RESPONSES_ORIGIN_PATH.arranged_by is r.ArrangingBy.REQUEST
+
+    def test_responses_origin_path_docstring_names_inbound_wire(self) -> None:
+        """The mirror-image half of F4 — the genuine inbound-wire trigger.
+
+        Unlike ``CC_ORIGIN_PATH``, this trigger is decided by the body the
+        inbound wire carries (Responses-shaped), not by the adapter's dispatch.
+        A docstring that names the inbound wire makes the asymmetry explicit.
+        """
+        doc = r.Trigger.RESPONSES_ORIGIN_PATH.__doc__ or ""
+        assert "responses" in doc.lower(), (
+            "the docstring must name the inbound wire shape that decides the trigger"
+        )
