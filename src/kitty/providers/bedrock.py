@@ -227,6 +227,21 @@ class BedrockAdapter(ProviderAdapter):
                 content = msg.get("content", "")
                 if isinstance(content, str):
                     content = [{"text": content}]
+                elif isinstance(content, list):
+                    # KBR-222: flatten CC content parts to their text -- the
+                    # single-block shape every Messages-route turn shipped
+                    # before the fix. Converse has no mapping for an
+                    # ``image_url`` part here, and forwarding the list would
+                    # fail boto3 validation (KBR-223 owns real handling).
+                    content = [
+                        {
+                            "text": "\n".join(
+                                part.get("text", "")
+                                for part in content
+                                if isinstance(part, dict) and part.get("type") == "text"
+                            )
+                        }
+                    ]
                 bedrock["messages"].append({"role": role, "content": content})
 
         # Translate tools

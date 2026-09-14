@@ -19,7 +19,7 @@ from kitty.bridge.messages.events import (
     format_message_stop_event,
 )
 
-__all__ = ["MessagesTranslator", "carry_tool_choice_and_metadata"]
+__all__ = ["MessagesTranslator", "build_user_content_message", "carry_tool_choice_and_metadata"]
 
 _EMPTY_ASSISTANT_FALLBACK_TEXT = (
     "Upstream model returned an empty response. Please retry. "
@@ -127,6 +127,65 @@ def carry_tool_choice_and_metadata(messages_request: dict, cc_request: dict) -> 
 
 #: KBR-203: the thinking ``display`` values Anthropic accepts without a beta header.
 _GA_THINKING_DISPLAYS: tuple[str, ...] = ("summarized", "omitted")
+
+
+def build_user_content_message(blocks: list, documents_out: list[dict]) -> dict:
+    """Build one CC user message from non-``tool_result`` Messages blocks.
+
+    The shared body of the two Messages→CC converters (:meth:`MessagesTranslator.
+    translate_request` and ``server._convert_native_to_cc_format``) — a second
+    copy of the value table is the drift that lost KBR-178's field on the
+    fallback's retry path. Text-only input keeps the pre-KBR-222 output — a
+    joined string — so the common turn's CC body does not change shape. Any
+    ``image`` block switches the message to a content-parts list (``text``
+    plus ``image_url`` parts), because a string would lose the image again one
+    hop later. ``document`` blocks go to *documents_out*, never into the CC
+    content.
+
+    Args:
+        blocks: The user message's non-``tool_result`` content blocks.
+        documents_out: Collector for ``document`` blocks; each entry is
+            addressed to the message dict this function builds.
+
+    Returns:
+        The CC user message dict.
+    """
+    # Text blocks join as today; images become CC parts; documents ride the
+    # internal key. Block types neither branch handles are dropped, as before
+    # this fix — nothing claims them.
+    parts: list[dict] = []
+    documents: list[dict] = []
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        kind = block.get("type")
+        if kind == "text":
+            parts.append({"type": "text", "text": block.get("text", "")})
+        elif kind == "image":
+            source = block.get("source") or {}
+            if source.get("type") == "base64":
+                url = f"data:{source.get('media_type', '')};base64,{source.get('data', '')}"
+            elif source.get("type") == "url":
+                url = source.get("url", "")
+            else:
+                # KBR-222: a source type hop 1 cannot express (Anthropic's
+                # `file`, or a malformed one) keeps today's drop — an
+                # empty-URL part would corrupt the reference and buy an
+                # opaque upstream 400.
+                continue
+            parts.append({"type": "image_url", "image_url": {"url": url}})
+        elif kind == "document":
+            documents.append(block)
+
+    message: dict = {
+        "role": "user",
+        "content": "\n".join(p["text"] for p in parts if p["type"] == "text") if parts else "",
+    }
+    if any(p["type"] != "text" for p in parts):
+        message["content"] = parts
+    if documents:
+        documents_out.append({"message": message, "blocks": documents})
+    return message
 
 
 class MessagesTranslator:
@@ -286,9 +345,14 @@ class MessagesTranslator:
                 system = "\n".join(parts)
             messages.append({"role": "system", "content": system})
 
-        # Messages with content block handling
+        # Messages with content block handling.  KBR-222: ``documents``
+        # collects every ``document`` block across the conversation, each
+        # addressed to the CC message dict it belongs to; the list is filled
+        # by _translate_user_message and travels on the ``_documents``
+        # internal key, which only Anthropic-family adapters restore.
+        documents: list[dict] = []
         for msg in messages_request.get("messages", []):
-            translated = self._translate_message(msg)
+            translated = self._translate_message(msg, documents)
             if translated is None:
                 continue
             if isinstance(translated, list):
@@ -301,6 +365,14 @@ class MessagesTranslator:
             "messages": messages,
             "stream": messages_request.get("stream", False),
         }
+
+        # KBR-222: Chat Completions has no slot for an Anthropic ``document``
+        # block, and shipping Anthropic part spelling on the CC wire would
+        # 400 turns that previously only lost the document.  It travels as
+        # internal metadata instead, like ``_top_k``; ``_INTERNAL_KEYS`` keeps
+        # it off the wire of every adapter that does not restore it.
+        if documents:
+            result["_documents"] = documents
 
         # KBR-228 part B: the verbatim system carriage, set here where the
         # joined form above has already been written into ``messages``.
@@ -404,17 +476,24 @@ class MessagesTranslator:
 
         return result
 
-    def _translate_message(self, msg: dict) -> dict | list[dict] | None:
+    def _translate_message(self, msg: dict, documents_out: list[dict]) -> dict | list[dict] | None:
         """Translate a single Messages API message to Chat Completions format.
 
-        Returns the translated message dict. For user messages with multiple
-        tool_result blocks, the caller should use ``_translate_messages`` instead.
+        Args:
+            msg: The inbound Messages API message dict.
+            documents_out: Collector for ``document`` blocks found in user
+                content (KBR-222); each entry is addressed to the CC message
+                dict it belongs to. Not modified for non-user messages.
+
+        Returns:
+            The translated message dict. For user messages with multiple
+            tool_result blocks, the caller should use ``_translate_messages`` instead.
         """
         role = msg.get("role")
         content = msg.get("content")
 
         if role == "user":
-            return self._translate_user_message(content)
+            return self._translate_user_message(content, documents_out)
         if role == "assistant":
             return self._translate_assistant_message(content)
 
@@ -424,28 +503,39 @@ class MessagesTranslator:
 
         return {"role": role, "content": str(content) if content else ""}
 
-    def _translate_user_message(self, content) -> dict | list[dict]:
+    def _translate_user_message(self, content, documents_out: list[dict]) -> dict | list[dict]:
         """Translate a user message, handling tool_result content blocks.
 
-        Returns a single message dict for simple content, or a list of message
-        dicts when multiple ``tool_result`` blocks need separate ``tool`` role
-        messages in Chat Completions format.
+        Non-tool blocks keep more than their text since KBR-222: an ``image``
+        block becomes a CC ``image_url`` content part, and a ``document``
+        block — for which Chat Completions has no slot — is appended to
+        *documents_out* as ``{"message": <the CC user message it belongs
+        to>, "blocks": [<the Anthropic document block, verbatim>]}``. The
+        address is the message's identity, not its position: compaction drops
+        whole messages, so an index would attach a document to the wrong turn,
+        while an identity either matches or forfeits the document.
+
+        Args:
+            content: The inbound user message content (string or block list).
+            documents_out: Collector for ``document`` blocks, shared across
+                the whole request so ``translate_request`` can publish them
+                on the ``_documents`` internal key.
+
+        Returns:
+            A single message dict for simple content, or a list of message
+            dicts when ``tool_result`` blocks need separate ``tool`` role
+            messages in Chat Completions format. Non-tool blocks beside a
+            tool_result become one trailing user message after the tool
+            messages, instead of being dropped.
         """
         if isinstance(content, str):
             return {"role": "user", "content": content}
 
         if isinstance(content, list):
             tool_results = [b for b in content if isinstance(b, dict) and b.get("type") == "tool_result"]
+            others = [b for b in content if not (isinstance(b, dict) and b.get("type") == "tool_result")]
             if tool_results:
-                if len(tool_results) == 1:
-                    tr = tool_results[0]
-                    return {
-                        "role": "tool",
-                        "tool_call_id": tr.get("tool_use_id", ""),
-                        "content": tr.get("content", ""),
-                    }
-                # Multiple tool results -> multiple tool role messages
-                return [
+                tool_msgs = [
                     {
                         "role": "tool",
                         "tool_call_id": tr.get("tool_use_id", ""),
@@ -453,15 +543,33 @@ class MessagesTranslator:
                     }
                     for tr in tool_results
                 ]
+                if not others:
+                    return tool_msgs[0] if len(tool_msgs) == 1 else tool_msgs
+                # KBR-222: the sibling blocks used to die here. They become a
+                # trailing user message; a text-first turn is reordered after
+                # the tool results, which only the register prose claims.
+                return [*tool_msgs, self._user_content_message(others, documents_out)]
 
-            # Regular content blocks -> concatenate text
-            text_parts = []
-            for block in content:
-                if isinstance(block, dict) and block.get("type") == "text":
-                    text_parts.append(block.get("text", ""))
-            return {"role": "user", "content": "\n".join(text_parts) if text_parts else ""}
+            return self._user_content_message(others, documents_out)
 
         return {"role": "user", "content": str(content) if content else ""}
+
+    def _user_content_message(self, blocks: list, documents_out: list[dict]) -> dict:
+        """Build one CC user message from non-``tool_result`` blocks.
+
+        Delegates to :func:`build_user_content_message` — the shared body of
+        both Messages→CC converters, so the fallback's retry cannot re-drop
+        what hop 1 carries (KBR-178's lesson).
+
+        Args:
+            blocks: The user message's non-``tool_result`` content blocks.
+            documents_out: Collector for ``document`` blocks; each entry is
+                addressed to the message dict this call builds.
+
+        Returns:
+            The CC user message dict.
+        """
+        return build_user_content_message(blocks, documents_out)
 
     def _translate_assistant_message(self, content) -> dict:
         """Translate an assistant message, handling tool_use and thinking content blocks."""

@@ -516,6 +516,31 @@ class TestCcToResponses:
         assert len(result["input"]) == 1
         assert result["input"][0]["role"] == "user"
 
+    def test_list_form_user_content_flattens_to_its_text_parts(self, adapter: OpenAISubscriptionAdapter) -> None:
+        """A list-form user content yields the joined text, never a ``str(list)`` repr (KBR-222).
+
+        Hop 1 now ships image-bearing turns as CC content parts; stringifying
+        that list would put its Python repr into the prompt. The flatten keeps
+        the Codex route at today's outcome — text only.
+        """
+        cc = {
+            "model": "gpt-5.4",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "what is in this?"},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": "data:image/png;base64,aWNvbg=="},
+                        },
+                    ],
+                }
+            ],
+        }
+        result = adapter._cc_to_responses(cc)
+        assert result["input"][0]["content"] == [{"type": "input_text", "text": "what is in this?"}]
+
     def test_converts_tools(self, adapter: OpenAISubscriptionAdapter) -> None:
         cc = {
             "model": "gpt-5.4",
