@@ -66,6 +66,14 @@ _WAIT_TIMEOUT = 0x102
 _SYNCHRONIZE = 0x00100000
 _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 
+# The Win32 process-creation flags ``start_bridge`` detaches the bridge child
+# with (KBR-231). Spelled as the values WinBase.h documents rather than read
+# off ``subprocess``, which imports those names from ``_winapi`` on Windows
+# only -- the POSIX legs could not even import a reference to them. The same
+# reasoning that keeps ``ERROR_ACCESS_DENIED`` above an int.
+_CREATE_NEW_PROCESS_GROUP = 0x00000200
+_DETACHED_PROCESS = 0x00000008
+
 
 def liveness_from_open_failure(last_error: int) -> ProcessLiveness:
     """Classify a failed ``OpenProcess`` by the error it set.
@@ -475,6 +483,37 @@ def _drain_output(stream: io.BufferedIOBase) -> tuple[threading.Thread, list[byt
     return reader, chunks
 
 
+def background_spawn_kwargs(platform: str) -> dict[str, int | bool]:
+    """Return the ``Popen`` keyword arguments that detach a bridge child on ``platform``.
+
+    ``start_bridge`` runs the bridge as a daemon: it must outlive the process
+    that started it and every console that process was attached to. POSIX says
+    that in one flag, ``start_new_session`` (``setsid()``). Windows has no
+    working equivalent — CPython's Windows ``Popen`` accepts
+    ``start_new_session`` and silently ignores it — so there the child is
+    started without a console (``DETACHED_PROCESS``, which keeps every console
+    event of every console away from it) and as the root of a new process
+    group (``CREATE_NEW_PROCESS_GROUP``, which additionally disables Ctrl+C
+    for the group). Together they keep a Ctrl+C or a closed window in the
+    user's terminal from ending a bridge the user was told runs in the
+    background (KBR-231).
+
+    Args:
+        platform: A ``sys.platform`` value. Any name other than ``"win32"``
+            gets the POSIX form.
+
+    Returns:
+        Keyword arguments for :class:`subprocess.Popen`, passed through
+        ``**`` at the spawn site. The two platforms share no key: POSIX
+        ``Popen`` raises ``ValueError`` for a nonzero ``creationflags``, and a
+        Windows ``Popen`` ignores ``start_new_session``, so each platform is
+        handed only the arguments that mean something on it.
+    """
+    if platform == "win32":
+        return {"creationflags": _CREATE_NEW_PROCESS_GROUP | _DETACHED_PROCESS}
+    return {"start_new_session": True}
+
+
 def start_bridge(
     *,
     state_path: Path | str | None = None,
@@ -577,12 +616,16 @@ def start_bridge(
             cmd.extend(["--tls-key", tls_key])
 
         # Spawn background process; stderr joins stdout so one reader drains both (KBR-176)
+        # The detachment is per platform: a new session on POSIX, and on Windows
+        # a new process group with no console -- there ``start_new_session`` is
+        # accepted and silently ignored, which left the child sharing the
+        # launcher's console (KBR-231).
         proc = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            start_new_session=True,
             env=child_env,
+            **typing.cast(dict[str, typing.Any], background_spawn_kwargs(sys.platform)),
         )
         # A PIPE comes back as a buffered reader, which has the read1 the drain uses
         reader, output = _drain_output(typing.cast(io.BufferedIOBase, proc.stdout))

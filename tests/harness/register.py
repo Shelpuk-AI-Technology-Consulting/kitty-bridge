@@ -348,7 +348,14 @@ _BRIDGE_ROWS: tuple[MutationRow, ...] = (
     ),
     MutationRow(
         id="M3",
-        site=(f"{_SERVER}:BridgeServer._truncate_oversized_tool_results",),
+        site=(
+            f"{_SERVER}:BridgeServer._truncate_oversized_tool_results",
+            # The Responses-subscription route ships the raw inbound body, so
+            # the mutation is performed there on the Responses-shaped `input`
+            # itself; the CC-shape site truncates a copy that never ships on
+            # that route (KBR-169).
+            f"{_SERVER}:BridgeServer._truncate_oversized_responses_outputs",
+        ),
         trigger=Trigger.TOOL_RESULT_OVER_LIMIT,
         # The truncated content lives in one ToolResult part. Anchoring at
         # `conversation.turns` would claim a dropped turn as well.
@@ -396,7 +403,15 @@ _BRIDGE_ROWS: tuple[MutationRow, ...] = (
     ),
     MutationRow(
         id="M7",
-        site=(f"{_SERVER}:BridgeServer._validate_tool_call_pairing",),
+        site=(
+            f"{_SERVER}:BridgeServer._validate_tool_call_pairing",
+            # The Responses-subscription route applies the pairing rule to the
+            # Responses-shaped `input`, and `_prune_compacted_responses_input`
+            # re-runs it after compaction — pruning an earlier wire group can
+            # orphan a later output (KBR-169).
+            f"{_SERVER}:BridgeServer._drop_orphan_responses_tool_outputs",
+            f"{_SERVER}:BridgeServer._prune_compacted_responses_input",
+        ),
         trigger=Trigger.ORPHAN_TOOL_RESULT,
         # Dropping an orphan renumbers the parts after it and can empty a turn,
         # so the collection is again the narrowest anchor that survives.
