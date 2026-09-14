@@ -1094,3 +1094,259 @@ class TestSynthesizeCompletedEvents:
             f"Expected actual arguments but got: {fc_items[0]['arguments']!r}. "
             "This indicates double-finalize() bug where buffer was already consumed."
         )
+
+
+# ── output_index allocation (KBR-240) ───────────────────────────────────────
+
+
+class TestOutputItemIndices:
+    """Every opened output item gets its own ``output_index`` (KBR-240).
+
+    The Responses SSE grammar positions output items by ``output_index``.
+    Before the fix the translator had no counter at all: text and reasoning
+    were pinned to 0 and a function call took the Chat Completions tool-call
+    index raw (also 0 for the first call), so prose-then-tool-call — the
+    common Codex shape — announced two items at slot 0 and closed slot 0
+    twice. One shared counter, allocated when an item opens, mirrors the
+    KBR-226 fix on the Messages wire; overlap and free close order stay
+    permitted, as decided there.
+    """
+
+    def setup_method(self):
+        """Give each test a fresh translator."""
+        self.t = ResponsesTranslator()
+        self.resp_id = "resp_test"
+
+    def _feed(self, delta: dict, finish: str | None = None) -> list[tuple[str, dict]]:
+        """Translate one Chat Completions chunk carrying ``delta``.
+
+        Args:
+            delta: The ``choices[0].delta`` object of the chunk.
+            finish: The chunk's ``finish_reason``, if it is the final chunk.
+
+        Returns:
+            The emitted events, parsed as ``(event_name, data_dict)`` pairs.
+        """
+        chunk = {"choices": [{"index": 0, "delta": delta, "finish_reason": finish}]}
+        return [_parse_sse_event(raw) for raw in self.t.translate_stream_chunk(self.resp_id, chunk)]
+
+    def _finish(self) -> list[tuple[str, dict]]:
+        """Translate the final chunk that closes the stream."""
+        return self._feed({}, finish="tool_calls")
+
+    @staticmethod
+    def _added(events: list[tuple[str, dict]]) -> list[tuple[int, str]]:
+        """Return ``(output_index, item_type)`` for every output_item.added.
+
+        Args:
+            events: Parsed ``(event_name, data_dict)`` pairs.
+
+        Returns:
+            One pair per ``response.output_item.added`` event, in wire order.
+        """
+        return [
+            (d["output_index"], d["item"]["type"])
+            for name, d in events
+            if name == "response.output_item.added"
+        ]
+
+    @staticmethod
+    def _done_indices(events: list[tuple[str, dict]]) -> list[int]:
+        """Return the ``output_index`` of every output_item.done event.
+
+        Args:
+            events: Parsed ``(event_name, data_dict)`` pairs.
+
+        Returns:
+            The indices in wire order.
+        """
+        return [d["output_index"] for name, d in events if name == "response.output_item.done"]
+
+    @staticmethod
+    def _tool_call(cc_index: int, call_id: str, arguments: str = "") -> dict:
+        """Build one Chat Completions ``tool_calls`` delta entry.
+
+        Args:
+            cc_index: The Chat Completions tool-call index the entry belongs to.
+            call_id: The upstream call id; its presence marks a new call.
+            arguments: The argument fragment the entry carries.
+
+        Returns:
+            A ``tool_calls`` delta entry in Chat Completions shape.
+        """
+        return {
+            "index": cc_index,
+            "id": call_id,
+            "type": "function",
+            "function": {"name": f"fn_{call_id}", "arguments": arguments},
+        }
+
+    def test_text_then_first_tool_call_get_distinct_indices(self):
+        """Prose followed by a tool call must not share the output slot."""
+        text_events = self._feed({"content": "Let me check."})
+        call_events = self._feed({"tool_calls": [self._tool_call(0, "call_a", '{"path": "a"}')]})
+        final_events = self._finish()
+
+        assert self._added(text_events) == [(0, "message")]
+        assert self._added(call_events) == [(1, "function_call")]
+        assert self._done_indices(final_events) == [0, 1]
+
+    def test_reasoning_text_and_parallel_calls_get_increasing_indices(self):
+        """All three item kinds draw from one counter, in open order.
+
+        Text sits at slot 1 here, so every text-addressed event — not just
+        output_item.added/done — is pinned to the text item's own slot: a
+        translator that pinned the delta/part events back to 0 fails here.
+        """
+        reasoning_events = self._feed({"reasoning_content": "thinking"})
+        text_events = self._feed({"content": "Both, then the calls."})
+        call_a_events = self._feed({"tool_calls": [self._tool_call(0, "call_a")]})
+        call_b_events = self._feed({"tool_calls": [self._tool_call(1, "call_b")]})
+
+        assert self._added(reasoning_events) == [(0, "reasoning")]
+        assert self._added(text_events) == [(1, "message")]
+        assert self._added(call_a_events) == [(2, "function_call")]
+        assert self._added(call_b_events) == [(3, "function_call")]
+
+        # The text item's part and delta events carry the text item's slot.
+        assert [
+            (name, d["output_index"])
+            for name, d in text_events
+            if name in ("response.content_part.added", "response.output_text.delta")
+        ] == [("response.content_part.added", 1), ("response.output_text.delta", 1)]
+
+        # The finish closes each item once, at its own recorded slot, and the
+        # text done events (output_text.done, content_part.done) follow it.
+        final_events = self._finish()
+        assert self._done_indices(final_events) == [0, 1, 2, 3]
+        assert [
+            (name, d["output_index"])
+            for name, d in final_events
+            if name in ("response.output_text.done", "response.content_part.done")
+        ] == [("response.output_text.done", 1), ("response.content_part.done", 1)]
+
+    def test_text_after_calls_opens_at_next_free_slot(self):
+        """Text following the calls opens a fresh slot; the calls stay open."""
+        self._feed({"tool_calls": [self._tool_call(0, "call_a")]})
+        self._feed({"tool_calls": [self._tool_call(1, "call_b")]})
+        text_events = self._feed({"content": "Both calls are in."})
+
+        # Overlap is the decided shape: the text item opens while both calls
+        # are still open, and no done event may close a call early.
+        assert self._added(text_events) == [(2, "message")]
+        assert not [name for name, _ in text_events if name == "response.output_item.done"]
+
+    def test_arguments_events_carry_the_owning_call_index(self):
+        """``function_call_arguments.delta/done`` address the call's own slot.
+
+        The vendor grammar defines ``output_index`` on both events as a
+        required field; the translator omitted it entirely.
+        """
+        self._feed({"content": "Let me check."})
+        self._feed({"tool_calls": [self._tool_call(0, "call_a")]})
+        args_events = self._feed({"tool_calls": [{"index": 0, "function": {"arguments": '{"path"'}}]})
+        final_events = self._finish()
+
+        arg_deltas = [
+            d["output_index"]
+            for name, d in args_events
+            if name == "response.function_call_arguments.delta"
+        ]
+        arg_dones = [
+            d["output_index"]
+            for name, d in final_events
+            if name == "response.function_call_arguments.done"
+        ]
+        assert arg_deltas == [1]
+        assert arg_dones == [1]
+
+    def test_finish_closes_each_item_once_at_its_recorded_index(self):
+        """The finish path closes text and both calls once, at their own slots."""
+        self._feed({"content": "Let me check."})
+        self._feed({"tool_calls": [self._tool_call(0, "call_a")]})
+        self._feed({"tool_calls": [self._tool_call(1, "call_b")]})
+
+        final_events = self._finish()
+        assert self._done_indices(final_events) == [0, 1, 2]
+
+    def test_synthesize_completed_events_closes_each_item_at_its_recorded_index(self):
+        """The EOF-without-finish path closes by the recorded slot, like finish."""
+        self._feed({"content": "Let me check."})
+        self._feed({"tool_calls": [self._tool_call(0, "call_a", '{"path": "a"}')]})
+
+        final_events = [
+            _parse_sse_event(raw) for raw in self.t.synthesize_completed_events(self.resp_id, "m")
+        ]
+        assert self._done_indices(final_events) == [0, 1]
+
+    def test_completed_output_ordered_by_index(self):
+        """The completed response's output array follows slot order, not open order.
+
+        Text opened first (slot 0), reasoning second (slot 1); the array must
+        list the message before the reasoning item so a positional client
+        aligning array position with ``output_index`` reads it correctly.
+        """
+        self._feed({"content": "The answer is 4."})
+        self._feed({"reasoning_content": "checked the sum"})
+        final_events = self._feed({}, finish="stop")
+
+        completed = [
+            d for name, d in final_events if name == "response.completed"
+        ]
+        output_types = [item["type"] for item in completed[0]["response"]["output"]]
+        assert output_types == ["message", "reasoning"]
+
+    def test_completed_array_includes_item_whose_text_stripped_to_nothing(self):
+        """A text item opened but stripped empty still closes and appears.
+
+        MiniMax interleaves thinking tags in content; when every character of
+        the text was a tag, the item is closed with empty text (its done event
+        already was) and stays in the completed array, so array position keeps
+        equalling ``output_index``.
+        """
+        self._feed({"content": "<اخل>weighing it</اخل>"})
+        self._feed({"tool_calls": [self._tool_call(0, "call_a", '{"path": "a"}')]})
+        final_events = self._finish()
+
+        text_done = [
+            d
+            for name, d in final_events
+            if name == "response.output_item.done" and d["item"]["type"] == "message"
+        ]
+        assert [d["output_index"] for d in text_done] == [0]
+        assert text_done[0]["item"]["content"][0]["text"] == ""
+
+        completed = [d for name, d in final_events if name == "response.completed"]
+        output_types = [item["type"] for item in completed[0]["response"]["output"]]
+        assert output_types == ["message", "function_call"]
+        assert completed[0]["response"]["output"][0]["content"][0]["text"] == ""
+
+    def test_synthesize_closes_the_reasoning_item_at_its_recorded_index(self):
+        """The EOF-without-finish path closes reasoning too, at its own slot.
+
+        Upstream streams that end without a finish chunk (timeout, dropped
+        connection) reach ``synthesize_completed_events`` with the reasoning
+        item open; leaving it open would leave an added with no done.
+        """
+        self._feed({"reasoning_content": "working it out"})
+        self._feed({"content": "The answer is 4."})
+
+        final_events = [
+            _parse_sse_event(raw) for raw in self.t.synthesize_completed_events(self.resp_id, "m")
+        ]
+        assert self._done_indices(final_events) == [0, 1]
+        completed = [d for name, d in final_events if name == "response.completed"]
+        output_types = [item["type"] for item in completed[0]["response"]["output"]]
+        assert output_types == ["reasoning", "message"]
+        assert completed[0]["response"]["output"][0]["summary"][0]["text"] == "working it out"
+
+    def test_reset_restarts_allocation_at_zero(self):
+        """A second stream on a reused translator allocates from 0 again."""
+        self._feed({"content": "First stream."})
+        self._feed({"tool_calls": [self._tool_call(0, "call_a")]})
+        self._finish()
+
+        text_events = self._feed({"content": "Second stream."})
+        call_events = self._feed({"tool_calls": [self._tool_call(0, "call_b")]})
+        assert self._added(text_events) == [(0, "message")]
+        assert self._added(call_events) == [(1, "function_call")]

@@ -165,12 +165,14 @@ class TestFunctionCallArgumentsDeltaEvent:
             seq=5,
             response_id="resp_abc",
             item_id="fc_001",
+            output_index=2,
             call_id="call_001",
             delta='{"city":',
         )
         data = _assert_required_fields(raw, "response.function_call_arguments.delta")
         assert data["response_id"] == "resp_abc"
         assert data["item_id"] == "fc_001"
+        assert data["output_index"] == 2
         assert data["call_id"] == "call_001"
         assert data["delta"] == '{"city":'
 
@@ -181,11 +183,14 @@ class TestFunctionCallArgumentsDoneEvent:
             seq=8,
             response_id="resp_abc",
             item_id="fc_001",
+            output_index=2,
             call_id="call_001",
             arguments='{"city":"London"}',
         )
         data = _assert_required_fields(raw, "response.function_call_arguments.done")
         assert data["arguments"] == '{"city":"London"}'
+        assert data["item_id"] == "fc_001"
+        assert data["output_index"] == 2
         assert data["call_id"] == "call_001"
 
 
@@ -251,10 +256,15 @@ class TestSSEFormatValidity:
             ),
             format_response_completed_event("r1", seq=8, response_data={"output": []}),
             format_function_call_arguments_delta_event(
-                seq=3, response_id="r1", item_id="fc_1", call_id="call_1", delta="{}"
+                seq=3, response_id="r1", item_id="fc_1", output_index=0, call_id="call_1", delta="{}"
             ),
             format_function_call_arguments_done_event(
-                seq=4, response_id="r1", item_id="fc_1", call_id="call_1", arguments="{}"
+                seq=4,
+                response_id="r1",
+                item_id="fc_1",
+                output_index=0,
+                call_id="call_1",
+                arguments="{}",
             ),
             format_error_event({"code": "x", "message": "y"}),
         ]
