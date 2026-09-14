@@ -214,6 +214,17 @@ class Trigger(Enum):
     MULTIPLE_SYSTEM_BLOCKS = ("multiple_system_blocks", ArrangingBy.REQUEST)
     ANTHROPIC_THINKING_ENABLED = ("anthropic_thinking_enabled", ArrangingBy.REQUEST)
     ADAPTIVE_THINKING_KEYS_PRESENT = ("adaptive_thinking_keys_present", ArrangingBy.REQUEST)
+    # KBR-44 (2026-09-14, B1-A): the row's deferred comment anticipated this
+    # trigger. The translator emits `_output_config` and `_effort` in
+    # independent `if`s (translator.py:425-426 vs :438-439), and the adapter
+    # restores `output_config` on `_output_config is not None` alone
+    # (anthropic.py:572-577) — so a request carrying `output_config` with no
+    # `thinking` and no top-level `effort` produces a delta at
+    # `envelope.extra[output_config]` with P5d's `ADAPTIVE_THINKING_KEYS_PRESENT`
+    # unmet. A separate trigger is the design's own plan and §3.2.2's P5d
+    # trigger-cell wording ("or output_config present") already anticipated it
+    # as data-orphan until this row landed.
+    OUTPUT_CONFIG_PRESENT = ("output_config_present", ArrangingBy.REQUEST)
     ASSISTANT_TURN_LACKS_THINKING_BLOCK = (
         "assistant_turn_lacks_thinking_block",
         ArrangingBy.REQUEST,
@@ -770,15 +781,35 @@ _PROVIDER_ROWS: tuple[MutationRow, ...] = (
         paths=(c.extra_path("thinking"), c.extra_path("effort")),
         conditional=True,
         design_ref="§3.2.2",
-        # KBR-186 (deferred output_config P-row, KBR-224 scope): the
-        # `envelope.extra[output_config]` address is not yet claimed because
-        # no captured corpus entry carries the field — a row whose conditional
-        # trigger is met but unclaimed manufactures a false I1 breach
-        # (§3.3.1a). The would-be trigger `output_config_present` is REQUEST
-        # (a request either carries the field or not), so the row + the first
-        # corpus entry carrying `output_config` land together later. Until
-        # then, per-destination scope is prose here, mirroring the `display`
-        # withholding row (KBR-139 precedent).
+        # KBR-44 (2026-09-14): the `envelope.extra[output_config]` address,
+        # deferred here since KBR-224, landed on the row below (P5f) under its
+        # own trigger, because the translator emits `_output_config`
+        # independently of `_effort` and of thinking (translator.py:425-426
+        # vs :438-439) — extending this row under its existing trigger would
+        # have left the output_config-only case unclaimed (the false I1
+        # breach §3.3.1a warns about). P5d's trigger is now thinking/effort
+        # only; see P5f for the output_config restore.
+    ),
+    MutationRow(
+        id="P5f",
+        site=("kitty/providers/anthropic.py:AnthropicAdapter.translate_to_upstream",),
+        trigger=Trigger.OUTPUT_CONFIG_PRESENT,
+        # KBR-224 / KBR-44: restore the agent's `output_config` (Anthropic's
+        # documented spelling of the effort control) where the upstream
+        # documents the field. Separate row and trigger, because the
+        # translator's `output_config` and `effort` emissions are two
+        # independent `if`s — the co-occurrence this row once assumed
+        # (its KBR-186 deferred comment) is an observation about Claude Code's
+        # behaviour, not a register invariant.
+        paths=(c.extra_path("output_config"),),
+        conditional=True,
+        design_ref="§3.2.2",
+        # First corpus entry carrying `output_config`: KBR-44's
+        # `effort_configured` capture (T-C1). Until a corpus entry carries the
+        # field, no oracle run can see the withhold — the pairing rule
+        # (§3.3.1a: a row whose conditional trigger is met but unclaimed
+        # manufactures a false I1 breach) is what this row and the entry land
+        # together.
     ),
     MutationRow(
         id="P5e",

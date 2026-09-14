@@ -24,6 +24,7 @@ committed*, which is this module's whole job.
 from __future__ import annotations
 
 import ast
+import re
 from pathlib import Path
 
 import pytest
@@ -158,6 +159,145 @@ class TestTheProcedureDescribesTheTool:
         who has just made the mistake will find it.
         """
         assert "rotate" in README.read_text(encoding="utf-8").lower()
+
+
+class TestTheCommittedCorpusIsFresh:
+    """The refresh cadence is enforced, not just written down.
+
+    Two workflows install Claude Code (`claude-code-review.yml:785` and
+    `tmux-disconnect.yml:98`); both spell the pin as ``bash -s -- X.Y.Z``. The
+    guard fails when either drifts, when the two disagree, or when the
+    committed corpus's captured entries no longer name that version. Reading
+    the pin from the workflow file — not a second copy of ``2.1.238`` in the
+    test — is what stops the two from diverging silently.
+    """
+
+    #: The exact shape the install line takes. Anchored on the installer URL
+    #: and ``bash -s --`` so a generic ``pip install X.Y.Z`` elsewhere cannot
+    #: be mistaken for the pin. The version arm is a strict semver triple
+    #: (no pre-release / build tags) followed by a boundary
+    #: (``\\s|"\\|'`` — the quote closes the shell's argument) so a relaxed
+    #: match does not greedily consume ``2.1.238`` out of ``2.1.238-rc1``.
+    _INSTALL_LINE = re.compile(
+        r"claude\.ai/install\.sh\s*\|\s*bash\s+-s\s+--\s+(?P<version>\d+\.\d+\.\d+)(?=[\s\"']|\Z)"
+    )
+
+    def _workflow_paths(self) -> tuple[Path, Path]:
+        """Both workflow files that pin the CLI. Two sites, one pin."""
+        return (
+            ROOT / ".github" / "workflows" / "claude-code-review.yml",
+            ROOT / ".github" / "workflows" / "tmux-disconnect.yml",
+        )
+
+    def _pin_from(self, path: Path) -> str:
+        """Return the pin named by ``path``'s install line, or raise.
+
+        Args:
+            path: A workflow file expected to contain the install line.
+
+        Returns:
+            The bare semver triple.
+
+        Raises:
+            AssertionError: When the install line is missing or its version
+                is not a strict ``X.Y.Z`` triple.
+        """
+        text = path.read_text(encoding="utf-8")
+        match = self._INSTALL_LINE.search(text)
+        assert match is not None, (
+            f"{path.name} no longer carries the Claude Code install line "
+            "(`curl -fsSL https://claude.ai/install.sh | bash -s -- X.Y.Z`); "
+            "the freshness guard cannot read its pin"
+        )
+        return match.group("version")
+
+    def test_both_workflows_install_the_same_pinned_version(self) -> None:
+        """One pin, two sites — the guard reads both and asserts they agree.
+
+        A bump of one and not the other leaves the corpus "fresh" against a
+        pin that no longer describes the CLI CI actually runs.
+        """
+        review, tmux = self._workflow_paths()
+        review_pin = self._pin_from(review)
+        tmux_pin = self._pin_from(tmux)
+
+        assert review_pin == tmux_pin, (
+            f"the two workflows disagree on the Claude Code pin: "
+            f"{review.name} installs {review_pin!r}, {tmux.name} installs {tmux_pin!r}. "
+            "Update both to the same version."
+        )
+
+    def test_a_workflow_whose_install_line_disappears_fails_loudly(self, tmp_path: Path) -> None:
+        """A reformat that drops the literal must surface, not pass vacuously.
+
+        The whole-token regex (``tests/test_ci_capability_inventory.py:103``)
+        documents this same shape: a guard that stringified the version would
+        quietly lose its anchor.
+        """
+        # Build a workflow whose pin line is gone (the version is now a comment).
+        broken = tmp_path / "workflow.yml"
+        broken.write_text(
+            "# review installs claude-code but the literal is commented out\n"
+            "# bash -s -- 2.1.238\n",
+            encoding="utf-8",
+        )
+
+        with pytest.raises(AssertionError, match="install line"):
+            self._pin_from(broken)
+
+    def test_a_workflow_pinning_a_non_semver_version_is_refused(self, tmp_path: Path) -> None:
+        r"""A relaxed version arm would let ``2.1.238-rc1`` slip through.
+
+        The pin's contract is ``X.Y.Z``; the workflow's literal is the
+        canonical form. A pre-release tag is a different pin — the corpus
+        should not pretend otherwise. The strict ``\d+\.\d+\.\d+`` arm with
+        a trailing boundary refuses to match it, which the helper reports
+        as "no install line" because the install line *as parsed* does not
+        exist.
+        """
+        relaxed = tmp_path / "workflow.yml"
+        relaxed.write_text(
+            "curl -fsSL https://claude.ai/install.sh | bash -s -- 2.1.238-rc1\n",
+            encoding="utf-8",
+        )
+
+        with pytest.raises(AssertionError):
+            self._pin_from(relaxed)
+
+    def test_a_workflow_whose_pin_disagrees_with_its_twin_fails_loudly(self, tmp_path: Path) -> None:
+        """The forward direction of the agreement check — the harder half.
+
+        ``tests/test_ci_capability_inventory.py:838-843`` documents that a
+        substring compare cannot catch this: ``bash -s -- 2.1.238`` contains
+        ``bash -s -- 2.1.23``. The whole-token regex and the strict version
+        arm together close that gap.
+        """
+        review_path, tmux_path = self._workflow_paths()
+        # The committed reviewer's pin is the truth; mutate the tmux workflow's
+        # install line to disagree, then re-read both. Restored in the same
+        # block so a partial failure does not leave the tree drifted.
+        original = tmux_path.read_text(encoding="utf-8")
+        try:
+            drifted = original.replace("bash -s -- 2.1.238", "bash -s -- 2.1.9")
+            assert drifted != original, "the mutant did not change the tmux pin"
+            tmux_path.write_text(drifted, encoding="utf-8")
+
+            with pytest.raises(AssertionError, match="disagree"):
+                self.test_both_workflows_install_the_same_pinned_version()
+        finally:
+            tmux_path.write_text(original, encoding="utf-8")
+
+    def test_the_committed_corpus_passes_the_freshness_guard(self) -> None:
+        """Binds the workflow artifacts to the corpus — the guard's whole point.
+
+        Red until the corpus ships its first captured entry (the guard raises
+        "no captured entries" by design); green the moment T-C1 commits its
+        five.
+        """
+        review, _ = self._workflow_paths()
+        pin = self._pin_from(review)
+
+        k.assert_captured_from_matches_pin(k.load_corpus(CORPUS), pin)
 
 
 class TestTheCorpusIsAnIndependentOracle:
