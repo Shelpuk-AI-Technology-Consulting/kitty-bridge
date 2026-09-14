@@ -51,7 +51,6 @@ consistency rather than the property.
 from __future__ import annotations
 
 import json
-import os
 from typing import Any, Literal
 
 import hypothesis.strategies as st
@@ -409,6 +408,16 @@ def messages_tool_pair(
         )
 
     def _draw_pair(tool: dict[str, Any], unique: str, result: str) -> list[dict[str, Any]]:
+        """Assemble the paired (tool_use, tool_result) turns from one draw.
+
+        Args:
+            tool: The tool declaration the block names.
+            unique: The shared ``tool_use.id`` / ``tool_result.tool_use_id``.
+            result: The ``tool_result`` content text.
+
+        Returns:
+            ``[assistant_with_tool_use, user_with_tool_result]``.
+        """
         return [
             {
                 "role": "assistant",
@@ -441,11 +450,12 @@ def messages_request(
     """Return a strategy over complete Anthropic Messages request bodies.
 
     The composite draws N message-rounds, alternating user / assistant,
-    starting and ending with user, and inserts a (tool_use, tool_result) pair
-    at one randomly chosen assistant turn when ``tools`` is non-empty. The
-    pairing invariant is owned here (R6), because the user-turn ``content``
-    shape depends on whether the turn is answering a tool_use (block list) or
-    not (string or block list).
+    starting and ending with user, and appends a ``tool_use`` turn at each
+    assistant turn with probability ½ when ``tools`` is non-empty — the
+    following user turn then answers it, which keeps the conversation
+    strictly alternating. The pairing invariant is owned here (R6), because
+    the user-turn ``content`` shape depends on whether the turn is answering
+    a tool_use (block list) or not (string or block list).
 
     Args:
         content_shape: When given, all user turns that are *not* answering a
@@ -477,12 +487,17 @@ def _build_messages_request(
         enforces.
     """
     tools = draw(st.lists(messages_tool_definition(), min_size=1, max_size=3))
-    n_turns = draw(st.integers(min_value=2, max_value=6))
+    # Roles always alternate and always start and end on a user turn: n full
+    # user/assistant pairs plus the closing user turn. Ending on user matters
+    # beyond convention — every assistant turn must have a following user
+    # iteration to answer a drawn tool_use, or the pairing invariant breaks.
+    n_pairs = draw(st.integers(min_value=1, max_value=3))
 
     turns: list[dict[str, Any]] = []
     roles: list[str] = []
-    for index in range(n_turns):
-        roles.append("user" if index % 2 == 0 else "assistant")
+    for _ in range(n_pairs):
+        roles.extend(["user", "assistant"])
+    roles.append("user")
 
     for index, role in enumerate(roles):
         # When the prior assistant turn emitted tool_use blocks, the user turn
@@ -520,9 +535,13 @@ def _build_messages_request(
         text_only = role == "user" and shape == "string"
 
         if role == "assistant" and tools and index > 0 and draw(st.booleans()):
+            # Append only the assistant tool_use turn here. The next
+            # user-role iteration sees ``turns[-1]`` is an assistant
+            # tool_use turn and answers it via the first arm above, which
+            # # keeps the conversation strictly alternating. ``messages_tool_pair``
+            # remains exported for downstream consumers (T-F3, R5).
             pair = draw(messages_tool_pair(tools))
             turns.append(pair[0])
-            turns.append(pair[1])
             continue
 
         if role == "user":
@@ -564,7 +583,7 @@ def messages_problems(body: object) -> list[str]:
         problems.append(f"body must be a dict, got {type(body).__name__}")
         return problems
 
-    for required in ("model", "messages"):
+    for required in ("model", "max_tokens", "messages"):
         if required not in body:
             problems.append(f"missing required field {required!r}")
 
@@ -581,16 +600,41 @@ def messages_problems(body: object) -> list[str]:
         problems.append(f"body is not JSON-strictly serialisable: {exc}")
 
     roles = [message.get("role") for message in messages if isinstance(message, dict)]
-    if roles[0] != "user":
+    # ``roles`` may be empty when every message is non-dict; the per-index
+    # loop below flags each of those, so the first-turn / alternation checks
+    # only run on what is actually present.
+    if roles and roles[0] != "user":
         problems.append(f"first turn must be a user turn, got {roles[0]!r}")
+
+    # Role alternation — fixture rule, mirroring ``cache_breakpoints.py``. The
+    # API merges consecutive same-role turns rather than rejecting them, so
+    # keeping the rule is what makes the property tests' outcomes attributable
+    # to one site.
+    for index in range(1, len(roles)):
+        if roles[index] == roles[index - 1]:
+            problems.append(f"consecutive {roles[index]!r} turns at messages[{index}]")
 
     # Tool pairing. Every ``tool_use`` block must have a matching
     # ``tool_result`` (same id) in a later user turn; no ``tool_result`` may
     # appear without its ``tool_use``. Tools declared must include every
     # ``tool_use.name``.
+    #
+    # An explicit ``null`` is a violation, not an absence: the wire rejects
+    # ``tools: null``, and a mutation that sets the key to ``None`` must show
+    # up here rather than reading as a toolless request.
+    raw_tools = body.get("tools")
+    if raw_tools is None:
+        if "tools" in body:
+            problems.append("'tools' must be a list when present")
+        tools_list: list[object] = []
+    elif isinstance(raw_tools, list):
+        tools_list = raw_tools
+    else:
+        problems.append("'tools' must be a list when present")
+        tools_list = []
     declared_tool_names = {
         tool.get("name")
-        for tool in body.get("tools", [])
+        for tool in tools_list
         if isinstance(tool, dict)
     }
     tool_uses: list[tuple[int, str]] = []
@@ -803,6 +847,15 @@ def cc_tool_pair(
         )
 
     def _draw_pair(tool_call: dict[str, Any], content: str) -> list[dict[str, Any]]:
+        """Assemble the paired (tool_calls, tool message) messages from one draw.
+
+        Args:
+            tool_call: The assistant's ``tool_calls`` entry.
+            content: The answering tool message's content text.
+
+        Returns:
+            ``[assistant_with_tool_calls, tool_message_answering]``.
+        """
         return [
             {
                 "role": "assistant",
@@ -833,8 +886,9 @@ def cc_request(
 
     The composite owns the (assistant ``tool_calls`` → tool message) pairing
     invariant (R6), drawing message rounds, alternating user / assistant,
-    starting and ending with user, and inserting a tool pair at one randomly
-    chosen assistant turn when ``tools`` is non-empty.
+    starting and ending with user, and appending a ``tool_calls`` turn at
+    each assistant turn with probability ½ when ``tools`` is non-empty — the
+    answering ``role: tool`` message follows immediately.
 
     Args:
         content_shape: When given, all user turns that are *not* answering a
@@ -863,13 +917,15 @@ def _build_cc_request(
         A request body that satisfies every rule :func:`cc_problems` enforces.
     """
     tools = draw(st.lists(cc_tool_definition(), min_size=1, max_size=3))
-    n_messages = draw(st.integers(min_value=2, max_value=6))
+    # Same shape as the Messages composite: strict alternation, starting and
+    # ending on a user message.
+    n_pairs = draw(st.integers(min_value=1, max_value=3))
 
     messages: list[dict[str, Any]] = []
-    roles: list[str] = [
-        "user" if index % 2 == 0 else "assistant"
-        for index in range(n_messages)
-    ]
+    roles: list[str] = []
+    for _ in range(n_pairs):
+        roles.extend(["user", "assistant"])
+    roles.append("user")
 
     for role in roles:
         # Answer a prior assistant tool_calls entry, if any, before considering
@@ -957,13 +1013,38 @@ def cc_problems(body: object) -> list[str]:
         for message in messages
         if isinstance(message, dict)
     ]
-    if roles[0] != "user":
+    # ``roles`` may be empty when every message is non-dict; the per-index
+    # loop below flags each of those, so the first-turn / alternation checks
+    # only run on what is actually present.
+    if roles and roles[0] != "user":
         problems.append(f"first message must be a user message, got {roles[0]!r}")
 
+    # Role alternation — fixture rule, same posture as the Messages reporter.
+    # ``tool`` messages are exempt: an assistant turn that made several calls
+    # is answered by several consecutive ``role: tool`` messages, which the
+    # wire requires and this rule must not reject.
+    for index in range(1, len(roles)):
+        if roles[index] == roles[index - 1] and roles[index] in ("user", "assistant"):
+            problems.append(
+                f"consecutive {roles[index]!r} messages at messages[{index}]"
+            )
+
+    # Explicit ``null`` is a violation, not an absence — same posture as the
+    # Messages reporter's ``tools`` guard.
+    raw_tools = body.get("tools")
+    if raw_tools is None:
+        if "tools" in body:
+            problems.append("'tools' must be a list when present")
+        tools_list: list[object] = []
+    elif isinstance(raw_tools, list):
+        tools_list = raw_tools
+    else:
+        problems.append("'tools' must be a list when present")
+        tools_list = []
     declared_tool_names = {
         tool.get("function", {}).get("name")
-        for tool in body.get("tools", [])
-        if isinstance(tool, dict)
+        for tool in tools_list
+        if isinstance(tool, dict) and isinstance(tool.get("function"), dict)
     }
 
     tool_call_ids: list[str] = []
@@ -975,7 +1056,21 @@ def cc_problems(body: object) -> list[str]:
             continue
         role = message.get("role")
         if role == "assistant":
-            for call in message.get("tool_calls") or []:
+            raw_calls = message.get("tool_calls")
+            if raw_calls is None:
+                if "tool_calls" in message:
+                    problems.append(
+                        f"messages[{index}] 'tool_calls' must be a list when present"
+                    )
+                calls: list[object] = []
+            elif isinstance(raw_calls, list):
+                calls = raw_calls
+            else:
+                problems.append(
+                    f"messages[{index}] 'tool_calls' must be a list when present"
+                )
+                calls = []
+            for call in calls:
                 if not isinstance(call, dict):
                     problems.append(
                         f"messages[{index}] tool_calls entry is not a dict"
@@ -986,7 +1081,13 @@ def cc_problems(body: object) -> list[str]:
                     problems.append(f"messages[{index}] tool_call has no 'id'")
                 else:
                     tool_call_ids.append(call_id)
-                name = call.get("function", {}).get("name")
+                function = call.get("function")
+                if not isinstance(function, dict):
+                    problems.append(
+                        f"messages[{index}] tool_call 'function' is not a dict"
+                    )
+                    continue
+                name = function.get("name")
                 if name not in declared_tool_names:
                     problems.append(
                         f"messages[{index}] tool_call targets undeclared tool {name!r}"
@@ -1006,27 +1107,3 @@ def cc_problems(body: object) -> list[str]:
         problems.append(f"tool_call {tid!r} has no matching tool message")
 
     return problems
-
-
-# ── Hypothesis CI profile (R8) ────────────────────────────────────────────
-#
-# When ``CI`` is set we load a profile that derandomises the test, removes
-# the default 200 ms per-example deadline (the slow Windows / macOS Fast-gate
-# legs would flake otherwise), and disables the example database (so a
-# failure caught on one machine does not replay on another). The profile is
-# registered lazily here because ``settings.register_profile`` must run
-# before ``settings.load_profile`` and the test module loads it at collection
-# time. None of this fires when ``CI`` is unset; the developer gets
-# hypothesis's default profile locally.
-
-if os.environ.get("CI"):
-    from hypothesis import HealthCheck, settings
-
-    settings.register_profile(
-        "kitty-bridge-ci",
-        derandomize=True,
-        deadline=None,
-        suppress_health_check=[HealthCheck.too_slow],
-        database=None,
-    )
-    settings.load_profile("kitty-bridge-ci")

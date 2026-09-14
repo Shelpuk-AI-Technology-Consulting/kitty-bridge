@@ -224,6 +224,15 @@ _MESSAGES_FALSIFICATION_CASES: list[tuple[str, dict, str]] = [
         "missing required field 'model'",
     ),
     (
+        "missing max_tokens",
+        {
+            "model": "claude-sonnet-5",
+            "messages": [{"role": "user", "content": "hi"}],
+            # 'max_tokens' is missing on purpose — wire-required for Messages
+        },
+        "missing required field 'max_tokens'",
+    ),
+    (
         "first turn is not user",
         {
             "model": "claude-sonnet-5",
@@ -233,6 +242,31 @@ _MESSAGES_FALSIFICATION_CASES: list[tuple[str, dict, str]] = [
             ],
         },
         "first turn must be a user turn",
+    ),
+    (
+        "consecutive user turns",
+        {
+            "model": "claude-sonnet-5",
+            "max_tokens": 10,
+            "messages": [
+                {"role": "user", "content": "a"},
+                {"role": "user", "content": "b"},
+            ],
+        },
+        "consecutive 'user' turns at messages[1]",
+    ),
+    (
+        "consecutive assistant turns",
+        {
+            "model": "claude-sonnet-5",
+            "max_tokens": 10,
+            "messages": [
+                {"role": "user", "content": "a"},
+                {"role": "assistant", "content": "b"},
+                {"role": "assistant", "content": "c"},
+            ],
+        },
+        "consecutive 'assistant' turns at messages[2]",
     ),
     (
         "undeclared tool use",
@@ -336,6 +370,29 @@ _CC_FALSIFICATION_CASES: list[tuple[str, dict, str]] = [
             "messages": [{"role": "assistant", "content": "I'm starting"}],
         },
         "first message must be a user message",
+    ),
+    (
+        "consecutive user messages",
+        {
+            "model": "gpt-4o",
+            "messages": [
+                {"role": "user", "content": "a"},
+                {"role": "user", "content": "b"},
+            ],
+        },
+        "consecutive 'user' messages at messages[1]",
+    ),
+    (
+        "consecutive assistant messages",
+        {
+            "model": "gpt-4o",
+            "messages": [
+                {"role": "user", "content": "a"},
+                {"role": "assistant", "content": "b"},
+                {"role": "assistant", "content": "c"},
+            ],
+        },
+        "consecutive 'assistant' messages at messages[2]",
     ),
     (
         "undeclared tool call",
@@ -474,6 +531,122 @@ def test_messages_problems_rejects_nan_float() -> None:
     assert any("JSON" in problem for problem in problems), (
         f"reporter did not flag the NaN: {problems}"
     )
+
+
+def test_cc_problems_rejects_nan_float() -> None:
+    """The Chat Completions reporter flags NaN too (R3, H1, AC-6 completeness)."""
+    body = {
+        "model": "gpt-4o",
+        "messages": [{"role": "user", "content": "hi"}],
+        "temperature": float("nan"),
+    }
+    problems = t.cc_problems(body)
+    assert any("JSON" in problem for problem in problems), (
+        f"reporter did not flag the NaN: {problems}"
+    )
+
+
+#: Hostile shapes the reporters must survive without raising (M1). Downstream
+#: T-F3 mutates valid bodies to produce its orphan-tool_result scenario, and a
+#: mutation that deletes a key or replaces a value with ``None`` or a wrong
+#: type must yield a problem list, not a crash in the middle of a property
+#: run. Each entry is (label, reporter, body, expected problem substring) —
+#: every hostile shape is also a violation, so a report of ``[]`` fails.
+_HOSTILE_INPUT_CASES: list[tuple[str, str, object, str]] = [
+    (
+        "messages contains a non-dict",
+        "messages",
+        {"model": "x", "messages": [1]},
+        "messages[0] is not a dict",
+    ),
+    (
+        "tools is None",
+        "messages",
+        {"model": "x", "messages": [{"role": "user", "content": "a"}], "tools": None},
+        "'tools' must be a list when present",
+    ),
+    (
+        "cc messages contains a non-dict",
+        "cc",
+        {"model": "x", "messages": [1]},
+        "messages[0] is not a dict",
+    ),
+    (
+        "cc tools is None",
+        "cc",
+        {"model": "x", "messages": [{"role": "user", "content": "a"}], "tools": None},
+        "'tools' must be a list when present",
+    ),
+    (
+        "cc tool_call function is None",
+        "cc",
+        {
+            "model": "x",
+            "messages": [
+                {"role": "user", "content": "a"},
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [{"id": "1", "function": None}],
+                },
+            ],
+        },
+        "'function' is not a dict",
+    ),
+    (
+        "cc tool_call function is a string",
+        "cc",
+        {
+            "model": "x",
+            "messages": [
+                {"role": "user", "content": "a"},
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [{"id": "1", "function": "oops"}],
+                },
+            ],
+        },
+        "'function' is not a dict",
+    ),
+    (
+        "cc tool_calls is not a list",
+        "cc",
+        {
+            "model": "x",
+            "messages": [
+                {"role": "user", "content": "a"},
+                {"role": "assistant", "content": None, "tool_calls": 5},
+            ],
+        },
+        "'tool_calls' must be a list when present",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("label", "format_name", "body", "expected_problem"),
+    _HOSTILE_INPUT_CASES,
+    ids=[case[0] for case in _HOSTILE_INPUT_CASES],
+)
+def test_reporters_never_raise_on_hostile_input(
+    label: str, format_name: str, body: object, expected_problem: str
+) -> None:
+    """Both reporters return a problem list — never raise — on hostile shapes (M1).
+
+    The docstring promise is scoped the way the sibling scopes it
+    (``cache_breakpoints.request_problems``): *on any value handed in, the
+    reporter returns a list*. A raise inside a property run crashes the test
+    instead of reporting the violation, so the contract is enforced here.
+    """
+    reporter = t.messages_problems if format_name == "messages" else t.cc_problems
+
+    problems = reporter(body)
+
+    assert isinstance(problems, list), f"{label}: reporter did not return a list"
+    assert any(
+        expected_problem in problem for problem in problems
+    ), f"{label}: reporter did not flag {expected_problem!r}: got {problems}"
 
 
 # ── AC-7: the module imports nothing from ``src/kitty`` ────────────────────
