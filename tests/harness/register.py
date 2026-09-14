@@ -38,8 +38,8 @@ must a corpus entry exist in which this row's mutation is provably **absent**.
 That is not the same as "the trigger cell says something".  P13's trigger is the
 CC-origin path through ``openai_subscription``; every request on that route meets
 it, so there is no complement to write and §3.2.2 lists the row as unconditional.
-A trigger is a *route* property or a *request* property, and only the second kind
-can be varied by a corpus entry.
+A trigger is arranged by one of four kinds — :class:`ArrangingBy` — and only
+:attr:`~ArrangingBy.REQUEST` can be varied by a corpus entry (KBR-186).
 
 **There is deliberately no scope column, and the site does not supply one.**
 §6.2.3's completeness guard and T-D8's coverage check both need to know, per
@@ -108,6 +108,45 @@ from harness import contract as c
 # --------------------------------------------------------------------------
 
 
+class ArrangingBy(Enum):
+    """How a trigger's condition is decided.
+
+    KBR-186. A trigger is one of four kinds:
+
+    * :attr:`REQUEST` — a property of the inbound request; the corpus entry
+      that carries the request decides it. Only REQUEST can be varied by a
+      corpus entry, so only REQUEST triggers count toward the §3.3.2
+      assertion-2 complement case.
+    * :attr:`ROUTE` — a property of the adapter/route dispatch. Every request
+      on the route meets it (or none does); a corpus entry cannot vary it.
+      ``P13`` :attr:`~Trigger.CC_ORIGIN_PATH` is the canonical case: under
+      reading (2) of its trigger ("the body reaching ``_cc_to_responses``,
+      regardless of inbound wire"), it is met when
+      ``provider.dispatch == "_cc_to_responses"``.
+    * :attr:`RESPONSE` — a property of the upstream response, arranged by a
+      scripted recorder (``M6``, ``M8``, ``M9``, ``M12``, ``M17``). T-D8
+      reads these from a named scripted-recorder test, not from the corpus.
+    * :attr:`PROFILE` — derived from the profile (``M1`` — profile model;
+      ``M4`` / ``M5`` — compaction budget from profile model, and on a
+      balancing profile from the smallest context in the pool). Declared
+      at the call site that resolves the profile.
+
+    The classification lets ``harness.corpus.NOT_CORPUS_DECIDABLE`` be
+    *derived* from the register rather than hand-listed — that is the
+    single-edit invariant this ticket exists to establish.
+
+    The enum is deliberately named ``ArrangingBy`` so it matches the
+    per-trigger attribute grammar (``Trigger.X.arranged_by``), which the
+    ticket fixed. Renaming the enum to ``TriggerKind`` would require
+    renaming the attribute too.
+    """
+
+    REQUEST = "request"
+    ROUTE = "route"
+    RESPONSE = "response"
+    PROFILE = "profile"
+
+
 class Trigger(Enum):
     """The conditions under which a registered mutation is permitted to fire.
 
@@ -117,50 +156,114 @@ class Trigger(Enum):
     spell one condition two ways and leave a row silently uncovered.
 
     :attr:`ALWAYS` is the absence of a condition, not a condition — a row
-    carrying it fires on every request that reaches its site.
+    carrying it fires on every request that reaches its site. It carries no
+    ``arranged_by``: the four kinds of :class:`ArrangingBy` are for the
+    triggers that *are* conditions.
+
+    Each non-``ALWAYS`` member carries an ``arranged_by`` of one of the four
+    :class:`ArrangingBy` kinds (F1 in :mod:`tests.harness.test_register`).
+    For compound triggers (e.g. :attr:`GEMINI_NON_STREAMING`) the
+    corpus-decidability of the discriminating component picks the kind —
+    that is the load-bearing choice, not abstract purity.
     """
 
-    ALWAYS = "always"
+    def __new__(cls, value: str, arranged_by: ArrangingBy | None = None) -> Trigger:
+        """Construct a member, storing ``arranged_by`` alongside ``.value``.
+
+        ``ALWAYS`` passes ``None`` and skips the attribute assignment so it
+        carries no ``arranged_by`` (the test ``test_always_does_not_carry_an_arranging_by``
+        is the guard).
+        """
+        obj = object.__new__(cls)
+        obj._value_ = value
+        if arranged_by is not None:
+            obj.arranged_by = arranged_by
+        return obj
+
+    # Absence of a condition. No ``arranged_by`` — see the enum docstring.
+    ALWAYS = ("always", None)
 
     # Bridge-level, request path.
-    PROFILE_SETS_MODEL = "profile_sets_model"
-    NON_NATIVE_UPSTREAM_WIRE = "non_native_upstream_wire"
-    TOOL_RESULT_OVER_LIMIT = "tool_result_over_limit"
-    COMPACTION_RAN_WITH_OVERSIZED_TOOL_RESULT = "compaction_ran_with_oversized_tool_result"
-    OVER_COMPACTION_BUDGET = "over_compaction_budget"
-    UPSTREAM_REJECTED_OVERSIZED_ON_BALANCING = "upstream_rejected_oversized_on_balancing"
-    ORPHAN_TOOL_RESULT = "orphan_tool_result"
-    THINKING_ROUNDTRIP_REJECTED = "thinking_roundtrip_rejected"
-    THINKING_SIGNATURE_REJECTED = "thinking_signature_rejected"
-    NATIVE_TOOL_USE_FORMAT_ERROR = "native_tool_use_format_error"
-    GEMINI_PROTOCOL = "gemini_protocol"
-    GEMINI_NON_STREAMING = "gemini_non_streaming"
+    PROFILE_SETS_MODEL = ("profile_sets_model", ArrangingBy.PROFILE)
+    NON_NATIVE_UPSTREAM_WIRE = ("non_native_upstream_wire", ArrangingBy.ROUTE)
+    TOOL_RESULT_OVER_LIMIT = ("tool_result_over_limit", ArrangingBy.REQUEST)
+    COMPACTION_RAN_WITH_OVERSIZED_TOOL_RESULT = (
+        "compaction_ran_with_oversized_tool_result",
+        ArrangingBy.PROFILE,
+    )
+    OVER_COMPACTION_BUDGET = ("over_compaction_budget", ArrangingBy.PROFILE)
+    UPSTREAM_REJECTED_OVERSIZED_ON_BALANCING = (
+        "upstream_rejected_oversized_on_balancing",
+        ArrangingBy.RESPONSE,
+    )
+    ORPHAN_TOOL_RESULT = ("orphan_tool_result", ArrangingBy.REQUEST)
+    THINKING_ROUNDTRIP_REJECTED = ("thinking_roundtrip_rejected", ArrangingBy.RESPONSE)
+    THINKING_SIGNATURE_REJECTED = ("thinking_signature_rejected", ArrangingBy.RESPONSE)
+    NATIVE_TOOL_USE_FORMAT_ERROR = ("native_tool_use_format_error", ArrangingBy.RESPONSE)
+    GEMINI_PROTOCOL = ("gemini_protocol", ArrangingBy.ROUTE)
+    GEMINI_NON_STREAMING = ("gemini_non_streaming", ArrangingBy.REQUEST)
 
     # Bridge-level, response path.
-    UPSTREAM_EMPTY_RESPONSE = "upstream_empty_response"
+    UPSTREAM_EMPTY_RESPONSE = ("upstream_empty_response", ArrangingBy.RESPONSE)
 
     # Provider-level.
-    ZAI_THINKING_ENABLED = "zai_thinking_enabled"
-    ZAI_THINKING_DISABLED = "zai_thinking_disabled"
-    REASONING_EFFORT_PRESENT = "reasoning_effort_present"
-    MAX_TOKENS_ABSENT = "max_tokens_absent"
-    MULTIPLE_SYSTEM_BLOCKS = "multiple_system_blocks"
-    ANTHROPIC_THINKING_ENABLED = "anthropic_thinking_enabled"
-    ADAPTIVE_THINKING_KEYS_PRESENT = "adaptive_thinking_keys_present"
-    ASSISTANT_TURN_LACKS_THINKING_BLOCK = "assistant_turn_lacks_thinking_block"
-    NON_STREAMING_MAX_TOKENS_OVER_4096 = "non_streaming_max_tokens_over_4096"
-    THINKING_SIGNALLED_OR_INFERRED = "thinking_signalled_or_inferred"
-    CC_ORIGIN_PATH = "cc_origin_path"
-    RESPONSES_ORIGIN_PATH = "responses_origin_path"
-    ALLOWLISTED_FIELD_IS_FALSY = "allowlisted_field_is_falsy"
-    NON_ENTRA_CREDENTIAL = "non_entra_credential"
-    CHATGPT_ACCOUNT_ID_PRESENT = "chatgpt_account_id_present"
-    # Both sit on the credential side of the G21 line — neither is decidable
-    # from the inbound request: NON_ENTRA_CREDENTIAL reads the profile's
-    # credential, CHATGPT_ACCOUNT_ID_PRESENT the `id_token` the
-    # openai_subscription profile authenticates with. NOT_CORPUS_DECIDABLE
-    # classifies neither — that classification is KBR-186's, filed rather
-    # than guessed.
+    ZAI_THINKING_ENABLED = ("zai_thinking_enabled", ArrangingBy.REQUEST)
+    ZAI_THINKING_DISABLED = ("zai_thinking_disabled", ArrangingBy.REQUEST)
+    REASONING_EFFORT_PRESENT = ("reasoning_effort_present", ArrangingBy.REQUEST)
+    MAX_TOKENS_ABSENT = ("max_tokens_absent", ArrangingBy.REQUEST)
+    MULTIPLE_SYSTEM_BLOCKS = ("multiple_system_blocks", ArrangingBy.REQUEST)
+    ANTHROPIC_THINKING_ENABLED = ("anthropic_thinking_enabled", ArrangingBy.REQUEST)
+    ADAPTIVE_THINKING_KEYS_PRESENT = ("adaptive_thinking_keys_present", ArrangingBy.REQUEST)
+    ASSISTANT_TURN_LACKS_THINKING_BLOCK = (
+        "assistant_turn_lacks_thinking_block",
+        ArrangingBy.REQUEST,
+    )
+    NON_STREAMING_MAX_TOKENS_OVER_4096 = (
+        "non_streaming_max_tokens_over_4096",
+        ArrangingBy.REQUEST,
+    )
+    THINKING_SIGNALLED_OR_INFERRED = ("thinking_signalled_or_inferred", ArrangingBy.REQUEST)
+    CC_ORIGIN_PATH = ("cc_origin_path", ArrangingBy.ROUTE)
+    RESPONSES_ORIGIN_PATH = ("responses_origin_path", ArrangingBy.REQUEST)
+    # An allowlisted field whose value is falsy (`include: []`, `reasoning: {}`)
+    # is dropped by the truthiness branches — decided by the inbound request's
+    # own field values, so REQUEST (KBR-186's classification).
+    ALLOWLISTED_FIELD_IS_FALSY = ("allowlisted_field_is_falsy", ArrangingBy.REQUEST)
+    # Both decided by the resolved profile, not by the inbound request:
+    # NON_ENTRA_CREDENTIAL reads the profile's configured `api_key`
+    # (``AzureOpenAIAdapter.build_upstream_headers``); CHATGPT_ACCOUNT_ID_PRESENT
+    # reads the OAuth `id_token` the openai_subscription profile authenticates
+    # with (``OpenAISubscriptionAdapter._build_codex_headers`` → ``_extract_account_id``).
+    # PROFILE per KBR-186's classification.
+    NON_ENTRA_CREDENTIAL = ("non_entra_credential", ArrangingBy.PROFILE)
+    CHATGPT_ACCOUNT_ID_PRESENT = ("chatgpt_account_id_present", ArrangingBy.PROFILE)
+
+
+#: Docstrings on the two adapter-dispatch triggers — the asymmetry is
+#: deliberately recorded because the names look like a symmetric pair and
+#: are not. ``CC_ORIGIN_PATH`` is ROUTE because ``provider.dispatch`` decides
+#: it (the body reaches ``_cc_to_responses`` regardless of inbound wire, per
+#: KBR-186's second comment). ``RESPONSES_ORIGIN_PATH`` is REQUEST because the
+#: inbound wire — Responses-shaped — decides it.
+Trigger.CC_ORIGIN_PATH.__doc__ = (
+    "Met when the adapter dispatches the body to ``_cc_to_responses``, "
+    "regardless of inbound wire. A Messages-origin request on the "
+    "``openai_subscription`` provider meets this trigger — the dispatch is "
+    "decided by the provider's routing, not by the request's wire shape. "
+    "Under KBR-186 this is a ROUTE property (the provider decides), not a "
+    "REQUEST property. Reading (1) — ``the inbound wire was Chat "
+    "Completions`` — would leave KBR-178's ``stop`` carry unclaimed on a "
+    "Messages-origin entry and the oracle would report a false I1 breach on "
+    "a deliberate mutation."
+)
+Trigger.RESPONSES_ORIGIN_PATH.__doc__ = (
+    "Met when the inbound wire is Responses-shaped (``/v1/responses``), so "
+    "``_original_body`` is set on the cc_request and ``_prepare_responses_body`` "
+    "is the dispatch site. Unlike ``CC_ORIGIN_PATH`` (ROUTE), this trigger is "
+    "decided by the request's own wire shape — REQUEST, not ROUTE. The "
+    "asymmetry is deliberate and load-bearing: the two names read as a "
+    "symmetric pair, but only one is decided by the provider's dispatch."
+)
 
 
 # --------------------------------------------------------------------------
@@ -667,6 +770,15 @@ _PROVIDER_ROWS: tuple[MutationRow, ...] = (
         paths=(c.extra_path("thinking"), c.extra_path("effort")),
         conditional=True,
         design_ref="§3.2.2",
+        # KBR-186 (deferred output_config P-row, KBR-224 scope): the
+        # `envelope.extra[output_config]` address is not yet claimed because
+        # no captured corpus entry carries the field — a row whose conditional
+        # trigger is met but unclaimed manufactures a false I1 breach
+        # (§3.3.1a). The would-be trigger `output_config_present` is REQUEST
+        # (a request either carries the field or not), so the row + the first
+        # corpus entry carrying `output_config` land together later. Until
+        # then, per-destination scope is prose here, mirroring the `display`
+        # withholding row (KBR-139 precedent).
     ),
     MutationRow(
         id="P5e",
@@ -777,10 +889,15 @@ _PROVIDER_ROWS: tuple[MutationRow, ...] = (
         # when the token fails to parse (`except Exception`); an empty claim
         # survives extraction and is dropped by `if account_id:` in
         # `_build_codex_headers`. So the header's absence is also the
-        # unparseable-token signature. §3.3.2 assertion 2 therefore owes a
-        # complement — a corpus entry whose `id_token` carries no claim. The L1
-        # pins live in `tests/providers/test_openai_subscription.py`; the
-        # corpus fixture arrives with T-D5.
+        # unparseable-token signature. The trigger is PROFILE under KBR-186's
+        # classification — the resolved profile's OAuth `id_token` decides
+        # it, not the inbound request — so the loader refuses it in both
+        # manifest lists and §3.3.2 assertion 2 cannot find a corpus
+        # complement. The complement is discharged by the L1 pins in
+        # `tests/providers/test_openai_subscription.py`; `conditional=True`
+        # here records that the row still needs a "mutant is absent" check
+        # somewhere, just not via the corpus. T-D5's "corpus fixture arrives
+        # with…" promise therefore does not apply for this row.
         paths=(c.header_path("chatgpt-account-id"),),
         conditional=True,
         design_ref="§3.2.2 · §4.3 C1",
@@ -834,8 +951,10 @@ _PROVIDER_ROWS: tuple[MutationRow, ...] = (
         # `Authorization: Bearer`, which is why the trigger is named rather
         # than ALWAYS. The credential is profile config, not request content,
         # so no corpus entry can vary it — the row is unconditional in
-        # §3.3.2's sense, M16's shape: a named trigger that is a property of
-        # the route, not of the request.
+        # §3.3.2's sense. Under KBR-186's four kinds that makes the trigger
+        # PROFILE (decided by the resolved profile), not ROUTE: the adapter's
+        # dispatch is the same hook on both branches; what differs is the
+        # profile's configured credential.
         paths=(c.header_path("authorization"), c.header_path("api-key")),
         conditional=False,
         design_ref="§3.2.2 · §4.3 C1",
