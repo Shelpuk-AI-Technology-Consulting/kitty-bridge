@@ -437,12 +437,26 @@ class AnthropicAdapter(ProviderAdapter):
             # provider decide the budget automatically.
             anthropic["thinking"] = self._with_thinking_display({"type": "adaptive"}, cc_request)
         elif cc_request.get("_thinking_enabled"):
-            # Anthropic requires budget_tokens >= 1024 and budget_tokens < max_tokens.
-            max_tokens = max(anthropic.get("max_tokens", _DEFAULT_MAX_TOKENS), 1025)
-            anthropic["max_tokens"] = max_tokens
-            anthropic["thinking"] = self._with_thinking_display(
-                {"type": "enabled", "budget_tokens": max_tokens - 1}, cc_request
-            )
+            # KBR-225: the agent's own budget, when the translator carried it,
+            # ships verbatim — Anthropic renders the budget into the prompt, so
+            # deriving it from max_tokens made two requests that differ only in
+            # max_tokens miss each other's cache.  A carried budget is already
+            # valid (int, >= 1024, < max_tokens), which implies
+            # max_tokens >= 1025, so the fallback's raise below cannot trigger
+            # on this branch and max_tokens ships as sent.
+            if "_thinking_budget_tokens" in cc_request:
+                anthropic["thinking"] = self._with_thinking_display(
+                    {"type": "enabled", "budget_tokens": cc_request["_thinking_budget_tokens"]}, cc_request
+                )
+            else:
+                # Fallback for an absent or invalid agent budget (the
+                # translator carries only valid ones): derive from max_tokens.
+                # Anthropic requires budget_tokens >= 1024 and budget_tokens < max_tokens.
+                max_tokens = max(anthropic.get("max_tokens", _DEFAULT_MAX_TOKENS), 1025)
+                anthropic["max_tokens"] = max_tokens
+                anthropic["thinking"] = self._with_thinking_display(
+                    {"type": "enabled", "budget_tokens": max_tokens - 1}, cc_request
+                )
         elif cc_request.get("_thinking_enabled") is False:
             # No display here: Anthropic rejects `display` alongside `disabled`.
             anthropic["thinking"] = {"type": "disabled"}
