@@ -397,6 +397,11 @@ compaction or truncation) and the model lost reasoning that was still valid. It 
 session total, next to `malformed_tool_use`, and is likewise a diagnostic only: it never marks a backend unhealthy.
 A compaction-heavy session whose reasoning keeps degrading shows up here.
 
+`recovery_holds` counts the arrival recovery holds: each time the bridge held a request because *every* member of the
+pool was cooling down but at least one would recover within 5 minutes (each held wait counts once, so a request held
+twice counts twice). A rising count says providers are throttling the pool; a high count with no failed requests says
+the hold is doing its job — agents are riding out short outages instead of failing.
+
 **After the run.** `--session-summary PATH` (or `KITTY_SESSION_SUMMARY`) writes the same document to a file when the
 bridge shuts down — a small artifact CI can upload, instead of a multi-megabyte debug log:
 
