@@ -32,10 +32,14 @@ of length-prefixed frames, each carrying ``:message-type`` and ``:event-type``
 headers plus a JSON payload, and closed by a CRC32. The pinned
 ``botocore.eventstream`` module has a parser but **no public serializer**
 (verified against the installed source), so the harness ships its own
-:func:`encode_eventstream` following the spec every AWS SDK implements, and
-:func:`tests.harness.test_botocore` validates it by round-trip through the
-pinned parser and through a real ``boto3.client(...).converse_stream(...)``
-call.
+:func:`encode_eventstream` following the spec every AWS SDK implements;
+:mod:`harness.test_botocore` validates it by round-trip through the pinned
+``botocore.eventstream.EventStreamBuffer`` parser and by a bridge-driven
+end-to-end path. (A live ``boto3.client(...).converse_stream(...)``
+round-trip is not exercised in the test suite: boto3's synchronous urllib3
+blocks the asyncio loop the recorder's aiohttp server runs in, and every
+such test times out — the parser round-trip plus the bridge-driven path
+carry that claim instead.)
 
 **It imports nothing from ``src/kitty``, and must not**, for the reason
 :mod:`harness.recorder` states: §3.3.1's independent-oracle rule. The product

@@ -2828,9 +2828,12 @@ unchanged; `check_peer_port` is satisfied because T-W4's `capture()` already
 calls `_peer_port(request)`, and an override here would mirror the path T-B1
 deliberately avoided. The conformance suite is run unchanged against the
 subclass; what proves the overrides themselves is a hand-written round-trip
-through the pinned `botocore.eventstream.EventStream` parser and a live
-`boto3.client("bedrock-runtime", endpoint_url=...).converse_stream(...)` call
-driven against the recorder.
+through the pinned `botocore.eventstream.EventStreamBuffer` parser, and the
+`TestThroughARealBridge` class drives a real `BridgeServer` against the
+recorder end-to-end. (A live `boto3.client(...).converse_stream(...)`
+round-trip is **not** exercised in the suite — boto3's synchronous urllib3
+blocks the asyncio loop the recorder's aiohttp server runs in, and every such
+test times out at 60 s without reaching the recorder's capture method.)
 
 **The product seam is `provider_config["endpoint_url"]`, not `AWS_ENDPOINT_URL`.**
 The env var (added in boto3 ≥ 1.28) is process-global ambient state, and CI
@@ -2849,16 +2852,18 @@ the JSON payload against the member's shape. There is no public serializer in
 the pinned `botocore.eventstream` module — verified against the installed
 source — so the harness ships its own encoder following the spec every AWS
 SDK implements, with CRC32 per the pinned `binascii.crc32(data) & 0xFFFFFFFF`.
-The encoder is validated by round-trip through the pinned parser **and** by a
-real `converse_stream` call; both belong in the suite.
+The encoder is validated by round-trip through the pinned parser, by a
+bad-CRC falsification case (`test_a_streaming_reply_with_a_bad_message_crc_fails_to_decode`),
+and by a bridge-driven end-to-end path (`test_a_streamed_request_via_the_bridge_yields_finish_reason`).
 
 **The harness rule (§1.4) requires a falsification case against the
 recorder's own overrides** — the conformance suite runs unchanged over the
-subclass and so cannot tell a wrong encoder from a working one. A frame with
-a wrong message CRC fails the pinned parser; a frame missing the
-`:event-type` header fails boto3's shape lookup. Both run in the suite and
-are the load-bearing test of the encoder — the conformance suite judges the
-capture path, this case judges what the recorder writes back.
+subclass and so cannot tell a wrong encoder from a working one. The shipped
+falsification is the bad-message-CRC test (`test_a_streaming_reply_with_a_bad_message_crc_fails_to_decode`)
+plus an encoding-determinism check (`test_encoding_is_deterministic`) and a
+construction-refusal check (`test_a_format_this_recorder_does_not_serve_is_refused_at_construction`).
+All three run in the suite; the conformance suite judges the capture path,
+these cases judge what the recorder writes back.
 
 **A non-streaming reply carries content, not the empty-reply ladder.** §7.2.1
 already names the 80-second `asyncio.sleep` cost that an empty or mis-shaped

@@ -7,10 +7,21 @@
 Two products are under observation here and they are driven differently, because
 they are reached differently. ``bedrock`` is driven through a real
 ``BridgeServer`` on T-W8's fixture; the EventStream encoder is round-tripped
-through the pinned ``botocore.eventstream`` parser and through a real
-``boto3.client("bedrock-runtime", endpoint_url=...).converse_stream(...)``
-call with fake credentials, because that is the only round-trip that
-exercises the wire contract botocore will face in production.
+through the pinned ``botocore.eventstream`` parser only — see the NOTE
+block below for why no live-boto3 round-trip is exercised here.
+
+**A live ``boto3.client(...).converse_stream(...)`` round-trip is not exercised
+in this module.** Measured: boto3's synchronous ``urllib3.PoolManager``
+blocks the asyncio loop on ``socket.recv`` while the recorder's aiohttp
+server's response waits to be processed — every such test times out at 60
+seconds with ``ReadTimeoutError`` and **never reaches the recorder's capture
+method**. The pinned ``botocore.eventstream.EventStreamBuffer`` parser
+round-trip in :class:`TestTheRepliesItSends` is what proves the encoder
+matches the wire format, and the
+:class:`TestThroughARealBridge` class proves the recorder answers a real
+``BridgeServer`` driving the product's own adapter. A live-boto3 round-trip
+belongs in a thread-based test or a separate worktree-driven harness, not in
+the L1 gate.
 
 Every conformance probe writes its request bytes itself, for the reason
 ``test_recorder.py`` records: a client library reorders, re-cases, adds and
@@ -357,22 +368,6 @@ class TestTheRepliesItSends:
         assert format_for_bedrock_path(f"/v1{BEDROCK_CONVERSE_SUFFIX}") is FORMAT
         assert format_for_bedrock_path(f"/v1{BEDROCK_CONVERSE_STREAM_SUFFIX}") is FORMAT
         assert format_for_bedrock_path("/v1/chat/completions") is None
-
-
-# NOTE: a live ``boto3.client(...).converse_stream(...)`` round-trip is not
-# exercised here. **Measured**: the recorder's aiohttp server runs in the
-# test's asyncio event loop; boto3's synchronous ``urllib3.PoolManager``
-# blocks the loop on ``socket.recv`` while the server's response is waiting
-# to be processed — every ``boto3.Session(...).client(...)`` round-trip in
-# this module times out at 60 seconds with ``ReadTimeoutError`` and **never
-# reaches the recorder's capture method**. The pinned
-# ``botocore.eventstream.EventStreamBuffer`` parser round-trip in
-# :class:`TestTheRepliesItSends` is what proves the encoder matches the
-# wire format, and the
-# :class:`TestThroughARealBridge` class proves the recorder answers a real
-# ``BridgeServer`` driving the product's own adapter. A live-boto3 round-trip
-# belongs in a thread-based test or a separate worktree-driven harness, not
-# in the L1 gate.
 
 
 class TestTheTransport:
