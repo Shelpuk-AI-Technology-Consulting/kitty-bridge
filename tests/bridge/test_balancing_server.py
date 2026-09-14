@@ -8,7 +8,6 @@ from unittest.mock import AsyncMock, patch
 import aiohttp
 import pytest
 from aioresponses import aioresponses
-from exemptions import ratchet
 
 from kitty.bridge.server import BridgeServer
 from kitty.launchers.base import LauncherAdapter, SpawnConfig
@@ -892,10 +891,10 @@ class TestBalancingAllCustomTransport:
         # Pin the weighted draw (random.choices): the non-stream backend is drawn first
         # and the streaming failover then selects the custom-transport one, so the
         # failover under test runs deterministically instead of by coin flip.
-        # KBR-249: while the plain-POST branch cannot drive a custom-transport backend,
-        # this path delivers no content and ends in the D4 502, so the client-visible
-        # status and content-type assertions are exempted against KBR-249; their rows
-        # must be deleted the day that ticket's dispatch fix lands.
+        # KBR-249: the dispatch fix (re-dispatch across transport classes on
+        # plain→custom failover) means the custom-transport branch drives the
+        # response; the previously exempted ratchets are gone with the fix and
+        # the exemption rows in tests/exemptions.py.
         draw = iter(chain([0], repeat(1)))
 
         def _deterministic_draw(self=server, *, require_streaming: bool = False):
@@ -913,16 +912,22 @@ class TestBalancingAllCustomTransport:
         try:
             with patch("kitty.bridge.server._EMPTY_FINAL_DELAYS", [0.0, 0.0]):
                 async with aiohttp.ClientSession() as session, session.post(url, json=request_body) as resp:
-                    with ratchet("kbr-249-failover-plain-post-status"):
-                        assert resp.status == 200
+                    assert resp.status == 200
                     assert server._active_provider is stream_provider
-                    with ratchet("kbr-249-failover-plain-post-sse"):
-                        assert resp.content_type == "text/event-stream"
+                    assert resp.content_type == "text/event-stream"
                     _ = await resp.read()
         finally:
             await server.stop_async()
 
         assert server._active_provider is stream_provider
+        # The custom-transport backend's stream_request must have been invoked at
+        # least once on the failover path — that is the dispatch correctness oracle
+        # for KBR-249 (AC-1.2). Without the re-dispatch fix the plain-POST branch
+        # drives the provider over HTTP and the mock never fires.
+        assert stream_provider.stream_request.called, (
+            "Expected the stream-capable backend's stream_request() to have been "
+            "called via cross-mode re-dispatch (KBR-249); got 0 calls."
+        )
 
 
 class TestCustomTransportCloudflareClassification:
