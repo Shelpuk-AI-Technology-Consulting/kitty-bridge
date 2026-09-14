@@ -4067,6 +4067,16 @@ class BridgeServer:
                                     elif sr is None:
                                         # An abandoned request must not keep a thinking phase billing.
                                         _raise_if_client_gone()
+                                    if hold.error_seen and hold.error_event_complete:
+                                        # D2 as amended by KBR-241: an upstream error event is the
+                                        # provider's terminal word, so the attempt is judged on it
+                                        # now rather than read out — but only once the event's own
+                                        # lines have all arrived, or a chunk boundary between the
+                                        # name line and its data line would truncate the payload.
+                                        # Leaving the ``async with`` releases the response and the
+                                        # connector closes the unconsumed body; the upstream may
+                                        # see a reset on its next write.
+                                        break
                             finally:
                                 # Bytes may already have reached the client even if
                                 # the iteration raised, so the partial tool_use is
@@ -4080,29 +4090,39 @@ class BridgeServer:
                                 break
 
                             # This attempt wrote nothing, so its discarded bytes exist only here.
+                            held_error_type: str | None = None
+                            if hold.error_seen and isinstance(hold.error_event, dict):
+                                err = hold.error_event.get("error")
+                                if isinstance(err, dict) and isinstance(err.get("type"), str):
+                                    held_error_type = err["type"]
                             logger.warning(
-                                "Native Messages stream ended with no content for %s (%d bytes held, stop_reason=%s)",
+                                "Native Messages stream ended with no content for %s (%d bytes held, "
+                                "stop_reason=%s%s)",
                                 message_id,
                                 hold.held_size,
                                 hold.stop_reason,
+                                f", upstream_error={held_error_type}" if held_error_type else "",
                             )
                             logger.debug("Discarded native reply head: %r", hold.head(_MAX_LOGGED_HELD_BYTES))
 
                             # An earlier attempt already wrote (the KBR-183 failover), so a JSON
                             # error cannot follow: per Q14(a) the open stream ends in an error event.
                             if sr is not None:
-                                await _write_client(
-                                    sr,
-                                    messages_format_error(
-                                        {
-                                            "type": "error",
-                                            "error": {
-                                                "type": "api_error",
-                                                "message": _NATIVE_EMPTY_AFTER_EMISSION_MESSAGE,
-                                            },
-                                        }
-                                    ).encode(),
-                                )
+                                # Guarded-dead post-KBR-183; if it ever runs, the terminal error is
+                                # the provider's own when this attempt carried one.
+                                if isinstance(hold.error_event, dict) and isinstance(
+                                    hold.error_event.get("error"), dict
+                                ):
+                                    terminal_error = hold.error_event
+                                else:
+                                    terminal_error = {
+                                        "type": "error",
+                                        "error": {
+                                            "type": "api_error",
+                                            "message": _NATIVE_EMPTY_AFTER_EMISSION_MESSAGE,
+                                        },
+                                    }
+                                await _write_client(sr, messages_format_error(terminal_error).encode())
                                 break
 
                             # D3: a truncation before any content is not improved by a retry.
@@ -4150,17 +4170,25 @@ class BridgeServer:
                                 )
                                 continue
                             logger.warning("Native Messages stream empty response after %d attempts", attempt + 1)
-                            return _make_error_response(
-                                {
+                            # D4, plus KBR-241's error variant: the provider's own payload is what
+                            # the client is written against (D2's rationale at exhaustion), so it is
+                            # re-embedded with only the reason marker added; anything unusable
+                            # keeps D4's body.
+                            if isinstance(hold.error_event, dict) and isinstance(hold.error_event.get("error"), dict):
+                                exhaustion_error = {
+                                    **hold.error_event,
+                                    "error": {**hold.error_event["error"], "reason": "upstream_error"},
+                                }
+                            else:
+                                exhaustion_error = {
                                     "type": "error",
                                     "error": {
                                         "type": "api_error",
                                         "message": _NATIVE_EMPTY_REPLY_MESSAGE,
                                         "reason": "empty_response",
                                     },
-                                },
-                                status=502,
-                            )
+                                }
+                            return _make_error_response(exhaustion_error, status=502)
 
                         line_buffer = bytearray()  # F23+F24: byte-based buffering
                         done = False

@@ -198,6 +198,15 @@ _CONTENT = (
     + b'event: content_block_delta\ndata: {"index":0,"delta":{"text":"Hello","type":"text_delta"},'
     b'"type":"content_block_delta"}\n\n' + _BLOCK_STOP + _stop("end_turn") + _MESSAGE_STOP
 )
+_ERROR_EVENT = _sse("error", {"type": "error", "error": {"type": "overloaded_error", "message": "Overloaded"}})
+# Content released, then the upstream errored mid-message: post-emission (Q14(a)), never retried.
+_PARTIAL_THEN_ERROR = (
+    b'event: message_start\ndata: {"message":{"role":"assistant","id":"msg_3","content":[]},'
+    b'  "type":"message_start"}\n\n'
+    + _EMPTY_TEXT_START
+    + b'event: content_block_delta\ndata: {"index":0,"delta":{"text":"Hel","type":"text_delta"},'
+    b'"type":"content_block_delta"}\n\n' + _ERROR_EVENT
+)
 _SSE_HEADERS = {"Content-Type": "text/event-stream"}
 
 
@@ -451,7 +460,7 @@ class TestTruncationBeforeContent:
 
 
 class TestPassThrough:
-    """R3, R7, D2 — what the hold releases reaches the client exactly as sent."""
+    """R3, R7 — what the hold releases reaches the client exactly as sent."""
 
     async def test_content_stream_is_byte_identical_and_not_retried(self):
         with aioresponses(passthrough=["http://127.0.0.1"]) as m:
@@ -472,18 +481,156 @@ class TestPassThrough:
         assert (status, body) == (200, _CONTENT)
         assert sorted(h["transport_error_count"] for h in server._backend_health) == [0, 1]
 
-    async def test_upstream_error_event_before_content_is_forwarded_verbatim(self):
-        upstream = _MESSAGE_START + _sse(
-            "error", {"type": "error", "error": {"type": "overloaded_error", "message": "Overloaded"}}
-        )
+
+class TestErrorEventBeforeContent:
+    """KBR-241 — a pre-content error event is judged pre-emission: retried, not delivered.
+
+    D2 as amended (TEST_SUITE.md §11 Q14(b)): the error ends the attempt, not the turn.
+    The ladder, the accounting and the exhaustion bodies follow the empty-reply path,
+    with the provider's own payload delivered at exhaustion when it is usable.
+    """
+
+    async def test_single_backend_retries_and_delivers_only_the_retry(self):
+        error_reply = _MESSAGE_START + _ERROR_EVENT
+        with aioresponses(passthrough=["http://127.0.0.1"]) as m:
+            m.post(_upstream(0), body=error_reply, headers=_SSE_HEADERS)
+            m.post(_upstream(0), body=_CONTENT, headers=_SSE_HEADERS)
+            status, body = await _stream(_single_backend_server())
+            posts = _posts(m)
+        assert posts == 2, "the errored attempt must be retried"
+        assert status == 200
+        assert body == _CONTENT, "the client must receive the retry's bytes, and nothing of the error"
+
+    async def test_balancing_retries_without_quarantine_or_success_credit(self):
+        """Selection among healthy backends is random, so the script follows arrival order, not URL."""
+        replies = iter([_MESSAGE_START + _ERROR_EVENT, _CONTENT])
+
+        def _next_reply(url, **kwargs):
+            """Answer each POST with the next scripted reply, whichever backend it reached."""
+            return CallbackResult(body=next(replies), headers=_SSE_HEADERS)
+
+        server = _balancing_server()
+        for health in server._backend_health:
+            health["transport_error_count"] = 1  # an errored attempt is not a success
         with aioresponses(passthrough=["http://127.0.0.1"]) as m:
             for i in range(2):
-                m.post(_upstream(i), body=upstream, headers=_SSE_HEADERS, repeat=True)
-            status, body = await _stream(_balancing_server())
+                m.post(_upstream(i), callback=_next_reply, repeat=True)
+            status, body = await _stream(server)
             posts = _posts(m)
-        assert posts == 1, "the provider's own error is delivered, not retried"
+        assert posts == 2
+        assert (status, body) == (200, _CONTENT)
+        assert server._session_stats()["attempts"] == 2, "each retry must draw a backend again"
+        assert all(h["healthy"] for h in server._backend_health), "an errored reply is retried, not quarantined"
+        # The errored attempt is no success; the retry that answered is: exactly one reset.
+        assert sorted(h["transport_error_count"] for h in server._backend_health) == [0, 1]
+
+    async def test_exhaustion_delivers_the_provider_payload(self):
+        budget = (server_module._MAX_RETRIES + 1) + len(server_module._EMPTY_FINAL_DELAYS)
+        assert budget == 6, "the literal pins the ladder; the derivation above follows the constants"
+        error_reply = _MESSAGE_START + _ERROR_EVENT
+        with aioresponses(passthrough=["http://127.0.0.1"]) as m:
+            m.post(_upstream(0), body=error_reply, headers=_SSE_HEADERS, repeat=True)
+            status, body = await _stream(_single_backend_server())
+            posts = _posts(m)
+        assert posts == budget == 6, f"expected the whole {budget}-attempt ladder, saw {posts}"
+        assert status == 502
+        error = json.loads(body)
+        assert error == {
+            "type": "error",
+            "error": {"type": "overloaded_error", "message": "Overloaded", "reason": "upstream_error"},
+        }, "the provider's payload is re-embedded with exactly the reason marker added"
+
+    async def test_exhaustion_with_an_unusable_payload_falls_back_to_the_empty_body(self):
+        error_reply = _MESSAGE_START + b'data: {"type":"error","error":"boom"}\n\n'
+        with aioresponses(passthrough=["http://127.0.0.1"]) as m:
+            m.post(_upstream(0), body=error_reply, headers=_SSE_HEADERS, repeat=True)
+            status, body = await _stream(_single_backend_server())
+            posts = _posts(m)
+        assert posts == 6
+        assert status == 502
+        error = json.loads(body)
+        assert error["error"]["reason"] == "empty_response"
+        assert "Kitty Bridge" in error["error"]["message"]
+
+    async def test_balancing_exhaustion_never_quarantines(self):
+        budget = (server_module._MAX_RETRIES + 1) * 2 + len(server_module._EMPTY_FINAL_DELAYS)
+        assert budget == 10, "the literal pins the ladder; the derivation above follows the constants"
+        server = _balancing_server()
+        for health in server._backend_health:
+            health["transport_error_count"] = 1
+        error_reply = _MESSAGE_START + _ERROR_EVENT
+        with aioresponses(passthrough=["http://127.0.0.1"]) as m:
+            for i in range(2):
+                m.post(_upstream(i), body=error_reply, headers=_SSE_HEADERS, repeat=True)
+            status, body = await _stream(server)
+            posts = _posts(m)
+        assert posts == budget == 10, f"expected the whole {budget}-attempt ladder, saw {posts}"
+        assert status == 502
+        assert json.loads(body)["error"]["reason"] == "upstream_error"
+        assert all(h["healthy"] for h in server._backend_health), "the empty ladder's health model, not quarantine"
+        assert [h["transport_error_count"] for h in server._backend_health] == [1, 1]
+
+    async def test_truncation_before_an_error_still_fails_at_once(self):
+        """D3 keeps precedence: a stop reason that preceded the error governs the held end."""
+        reply = _MESSAGE_START + _stop("max_tokens") + _ERROR_EVENT + _MESSAGE_STOP
+        with aioresponses(passthrough=["http://127.0.0.1"]) as m:
+            m.post(_upstream(0), body=reply, headers=_SSE_HEADERS, repeat=True)
+            status, body = await _stream(_single_backend_server())
+            posts = _posts(m)
+        assert posts == 1, "no retry can improve a max_tokens truncation"
+        assert status == 400
+        assert json.loads(body)["error"]["reason"] == "max_tokens_before_content"
+
+    async def test_error_before_a_truncation_takes_the_ladder(self):
+        """The first terminal signal governs: the post-error stop reason is noise, the error retries."""
+        reply = _MESSAGE_START + _ERROR_EVENT + _stop("max_tokens") + _MESSAGE_STOP
+        with aioresponses(passthrough=["http://127.0.0.1"]) as m:
+            m.post(_upstream(0), body=reply, headers=_SSE_HEADERS)
+            m.post(_upstream(0), body=_CONTENT, headers=_SSE_HEADERS)
+            status, body = await _stream(_single_backend_server())
+            posts = _posts(m)
+        assert posts == 2, "the error, not the post-terminal stop reason, is what the ladder retried"
+        assert (status, body) == (200, _CONTENT)
+
+    async def test_error_after_content_passes_through_and_counts_as_a_completion(self):
+        """Q14(a) stands: post-emission errors are never retried, and the attempt is a success."""
+        server = _balancing_server()
+        for health in server._backend_health:
+            health["transport_error_count"] = 1  # a released stream is a success: reset to 0
+        with aioresponses(passthrough=["http://127.0.0.1"]) as m:
+            for i in range(2):
+                m.post(_upstream(i), body=_PARTIAL_THEN_ERROR, headers=_SSE_HEADERS, repeat=True)
+            status, body = await _stream(server)
+            posts = _posts(m)
+        assert posts == 1, "post-emission errors are forwarded, never retried"
         assert status == 200
-        assert body == upstream
+        assert body == _PARTIAL_THEN_ERROR, "post-release bytes pass through byte-for-byte"
+        assert sorted(h["transport_error_count"] for h in server._backend_health) == [0, 1], "a completion"
+
+    async def test_discarded_error_attempt_logs_its_upstream_error(self, caplog):
+        with (
+            caplog.at_level(logging.DEBUG, logger="kitty.bridge.server"),
+            aioresponses(passthrough=["http://127.0.0.1"]) as m,
+        ):
+            m.post(_upstream(0), body=_MESSAGE_START + _ERROR_EVENT, headers=_SSE_HEADERS)
+            m.post(_upstream(0), body=_CONTENT, headers=_SSE_HEADERS)
+            await _stream(_single_backend_server())
+        warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+        assert any("upstream_error=overloaded_error" in w for w in warnings), warnings
+
+    async def test_exhausted_empty_ladder_logs_no_upstream_error(self, caplog):
+        """Negative control, exhausted: no line of the empty ladder's run grows the error field."""
+        with (
+            caplog.at_level(logging.DEBUG, logger="kitty.bridge.server"),
+            aioresponses(passthrough=["http://127.0.0.1"]) as m,
+        ):
+            m.post(_upstream(0), body=_CONTENTLESS, headers=_SSE_HEADERS, repeat=True)
+            status, body = await _stream(_single_backend_server())
+            posts = _posts(m)
+        assert posts == 6, "the whole ladder must have run for the exhaustion line to be on the page"
+        assert status == 502
+        warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+        assert not any("upstream_error=" in w for w in warnings), warnings
 
 
 class TestFailuresWhileHeld:
@@ -535,6 +682,115 @@ class TestFailuresWhileHeld:
         assert len(calls) == 2, "a drop before release must be retried, not closed off"
         assert status == 200
         assert body == _CONTENT, "the client must see only the retry, never the dropped preamble"
+
+    async def test_upstream_error_then_silence_is_judged_on_the_error(self, monkeypatch):
+        """An error event is the provider's terminal word: the attempt ends on it, not at the read timeout.
+
+        The stall is silent, so a build that keeps reading hits the read timeout — which
+        quarantines the backend and fails the health assertion — instead of the ladder.
+        """
+        monkeypatch.setattr(server_module, "_STREAM_READ_TIMEOUT", 2.0)
+        calls: list[int] = []
+        holder: dict = {}
+
+        async def _handler(request: web.Request) -> web.StreamResponse:
+            """Error then stall on the first call; succeed on the next."""
+            calls.append(1)
+            resp = web.StreamResponse(headers=_SSE_HEADERS)
+            await resp.prepare(request)
+            if len(calls) == 1:
+                await resp.write(_MESSAGE_START + _ERROR_EVENT)
+                # Hold the socket until the bridge closes it; bounded so a build that
+                # never closes cannot hang the runner's cleanup past the client timeout.
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline:
+                    connections = holder["runner"].server.connections if holder["runner"].server else ()
+                    if not any(h.transport is not None for h in connections):
+                        break
+                    await asyncio.sleep(0.01)
+                return resp
+            await resp.write(_CONTENT)
+            return resp
+
+        runner, base = await self._serve(_handler)
+        holder["runner"] = runner
+        try:
+            server = BridgeServer(
+                adapter=_StubLauncher(), provider=_NativeProvider(base), resolved_key="key-0", model="test-model"
+            )
+            port = await server.start_async()
+            try:
+                async with (
+                    aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session,
+                    session.post(
+                        f"http://127.0.0.1:{port}/v1/messages",
+                        json={"model": "test-model", "messages": [{"role": "user", "content": "hi"}], "stream": True},
+                    ) as resp,
+                ):
+                    status = resp.status
+                    body = await resp.read()
+            finally:
+                await server.stop_async()
+        finally:
+            await runner.cleanup()
+        assert len(calls) == 2, "the errored attempt must be retried on its own ladder, not read out to a timeout"
+        assert status == 200
+        assert body == _CONTENT
+        for health in server._backend_health:
+            assert health["healthy"], "the error path is the empty ladder's, not the read-timeout quarantine"
+
+    async def test_every_errored_attempt_ends_on_its_error(self, monkeypatch):
+        """A build that reads past the error burns sock_read per attempt and exhausts through
+        the timeout arm's body; the break ends all six attempts at once on the provider's error."""
+        monkeypatch.setattr(server_module, "_STREAM_READ_TIMEOUT", 2.0)
+        calls: list[int] = []
+        holder: dict = {}
+
+        async def _handler(request: web.Request) -> web.StreamResponse:
+            """Error then stall on every call; the bridge must never read out to the timeout."""
+            calls.append(1)
+            resp = web.StreamResponse(headers=_SSE_HEADERS)
+            await resp.prepare(request)
+            # The error event in two writes: a build that breaks before the event's
+            # lines complete truncates the payload and exhausts with the wrong body.
+            await resp.write(_MESSAGE_START + b"event: error\n")
+            await asyncio.sleep(0.05)
+            await resp.write(b'data: {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}\n\n')
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                connections = holder["runner"].server.connections if holder["runner"].server else ()
+                if not any(h.transport is not None for h in connections):
+                    break
+                await asyncio.sleep(0.01)
+            return resp
+
+        runner, base = await self._serve(_handler)
+        holder["runner"] = runner
+        try:
+            server = BridgeServer(
+                adapter=_StubLauncher(), provider=_NativeProvider(base), resolved_key="key-0", model="test-model"
+            )
+            port = await server.start_async()
+            try:
+                async with (
+                    aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session,
+                    session.post(
+                        f"http://127.0.0.1:{port}/v1/messages",
+                        json={"model": "test-model", "messages": [{"role": "user", "content": "hi"}], "stream": True},
+                    ) as resp,
+                ):
+                    status = resp.status
+                    body = await resp.read()
+            finally:
+                await server.stop_async()
+        finally:
+            await runner.cleanup()
+        budget = (server_module._MAX_RETRIES + 1) + len(server_module._EMPTY_FINAL_DELAYS)
+        assert calls == [1] * budget, "each attempt must end at its error event, not at the read timeout"
+        assert status == 502
+        error = json.loads(body)
+        assert error["error"]["type"] == "overloaded_error"
+        assert error["error"]["reason"] == "upstream_error"
 
     async def test_client_disconnect_while_held_stops_reading_upstream(self):
         """Before the hold a failed write revealed a gone client; while held nothing is written."""

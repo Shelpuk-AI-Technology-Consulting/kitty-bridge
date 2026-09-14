@@ -693,6 +693,14 @@ or model is misbehaving.
 The response is a `502` carrying `"reason": "empty_response"`. One visible cost of the hold: on reasoning models the
 agent shows its spinner, not live thinking, until the first text or tool call arrives.
 
+### A 502 whose error carries `"reason": "upstream_error"`
+
+Same providers. The provider answered kitty's request with its own error event before producing any content —
+an `overloaded_error`, say. Kitty retries the attempt on the same ladder as an empty reply (and fails over on a
+balancing profile), so you see this only when every attempt came back with the provider's error. Nothing reached
+the agent; the error shown is the provider's own, with kitty's `"reason": "upstream_error"` added so logs can tell
+it apart. Simply resend; if it persists, the provider is failing outright — switch backend or wait it out.
+
 ### "Kitty Bridge received a reply from the upstream provider that stopped (max_tokens) before producing any content"
 
 Same providers. The model used its whole output budget — typically all of it on thinking — or filled its context window
