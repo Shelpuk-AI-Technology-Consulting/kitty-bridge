@@ -5105,7 +5105,11 @@ found cases they did not reach and one they understated. Each is decided here, w
   re-embedded** (`502`, with only `reason: "upstream_error"` added inside its `error` object),
   because the provider's error type is what the client is written against; this deliberately
   departs from Q9/D4's "names the product" precedent, so the body is not mistaken for a defect
-  or "fixed" into kitty's own wording later. What it changes: the hold records the error
+  or "fixed" into kitty's own wording later. When the error was seen but its payload is too
+  malformed to deliver (no `error` object, unparseable data), the marker still says
+  `upstream_error` and the wording is kitty's own (Q9) — an errored ladder never reports
+  `empty_response`, which would be false reporting against D4's own rationale for the marker.
+  What it changes: the hold records the error
   (`error_seen`, `error_event`, `error_event_complete` — a chunk boundary may fall between the
   name line and its data line, and reading stops only when the event's lines have all arrived)
   and is deaf to everything after it (a later `message_delta` stop reason records nothing, so
@@ -5114,7 +5118,8 @@ found cases they did not reach and one they understated. Each is decided here, w
   the health model stays the empty ladder's — no quarantine, unlike the CC-wire path's in-stream
   cooldown — and the two wires now also exhaust differently, the CC-wire generic body carrying
   neither the provider payload nor a reason marker. The `sr is not None` arm ends an
-  already-open stream with the provider's payload raw. Three accepted residues: error-then-content
+  already-open stream with the provider's payload raw, or kitty's upstream-error wording when
+  the payload is unusable. Three accepted residues: error-then-content
   reaches the client only when both arrive in one chunk (the SDK raises on the event, so that
   content was wasted anyway); the D5 cap still fails open past an unjudged error, delivering as
   before this amendment; and a stream that stalls *inside* the error event (name line seen, no

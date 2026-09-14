@@ -699,7 +699,9 @@ Same providers. The provider answered kitty's request with its own error event b
 an `overloaded_error`, say. Kitty retries the attempt on the same ladder as an empty reply (and fails over on a
 balancing profile), so you see this only when every attempt came back with the provider's error. Nothing reached
 the agent; the error shown is the provider's own, with kitty's `"reason": "upstream_error"` added so logs can tell
-it apart. Simply resend; if it persists, the provider is failing outright — switch backend or wait it out.
+it apart — or, if the provider's error payload was too malformed to deliver, kitty's own message saying so, with
+the same `"reason": "upstream_error"`. Either way an errored ladder is never reported as an empty one. Simply
+resend; if it persists, the provider is failing outright — switch backend or wait it out.
 
 ### "Kitty Bridge received a reply from the upstream provider that stopped (max_tokens) before producing any content"
 

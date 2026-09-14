@@ -540,7 +540,8 @@ class TestErrorEventBeforeContent:
             "error": {"type": "overloaded_error", "message": "Overloaded", "reason": "upstream_error"},
         }, "the provider's payload is re-embedded with exactly the reason marker added"
 
-    async def test_exhaustion_with_an_unusable_payload_falls_back_to_the_empty_body(self):
+    async def test_exhaustion_with_an_unusable_payload_still_reports_the_upstream_error(self):
+        """An errored ladder never reports empty_response, however malformed the error payload was."""
         error_reply = _MESSAGE_START + b'data: {"type":"error","error":"boom"}\n\n'
         with aioresponses(passthrough=["http://127.0.0.1"]) as m:
             m.post(_upstream(0), body=error_reply, headers=_SSE_HEADERS, repeat=True)
@@ -549,8 +550,9 @@ class TestErrorEventBeforeContent:
         assert posts == 6
         assert status == 502
         error = json.loads(body)
-        assert error["error"]["reason"] == "empty_response"
-        assert "Kitty Bridge" in error["error"]["message"]
+        assert error["error"]["reason"] == "upstream_error"
+        assert "Kitty Bridge" in error["error"]["message"], "Q9: kitty's fallback wording names the product"
+        assert "error" in error["error"]["message"], "the wording reports an error, not an empty reply"
 
     async def test_balancing_exhaustion_never_quarantines(self):
         budget = (server_module._MAX_RETRIES + 1) * 2 + len(server_module._EMPTY_FINAL_DELAYS)
@@ -607,16 +609,37 @@ class TestErrorEventBeforeContent:
         assert body == _PARTIAL_THEN_ERROR, "post-release bytes pass through byte-for-byte"
         assert sorted(h["transport_error_count"] for h in server._backend_health) == [0, 1], "a completion"
 
-    async def test_discarded_error_attempt_logs_its_upstream_error(self, caplog):
+    @pytest.mark.parametrize(
+        ("error_bytes", "marker"),
+        [
+            (_ERROR_EVENT, "upstream_error=overloaded_error"),
+            (b"event: error\ndata: upstream exploded\n\n", "upstream_error=unusable"),
+            (b'data: {"type":"error","error":"boom"}\n\n', "upstream_error=unusable"),
+        ],
+        ids=["well_formed", "name_only_unparseable", "type_only_malformed"],
+    )
+    async def test_discarded_error_attempt_logs_its_upstream_error(self, caplog, error_bytes, marker):
         with (
             caplog.at_level(logging.DEBUG, logger="kitty.bridge.server"),
             aioresponses(passthrough=["http://127.0.0.1"]) as m,
         ):
-            m.post(_upstream(0), body=_MESSAGE_START + _ERROR_EVENT, headers=_SSE_HEADERS)
+            m.post(_upstream(0), body=_MESSAGE_START + error_bytes, headers=_SSE_HEADERS)
             m.post(_upstream(0), body=_CONTENT, headers=_SSE_HEADERS)
             await _stream(_single_backend_server())
         warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
-        assert any("upstream_error=overloaded_error" in w for w in warnings), warnings
+        assert any(marker in w for w in warnings), warnings
+
+    async def test_discarded_typeless_payload_logs_unknown(self, caplog):
+        """A usable payload without a name still logs the marker, as ``unknown``."""
+        with (
+            caplog.at_level(logging.DEBUG, logger="kitty.bridge.server"),
+            aioresponses(passthrough=["http://127.0.0.1"]) as m,
+        ):
+            m.post(_upstream(0), body=_MESSAGE_START + b'data: {"type":"error","error":{}}\n\n', headers=_SSE_HEADERS)
+            m.post(_upstream(0), body=_CONTENT, headers=_SSE_HEADERS)
+            await _stream(_single_backend_server())
+        warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+        assert any("upstream_error=unknown" in w for w in warnings), warnings
 
     async def test_exhausted_empty_ladder_logs_no_upstream_error(self, caplog):
         """Negative control, exhausted: no line of the empty ladder's run grows the error field."""
@@ -683,11 +706,14 @@ class TestFailuresWhileHeld:
         assert status == 200
         assert body == _CONTENT, "the client must see only the retry, never the dropped preamble"
 
-    async def test_upstream_error_then_silence_is_judged_on_the_error(self, monkeypatch):
-        """An error event is the provider's terminal word: the attempt ends on it, not at the read timeout.
+    async def test_upstream_error_then_silence_still_serves_the_retry(self, monkeypatch):
+        """A silent stall after the error event does not hold the turn: the second reply is served.
 
-        The stall is silent, so a build that keeps reading hits the read timeout — which
-        quarantines the backend and fails the health assertion — instead of the ladder.
+        This pins the happy path only — the kill for a build that reads past the error
+        lives in ``test_every_errored_attempt_ends_on_its_error``, whose all-attempts
+        stall exhausts through the timeout arm's body and attempt count. A single
+        backend's ``_backend_health`` is empty, so there is deliberately no health
+        assertion here to go vacuous.
         """
         monkeypatch.setattr(server_module, "_STREAM_READ_TIMEOUT", 2.0)
         calls: list[int] = []
@@ -733,11 +759,9 @@ class TestFailuresWhileHeld:
                 await server.stop_async()
         finally:
             await runner.cleanup()
-        assert len(calls) == 2, "the errored attempt must be retried on its own ladder, not read out to a timeout"
+        assert len(calls) == 2, "the errored attempt must be retried on its own ladder"
         assert status == 200
         assert body == _CONTENT
-        for health in server._backend_health:
-            assert health["healthy"], "the error path is the empty ladder's, not the read-timeout quarantine"
 
     async def test_every_errored_attempt_ends_on_its_error(self, monkeypatch):
         """A build that reads past the error burns sock_read per attempt and exhausts through

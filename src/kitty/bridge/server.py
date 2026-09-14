@@ -855,6 +855,13 @@ _NATIVE_EMPTY_REPLY_MESSAGE = (
 _NATIVE_EMPTY_AFTER_EMISSION_MESSAGE = (
     "Kitty Bridge lost the upstream reply mid-stream and the retry came back empty. Retry the request."
 )
+# KBR-241: the error variant's kitty wording, for attempts whose error payload was too
+# malformed to deliver. Names the product (Q9) and reports what happened — an upstream
+# error, not an empty reply — so the exhaustion reason marker never lies.
+_NATIVE_UPSTREAM_ERROR_MESSAGE = (
+    "Kitty Bridge received an error from the upstream provider before any content, on every "
+    "attempt, but the provider's error payload could not be delivered. Retry the request."
+)
 # D3: stop reasons that truncate a reply, so no retry can improve one that arrives before content.
 _NATIVE_TRUNCATING_STOP_REASONS = frozenset({"max_tokens", "model_context_window_exceeded"})
 _MAX_LOGGED_HELD_BYTES = 2000  # bound on a discarded native reply's head in the DEBUG log
@@ -4110,10 +4117,14 @@ class BridgeServer:
 
                             # This attempt wrote nothing, so its discarded bytes exist only here.
                             usable_payload = _usable_upstream_error_payload(hold)
-                            held_error_type = (
-                                usable_payload["error"].get("type") if usable_payload is not None else None
-                            )
-                            if not isinstance(held_error_type, str):
+                            if usable_payload is not None:
+                                err_type = usable_payload["error"].get("type")
+                                # The error is on record even when its payload carries no
+                                # name: the log marker must not vanish with it.
+                                held_error_type = err_type if isinstance(err_type, str) else "unknown"
+                            elif hold.error_seen:
+                                held_error_type = "unusable"
+                            else:
                                 held_error_type = None
                             error_note = f", upstream_error={held_error_type}" if held_error_type else ""
                             logger.warning(
@@ -4130,9 +4141,19 @@ class BridgeServer:
                             # error cannot follow: per Q14(a) the open stream ends in an error event.
                             if sr is not None:
                                 # Guarded-dead post-KBR-183; if it ever runs, the terminal error is
-                                # the provider's own when this attempt carried one.
+                                # the provider's own when this attempt carried a usable one, and
+                                # kitty's error wording otherwise — never the empty-reply message,
+                                # which would misreport an errored attempt as an empty one.
                                 if usable_payload is not None:
                                     terminal_error = usable_payload
+                                elif hold.error_seen:
+                                    terminal_error = {
+                                        "type": "error",
+                                        "error": {
+                                            "type": "api_error",
+                                            "message": _NATIVE_UPSTREAM_ERROR_MESSAGE,
+                                        },
+                                    }
                                 else:
                                     terminal_error = {
                                         "type": "error",
@@ -4189,14 +4210,26 @@ class BridgeServer:
                                 )
                                 continue
                             logger.warning("Native Messages stream empty response after %d attempts", attempt + 1)
-                            # D4, plus KBR-241's error variant: the provider's own payload is what
-                            # the client is written against (D2's rationale at exhaustion), so it is
-                            # re-embedded with only the reason marker added; anything unusable
-                            # keeps D4's body.
+                            # D4, plus KBR-241's error variant: whenever an upstream error was
+                            # seen the reason marker says so — the ladder did not watch an empty
+                            # reply. The provider's payload is what the client is written against
+                            # (D2's rationale at exhaustion), so a usable one is re-embedded with
+                            # only the marker added; a malformed one cannot be delivered, and the
+                            # body falls back to kitty's own upstream-error wording (Q9), never to
+                            # the empty-reply message that would misreport what happened.
                             if usable_payload is not None:
                                 exhaustion_error = {
                                     **usable_payload,
                                     "error": {**usable_payload["error"], "reason": "upstream_error"},
+                                }
+                            elif hold.error_seen:
+                                exhaustion_error = {
+                                    "type": "error",
+                                    "error": {
+                                        "type": "api_error",
+                                        "message": _NATIVE_UPSTREAM_ERROR_MESSAGE,
+                                        "reason": "upstream_error",
+                                    },
                                 }
                             else:
                                 exhaustion_error = {
