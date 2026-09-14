@@ -626,6 +626,44 @@ class TestBalancingAllCustomTransport:
     produced 'Upstream Cloudflare block' errors from the aiohttp path.
     """
 
+    class NoStreamProvider(ProviderAdapter):
+        """A plain HTTP provider with no `stream_request` override.
+
+        Shared by the KBR-249 tests in this class: the skip test needs a
+        provider that cannot be driven by the custom-transport branch, and
+        the cap test needs the same skeleton plus a poisoned stream path.
+        """
+
+        def __init__(self):
+            self._provider_type = "nostream"
+
+        @property
+        def provider_type(self) -> str:
+            return self._provider_type
+
+        @property
+        def default_base_url(self) -> str:
+            return "https://api.nostream.example.com/v1"
+
+        def build_request(self, model: str, messages: list[dict], **kwargs) -> dict:
+            return {"model": model, "messages": messages, **kwargs}
+
+        def translate_to_upstream(self, cc_request: dict) -> dict:
+            return {
+                "model": cc_request["model"],
+                "messages": cc_request["messages"],
+                "stream": True,
+            }
+
+        def parse_response(self, response_data: dict) -> dict:
+            return response_data
+
+        def map_error(self, status_code: int, body: dict) -> Exception:
+            return Exception(f"Error {status_code}")
+
+        def make_request(self, cc_request: dict) -> dict:
+            return UPSTREAM_RESPONSE
+
     @pytest.mark.asyncio
     async def test_responses_stream_uses_custom_transport(self):
         """Responses API streaming should call provider.stream_request(), not aiohttp."""
@@ -815,37 +853,7 @@ class TestBalancingAllCustomTransport:
 
         from kitty.profiles.schema import Profile
 
-        class NoStreamProvider(ProviderAdapter):
-            def __init__(self):
-                self._provider_type = "nostream"
-
-            @property
-            def provider_type(self) -> str:
-                return self._provider_type
-
-            @property
-            def default_base_url(self) -> str:
-                return "https://api.nostream.example.com/v1"
-
-            def build_request(self, model: str, messages: list[dict], **kwargs) -> dict:
-                return {"model": model, "messages": messages, **kwargs}
-
-            def translate_to_upstream(self, cc_request: dict) -> dict:
-                return {
-                    "model": cc_request["model"],
-                    "messages": cc_request["messages"],
-                    "stream": True,
-                }
-
-            def parse_response(self, response_data: dict) -> dict:
-                return response_data
-
-            def map_error(self, status_code: int, body: dict) -> Exception:
-                return Exception(f"Error {status_code}")
-
-            def make_request(self, cc_request: dict) -> dict:
-                return UPSTREAM_RESPONSE
-
+        NoStreamProvider = self.NoStreamProvider
         stream_provider = BedrockAdapter()
 
         async def _fake_stream(req, write):
@@ -946,38 +954,7 @@ class TestBalancingAllCustomTransport:
 
         from kitty.profiles.schema import Profile
 
-        # Same provider skeleton as the test above, so we don't depend on
-        # the broader module's NoStreamProvider not leaking between tests.
-        class NoStreamProvider(ProviderAdapter):
-            def __init__(self):
-                self._provider_type = "nostream"
-
-            @property
-            def provider_type(self) -> str:
-                return self._provider_type
-
-            @property
-            def default_base_url(self) -> str:
-                return "https://api.nostream.example.com/v1"
-
-            def build_request(self, model, messages, **kwargs):
-                return {"model": model, "messages": messages, **kwargs}
-
-            def translate_to_upstream(self, cc_request):
-                return {
-                    "model": cc_request["model"],
-                    "messages": cc_request["messages"],
-                    "stream": True,
-                }
-
-            def parse_response(self, response_data):
-                return response_data
-
-            def map_error(self, status_code, body):
-                return Exception(f"Error {status_code}")
-
-            def make_request(self, cc_request):
-                return UPSTREAM_RESPONSE
+        NoStreamProvider = self.NoStreamProvider
 
         # Pool: one plain, one custom-transport. Marking is patched to a no-op
         # so the pool never drains — the cap is the only stop.
