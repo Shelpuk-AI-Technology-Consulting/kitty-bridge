@@ -1090,6 +1090,18 @@ class TestParts:
             c.Image(digest=None, media_type="audio/mpeg", ref="files/example"),
         )
 
+    def test_file_data_with_no_file_uri_keeps_its_position_and_carries_identity(self) -> None:
+        """KBR-192 — a missing ``fileUri`` is a required-field absent (R7.3); the
+        part must keep its position with identity from the canonical JSON of the
+        blob, and the residual records the missing key.
+        """
+        projected = project_untotalled({"contents": [{"parts": [{"fileData": {}}]}]})
+
+        assert projected.conversation.turns[0].parts == (
+            c.Image(digest=c.opaque_digest({}), media_type=None, ref=None),
+        )
+        assert projected.residual == {"contents[0].parts[0].fileData.fileUri": None}
+
     def test_a_function_call_carries_the_published_optional_id(self) -> None:
         """R6.4 — Gemini `v1beta` publishes `FunctionCall.id`, contrary to §3.3.1's note.
 
@@ -2183,7 +2195,9 @@ class TestEveryOptionalLeafFailsClosed:
         "blob.data undecodable": (
             {"contents": [{"parts": [{"inlineData": {"mimeType": "image/png", "data": "aGk=\n"}}]}]},
             "contents[0].parts[0].inlineData.data",
-            lambda p: p.conversation.turns[0].parts[0] == c.Image(media_type="image/png"),
+            lambda p: p.conversation.turns[0].parts[0] == c.Image(
+                digest=c.image_digest(b"aGk=\n"), media_type="image/png",
+            ),
         ),
         "part.thought": (
             {"contents": [{"parts": [{"text": "x", "thought": "yes"}]}]},
@@ -2218,7 +2232,11 @@ class TestEveryOptionalLeafFailsClosed:
         "fileData.fileUri": (
             {"contents": [{"parts": [{"fileData": {"fileUri": ["a"]}}]}]},
             "contents[0].parts[0].fileData.fileUri",
-            lambda p: p.conversation.turns[0].parts[0].ref is None,
+            # `ref` falls back to the absent value; the part keeps its identity
+            # through the canonical-JSON digest of the fileData blob (KBR-192).
+            lambda p: p.conversation.turns[0].parts[0].ref is None
+            and p.conversation.turns[0].parts[0].digest
+            == c.opaque_digest({"fileUri": ["a"]}),
         ),
         "fileData.mimeType": (
             {"contents": [{"parts": [{"fileData": {"fileUri": "files/x", "mimeType": 7}}]}]},
@@ -2650,9 +2668,11 @@ class TestUnionMemberValues:
             {"contents": [{"parts": [{"inlineData": {"mimeType": "image/png", "data": wrapped}}, {"text": "and"}]}]}
         )
 
-        # The part keeps its place and the later part keeps its index.
+        # The part keeps its place and the later part keeps its index; the
+        # digest is the raw wire bytes per `image_digest`'s second recipe
+        # (KBR-192), so the part still has identity.
         assert projected.conversation.turns[0].parts == (
-            c.Image(digest=None, media_type="image/png"),
+            c.Image(digest=c.image_digest(wrapped.encode("utf-8")), media_type="image/png"),
             c.Text("and"),
         )
         assert projected.residual == {"contents[0].parts[0].inlineData.data": wrapped}

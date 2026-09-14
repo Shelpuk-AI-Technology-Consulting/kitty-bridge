@@ -1310,25 +1310,29 @@ def _read_inline_data(view: Mapping[str, tuple[str, Any]], path: str, residual: 
     blob = _aliased(value, PUBLISHED_BLOB_KEYS, item, residual)
     raw = _typed_leaf(blob, "data", (str,), item, residual, default="")
     try:
-        decoded: bytes | None = base64.b64decode(raw, validate=True)
+        decoded = base64.b64decode(raw, validate=True)
     except (binascii.Error, ValueError):
-        # Residualised, not raised on: `Image.digest` is `str | None`, so the
-        # grammar *has* an absent value here, and §7.4.1 is explicit that
-        # "raising is the other wrong answer: it blinds the oracle to everything
-        # else in a request it could otherwise diff". The case is real rather
-        # than hypothetical — `validate=True` rejects every RFC 2045 line break,
-        # and Google's own image sample passes `-w0` to `base64(1)` precisely
+        # Residualised, not raised on: §7.4.1 is explicit that "raising is the
+        # other wrong answer: it blinds the oracle to everything else in a
+        # request it could otherwise diff". The case is real rather than
+        # hypothetical — `validate=True` rejects every RFC 2045 line break, and
+        # Google's own image sample passes `-w0` to `base64(1)` precisely
         # because its default output is wrapped. Nor is the part dropped: the
-        # index would shift and invent a delta on every later part.
+        # index would shift and invent a delta on every later part. The part
+        # needs an identity even so, so we digest the raw wire bytes — the
+        # second of `image_digest`'s recipes (KBR-192) — rather than carry a
+        # bare ``None`` that would defeat `Image.__post_init__`'s XOR check.
         residual[_join(item, blob["data"][0] if "data" in blob else "data")] = raw
-        decoded = None
+        digest = c.image_digest(raw.encode("utf-8"))
+    else:
+        digest = c.image_digest(decoded)
 
     _residualise(blob, {"data", "mimeType", "displayName"}, item, residual)
     _residualise(view, {"inlineData", "videoMetadata"}, path, residual)
     # The media type is excluded from the digest and carried separately, so a
     # changed media type is its own delta rather than an unexplained change.
     return c.Image(
-        digest=c.image_digest(decoded) if decoded is not None else None,
+        digest=digest,
         media_type=_typed_leaf(blob, "mimeType", (str,), item, residual),
         display_name=_typed_leaf(blob, "displayName", (str,), item, residual),
         video_metadata=_typed_leaf(view, "videoMetadata", (dict,), path, residual),
@@ -1358,8 +1362,22 @@ def _read_file_data(view: Mapping[str, tuple[str, Any]], path: str, residual: di
         raise c.UnreadableBodyError(f"{item} must be an object, got {type(value).__name__}")
 
     data = _aliased(value, PUBLISHED_FILE_DATA_KEYS, item, residual)
+    ref = _typed_leaf(data, "fileUri", (str,), item, residual)
+    if ref is None:
+        # `fileUri` is a required field of fileData (§7.4 rule 7 row 2): the
+        # part keeps its position, with identity from the canonical-JSON digest
+        # of the fileData blob (the `opaque_digest` recipe; no `type` to
+        # exclude — fileData is identified by its wire key, not a `type` field).
+        # The residual carries the missing key, or the wrongly-typed value
+        # `_typed_leaf` already residualised, so the run fails visibly.
+        digest = c.opaque_digest(value)
+        if "fileUri" not in data:
+            residual[_join(item, "fileUri")] = None
+    else:
+        digest = None
     projected = c.Image(
-        ref=_typed_leaf(data, "fileUri", (str,), item, residual),
+        ref=ref,
+        digest=digest,
         media_type=_typed_leaf(data, "mimeType", (str,), item, residual),
         display_name=_typed_leaf(data, "displayName", (str,), item, residual),
         video_metadata=_typed_leaf(view, "videoMetadata", (dict,), path, residual),

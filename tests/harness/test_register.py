@@ -99,11 +99,11 @@ _SHAPES: tuple[tuple[str, str], ...] = (
 
 
 class TestTheRowsThemselves:
-    """§3.2 publishes 46 live rows; the data must be those rows and no others."""
+    """§3.2 publishes 52 live rows; the data must be those rows and no others."""
 
     def test_the_register_holds_every_live_row(self) -> None:
-        """17 bridge-level rows less the withdrawn M13, plus 30 provider-level."""
-        assert len(r.REGISTER) == 46
+        """16 bridge-level rows less the withdrawn M13, plus 36 provider-level."""
+        assert len(r.REGISTER) == 52
 
     def test_the_register_is_a_tuple_and_not_a_list(self) -> None:
         """`mypy` does not run over `tests/`, so the annotation is not enforcement.
