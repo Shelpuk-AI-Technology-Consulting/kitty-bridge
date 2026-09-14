@@ -305,10 +305,12 @@ class AnthropicAdapter(ProviderAdapter):
         """Add the agent's thinking ``display`` to *thinking* where this upstream documents it.
 
         Restoring ``display`` keeps the request faithful to what the agent sent;
-        the translated route does not yet return thinking to the user (KBR-227,
-        KBR-228).  Sending it to an upstream that does not document the field
-        risks a 400 on every thinking request (KBR-203).  The value itself is
-        checked by the translator, the only writer of ``_thinking_display``.
+        since KBR-227 (streamed replies are forwarded byte-for-byte) and
+        KBR-228 part A (the non-streaming reply carries thinking through to
+        ``MessagesTranslator``) the user actually sees the thinking it asks
+        for.  Sending it to an upstream that does not document the field risks
+        a 400 on every thinking request (KBR-203).  The value itself is checked
+        by the translator, the only writer of ``_thinking_display``.
 
         Args:
             thinking: The ``adaptive`` or ``enabled`` thinking object being built.
