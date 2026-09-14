@@ -833,7 +833,7 @@ def _checked_id(entry_id: str) -> str:
 #:
 #: **This set is the subset that is *provable* from text already in the
 #: repository, not a classification of the whole vocabulary.**  Classifying all
-#: 26 triggers is `KBR-186`, filed rather than guessed, for the reason T-W3 gave
+#: 28 triggers is `KBR-186`, filed rather than guessed, for the reason T-W3 gave
 #: for deferring trigger predicates: data nothing in this change could prove
 #: wrong is what plan §1.4 forbids.  Until it lands, T-D8 cannot read corpus
 #: coverage for M6, M8, M9, M12 and M17 — they are discharged by a scripted-recorder
