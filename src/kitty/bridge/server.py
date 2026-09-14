@@ -3748,7 +3748,13 @@ class BridgeServer:
                                 max_attempts,
                             )
                             continue
-                        # No more backends — emit error event and mark incomplete
+                        # No more backends — emit error event and mark incomplete.
+                        # KBR-250: break here, so the exhausted in-stream error
+                        # does not fall through to the empty-response gate below
+                        # (the no-finish arm would otherwise write a second
+                        # terminal error event after this one; the messages
+                        # branch has always ended its in-stream-error exhaustion
+                        # with a break).
                         terminal_status = "incomplete"
                         error_event = responses_format_error(
                             {"code": "upstream_error", "message": "All upstream providers returned errors"},
@@ -3761,9 +3767,29 @@ class BridgeServer:
                                 "Client disconnected before error could be sent for %s",
                                 response_id,
                             )
+                        break
 
-                    # Check for empty response
-                    if translator.response_was_empty and finish_events:
+                    # Check for empty response. KBR-250 extends the gate with
+                    # the no-finish arm (`empty_no_finish`) so a stream whose
+                    # upstream produced no finish chunk (zero bytes, [DONE]-only,
+                    # or truncated before any chunk) enters the same ladder as
+                    # the finish-chunk-empty case. When the ladder exhausts and
+                    # the entry was the no-finish arm, write the D4 SSE error
+                    # event and let the post-loop synthesize response.completed
+                    # with status="incomplete" and write_eof. The
+                    # `code: "empty_response"` field is the D4 discriminator on
+                    # the Responses wire (TEST_SUITE.md §11 Q14, KBR-235).
+                    #
+                    # No post-emission arm here, unlike KBR-235 on `/v1/messages`:
+                    # `ResponsesTranslator.response_was_empty` is whole-response-
+                    # scoped (accumulated text + tools + reasoning), so a stream
+                    # that wrote content cannot have `response_was_empty` True
+                    # and `empty_no_finish` requires `not events_emitted` on the
+                    # current attempt. The post-emission arm is structurally
+                    # unreachable on this route — see TEST_SUITE.md §11 Q14
+                    # amendment.
+                    empty_no_finish = not finish_events and not events_emitted
+                    if (translator.response_was_empty and finish_events) or empty_no_finish:
                         translator.reset()
                         finish_events.clear()
                         if self._backends and self._current_backend_idx >= 0:
@@ -3799,6 +3825,29 @@ class BridgeServer:
                                 "Responses stream empty response after %d attempts, emitting fallback",
                                 max_attempts,
                             )
+
+                        if empty_no_finish:
+                            # D4 exhaustion: no prior emission, every attempt
+                            # empty. Write the D4 SSE error event and let the
+                            # post-loop synthesize response.completed(incomplete)
+                            # and write_eof.
+                            terminal_status = "incomplete"
+                            error_event = responses_format_error(
+                                {
+                                    "code": "empty_response",
+                                    "message": _NATIVE_EMPTY_REPLY_MESSAGE,
+                                },
+                                seq=translator._next_seq(),
+                            )
+                            try:
+                                await sr.write(error_event.encode())
+                            except (ConnectionResetError, BrokenPipeError, OSError):
+                                logger.debug(
+                                    "Client disconnected before empty-response exhaustion "
+                                    "error could be sent for %s",
+                                    response_id,
+                                )
+                            break
 
                     # Write buffered finish events to client
                     for event in finish_events:
@@ -5670,11 +5719,38 @@ class BridgeServer:
                                 max_attempts,
                             )
                             continue
-                        # No more backends — error already logged, stream continues to end
+                        # No more backends — error already logged, stream continues to end.
+                        # KBR-250: break here so the exhausted in-stream error
+                        # does not fall through to the empty-response gate below
+                        # (the no-finish arm would otherwise write a second
+                        # terminal error after the stream ends). The messages
+                        # branch has always ended its in-stream-error exhaustion
+                        # this way. Gemini did not write a terminal error on this
+                        # path before KBR-250 either; the break preserves that.
                         done = True
+                        break
 
-                    # Check for empty response
-                    if translator.response_was_empty and finish_events:
+                    # Check for empty response. KBR-250 extends the gate with
+                    # the no-finish arm (`empty_no_finish`) so a stream whose
+                    # upstream produced no finish chunk (zero bytes, [DONE]-only,
+                    # or truncated before any chunk) enters the same ladder as
+                    # the finish-chunk-empty case. When the ladder exhausts and
+                    # the entry was the no-finish arm, write the D4 SSE error
+                    # event and let the post-loop write_eof without the
+                    # healthy-mark. The `reason: "empty_response"` field is the
+                    # D4 discriminator on the Gemini wire (TEST_SUITE.md §11
+                    # Q14, KBR-235).
+                    #
+                    # No post-emission arm here, unlike KBR-235 on `/v1/messages`:
+                    # `GeminiTranslator.response_was_empty` is whole-response-
+                    # scoped (accumulated text + tools), so a stream that wrote
+                    # content cannot have `response_was_empty` True and
+                    # `empty_no_finish` requires `not events_emitted` on the
+                    # current attempt. The post-emission arm is structurally
+                    # unreachable on this route — see TEST_SUITE.md §11 Q14
+                    # amendment.
+                    empty_no_finish = not finish_events and not events_emitted
+                    if (translator.response_was_empty and finish_events) or empty_no_finish:
                         translator.reset()
                         finish_events.clear()
                         if self._backends and self._current_backend_idx >= 0:
@@ -5709,6 +5785,28 @@ class BridgeServer:
                                 "Gemini stream empty response after %d attempts, emitting fallback",
                                 max_attempts,
                             )
+
+                        if empty_no_finish:
+                            # D4 exhaustion: no prior emission, every attempt
+                            # empty. Write the D4 SSE error event and let the
+                            # post-loop write_eof. stream_ok stays False so
+                            # the backend is not marked healthy.
+                            error_payload = {
+                                "error": {
+                                    "code": 502,
+                                    "message": _NATIVE_EMPTY_REPLY_MESSAGE,
+                                    "reason": "empty_response",
+                                }
+                            }
+                            error_sse = f"data: {json.dumps(error_payload)}\n\n"
+                            try:
+                                await sr.write(error_sse.encode())
+                            except (ConnectionResetError, BrokenPipeError, OSError):
+                                logger.debug(
+                                    "Client disconnected before empty-response exhaustion "
+                                    "error could be sent"
+                                )
+                            break
 
                     # Write buffered finish events
                     for event in finish_events:

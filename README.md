@@ -719,8 +719,18 @@ before your agent sees it; on the translated side a streamed reply that carries 
 takes the same ladder. This error means every attempt kitty made came back empty. Nothing reached the agent, so simply
 resend; if it persists, the provider or model is misbehaving.
 
-The response is a `502` carrying `"reason": "empty_response"`. One visible cost of the hold, on the Anthropic-format
-side: on reasoning models the agent shows its spinner, not live thinking, until the first text or tool call arrives.
+The response is a `502` carrying `"reason": "empty_response"` for clients that expect JSON
+(`/v1/messages` non-stream and streamed). For streaming clients that expect SSE
+(`/v1/responses` to Codex CLI; `/v1beta/...:streamGenerateContent` to Gemini CLI) the
+exhaustion is delivered inside the open stream as an SSE error event carrying the
+route-specific D4 discriminator — `code: "empty_response"` on the Responses wire,
+`reason: "empty_response"` inside the nested `error` object on the Gemini wire —
+followed by the stream's normal lifecycle closer. The HTTP status stays
+`200 text/event-stream` throughout; the discriminator inside the payload marks the
+stream as an exhausted-empty one, distinguishable from any other terminal event.
+
+One visible cost of the hold, on the Anthropic-format side: on reasoning models the
+agent shows its spinner, not live thinking, until the first text or tool call arrives.
 
 ### "Kitty Bridge received an empty response from the upstream provider after content had already been sent"
 
