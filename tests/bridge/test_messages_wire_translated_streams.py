@@ -26,8 +26,10 @@ from kitty.bridge import server as server_module
 from kitty.bridge.server import BridgeServer
 from kitty.launchers.base import LauncherAdapter, SpawnConfig
 from kitty.providers.anthropic import AnthropicAdapter
+from kitty.providers.custom_anthropic import CustomAnthropicAdapter
 from kitty.providers.minimax_token import MiniMaxTokenAnthropicAdapter
 from kitty.providers.opencode import OpenCodeGoAdapter
+from kitty.providers.zai_anthropic import ZaiAnthropicAdapter
 from kitty.types import BridgeProtocol
 
 #: A tool schema the client declares and the auditor can hold a call against.
@@ -97,11 +99,15 @@ class _ProtocolLauncher(LauncherAdapter):
         return SpawnConfig(env_overrides={}, env_clear=[], cli_args=[])
 
 
-#: The translated Messages-wire adapters, each with a model that serves on that wire.
+#: The Messages-wire adapters, each with a model that serves on that wire: the
+#: translated ones the ticket names, and the native ones (`custom_anthropic`,
+#: `zai_coding`) whose upstream streams are the same Anthropic SSE.
 _MESSAGES_WIRE = [
     pytest.param(AnthropicAdapter, "claude-opus-4-6", id="anthropic"),
     pytest.param(MiniMaxTokenAnthropicAdapter, "MiniMax-M3", id="minimax_token-default"),
     pytest.param(OpenCodeGoAdapter, "minimax-m2.7", id="opencode_go-messages-model"),
+    pytest.param(CustomAnthropicAdapter, "claude-opus-4-6", id="custom_anthropic-native"),
+    pytest.param(ZaiAnthropicAdapter, "claude-opus-4-6", id="zai_coding-native"),
 ]
 
 
