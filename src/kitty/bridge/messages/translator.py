@@ -19,7 +19,7 @@ from kitty.bridge.messages.events import (
     format_message_stop_event,
 )
 
-__all__ = ["MessagesTranslator", "carry_tool_choice_and_metadata"]
+__all__ = ["MessagesTranslator", "build_user_content_message", "carry_tool_choice_and_metadata"]
 
 _EMPTY_ASSISTANT_FALLBACK_TEXT = (
     "Upstream model returned an empty response. Please retry. "
@@ -127,6 +127,65 @@ def carry_tool_choice_and_metadata(messages_request: dict, cc_request: dict) -> 
 
 #: KBR-203: the thinking ``display`` values Anthropic accepts without a beta header.
 _GA_THINKING_DISPLAYS: tuple[str, ...] = ("summarized", "omitted")
+
+
+def build_user_content_message(blocks: list, documents_out: list[dict]) -> dict:
+    """Build one CC user message from non-``tool_result`` Messages blocks.
+
+    The shared body of the two Messages→CC converters (:meth:`MessagesTranslator.
+    translate_request` and ``server._convert_native_to_cc_format``) — a second
+    copy of the value table is the drift that lost KBR-178's field on the
+    fallback's retry path. Text-only input keeps the pre-KBR-222 output — a
+    joined string — so the common turn's CC body does not change shape. Any
+    ``image`` block switches the message to a content-parts list (``text``
+    plus ``image_url`` parts), because a string would lose the image again one
+    hop later. ``document`` blocks go to *documents_out*, never into the CC
+    content.
+
+    Args:
+        blocks: The user message's non-``tool_result`` content blocks.
+        documents_out: Collector for ``document`` blocks; each entry is
+            addressed to the message dict this function builds.
+
+    Returns:
+        The CC user message dict.
+    """
+    # Text blocks join as today; images become CC parts; documents ride the
+    # internal key. Block types neither branch handles are dropped, as before
+    # this fix — nothing claims them.
+    parts: list[dict] = []
+    documents: list[dict] = []
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        kind = block.get("type")
+        if kind == "text":
+            parts.append({"type": "text", "text": block.get("text", "")})
+        elif kind == "image":
+            source = block.get("source") or {}
+            if source.get("type") == "base64":
+                url = f"data:{source.get('media_type', '')};base64,{source.get('data', '')}"
+            elif source.get("type") == "url":
+                url = source.get("url", "")
+            else:
+                # KBR-222: a source type hop 1 cannot express (Anthropic's
+                # `file`, or a malformed one) keeps today's drop — an
+                # empty-URL part would corrupt the reference and buy an
+                # opaque upstream 400.
+                continue
+            parts.append({"type": "image_url", "image_url": {"url": url}})
+        elif kind == "document":
+            documents.append(block)
+
+    message: dict = {
+        "role": "user",
+        "content": "\n".join(p["text"] for p in parts if p["type"] == "text") if parts else "",
+    }
+    if any(p["type"] != "text" for p in parts):
+        message["content"] = parts
+    if documents:
+        documents_out.append({"message": message, "blocks": documents})
+    return message
 
 
 class MessagesTranslator:
@@ -498,12 +557,9 @@ class MessagesTranslator:
     def _user_content_message(self, blocks: list, documents_out: list[dict]) -> dict:
         """Build one CC user message from non-``tool_result`` blocks.
 
-        Text-only input keeps the pre-KBR-222 output — a joined string — so
-        the common turn's CC body does not change shape. Any ``image`` block
-        switches the message to a content-parts list (``text`` plus
-        ``image_url`` parts), because a string would lose the image again one
-        hop later. ``document`` blocks go to *documents_out*, never into the
-        CC content.
+        Delegates to :func:`build_user_content_message` — the shared body of
+        both Messages→CC converters, so the fallback's retry cannot re-drop
+        what hop 1 carries (KBR-178's lesson).
 
         Args:
             blocks: The user message's non-``tool_result`` content blocks.
@@ -513,42 +569,7 @@ class MessagesTranslator:
         Returns:
             The CC user message dict.
         """
-        # Text blocks join as today; images become CC parts; documents ride
-        # the internal key. Block types neither branch handles are dropped,
-        # as before this fix — nothing claims them.
-        parts: list[dict] = []
-        documents: list[dict] = []
-        for block in blocks:
-            if not isinstance(block, dict):
-                continue
-            kind = block.get("type")
-            if kind == "text":
-                parts.append({"type": "text", "text": block.get("text", "")})
-            elif kind == "image":
-                source = block.get("source") or {}
-                if source.get("type") == "base64":
-                    url = f"data:{source.get('media_type', '')};base64,{source.get('data', '')}"
-                elif source.get("type") == "url":
-                    url = source.get("url", "")
-                else:
-                    # KBR-222: a source type hop 1 cannot express (Anthropic's
-                    # `file`, or a malformed one) keeps today's drop — an
-                    # empty-URL part would corrupt the reference and buy an
-                    # opaque upstream 400.
-                    continue
-                parts.append({"type": "image_url", "image_url": {"url": url}})
-            elif kind == "document":
-                documents.append(block)
-
-        message: dict = {
-            "role": "user",
-            "content": "\n".join(p["text"] for p in parts if p["type"] == "text") if parts else "",
-        }
-        if any(p["type"] != "text" for p in parts):
-            message["content"] = parts
-        if documents:
-            documents_out.append({"message": message, "blocks": documents})
-        return message
+        return build_user_content_message(blocks, documents_out)
 
     def _translate_assistant_message(self, content) -> dict:
         """Translate an assistant message, handling tool_use and thinking content blocks."""

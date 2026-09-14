@@ -37,7 +37,11 @@ from kitty.bridge.messages.events import (
 from kitty.bridge.messages.events import (
     format_error_event as messages_format_error,
 )
-from kitty.bridge.messages.translator import MessagesTranslator, carry_tool_choice_and_metadata
+from kitty.bridge.messages.translator import (
+    MessagesTranslator,
+    build_user_content_message,
+    carry_tool_choice_and_metadata,
+)
 from kitty.bridge.preamble_hold import PreambleHold
 from kitty.bridge.responses.events import (
     format_error_event as responses_format_error,
@@ -703,6 +707,9 @@ def _convert_native_to_cc_format(body: dict) -> dict:
     - ``content`` blocks → plain strings / null
     - ``tool_use`` → ``tool_calls``
     - ``tool_result`` → ``{"role": "tool", ...}``
+    - ``image`` blocks → CC ``image_url`` parts, ``document`` blocks → the
+      internal ``_documents`` key (KBR-222), through the translator's shared
+      user-content builder
     - Anthropic ``tools`` → CC-format tools
     - Preserves model, stream, max_tokens, temperature, top_p
     - ``stop_sequences`` → ``stop``, and ``top_k`` → the internal ``_top_k``
@@ -713,6 +720,9 @@ def _convert_native_to_cc_format(body: dict) -> dict:
     on translator state (tool call buffers, thinking warnings, etc.).
     """
     messages: list[dict] = []
+    # KBR-222: document blocks collected across the conversation, published on
+    # ``_documents`` below so the Anthropic adapters restore them on the retry.
+    documents: list[dict] = []
 
     # System prompt → system message.  The original value rides the internal
     # `_anthropic_system` key verbatim (KBR-228 part B), exactly as in
@@ -778,13 +788,16 @@ def _convert_native_to_cc_format(body: dict) -> dict:
             continue
 
         if role == "user" and isinstance(content, list):
-            text_blocks = [b for b in content if isinstance(b, dict) and b.get("type") == "text"]
             tool_results = [b for b in content if isinstance(b, dict) and b.get("type") == "tool_result"]
+            others = [b for b in content if not (isinstance(b, dict) and b.get("type") == "tool_result")]
 
-            # Emit text as user message, then tool results as tool messages
-            if text_blocks:
-                text = "\n".join(b.get("text", "") for b in text_blocks)
-                messages.append({**msg, "content": text})
+            # KBR-222: the retry owes hop 1's non-text mappings -- KBR-178's
+            # lesson, a mapping hop 1 learns and the fallback misses is lost
+            # again on this exact path. The shared builder emits text and
+            # images and collects documents; placement keeps the fallback's
+            # text-first order.
+            if others:
+                messages.append(build_user_content_message(others, documents))
 
             for tr in tool_results:
                 result_content = tr.get("content", "")
@@ -802,9 +815,6 @@ def _convert_native_to_cc_format(body: dict) -> dict:
                         "content": result_content if isinstance(result_content, str) else str(result_content or ""),
                     }
                 )
-
-            if not text_blocks and not tool_results:
-                messages.append(msg)
             continue
 
         # String content or any other role — pass through
@@ -821,6 +831,10 @@ def _convert_native_to_cc_format(body: dict) -> dict:
         "messages": messages,
         "stream": body.get("stream", False),
     }
+
+    # KBR-222: the retry's documents ride the same internal key hop 1 uses.
+    if documents:
+        result["_documents"] = documents
 
     # KBR-228 part B: the verbatim system carriage, mirroring the translator.
     if carried_system:
