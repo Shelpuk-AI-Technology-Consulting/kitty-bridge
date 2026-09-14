@@ -2810,6 +2810,68 @@ be mistaken for a hole.
 [KBR-40]: https://shelpuk.atlassian.net/browse/KBR-40
 [KBR-25]: https://shelpuk.atlassian.net/browse/KBR-25
 
+#### 7.2.3 What T-B3 settled — the botocore endpoint-override recorder
+
+**Delivered by T-B3 ([KBR-42]) in `tests/harness/botocore_recorder.py` and
+`tests/harness/botocore.py`**, registered as `botocore` with a `CONFORMANCE_CASES`
+row naming `BEDROCK_CONVERSE` and the **Chat Completions** inbound route — named
+rather than derived, because the bridge *translates* and the Bedrock adapter is
+a CC-wire adapter (§7.5.1, §3.2.3).
+
+**It subclasses T-W4's recorder, for the same reason T-B1 does.** The six ways an
+aiohttp recorder can look correct and lie (§7.2.1) are capture-path facts; a
+second implementation is a second chance to get each of them wrong. The
+differences from T-W4 / T-B1 are vocabulary only — the format served, the
+suffix table that dispatches the reply, and what a minimal success looks like —
+and that is the same three-override recipe. The capture path is inherited
+unchanged; `check_peer_port` is satisfied because T-W4's `capture()` already
+calls `_peer_port(request)`, and an override here would mirror the path T-B1
+deliberately avoided. The conformance suite is run unchanged against the
+subclass; what proves the overrides themselves is a hand-written round-trip
+through the pinned `botocore.eventstream.EventStream` parser and a live
+`boto3.client("bedrock-runtime", endpoint_url=...).converse_stream(...)` call
+driven against the recorder.
+
+**The product seam is `provider_config["endpoint_url"]`, not `AWS_ENDPOINT_URL`.**
+The env var (added in boto3 ≥ 1.28) is process-global ambient state, and CI
+runners carry user-set `AWS_ENDPOINT_URL` values that would hijack the test
+fixture in the same way they hijack production traffic. The `provider_config`
+channel is the bridge's own (§7.5.2): per-profile, visible in the schema, and
+the same precedent `provider_config["base_url"]` already sets for T-B1. The
+edit is five lines in `BedrockAdapter._get_boto3_client` and adds nothing when
+the key is absent.
+
+**The streaming reply is AWS EventStream binary, not SSE.** Bedrock's
+`converse_stream` returns `application/vnd.amazon.eventstream`; boto3 parses
+each frame's `:event-type` header to a member key (`messageStart`,
+`contentBlockDelta`, `contentBlockStop`, `messageStop`, `metadata`) and parses
+the JSON payload against the member's shape. There is no public serializer in
+the pinned `botocore.eventstream` module — verified against the installed
+source — so the harness ships its own encoder following the spec every AWS
+SDK implements, with CRC32 per the pinned `binascii.crc32(data) & 0xFFFFFFFF`.
+The encoder is validated by round-trip through the pinned parser **and** by a
+real `converse_stream` call; both belong in the suite.
+
+**The harness rule (§1.4) requires a falsification case against the
+recorder's own overrides** — the conformance suite runs unchanged over the
+subclass and so cannot tell a wrong encoder from a working one. A frame with
+a wrong message CRC fails the pinned parser; a frame missing the
+`:event-type` header fails boto3's shape lookup. Both run in the suite and
+are the load-bearing test of the encoder — the conformance suite judges the
+capture path, this case judges what the recorder writes back.
+
+**A non-streaming reply carries content, not the empty-reply ladder.** §7.2.1
+already names the 80-second `asyncio.sleep` cost that an empty or mis-shaped
+upstream reply triggers; a minimal success that satisfied the bridge's emptiness
+judgement is the contract every recorder obeys, and T-B3's is no exception.
+
+**No `aclose` and no session.** `_get_boto3_client` builds a botocore client per
+call (KBR-190) — `BotocoreTransport.stop` has nothing here to release, and the
+`tests/test_provider_bedrock.py` regression pins that property for this adapter
+specifically.
+
+[KBR-42]: https://shelpuk.atlassian.net/browse/KBR-42
+
 ### 7.3 Recording CONNECT proxy
 
 **Delivered by T-W5 ([KBR-28]) in `tests/harness/connect_proxy.py`**, extracted from

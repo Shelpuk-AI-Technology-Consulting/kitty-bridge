@@ -75,6 +75,7 @@ from kitty.providers.vertex import VertexAIAdapter
 CONFORMANCE_CASES: tuple[tuple[str, str, WireFormat, InboundProtocol], ...] = (
     ("harness.bridge", "aiohttp", WireFormat.ANTHROPIC_MESSAGES, InboundProtocol.MESSAGES),
     ("harness.provider_aiohttp", "provider_aiohttp", WireFormat.OLLAMA_CHAT, InboundProtocol.CHAT_COMPLETIONS),
+    ("harness.botocore", "botocore", WireFormat.BEDROCK_CONVERSE, InboundProtocol.CHAT_COMPLETIONS),
 )
 
 #: What the modules above are expected to have registered between them. Derived
