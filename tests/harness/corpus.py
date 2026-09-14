@@ -938,10 +938,28 @@ def _triggers(names: object, field_name: str, entry_id: str) -> frozenset[Trigge
         if not isinstance(name, str) or name not in known:
             raise CorpusEntryError(f"{entry_id}: {field_name} names unknown trigger {name!r}")
         if known[name] in NOT_CORPUS_DECIDABLE:
+            # The reason is per-kind, because the reader who tripped this needs
+            # the *right* pointer: a RESPONSE trigger belongs to the test that
+            # scripts the recorder, a ROUTE trigger is decided by the adapter's
+            # dispatch (no complement exists on-route), and a PROFILE trigger is
+            # declared at the call site that resolves the profile.  The older
+            # message pointed every refusal at the scripted-recorder test,
+            # which is the right advice only for the RESPONSE kind.
+            reason = {
+                ArrangingBy.ROUTE: "the adapter's dispatch decides it — every "
+                "request on that route meets it (or none does), so no corpus "
+                "entry can vary it",
+                ArrangingBy.RESPONSE: "the upstream response decides it — "
+                "declare it at the test that scripts the recorder",
+                ArrangingBy.PROFILE: "the resolved profile decides it — "
+                "declare it at the call site that resolves the profile",
+            }.get(
+                getattr(known[name], "arranged_by", None),
+                "it is the absence of a condition, not a condition",
+            )
             raise CorpusEntryError(
                 f"{entry_id}: {field_name} names {name!r}, which an inbound request cannot "
-                "arrange — it is decided by the upstream response or by nothing at all. "
-                "Declare it at the test that scripts the recorder, not in the manifest."
+                f"arrange — {reason}."
             )
         resolved.add(known[name])
     return frozenset(resolved)

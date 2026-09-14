@@ -1648,6 +1648,56 @@ class TestNotCorpusDecidableIsDerivedFromArrangingBy:
         assert trigger not in entry.triggers_absent
 
 
+class TestTheRefusalMessageIsPerKind:
+    """KBR-186 (orphan review): the loader's refusal message names the kind.
+
+    The earlier message pointed every refusal at "the test that scripts the
+    recorder" — correct advice for RESPONSE triggers, wrong for ROUTE (the
+    adapter's dispatch decides, no complement on-route) and PROFILE (declared
+    at the call site that resolves the profile).  The message must point the
+    reader at the *right* place, so this test pins a representative member of
+    each kind against its own reason text.
+    """
+
+    @pytest.mark.parametrize(
+        ("trigger", "expected_reason"),
+        [
+            (
+                Trigger.NON_NATIVE_UPSTREAM_WIRE,
+                "adapter's dispatch",
+            ),
+            (
+                Trigger.UPSTREAM_EMPTY_RESPONSE,
+                "scripts the recorder",
+            ),
+            (
+                Trigger.OVER_COMPACTION_BUDGET,
+                "resolved profile",
+            ),
+            (
+                Trigger.ALWAYS,
+                "absence of a condition",
+            ),
+        ],
+    )
+    def test_refusal_message_names_the_correct_destination(
+        self,
+        tmp_path: Path,
+        trigger: Trigger,
+        expected_reason: str,
+    ) -> None:
+        path = manifest_for(tmp_path, triggers_met=[trigger.value])
+
+        with pytest.raises(k.CorpusEntryError) as info:
+            k.load_entry(path)
+
+        assert "cannot arrange" in str(info.value)
+        assert expected_reason in str(info.value), (
+            f"refusal for {trigger.name} ({getattr(trigger, 'arranged_by', None)}) "
+            f"must point at the {expected_reason!r} destination"
+        )
+
+
 class TestTheInboundFormatIsDeclared:
     """§7.4's oracle takes an `inbound_format`; the corpus supplies the inbound half."""
 
