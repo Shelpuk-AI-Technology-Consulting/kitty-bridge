@@ -349,11 +349,6 @@ the EOF-without-finish fallback: `finalize_interrupted_stream` /
 
 - A repeated id-chunk for an already-open CC tool-call index re-enters the open branch and
   stays malformed (G39's scope-out, shared with the Responses translator).
-- The server buffers `response.created` / `response.in_progress`
-  (`translate_stream_start`) for the empty-response failover and **never writes them**, so
-  every translated `/v1/responses` stream opens at `output_item.added`, mid-sentence.
-  Found by KBR-240's server-level walk; owned by
-  [KBR-242](https://shelpuk.atlassian.net/browse/KBR-242) (gap **G41**).
 
 ---
 
@@ -395,6 +390,7 @@ logic. A no means byte-identical to the pre-KBR-232 behaviour.
 | S4 | Gate and converter re-evaluated per attempt | A failover can land on a Chat Completions-wire backend mid-handler; a stale converter would mangle its Chat Completions stream. |
 | S5 | `thinking_delta` → `reasoning_content`; signatures dropped | The Chat Completions wire has no signature slot, so preservation is impossible; M17's strip-and-retry recovers the round-trip rejection instead (KBR-238). |
 | S6 | The three loops run wider by the strip budget, with an attempt correction | Same rationale KBR-238 recorded on `_stream_messages`: a strip gets its attempt back, so the empty-response schedule is not pulled forward. |
+| S7 | `_stream_responses` opens the lifecycle lazily, on the first non-finish write of each attempt | `translate_stream_start` and `translate_stream_chunk` draw from the same `_seq` counter, so translating the lifecycle after the first chunk had been translated would put `sequence_number` 3 and 4 on the wire ahead of the chunk's 0, 1, 2 — the translation therefore runs speculatively at attempt start, before any chunk, and the two strings are written on the first real event and invalidated at every `translator.reset()` inside the loop (KBR-242; gap G41). Writing eagerly, before the first chunk is translated, was rejected: an all-finish first chunk is how an empty response presents, and publishing the lifecycle before the empty verdict is known would put a half-open lifecycle on the wire exactly where the failover ladder is about to retire the attempt. A purely-empty attempt publishes nothing, so KBR-247's `events_emitted` model survives; the exhausted-ladder fallback stays an empty 200 (KBR-235's territory); the error paths never open the lifecycle. Tests: `tests/bridge/test_responses_stream_lifecycle.py`, and the KBR-240 walk's opening + exact-`sequence_number` assertions |
 
 ### 5.4 Known limits
 
