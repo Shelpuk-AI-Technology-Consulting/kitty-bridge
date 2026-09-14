@@ -203,7 +203,11 @@ async def test_prose_then_tool_call_gets_distinct_output_indices():
     # with the prose message first and the tool call second.
     added = [(d["output_index"], d["item"]["type"]) for name, d in events if name == "response.output_item.added"]
     assert added == [(0, "message"), (1, "function_call")]
-    fc_item = next(d["item"] for name, d in events if name == "response.output_item.added" and d["item"]["type"] == "function_call")
+    fc_item = next(
+        d["item"]
+        for name, d in events
+        if name == "response.output_item.added" and d["item"]["type"] == "function_call"
+    )
     assert fc_item["name"] == "Read"
     assert fc_item["call_id"] == "call_1"
 

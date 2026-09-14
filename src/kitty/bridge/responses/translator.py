@@ -808,7 +808,13 @@ class ResponsesTranslator:
         # An item whose events already reached the client must be closed here,
         # even when its text stripped to nothing: an opened-but-never-closed
         # item is the defect this counter exists to prevent.
-        if status == "completed" and not clean_text and not self._tool_call_buffers and not self._accumulated_reasoning and not self._text_started:
+        if (
+            status == "completed"
+            and not clean_text
+            and not self._tool_call_buffers
+            and not self._accumulated_reasoning
+            and not self._text_started
+        ):
             return []
 
         events: list[str] = []
