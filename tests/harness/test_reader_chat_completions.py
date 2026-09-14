@@ -198,6 +198,71 @@ class TestEnvelope:
         assert projected.envelope.extra["service_tier"] == "auto"
         assert projected.residual == {}
 
+    @pytest.mark.parametrize(
+        "key, value",
+        [
+            ("audio", {"voice": "alloy", "format": "wav"}),
+            ("moderation", {"model": "omni-moderation-latest"}),
+            ("functions", [{"name": "old_f", "parameters": {}}]),  # deprecated top-level
+            ("function_call", "auto"),  # deprecated top-level
+            ("prediction", {"type": "content", "content": []}),
+            ("modalities", ["text", "audio"]),
+            ("verbosity", "low"),
+            ("reasoning_effort", "medium"),
+            ("prompt_cache_options", {"ttl": "30m"}),
+            ("web_search_options", {"user_location": {"type": "approximate"}}),
+        ],
+        ids=[
+            "audio",
+            "moderation",
+            "functions-deprecated",
+            "function_call-deprecated",
+            "prediction",
+            "modalities",
+            "verbosity",
+            "reasoning_effort",
+            "prompt_cache_options",
+            "web_search_options",
+        ],
+    )
+    def test_each_published_extra_key_is_consumed_at_its_wire_key(
+        self, key: str, value: Any
+    ) -> None:
+        """R1.6a — every key in :data:`_PUBLISHED_EXTRA_KEYS` rides at its wire key
+        (the B1 closure). The closure's six unclassified fields (`audio`,
+        `moderation`, `functions`, `function_call` deprecated) plus the
+        others the system-design-reviewer named that already shipped
+        (`prediction`, `modalities`, `verbosity`, `reasoning_effort`,
+        `prompt_cache_options`, `web_search_options`) all carry the
+        §3.3.1a "declared control field of the format maps to
+        ``envelope.extra[<wire key>]``" rule. A residual entry on any of
+        them is the wrong shape — G26 binds the row-plan for the
+        downstream register, and a body carrying any of them is one real
+        Codex / OpenAI / OpenAI-compat traffic sends.
+        """
+        projected = _read(_minimal(**{key: value}))
+
+        assert projected.envelope.extra[key] == value, (
+            f"key {key!r} did not ride at its wire key: {projected.envelope.extra!r}"
+        )
+        assert projected.residual == {}
+        c.verify_total(projected)
+
+    def test_audio_with_a_wrongly_typed_value_is_carried_whole(self) -> None:
+        """R1.6b — §3.3.1a: ``extra[<wire key>]`` is compared **whole**, and the value's
+        shape is not type-checked today (the posture T-A1 ships for its
+        published-extra set). The value's own type is the schema's problem —
+        the reader's job is to name the wire field, which a wrongly-typed
+        value still does. A stricter rule is a separate ticket's worth of
+        work; the behaviour is documented here so a future test pins the
+        next decision.
+        """
+        projected = _read(_minimal(audio="not an audio config"))
+
+        assert projected.envelope.extra["audio"] == "not an audio config"
+        assert projected.residual == {}
+        c.verify_total(projected)
+
     def test_a_sampling_key_rides_at_its_canonical_spelling(self) -> None:
         """R1.7 — §3.3.1b: CC's spellings are the canonical spellings."""
         projected = _read(
@@ -494,7 +559,9 @@ class TestMessages:
 
         assert projected.residual == {"messages[1].tool_calls[0].function.arguments": "not json"}
         # `arguments` defaults to `{}` when unreadable.
-        assert projected.conversation.turns[1].parts[0].arguments == {}
+        call = projected.conversation.turns[1].parts[0]
+        assert isinstance(call, c.ToolUse)
+        assert call.arguments == {}
 
     def test_a_tool_message_projects_a_tool_result_part_in_a_user_turn(self) -> None:
         """R3.9 — CC's ``role: tool`` is the canonical tool-result carrier."""
@@ -1068,11 +1135,14 @@ class TestConvergence:
         """R7.2 — §7.4.1 names a specific failure (re-sorting results *after* the merge);
         the pin lives in the suite, not in a one-off run.
 
-        Hand-built: a turn whose parts are a ToolResult followed by a Text
-        (the post-merge wrong order) is not equal to the CC-merged turn, so a
-        reader that applies that mutation would fail this assertion. The pin
-        is here, not in :func:`_normalise_turns`, so it cannot be removed by
-        editing the reader.
+        Two assertions, on two levels: (1) the dataclass equality between
+        two fabricated ``Turn`` objects — the merge-rule invariant that
+        results come first within a merged turn. (2) The reader's actual
+        behaviour on the standard exchange — the merged turn's parts
+        start with a ``ToolResult`` and the absorbed user text follows it,
+        in that order. A reader that mutated clauses 1+2+4 to re-sort
+        results after merge would fail (2); a reader that broke the
+        invariant the merger produces would fail (1).
         """
         wrong_merged = c.Turn(
             role="user",
@@ -1089,7 +1159,37 @@ class TestConvergence:
             ),
         )
 
+        # (1) Dataclass-level: the merge-rule invariant.
         assert wrong_merged != right_merged
+
+        # (2) Reader-level: the canonical exchange from R7.1 produces a
+        # merged user turn whose parts are ``[ToolResult, Text("Thanks!")]``
+        # in that order. A reader that re-sorted would produce
+        # ``[Text("Thanks!"), ToolResult]`` and fail this assertion.
+        cc_body = {
+            "model": "gpt-6-astra",
+            "max_tokens": 1024,
+            "messages": [
+                {"role": "user", "content": "What's the weather?"},
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [PUBLISHED_TOOL_CALL],
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "call_abc123",
+                    "content": "72 and sunny",
+                },
+                {"role": "user", "content": "Thanks!"},
+            ],
+        }
+        projected = cc.ChatCompletionsProjection().read_request(_captured(cc_body))
+        merged = projected.conversation.turns[2]
+        assert [type(p).__name__ for p in merged.parts] == ["ToolResult", "Text"]
+        assert isinstance(merged.parts[0], c.ToolResult)
+        assert isinstance(merged.parts[1], c.Text)
+        assert merged.parts[1].text == "Thanks!"
 
 
 # --------------------------------------------------------------------------
