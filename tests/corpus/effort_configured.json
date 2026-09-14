@@ -101,7 +101,7 @@
     ]
   ],
   "body_file": "effort_configured.body",
-  "body_sha256": "6a59d79c12b024afa5242c5620887f62f1f3e874a80811e63d8c7614eaea106d",
+  "body_sha256": "20b9fff602dcdff935eec5a06ba5320fa944884d314616027775938c70421c93",
   "wire_format": "anthropic_messages",
   "known_non_secrets": [],
   "triggers_met": [

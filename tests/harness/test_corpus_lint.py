@@ -211,21 +211,44 @@ class TestTheCommittedCorpusIsFresh:
         )
         return match.group("version")
 
+    def _assert_pins_agree(self, review_path: Path, tmux_path: Path) -> str:
+        """Assert both workflow files name the same pin and return it.
+
+        Args:
+            review_path: One workflow file expected to carry the install line.
+            tmux_path: The other.
+
+        Returns:
+            The pin both name.
+
+        Raises:
+            AssertionError: When either install line is missing or the two
+                pins disagree.
+        """
+        review_pin = self._pin_from(review_path)
+        tmux_pin = self._pin_from(tmux_path)
+
+        assert review_pin == tmux_pin, (
+            f"the two workflows disagree on the Claude Code pin: "
+            f"{review_path.name} installs {review_pin!r}, {tmux_path.name} installs {tmux_pin!r}. "
+            "Update both to the same version."
+        )
+        return review_pin
+
     def test_both_workflows_install_the_same_pinned_version(self) -> None:
         """One pin, two sites — the guard reads both and asserts they agree.
 
         A bump of one and not the other leaves the corpus "fresh" against a
-        pin that no longer describes the CLI CI actually runs.
+        pin that no longer describes the CLI CI actually runs. A bump of
+        **both** passes here by design — that case is the corpus guard's
+        (`test_the_committed_corpus_passes_the_freshness_guard`), whose
+        captured entries name the old pin. No version literal lives in this
+        file: two copies of one value is how they drift, which is what this
+        guard exists to prevent.
         """
         review, tmux = self._workflow_paths()
-        review_pin = self._pin_from(review)
-        tmux_pin = self._pin_from(tmux)
+        self._assert_pins_agree(review, tmux)
 
-        assert review_pin == tmux_pin, (
-            f"the two workflows disagree on the Claude Code pin: "
-            f"{review.name} installs {review_pin!r}, {tmux.name} installs {tmux_pin!r}. "
-            "Update both to the same version."
-        )
 
     def test_a_workflow_whose_install_line_disappears_fails_loudly(self, tmp_path: Path) -> None:
         """A reformat that drops the literal must surface, not pass vacuously.
@@ -271,21 +294,24 @@ class TestTheCommittedCorpusIsFresh:
         substring compare cannot catch this: ``bash -s -- 2.1.238`` contains
         ``bash -s -- 2.1.23``. The whole-token regex and the strict version
         arm together close that gap.
-        """
-        review_path, tmux_path = self._workflow_paths()
-        # The committed reviewer's pin is the truth; mutate the tmux workflow's
-        # install line to disagree, then re-read both. Restored in the same
-        # block so a partial failure does not leave the tree drifted.
-        original = tmux_path.read_text(encoding="utf-8")
-        try:
-            drifted = original.replace("bash -s -- 2.1.238", "bash -s -- 2.1.9")
-            assert drifted != original, "the mutant did not change the tmux pin"
-            tmux_path.write_text(drifted, encoding="utf-8")
 
-            with pytest.raises(AssertionError, match="disagree"):
-                self.test_both_workflows_install_the_same_pinned_version()
-        finally:
-            tmux_path.write_text(original, encoding="utf-8")
+        Two ``tmp_path`` copies pin to disagreeing versions — no mutation of
+        the real workflows, so a SIGKILL'd ``pytest`` cannot leave a drifted
+        tree behind.
+        """
+        review = tmp_path / "claude-code-review.yml"
+        review.write_text(
+            "curl -fsSL https://claude.ai/install.sh | bash -s -- 2.1.238\n",
+            encoding="utf-8",
+        )
+        tmux = tmp_path / "tmux-disconnect.yml"
+        tmux.write_text(
+            "curl -fsSL https://claude.ai/install.sh | bash -s -- 2.1.9\n",
+            encoding="utf-8",
+        )
+
+        with pytest.raises(AssertionError, match="disagree"):
+            self._assert_pins_agree(review, tmux)
 
     def test_the_committed_corpus_passes_the_freshness_guard(self) -> None:
         """Binds the workflow artifacts to the corpus — the guard's whole point.

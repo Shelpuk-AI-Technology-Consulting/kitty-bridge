@@ -101,7 +101,7 @@
     ]
   ],
   "body_file": "tool_use_and_tool_result.body",
-  "body_sha256": "53be3acdab4783081656a17dcb1b6963b2a57ffdde68907c1da1cdacd7dce4b5",
+  "body_sha256": "d60f2c3b8961d2aa0853405974f5f18a648ff2bb7a8fc4b0271c006882af1ff2",
   "wire_format": "anthropic_messages",
   "known_non_secrets": [],
   "triggers_met": [

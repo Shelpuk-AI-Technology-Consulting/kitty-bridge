@@ -101,7 +101,7 @@
     ]
   ],
   "body_file": "plain_turn.body",
-  "body_sha256": "279b33ba5cdfeaab68795ccefa54faf22c0e3eddc091a4f45509882118abd9d7",
+  "body_sha256": "caf7e4d2360ad2571d30953a59f141c80e0c22ad5ab6505bafa71c535e0633bc",
   "wire_format": "anthropic_messages",
   "known_non_secrets": [],
   "triggers_met": [
