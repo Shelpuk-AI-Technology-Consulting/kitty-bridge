@@ -1050,3 +1050,68 @@ class TestTheEndpointUrlSeam:
             "endpoint_url must not be passed when the profile does not set it; "
             "production profiles do not, and some botocore versions raise on None"
         )
+
+    def test_endpoint_url_reaches_the_sso_branch_when_set(self) -> None:
+        """The SSO half of the ``if/else`` shares the same ``client_kwargs``.
+
+        The two tests above drive the credentials branch
+        (``parse_aws_credentials`` → ``boto3.Session(aws_access_key_id=…,
+        …)``); this one drives the SSO branch
+        (``boto3.Session(profile_name=…, region_name=…)``), which shares
+        the same ``client_kwargs`` the seam mutates. ``endpoint_url``
+        sits **above** the ``if/else`` today, so both branches see it —
+        a refactor that moved the lines into one branch only would pass
+        the credentials tests while silently breaking SSO profiles,
+        which is why the SSO case is pinned too.
+        """
+        adapter = BedrockAdapter()
+        captured_kwargs: dict = {}
+        captured_session_kwargs: dict = {}
+
+        def _capture(*args: object, **kwargs: object) -> MagicMock:
+            captured_kwargs.update(kwargs)
+            return MagicMock()
+
+        session_mock = MagicMock()
+        session_mock.client.side_effect = _capture
+
+        def _session_capture(*args: object, **kwargs: object) -> MagicMock:
+            captured_session_kwargs.update(kwargs)
+            return session_mock
+
+        with patch("boto3.Session") as session_cls:
+            session_cls.side_effect = _session_capture
+            adapter._get_boto3_client(
+                "sso",
+                {"endpoint_url": "http://recorder:9", "region": "us-east-1", "profile_name": "harness-profile"},
+            )
+
+        assert captured_session_kwargs.get("profile_name") == "harness-profile", (
+            "the SSO branch was not taken — this test is pinned to the SSO half of the if/else, "
+            "so a credentials-branch test passing here means the if/else moved"
+        )
+        assert captured_kwargs.get("endpoint_url") == "http://recorder:9", (
+            "the test-harness seam did not reach the SSO branch's boto3 client; "
+            "the seam sits inside one arm of the if/else and the other arm lost it"
+        )
+
+    def test_the_harness_key_is_not_an_sso_marker(self) -> None:
+        """The harness key routes through the credentials branch.
+
+        ``HarnessBedrockAdapter``'s override of ``parse_aws_credentials``
+        resolves the harness key to the fake pair — but only when the key
+        is **not** an SSO marker. ``is_sso_mode`` intercepts ``""`` and
+        ``"sso"`` *before* ``parse_aws_credentials`` runs, so a harness
+        key that matched either would silently fall into the SSO branch
+        and use whatever ambient AWS credentials the test machine has.
+        Pinning the harness key's non-membership here makes that
+        brittleness a checkable claim rather than a docstring promise.
+        """
+        from kitty.providers.bedrock import BedrockAdapter
+
+        adapter = BedrockAdapter()
+        assert not adapter.is_sso_mode("harness-key"), (
+            "the harness key matched an SSO marker; HarnessBedrockAdapter's "
+            "parse_aws_credentials override would be silently bypassed and "
+            "the test would use whatever ambient AWS credentials the machine has"
+        )
