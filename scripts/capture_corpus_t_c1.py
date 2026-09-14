@@ -128,10 +128,24 @@ def _tool_use_events() -> tuple[bytes, ...]:
 
 
 def _queue_responder(replies: list[tuple[bytes, ...]]):
-    """Return a responder that hands out ``replies`` in order, then repeats the last."""
+    """Return a responder that hands out ``replies`` in order to ``/v1/messages`` POSTs.
+
+    Claude Code fires a ``HEAD /api/hello`` preflight before the real POST;
+    consumed by the queue, that preflight would burn the first scripted reply
+    (the tool_use) and the real request would land on the second slot. The
+    responder short-circuits the preflight — anything that is not a non-empty
+    ``/v1/messages`` POST gets a 204 No Content and does not advance the queue.
+    """
     state = {"index": 0}
 
     async def respond(captured, response) -> None:  # type: ignore[no-untyped-def]
+        if not (captured.method == "POST"
+                and captured.path == "/v1/messages"
+                and captured.body):
+            response.content_length = 0
+            await response.begin(204, {})
+            await response.write_eof()
+            return
         idx = min(state["index"], len(replies) - 1)
         state["index"] += 1
         await response.begin(200, {"Content-Type": "text/event-stream"})
@@ -142,9 +156,20 @@ def _queue_responder(replies: list[tuple[bytes, ...]]):
     return respond
 
 
-def _run_cc(session_home: Path, port: int, prompt: str, *, effort: str | None,
-            bare: bool, timeout: int) -> subprocess.CompletedProcess[str]:
-    """Run one Claude Code session against the recorder on ``port``."""
+def _build_cc_cmd(prompt: str, *, effort: str | None, bare: bool) -> list[str]:
+    """Build the Claude Code command line for one session."""
+    cmd = [CC_BIN]
+    if bare:
+        cmd.append("--bare")
+    cmd += ["-p", "--no-session-persistence", "--permission-mode", "bypassPermissions"]
+    if effort is not None:
+        cmd += ["--effort", effort]
+    cmd.append(prompt)
+    return cmd
+
+
+def _cc_env(session_home: Path, port: int, *, effort: str | None) -> dict[str, str]:
+    """Build the environment for one Claude Code session against the recorder."""
     env = os.environ.copy()
     env["HOME"] = str(session_home)
     env["CLAUDE_CONFIG_DIR"] = str(session_home / ".claude")
@@ -159,15 +184,31 @@ def _run_cc(session_home: Path, port: int, prompt: str, *, effort: str | None,
     env.pop("CLAUDE_EFFORT", None)
     if effort is not None:
         env["CLAUDE_EFFORT"] = effort
+    return env
 
-    cmd = [CC_BIN]
-    if bare:
-        cmd.append("--bare")
-    cmd += ["-p", "--no-session-persistence", "--permission-mode", "bypassPermissions"]
-    if effort is not None:
-        cmd += ["--effort", effort]
-    cmd.append(prompt)
-    return subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=timeout)
+
+async def _run_cc(session_home: Path, port: int, prompt: str, *,
+                  effort: str | None, bare: bool, timeout: int) -> subprocess.CompletedProcess[str]:
+    """Run one Claude Code session against the recorder on ``port``.
+
+    Async: ``subprocess.run`` would block the event loop, and the recorder's
+    aiohttp server runs on the same loop — a blocked loop means the recorder
+    never answers, and CC waits out its whole timeout on a silent socket.
+    """
+    cmd = _build_cc_cmd(prompt, effort=effort, bare=bare)
+    env = _cc_env(session_home, port, effort=effort)
+    proc = await asyncio.create_subprocess_exec(
+        *cmd, env=env, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    except asyncio.TimeoutError:
+        proc.kill()
+        out, err = await proc.communicate()
+        return subprocess.CompletedProcess(cmd, -9, out.decode(errors="replace"),
+                                           err.decode(errors="replace"))
+    return subprocess.CompletedProcess(cmd, proc.returncode or 0,
+                                       out.decode(errors="replace"), err.decode(errors="replace"))
 
 
 async def _capture_session(
@@ -185,7 +226,7 @@ async def _capture_session(
     await upstream.start()
     scratch = Path(tempfile.mkdtemp(prefix=f"kbr44-{name}-"))
     try:
-        proc = _run_cc(scratch, upstream._port, prompt, effort=effort, bare=bare, timeout=180)
+        proc = await _run_cc(scratch, upstream._port, prompt, effort=effort, bare=bare, timeout=180)
         captured = list(upstream.requests)
         print(f"[{name}] exit={proc.returncode} stdout_lines={len(proc.stdout.splitlines())} "
               f"captured={len(captured)}")
@@ -236,10 +277,10 @@ async def main() -> None:
     _summarise("plain", a)
 
     # Session B — the tool_use / tool_result pair. The recorder's first reply
-    # carries a Bash tool_use; CC executes it and sends the paired turn; the
-    # second reply is plain text so CC stops (the queue repeats the last when
-    # the index overruns, which is the desired behaviour — any extra request
-    # CC sends gets the same plain text).
+    # (on the real /v1/messages POST) carries a Bash tool_use; CC executes it and
+    # sends the paired turn; the second reply is plain text so CC stops. The
+    # responder skips the `HEAD /api/hello` preflight (returns 204) so the queue
+    # is not consumed before the real request.
     b = await _capture_session(
         "tools",
         "Read the file README.md at the repository root and reply with its first line.",

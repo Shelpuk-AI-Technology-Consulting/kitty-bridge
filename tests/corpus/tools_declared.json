@@ -1,0 +1,119 @@
+{
+  "id": "tools_declared",
+  "description": "Same shape as `plain_turn` but from a NON-bare Claude Code run, whose `tools` array carries the full 24-tool set (Agent, Bash, Edit, Read, Write, Task*, WebSearch, etc.). The tool-declaration projection evidence — every name and `input_schema` the agent sent, captured verbatim for the §3.3.1 tool-array fidelity assertion. C5 verified: output_config + thinking co-occur.",
+  "origin": "captured",
+  "origin_note": "",
+  "captured_from": "claude-code/2.1.238",
+  "captured_at": "2026-09-14",
+  "method": "POST",
+  "scheme": "https",
+  "host": "api.anthropic.com",
+  "path": "/v1/messages",
+  "query": "beta=true",
+  "headers": [
+    [
+      "Accept",
+      "application/json"
+    ],
+    [
+      "Authorization",
+      "<redacted:credential_header>"
+    ],
+    [
+      "Content-Type",
+      "application/json"
+    ],
+    [
+      "User-Agent",
+      "claude-cli/2.1.238 (external, sdk-cli)"
+    ],
+    [
+      "X-Claude-Code-Session-Id",
+      "1090ce86-8881-4acf-a770-a938df4d37bc"
+    ],
+    [
+      "X-Stainless-Arch",
+      "x64"
+    ],
+    [
+      "X-Stainless-Lang",
+      "js"
+    ],
+    [
+      "X-Stainless-OS",
+      "Linux"
+    ],
+    [
+      "X-Stainless-Package-Version",
+      "0.112.1"
+    ],
+    [
+      "X-Stainless-Retry-Count",
+      "0"
+    ],
+    [
+      "X-Stainless-Runtime",
+      "node"
+    ],
+    [
+      "X-Stainless-Runtime-Version",
+      "v26.3.0"
+    ],
+    [
+      "X-Stainless-Timeout",
+      "600"
+    ],
+    [
+      "anthropic-beta",
+      "claude-code-20250219,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,effort-2025-11-24"
+    ],
+    [
+      "anthropic-dangerous-direct-browser-access",
+      "true"
+    ],
+    [
+      "anthropic-version",
+      "2023-06-01"
+    ],
+    [
+      "x-api-key",
+      "<redacted:credential_header>"
+    ],
+    [
+      "x-app",
+      "cli"
+    ],
+    [
+      "Connection",
+      "keep-alive"
+    ],
+    [
+      "Host",
+      "127.0.0.1:32803"
+    ],
+    [
+      "Accept-Encoding",
+      "gzip, deflate, br, zstd"
+    ],
+    [
+      "Content-Length",
+      "119879"
+    ]
+  ],
+  "body_file": "tools_declared.body",
+  "body_sha256": "a2d4b0573a5ec31437c7e2d450416b42dbae62b5ea6e4afe85eb3cda335b89ad",
+  "wire_format": "anthropic_messages",
+  "known_non_secrets": [],
+  "triggers_met": [
+    "adaptive_thinking_keys_present",
+    "multiple_system_blocks",
+    "output_config_present"
+  ],
+  "triggers_absent": [
+    "max_tokens_absent",
+    "non_streaming_max_tokens_over_4096",
+    "orphan_tool_result",
+    "responses_origin_path",
+    "tool_result_over_limit"
+  ]
+}
