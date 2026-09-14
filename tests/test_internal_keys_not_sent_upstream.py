@@ -254,6 +254,88 @@ class TestNoInternalKeyReachesUpstream:
         assert {"_effort", "_thinking_adaptive"} <= set(cc)
 
 
+def _cc_request_with_message_keys(model: str, *, native: bool) -> dict:
+    """Build a CC request whose every message carries a message-level internal key.
+
+    The message-level keys are invisible to the top-level strip, so each needs
+    its own behavioural guard: ``_thinking_blocks`` rides on assistant messages
+    (KBR-228) and must reach no wire except the adapters that consume it into
+    their own rebuild.
+
+    Args:
+        model: Model name to route on.
+        native: Value for ``_native_messages_request``, as in :func:`_cc_request`.
+
+    Returns:
+        A normalized CC request dict with the key planted on every message.
+    """
+    cc = _cc_request(model, native=native)
+    for msg in cc["messages"]:
+        if isinstance(msg, dict):
+            msg["_thinking_blocks"] = [{"type": "thinking", "thinking": "t", "signature": "s"}]
+    return cc
+
+
+def _message_level_leaked(body: dict) -> list[str]:
+    """Return the registered message-level internal keys present in a wire body.
+
+    Membership is checked against ``_INTERNAL_MESSAGE_KEYS`` only, mirroring
+    the top-level guard's rule that the input carries registered keys — a
+    client's own ``_``-prefixed fields on a native passthrough body are the
+    client's bytes, not kitty's.
+
+    Args:
+        body: The upstream request body.
+
+    Returns:
+        Sorted offending keys found on any message; empty when clean.
+    """
+    internal = set(ProviderAdapter._INTERNAL_MESSAGE_KEYS)
+    found: set[str] = set()
+    messages = body.get("messages")
+    if isinstance(messages, list):
+        for msg in messages:
+            if isinstance(msg, dict):
+                found.update(key for key in msg if key in internal)
+    return sorted(found)
+
+
+class TestNoMessageLevelInternalKeyReachesUpstream:
+    """The message-level strip works on every adapter, on every route (KBR-228).
+
+    ``cc_request["messages"]`` is shared by reference through the top-level
+    strip, so a key planted on a message dict rides to the wire on every
+    adapter that forwards messages through — the same defect class as KBR-6,
+    one level down.  The Anthropic-family adapters consume the key into their
+    own rebuild and so pass by construction, which this guard also proves.
+    """
+
+    @pytest.mark.parametrize(
+        ("provider_type", "model", "native"),
+        _routes(),
+        ids=lambda value: str(value),
+    )
+    def test_no_message_level_internal_key_reaches_upstream(self, provider_type: str, model: str, native: bool):
+        body = _upstream_body(provider_type, _cc_request_with_message_keys(model, native=native))
+
+        assert not _message_level_leaked(body), (
+            f"{provider_type} forwards kitty-internal message key(s) {_message_level_leaked(body)} "
+            "to the provider. Every key kitty adds to a message dict must be a member of "
+            "ProviderAdapter._INTERNAL_MESSAGE_KEYS and must be stripped by "
+            "_strip_internal_message_keys before serialization "
+            "(src/kitty/providers/base.py)."
+        )
+
+    def test_message_keys_are_also_registered_top_level(self):
+        """One registry, not two: the AST-scan completeness guard reads ``_INTERNAL_KEYS``.
+
+        A key registered only on ``_INTERNAL_MESSAGE_KEYS`` would be invisible
+        to ``test_every_internal_key_written_is_registered`` the moment a
+        converter started minting it.
+        """
+        assert set(ProviderAdapter._INTERNAL_MESSAGE_KEYS) <= set(ProviderAdapter._INTERNAL_KEYS)
+
+
 class TestTheStripPreservesWhatTheKeysCarry:
     """R5: cleanliness must not be bought by deleting the feature.
 

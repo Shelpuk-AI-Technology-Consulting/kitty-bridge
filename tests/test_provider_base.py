@@ -254,6 +254,48 @@ class TestTranslateToUpstreamDefault:
         assert result["model"] == "gpt-4o"
 
 
+class TestStripInternalMessageKeys:
+    """The message-level strip's edge branches, in isolation (KBR-228).
+
+    The behavioural guard in ``tests/test_internal_keys_not_sent_upstream.py``
+    exercises the helper through every adapter's full serialization; these
+    tests pin the helper's own contract: copy-on-write only when the strip
+    changes anything, the same object back on the warm path, non-list and
+    non-dict inputs untouched.
+    """
+
+    def setup_method(self):
+        self.adapter = _stub_adapter()
+
+    def test_non_list_messages_pass_through_unchanged(self):
+        assert self.adapter._strip_internal_message_keys(None) is None
+        assert self.adapter._strip_internal_message_keys("not a list") == "not a list"
+
+    def test_empty_list_returns_same_object(self):
+        messages: list = []
+        assert self.adapter._strip_internal_message_keys(messages) is messages
+
+    def test_list_without_registered_keys_returns_same_object(self):
+        messages = [{"role": "user", "content": "hi"}]
+        assert self.adapter._strip_internal_message_keys(messages) is messages
+
+    def test_non_dict_elements_pass_through(self):
+        messages = ["keep me", {"role": "assistant", "content": "x", "_thinking_blocks": []}]
+        result = self.adapter._strip_internal_message_keys(messages)
+        assert result[0] == "keep me"
+        assert "_thinking_blocks" not in result[1]
+
+    def test_registered_keys_are_removed_without_touching_the_input(self):
+        block = [{"type": "thinking", "thinking": "t", "signature": "s"}]
+        messages = [{"role": "assistant", "content": "x", "_thinking_blocks": block}]
+        result = self.adapter._strip_internal_message_keys(messages)
+        assert "_thinking_blocks" not in result[0]
+        assert result[0]["content"] == "x"
+        # Copy-on-write: the input list and its messages keep the carriage, so
+        # the next re-serialization still sees it.
+        assert messages[0]["_thinking_blocks"] == block
+
+
 class TestTranslateFromUpstreamDefault:
     """Default translate_from_upstream returns the response unchanged."""
 
