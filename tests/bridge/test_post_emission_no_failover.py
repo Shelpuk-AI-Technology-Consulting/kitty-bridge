@@ -24,6 +24,7 @@ from collections.abc import Awaitable, Callable
 import aiohttp
 import pytest
 from aiohttp import web
+from aioresponses import aioresponses
 
 from kitty.bridge import server as server_module
 from kitty.bridge.server import BridgeServer
@@ -744,3 +745,317 @@ class TestCustomTransportFailureAfterBytes:
 
         assert len(calls) == 2
         assert b"Served" in body
+
+
+# ── /v1/responses and /v1/gemini, standard (aiohttp) providers ────────────
+#
+# KBR-247: the same empty-finish-then-content shape that KBR-236 closed on the
+# translated /v1/messages branch reaches the standard /v1/responses and
+# /v1/gemini streaming paths too. The bridge translates both inbound protocols
+# to Chat Completions on the wire, so the upstream we mock is the same
+# `/v1/chat/completions` endpoint the Messages tests use — only the inbound
+# request shape differs.
+
+
+_RESPONSES_REQUEST = {
+    "model": "test-model",
+    "input": [{"type": "message", "role": "user", "content": "hi"}],
+    "stream": True,
+}
+
+_GEMINI_REQUEST = {
+    "contents": [{"role": "user", "parts": [{"text": "hi"}]}],
+}
+
+
+def _make_responses_server(n: int, base_urls: list[str] | None = None) -> BridgeServer:
+    """Build a BridgeServer with ``n`` openai backends, every protocol route registered."""
+    if n == 1:
+        provider = _StubProvider("https://api0.example.com/v1")
+        return BridgeServer(
+            adapter=None,
+            provider=provider,
+            resolved_key="key-0",
+            model="test-model",
+        )
+    backends = []
+    for i in range(n):
+        base = base_urls[i] if base_urls else f"https://api{i}.example.com/v1"
+        provider = _StubProvider(base)
+        profile = Profile(
+            name=f"profile-{i}",
+            provider="openai",
+            model="test-model",
+            auth_ref=str(uuid.uuid4()),
+        )
+        backends.append((provider, f"key-{i}", profile))
+    return BridgeServer(
+        adapter=None,
+        provider=backends[0][0],
+        resolved_key=backends[0][1],
+        model="test-model",
+        backends=backends,
+    )
+
+
+async def _drive_stream(
+    server: BridgeServer,
+    path: str,
+    payload: dict,
+    upstream_body: bytes,
+) -> tuple[bytes, int]:
+    """Drive one inbound stream through ``server`` against ``upstream_body``.
+
+    Args:
+        server: The bridge to start.
+        path: The inbound route, e.g. ``"/v1/responses"``.
+        payload: The inbound JSON body.
+        upstream_body: The full Chat Completions SSE body the upstream returns.
+
+    Returns:
+        The raw body the client received and the number of upstream POSTs
+        recorded by ``aioresponses``.
+    """
+    port = await server.start_async()
+    try:
+        with aioresponses(passthrough=["http://127.0.0.1"]) as m:
+            m.post(
+                "https://api0.example.com/v1/chat/completions",
+                body=upstream_body,
+                headers={"Content-Type": "text/event-stream"},
+                repeat=True,
+            )
+            m.post(
+                "https://api1.example.com/v1/chat/completions",
+                body=upstream_body,
+                headers={"Content-Type": "text/event-stream"},
+                repeat=True,
+            )
+            async with (
+                aiohttp.ClientSession() as session,
+                session.post(
+                    f"http://127.0.0.1:{port}{path}",
+                    json=payload,
+                    timeout=aiohttp.ClientTimeout(total=30),
+                ) as resp,
+            ):
+                body = await resp.read()
+        posts = sum(
+            len(calls) for (method, _), calls in m.requests.items() if method == "POST"
+        )
+        return body, posts
+    finally:
+        await server.stop_async()
+
+
+class TestResponsesEmptyVerdictAfterContent:
+    """An empty-response verdict on /v1/responses after content reached the client ends the turn (KBR-247)."""
+
+    @pytest.fixture(autouse=True)
+    def _no_retry_delays(self, monkeypatch):
+        """Zero every retry delay; the tests count attempts, never time them."""
+        monkeypatch.setattr(server_module, "_BACKOFF_BASE", 0.0)
+        monkeypatch.setattr(server_module, "_EMPTY_FINAL_DELAYS", [0.0, 0.0])
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("mode", ["balanced", "single"])
+    async def test_empty_verdict_after_content_sends_one_upstream_request(self, mode):
+        """No second attempt follows content the client already saw on /v1/responses."""
+        n_backends = 2 if mode == "balanced" else 1
+        server = _make_responses_server(n_backends)
+        body, posts = await _drive_stream(
+            server, "/v1/responses", _RESPONSES_REQUEST, _CC_EMPTY_FINISH_THEN_CONTENT
+        )
+
+        assert posts == 1, f"the upstream was asked {posts} times after text was emitted"
+        assert body.count(b'"delta": "Hi"') == 1
+        names = [name for name, _ in _events(body)]
+        assert names[-1] == "response.completed"
+        assert body.count(b'"status": "incomplete"') == 1
+        # Exactly one error event, and it sits between the late content and the
+        # closing response.completed — never a second attempt's delta after it.
+        error_events = [data for name, data in _events(body) if name == "error"]
+        assert len(error_events) == 1
+        assert error_events[0]["code"] == "upstream_error"
+        last_delta = max(
+            (idx for idx, (name, _) in enumerate(_events(body)) if name == "response.output_text.delta"),
+            default=-1,
+        )
+        first_error = next(idx for idx, (name, _) in enumerate(_events(body)) if name == "error")
+        assert last_delta < first_error, "the error event must follow the late content"
+        # AC-1: the errored turn is not counted as a completion. The guard
+        # `break`s out of the retry loop before reaching `_log_usage`, the only
+        # call path that increments `_model_stats["completions"]` on this
+        # route — pin the invariant here so a future refactor cannot move the
+        # log call into the guard path and silently regress AC-1.
+        assert server._model_stats("test-model")["completions"] == 0
+
+    @pytest.mark.asyncio
+    async def test_empty_verdict_after_content_quarantines_no_backend(self):
+        """An empty reply is a polite completion: the pool stays healthy and uncharged."""
+        server = _make_responses_server(2)
+        body, posts = await _drive_stream(
+            server, "/v1/responses", _RESPONSES_REQUEST, _CC_EMPTY_FINISH_THEN_CONTENT
+        )
+
+        assert posts == 1, f"the pool was asked {posts} times after text was emitted"
+        _assert_all_backends_untouched(server)
+        names = [name for name, _ in _events(body)]
+        assert names[-1] == "response.completed"
+
+    @pytest.mark.asyncio
+    async def test_empty_verdict_after_content_closes_the_tool_call(self):
+        """A late tool-call delta after the empty verdict must not splice arguments from a second attempt."""
+        late_tool = (
+            b'data: {"id":"c1","choices":[{"index":0,"delta":{},'
+            b'"finish_reason":"stop"}],"model":"test-model","usage":null}\n\n'
+            + b'data: {"id":"c1","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,'
+            b'"id":"call_1","type":"function","function":{"name":"lookup","arguments":"{\\"q\\":"}}]},'
+            b'"finish_reason":null}],"model":"test-model"}\n\n'
+            + b"data: [DONE]\n\n"
+        )
+        server = _make_responses_server(2)
+        body, posts = await _drive_stream(
+            server, "/v1/responses", _RESPONSES_REQUEST, late_tool
+        )
+
+        assert posts == 1, f"the upstream was asked {posts} times after a tool-call delta was emitted"
+        # Exactly one arguments-delta event — the half-sent argument string was
+        # never completed by a second attempt, and the bridge closed the item
+        # rather than continuing it.
+        names = [name for name, _ in _events(body)]
+        assert names.count("response.function_call_arguments.delta") == 1
+        # The synthesized completion closed the tool-call item and the response
+        # itself with status="incomplete" — every closed item carries that
+        # marker, so we assert at least one and the closing response.completed.
+        assert body.count(b'"status": "incomplete"') >= 1
+        assert names[-1] == "response.completed"
+        # No second attempt's function_call_arguments — only one delta and one
+        # `output_item.done` for the tool call.
+        assert names.count("response.output_item.done") == 1
+        assert body.count(b'"{\\"q\\":') == 1
+
+    @pytest.mark.asyncio
+    async def test_pre_emission_empty_response_still_fails_over(self):
+        """A pre-emission empty verdict still retries today, unchanged by this guard."""
+        pure_empty = (
+            b'data: {"id":"c1","choices":[{"index":0,"delta":{},'
+            b'"finish_reason":"stop"}],"model":"test-model","usage":null}\n\n'
+            b"data: [DONE]\n\n"
+        )
+        server = _make_responses_server(2)
+        # Pin the draw: backend-0 first (empty), then backend-1 (full). The
+        # random draw could otherwise open on the healthy backend and pass
+        # without ever exercising the ladder.
+        _pick = iter([0, 1])
+
+        def _fixed_select(self=server):
+            """Select backends in the scripted order, without the weighted draw."""
+            idx = next(_pick)
+            provider, key, profile = server._backends[idx]
+            server._active_provider = provider
+            server._active_key = key
+            server._active_model = profile.model
+            server._active_provider_config = profile.provider_config or {}
+            server._current_backend_idx = idx
+
+        server._select_backend = _fixed_select
+
+        # Front up empty on backend-0 and the success stream on backend-1. The
+        # pre-emission verdict runs the ladder, so the pool is asked at least
+        # twice — assert the lower bound, not the upper, because the ladder
+        # could keep retrying past the second attempt and still complete cleanly.
+        with aioresponses(passthrough=["http://127.0.0.1"]) as m:
+            m.post(
+                "https://api0.example.com/v1/chat/completions",
+                body=pure_empty,
+                headers={"Content-Type": "text/event-stream"},
+                repeat=True,
+            )
+            m.post(
+                "https://api1.example.com/v1/chat/completions",
+                body=_CC_FULL_STREAM,
+                headers={"Content-Type": "text/event-stream"},
+                repeat=True,
+            )
+            port = await server.start_async()
+            try:
+                async with (
+                    aiohttp.ClientSession() as session,
+                    session.post(
+                        f"http://127.0.0.1:{port}/v1/responses",
+                        json=_RESPONSES_REQUEST,
+                        timeout=aiohttp.ClientTimeout(total=30),
+                    ) as resp,
+                ):
+                    body = await resp.read()
+            finally:
+                await server.stop_async()
+        posts = sum(
+            len(calls) for (method, _), calls in m.requests.items() if method == "POST"
+        )
+        assert posts >= 2, "the pre-emission ladder must still run"
+        names = [name for name, _ in _events(body)]
+        assert names[-1] == "response.completed"
+        assert b'"status": "incomplete"' not in body, "the successful retry must complete, not error"
+
+
+class TestGeminiEmptyVerdictAfterContent:
+    """An empty-response verdict on /v1/gemini after content reached the client ends the turn (KBR-247)."""
+
+    @pytest.fixture(autouse=True)
+    def _no_retry_delays(self, monkeypatch):
+        """Zero every retry delay; the tests count attempts, never time them."""
+        monkeypatch.setattr(server_module, "_BACKOFF_BASE", 0.0)
+        monkeypatch.setattr(server_module, "_EMPTY_FINAL_DELAYS", [0.0, 0.0])
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("mode", ["balanced", "single"])
+    async def test_empty_verdict_after_content_sends_one_upstream_request(self, mode):
+        """No second attempt follows content the client already saw on /v1/gemini."""
+        n_backends = 2 if mode == "balanced" else 1
+        server = _make_responses_server(n_backends)
+        body, posts = await _drive_stream(
+            server,
+            "/v1beta/models/test-model:streamGenerateContent",
+            _GEMINI_REQUEST,
+            _CC_EMPTY_FINISH_THEN_CONTENT,
+        )
+
+        assert posts == 1, f"the upstream was asked {posts} times after text was emitted"
+        # The Gemini wire carries the text delta verbatim through the Chat
+        # Completions-to-Gemini converter; "Hi" appears once.
+        assert body.count(b'"Hi"') == 1
+        # The terminal shape is one SSE `data: {"error":...}` event and EOF —
+        # nothing after it.
+        error_blocks = body.split(b"\n\n")
+        error_payloads = [
+            json.loads(block.split(b"data: ", 1)[1].decode())
+            for block in error_blocks
+            if block.startswith(b"data: {") and b'"error":' in block
+        ]
+        assert len(error_payloads) == 1, f"the body should carry one error payload, found {len(error_payloads)}"
+        assert error_payloads[0]["error"]["code"] == 502
+        assert error_payloads[0]["error"]["message"].startswith("Kitty Bridge received an empty response")
+        # AC-1: the errored turn is not counted as a completion.
+        assert server._model_stats("test-model")["completions"] == 0
+
+    @pytest.mark.asyncio
+    async def test_empty_verdict_after_content_quarantines_no_backend(self):
+        """An empty reply is a polite completion: the pool stays healthy and uncharged."""
+        server = _make_responses_server(2)
+        body, _posts = await _drive_stream(
+            server,
+            "/v1beta/models/test-model:streamGenerateContent",
+            _GEMINI_REQUEST,
+            _CC_EMPTY_FINISH_THEN_CONTENT,
+        )
+
+        _assert_all_backends_untouched(server)
+        error_blocks = body.split(b"\n\n")
+        error_payloads = [
+            json.loads(block.split(b"data: ", 1)[1].decode())
+            for block in error_blocks
+            if block.startswith(b"data: {") and b'"error":' in block
+        ]
+        assert len(error_payloads) == 1

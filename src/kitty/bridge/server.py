@@ -3452,6 +3452,12 @@ class BridgeServer:
         upstream_status = None
         terminal_status = "completed"
         last_usage: dict | None = None
+        # KBR-247: the request-level emission flag, outside the attempt loop.
+        # `events_emitted` resets per attempt, so it cannot answer "has this
+        # *request* ever written to the client" — the question the post-emission
+        # guard below must ask. `sr` is no oracle here: unlike `_stream_messages`
+        # it is prepared eagerly, so `sr is not None` is true from the start.
+        _request_emitted = False
         try:
             url = self._build_upstream_url(cc_request)
             headers = self._build_upstream_headers(cc_request)
@@ -3687,6 +3693,7 @@ class BridgeServer:
                                             logger.debug("SSE → %s", event.split("\n", 1)[0][:120])
                                             await sr.write(event.encode())
                                             events_emitted = True
+                                            _request_emitted = True
                                 if done:
                                     break
 
@@ -3725,6 +3732,7 @@ class BridgeServer:
                                                 logger.debug("SSE (flush) → %s", event.split("\n", 1)[0][:120])
                                                 await sr.write(event.encode())
                                                 events_emitted = True
+                                                _request_emitted = True
                                     except json.JSONDecodeError:
                                         logger.warning("Failed to parse flushed SSE data: %s", data_str[:200])
 
@@ -3764,6 +3772,41 @@ class BridgeServer:
 
                     # Check for empty response
                     if translator.response_was_empty and finish_events:
+                        # KBR-247 (§11 Q14(a)): when the empty verdict fires after
+                        # the request has already written anything to the client
+                        # — content arriving after the empty finish chunk was
+                        # written live, since the chunk reset the translator and
+                        # a new text item was opened on the wire — the empty
+                        # ladder must not start a second attempt. Drop the
+                        # buffered fallback events (the half-open lifecycle
+                        # belongs to the post-loop `synthesize_completed_events`,
+                        # which closes the item the client saw open under
+                        # `status="incomplete"`), emit one terminal error, and
+                        # let the agent retry the turn. No backend is charged:
+                        # a polite empty reply keeps the empty ladder's
+                        # no-quarantine model.
+                        if _request_emitted:
+                            finish_events.clear()
+                            terminal_status = "incomplete"
+                            logger.warning(
+                                "Responses stream empty response after content was emitted for %s; ending the turn",
+                                response_id,
+                            )
+                            error_event = responses_format_error(
+                                {
+                                    "code": "upstream_error",
+                                    "message": _EMPTY_RESPONSE_AFTER_EMISSION_MESSAGE,
+                                },
+                                seq=translator._next_seq(),
+                            )
+                            try:
+                                await sr.write(error_event.encode())
+                            except (ConnectionResetError, BrokenPipeError, OSError):
+                                logger.debug(
+                                    "Client disconnected before error could be sent for %s",
+                                    response_id,
+                                )
+                            break
                         translator.reset()
                         finish_events.clear()
                         if self._backends and self._current_backend_idx >= 0:
@@ -5288,6 +5331,12 @@ class BridgeServer:
 
         last_usage: dict | None = None
         stream_ok = False  # Set True only on clean completion
+        # KBR-247: the request-level emission flag, outside the attempt loop.
+        # `events_emitted` resets per attempt, so it cannot answer "has this
+        # *request* ever written to the client" — the question the post-emission
+        # guard below must ask. `sr` is no oracle here: unlike `_stream_messages`
+        # it is prepared eagerly, so `sr is not None` is true from the start.
+        _request_emitted = False
 
         # Custom-transport providers handle their own HTTP requests.
         if self._active_provider.use_custom_transport:
@@ -5619,6 +5668,7 @@ class BridgeServer:
                                         for event in events:
                                             await sr.write(event.encode())
                                             events_emitted = True
+                                            _request_emitted = True
                                 if done:
                                     break
 
@@ -5648,6 +5698,7 @@ class BridgeServer:
                                             for event in events:
                                                 await sr.write(event.encode())
                                                 events_emitted = True
+                                                _request_emitted = True
                                     except json.JSONDecodeError:
                                         logger.warning("Failed to parse flushed SSE data: %s", data_str[:200])
 
@@ -5675,6 +5726,26 @@ class BridgeServer:
 
                     # Check for empty response
                     if translator.response_was_empty and finish_events:
+                        # KBR-247 (§11 Q14(a)): when the empty verdict fires after
+                        # the request has already written anything to the client —
+                        # content arriving after the empty finish chunk was
+                        # written live, since the chunk reset the translator — the
+                        # empty ladder must not start a second attempt. Drop the
+                        # buffered finish events, emit one terminal error in the
+                        # route's own convention (a single `{"error": ...}` SSE
+                        # data event, then EOF), and let the agent retry the
+                        # turn. No backend is charged: a polite empty reply keeps
+                        # the empty ladder's no-quarantine model.
+                        if _request_emitted:
+                            finish_events.clear()
+                            logger.warning("Gemini stream empty response after content was emitted; ending the turn")
+                            error_payload = {"error": {"code": 502, "message": _EMPTY_RESPONSE_AFTER_EMISSION_MESSAGE}}
+                            error_sse = f"data: {json.dumps(error_payload)}\n\n"
+                            try:
+                                await sr.write(error_sse.encode())
+                            except (ConnectionResetError, BrokenPipeError, OSError):
+                                logger.debug("Client disconnected before error could be sent")
+                            break
                         translator.reset()
                         finish_events.clear()
                         if self._backends and self._current_backend_idx >= 0:
