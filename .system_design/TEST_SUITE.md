@@ -2854,6 +2854,33 @@ What it provides:
 Still **T-E1's** (KBR-61): the per-transport **direct**-route override §5.2.2 phase 1 needs, and
 which transport gets which route. T-W5 ships the seam, not the policy.
 
+**Delivered by T-E1 ([KBR-61])** in `tests/harness/containment.py`, the same pattern — seam and
+policy in separate modules — continued one layer up. What it provides:
+
+- **`SealedNetwork`** — proxy + recording upstream stood up together, the upstream addressed by
+  :data:`HARNESS_UPSTREAM_HOST` at its own ephemeral port and the proxy's ``resolve`` map carrying
+  exactly that ``host:port`` → ``127.0.0.1:port`` binding. T-E2–T-E5 read the same
+  :class:`~harness.connect_proxy.ConnectProxy` and recording-upstream objects the harness holds,
+  so sibling slices do not need a second pair.
+- **`monkeypatched_aiohttp_resolver`** — the **direct**-leg override for the bridge's own aiohttp
+  sessions: ``socket.getaddrinfo`` mapped for the harness hostname, deferring every other name to
+  the real resolver. It is ``getaddrinfo``, not an aiohttp ``Resolver`` instance, because
+  ``_build_client_session`` builds its own ``TCPConnector`` with no injection point (§5.3) and the
+  ``DefaultResolver`` the connector reaches is reached through ``getaddrinfo`` in a worker thread
+  either way. ``/etc/hosts`` stays out — no administrator rights on CI runners.
+- **The per-transport capability report** — `CapabilityReport`, an in-process singleton over the
+  four §5.5 transports, every entry initialised ``not_attempted``; ``proven``, ``unsupported``
+  (with a reason) and ``failed`` are recorded by T-E2–T-E5, and T-E9's completeness gate reads
+  what they wrote. T-E1 records nothing — shipping the report and shipping verdicts are separate
+  deliveries, per plan §8's rule that a transport task is done when it records an outcome.
+- **The containment transport extension interface** — a ``ContainmentTransport`` protocol plus
+  registry, with the bridge-aiohttp route registered as the default. T-E3–T-E5 register their
+  own; nothing in this module changes for them.
+
+The containment tests live at the **l1 path default** for the reason `test_bridge.py` records:
+§8.2 forbids moving a test to a layer no job selects, and the Subsystem job is T-K6's. §8.2
+lists `tests/harness/test_containment.py` so T-K6 inherits the relocation.
+
 **A missing `openssl` fails, it does not skip.** `certs` is shared infrastructure, and §8's rule
 is that a skip in a gating job is a failure: a suite that quietly stops proving containment
 because a tool is absent is indistinguishable from one that proves it.
