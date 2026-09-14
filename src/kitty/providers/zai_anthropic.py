@@ -41,6 +41,10 @@ class ZaiAnthropicAdapter(AnthropicAdapter):
     #: was translated.  KBR-203, decision D2.
     forwards_thinking_display = False
 
+    #: Z.AI's reference does not document ``output_config`` either; the same
+    #: failover path is where the translated branch would restore it.  KBR-224.
+    forwards_output_config = False
+
     @property
     def provider_type(self) -> str:
         return "zai_coding"

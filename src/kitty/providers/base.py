@@ -48,11 +48,22 @@ class ProviderAdapter(ABC):
             # agent's thinking `display`; AnthropicAdapter restores it onto
             # `thinking` where the upstream documents the field.
             "_thinking_display",
+            # KBR-225: written by MessagesTranslator.translate_request to carry
+            # the agent's thinking `budget_tokens` (validated there: an int,
+            # >= 1024 and < max_tokens); AnthropicAdapter ships it verbatim so
+            # the prompt cache survives a max_tokens change, and derives a
+            # budget as before when the key is absent.
+            "_thinking_budget_tokens",
             # KBR-214: carries the agent's Anthropic `metadata` to the
             # Anthropic-family adapters that restore it. Chat Completions' own
             # `metadata` is a stored-completions tag map, a different concept, so
             # stripping it here keeps it off every other provider's wire.
             "_metadata",
+            # KBR-224: written by MessagesTranslator.translate_request to carry the
+            # agent's `output_config` — Anthropic's documented spelling of the
+            # effort control — which Chat Completions has no field for.
+            # AnthropicAdapter restores it where the upstream documents the field.
+            "_output_config",
             "base_url",  # F15 defense-in-depth — URL override goes through build_base_url(),
             # not the CC request body.  Stripping it here protects
             # adapters that rely on the default translate_to_upstream().

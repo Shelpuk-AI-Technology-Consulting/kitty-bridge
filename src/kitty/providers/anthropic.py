@@ -109,9 +109,16 @@ class AnthropicAdapter(ProviderAdapter):
             subclass whose upstream does not document it sets this to False, so
             an unknown field cannot turn every thinking request into a 400
             (KBR-203).
+        forwards_output_config: Whether :meth:`translate_to_upstream` restores
+            the agent's ``output_config`` — the documented spelling of the
+            effort control.  True here, because the field is on Anthropic's
+            published Messages schema.  A subclass whose upstream rejects or
+            does not document it sets this to False (KBR-224).
     """
 
     forwards_thinking_display: bool = True
+
+    forwards_output_config: bool = True
 
     @property
     def provider_type(self) -> str:
@@ -242,12 +249,26 @@ class AnthropicAdapter(ProviderAdapter):
             # provider decide the budget automatically.
             anthropic["thinking"] = self._with_thinking_display({"type": "adaptive"}, cc_request)
         elif cc_request.get("_thinking_enabled"):
-            # Anthropic requires budget_tokens >= 1024 and budget_tokens < max_tokens.
-            max_tokens = max(anthropic.get("max_tokens", _DEFAULT_MAX_TOKENS), 1025)
-            anthropic["max_tokens"] = max_tokens
-            anthropic["thinking"] = self._with_thinking_display(
-                {"type": "enabled", "budget_tokens": max_tokens - 1}, cc_request
-            )
+            # KBR-225: the agent's own budget, when the translator carried it,
+            # ships verbatim — Anthropic renders the budget into the prompt, so
+            # deriving it from max_tokens made two requests that differ only in
+            # max_tokens miss each other's cache.  A carried budget is already
+            # valid (int, >= 1024, < max_tokens), which implies
+            # max_tokens >= 1025, so the fallback's raise below cannot trigger
+            # on this branch and max_tokens ships as sent.
+            if "_thinking_budget_tokens" in cc_request:
+                anthropic["thinking"] = self._with_thinking_display(
+                    {"type": "enabled", "budget_tokens": cc_request["_thinking_budget_tokens"]}, cc_request
+                )
+            else:
+                # Fallback for an absent or invalid agent budget (the
+                # translator carries only valid ones): derive from max_tokens.
+                # Anthropic requires budget_tokens >= 1024 and budget_tokens < max_tokens.
+                max_tokens = max(anthropic.get("max_tokens", _DEFAULT_MAX_TOKENS), 1025)
+                anthropic["max_tokens"] = max_tokens
+                anthropic["thinking"] = self._with_thinking_display(
+                    {"type": "enabled", "budget_tokens": max_tokens - 1}, cc_request
+                )
         elif cc_request.get("_thinking_enabled") is False:
             # No display here: Anthropic rejects `display` alongside `disabled`.
             anthropic["thinking"] = {"type": "disabled"}
@@ -258,6 +279,13 @@ class AnthropicAdapter(ProviderAdapter):
         # it as a top-level parameter alongside thinking.
         if cc_request.get("_effort"):
             anthropic["effort"] = cc_request["_effort"]
+
+        # KBR-224: restore the agent's `output_config` (the documented spelling
+        # of the effort control) where this upstream documents the field.  Both
+        # effort spellings ship side by side, unmerged: kitty has no authority
+        # to arbitrate between two values the agent sent.
+        if self.forwards_output_config and cc_request.get("_output_config") is not None:
+            anthropic["output_config"] = cc_request["_output_config"]
 
         return anthropic
 

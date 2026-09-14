@@ -338,6 +338,15 @@ Point your tool at `http://localhost:<port>` and it just works.
 **Background bridges:** `kitty bridge start`, `stop`, `restart`, and `status` manage a bridge running in the background,
 tracked in `bridge_state.json`.
 
+**Who can call a background bridge.** Authentication is on only when a keys file is in play: `bridge.yaml` names one
+(`keys_file:`), or the default `~/.config/kitty/bridge_keys.txt` exists. Otherwise the bridge accepts unauthenticated
+clients — the same as the foreground bridge and `kitty claude`; it listens on `127.0.0.1` unless configured otherwise.
+A `keys_file:` that names a missing file stops the start with an error naming the path, and `kitty bridge config` shows
+which case applies.
+The policy is evaluated when the bridge starts — create or remove a keys file, then run `kitty bridge restart` to
+apply it. Note the combination of a non-loopback `host` and no keys file: any host that can reach the machine can
+then use the bridge and its upstream API key; set `keys_file:` to prevent that.
+
 If `status` reports **"Running under another user account"**, a bridge is serving at the recorded address but was started
 by a different user (via `sudo`, a service account, or another session). kitty will not stop or restart it, and will not
 start a second one beside it — signalling a process it does not own is unsafe, because the operating system may have
@@ -692,6 +701,16 @@ or model is misbehaving.
 
 The response is a `502` carrying `"reason": "empty_response"`. One visible cost of the hold: on reasoning models the
 agent shows its spinner, not live thinking, until the first text or tool call arrives.
+
+### A 502 whose error carries `"reason": "upstream_error"`
+
+Same providers. The provider answered kitty's request with its own error event before producing any content —
+an `overloaded_error`, say. Kitty retries the attempt on the same ladder as an empty reply (and fails over on a
+balancing profile), so you see this only when every attempt came back with the provider's error. Nothing reached
+the agent; the error shown is the provider's own, with kitty's `"reason": "upstream_error"` added so logs can tell
+it apart — or, if the provider's error payload was too malformed to deliver, kitty's own message saying so, with
+the same `"reason": "upstream_error"`. Either way an errored ladder is never reported as an empty one. Simply
+resend; if it persists, the provider is failing outright — switch backend or wait it out.
 
 ### "Kitty Bridge received a reply from the upstream provider that stopped (max_tokens) before producing any content"
 

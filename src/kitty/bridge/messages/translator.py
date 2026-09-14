@@ -346,6 +346,16 @@ class MessagesTranslator:
         if "effort" in messages_request:
             result["_effort"] = messages_request["effort"]
 
+        # KBR-224: `output_config` is Anthropic's documented spelling of the
+        # effort control (and the home of structured output).  Chat Completions
+        # has no slot for it, so — like `_effort` above — it rides an internal
+        # key to the Anthropic-family adapters, which restore it where the
+        # upstream documents the field.  Carried verbatim: an undocumented
+        # member is the agent's mistake, and the upstream that documents the
+        # field reports that better than a silent repair would.
+        if messages_request.get("output_config") is not None:
+            result["_output_config"] = messages_request["output_config"]
+
         # Extract thinking config into normalized effort metadata
         thinking = messages_request.get("thinking")
         if thinking and isinstance(thinking, dict):
@@ -354,6 +364,19 @@ class MessagesTranslator:
             if thinking.get("type") == "enabled":
                 result["_thinking_enabled"] = True
                 result["_reasoning_effort"] = "high"
+                # KBR-225: carry the agent's own budget so AnthropicAdapter can
+                # ship it verbatim instead of deriving one from max_tokens.
+                # Only a valid budget rides the key -- an int, at least 1024,
+                # and strictly below max_tokens (Anthropic's constraint) --
+                # because the adapter trusts the key and falls back when it is
+                # absent.  max_tokens must itself be an int: comparing against
+                # a non-int would move the malformed-input TypeError from the
+                # Anthropic-family adapter into this shared translator.  A bool
+                # budget is excluded by the floor (every bool is 0 or 1).
+                budget = thinking.get("budget_tokens")
+                max_tokens = messages_request.get("max_tokens")
+                if isinstance(budget, int) and isinstance(max_tokens, int) and 1024 <= budget < max_tokens:
+                    result["_thinking_budget_tokens"] = budget
             elif thinking.get("type") == "adaptive":
                 # Adaptive thinking — remember the original type so
                 # AnthropicAdapter can restore it verbatim.
@@ -714,6 +737,9 @@ class MessagesTranslator:
                             {"type": "tool_use", "id": tool_id, "name": func.get("name", ""), "input": {}},
                         )
                     )
+                    # Advance past the opened block (KBR-226) so a parallel call
+                    # or a following text block opens the next free index.
+                    self._content_block_index += 1
 
                 # Argument delta
                 func = tc_delta.get("function", {})

@@ -855,6 +855,13 @@ _NATIVE_EMPTY_REPLY_MESSAGE = (
 _NATIVE_EMPTY_AFTER_EMISSION_MESSAGE = (
     "Kitty Bridge lost the upstream reply mid-stream and the retry came back empty. Retry the request."
 )
+# KBR-241: the error variant's kitty wording, for attempts whose error payload was too
+# malformed to deliver. Names the product (Q9) and reports what happened — an upstream
+# error, not an empty reply — so the exhaustion reason marker never lies.
+_NATIVE_UPSTREAM_ERROR_MESSAGE = (
+    "Kitty Bridge received an error from the upstream provider before any content, on every "
+    "attempt, but the provider's error payload could not be delivered. Retry the request."
+)
 # D3: stop reasons that truncate a reply, so no retry can improve one that arrives before content.
 _NATIVE_TRUNCATING_STOP_REASONS = frozenset({"max_tokens", "model_context_window_exceeded"})
 _MAX_LOGGED_HELD_BYTES = 2000  # bound on a discarded native reply's head in the DEBUG log
@@ -1088,6 +1095,25 @@ def _stops_for_blocks_the_client_saw(buffered_events: list[str]) -> list[str]:
     return [
         e for e in buffered_events if e.startswith("event: content_block_stop\n") and _index(e) not in started_unsent
     ]
+
+
+def _usable_upstream_error_payload(hold: PreambleHold) -> dict | None:
+    """Return the hold's recorded error payload when its ``error`` value is a dict.
+
+    Recognition on the hold admits any JSON object an error event carries, but
+    only this shape is deliverable to the client (D2 as amended by KBR-241);
+    everything else keeps the bridge's own fallback bodies.
+
+    Args:
+        hold: The preamble hold whose attempt ended unreleased.
+
+    Returns:
+        The recorded payload, or ``None`` when it is absent or unusable.
+    """
+    payload = hold.error_event
+    if isinstance(payload, dict) and isinstance(payload.get("error"), dict):
+        return payload
+    return None
 
 
 def _is_retryable_exception(exc: Exception) -> bool:
@@ -4073,6 +4099,16 @@ class BridgeServer:
                                     elif sr is None:
                                         # An abandoned request must not keep a thinking phase billing.
                                         _raise_if_client_gone()
+                                    if hold.error_seen and hold.error_event_complete:
+                                        # D2 as amended by KBR-241: an upstream error event is the
+                                        # provider's terminal word, so the attempt is judged on it
+                                        # now rather than read out — but only once the event's own
+                                        # lines have all arrived, or a chunk boundary between the
+                                        # name line and its data line would truncate the payload.
+                                        # Leaving the ``async with`` releases the response and the
+                                        # connector closes the unconsumed body; the upstream may
+                                        # see a reset on its next write.
+                                        break
                             finally:
                                 # Bytes may already have reached the client even if
                                 # the iteration raised, so the partial tool_use is
@@ -4086,29 +4122,53 @@ class BridgeServer:
                                 break
 
                             # This attempt wrote nothing, so its discarded bytes exist only here.
+                            usable_payload = _usable_upstream_error_payload(hold)
+                            if usable_payload is not None:
+                                err_type = usable_payload["error"].get("type")
+                                # The error is on record even when its payload carries no
+                                # name: the log marker must not vanish with it.
+                                held_error_type = err_type if isinstance(err_type, str) else "unknown"
+                            elif hold.error_seen:
+                                held_error_type = "unusable"
+                            else:
+                                held_error_type = None
+                            error_note = f", upstream_error={held_error_type}" if held_error_type else ""
                             logger.warning(
-                                "Native Messages stream ended with no content for %s (%d bytes held, stop_reason=%s)",
+                                "Native Messages stream ended with no content for %s (%d bytes held, "
+                                "stop_reason=%s%s)",
                                 message_id,
                                 hold.held_size,
                                 hold.stop_reason,
+                                error_note,
                             )
                             logger.debug("Discarded native reply head: %r", hold.head(_MAX_LOGGED_HELD_BYTES))
 
                             # An earlier attempt already wrote (the KBR-183 failover), so a JSON
                             # error cannot follow: per Q14(a) the open stream ends in an error event.
                             if sr is not None:
-                                await _write_client(
-                                    sr,
-                                    messages_format_error(
-                                        {
-                                            "type": "error",
-                                            "error": {
-                                                "type": "api_error",
-                                                "message": _NATIVE_EMPTY_AFTER_EMISSION_MESSAGE,
-                                            },
-                                        }
-                                    ).encode(),
-                                )
+                                # Guarded-dead post-KBR-183; if it ever runs, the terminal error is
+                                # the provider's own when this attempt carried a usable one, and
+                                # kitty's error wording otherwise — never the empty-reply message,
+                                # which would misreport an errored attempt as an empty one.
+                                if usable_payload is not None:
+                                    terminal_error = usable_payload
+                                elif hold.error_seen:
+                                    terminal_error = {
+                                        "type": "error",
+                                        "error": {
+                                            "type": "api_error",
+                                            "message": _NATIVE_UPSTREAM_ERROR_MESSAGE,
+                                        },
+                                    }
+                                else:
+                                    terminal_error = {
+                                        "type": "error",
+                                        "error": {
+                                            "type": "api_error",
+                                            "message": _NATIVE_EMPTY_AFTER_EMISSION_MESSAGE,
+                                        },
+                                    }
+                                await _write_client(sr, messages_format_error(terminal_error).encode())
                                 break
 
                             # D3: a truncation before any content is not improved by a retry.
@@ -4156,17 +4216,37 @@ class BridgeServer:
                                 )
                                 continue
                             logger.warning("Native Messages stream empty response after %d attempts", attempt + 1)
-                            return _make_error_response(
-                                {
+                            # D4, plus KBR-241's error variant: whenever an upstream error was
+                            # seen the reason marker says so — the ladder did not watch an empty
+                            # reply. The provider's payload is what the client is written against
+                            # (D2's rationale at exhaustion), so a usable one is re-embedded with
+                            # only the marker added; a malformed one cannot be delivered, and the
+                            # body falls back to kitty's own upstream-error wording (Q9), never to
+                            # the empty-reply message that would misreport what happened.
+                            if usable_payload is not None:
+                                exhaustion_error = {
+                                    **usable_payload,
+                                    "error": {**usable_payload["error"], "reason": "upstream_error"},
+                                }
+                            elif hold.error_seen:
+                                exhaustion_error = {
+                                    "type": "error",
+                                    "error": {
+                                        "type": "api_error",
+                                        "message": _NATIVE_UPSTREAM_ERROR_MESSAGE,
+                                        "reason": "upstream_error",
+                                    },
+                                }
+                            else:
+                                exhaustion_error = {
                                     "type": "error",
                                     "error": {
                                         "type": "api_error",
                                         "message": _NATIVE_EMPTY_REPLY_MESSAGE,
                                         "reason": "empty_response",
                                     },
-                                },
-                                status=502,
-                            )
+                                }
+                            return _make_error_response(exhaustion_error, status=502)
 
                         line_buffer = bytearray()  # F23+F24: byte-based buffering
                         done = False

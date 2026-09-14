@@ -14,8 +14,9 @@ and then the adapter's ``translate_to_upstream`` — the translated route as the
 bridge runs it.  Starting from a hand-built Chat Completions dict would skip the
 half of the route that decides what is carried at all.
 
-Register rows: P5c (the budget rewrite) and P5d (adaptive thinking, effort and
-``display``), ``.system_design/TEST_SUITE.md`` §3.2.2.  The native-passthrough
+Register rows: P5c (the budget rewrite) and P5d (adaptive thinking, effort,
+``display`` and — since KBR-224 — ``output_config``),
+``.system_design/TEST_SUITE.md`` §3.2.2.  The native-passthrough
 counterpart lives in ``tests/bridge/test_native_thinking_passthrough.py``.
 """
 
@@ -31,8 +32,10 @@ from kitty.providers.minimax_token import MiniMaxTokenAnthropicAdapter
 from kitty.providers.opencode import OpenCodeGoAdapter
 from kitty.providers.zai_anthropic import ZaiAnthropicAdapter
 
-#: The agent's own budget, deliberately far from any ``max_tokens - 1`` used below,
-#: so a shipped value equal to it cannot be a coincidence of the derivation.
+#: The agent's own budget, deliberately far from any ``max_tokens - 1`` used
+#: below, so a shipped value equal to it cannot be a coincidence of the
+#: derivation — the one deliberate exception being the floor-pin case, whose
+#: ``max_tokens = budget + 1`` makes the old derivation agree with the agent.
 _AGENT_BUDGET = 2048
 
 
@@ -77,49 +80,177 @@ def _ship(adapter: ProviderAdapter, body: dict, *, model: str | None = None) -> 
     return adapter.translate_to_upstream(cc_request)
 
 
-class TestEnabledThinkingBudgetIsDerivedNotForwarded:
-    """P5c: the shipped budget is kitty's, computed from ``max_tokens``.
+class TestEnabledThinkingBudgetIsForwarded:
+    """P5c, after KBR-225: the shipped budget is the agent's own.
 
-    These pin **today's defect** so that it is on the record and cannot change
-    silently.  KBR-225 fixes it by forwarding the agent's own budget, and that
-    change must invert these tests rather than delete them.
+    KBR-203 pinned the old defect here (the shipped budget was kitty's,
+    computed from ``max_tokens``); KBR-225 inverts those pins rather than
+    deleting them.  A valid agent budget — ``>= 1024`` and ``< max_tokens`` —
+    ships verbatim, so two requests differing only in ``max_tokens`` share one
+    thinking configuration and can share a cached prefix.  An invalid budget
+    keeps the old derivation as the documented fallback.
     """
 
-    def test_budget_moves_with_max_tokens_although_the_agent_sent_one_budget(self):
-        """R1 — the falsifiable core of KBR-203.
+    def test_two_requests_differing_only_in_max_tokens_ship_one_identical_thinking(self):
+        """R1 — the falsifiable core of KBR-225.
 
         Two requests identical except for ``max_tokens``, carrying the same
-        agent budget, ship two different budgets.  Anthropic renders the budget
-        into the prompt, so these two requests cannot share a cached prefix.
+        agent budget, ship the same thinking configuration — the agent's own.
+        Anthropic renders the budget into the prompt, so this is what lets the
+        two requests share a cached prefix.
+
         """
         thinking = {"type": "enabled", "budget_tokens": _AGENT_BUDGET}
 
         first = _ship(AnthropicAdapter(), _messages_body(max_tokens=8000, thinking=thinking))
         second = _ship(AnthropicAdapter(), _messages_body(max_tokens=16000, thinking=thinking))
 
-        assert first["thinking"]["budget_tokens"] == 7999
-        assert second["thinking"]["budget_tokens"] == 15999
+        assert first["thinking"] == thinking
+        assert second["thinking"] == first["thinking"]
+        assert first["max_tokens"] == 8000
+        assert second["max_tokens"] == 16000
 
     @pytest.mark.parametrize(
         ("max_tokens", "shipped_max_tokens", "shipped_budget"),
-        [(8000, 8000, 7999), (512, 1025, 1024)],
-        ids=["derived", "clamped-to-anthropic-minimum"],
+        [
+            # Discriminating case: the old derivation would ship 2999, so this
+            # one is red until the agent's budget is forwarded.
+            (3000, 3000, _AGENT_BUDGET),
+            # Floor pin: ``max_tokens = budget + 1`` is the one input where the
+            # old derivation already agreed with the agent (max(2049, 1025) - 1
+            # == 2048).  It falsifies nothing; it characterises that the change
+            # does not disturb the boundary.
+            (2049, 2049, _AGENT_BUDGET),
+            # Invalid budget (2048 >= 512): the derivation is kept as the
+            # fallback, clamped to Anthropic's minimum.
+            (512, 1025, 1024),
+        ],
+        ids=["forwarded", "floor-pin", "invalid-budget-falls-back-clamped"],
     )
-    def test_shipped_thinking_is_computed_not_the_agents(self, max_tokens, shipped_max_tokens, shipped_budget):
-        """R2 — the agent's own ``thinking`` object is not what ships.
+    def test_shipped_budget_is_the_agents_when_valid_and_derived_when_not(
+        self, max_tokens, shipped_max_tokens, shipped_budget
+    ):
+        """The shipped budget is the agent's own when valid, the derivation when not.
 
         Args:
             max_tokens: The agent's ``max_tokens``.
-            shipped_max_tokens: The ``max_tokens`` kitty ships after P5c's raise.
-            shipped_budget: The budget kitty computes.
+            shipped_max_tokens: The ``max_tokens`` kitty ships — as sent when
+                the budget is valid (a valid budget implies ``max_tokens >=
+                1025``, so P5c's old raise cannot trigger), clamped on the
+                fallback.
+            shipped_budget: The budget kitty ships — the agent's, or the
+                derivation when the agent's is invalid.
         """
         agent_thinking = {"type": "enabled", "budget_tokens": _AGENT_BUDGET}
 
         shipped = _ship(AnthropicAdapter(), _messages_body(max_tokens=max_tokens, thinking=agent_thinking))
 
-        assert shipped["thinking"] != agent_thinking
         assert shipped["thinking"] == {"type": "enabled", "budget_tokens": shipped_budget}
         assert shipped["max_tokens"] == shipped_max_tokens
+
+
+class TestAdapterForwardsTheCarriedBudget:
+    """Hand-built Chat Completions cases isolating the adapter hop.
+
+    The through-the-route tests above cannot say *which* hop regressed when
+    they go red.  These two pin the adapter's contract on its own: forward the
+    carried key verbatim, fall back to the derivation when it is absent — the
+    same house style as ``test_display_is_never_added_to_disabled_thinking``.
+    """
+
+    def test_carried_budget_is_forwarded_and_max_tokens_untouched(self):
+        """A present ``_thinking_budget_tokens`` ships verbatim; ``max_tokens`` is not raised."""
+        cc_request = {
+            "model": "claude-opus-4-6",
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 3000,
+            "_thinking_enabled": True,
+            "_thinking_budget_tokens": _AGENT_BUDGET,
+        }
+
+        shipped = AnthropicAdapter().translate_to_upstream(cc_request)
+
+        assert shipped["thinking"] == {"type": "enabled", "budget_tokens": _AGENT_BUDGET}
+        assert shipped["max_tokens"] == 3000
+
+    def test_absent_budget_falls_back_to_the_derivation(self):
+        """Without the key, the old derivation runs unchanged."""
+        cc_request = {
+            "model": "claude-opus-4-6",
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 3000,
+            "_thinking_enabled": True,
+        }
+
+        shipped = AnthropicAdapter().translate_to_upstream(cc_request)
+
+        assert shipped["thinking"] == {"type": "enabled", "budget_tokens": 2999}
+        assert shipped["max_tokens"] == 3000
+
+
+class TestTranslatorCarriesThinkingBudget:
+    """The translator carries the agent's ``budget_tokens`` on ``_thinking_budget_tokens``.
+
+    The value is checked here, at the only write site, so the adapter can trust
+    the key — the same division of labour KBR-203 established for
+    ``_thinking_display``.
+    """
+
+    def test_budget_is_carried_when_valid(self):
+        """A valid budget rides the internal key."""
+        cc_request = MessagesTranslator().translate_request(
+            _messages_body(max_tokens=8000, thinking={"type": "enabled", "budget_tokens": _AGENT_BUDGET})
+        )
+
+        assert cc_request["_thinking_budget_tokens"] == _AGENT_BUDGET
+
+    @pytest.mark.parametrize(
+        ("max_tokens", "thinking"),
+        [
+            (8000, {"type": "enabled", "budget_tokens": 1023}),
+            (8000, {"type": "enabled", "budget_tokens": 8000}),
+            (8000, {"type": "enabled", "budget_tokens": 9000}),
+            (8000, {"type": "enabled", "budget_tokens": "2048"}),
+            (8000, {"type": "enabled", "budget_tokens": True}),
+            (8000, {"type": "enabled"}),
+            (None, {"type": "enabled", "budget_tokens": _AGENT_BUDGET}),
+            ("8000", {"type": "enabled", "budget_tokens": _AGENT_BUDGET}),
+        ],
+        ids=[
+            "below-floor",
+            "equals-max-tokens",
+            "above-max-tokens",
+            "string-budget",
+            "bool-budget",
+            "absent-budget",
+            "max-tokens-absent",
+            "max-tokens-not-an-int",
+        ],
+    )
+    def test_budget_is_not_carried_when_absent_or_invalid(self, max_tokens, thinking):
+        """Only an int budget strictly between 1023 and ``max_tokens`` is carried.
+
+        A non-int ``max_tokens`` is treated as absent: comparing against one
+        would move the malformed-input TypeError from the Anthropic-family
+        adapter into the shared translator, crashing every provider.  The bool
+        case cannot fail on its own (every bool is 0 or 1, under the 1024
+        floor); it documents the outcome.
+
+        Args:
+            max_tokens: The agent's ``max_tokens``; ``None`` means the key is
+                omitted from the body entirely, a string exercises the non-int
+                guard.
+            thinking: An agent thinking object that must not yield the key.
+        """
+        body = _messages_body(max_tokens=8000, thinking=thinking)
+        if max_tokens is None:
+            del body["max_tokens"]
+        else:
+            body["max_tokens"] = max_tokens
+
+        cc_request = MessagesTranslator().translate_request(body)
+
+        assert "_thinking_budget_tokens" not in cc_request
 
 
 class TestAdaptiveThinkingAndEffortAreStable:
@@ -148,9 +279,10 @@ class TestAdaptiveThinkingAndEffortAreStable:
 
         That key is not in Anthropic's API reference: it is what Claude Code
         sends (TEST_SUITE.md §7.4.1).  The documented spelling is
-        ``output_config.effort``, which this route drops (KBR-224), and the
-        values here are borrowed from that field's enum.  So this pins
-        verbatim copying and nothing more — it makes no claim about caching.
+        ``output_config.effort``, which KBR-224 now carries alongside this key
+        (see ``tests/providers/test_anthropic_output_config.py``); the values
+        here are borrowed from that field's enum.  So this pins verbatim
+        copying and nothing more — it makes no claim about caching.
 
         Args:
             effort: A value from ``output_config.effort``'s enum.
