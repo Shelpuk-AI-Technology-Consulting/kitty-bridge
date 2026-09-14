@@ -3462,8 +3462,14 @@ class BridgeServer:
                             )
                             continue
 
-                        # In balancing mode: mark unhealthy, try next backend
-                        if self._backends and self._current_backend_idx >= 0:
+                        # In balancing mode: mark unhealthy and try next backend for ANY error —
+                        # except a signature rejection recovery could not fix: that history fails
+                        # on every member alike, so it surfaces without cooling a backend (M17).
+                        if (
+                            self._backends
+                            and self._current_backend_idx >= 0
+                            and not _is_thinking_signature_error(upstream.status, error_body)
+                        ):
                             kind = (
                                 "auth"
                                 if upstream.status in _AUTH_FAILURE_STATUSES
@@ -4320,8 +4326,14 @@ class BridgeServer:
                                 continue
 
                             retryable = self._should_retry_stream(upstream.status, error_body)
-                            # In balancing mode: mark unhealthy and try next backend for ANY error
-                            if self._backends and self._current_backend_idx >= 0:
+                            # In balancing mode: mark unhealthy and try next backend for ANY error —
+                            # except a signature rejection recovery could not fix: that history fails
+                            # on every member alike, so it surfaces without cooling a backend (M17).
+                            if (
+                                self._backends
+                                and self._current_backend_idx >= 0
+                                and not _is_thinking_signature_error(upstream.status, error_body)
+                            ):
                                 kind = (
                                     "auth"
                                     if upstream.status in _AUTH_FAILURE_STATUSES
@@ -5355,8 +5367,14 @@ class BridgeServer:
                             )
                             continue
 
-                        # In balancing mode: mark unhealthy, try next backend
-                        if self._backends and self._current_backend_idx >= 0:
+                        # In balancing mode: mark unhealthy and try next backend for ANY error —
+                        # except a signature rejection recovery could not fix: that history fails
+                        # on every member alike, so it surfaces without cooling a backend (M17).
+                        if (
+                            self._backends
+                            and self._current_backend_idx >= 0
+                            and not _is_thinking_signature_error(upstream.status, error_body)
+                        ):
                             kind = (
                                 "auth"
                                 if upstream.status in _AUTH_FAILURE_STATUSES
@@ -5791,7 +5809,10 @@ class BridgeServer:
                         continue  # empty after compaction → standard next-backend flow
                     except UpstreamError as retry_exc:
                         last_exc = retry_exc  # second failure → fall through to mark-unhealthy
-                if idx >= 0:
+                # An unrecovered signature rejection is the bridge's history, not this backend: don't cool it (M17).
+                # Read last_exc, not exc: the compaction retry above may have replaced the error.
+                final = last_exc if isinstance(last_exc, UpstreamError) else exc
+                if idx >= 0 and not _is_thinking_signature_error(final.status, final.body):
                     if exc.status == 429:
                         failure_kind = "rate_limit"
                     elif isinstance(exc.body, str) and self._is_cloudflare_block(exc.status, exc.body):
@@ -5909,7 +5930,8 @@ class BridgeServer:
             except UpstreamError as exc:
                 last_exc = exc
                 idx = self._current_backend_idx
-                if idx >= 0:
+                # Same rule as the loop above: an unrecovered signature rejection cools no backend (M17).
+                if idx >= 0 and not _is_thinking_signature_error(exc.status, exc.body):
                     if exc.status == 429:
                         failure_kind = "rate_limit"
                     elif isinstance(exc.body, str) and self._is_cloudflare_block(exc.status, exc.body):
@@ -6349,8 +6371,14 @@ class BridgeServer:
                             )
                             continue
 
-                        # In balancing mode: mark unhealthy, try next backend
-                        if self._backends and self._current_backend_idx >= 0:
+                        # In balancing mode: mark unhealthy and try next backend for ANY error —
+                        # except a signature rejection recovery could not fix: that history fails
+                        # on every member alike, so it surfaces without cooling a backend (M17).
+                        if (
+                            self._backends
+                            and self._current_backend_idx >= 0
+                            and not _is_thinking_signature_error(upstream.status, error_body)
+                        ):
                             kind = (
                                 "auth"
                                 if upstream.status in _AUTH_FAILURE_STATUSES
