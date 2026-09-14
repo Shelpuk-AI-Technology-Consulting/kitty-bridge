@@ -197,13 +197,29 @@ class ResponsesTranslator:
 
     # ── Request translation ───────────────────────────────────────────────
 
-    def translate_request(self, responses_request: dict) -> dict:
-        """Convert a Responses API request to a Chat Completions request."""
-        # Idempotent, and the live caller has normalised already -- this is here so
-        # the translator is correct for any caller, not only the handler.
-        responses_request = normalize_responses_request(responses_request)
-        messages = []
+    def walk_input_items(self, responses_request: dict) -> tuple[list[dict], list[int | None]]:
+        """Translate input items to CC messages, recording each item's owner.
 
+        This is :meth:`translate_request`'s conversation loop — the single
+        implementation of it — extended to also report, for every **input
+        item**, the index of the translated message that carries it (KBR-169).
+        Riding items — ``reasoning`` items and types the translation skips —
+        are owned by the next **assistant** message, exactly where this loop
+        attaches accumulated reasoning; a riding item with no following
+        assistant message has no owner and stays ``None``. Owner indices are
+        stable through the system-message merge: an item whose message was
+        merged into the previous system message is owned by the survivor.
+
+        Args:
+            responses_request: A normalized Responses API request.
+
+        Returns:
+            A ``(messages, item_owners)`` pair. ``messages`` is exactly what
+            :meth:`translate_request` builds; ``item_owners`` has one entry
+            per input item.
+        """
+        messages: list[dict] = []
+        item_owners: list[int | None] = []
         # System instructions -> system message
         instructions = responses_request.get("instructions")
         if instructions:
@@ -213,24 +229,57 @@ class ResponsesTranslator:
         # Accumulate reasoning from 'reasoning' items and merge into the next
         # assistant message's reasoning_content field.
         pending_reasoning: list[str] = []
+        # Input-item indices awaiting the assistant message that will own them.
+        riding: list[int] = []
         for item in responses_request.get("input", []):
+            item_index = len(item_owners)
+            item_owners.append(None)
             # Extract reasoning text from reasoning items
             if item.get("type") == "reasoning":
                 for summary in item.get("summary", []):
                     if summary.get("type") == "summary_text" and summary.get("text"):
                         pending_reasoning.append(summary["text"])
+                riding.append(item_index)
                 continue
 
             msg = self._translate_input_item(item)
-            if msg is not None:
-                # Attach accumulated reasoning to assistant messages
-                if msg.get("role") == "assistant" and pending_reasoning:
-                    msg["reasoning_content"] = "\n".join(pending_reasoning)
-                    pending_reasoning = []
-                messages.append(msg)
+            if msg is None:
+                riding.append(item_index)
+                continue
+            # Attach accumulated reasoning to assistant messages
+            if msg.get("role") == "assistant" and pending_reasoning:
+                msg["reasoning_content"] = "\n".join(pending_reasoning)
+                pending_reasoning = []
+            messages.append(msg)
+            item_owners[item_index] = len(messages) - 1
+            if msg.get("role") == "assistant":
+                for rider in riding:
+                    item_owners[rider] = len(messages) - 1
+                riding = []
 
-        # Merge consecutive system messages (some providers reject multiples)
-        messages = self._merge_consecutive_system_messages(messages)
+        # Merge consecutive system messages (some providers reject multiples),
+        # remapping owner indices onto the merged list.
+        merged: list[dict] = []
+        remap: list[int] = []
+        for msg in messages:
+            if msg.get("role") == "system" and merged and merged[-1].get("role") == "system":
+                prev = merged[-1].get("content") or ""
+                curr = msg.get("content") or ""
+                merged[-1]["content"] = f"{prev}\n\n{curr}"
+                remap.append(len(merged) - 1)
+            else:
+                merged.append(msg)
+                remap.append(len(merged) - 1)
+        messages = merged
+        item_owners = [remap[o] if o is not None else None for o in item_owners]
+        return messages, item_owners
+
+    def translate_request(self, responses_request: dict) -> dict:
+        """Convert a Responses API request to a Chat Completions request."""
+        # Idempotent, and the live caller has normalised already -- this is here so
+        # the translator is correct for any caller, not only the handler.
+        responses_request = normalize_responses_request(responses_request)
+        messages, _item_owners = self.walk_input_items(responses_request)
 
         result: dict = {
             # `CreateResponse` declares no required fields, and register row M1
@@ -305,22 +354,6 @@ class ResponsesTranslator:
                 return "\n".join(text_parts) if parts else ""
             return parts
         return content
-
-    @staticmethod
-    def _merge_consecutive_system_messages(messages: list[dict]) -> list[dict]:
-        """Merge consecutive system messages into a single system message.
-
-        Some providers (e.g. MiniMax) reject requests with multiple system messages.
-        """
-        result: list[dict] = []
-        for msg in messages:
-            if msg.get("role") == "system" and result and result[-1].get("role") == "system":
-                prev = result[-1].get("content") or ""
-                curr = msg.get("content") or ""
-                result[-1]["content"] = f"{prev}\n\n{curr}"
-            else:
-                result.append(msg)
-        return result
 
     def _translate_input_item(self, item: dict) -> dict | None:
         """Translate a single Responses API input item to a Chat Completions message."""
