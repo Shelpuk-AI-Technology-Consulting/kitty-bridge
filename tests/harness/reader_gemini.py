@@ -227,10 +227,11 @@ _BUILT_IN_TOOL_KEYS = frozenset(
 #: All nine.
 PUBLISHED_TOOL_KEYS = _BUILT_IN_TOOL_KEYS | frozenset({"functionDeclarations"})
 
-#: ``FunctionDeclaration``'s seven published members.  ``behavior``, ``response``
-#: and ``responseJsonSchema`` have no slot in :class:`~harness.contract.ToolDecl`
-#: and residualise; ``parametersJsonSchema`` is the published mutually-exclusive
-#: alternative to ``parameters`` and fills the same slot.
+#: ``FunctionDeclaration``'s seven published members. ``behavior`` slots
+#: into :class:`~harness.contract.ToolDecl.behavior` (KBR-194); ``response``
+#: and ``responseJsonSchema`` still have no slot and residualise;
+#: ``parametersJsonSchema`` is the published mutually-exclusive alternative to
+#: ``parameters`` and fills the same slot.
 PUBLISHED_FUNCTION_DECLARATION_KEYS = frozenset(
     {
         "behavior",
@@ -286,9 +287,10 @@ _OPAQUE_PART_KEYS: Mapping[str, str] = {
 }
 
 #: ``Part`` members that modify another member rather than being content of
-#: their own.  The grammar has no slot for any of them, so they residualise at
-#: their own path — ``thoughtSignature`` only when the part is not a thought,
-#: since :class:`~harness.contract.Thinking` carries it when it is.
+#: their own. ``thoughtSignature`` slots on ``Thinking`` (always) and
+#: ``ToolUse`` (a function-call part, Gemini 3's echo back — KBR-194);
+#: ``videoMetadata`` slots on ``Text`` and ``Image`` (KBR-194). The rest
+#: residualise at their own path.
 _PART_MODIFIER_KEYS = frozenset(
     {
         "audioTranscription",
