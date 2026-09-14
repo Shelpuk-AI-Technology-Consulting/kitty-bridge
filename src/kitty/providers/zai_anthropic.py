@@ -55,6 +55,10 @@ class ZaiAnthropicAdapter(AnthropicAdapter):
     #: bytes only matches what the upstream already receives.
     forwards_thinking_signature = True
 
+    #: Z.AI's reference does not document ``output_config`` either; the same
+    #: failover path is where the translated branch would restore it.  KBR-224.
+    forwards_output_config = False
+
     @property
     def provider_type(self) -> str:
         return "zai_coding"

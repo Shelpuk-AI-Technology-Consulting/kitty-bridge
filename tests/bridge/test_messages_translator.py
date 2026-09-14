@@ -1581,3 +1581,123 @@ class TestCloseOpenBlocks:
         self.t.close_open_blocks()
 
         assert self.t.close_open_blocks() == []
+
+
+class TestParallelToolCallBlockIndices:
+    """Parallel ``tool_use`` calls each open their own Anthropic content block.
+
+    KBR-226: the tool-call branch recorded ``block_index: self._content_block_index``
+    but never advanced the counter, so a translated stream carrying two tool calls
+    opened both at index 0 and the finish path closed index 0 twice. The Anthropic
+    stream grammar identifies a block by its index, so Claude Code saw the second
+    call reuse the first one's slot while it was still open. Text that follows the
+    calls opens at the next free index; the tool blocks stay open until the finish
+    closes each at its own index, so a late argument delta can never land after
+    its block's stop.
+    """
+
+    def setup_method(self):
+        """Give each test a fresh translator."""
+        self.t = MessagesTranslator()
+        self.msg_id = f"msg_{uuid.uuid4().hex[:24]}"
+
+    def _feed(self, delta: dict) -> list[tuple[str, dict]]:
+        """Translate one non-final Chat Completions chunk carrying ``delta``.
+
+        Args:
+            delta: The ``choices[0].delta`` object of the chunk.
+
+        Returns:
+            The emitted events, parsed as ``(event_name, data_dict)`` pairs.
+        """
+        return _parse_events(
+            self.t.translate_stream_chunk(
+                self.msg_id, "m", {"choices": [{"index": 0, "delta": delta, "finish_reason": None}]}
+            )
+        )
+
+    @staticmethod
+    def _tool_call(cc_index: int, call_id: str, arguments: str = "") -> dict:
+        """Build one Chat Completions ``tool_calls`` delta entry.
+
+        Args:
+            cc_index: The Chat Completions tool-call index the entry belongs to.
+            call_id: The upstream call id; its presence marks a new call.
+            arguments: The argument fragment the entry carries.
+
+        Returns:
+            A ``tool_calls`` delta entry in Chat Completions shape.
+        """
+        return {
+            "index": cc_index,
+            "id": call_id,
+            "type": "function",
+            "function": {"name": f"fn_{call_id}", "arguments": arguments},
+        }
+
+    def test_two_parallel_tool_calls_open_distinct_increasing_indices(self):
+        """The second call must not reuse the first one's open block slot."""
+        events1 = self._feed({"tool_calls": [self._tool_call(0, "call_a")]})
+        events2 = self._feed({"tool_calls": [self._tool_call(1, "call_b")]})
+
+        starts = [d for name, d in [*events1, *events2] if name == "content_block_start"]
+        assert [d["index"] for d in starts] == [0, 1]
+        assert all(d["content_block"]["type"] == "tool_use" for d in starts)
+
+    def test_interleaved_argument_deltas_route_to_their_own_block(self):
+        """Argument chunks are routed by the per-call meta, not by arrival order.
+
+        The interleaved order (id0, id1, args1, args0) is what pins the routing:
+        a translator that tracked "the current" index instead would swap the two.
+        """
+        self._feed({"tool_calls": [self._tool_call(0, "call_a")]})
+        self._feed({"tool_calls": [self._tool_call(1, "call_b")]})
+        events3 = self._feed({"tool_calls": [{"index": 1, "function": {"arguments": '{"b":'}}]})
+        events4 = self._feed({"tool_calls": [{"index": 0, "function": {"arguments": '{"a":'}}]})
+
+        deltas = [
+            (d["index"], d["delta"]["partial_json"])
+            for name, d in [*events3, *events4]
+            if name == "content_block_delta"
+        ]
+        assert deltas == [(1, '{"b":'), (0, '{"a":')]
+
+    def test_finish_emits_one_stop_per_opened_index(self):
+        """The finish closes each tool block once, at that block's own index."""
+        self._feed({"tool_calls": [self._tool_call(0, "call_a")]})
+        self._feed({"tool_calls": [self._tool_call(1, "call_b")]})
+        final = _parse_events(
+            self.t.translate_stream_chunk(
+                self.msg_id,
+                "m",
+                {"choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]},
+            )
+        )
+
+        stops = [d["index"] for name, d in final if name == "content_block_stop"]
+        assert stops == [0, 1]
+        tail = [name for name, _ in final]
+        assert tail[-2:] == ["message_delta", "message_stop"]
+
+    def test_text_after_tool_calls_opens_at_next_free_index(self):
+        """Text following the calls opens a fresh block; the tool blocks stay open."""
+        self._feed({"tool_calls": [self._tool_call(0, "call_a")]})
+        self._feed({"tool_calls": [self._tool_call(1, "call_b")]})
+        events3 = self._feed({"content": "Both calls are in."})
+
+        starts = [d for name, d in events3 if name == "content_block_start"]
+        assert len(starts) == 1
+        assert starts[0]["index"] == 2
+        assert starts[0]["content_block"]["type"] == "text"
+        # Overlap is the decided shape: no stop may close a tool block early,
+        # because a late argument delta would land after its block's stop.
+        assert not [name for name, _ in events3 if name == "content_block_stop"]
+
+    def test_finalize_interrupted_stream_closes_each_tool_block_at_its_own_index(self):
+        """An interrupted stream closes every open tool block exactly once."""
+        self._feed({"tool_calls": [self._tool_call(0, "call_a", arguments='{"a":')]})
+        self._feed({"tool_calls": [self._tool_call(1, "call_b", arguments='{"b":')]})
+
+        final = _parse_events(self.t.finalize_interrupted_stream())
+        stops = [d["index"] for name, d in final if name == "content_block_stop"]
+        assert stops == [0, 1]

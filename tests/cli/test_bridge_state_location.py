@@ -10,6 +10,10 @@ These tests run the real commands and the real bridge, because the defect lives
 *between* two processes. Each side read correctly by its own logic, and every
 in-process test handed both sides the same path.
 
+KBR-230 adds the background bridge's keys-file auth policy to the same harness:
+the fresh-install shape (no keys file anywhere), a named-but-missing file, and
+the ``bridge config`` display.
+
 **Isolation.** The children get a temporary home (``HOME``/``USERPROFILE``) and a
 temporary ``platformdirs`` config and cache directory: ``XDG_CONFIG_HOME`` and
 ``XDG_CACHE_HOME`` on Linux and macOS, ``WIN_PD_OVERRIDE_LOCAL_APPDATA`` on Windows.
@@ -43,6 +47,8 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.error
+import urllib.request
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -162,20 +168,22 @@ def _wait_until_gone(pid: int) -> bool:
     return False
 
 
-@pytest.fixture
-def kitty_install(tmp_path: Path) -> Iterator[KittyInstall]:
-    """Build an isolated kitty with one profile, and stop every bridge it ran at teardown.
+def _isolated_install(tmp_path: Path, *, with_keys: bool) -> Iterator[KittyInstall]:
+    """Build the isolated kitty the fixtures hand out, with or without a keys file.
 
     Args:
         tmp_path: pytest's per-test temporary directory.
+        with_keys: Write the default keys file. The fresh-install tests (KBR-230)
+            need the install *without* it: nothing in kitty creates that file.
 
     Yields:
         The isolated installation.
     """
     home = tmp_path / "home"
-    # A background bridge started with a bridge.yaml requires a keys file at its default place.
     (home / ".config" / "kitty").mkdir(parents=True)
-    (home / ".config" / "kitty" / "bridge_keys.txt").write_text("e2e-client-key\n", encoding="utf-8")
+    if with_keys:
+        # The default keys file: until KBR-230 a background bridge required it.
+        (home / ".config" / "kitty" / "bridge_keys.txt").write_text("e2e-client-key\n", encoding="utf-8")
 
     # KITTY_* settings in the developer's environment (a gateway, a session summary path) must not steer the bridge.
     env = {name: value for name, value in os.environ.items() if not name.startswith("KITTY_")}
@@ -231,6 +239,32 @@ def kitty_install(tmp_path: Path) -> Iterator[KittyInstall]:
             if probe_pid(pid) is ProcessLiveness.ALIVE:
                 os.kill(pid, getattr(signal, "SIGKILL", signal.SIGTERM))
                 _wait_until_gone(pid)
+
+
+@pytest.fixture
+def kitty_install(tmp_path: Path) -> Iterator[KittyInstall]:
+    """Build an isolated kitty with one profile and the default keys file, and stop every bridge it ran at teardown.
+
+    Args:
+        tmp_path: pytest's per-test temporary directory.
+
+    Yields:
+        The isolated installation.
+    """
+    yield from _isolated_install(tmp_path, with_keys=True)
+
+
+@pytest.fixture
+def kitty_install_without_keys(tmp_path: Path) -> Iterator[KittyInstall]:
+    """Build an isolated kitty with no keys file anywhere: the fresh-install shape (KBR-230).
+
+    Args:
+        tmp_path: pytest's per-test temporary directory.
+
+    Yields:
+        The isolated installation.
+    """
+    yield from _isolated_install(tmp_path, with_keys=False)
 
 
 class TestKittyBridgeFindsTheBridgeItStarted:
@@ -354,3 +388,137 @@ class TestKittyBridgeFindsAServiceStartedBridge:
             # `stop` ends the process outright, so there is no handler to have run.
             proc.wait(timeout=_PROCESS_EXIT_TIMEOUT_SECONDS)
             assert proc.returncode == 0, f"the bridge did not shut down cleanly: exit {proc.returncode}"
+
+
+class TestABridgeWithNoKeysFileStartsWithAuthOff:
+    """The fresh-install case (KBR-230): nothing creates a keys file, so auth is off, not a crash."""
+
+    def test_start_serves_healthz_without_credentials_and_stop_ends_it(
+        self, kitty_install_without_keys: KittyInstall
+    ):
+        """``kitty bridge start`` succeeds with no keys file and ``/healthz`` answers without credentials.
+
+        Before KBR-230 the start died in ``parse_keys_file`` with a
+        ``FileNotFoundError`` traceback: the config default named a file nothing
+        creates.
+        """
+        install = kitty_install_without_keys
+        state_file = install.home / ".config" / "kitty" / "bridge_state.json"
+
+        code, output = install.kitty("bridge", "start")
+        assert code == 0, f"kitty bridge start failed without a keys file:\n{output}"
+        assert "http://127.0.0.1:" in output, output
+        assert "Traceback" not in output, output
+        state = load_state(state_file)
+        assert state is not None, f"the bridge recorded no state:\n{output}"
+
+        # Auth off is a claim about the wire, not the exit code: the middleware
+        # would 401 this request if any keys file had been loaded (the control
+        # for that is TestAKeysFilePresentKeepsAuthOn).
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with opener.open(f"http://{state.host}:{state.port}/healthz", timeout=10) as response:
+            assert response.status == 200, f"/healthz answered {response.status}"
+
+        code, output = install.kitty("bridge", "stop")
+        assert code == 0, f"kitty bridge stop failed:\n{output}"
+
+    def test_an_explicitly_named_missing_keys_file_fails_with_a_clear_error(
+        self, kitty_install_without_keys: KittyInstall
+    ):
+        """A ``keys_file:`` naming a missing file stops the start with one clear line, not a traceback.
+
+        An explicit configuration is never silently ignored (KBR-230 AC-2).
+        """
+        install = kitty_install_without_keys
+        named = install.root / "absent" / "keys.txt"
+        (install.config_dir / "bridge.yaml").write_text(
+            f"host: 127.0.0.1\nport: 0\nkeys_file: {named}\n", encoding="utf-8"
+        )
+
+        code, output = install.kitty("bridge", "start")
+        assert code == 1, f"the start ignored a named missing keys file:\n{output}"
+        assert f"Keys file not found: {named}" in output, output
+        assert "Traceback" not in output, output
+
+
+class TestAKeysFilePresentKeepsAuthOn:
+    """The control for the auth-off test: with the default keys file present, the bridge 401s."""
+
+    def test_healthz_rejects_a_request_without_credentials(self, kitty_install: KittyInstall):
+        """``/healthz`` without a Bearer key returns 401 while a keys file is in play.
+
+        Proves the auth-off test's 200 means the middleware is disabled, not
+        that `/healthz` is open by design.
+        """
+        install = kitty_install
+        state_file = install.home / ".config" / "kitty" / "bridge_state.json"
+
+        code, output = install.kitty("bridge", "start")
+        assert code == 0, f"kitty bridge start failed:\n{output}"
+        state = load_state(state_file)
+        assert state is not None, f"the bridge recorded no state:\n{output}"
+
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        rejected: urllib.error.HTTPError | None = None
+        try:
+            opener.open(f"http://{state.host}:{state.port}/healthz", timeout=10).read()
+        except urllib.error.HTTPError as exc:
+            rejected = exc
+        assert rejected is not None and rejected.code == 401, (
+            f"the bridge answered an unauthenticated /healthz with a keys file in play:\n{output}"
+        )
+
+        code, output = install.kitty("bridge", "stop")
+        assert code == 0, f"kitty bridge stop failed:\n{output}"
+
+
+class TestBridgeConfigReportsTheEffectiveKeysFile:
+    """``kitty bridge config`` shows the auth a start would really apply (KBR-230)."""
+
+    def test_a_fresh_install_reports_auth_disabled(self, kitty_install_without_keys: KittyInstall):
+        """With nothing named and no default file, the display says auth is off."""
+        code, output = kitty_install_without_keys.kitty("bridge", "config")
+        assert code == 0, f"kitty bridge config failed:\n{output}"
+        assert "Keys file: (none — auth disabled)" in output, output
+
+    def test_a_default_keys_file_is_reported_by_path(self, kitty_install: KittyInstall):
+        """With the default keys file present, the display shows its path."""
+        install = kitty_install
+        default = install.home / ".config" / "kitty" / "bridge_keys.txt"
+
+        code, output = install.kitty("bridge", "config")
+        assert code == 0, f"kitty bridge config failed:\n{output}"
+        assert f"Keys file: {default}" in output, output
+
+    def test_a_named_present_keys_file_displays_as_a_bare_path(self, kitty_install: KittyInstall):
+        """Row 1: a named keys file that exists prints as a bare path, no suffix (KBR-230).
+
+        Pins the trailing newline so a regression printing the not-found
+        suffix on a working configuration cannot pass.
+        """
+        install = kitty_install
+        named = install.root / "client-keys.txt"
+        named.write_text("another-e2e-client-key\n", encoding="utf-8")
+        (install.config_dir / "bridge.yaml").write_text(
+            f"host: 127.0.0.1\nport: 0\nkeys_file: {named}\n", encoding="utf-8"
+        )
+
+        code, output = install.kitty("bridge", "config")
+        assert code == 0, f"kitty bridge config failed:\n{output}"
+        assert f"Keys file: {named}\n" in output, output
+
+    def test_a_named_missing_keys_file_is_flagged_in_the_display(self, kitty_install_without_keys: KittyInstall):
+        """A named-but-missing keys file does not display like a working one (KBR-230).
+
+        §1.6's row 2 and row 1 must be distinguishable on screen, or the user
+        reads auth-on from a `bridge start` that will be refused.
+        """
+        install = kitty_install_without_keys
+        named = install.root / "absent" / "keys.txt"
+        (install.config_dir / "bridge.yaml").write_text(
+            f"host: 127.0.0.1\nport: 0\nkeys_file: {named}\n", encoding="utf-8"
+        )
+
+        code, output = install.kitty("bridge", "config")
+        assert code == 0, f"kitty bridge config failed:\n{output}"
+        assert f"Keys file: {named} (not found" in output, output

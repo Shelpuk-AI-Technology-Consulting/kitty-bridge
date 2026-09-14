@@ -79,6 +79,11 @@ class MiniMaxTokenAnthropicAdapter(AnthropicAdapter):
     #: fields before (KBR-228 part B; the P5d precedent).
     forwards_thinking_signature = False
 
+    #: MiniMax's Anthropic-compatible endpoint rejects bodies carrying
+    #: ``output_config`` (module docstring); restoring it here would turn a
+    #: request that works today into a 400.  KBR-224.
+    forwards_output_config = False
+
     def __init__(
         self,
         *,

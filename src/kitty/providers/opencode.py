@@ -122,6 +122,10 @@ class OpenCodeGoAdapter(AnthropicAdapter):
     #: recognises only Anthropic's rejection wording (KBR-228 part B).
     forwards_thinking_signature = False
 
+    #: The Messages route's upstreams (MiniMax rejects the field outright; Qwen
+    #: does not document it) cannot safely receive ``output_config``.  KBR-224.
+    forwards_output_config = False
+
     @property
     def provider_type(self) -> str:
         return "opencode_go"

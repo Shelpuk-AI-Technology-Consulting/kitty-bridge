@@ -50,8 +50,11 @@ _CC_MODEL = "claude-sonnet-4-5"
 _EXTRA_MODELS: dict[str, tuple[str, ...]] = {"opencode_go": ("minimax-m2.5",)}
 
 #: Adapters whose upstream body comes from ``AnthropicAdapter``'s rebuild, which
-#: is what restores ``thinking`` and ``effort`` from the internal keys.  The
-#: three subclasses reach it whenever ``_native_messages_request`` is unset.
+#: is what restores ``thinking`` and ``effort`` from the internal keys, and
+#: ``output_config`` on the two upstreams that document the field (KBR-224:
+#: withheld on ``minimax_token`` and ``zai_coding``; ``opencode_go``'s Messages
+#: route likewise withholds).  The subclasses reach the rebuild whenever
+#: ``_native_messages_request`` is unset.
 _ANTHROPIC_REBUILD_ADAPTERS = ("anthropic", "custom_anthropic", "minimax_token", "zai_coding")
 
 #: Placeholder values by key, so an adapter that reads a key finds the shape it
@@ -60,6 +63,7 @@ _PLACEHOLDERS: dict[str, object] = {
     "_provider_config": {},
     "_original_body": {"model": _CC_MODEL},
     "_resolved_key": "test-key",
+    "_output_config": {"effort": "high"},
     "base_url": "https://upstream.kitty-test.invalid",
 }
 

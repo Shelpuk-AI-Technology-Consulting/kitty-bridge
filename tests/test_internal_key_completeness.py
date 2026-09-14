@@ -47,6 +47,9 @@ pytestmark = pytest.mark.l2
 _EXPECTED_KEYS: dict[str, set[str]] = {
     "bridge/messages/translator.py": {
         "_effort",
+        # KBR-224: the agent's `output_config`, restored by AnthropicAdapter
+        # where the upstream documents the field.
+        "_output_config",
         "_reasoning_effort",
         # KBR-228 part B: the agent's original system value, restored verbatim
         # by the Anthropic-family adapters on the signature-binding routes.
