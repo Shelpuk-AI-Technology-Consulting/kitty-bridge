@@ -284,7 +284,7 @@ class TestTheCommittedCorpusIsFresh:
             encoding="utf-8",
         )
 
-        with pytest.raises(AssertionError):
+        with pytest.raises(AssertionError, match="install line"):
             self._pin_from(relaxed)
 
     def test_a_workflow_whose_pin_disagrees_with_its_twin_fails_loudly(self, tmp_path: Path) -> None:

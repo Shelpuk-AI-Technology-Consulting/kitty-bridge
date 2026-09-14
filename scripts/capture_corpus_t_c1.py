@@ -223,20 +223,22 @@ async def _capture_session(
     upstream = RecordingUpstream(default_format=WireFormat.ANTHROPIC_MESSAGES)
     if scripted is not None:
         upstream.responder = _queue_responder(list(scripted))
-    await upstream.start()
-    scratch = Path(tempfile.mkdtemp(prefix=f"kbr44-{name}-"))
-    try:
-        proc = await _run_cc(scratch, upstream._port, prompt, effort=effort, bare=bare, timeout=180)
-        captured = list(upstream.requests)
-        print(f"[{name}] exit={proc.returncode} stdout_lines={len(proc.stdout.splitlines())} "
-              f"captured={len(captured)}")
-        if proc.returncode != 0:
-            head = (proc.stderr or proc.stdout).splitlines()[:6]
-            for line in head:
-                print(f"    {line}")
-        return captured
-    finally:
-        await upstream.stop()
+    with tempfile.TemporaryDirectory(prefix=f"kbr44-{name}-") as home_str:
+        scratch = Path(home_str)
+        await upstream.start()
+        try:
+            proc = await _run_cc(scratch, upstream.port, prompt,
+                                  effort=effort, bare=bare, timeout=180)
+            captured = list(upstream.requests)
+            print(f"[{name}] exit={proc.returncode} stdout_lines={len(proc.stdout.splitlines())} "
+                  f"captured={len(captured)}")
+            if proc.returncode != 0:
+                head = (proc.stderr or proc.stdout).splitlines()[:6]
+                for line in head:
+                    print(f"    {line}")
+            return captured
+        finally:
+            await upstream.stop()
 
 
 def _summarise(label: str, captured: list) -> None:

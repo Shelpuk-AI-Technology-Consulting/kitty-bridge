@@ -97,11 +97,11 @@
     ],
     [
       "Content-Length",
-      "119879"
+      "119849"
     ]
   ],
   "body_file": "tools_declared.body",
-  "body_sha256": "25930a4a9db93b2885a1c1c0312f7b5f8bfc870eef0e0b8147cce205d5a1dab3",
+  "body_sha256": "a795121907e8298c97853879a6cb8efc7f504692388cb0f824f8a4243b34dac6",
   "wire_format": "anthropic_messages",
   "known_non_secrets": [],
   "triggers_met": [
