@@ -1664,7 +1664,7 @@ def residual_path(key: str) -> str:
     return f"residual[{key}]"
 
 
-def residual_key(prefix: str, key: str | None = None, index: int | str | None = None) -> str:
+def residual_key(prefix: str, key: str | None = None, index: int | None = None) -> str:
     """Return the residual key naming one unclassified value inside a body.
 
     §7.4.1 fixes two rules and this builder is the one shared spelling of
@@ -1704,11 +1704,14 @@ def residual_key(prefix: str, key: str | None = None, index: int | str | None = 
         ValueError: When the arguments cannot spell a body path — an empty
             ``prefix`` with an ``index`` (``"[0].field"`` is not a path),
             an explicitly-passed empty ``key`` (``"prefix."`` is a trailing
-            dot), or an ``index`` that is a ``bool``, a ``float``, or the
-            :data:`WILDCARD` sentinel.  ``bool`` is rejected despite being
-            a subclass of ``int``, matching :func:`_index`; ``WILDCARD`` is
-            rejected *unlike* :func:`_index` because §7.4.1 fixes residual
-            keys as array positions, never patterns.
+            dot), or an ``index`` that is not an ``int``.  The three
+            non-int cases are worth naming separately: ``bool`` is
+            rejected despite being a subclass of ``int`` (matching
+            :func:`_index`), a ``float`` would silently build
+            ``prefix[1.5]``, and *any* string — including the
+            :data:`WILDCARD` sentinel — is rejected *unlike*
+            :func:`_index`, because §7.4.1 fixes residual keys as array
+            positions, never patterns.
 
     Examples:
         >>> residual_key("tool_choice")
