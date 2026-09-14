@@ -215,6 +215,29 @@ class TestToolRunRejoin:
             "content": [_tool_result("a"), _PDF_BLOCK],
         }
 
+    def test_image_beside_tool_result_rejoins_into_one_user_message(self):
+        """An image sibling ships inside the re-joined user message, bytes intact."""
+        wire = _route(
+            _messages_body(
+                {"role": "user", "content": "go"},
+                _assistant_tool_calls("a"),
+                {
+                    "role": "user",
+                    "content": [
+                        _tool_result("a"),
+                        {"type": "image", "source": dict(_PNG_SOURCE)},
+                    ],
+                },
+            )
+        )
+        assert wire["messages"][-1] == {
+            "role": "user",
+            "content": [
+                _tool_result("a"),
+                {"type": "image", "source": _PNG_SOURCE},
+            ],
+        }
+
     def test_bare_parallel_tool_results_keep_two_messages(self):
         """Without a trailing user turn, today's per-result messages are unchanged."""
         wire = _route(
