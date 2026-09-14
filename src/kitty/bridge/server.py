@@ -4062,6 +4062,15 @@ class BridgeServer:
         # plain-POST failover sites and the three dispatch signals (completed,
         # re-dispatch, cross-mode fall-through).
         _crossings = 0
+        # The bound is generous by construction: each crossing consumes a
+        # backend's health (the failover that caused it marked its source
+        # unhealthy), so a healthy other-class peer is the precondition for
+        # the next hop. `2 * n_backends` covers both directions with margin;
+        # the `+1` absorbs the initial-entry leg, which is not a crossing.
+        # In a healthy pool the test's plain → custom hop is the only
+        # crossing, so this cap never fires in normal operation — it is
+        # defence in depth against pathological cooldown-expiry ping-pong
+        # (§5.3 S7 of `SYSTEM_DESIGN.md`).
         _max_crossings = (2 * (len(self._backends) if self._backends else 1)) + 1
 
         while True:
