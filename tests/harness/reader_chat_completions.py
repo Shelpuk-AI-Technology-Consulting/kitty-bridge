@@ -1,0 +1,1000 @@
+"""The Chat Completions reader — `POST /v1/chat/completions` into the common form.
+
+`.system_design/TEST_SUITE.md` §3.3.1, §3.3.1a, §3.3.1b, §7.4.1 · plan task
+**T-A2** (KBR-34).
+
+This module **imports nothing from** ``src/kitty``, and must not. §3.3.1's
+independent-oracle rule: a reader validated against kitty's output inherits
+kitty's bugs and the oracle becomes circular. It is written against OpenAI's
+published schema — `openai/openai-openapi` master, retrieved 2026-09-14, the same
+source the design doc cites for G37's cache-breakpoint facts.
+
+**It reads both ends of the comparison.** The oracle calls it on the inbound body
+Claude Code sent the bridge *and* on the captured upstream body wherever an
+adapter speaks Chat Completions — the translated shape `AnthropicAdapter`,
+`OllamaCloudAdapter` and friends rebuild. One reader, both sides, which is why
+`system` and `developer` roles and the deprecated `function` role are all
+accounted for: real Claude Code and real adapters can both send them.
+
+**Totality is the load-bearing property.** Every key of the body, at every depth,
+is either mapped and named in :attr:`~harness.contract.Request.consumed`, or
+placed in :attr:`~harness.contract.Request.residual` under its path from the body
+root. Nothing is dropped silently — an unaccounted field is precisely where an
+unregistered mutation hides.
+
+**§3.3.1b's merge rule, on this format, is satisfied vacuously for clause 3.**
+Chat Completions delivers tool results contiguously in their own ``tool``
+messages, so the run and following-message clauses do all the work; the
+results-first clause has nothing to reorder. §7.4.1 records the distinction.
+"""
+
+from __future__ import annotations
+
+import base64
+import json
+import re
+from collections.abc import Mapping, Sequence
+from typing import Any
+
+from harness import contract as c
+
+# --------------------------------------------------------------------------
+# The recognised key sets
+# --------------------------------------------------------------------------
+
+#: Published top-level control fields that map to ``envelope.extra`` under their
+#: own wire key. Sourced from `openai/openai-openapi` master's
+#: ``CreateChatCompletionRequest`` (retrieved 2026-09-14), which folds the
+#: request properties of ``CreateModelResponseProperties`` into the CC surface.
+#: ``parallel_tool_calls`` is deliberately **not** in this set: §3.3.1b (KBR-205,
+#: closing G36) fixes a canonical address for the parallel-tool-use knob,
+#: and this reader is the first to *read* it directly rather than write it.
+_PUBLISHED_EXTRA_KEYS = frozenset(
+    {
+        "store",
+        "metadata",
+        "service_tier",
+        "reasoning_effort",
+        "verbosity",
+        "modalities",
+        "prediction",
+        "user",
+        "web_search_options",
+        "prompt_cache_options",
+    }
+)
+
+#: Sampling parameters, mapped onto the canonical Chat Completions spelling
+#: (§3.3.1b). Chat Completions **is** the spelling the closed set was derived
+#: from, so this table is the identity — no rename, no shift. ``max_tokens``
+#: (the older spelling) and ``max_completion_tokens`` both map onto themselves,
+#: and P13 drops the two in their own right, so a reader that collapsed them
+#: would hide a P13 delta.
+_SAMPLING_KEYS = frozenset(
+    {
+        "temperature",
+        "top_p",
+        "max_tokens",
+        "max_completion_tokens",
+        "frequency_penalty",
+        "presence_penalty",
+        "logprobs",
+        "top_logprobs",
+        "response_format",
+        "stop",
+        "n",
+        "stream_options",
+        "seed",
+        "logit_bias",
+    }
+)
+
+#: Roles that lift into ``conversation.system`` rather than becoming a turn
+#: (§3.3.1b). ``system`` is the older spelling; ``developer`` replaced it, and
+#: both name one concept on the wire.
+_SYSTEM_ROLES = frozenset({"system", "developer"})
+
+#: Every role a published Chat Completions message may carry. Anything else is a
+#: body this reader cannot read — :class:`~harness.contract.UnreadableBodyError`'s
+#: own documented case. ``function`` (deprecated, replaced by ``tool``) is
+#: **deliberately not** in the set: the bridge does not translate the legacy
+#: spelling, so a body carrying it is one the product cannot faithfully forward,
+#: and residualising it at its own path names the shape rather than inventing a
+#: projection.
+_MESSAGE_ROLES = _SYSTEM_ROLES | {"user", "assistant", "tool"}
+
+#: Content-part types a ``user`` message may carry. ``input_audio`` and ``file``
+#: project as :class:`~harness.contract.Opaque` per the alias rule — neither the
+#: grammar nor any reader models their payload.
+_USER_PART_TYPES = frozenset({"text", "image_url", "input_audio", "file"})
+
+#: Content-part types an ``assistant`` message may carry. The schema allows
+#: exactly ``text`` and ``refusal`` — a refusal is a bare string on the message
+#: or one ``refusal`` part in the array, and both name one concept.
+_ASSISTANT_PART_TYPES = frozenset({"text", "refusal"})
+
+#: Content-part types a ``tool`` message may carry. The schema allows only
+#: ``text`` — a tool result's richer shapes (image, file) belong to the
+#: destination wire, not the CC request body.
+_TOOL_PART_TYPES = frozenset({"text"})
+
+#: The cache-breakpoint keys a content part or a tool declaration may carry.
+#: Both spellings fill :attr:`~harness.contract.Text.cache_control` **verbatim**
+#: (§11 Q16, closing G37): the slot is ``Mapping[str, Any] | None``, and §3.3.1's
+#: "carried whole, not reduced" rule applies to a spelling with no TTL
+#: (``prompt_cache_breakpoint``, request-wide TTL in ``prompt_cache_options``)
+#: the same way it applies to one with.
+_CACHE_KEYS = frozenset({"cache_control", "prompt_cache_breakpoint"})
+
+#: Tool-choice strings whose canonical values already agree — CC's ``required``
+#: maps to ``any`` because both name "the model must call one or more tools",
+#: which is the mapping KBR-214 fixed and T-A3 shipped.
+_TOOL_CHOICE_STRINGS: Mapping[str, str] = {
+    "none": "none",
+    "auto": "auto",
+    "required": "any",
+}
+
+#: Tool-choice object ``type`` spellings whose ``function``/``custom`` member
+#: carries a ``name`` — the named form §3.3.1b maps to ``tool:<name>``.
+_TOOL_CHOICE_BY_NAME = frozenset({"function", "custom"})
+
+#: A ``data:`` URL carrying base64 image bytes, with its media type.
+_DATA_URL = re.compile(r"^data:([^;,]+);base64,(.*)$", re.DOTALL)
+
+#: Any ``data:`` URL at all — a non-base64 one residualises instead of falling
+#: through to :attr:`~harness.contract.Image.ref`, so a projection cannot agree
+#: with the Responses reader on an unchanged image one way and disagree on
+#: another. The two readers' :attr:`~harness.contract.Image` shapes must match
+#: for the §3.3.1b comparison to be meaningful.
+_ANY_DATA_URL = re.compile(r"^data:", re.IGNORECASE)
+
+
+class ChatCompletionsProjection:
+    """Reads an OpenAI Chat Completions request into the wire-independent form.
+
+    Implements :class:`~harness.contract.Projection` for
+    :attr:`~harness.contract.WireFormat.CHAT_COMPLETIONS`.
+
+    The reader is stateless; every method takes what it needs and returns what
+    it produced, so one instance is safe to share across a whole corpus run.
+    """
+
+    wire_format = c.WireFormat.CHAT_COMPLETIONS
+
+    def read_request(self, captured: c.CapturedRequest) -> c.Request:
+        """Project a captured Chat Completions request.
+
+        Args:
+            captured: The request as observed on the wire. Only the body is
+                consulted — unlike Gemini, Chat Completions carries neither the
+                model nor the operation in the URL.
+
+        Returns:
+            The wire-independent projection, total over the body.
+
+        Raises:
+            UnreadableBodyError: When the body cannot be read — malformed JSON,
+                a role no Chat Completions message defines, a message with no
+                ``role``, or a content block with no ``type``. ``ValueError`` is
+                deliberately **not** caught: from inside a reader it means the
+                reader mis-routed a field, which is a reader bug and must
+                surface.
+        """
+        body = _parse_body(captured.body)
+
+        try:
+            return _project(body)
+        except (KeyError, TypeError, AttributeError) as exc:
+            raise c.UnreadableBodyError(f"unreadable Chat Completions body: {exc!r}") from exc
+
+
+def _parse_body(raw: bytes) -> Mapping[str, Any]:
+    """Decode the request body into a JSON object.
+
+    Args:
+        raw: The raw body bytes.
+
+    Returns:
+        The parsed body.
+
+    Raises:
+        UnreadableBodyError: When the bytes are not JSON, or are JSON that is
+            not an object. A JSON array is valid JSON and an invalid request.
+    """
+    try:
+        body = json.loads(raw)
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise c.UnreadableBodyError(f"body is not valid JSON: {exc}") from exc
+
+    if not isinstance(body, dict):
+        raise c.UnreadableBodyError(f"body must be a JSON object, got {type(body).__name__}")
+
+    return body
+
+
+def _project(body: Mapping[str, Any]) -> c.Request:
+    """Classify every top-level key into the envelope, the conversation or the residual.
+
+    Args:
+        body: The parsed request body.
+
+    Returns:
+        The projection.
+
+    Raises:
+        UnreadableBodyError: Propagated from the per-field readers.
+    """
+    residual: dict[str, Any] = {}
+    consumed: set[str] = set()
+    extra: dict[str, Any] = {}
+    sampling: dict[str, Any] = {}
+
+    # The envelope's two named fields, then every other control field the format
+    # defines, keyed by the wire key so a register row can name it (§3.3.1a).
+    # `parallel_tool_calls` is routed through `PARALLEL_TOOL_CALLS_KEY` rather
+    # than the wire key so the two spellings cannot drift if either ever
+    # changes — the wire key is already the canonical spelling today, and the
+    # alias keeps it that way by construction.
+    for key, value in body.items():
+        if key in ("model", "stream", "messages", "tools"):
+            consumed.add(key)
+        elif key in _SAMPLING_KEYS:
+            sampling[key] = value
+            consumed.add(key)
+        elif key == "tool_choice":
+            extra[c.TOOL_CHOICE_KEY] = _read_tool_choice(value)
+            consumed.add(key)
+        elif key == "parallel_tool_calls":
+            parallel = _typed_leaf(body, "parallel_tool_calls", bool, "", residual)
+            if parallel is not None:
+                extra[c.PARALLEL_TOOL_CALLS_KEY] = parallel
+            consumed.add(key)
+        elif key in _PUBLISHED_EXTRA_KEYS:
+            # Keyed by the wire key, never nested (§3.3.1a). `store` joins
+            # this set for the same reason: the canonical address is the wire
+            # key, and `Envelope.store`'s `bool | None` would coerce a
+            # `"true"` string the schema forbids — a wrongly-typed leaf
+            # residualises, so reading it here and letting `Envelope` carry
+            # `None` for a body that never sent it is the honest shape.
+            extra[key] = value
+            consumed.add(key)
+        else:
+            residual[key] = value
+
+    messages = body.get("messages")
+    system = _read_system_messages(messages)
+    turns = _read_messages(messages, residual)
+
+    conversation = c.Conversation(
+        system=system,
+        turns=turns,
+        tools=_read_tools(body.get("tools"), residual),
+        sampling=sampling,
+    )
+
+    envelope = c.Envelope(
+        model=_typed_leaf(body, "model", str, "", residual),
+        stream=_typed_leaf(body, "stream", bool, "", residual),
+        # `store` rides `extra[store]` like every other CC control field; the
+        # grammar's named `Envelope.store` is Responses-only (§3.3.1a), and
+        # giving CC's `store` a second address would let a comparison see one
+        # side carrying it and the other not.
+        store=None,
+        extra=extra,
+    )
+
+    return c.Request(
+        envelope=envelope,
+        conversation=conversation,
+        residual=residual,
+        consumed=frozenset(consumed),
+        source=body,
+    )
+
+
+def _read_system_messages(value: Any) -> tuple[c.Text, ...]:
+    """Lift ``system`` and ``developer`` messages into ordered text parts.
+
+    Runs as a second pass over ``messages`` because :class:`~harness.contract.
+    Conversation` takes ``system`` and ``turns`` in one constructor call, and a
+    role that is system-shaped in the turns pass is a system here too — lifting
+    it in two places would disagree the first time a body carried both.
+
+    Args:
+        value: The ``messages`` field, absent or a list of messages.
+
+    Returns:
+        The system text, in order.
+
+    Raises:
+        UnreadableBodyError: Propagated from :func:`_read_one_message`.
+    """
+    if value is None:
+        return ()
+
+    parts: list[c.Text] = []
+    for index, message in enumerate(value):
+        if isinstance(message, dict) and message.get("role") in _SYSTEM_ROLES:
+            parts.extend(_system_parts(message, index))
+    return tuple(parts)
+
+
+def _system_parts(message: Mapping[str, Any], index: int) -> tuple[c.Text, ...]:
+    """Read one system or developer message's content into text parts.
+
+    Args:
+        message: The message object.
+        index: The message's position, for residual keys.
+
+    Returns:
+        The message's text parts, in order.
+
+    Raises:
+        UnreadableBodyError: When the content is neither a string nor a list,
+            or a part is not an object carrying ``type: "text"``.
+    """
+    content = message.get("content")
+    if isinstance(content, str):
+        return (c.Text(content),)
+    if not isinstance(content, list):
+        raise c.UnreadableBodyError(
+            f"messages[{index}] system content must be a string or a list, got {type(content).__name__}"
+        )
+
+    parts: list[c.Text] = []
+    for part_index, part in enumerate(content):
+        if not isinstance(part, dict):
+            raise c.UnreadableBodyError(
+                f"messages[{index}].content[{part_index}] must be an object"
+            )
+        if part.get("type") != "text":
+            raise c.UnreadableBodyError(
+                f"messages[{index}].content[{part_index}] must be a text part"
+            )
+        text = part.get("text")
+        if not isinstance(text, str):
+            raise c.UnreadableBodyError(
+                f"messages[{index}].content[{part_index}] text must be a string"
+            )
+        parts.append(c.Text(text))
+    return tuple(parts)
+
+
+def _read_messages(value: Any, residual: dict[str, Any]) -> tuple[c.Turn, ...]:
+    """Read the conversation turns per §3.3.1b's merge rule.
+
+    Args:
+        value: The ``messages`` field, absent or a list of messages.
+        residual: The residual mapping, extended with anything the grammar
+            cannot carry.
+
+    Returns:
+        The turns, normalised.
+
+    Raises:
+        UnreadableBodyError: When ``messages`` is not a list, a message is not
+            an object or lacks ``role``/``content``, or a role is not one
+            :data:`_MESSAGE_ROLES` names.
+    """
+    if value is None:
+        # Absent is not an error, the T-A1 precedent: the oracle catches a
+        # vanished conversation as a `conversation.turns` delta, which is a
+        # better diagnosis than an unreadable-body error.
+        return ()
+
+    if not isinstance(value, list):
+        raise c.UnreadableBodyError(f"messages must be a list, got {type(value).__name__}")
+
+    turns: list[c.Turn] = []
+    for index, message in enumerate(value):
+        if not isinstance(message, dict):
+            raise c.UnreadableBodyError(f"messages[{index}] must be an object")
+        if "role" not in message:
+            raise c.UnreadableBodyError(f"messages[{index}] lacks a role")
+
+        role = message["role"]
+        if role in _SYSTEM_ROLES:
+            # Lifted by `_read_system_messages`; not a turn. Residualising the
+            # message's keys here would put `content` in the residual twice —
+            # once here, once in the system pass — so this pass just claims
+            # the keys it consumed.
+            consumed_system = {"role", "content"} | ({"name"} if "name" in message else set())
+            _residualise(message, consumed_system, c.residual_key("messages", index=index), residual)
+            continue
+        if role not in _MESSAGE_ROLES:
+            raise c.UnreadableBodyError(
+                f"messages[{index}] role must be one of {sorted(_MESSAGE_ROLES)}, got {role!r}"
+            )
+
+        turns.append(_read_one_message(message, index, residual))
+
+    return _normalise_turns(turns)
+
+
+def _read_one_message(
+    message: Mapping[str, Any], index: int, residual: dict[str, Any]
+) -> c.Turn:
+    """Read one ``user``, ``assistant`` or ``tool`` message into a turn.
+
+    Args:
+        message: The message object.
+        index: The message's position, for residual keys.
+        residual: The residual mapping.
+
+    Returns:
+        The turn, with its parts in the wire's order.
+
+    Raises:
+        UnreadableBodyError: When a content part or a tool call is malformed.
+    """
+    role = message["role"]
+    path = c.residual_key("messages", index=index)
+
+    if role == "tool":
+        # A `tool` message is a `ToolResult` part inside a `user` turn. Its
+        # `tool_call_id` populates `ToolResult.tool_use_id`; its content is
+        # always text per the schema.
+        tool_call_id = message.get("tool_call_id")
+        if not isinstance(tool_call_id, str):
+            raise c.UnreadableBodyError(f"{path} tool message must carry a string tool_call_id")
+        content = _read_result_content(message.get("content"), path, residual)
+        _residualise(message, {"role", "content", "tool_call_id"}, path, residual)
+        return c.Turn(role="user", parts=(c.ToolResult(content=content, tool_use_id=tool_call_id),))
+
+    if role == "assistant":
+        parts: list[c.Part] = []
+        tool_calls = message.get("tool_calls")
+        if tool_calls is not None:
+            if not isinstance(tool_calls, list):
+                raise c.UnreadableBodyError(f"{path} tool_calls must be a list")
+            parts.extend(_read_tool_calls(tool_calls, path, residual))
+
+        content_parts = _read_content(message.get("content"), path, residual, _ASSISTANT_PART_TYPES)
+        parts.extend(content_parts)
+
+        _residualise(
+            message,
+            {"role", "content", "tool_calls", "name", "refusal", "audio", "function_call"},
+            path,
+            residual,
+        )
+        return c.Turn(role="assistant", parts=tuple(parts))
+
+    # role == "user"
+    parts = list(_read_content(message.get("content"), path, residual, _USER_PART_TYPES))
+    _residualise(message, {"role", "content", "name"}, path, residual)
+    return c.Turn(role="user", parts=tuple(parts))
+
+
+def _read_tool_calls(
+    value: Sequence[Any], path: str, residual: dict[str, Any]
+) -> list[c.Part]:
+    """Read one assistant message's ``tool_calls`` into ``ToolUse`` parts.
+
+    Args:
+        value: The message's ``tool_calls`` list.
+        path: The message's path from the body root, for residual keys.
+        residual: The residual mapping.
+
+    Returns:
+        The ``ToolUse`` parts, in the wire's order.
+
+    Raises:
+        UnreadableBodyError: When a call carries no ``id``, no ``function``,
+            or a ``function`` with no ``name``.
+    """
+    parts: list[c.Part] = []
+    for index, call in enumerate(value):
+        call_path = f"{path}.tool_calls[{index}]"
+        if not isinstance(call, dict):
+            raise c.UnreadableBodyError(f"{call_path} must be an object")
+
+        kind = call.get("type")
+        function = call.get("function")
+        if kind == "custom" and function is None:
+            # OpenAI's `custom` tool-call shape carries `custom.name` and
+            # `custom.input`, not `function`. `ToolUse` models the `function`
+            # shape; a `custom` one residuals at its own path — it is rare,
+            # and forcing it into `ToolUse` would invent a mapping the design
+            # has not decided.
+            _residualise(call, set(call), call_path, residual)
+            continue
+
+        if not isinstance(function, dict):
+            raise c.UnreadableBodyError(f"{call_path} must carry a function object")
+        if not isinstance(call.get("id"), str):
+            raise c.UnreadableBodyError(f"{call_path} must carry a string id")
+        if not isinstance(function.get("name"), str):
+            raise c.UnreadableBodyError(f"{call_path}.function must carry a name")
+
+        _residualise(
+            call, {"type", "id", "function", "index"}, call_path, residual
+        )
+        _residualise(
+            function,
+            {"name", "arguments"},
+            f"{call_path}.function",
+            residual,
+        )
+        parts.append(
+            c.ToolUse(
+                name=function["name"],
+                arguments=c.decode_arguments(
+                    function.get("arguments"),
+                    c.residual_key(f"{call_path}.function", "arguments"),
+                    residual,
+                ),
+                id=call["id"],
+            )
+        )
+    return parts
+
+
+def _read_content(
+    value: Any,
+    path: str,
+    residual: dict[str, Any],
+    part_types: frozenset[str],
+) -> tuple[c.Part, ...]:
+    """Read a message's ``content`` into ordered parts.
+
+    Args:
+        value: The ``content`` field: a string, a list of parts, or ``None``
+            (which an assistant message may carry when only ``tool_calls`` are
+            present).
+        path: The message's path from the body root, for residual keys.
+        residual: The residual mapping.
+        part_types: The part types this message's role admits.
+
+    Returns:
+        The parts, in order.
+
+    Raises:
+        UnreadableBodyError: When content is neither a string, a list, nor
+            ``None``, or a part is not an object carrying a type in
+            ``part_types``.
+    """
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        return (c.Text(value),)
+    if not isinstance(value, list):
+        raise c.UnreadableBodyError(
+            f"{path} content must be a string, a list, or null, got {type(value).__name__}"
+        )
+
+    parts: list[c.Part] = []
+    for index, part in enumerate(value):
+        part_path = f"{path}.content[{index}]"
+        parts.append(_read_content_part(part, part_path, residual, part_types))
+    return tuple(parts)
+
+
+def _read_content_part(
+    part: Any, path: str, residual: dict[str, Any], part_types: frozenset[str]
+) -> c.Part:
+    """Read one content part into a part.
+
+    Args:
+        part: The content-part object.
+        path: The part's path from the body root, for residual keys.
+        residual: The residual mapping.
+        part_types: The part types the part's carrying role admits.
+
+    Returns:
+        The part.
+
+    Raises:
+        UnreadableBodyError: When the part is not an object, carries no
+            ``type``, or its type is not one this role admits.
+    """
+    if not isinstance(part, dict):
+        raise c.UnreadableBodyError(f"{path} must be an object, got {type(part).__name__}")
+    kind = part.get("type")
+    if kind not in part_types:
+        raise c.UnreadableBodyError(
+            f"{path} type must be one of {sorted(part_types)}, got {kind!r}"
+        )
+
+    if kind == "text":
+        text = part.get("text")
+        if not isinstance(text, str):
+            raise c.UnreadableBodyError(f"{path} text must be a string")
+        cache_control = _read_cache_control(part, path, residual)
+        _residualise(part, {"type", "text", *_CACHE_KEYS}, path, residual)
+        return c.Text(text, cache_control=cache_control)
+
+    if kind == "refusal":
+        # A refusal part carries the refusal's text in `refusal`. §7.4.1 pins
+        # "a CC refusal is a bare string on the message, so there is no block
+        # for T-A2 to hash" — the string form lands as `Text` with the
+        # refusal's text; the part form is the same shape one level down, and
+        # both project as text so the two spellings agree.
+        refusal = part.get("refusal")
+        if not isinstance(refusal, str):
+            raise c.UnreadableBodyError(f"{path} refusal must be a string")
+        _residualise(part, {"type", "refusal", *_CACHE_KEYS}, path, residual)
+        return c.Text(refusal, cache_control=_read_cache_control(part, path, residual))
+
+    if kind == "image_url":
+        image = _read_image_part(part, path, residual)
+        if image is None:
+            # The image could not be projected (undecodable base64, non-base64
+            # data URL, etc.); the helper residualised the offending entry.
+            # Returning a placeholder Part would still count as an image in
+            # ``verify_total``, but the reader has nothing to put there —
+            # contract's XOR invariant rejects both-None, and an ``Opaque``
+            # would invent a `kind` the schema does not name.
+            return c.Text("")
+        return image
+
+    # `input_audio` and `file` — unmodelled shapes, `Opaque` per the alias rule.
+    return _read_opaque_part(part, str(kind), path, residual)
+
+
+def _read_image_part(
+    part: Mapping[str, Any], path: str, residual: dict[str, Any]
+) -> c.Image | None:
+    """Read an ``image_url`` content part into an :class:`~harness.contract.Image`.
+
+    Args:
+        part: The content-part object.
+        path: The part's path from the body root, for residual keys.
+        residual: The residual mapping.
+
+    Returns:
+        The image part, with a digest when the URL carries decodable bytes and
+        a ``ref`` otherwise; ``None`` when the part carries an undecodable
+        or non-base64 data URL — the helper residualises the offending entry
+        and the caller substitutes an empty Text to keep ``verify_total``
+        honest.
+
+    Raises:
+        UnreadableBodyError: When the part carries no ``image_url`` object.
+    """
+    image_url = part.get("image_url")
+    if not isinstance(image_url, dict):
+        raise c.UnreadableBodyError(f"{path} must carry an image_url object")
+
+    url = image_url.get("url")
+    if not isinstance(url, str):
+        raise c.UnreadableBodyError(f"{path}.image_url must carry a string url")
+
+    cache_control = _read_cache_control(part, path, residual)
+    _residualise(part, {"type", "image_url", *_CACHE_KEYS}, path, residual)
+    _residualise(image_url, {"url", "detail"}, f"{path}.image_url", residual)
+
+    # A `data:` URL carrying base64 bytes projects as a digest — the same
+    # recipe the Responses reader applies, so the two projections agree on an
+    # unchanged image. Any other URL keeps its `ref`.
+    data_match = _DATA_URL.match(url)
+    if data_match:
+        media_type = data_match.group(1)
+        encoded = data_match.group(2)
+        try:
+            decoded = base64.b64decode(encoded, validate=True)
+        except (ValueError, TypeError):
+            residual[f"{path}.image_url.url"] = url
+            return None
+
+        return c.Image(
+            digest=c.image_digest(decoded),
+            media_type=media_type,
+            cache_control=cache_control,
+        )
+    if _ANY_DATA_URL.match(url):
+        # A non-base64 data URL — `data:image/png,abc` — cannot be digested
+        # without inventing a decoding, and `ref` would make the two readers
+        # disagree. Residualised at its own path, the run fails with the
+        # field named.
+        residual[f"{path}.image_url.url"] = url
+        return None
+
+    return c.Image(ref=url, cache_control=cache_control)
+
+
+def _read_opaque_part(
+    part: Mapping[str, Any], kind: str, path: str, residual: dict[str, Any]
+) -> c.Opaque:
+    """Read an ``input_audio`` or ``file`` content part into an :class:`~harness.contract.Opaque`.
+
+    Args:
+        part: The content-part object.
+        kind: The part's wire type, which becomes :attr:`~harness.contract.Opaque.kind`.
+        path: The part's path from the body root, for residual keys.
+        residual: The residual mapping.
+
+    Returns:
+        The opaque part, carrying a digest of its payload.
+
+    Raises:
+        UnreadableBodyError: When the wire type has no canonical name.
+    """
+    _residualise(part, set(part), path, residual)
+
+    try:
+        canonical = c.opaque_kind(kind)
+    except ValueError as exc:
+        raise c.UnreadableBodyError(f"{path}: {exc}") from exc
+
+    return c.Opaque(
+        kind=canonical,
+        digest=c.opaque_digest(part),
+        cache_control=_read_cache_control(part, path, residual),
+    )
+
+
+def _read_result_content(
+    value: Any, path: str, residual: dict[str, Any]
+) -> tuple[c.Text, ...]:
+    """Read a ``tool`` message's ``content`` into text parts.
+
+    Args:
+        value: The ``content`` field: a string or a list of text parts.
+        path: The message's path from the body root.
+        residual: The residual mapping.
+
+    Returns:
+        The result content, in order.
+
+    Raises:
+        UnreadableBodyError: When content is neither a string nor a list, or a
+            part is not an object carrying ``type: "text"``.
+    """
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        return (c.Text(value),)
+    if not isinstance(value, list):
+        raise c.UnreadableBodyError(
+            f"{path} tool content must be a string or a list, got {type(value).__name__}"
+        )
+
+    parts: list[c.Text] = []
+    for index, part in enumerate(value):
+        part_path = f"{path}.content[{index}]"
+        if not isinstance(part, dict):
+            raise c.UnreadableBodyError(f"{part_path} must be an object")
+        if part.get("type") != "text":
+            raise c.UnreadableBodyError(f"{part_path} must be a text part")
+        text = part.get("text")
+        if not isinstance(text, str):
+            raise c.UnreadableBodyError(f"{part_path} text must be a string")
+        _residualise(part, {"type", "text", *_CACHE_KEYS}, part_path, residual)
+        parts.append(c.Text(text, cache_control=_read_cache_control(part, part_path, residual)))
+    return tuple(parts)
+
+
+def _read_tools(value: Any, residual: dict[str, Any]) -> tuple[c.ToolDecl, ...]:
+    """Read the declared tools.
+
+    Args:
+        value: The ``tools`` field, absent or a list of declarations.
+        residual: The residual mapping, extended with any entry key the grammar
+            cannot carry.
+
+    Returns:
+        The declarations, in order.
+
+    Raises:
+        UnreadableBodyError: When ``tools`` is not a list, an entry is not an
+            object, or its ``function`` carries no name.
+    """
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        raise c.UnreadableBodyError(f"tools must be a list, got {type(value).__name__}")
+
+    declared: list[c.ToolDecl] = []
+    for index, tool in enumerate(value):
+        if not isinstance(tool, dict):
+            raise c.UnreadableBodyError(f"tools[{index}] must be an object")
+        path = c.residual_key("tools", index=index)
+
+        kind = tool.get("type")
+        function = tool.get("function")
+        if kind != "function" or not isinstance(function, dict):
+            # A non-function tool declaration (OpenAI's built-ins) residualises
+            # at its own path — the Chat Completions surface kitty translates
+            # to declares only `function` tools, so any other kind is one the
+            # product cannot faithfully forward, and naming it is the
+            # honest answer.
+            residual[path] = tool
+            continue
+
+        if not isinstance(function.get("name"), str):
+            raise c.UnreadableBodyError(f"{path}.function must carry a name")
+
+        schema = function.get("parameters")
+        if schema is not None and not isinstance(schema, dict):
+            residual[c.residual_key("tools", "parameters", index=index)] = schema
+            schema = None
+
+        _residualise(tool, {"type", "function"}, path, residual)
+        _residualise(
+            function,
+            {"name", "description", "parameters", "strict", *_CACHE_KEYS},
+            f"{path}.function",
+            residual,
+        )
+        declared.append(
+            c.ToolDecl(
+                name=function["name"],
+                description=_typed_leaf(
+                    function, "description", str, f"{path}.function", residual
+                ),
+                schema=schema,
+                strict=_typed_leaf(function, "strict", bool, f"{path}.function", residual),
+                # The Chat Completions format does not carry a tool `type`
+                # leaf the way Anthropic's does — the discriminator is the
+                # outer object's `type`, which is `"function"`. Carried as
+                # such, so the two readers' `ToolDecl.type` agree.
+                type="function",
+                cache_control=_read_cache_control(function, f"{path}.function", residual),
+            )
+        )
+    return tuple(declared)
+
+
+def _read_tool_choice(value: Any) -> str:
+    """Normalise a ``tool_choice`` onto its canonical value.
+
+    Four wire keys across the formats name one concept, so §3.3.1b makes the
+    *value* canonical too. Chat Completions carries three strings —
+    ``none``, ``auto``, ``required`` — where ``required`` maps to ``any``
+    (both name "the model must call one or more tools"; the mapping is
+    KBR-214's and T-A3 shipped it), and one named form whose
+    ``function``/``custom`` member carries a ``name``.
+
+    Args:
+        value: The wire value.
+
+    Returns:
+        The canonical value.
+
+    Raises:
+        UnreadableBodyError: When the shape is not one the format publishes.
+            Classified here rather than letting
+            :class:`~harness.contract.Envelope` judge, for the reason T-A1
+            gives: ``Envelope`` accepts any string starting ``tool:``, so a
+            missing name would become the canonical-looking ``"tool:None"``
+            that no register row can interpret.
+    """
+    if isinstance(value, str):
+        if value in _TOOL_CHOICE_STRINGS:
+            return _TOOL_CHOICE_STRINGS[value]
+        raise c.UnreadableBodyError(f"unrecognised tool_choice string {value!r}")
+
+    if not isinstance(value, dict):
+        raise c.UnreadableBodyError(
+            f"tool_choice must be a string or an object, got {type(value).__name__}"
+        )
+
+    kind = value.get("type")
+    if kind in _TOOL_CHOICE_BY_NAME:
+        # The named form. `function` and `custom` carry their member's `name`
+        # — the shape §3.3.1b maps to `tool:<name>`.
+        member_key = "function" if kind == "function" else "custom"
+        member = value.get(member_key)
+        if not isinstance(member, dict):
+            raise c.UnreadableBodyError(
+                f"tool_choice type {kind!r} requires a {member_key} object"
+            )
+        name = member.get("name")
+        if not isinstance(name, str):
+            raise c.UnreadableBodyError(
+                f"tool_choice type {kind!r} requires a {member_key}.name string"
+            )
+        return f"tool:{name}"
+
+    raise c.UnreadableBodyError(f"unrecognised tool_choice type {kind!r}")
+
+
+def _typed_leaf(
+    source: Mapping[str, Any],
+    key: str,
+    expected: type | tuple[type, ...],
+    path: str,
+    residual: dict[str, Any],
+    default: Any = None,
+) -> Any:
+    """Return an optional leaf, residualising it when the wire carried the wrong type.
+
+    §7.4.1's wrongly-typed-leaf rule, the same shape T-A1 ships.
+
+    Args:
+        source: The object being read.
+        key: The leaf's key.
+        expected: The type the format publishes for it.
+        path: The object's path from the body root, or ``""`` for a top-level
+            key, whose residual key is its bare name.
+        residual: The residual mapping, extended in place.
+        default: The grammar's absent value for this field.
+
+    Returns:
+        The leaf, or ``default`` when the wire value was the wrong type.
+    """
+    value = source.get(key, default)
+    if value is not None and not isinstance(value, expected):
+        residual[f"{path}.{key}" if path else key] = value
+        return default
+    return value
+
+
+def _read_cache_control(
+    part: Mapping[str, Any], path: str, residual: dict[str, Any]
+) -> Mapping[str, Any] | None:
+    """Read a content part's or tool declaration's cache breakpoint into the slot.
+
+    Both spellings fill the same slot **verbatim** — the G37 decision, §11 Q16.
+    ``prompt_cache_breakpoint`` carries ``{"mode": "explicit"}`` with no TTL;
+    ``cache_control`` (OpenRouter's CC dialect, Anthropic's own spelling)
+    carries ``{"type": "ephemeral"}`` with an optional ``ttl``. The slot is
+    ``Mapping[str, Any] | None``, and §3.3.1's "carried whole, not reduced"
+    rule applies to a spelling with no TTL the same way it applies to one
+    with: a flattened form would make a vendor's future TTL invisible, and a
+    normalised form would put a vendor spelling into a wire-independent value.
+
+    Args:
+        part: The content part or tool declaration being read.
+        path: The object's path from the body root, for the residual key.
+        residual: The residual mapping, extended in place when the value is
+            not an object.
+
+    Returns:
+        The breakpoint as the wire mapping, or ``None`` when absent or unusable.
+    """
+    for key in _CACHE_KEYS:
+        value = part.get(key)
+        if value is None:
+            continue
+        if not isinstance(value, dict):
+            residual[f"{path}.{key}"] = value
+            continue
+        return value
+    return None
+
+
+def _residualise(
+    source: Mapping[str, Any], mapped: set[str], prefix: str, residual: dict[str, Any]
+) -> None:
+    """Record every key of ``source`` the reader did not map.
+
+    §3.3.1's "unknown fields fail closed", applied at depth.
+
+    Args:
+        source: The object being read.
+        mapped: The keys the caller accounted for.
+        prefix: The object's path from the body root, to which each unmapped
+            key is appended.
+        residual: The residual mapping, extended in place.
+    """
+    for key, value in source.items():
+        if key not in mapped:
+            residual[c.residual_key(prefix, key)] = value
+
+
+def _normalise_turns(turns: Sequence[c.Turn]) -> tuple[c.Turn, ...]:
+    """Merge consecutive same-role turns (§3.3.1b's fourth clause).
+
+    On Chat Completions, clause 1 and clause 2 of the merge rule are satisfied
+    by the wire itself — a run of ``tool`` messages forms the run, and an
+    immediately following non-tool ``user`` message is a separate message the
+    reader already sees contiguously. Clause 3 is vacuous: every ``tool``
+    message is already a ``ToolResult`` turn. Clause 4 — consecutive same-role
+    turns merge — is the only work left.
+
+    Args:
+        turns: The turns as the wire delivered them.
+
+    Returns:
+        The merged turns, same-role runs collapsed into one turn.
+    """
+    merged: list[c.Turn] = []
+    for turn in turns:
+        if merged and merged[-1].role == turn.role:
+            merged[-1] = c.Turn(role=turn.role, parts=(*merged[-1].parts, *turn.parts))
+        else:
+            merged.append(turn)
+    return tuple(merged)
