@@ -687,8 +687,12 @@ fallback branch, the agent's own configuration verbatim on KBR-225's forward bra
 the agent sent) — so any delta is at the key. P2a, P2b, P3, P4, P5d and P10 are anchored the same way
 for the same reason. Under the other spelling every one of those six rows would match nothing and
 §3.3.2 assertion 1 would report a false I1 breach on six *registered* mutations — the under-claiming
-direction this section warns is the unrecoverable one. `extra_path()` **enforces** the rule: a key
-containing a dot raises, so a reader cannot emit the nested form by accident.
+direction this section warns is the unrecoverable one. **Two sites enforce the rule**, so a reader
+cannot emit the nested form by accident at either: `extra_path()` rejects a dotted key on the
+path-builder side, and `Envelope.__post_init__` (KBR-191) rejects one on the constructor side.
+The constructor's guard raises because `Envelope` is constructed by harness readers, where a
+violation is a reader bug rather than a vendor datum; §7.4.1 records why that direction is
+right for keys, with leaves still residualising for the opposite reason.
 
 **The cost, recorded so it is not discovered later.** `envelope.extra[<key>]` is the narrowest
 address the vocabulary offers, so a row anchored there claims everything inside that key by
@@ -2953,7 +2957,8 @@ show as an opaque digest change no row could name.
 
 **A wrongly-typed leaf residualises — it is neither coerced nor raised on — and the rule is
 general.** It binds *every* optional leaf, not the ones a bug happened to be found in: the
-contract validates only `Turn.role`, `Conversation.sampling` and `extra["tool_choice"]`, so an
+contract validates only `Turn.role`, `Conversation.sampling`, `extra["tool_choice"]` and —
+KBR-191 — that an `extra` key names no nested value, so an
 unguarded leaf declared `str | None` carries a dict silently with an empty residual. A reader
 should apply it through one helper, so the next field added inherits it. `str(7)` and
 `dict(["ab", "cd"])` invent a value the agent never sent, and a silently nulled tool description is
@@ -2961,7 +2966,13 @@ indistinguishable from the deletion §3.3.1's own falsification set injects. Rai
 wrong answer: it blinds the oracle to everything else in a request it could otherwise diff, and
 `verify_total` cannot see a nested coercion because `consumed` is top-level only. So the field
 residualises at its own path, the projection carries the grammar's absent value in its place, and
-the run fails with the field named.
+the run fails with the field named. **The one exception is the leaf the contract itself validates
+— the key-shape rule — and the two read in opposite directions deliberately.** A wrongly-typed
+leaf is vendor input arriving through a reader's own parse, so residualising keeps the rest of
+the request diffable. A dotted `extra` key is not vendor input at all: `Envelope` is constructed
+by harness readers, so the violation is a reader bug before it is ever a fidelity finding, and
+`contract` already defines a reader-raised `ValueError` as a reader bug. Residualising it would
+land the unclaimed address on `residual[...]`, where no register row can ever reach it.
 
 Structural failures are the exception and still raise `UnreadableBodyError` — a role outside
 `user`/`assistant`, a content block with no type — because there is no partial projection to
