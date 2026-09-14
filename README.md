@@ -384,6 +384,12 @@ backend and as a session total, so a pool member returning well-formed-looking g
 under `--debug`. It is a diagnostic only: it never marks a backend unhealthy or triggers failover. Run with `--debug`
 and `grep 'tool_use audit:'` for the offending payloads.
 
+`thinking_stripped` counts the thinking blocks the bridge had to strip and retry because the upstream rejected their
+signatures — which, since the signed history is carried through, means the conversation history was edited (by
+compaction or truncation) and the model lost reasoning that was still valid. It is reported per backend and as a
+session total, next to `malformed_tool_use`, and is likewise a diagnostic only: it never marks a backend unhealthy.
+A compaction-heavy session whose reasoning keeps degrading shows up here.
+
 **After the run.** `--session-summary PATH` (or `KITTY_SESSION_SUMMARY`) writes the same document to a file when the
 bridge shuts down — a small artifact CI can upload, instead of a multi-megabyte debug log:
 

@@ -298,6 +298,42 @@ class TestUsageCounting:
         assert served["output_tokens"] == 0
 
 
+class TestThinkingStrippedCounting:
+    """The ``thinking_stripped`` counter (KBR-228, ticket comment 4, item 2).
+
+    After KBR-228's restore, an M17 strip on the Anthropic routes means the
+    history was edited — compaction or the like — and the model lost reasoning
+    that was still valid. The only signal used to be a WARNING log line, which
+    a run without ``--debug`` never shows; the counter makes a compaction-heavy
+    session's reasoning loss visible in ``GET /stats``. Diagnostics only, like
+    ``malformed_tool_use``: never consulted for health or routing.
+    """
+
+    def test_fresh_server_reports_zero_thinking_stripped(self) -> None:
+        stats = _make_server()._session_stats()
+
+        assert stats["thinking_stripped"] == 0
+        assert all(member["thinking_stripped"] == 0 for member in stats["backends"])
+
+    def test_fresh_single_backend_server_reports_zero_thinking_stripped(self) -> None:
+        stats = _make_single_server()._session_stats()
+
+        assert stats["thinking_stripped"] == 0
+        assert stats["backends"][0]["thinking_stripped"] == 0
+
+    def test_thinking_stripped_is_attributed_to_the_serving_backend_and_totalled(self) -> None:
+        server = _make_server(2)
+
+        contextvars.copy_context().run(server._select_backend)
+        serving = server._current_backend_idx
+        server._record_thinking_stripped()
+        server._record_thinking_stripped()
+
+        stats = server._session_stats()
+        assert stats["backends"][serving]["thinking_stripped"] == 2
+        assert stats["thinking_stripped"] == 2
+
+
 class TestAllBackendsUnhealthyCounting:
     """The "all backends unhealthy: never" flag the issue asks for by name."""
 
@@ -381,6 +417,7 @@ class TestBackendDescription:
                 "remaining_cooldown": 0,
                 "cooldown_events": 0,
                 "malformed_tool_use": 0,
+                "thinking_stripped": 0,
             }
         ]
 
