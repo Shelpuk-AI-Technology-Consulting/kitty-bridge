@@ -303,6 +303,8 @@ class TestChatCompletionsHandlerReturns503:
 class TestGeminiHandlerReturns503:
     @pytest.mark.asyncio
     async def test_returns_503_with_retry_after(self):
+        # retry_after=300 pins the strict KBR-243 boundary over HTTP: exactly
+        # 300 is beyond the window, so the 503 is immediate.
         server = _make_bridge_mode_server()
         port = await server.start_async()
         try:
@@ -324,6 +326,32 @@ class TestGeminiHandlerReturns503:
                 ):
                     assert resp.status == 503
                     assert resp.headers.get("Retry-After") is not None
+        finally:
+            await server.stop_async()
+
+    @pytest.mark.asyncio
+    async def test_returns_503_immediately_beyond_window(self):
+        server = _make_bridge_mode_server()
+        port = await server.start_async()
+        try:
+            with patch.object(
+                server,
+                "_select_backend",
+                side_effect=AllBackendsUnhealthyError(
+                    [{"name": "stub"}],
+                    retry_after=400,
+                ),
+            ):
+                async with (
+                    aiohttp.ClientSession() as session,
+                    session.post(
+                        f"http://127.0.0.1:{port}/v1beta/models/test:generateContent",
+                        json={"contents": [{"parts": [{"text": "hi"}]}]},
+                        headers={"content-type": "application/json"},
+                    ) as resp,
+                ):
+                    assert resp.status == 503
+                    assert int(resp.headers["Retry-After"]) == 400
         finally:
             await server.stop_async()
 
@@ -896,6 +924,8 @@ class TestRecoveryHold:
         assert result is exc
         assert sleeps == [100.0, 100.0]
         assert server._stats_recovery_holds == 2
+        # The counter must reach the /stats document, not just the attribute.
+        assert server._session_stats()["recovery_holds"] == 2
 
 
 class TestArrivalHoldWiring:
@@ -939,6 +969,60 @@ class TestArrivalHoldWiring:
                     assert resp.status == 200
                     data = await resp.json()
                     assert data["role"] == "assistant"
+        finally:
+            await server.stop_async()
+
+    @pytest.mark.parametrize(
+        ("path", "payload"),
+        [
+            (
+                "/v1/responses",
+                {"model": "test-model", "input": [{"role": "user", "content": "hi"}], "stream": False},
+            ),
+            (
+                "/v1/chat/completions",
+                {"model": "test-model", "messages": [{"role": "user", "content": "Hi"}], "stream": False},
+            ),
+            ("/v1beta/models/test:generateContent", {"contents": [{"parts": [{"text": "hi"}]}]}),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_held_request_completes_after_recovery(self, path, payload):
+        """AC-1 for the remaining protocols: a request held on arrival at a
+        1 s-away recovery completes with the normal (non-503) response once a
+        backend is selectable again."""
+        from aioresponses import aioresponses
+
+        # Non-streaming CC response — every protocol's pipeline consumes this
+        # upstream shape through its own translation.
+        body = json.dumps(
+            {
+                "id": "test-1",
+                "object": "chat.completion",
+                "choices": [{"message": {"role": "assistant", "content": "hi"}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 5, "completion_tokens": 3, "total_tokens": 8},
+            }
+        ).encode()
+
+        server = _make_bridge_mode_server()
+        port = await server.start_async()
+        try:
+            first = AllBackendsUnhealthyError([{"name": "stub"}], retry_after=1)
+            with (
+                aioresponses(passthrough=["http://127.0.0.1"]) as m,
+                patch.object(server_module, "_recovery_hold_jitter", lambda: 0.0),
+                patch.object(server, "_select_backend", side_effect=[first, Mock()]),
+            ):
+                m.post("https://api.example.com/v1/chat/completions", status=200, body=body)
+                async with (
+                    aiohttp.ClientSession() as session,
+                    session.post(
+                        f"http://127.0.0.1:{port}{path}",
+                        json=payload,
+                        headers={"content-type": "application/json"},
+                    ) as resp,
+                ):
+                    assert resp.status == 200
         finally:
             await server.stop_async()
 

@@ -2382,6 +2382,9 @@ class BridgeServer:
         seeing a 503; and ``requests`` counts requests that *reached a
         backend*, so one rejected because the whole pool was in cooldown raises
         ``all_backends_unhealthy`` without incrementing ``requests``.
+        ``recovery_holds`` (KBR-243) counts hold *starts* — sleeps begun while
+        waiting out a cooldown — not requests, so one request held twice
+        reports twice.
 
         Returns:
             A JSON-serialisable dict describing the session.
