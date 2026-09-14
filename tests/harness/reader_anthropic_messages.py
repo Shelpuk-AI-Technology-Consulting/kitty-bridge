@@ -29,7 +29,7 @@ from __future__ import annotations
 import base64
 import binascii
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from typing import Any
 
 from harness import contract as c
@@ -85,12 +85,15 @@ _SAMPLING_KEYS = {
     "stop_sequences": "stop",
 }
 
-#: Tool-declaration keys the grammar carries.  Anything else on a tool entry
-#: residualises — ``type`` on a server tool is the one that occurs.
+#: Tool-declaration keys the grammar carries.  ``type`` joined this set with
+#: KBR-205: a tool's discriminator decides whether a forced call is to a
+#: client-declared or an Anthropic-defined tool (KBR-214 D10), and G35's
+#: register row anchors its conditional on it — residualising it would
+#: fail the run before that row could match.
 #: ``cache_control`` joined this set with KBR-167: Anthropic caches tool
 #: definitions, and Claude Code marks the last declaration on nearly every
 #: request, so residualising it failed the run on every real body.
-_TOOL_KEYS = frozenset({"name", "description", "input_schema", "cache_control"})
+_TOOL_KEYS = frozenset({"name", "description", "input_schema", "type", "cache_control"})
 
 #: ``tool_choice.type`` values that map straight onto the canonical value.
 #: ``tool`` is handled separately because it carries a name.
@@ -194,7 +197,7 @@ def _project(body: Mapping[str, Any]) -> c.Request:
             sampling[_SAMPLING_KEYS[key]] = value
             consumed.add(key)
         elif key == "tool_choice":
-            extra[c.TOOL_CHOICE_KEY] = _read_tool_choice(value, residual)
+            extra[c.TOOL_CHOICE_KEY] = _read_tool_choice(value, residual, extra)
             consumed.add(key)
         elif key in _PUBLISHED_EXTRA_KEYS or key in _CLIENT_SENT_EXTRA_KEYS:
             # Keyed by the wire key, never nested (§3.3.1a). The two key sets are
@@ -228,16 +231,28 @@ def _project(body: Mapping[str, Any]) -> c.Request:
     )
 
 
-def _read_tool_choice(value: Any, residual: dict[str, Any]) -> str:
-    """Normalise a ``tool_choice`` onto its canonical value.
+def _read_tool_choice(
+    value: Any, residual: dict[str, Any], extra: dict[str, Any]
+) -> str:
+    """Normalise a ``tool_choice`` onto its canonical value, and map the parallel knob.
 
     Four wire keys across the formats name one concept, so §3.3.1b makes the
     *value* canonical too — ``auto``, ``any``, ``none`` or ``tool:<name>``.
+    Anthropic's nested, inverted ``disable_parallel_tool_use`` flag maps
+    onto ``envelope.extra["parallel_tool_calls"]`` (the Chat Completions
+    spelling and polarity, fixed in §3.3.1b), and the entry is written only
+    when the wire carries a non-default value — mirroring KBR-214's
+    forwarding rule, which forwards only ``disable_parallel_tool_use: true``
+    as ``parallel_tool_calls: false``. An absent flag and an explicit
+    ``false`` are one request on both wires, so writing both would invent a
+    second field some providers reject and every comparison would carry.
 
     Args:
         value: The wire value.
         residual: The residual mapping, extended with any key the canonical
             value does not carry.
+        extra: The envelope's ``extra`` mapping, extended in place when the
+            parallel knob carries a non-default value.
 
     Returns:
         The canonical value.
@@ -265,12 +280,36 @@ def _read_tool_choice(value: Any, residual: dict[str, Any]) -> str:
     else:
         raise c.UnreadableBodyError(f"unrecognised tool_choice type {kind!r}")
 
+    # Parallel knob — Anthropic's flag, Chat Completions' polarity (§3.3.1b).
+    # `True` is the only non-default value: it inverts to `False` on the
+    # canonical address. Absent and `false` are both the default and produce
+    # no entry, so neither side carries a delta. Writing on the absent case
+    # would force the CC reader to compare a default the wire never wrote.
+    # A wrongly-typed value (not a bool) is *not* added to the mapped set, so
+    # `_residualise` puts it in the residual — §7.4.1's wrongly-typed-leaf
+    # rule, applied here because the registry is not the right home for a
+    # mapped field.
+    flag = value.get("disable_parallel_tool_use")
+    mapped_disable: set[str] = set()
+    if isinstance(flag, bool):
+        mapped_disable = {"disable_parallel_tool_use"}
+        if flag:
+            extra[c.PARALLEL_TOOL_CALLS_KEY] = False
+
     # `name` is accounted for only on the branch that read it: a stale `name`
     # beside `type: "auto"` is exactly the mutation the oracle should report, and
-    # excluding it unconditionally would drop it silently. `disable_parallel_tool_use`
-    # is a separate knob, not part of the concept four formats share, so folding
-    # it into the value would make that value match nothing.
-    _residualise(value, {"type", "name"} if kind == "tool" else {"type"}, "tool_choice", residual)
+    # excluding it unconditionally would drop it silently.
+    # `disable_parallel_tool_use` joins the mapped set only when its value is a
+    # bool (read, either mapped onto `extra[parallel_tool_calls]` or silently
+    # the default) — a typo'd sibling (``disable_parallel_tool_usee: true``) is
+    # not in the set and residualises, the unregistered-mutation guard §3.3.1
+    # names.
+    _residualise(
+        value,
+        {"type", "name", *mapped_disable} if kind == "tool" else {"type", *mapped_disable},
+        "tool_choice",
+        residual,
+    )
 
     return canonical
 
@@ -325,8 +364,10 @@ def _read_tools(value: Any, residual: dict[str, Any]) -> tuple[c.ToolDecl, ...]:
     Args:
         value: The ``tools`` field, absent or a list of declarations.
         residual: The residual mapping, extended with any entry key the grammar
-            cannot carry, such as ``type`` on a server tool. ``cache_control``
-            is carried rather than residualised, since KBR-167.
+            cannot carry, such as an unknown tool key. ``cache_control`` is
+            carried rather than residualised, since KBR-167; ``type`` is
+            carried on :attr:`ToolDecl.type` rather than residualised, since
+            KBR-205 — G35's register row anchors on it.
 
     Returns:
         The declarations, in order.
@@ -367,6 +408,12 @@ def _read_tools(value: Any, residual: dict[str, Any]) -> tuple[c.ToolDecl, ...]:
                 # Absent, not False: the Messages format defines no `strict`,
                 # and P15's presence and absence must stay distinguishable.
                 strict=None,
+                # `"custom"` on a client tool, a dated vendor spelling on a
+                # server tool — carried whole, never canonicalised, because a
+                # vendor spelling on a ToolDecl is the deliberate exception
+                # §7.4.1 makes for `Opaque.kind` and for the same reason: the
+                # type's identity *is* its wire spelling.
+                type=_typed_leaf(tool, "type", str, c.residual_key("tools", index=index), residual),
                 cache_control=_read_cache_control(tool, c.residual_key("tools", index=index), residual),
             )
         )
@@ -491,7 +538,12 @@ def _read_block(block: Any, path: str, residual: dict[str, Any], *, nested: bool
         text = block["text"]
         if not isinstance(text, str):
             raise c.UnreadableBodyError(f"{path} text must be a string, got {type(text).__name__}")
-        _residualise(block, {"type", "text", "cache_control"}, path, residual)
+        # Declared-ignored fields are consumed before `_residualise` runs, so
+        # they do not land in the residual as if unknown (§3.3.1, KBR-205). A
+        # wrong-typed value still residualises at its own path — the
+        # registry declares the field ignorable, not the value well-formed.
+        ignored = c.consumed_ignored_fields(block, kind, path, residual)
+        _residualise(block, {"type", "text", "cache_control", *ignored}, path, residual)
         return c.Text(text, cache_control=_read_cache_control(block, path, residual, permitted=not nested))
 
     if kind == "thinking":
@@ -522,7 +574,8 @@ def _read_block(block: Any, path: str, residual: dict[str, Any], *, nested: bool
             residual[c.residual_key(path, "input")] = arguments
             arguments = None
 
-        _residualise(block, {"type", "name", "input", "id", "cache_control"}, path, residual)
+        ignored = c.consumed_ignored_fields(block, kind, path, residual)
+        _residualise(block, {"type", "name", "input", "id", "cache_control", *ignored}, path, residual)
         return c.ToolUse(
             name=block["name"],
             arguments=arguments or {},
@@ -540,8 +593,9 @@ def _read_block(block: Any, path: str, residual: dict[str, Any], *, nested: bool
             residual[c.residual_key(path, "is_error")] = is_error
             is_error = False
 
+        ignored = c.consumed_ignored_fields(block, kind, path, residual)
         _residualise(
-            block, {"type", "tool_use_id", "content", "is_error", "cache_control"}, path, residual
+            block, {"type", "tool_use_id", "content", "is_error", "cache_control", *ignored}, path, residual
         )
         return c.ToolResult(
             content=_read_result_content(block.get("content"), path, residual),
@@ -586,7 +640,8 @@ def _read_image(
         raise c.UnreadableBodyError(f"{path} image carries no source object")
 
     kind = source.get("type")
-    _residualise(block, {"type", "source", "cache_control"}, path, residual)
+    ignored = c.consumed_ignored_fields(block, "image", path, residual)
+    _residualise(block, {"type", "source", "cache_control", *ignored}, path, residual)
 
     # The breakpoint sits on the *block*, not on its source, so it is read once
     # here and handed to whichever of the three source kinds builds the part.
@@ -826,7 +881,7 @@ def _read_cache_control(
 
 
 def _residualise(
-    source: Mapping[str, Any], mapped: set[str], prefix: str, residual: dict[str, Any]
+    source: Mapping[str, Any], mapped: Collection[str], prefix: str, residual: dict[str, Any]
 ) -> None:
     """Record every key of ``source`` the reader did not map.
 
@@ -835,7 +890,10 @@ def _residualise(
 
     Args:
         source: The object being read.
-        mapped: The keys the caller accounted for.
+        mapped: The keys the caller accounted for. Accepts a ``set`` or a
+            ``frozenset`` — the per-block call sites build a fresh ``set``
+            from a literal, while :data:`_TOOL_KEYS` is a ``frozenset`` so a
+            reader cannot quietly grow it mid-request.
         prefix: The object's path from the body root, to which each unmapped
             key is appended.
         residual: The residual mapping, extended in place.
