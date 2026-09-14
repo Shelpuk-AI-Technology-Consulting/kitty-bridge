@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from kitty.bridge.config import load_bridge_config
+from kitty.bridge.config import load_bridge_config, resolve_keys_file
 
 
 def _write_yaml(path: Path, content: str) -> Path:
@@ -31,6 +31,19 @@ class TestBridgeConfigParsing:
         assert config.log_access is None  # None means "use mode default"
         assert config.tls_cert is None
         assert config.tls_key is None
+        # None, not the default path: the background bridge must tell "nothing
+        # configured" (KBR-230: use the default file only if it exists) apart
+        # from "configured and missing" (a clear startup error).
+        assert config.keys_file is None
+
+    @pytest.mark.parametrize("yaml_value", ['null', '""', "false", "0"])
+    def test_falsy_keys_file_values_count_as_nothing_named(self, tmp_path: Path, yaml_value: str):
+        _write_yaml(tmp_path / "bridge.yaml", f"keys_file: {yaml_value}")
+        config = load_bridge_config(tmp_path / "bridge.yaml")
+        # Every falsy scalar counts as nothing named (SYSTEM_DESIGN.md §1.6):
+        # a typo like `keys_file: 0` yields auth off, not a crash on a path
+        # named "False" or "0".
+        assert config.keys_file is None
 
     def test_full_config(self, tmp_path: Path):
         _write_yaml(
@@ -167,3 +180,30 @@ class TestBridgeConfigResolvedLogging:
         _write_yaml(tmp_path / "bridge.yaml", "log_access: true")
         config = load_bridge_config(tmp_path / "bridge.yaml")
         assert config.resolved_log_access(background=False) is True
+
+
+class TestResolveKeysFile:
+    """The effective keys file: the named one, else the default when it exists."""
+
+    def test_named_file_wins_even_when_missing(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setattr("kitty.bridge.config._DEFAULT_KEYS_FILE", str(tmp_path / "default.txt"))
+        named = tmp_path / "named" / "keys.txt"
+        # Single-quoted YAML style: on Windows the path's backslashes are
+        # literal here, where double quotes would read them as escapes.
+        _write_yaml(tmp_path / "bridge.yaml", f"keys_file: '{named}'")
+        config = load_bridge_config(tmp_path / "bridge.yaml")
+        # The named path is returned as-is even though it does not exist: deciding
+        # how a named-but-missing file fails is the runner's job, not the resolver's.
+        assert resolve_keys_file(config) == str(named)
+
+    def test_unnamed_uses_the_default_when_it_exists(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        default = tmp_path / "default.txt"
+        default.write_text("client-key\n", encoding="utf-8")
+        monkeypatch.setattr("kitty.bridge.config._DEFAULT_KEYS_FILE", str(default))
+        config = load_bridge_config(tmp_path / "nonexistent.yaml")
+        assert resolve_keys_file(config) == str(default)
+
+    def test_unnamed_without_a_default_is_none(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setattr("kitty.bridge.config._DEFAULT_KEYS_FILE", str(tmp_path / "absent.txt"))
+        config = load_bridge_config(tmp_path / "nonexistent.yaml")
+        assert resolve_keys_file(config) is None

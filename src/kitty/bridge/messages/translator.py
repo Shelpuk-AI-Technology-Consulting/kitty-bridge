@@ -346,6 +346,16 @@ class MessagesTranslator:
         if "effort" in messages_request:
             result["_effort"] = messages_request["effort"]
 
+        # KBR-224: `output_config` is Anthropic's documented spelling of the
+        # effort control (and the home of structured output).  Chat Completions
+        # has no slot for it, so — like `_effort` above — it rides an internal
+        # key to the Anthropic-family adapters, which restore it where the
+        # upstream documents the field.  Carried verbatim: an undocumented
+        # member is the agent's mistake, and the upstream that documents the
+        # field reports that better than a silent repair would.
+        if messages_request.get("output_config") is not None:
+            result["_output_config"] = messages_request["output_config"]
+
         # Extract thinking config into normalized effort metadata
         thinking = messages_request.get("thinking")
         if thinking and isinstance(thinking, dict):
@@ -727,6 +737,9 @@ class MessagesTranslator:
                             {"type": "tool_use", "id": tool_id, "name": func.get("name", ""), "input": {}},
                         )
                     )
+                    # Advance past the opened block (KBR-226) so a parallel call
+                    # or a following text block opens the next free index.
+                    self._content_block_index += 1
 
                 # Argument delta
                 func = tc_delta.get("function", {})

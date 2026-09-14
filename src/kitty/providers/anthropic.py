@@ -109,9 +109,16 @@ class AnthropicAdapter(ProviderAdapter):
             subclass whose upstream does not document it sets this to False, so
             an unknown field cannot turn every thinking request into a 400
             (KBR-203).
+        forwards_output_config: Whether :meth:`translate_to_upstream` restores
+            the agent's ``output_config`` — the documented spelling of the
+            effort control.  True here, because the field is on Anthropic's
+            published Messages schema.  A subclass whose upstream rejects or
+            does not document it sets this to False (KBR-224).
     """
 
     forwards_thinking_display: bool = True
+
+    forwards_output_config: bool = True
 
     @property
     def provider_type(self) -> str:
@@ -272,6 +279,13 @@ class AnthropicAdapter(ProviderAdapter):
         # it as a top-level parameter alongside thinking.
         if cc_request.get("_effort"):
             anthropic["effort"] = cc_request["_effort"]
+
+        # KBR-224: restore the agent's `output_config` (the documented spelling
+        # of the effort control) where this upstream documents the field.  Both
+        # effort spellings ship side by side, unmerged: kitty has no authority
+        # to arbitrate between two values the agent sent.
+        if self.forwards_output_config and cc_request.get("_output_config") is not None:
+            anthropic["output_config"] = cc_request["_output_config"]
 
         return anthropic
 
