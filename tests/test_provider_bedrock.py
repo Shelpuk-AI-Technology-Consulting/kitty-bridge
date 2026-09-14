@@ -147,6 +147,54 @@ class TestBedrockTranslateToUpstream:
         result = self.adapter.translate_to_upstream(cc)
         assert result["messages"][0] == {"role": "user", "content": [{"text": "Hello"}]}
 
+    def test_user_content_parts_list_flattens_to_its_text(self):
+        """A parts-list user turn degrades to the single text block every pre-KBR-222 turn had.
+
+        Hop 1 (KBR-222) ships image-bearing turns as CC content parts. Converse
+        has no mapping for them here (KBR-223's territory), so the list must
+        flatten — forwarding it would fail boto3 validation on every
+        Messages-route image turn, a regression this fix would otherwise
+        manufacture.
+        """
+        cc = {
+            "model": "anthropic.claude-sonnet-4-20250514",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "look at this"},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": "data:image/png;base64,aWNvbg=="},
+                        },
+                    ],
+                }
+            ],
+            "stream": False,
+        }
+        result = self.adapter.translate_to_upstream(cc)
+        assert result["messages"][0] == {"role": "user", "content": [{"text": "look at this"}]}
+
+    def test_user_content_image_only_list_flattens_to_the_pre_fix_empty_text(self):
+        """An image-only list flattens to ``[{"text": ""}]`` — the pre-fix shape for that turn."""
+        cc = {
+            "model": "anthropic.claude-sonnet-4-20250514",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": "data:image/png;base64,aWNvbg=="},
+                        }
+                    ],
+                }
+            ],
+            "stream": False,
+        }
+        result = self.adapter.translate_to_upstream(cc)
+        assert result["messages"][0] == {"role": "user", "content": [{"text": ""}]}
+
     def test_max_tokens_inference_config(self):
         cc = {
             "model": "anthropic.claude-sonnet-4-20250514",

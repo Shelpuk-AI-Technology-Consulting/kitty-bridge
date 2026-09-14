@@ -47,6 +47,9 @@ pytestmark = pytest.mark.l2
 _EXPECTED_KEYS: dict[str, set[str]] = {
     "bridge/messages/translator.py": {
         "_effort",
+        # KBR-222: the agent's `document` blocks, addressed to the CC message
+        # dict each belongs to; AnthropicAdapter restores them there, verbatim.
+        "_documents",
         # KBR-224: the agent's `output_config`, restored by AnthropicAdapter
         # where the upstream documents the field.
         "_output_config",

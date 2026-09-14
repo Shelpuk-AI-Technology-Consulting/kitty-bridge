@@ -94,6 +94,24 @@ def _safe_json_load_args(arguments: str | None) -> dict:
         return {}
 
 
+def _image_source_from_url(url: str) -> dict:
+    """Convert a CC ``image_url`` value into an Anthropic ``image`` source.
+
+    A ``data:<media_type>;base64,<data>`` URI becomes a base64 source; anything
+    else is forwarded as a URL source for the upstream to validate (KBR-222).
+
+    Args:
+        url: The ``url`` member of a CC ``image_url`` content part.
+
+    Returns:
+        An Anthropic ``image.source`` object.
+    """
+    if url.startswith("data:") and ";base64," in url:
+        media_type, _, data = url[len("data:"):].partition(";base64,")
+        return {"type": "base64", "media_type": media_type, "data": data}
+    return {"type": "url", "url": url}
+
+
 class AnthropicAdapter(ProviderAdapter):
     """Anthropic Messages API adapter.
 
@@ -208,16 +226,52 @@ class AnthropicAdapter(ProviderAdapter):
         if system_parts:
             anthropic["system"] = "\n".join(system_parts)
 
-        # Translate messages
+        # Translate messages.  KBR-222: a run of CC tool messages followed by
+        # a user message re-joins into ONE Anthropic user message -- the
+        # tool_result blocks first, then the translated sibling blocks -- which
+        # is the shape Anthropic's docs prescribe and Claude Code sent inbound;
+        # strict third-party Anthropic-compatible endpoints have rejected the
+        # split.  Trailing tool messages with no user follower keep the
+        # per-message shape this loop shipped before the fix.
+        pending_tool_results: list[dict] = []
         for msg in cc_request.get("messages", []):
             role = msg.get("role")
             if role == "system":
                 continue  # already handled above
 
+            if role == "tool":
+                pending_tool_results.append(self._tool_result_block(msg))
+                continue
+
+            if pending_tool_results and role == "user":
+                # A string sibling needs block form to sit beside the
+                # tool_result blocks; an empty or absent one contributes
+                # nothing, which reproduces today's single tool_result message
+                # exactly.
+                sibling = self._translate_user_content(msg, cc_request)
+                if not isinstance(sibling, list):
+                    sibling = [{"type": "text", "text": sibling}] if sibling else []
+                anthropic["messages"].append(
+                    {
+                        "role": "user",
+                        "content": [*pending_tool_results, *sibling],
+                    }
+                )
+                pending_tool_results = []
+                continue
+
+            anthropic["messages"].extend({"role": "user", "content": [b]} for b in pending_tool_results)
+            pending_tool_results = []
+
             if role == "assistant":
                 anthropic["messages"].append(self._translate_assistant_msg(msg, cc_request))
-            elif role == "tool":
-                anthropic["messages"].append(self._translate_tool_result_msg(msg))
+            elif role == "user":
+                anthropic["messages"].append(
+                    {
+                        "role": "user",
+                        "content": self._translate_user_content(msg, cc_request),
+                    }
+                )
             else:
                 anthropic["messages"].append(
                     {
@@ -225,6 +279,9 @@ class AnthropicAdapter(ProviderAdapter):
                         "content": msg.get("content", ""),
                     }
                 )
+
+        # A tool run at the very end of the body has no user turn to re-join.
+        anthropic["messages"].extend({"role": "user", "content": [b]} for b in pending_tool_results)
 
         # Translate tools
         if "tools" in cc_request and cc_request["tools"]:
@@ -330,20 +387,95 @@ class AnthropicAdapter(ProviderAdapter):
 
         return {"role": "assistant", "content": content_blocks or ""}
 
-    def _translate_tool_result_msg(self, msg: dict) -> dict:
-        """Translate a tool result message to Anthropic user message with tool_result block."""
-        content = msg.get("content", "")
-        # Anthropic requires tool_result to be inside a user message
+    @staticmethod
+    def _tool_result_block(msg: dict) -> dict:
+        """Build the Anthropic ``tool_result`` block for one CC tool message.
+
+        Args:
+            msg: A CC-format ``role: "tool"`` message dict.
+
+        Returns:
+            The ``tool_result`` content block. Anthropic requires tool_result
+            to be inside a user message; the caller decides whether that is a
+            message of its own or a re-joined tool run (KBR-222).
+        """
         return {
-            "role": "user",
-            "content": [
-                {
-                    "type": "tool_result",
-                    "tool_use_id": msg.get("tool_call_id", ""),
-                    "content": content,
-                }
-            ],
+            "type": "tool_result",
+            "tool_use_id": msg.get("tool_call_id", ""),
+            "content": msg.get("content", ""),
         }
+
+    def _translate_user_content(self, msg: dict, cc_request: dict) -> list[dict] | str | None:
+        """Translate a CC user message's content into Anthropic content blocks.
+
+        Text and ``image_url`` parts get their Anthropic spellings; anything
+        else forwards verbatim, as this hop did before KBR-222, so a
+        CC-ingress client's unusual part reaches the upstream's validator
+        instead of being silently repaired. A ``_documents`` entry addressed
+        to *msg* contributes its blocks here too — by identity, so a compaction
+        pass that rebuilt the message list forfeits the document rather than
+        attaching it to a stranger.
+
+        Args:
+            msg: The CC-format user message dict.
+            cc_request: The full CC request, read for ``_documents``.
+
+        Returns:
+            The content to ship: a list of blocks for list-form content or
+            string turns carrying documents, otherwise the original string or
+            ``None`` unchanged.
+        """
+        # KBR-222: documents ride the ``_documents`` internal key, addressed to
+        # this message by identity. Collected first so both the string and the
+        # list path splice them in. A malformed value is skipped, not raised:
+        # like ``_top_k``, an internal key must never fail the request no
+        # matter what it carries (the R5 suite injects a probe into every one).
+        documents: list[dict] = []
+        raw_documents = cc_request.get("_documents")
+        if isinstance(raw_documents, list):
+            for entry in raw_documents:
+                if not isinstance(entry, dict) or entry.get("message") is not msg:
+                    continue
+                entry_blocks = entry.get("blocks")
+                if isinstance(entry_blocks, list):
+                    documents.extend(b for b in entry_blocks if isinstance(b, dict))
+
+        content: object = msg.get("content", "")
+        if isinstance(content, list):
+            # Text and images get Anthropic spellings; unknown parts pass
+            # through. A known part's other members survive the rebuild --
+            # verbatim forwarding carried them before KBR-222, and a
+            # CC-ingress client's ``cache_control`` on a text part is pinned
+            # by the KBR-199 suite.
+            blocks: list[dict] = []
+            for part in content:
+                if not isinstance(part, dict):
+                    blocks.append(part)
+                    continue
+                kind = part.get("type")
+                if kind == "text":
+                    blocks.append({**part, "type": "text", "text": part.get("text", "")})
+                elif kind == "image_url":
+                    url = (part.get("image_url") or {}).get("url", "")
+                    image_block: dict = {"type": "image", "source": _image_source_from_url(url)}
+                    if "cache_control" in part:
+                        image_block["cache_control"] = part["cache_control"]
+                    blocks.append(image_block)
+                else:
+                    blocks.append(part)
+            blocks.extend(documents)
+            return blocks
+
+        if isinstance(content, str) or content is None:
+            if not documents:
+                return content
+            # A string turn carrying documents needs block form to hold them;
+            # an empty or absent string contributes no text block.
+            return ([{"type": "text", "text": content}] if content else []) + documents
+
+        # A payload type no writer produces; stringify like the
+        # ``_translate_message`` fallback rather than ship it raw.
+        return str(content)
 
     def _translate_tools(self, cc_tools: list[dict]) -> list[dict]:
         """Translate CC tool definitions to Anthropic format."""

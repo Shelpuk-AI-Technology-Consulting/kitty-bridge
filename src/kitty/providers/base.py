@@ -58,6 +58,12 @@ class ProviderAdapter(ABC):
             # effort control — which Chat Completions has no field for.
             # AnthropicAdapter restores it where the upstream documents the field.
             "_output_config",
+            # KBR-222: written by MessagesTranslator.translate_request to carry
+            # the agent's `document` blocks, which Chat Completions has no slot
+            # for. Each entry is addressed to the CC message dict it belongs
+            # to; AnthropicAdapter restores it there, verbatim. Stripping it
+            # here keeps documents off the wire of every other provider's.
+            "_documents",
             "base_url",  # F15 defense-in-depth — URL override goes through build_base_url(),
             # not the CC request body.  Stripping it here protects
             # adapters that rely on the default translate_to_upstream().

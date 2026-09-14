@@ -615,12 +615,21 @@ class TestTranslateRequestCacheBreakpoints:
         assert cb.find_breakpoints(self._translate("assistant_text")) == []
 
     def test_image_block_breakpoint_is_destroyed(self):
-        """A cached image prefix is re-billed uncached: the image block is dropped whole (KBR-222)."""
+        """The image now ships as an ``image_url`` part (KBR-222), which carries no breakpoint."""
         assert cb.find_breakpoints(self._translate("image")) == []
 
-    def test_document_block_breakpoint_is_destroyed(self):
-        """A cached document prefix is re-billed uncached: the document block is dropped whole (KBR-222)."""
-        assert cb.find_breakpoints(self._translate("document")) == []
+    def test_document_block_breakpoint_survives_on_the_internal_key(self):
+        """The document rides ``_documents`` verbatim, so its breakpoint rides with it (KBR-222).
+
+        Like the nested ``tool_result`` carrier: outside M16's paths, so the
+        strip cannot reach it, and on the Anthropic family the restored block
+        carries a legal ``cache_control``. Pinned so this site, too, cannot
+        start losing its breakpoint unnoticed.
+        """
+        result = self._translate("document")
+
+        assert len(cb.find_breakpoints(result)) == 1
+        assert cb.find_breakpoints(result["_documents"][0]["blocks"][0]) != []
 
     def test_tool_use_block_breakpoint_is_destroyed(self):
         """History up to a tool call is re-billed uncached: the block is rebuilt as ``tool_calls``."""
@@ -1541,3 +1550,170 @@ class TestParallelToolCallBlockIndices:
         final = _parse_events(self.t.finalize_interrupted_stream())
         stops = [d["index"] for name, d in final if name == "content_block_stop"]
         assert stops == [0, 1]
+
+
+# ── KBR-222: image / document / tool_result-sibling blocks ──────────────────
+
+
+class TestUserImageDocumentAndSiblingBlocks:
+    """KBR-222: a pasted screenshot or document must survive the translated route.
+
+    Hop 1 (``_translate_user_message``) used to keep only ``text`` blocks, so
+    images and documents never reached the upstream and a tool_result's sibling
+    text was dropped. These tests pin the hop-1 half of the fix: images become
+    CC ``image_url`` content parts, documents ride the ``_documents`` internal
+    key addressed to their message, and non-tool blocks beside a tool_result
+    become one trailing user message.
+    """
+
+    def setup_method(self):
+        self.t = MessagesTranslator()
+
+    @staticmethod
+    def _request(content):
+        return {
+            "model": "claude-3-opus",
+            "messages": [{"role": "user", "content": content}],
+            "max_tokens": 1024,
+        }
+
+    def test_base64_image_becomes_cc_image_url_part(self):
+        """A base64-source image ships as a data-URI ``image_url`` part beside the text."""
+        result = self.t.translate_request(
+            self._request(
+                [
+                    {"type": "text", "text": "what is in this screenshot?"},
+                    {
+                        "type": "image",
+                        "source": {"type": "base64", "media_type": "image/png", "data": "aWNvbg=="},
+                    },
+                ]
+            )
+        )
+        assert result["messages"][0]["content"] == [
+            {"type": "text", "text": "what is in this screenshot?"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,aWNvbg=="}},
+        ]
+
+    def test_url_image_carries_the_url_verbatim(self):
+        """A URL-source image ships as an ``image_url`` part with the URL unchanged."""
+        result = self.t.translate_request(
+            self._request(
+                [
+                    {
+                        "type": "image",
+                        "source": {"type": "url", "url": "https://example.com/cat.png"},
+                    }
+                ]
+            )
+        )
+        assert result["messages"][0]["content"] == [
+            {"type": "image_url", "image_url": {"url": "https://example.com/cat.png"}},
+        ]
+
+    def test_image_only_turn_is_not_empty(self):
+        """An image-only user turn must not collapse to an empty string message."""
+        result = self.t.translate_request(
+            self._request(
+                [
+                    {
+                        "type": "image",
+                        "source": {"type": "base64", "media_type": "image/jpeg", "data": "amdm"},
+                    }
+                ]
+            )
+        )
+        assert result["messages"][0]["content"] == [
+            {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,amdm"}},
+        ]
+
+    def test_image_with_unexpressable_source_type_is_dropped(self):
+        """A `file`-source image keeps today's drop instead of shipping an empty-URL part."""
+        result = self.t.translate_request(
+            self._request(
+                [
+                    {"type": "text", "text": "read this"},
+                    {"type": "image", "source": {"type": "file", "file_id": "file_abc"}},
+                ]
+            )
+        )
+        assert result["messages"][0]["content"] == "read this"
+
+    def test_text_only_user_message_stays_a_joined_string(self):
+        """No image present — the content stays the pre-fix joined string, not a parts list."""
+        result = self.t.translate_request(
+            self._request(
+                [
+                    {"type": "text", "text": "a"},
+                    {"type": "text", "text": "b"},
+                ]
+            )
+        )
+        assert result["messages"][0]["content"] == "a\nb"
+        assert "_documents" not in result
+
+    def test_document_carried_on_documents_internal_key(self):
+        """A document block rides ``_documents`` verbatim, addressed to its CC message."""
+        document = {
+            "type": "document",
+            "source": {"type": "base64", "media_type": "application/pdf", "data": "cGRm"},
+        }
+        result = self.t.translate_request(
+            self._request(
+                [
+                    {"type": "text", "text": "summarise"},
+                    document,
+                ]
+            )
+        )
+        message = result["messages"][0]
+        assert message["content"] == "summarise"
+        assert "_documents" in result
+        assert len(result["_documents"]) == 1
+        entry = result["_documents"][0]
+        assert entry["blocks"] == [document]
+        # Addressed by identity, not position: compaction reindexes messages,
+        # so an index would attach the document to the wrong turn.
+        assert entry["message"] is message
+
+    def test_text_beside_tool_result_becomes_trailing_user_message(self):
+        """A system reminder beside a tool_result must not be dropped."""
+        result = self.t.translate_request(
+            self._request(
+                [
+                    {"type": "tool_result", "tool_use_id": "t1", "content": "ok"},
+                    {"type": "text", "text": "<system-reminder>keep going</system-reminder>"},
+                ]
+            )
+        )
+        assert result["messages"] == [
+            {"role": "tool", "tool_call_id": "t1", "content": "ok"},
+            {"role": "user", "content": "<system-reminder>keep going</system-reminder>"},
+        ]
+
+    def test_image_beside_tool_result_becomes_trailing_parts_message(self):
+        """An image beside a tool_result ships as a trailing user message with parts."""
+        result = self.t.translate_request(
+            self._request(
+                [
+                    {"type": "tool_result", "tool_use_id": "t1", "content": "ok"},
+                    {
+                        "type": "image",
+                        "source": {"type": "base64", "media_type": "image/png", "data": "aWNvbg=="},
+                    },
+                ]
+            )
+        )
+        assert result["messages"][0] == {"role": "tool", "tool_call_id": "t1", "content": "ok"}
+        assert result["messages"][1]["role"] == "user"
+        assert result["messages"][1]["content"] == [
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,aWNvbg=="}},
+        ]
+
+    def test_tool_result_alone_emits_no_trailing_user_message(self):
+        """A bare tool_result keeps today's exact output shape."""
+        result = self.t.translate_request(
+            self._request([{"type": "tool_result", "tool_use_id": "t1", "content": "ok"}])
+        )
+        assert result["messages"] == [{"role": "tool", "tool_call_id": "t1", "content": "ok"}]
+        assert "_documents" not in result

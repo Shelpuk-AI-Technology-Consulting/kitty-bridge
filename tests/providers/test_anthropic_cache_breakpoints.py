@@ -597,7 +597,8 @@ def test_the_adapter_keeps_or_drops_a_given_breakpoint_site_by_site(
 ) -> None:
     """Record, site by site, which Chat Completions breakpoints reach the Anthropic wire.
 
-    The adapter copies user content and tool-message content verbatim, so a
+    The adapter rebuilds a user ``text`` part member-for-member (KBR-222 gave
+    known parts Anthropic spellings, preserving their other members), so a
     breakpoint there survives with its position and TTL. The tool-message one is
     moved inside the ``tool_result`` block's ``content``, a depth at which it is
     not established that Anthropic honours a breakpoint, so a fix may change
