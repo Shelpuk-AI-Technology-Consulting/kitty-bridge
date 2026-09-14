@@ -1312,6 +1312,35 @@ class TestParts:
         assert projected.residual == {f"contents[0].parts[0].{key}": {"a": 1}}
 
     @pytest.mark.parametrize(
+        "part",
+        [
+            # A thought part — `Thinking` carries no video slot.
+            {"thought": True, "text": "hmm"},
+            # A tool call — `ToolUse` carries no video slot.
+            {"functionCall": {"name": "f"}},
+            # A tool response — `ToolResult` carries no video slot.
+            {"functionResponse": {"name": "f", "response": {}}},
+        ],
+    )
+    def test_video_metadata_on_a_non_text_non_image_part_residualises(self, part: Any) -> None:
+        """KBR-194 scoped `videoMetadata` to `Text` and `Image`.
+
+        On `Thought`, `ToolUse` and `ToolResult` the modifier still
+        residualises at its part-level path — those parts carry no
+        `video_metadata` slot, and real traffic does not attach video to
+        them. Pinned so a future reader that quietly consumes it on one of
+        these dispatchers is caught: the source-scan guard at
+        `test_the_table_covers_every_leaf_the_reader_guards` covers
+        `_typed_leaf` call sites, not the `_residualise` mapped-set choices
+        on the part dispatchers, so this assertion is the only safety net.
+        """
+        body = dict(part)
+        body["videoMetadata"] = {"fps": 1.0}
+        projected = project_untotalled({"contents": [{"parts": [body]}]})
+
+        assert projected.residual == {"contents[0].parts[0].videoMetadata": {"fps": 1.0}}
+
+    @pytest.mark.parametrize(
         ("part", "case"),
         [
             ({}, "an empty part"),
