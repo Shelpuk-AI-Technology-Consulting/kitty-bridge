@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -27,6 +28,10 @@ from harness import corpus as k
 from harness import corpus_thresholds as ct
 from harness.contract import CapturedRequest, WireFormat
 from harness.register import Trigger
+
+#: The bridge's CC translator — imported so the L1 tests can measure what
+#: ``_compact_messages`` actually compares against.
+from kitty.bridge.messages.translator import MessagesTranslator
 
 #: The constants the bridge itself decides on, imported from the source of
 #: truth. The builder imports the same names; these tests assert against them
@@ -76,50 +81,58 @@ class TestBuilderThresholdProperties:
         assert _tool_result_string_lengths(captured) == [_TOOL_RESULT_TRUNCATION_LIMIT + 1]
 
     def test_under_budget_messages_serialize_at_the_threshold(self) -> None:
-        """The under-budget entry's messages serialize exactly at ``2_800_000``.
+        """The under-budget entry's CC-converted messages serialise to exactly the threshold.
 
         ``_compact_messages`` short-circuits on ``original_size <= threshold``,
         so the threshold itself is the largest short-circuit size — mirroring
-        the M3 pair's boundary pattern.
+        the M3 pair's boundary pattern. The CC-converted shape is what the
+        bridge measures (server.py:6996 ``_safe_size``); pinning against the
+        Anthropic-Messages shape would land the fixture 92 chars off the
+        boundary the bridge actually compares.
         """
         captured, met, absent = ct.build_compaction_budget_under()
         assert absent == frozenset({Trigger.TOOL_RESULT_OVER_LIMIT})
         assert met == frozenset()
-        serialized = _anthropic_messages_serialized(captured)
-        assert serialized == _COMPACTION_CHAR_THRESHOLD, (
-            f"serialized messages length {serialized} != {_COMPACTION_CHAR_THRESHOLD}"
+        cc_len = _cc_messages_serialized(captured)
+        assert cc_len == _COMPACTION_CHAR_THRESHOLD, (
+            f"CC-converted messages length {cc_len} != {_COMPACTION_CHAR_THRESHOLD}"
         )
 
-    def test_over_budget_messages_serialize_one_above_the_threshold(self) -> None:
-        """The over-budget entry's messages serialize at ``threshold + 1``.
+    def test_over_budget_filler_alone_crosses_threshold(self) -> None:
+        """The over-budget entry's CC-converted messages length exceeds the threshold.
 
-        The smallest value ``original_size > threshold`` accepts, mirroring
-        the M3 pair's ``limit + 1``.
+        Captured WITHOUT the oversized tool_result's contribution, the filler
+        is sized so the CC-converted length is exactly ``threshold + 1`` — the
+        smallest value ``original_size > threshold`` accepts. Adding the 50 001-char
+        tool_result on top pushes the total past ``threshold + 50 000``.
         """
         captured, met, absent = ct.build_compaction_budget_over()
         assert met == frozenset({Trigger.TOOL_RESULT_OVER_LIMIT})
         assert absent == frozenset()
-        serialized = _anthropic_messages_serialized(captured)
-        assert serialized == _COMPACTION_CHAR_THRESHOLD + 1, (
-            f"serialized messages length {serialized} != {_COMPACTION_CHAR_THRESHOLD + 1}"
+        cc_len = _cc_messages_serialized(captured)
+        assert cc_len > _COMPACTION_CHAR_THRESHOLD, (
+            f"CC-converted messages length {cc_len} not above {_COMPACTION_CHAR_THRESHOLD}; "
+            "the over entry must cross the threshold the bridge compares against"
         )
 
-    def test_over_budget_is_trigger_for_any_profile_budget(self) -> None:
-        """``threshold + 1`` exceeds any profile's derived ``messages_budget``.
+    def test_over_budget_still_over_threshold_after_m3_truncation(self) -> None:
+        """After M3 truncates the 50 001-char tool_result, the body is still over budget.
 
-        ``messages_budget = max_chars - overhead - 10_000`` where
-        ``max_chars = min(tokens_to_chars(context_tokens), _MAX_REQUEST_CHARS) = 4 000 000``,
-        so the largest budget is at most ``4 000 000 - 10 000``. A body of
-        ``threshold + 1 = 2 800 001`` is below that ceiling, but the budget
-        also subtracts the request overhead (tools, model, metadata), so a
-        fixture that is meant to guarantee M5-trigger needs to be past the
-        budget after overhead — which ``threshold + 1`` is for any realistic
-        envelope (a few KB). Recorded rather than asserted-on: the constant
-        arithmetic lives in the bridge, not here.
+        This is the failure mode the first iteration had: with the filler at
+        exactly ``threshold + 1`` and the 50 001-char tool_result on top,
+        M3's truncation drops the body ~50 000 chars and it falls below the
+        threshold, so M5 short-circuits instead of firing the pruning step.
+        The resized build keeps the filler alone over threshold so the
+        post-truncation body remains above it.
         """
         captured, _met, _absent = ct.build_compaction_budget_over()
-        assert _anthropic_messages_serialized(captured) == _COMPACTION_CHAR_THRESHOLD + 1
-        assert _COMPACTION_CHAR_THRESHOLD + 1 < 4_000_000
+        cc = _translate_to_cc(captured)
+        _apply_m3_truncation(cc["messages"])
+        post_m3_cc = len(json.dumps(cc["messages"], ensure_ascii=False))
+        assert post_m3_cc > _COMPACTION_CHAR_THRESHOLD, (
+            f"post-M3 CC length {post_m3_cc} is not above {_COMPACTION_CHAR_THRESHOLD}; "
+            "M5's pruning step would short-circuit instead of fire"
+        )
 
     def test_over_budget_carries_an_oversized_tool_result(self) -> None:
         """The over-budget entry also supplies M4's second condition.
@@ -254,7 +267,7 @@ class TestCommittedArtifactsRegenerate:
 
 # Idiom matching ``TestCommittedArtifactsRegenerate``: parametrize test methods on the
 # builder, so a hand edit to any of the four committed artifacts fails here.
-_BUILD_BY_ID: dict[str, object] = {
+_BUILD_BY_ID: dict[str, Callable[[], tuple[CapturedRequest, frozenset, frozenset]]] = {
     "tool_result_under_limit": ct.build_tool_result_under_limit,
     "tool_result_over_limit": ct.build_tool_result_over_limit,
     "compaction_budget_under": ct.build_compaction_budget_under,
@@ -292,17 +305,72 @@ class TestPaddedBodyStructure:
 # ---------------------------------------------------------------------------
 
 
-def _anthropic_messages_serialized(captured: CapturedRequest) -> int:
-    """Return the length the bridge's ``json.dumps(messages, ensure_ascii=False)`` would see.
+def _cc_messages_serialized(captured: CapturedRequest) -> int:
+    """Return ``len(json.dumps(messages, ensure_ascii=False))`` on the CC-converted shape.
 
-    The fixture body is Anthropic Messages shape; the bridge's M5 comparison
-    runs on the CC-converted messages, whose serialization of these simple
-    text/tool shapes is within a few hundred characters of the Anthropic
-    shape's. The builder's targets keep a wide margin around the threshold so
-    the conversion's small delta cannot flip a side.
+    This is the property ``_compact_messages`` (``server.py:6996``) measures
+    when deciding whether the budget is exceeded. The Anthropic-Messages shape
+    the fixture commits differs from the CC-converted shape by a constant ~92
+    chars for the no-tool-result layout; pinning against the CC shape is
+    what makes the fixture land on the boundary the bridge actually compares.
+
+    Args:
+        captured: The fixture's captured request.
+
+    Returns:
+        The length the bridge's ``_safe_size`` would observe.
     """
     body = json.loads(captured.body.decode("utf-8"))
-    return len(json.dumps(body["messages"], ensure_ascii=False))
+    cc = _TRANSLATOR.translate_request(body)
+    return len(json.dumps(cc["messages"], ensure_ascii=False))
+
+
+def _translate_to_cc(captured: CapturedRequest) -> dict:
+    """Run ``MessagesTranslator.translate_request`` on the captured body.
+
+    Returns the CC-converted request dict; callers mutate ``["messages"]``
+    in place to simulate the bridge's mutation chain.
+    """
+    body = json.loads(captured.body.decode("utf-8"))
+    return _TRANSLATOR.translate_request(body)
+
+
+def _apply_m3_truncation(messages: list[dict]) -> int:
+    """Run the M3 mutation sites against ``messages`` in place; return the count of truncations.
+
+    Mirrors ``server.py:7267-7294`` (CC and Anthropic-native shapes) and
+    ``server.py:7314-7325`` (Responses shape, which this fixture does not
+    exercise) so the post-M3 length is exactly what the bridge would
+    observe. Used by the post-M3 over-budget tests.
+    """
+    truncated = 0
+    for msg in messages:
+        if msg.get("role") == "tool" and isinstance(msg.get("content"), str):
+            content_len = len(msg["content"])
+            if content_len > _TOOL_RESULT_TRUNCATION_LIMIT:
+                msg["content"] = (
+                    f"[Tool output truncated — original size: {content_len:,} chars]"
+                )
+                truncated += 1
+            continue
+        if msg.get("role") == "user" and isinstance(msg.get("content"), list):
+            for block in msg["content"]:
+                if (
+                    isinstance(block, dict)
+                    and block.get("type") == "tool_result"
+                    and isinstance(block.get("content"), str)
+                    and len(block["content"]) > _TOOL_RESULT_TRUNCATION_LIMIT
+                ):
+                    original_len = len(block["content"])
+                    block["content"] = (
+                        f"[Tool output truncated — original size: {original_len:,} chars]"
+                    )
+                    truncated += 1
+    return truncated
+
+
+#: The bridge's CC translator — used by the CC-shape measurements below.
+_TRANSLATOR = MessagesTranslator()
 
 
 def _tool_result_string_lengths(captured: CapturedRequest) -> list[int]:
