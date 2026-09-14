@@ -110,6 +110,10 @@ class OpenCodeGoAdapter(AnthropicAdapter):
     #: document ``display``.  KBR-203, decision D2.
     forwards_thinking_display = False
 
+    #: The Messages route's upstreams (MiniMax rejects the field outright; Qwen
+    #: does not document it) cannot safely receive ``output_config``.  KBR-224.
+    forwards_output_config = False
+
     @property
     def provider_type(self) -> str:
         return "opencode_go"
