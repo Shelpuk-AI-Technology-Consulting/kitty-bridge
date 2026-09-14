@@ -298,17 +298,19 @@ def test_can_interact_and_composes_the_console_probe(
 ) -> None:
     """KBR-218: on Windows the guard ANDs the probe over both standard handles.
 
-    The ctypes call is Windows-only plumbing; the AND-composition is a decision,
-    and it is pinned here on every leg by patching the interpretation seam.
-    ``side_effect=iter([...])`` feeds the first probe call the stdin value and
-    the second the stdout value, so the assertion really exercises
-    ``can_interact``'s AND over two calls. ``sys.platform`` is forced to
-    ``win32`` so the Windows branch is reachable on every leg.
+    The ctypes call is Windows-only plumbing; the AND-composition is a
+    decision, and it is pinned here on every leg by patching the plumbing
+    seam. The first plumbing call returns the stdin raw and the second the
+    stdout raw; ``_handle_attached`` stays real and interprets each one
+    before the AND composes them. ``sys.platform`` is forced to ``win32`` so
+    the Windows branch is reachable on every leg.
 
     This is the positive direction of the fix: every subprocess case exercises
     the refusal branch, so without this table a regression that makes
     ``can_interact()`` always False on ``win32`` (silently refusing every real
-    console) ships green against the whole suite.
+    console) ships green against the whole suite. The interpretation itself
+    (``bool(raw_mode)``) is pinned separately by
+    :func:`test_handle_attached_interprets_a_console_mode_return`.
 
     Args:
         monkeypatch: Pytest patcher, restored after the test.
@@ -320,11 +322,11 @@ def test_can_interact_and_composes_the_console_probe(
 
     from kitty.tui import prompts
 
-    monkeypatch.setattr(
-        prompts,
-        "_handle_attached",
-        MagicMock(side_effect=iter([stdin_attached, stdout_attached])),
-    )
+    # 1 = console attached (raw GetConsoleMode return), 0 = not. The patched
+    # plumbing skips ctypes entirely, which is the only way the Windows branch
+    # of ``can_interact`` is reachable on a POSIX test runner.
+    side_effect_iter = iter([1 if stdin_attached else 0, 1 if stdout_attached else 0])
+    monkeypatch.setattr(prompts, "_query_console_mode", lambda _hv: next(side_effect_iter))
     monkeypatch.setattr(_sys, "platform", "win32")
 
     assert prompts.can_interact() is expected
