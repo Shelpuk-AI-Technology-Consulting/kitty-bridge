@@ -1,0 +1,49 @@
+{
+  "id": "m6_recovery_oversized_paired",
+  "description": "M6 recovery case: a well-paired conversation whose post-pre-flight serialized size exceeds the 600,000-char oversized gate",
+  "origin": "synthetic",
+  "origin_note": "Synthetic, not captured: an oversized well-paired conversation does not occur in a real Claude Code session on demand, and design section 7.1's real-not-synthetic rationale does not apply to it. The size is constructed: a small hand-written core (the system prompt and the turn skeleton) padded with deterministic filler to clear the 600,000-character oversized gate measured on this committed artifact. The KBR-5 correction applies: a well-paired conversation is what the M6 recovery path can act on, because an oversized orphan tool result is truncated to a stub before pairing validation runs and the recovery is never reached. The mandatory human-review step is replaced by code-review of the builder (this script), the scrubber's full-byte scan in CI, and a bounded head/tail human read of the committed .body file, per TEST_SUITE.md section 7.1.1.",
+  "captured_from": "",
+  "captured_at": "",
+  "method": "POST",
+  "scheme": "http",
+  "host": "127.0.0.1",
+  "path": "/v1/messages",
+  "query": "",
+  "headers": [
+    [
+      "Host",
+      "127.0.0.1"
+    ],
+    [
+      "Accept",
+      "application/json"
+    ],
+    [
+      "Content-Type",
+      "application/json"
+    ],
+    [
+      "X-Api-Key",
+      "<redacted:credential_header>"
+    ],
+    [
+      "anthropic-version",
+      "2023-06-01"
+    ],
+    [
+      "anthropic-beta",
+      "claude-code-20250219"
+    ],
+    [
+      "Content-Length",
+      "605537"
+    ]
+  ],
+  "body_file": "m6_recovery_oversized_paired.body",
+  "body_sha256": "444776878f712c538ae12c463d02a9f5164619c98458bc7c946dca3d2ad38a10",
+  "wire_format": "anthropic_messages",
+  "known_non_secrets": [],
+  "triggers_met": [],
+  "triggers_absent": []
+}
