@@ -518,26 +518,11 @@ def _aliased(
         held_key, held_value = view[name]
         if wire_key == name and held_key != name:
             view[name] = (wire_key, value)
-            residual[_join(prefix, held_key)] = held_value
+            residual[c.residual_key(prefix, held_key)] = held_value
         else:
-            residual[_join(prefix, wire_key)] = value
+            residual[c.residual_key(prefix, wire_key)] = value
 
     return view
-
-
-def _join(prefix: str, key: str) -> str:
-    """Return a residual key for ``key`` inside the object at ``prefix``.
-
-    Args:
-        prefix: The object's path from the body root, ``""`` at the top level.
-        key: The wire key.
-
-    Returns:
-        The dotted path, or the bare key at the top level — where the bare form
-        is required, because :func:`~harness.contract.verify_total` compares the
-        residual's keys against the body's own.
-    """
-    return f"{prefix}.{key}" if prefix else key
 
 
 def _residualise(
@@ -560,7 +545,7 @@ def _residualise(
     """
     for name, (wire_key, value) in view.items():
         if name not in mapped:
-            residual[_join(prefix, wire_key)] = value
+            residual[c.residual_key(prefix, wire_key)] = value
 
 
 def _typed_leaf(
@@ -605,7 +590,7 @@ def _typed_leaf(
     # `"topK": true` through as the integer 1 — a value the agent never sent.
     wrong = not isinstance(value, expected) or (isinstance(value, bool) and bool not in expected)
     if wrong:
-        residual[_join(prefix, wire_key)] = value
+        residual[c.residual_key(prefix, wire_key)] = value
         return default
 
     return value
@@ -795,7 +780,7 @@ def _read_tool_choice(nested: Mapping[str, tuple[str, Any]], prefix: str, residu
         return None
 
     wire_key, value = nested["functionCallingConfig"]
-    path = _join(prefix, wire_key)
+    path = c.residual_key(prefix, wire_key)
     if not isinstance(value, Mapping):
         residual[path] = value
         return None
@@ -815,7 +800,7 @@ def _read_tool_choice(nested: Mapping[str, tuple[str, Any]], prefix: str, residu
         # has already been residualised correctly by `_typed_leaf`, and `mode` is
         # by then the default it fell back to. Overwriting would tell a
         # maintainer the client sent `null` when it sent an object.
-        residual.setdefault(_join(path, config["mode"][0]), config["mode"][1])
+        residual.setdefault(c.residual_key(path, config["mode"][0]), config["mode"][1])
 
     allowed = _typed_leaf(config, "allowedFunctionNames", (list,), path, residual)
     if allowed is not None:
@@ -825,7 +810,7 @@ def _read_tool_choice(nested: Mapping[str, tuple[str, Any]], prefix: str, residu
         else:
             # A restriction to several names has no canonical form; the mode
             # still projects, so the residual names only what was lost.
-            residual[_join(path, config["allowedFunctionNames"][0])] = allowed
+            residual[c.residual_key(path, config["allowedFunctionNames"][0])] = allowed
 
     _residualise(config, PUBLISHED_FUNCTION_CALLING_CONFIG_KEYS, path, residual)
     return choice
@@ -860,7 +845,7 @@ def _read_tools(
     extra: dict[str, Any] = {}
 
     for index, entry in enumerate(entries):
-        path = f"{wire_key}[{index}]"
+        path = c.residual_key(wire_key, index=index)
         if not isinstance(entry, Mapping):
             raise c.UnreadableBodyError(f"{path} must be an object, got {type(entry).__name__}")
 
@@ -871,7 +856,7 @@ def _read_tools(
             if name in extra:
                 # A second entry re-declaring one has no second address; the
                 # first is the one `envelope.extra[<key>]` names.
-                residual[_join(path, tool[name][0])] = tool[name][1]
+                residual[c.residual_key(path, tool[name][0])] = tool[name][1]
                 continue
             extra[name] = tool[name][1]
 
@@ -903,14 +888,14 @@ def _read_function_declarations(
         return []
 
     wire_key, value = tool["functionDeclarations"]
-    path = _join(prefix, wire_key)
+    path = c.residual_key(prefix, wire_key)
     entries = _members(value)
     if entries is None:
         raise c.UnreadableBodyError(f"{path} must be a list, got {type(value).__name__}")
 
     declared: list[c.ToolDecl] = []
     for index, entry in enumerate(entries):
-        item = f"{path}[{index}]"
+        item = c.residual_key(path, index=index)
         if not isinstance(entry, Mapping):
             raise c.UnreadableBodyError(f"{item} must be an object, got {type(entry).__name__}")
 
@@ -966,7 +951,7 @@ def _read_required_name(view: Mapping[str, tuple[str, Any]], path: str, residual
     name: str | None = _typed_leaf(view, "name", (str,), path, residual)
     if name is None:
         residual.setdefault(
-            _join(path, view["name"][0] if "name" in view else "name"),
+            c.residual_key(path, view["name"][0] if "name" in view else "name"),
             view["name"][1] if "name" in view else None,
         )
         return ""
@@ -1045,7 +1030,7 @@ def _read_system_instruction(view: Mapping[str, tuple[str, Any]], residual: dict
 
     system: list[c.Text] = []
     for index, part in enumerate(parts):
-        path = f"{_join(wire_key, content['parts'][0])}[{index}]"
+        path = c.residual_key(c.residual_key(wire_key, content["parts"][0]), index=index)
         if not isinstance(part, Mapping):
             raise c.UnreadableBodyError(f"{path} must be an object, got {type(part).__name__}")
 
@@ -1092,7 +1077,7 @@ def _read_contents(view: Mapping[str, tuple[str, Any]], residual: dict[str, Any]
 
     turns: list[c.Turn] = []
     for index, member in enumerate(members):
-        path = f"{wire_key}[{index}]"
+        path = c.residual_key(wire_key, index=index)
         if not isinstance(member, Mapping):
             raise c.UnreadableBodyError(f"{path} must be an object, got {type(member).__name__}")
 
@@ -1162,14 +1147,14 @@ def _read_parts(content: Mapping[str, tuple[str, Any]], prefix: str, residual: d
         return ()
 
     wire_key, value = content["parts"]
-    path = _join(prefix, wire_key)
+    path = c.residual_key(prefix, wire_key)
     members = _members(value)
     if members is None:
         raise c.UnreadableBodyError(f"{path} must be a list or an object")
 
     parts: list[c.Part] = []
     for index, member in enumerate(members):
-        item = f"{path}[{index}]"
+        item = c.residual_key(path, index=index)
         if not isinstance(member, Mapping):
             raise c.UnreadableBodyError(f"{item} must be an object, got {type(member).__name__}")
         parts.append(_read_part(member, item, residual))
@@ -1286,7 +1271,7 @@ def _read_inline_data(view: Mapping[str, tuple[str, Any]], path: str, residual: 
             not decode residualises instead — see the comment below.
     """
     wire_key, value = view["inlineData"]
-    item = _join(path, wire_key)
+    item = c.residual_key(path, wire_key)
     if not isinstance(value, Mapping):
         raise c.UnreadableBodyError(f"{item} must be an object, got {type(value).__name__}")
 
@@ -1303,7 +1288,7 @@ def _read_inline_data(view: Mapping[str, tuple[str, Any]], path: str, residual: 
         # and Google's own image sample passes `-w0` to `base64(1)` precisely
         # because its default output is wrapped. Nor is the part dropped: the
         # index would shift and invent a delta on every later part.
-        residual[_join(item, blob["data"][0] if "data" in blob else "data")] = raw
+        residual[c.residual_key(item, blob["data"][0] if "data" in blob else "data")] = raw
         decoded = None
 
     _residualise(blob, {"data", "mimeType"}, item, residual)
@@ -1334,7 +1319,7 @@ def _read_file_data(view: Mapping[str, tuple[str, Any]], path: str, residual: di
         UnreadableBodyError: When the file data is not an object.
     """
     wire_key, value = view["fileData"]
-    item = _join(path, wire_key)
+    item = c.residual_key(path, wire_key)
     if not isinstance(value, Mapping):
         raise c.UnreadableBodyError(f"{item} must be an object, got {type(value).__name__}")
 
@@ -1376,7 +1361,7 @@ def _read_function_call(view: Mapping[str, tuple[str, Any]], path: str, residual
             usable name residualises instead — see :func:`_read_required_name`.
     """
     wire_key, value = view["functionCall"]
-    item = _join(path, wire_key)
+    item = c.residual_key(path, wire_key)
     if not isinstance(value, Mapping):
         raise c.UnreadableBodyError(f"{item} must be an object, got {type(value).__name__}")
 
@@ -1416,7 +1401,7 @@ def _read_function_response(view: Mapping[str, tuple[str, Any]], path: str, resi
         UnreadableBodyError: When the response is not an object.
     """
     wire_key, value = view["functionResponse"]
-    item = _join(path, wire_key)
+    item = c.residual_key(path, wire_key)
     if not isinstance(value, Mapping):
         raise c.UnreadableBodyError(f"{item} must be an object, got {type(value).__name__}")
 
@@ -1461,14 +1446,14 @@ def _read_response_parts(answer: Mapping[str, tuple[str, Any]], prefix: str, res
         return []
 
     wire_key, value = answer["parts"]
-    path = _join(prefix, wire_key)
+    path = c.residual_key(prefix, wire_key)
     members = _members(value)
     if members is None:
         raise c.UnreadableBodyError(f"{path} must be a list or an object")
 
     images: list[c.Image] = []
     for index, member in enumerate(members):
-        item = f"{path}[{index}]"
+        item = c.residual_key(path, index=index)
         if not isinstance(member, Mapping):
             raise c.UnreadableBodyError(f"{item} must be an object, got {type(member).__name__}")
 

@@ -1608,6 +1608,93 @@ def residual_path(key: str) -> str:
     return f"residual[{key}]"
 
 
+def residual_key(prefix: str, key: str | None = None, index: int | str | None = None) -> str:
+    """Return the residual key naming one unclassified value inside a body.
+
+    §7.4.1 fixes two rules and this builder is the one shared spelling of
+    both (KBR-193).  Rule 1: a wholly-unclassified **top-level** key is
+    keyed by its bare name — ``x-kitty-trace``, never
+    ``residual[x-kitty-trace]`` — because :func:`verify_total` compares the
+    residual's keys against the body's own top-level keys, and a wrapped
+    form would miss ``source`` and raise :class:`DroppedFieldsError` naming
+    the wrong defect.  Rule 2: a nested key is keyed by its path from the
+    body root with **array positions as indices** — ``tools[0].type``,
+    ``messages[2].content[0].x_vendor_marker``.  It deliberately does
+    **not** inherit §3.3.1a's by-name tool addressing: that convention
+    exists because translators reorder declarations, a property of a
+    *comparison*, while a residual key is never matched against a register
+    pattern.
+
+    This is the *mapping* builder.  :func:`residual_path` renders the
+    *delta path* the oracle reports — the two are deliberately distinct,
+    and §7.4.1 says so in as many words.
+
+    Args:
+        prefix: The path of the containing object from the body root,
+            ``""`` at the body root.  May already contain bracketed array
+            indices from earlier :func:`residual_key` calls.
+        key: The wire key naming the value inside ``prefix``'s object.
+            ``None`` when the value *is* the object at ``prefix`` (or at
+            ``prefix[index]``) and no further field name follows.
+        index: The array position to append to ``prefix`` in ``[index]``
+            form, **before** ``key`` is appended.  ``None`` when the value
+            does not live in an array.
+
+    Returns:
+        The key under which the value is stored in a request's
+        ``residual`` mapping.
+
+    Raises:
+        ValueError: When the arguments cannot spell a body path — an empty
+            ``prefix`` with an ``index`` (``"[0].field"`` is not a path),
+            an explicitly-passed empty ``key`` (``"prefix."`` is a trailing
+            dot), or an ``index`` that is a ``bool``, a ``float``, or the
+            :data:`WILDCARD` sentinel.  ``bool`` is rejected despite being
+            a subclass of ``int``, matching :func:`_index`; ``WILDCARD`` is
+            rejected *unlike* :func:`_index` because §7.4.1 fixes residual
+            keys as array positions, never patterns.
+
+    Examples:
+        >>> residual_key("tool_choice")
+        'tool_choice'
+        >>> residual_key("", "tool_choice")
+        'tool_choice'
+        >>> residual_key("messages[2].content", "x_marker")
+        'messages[2].content.x_marker'
+        >>> residual_key("tools", "input_schema", index=0)
+        'tools[0].input_schema'
+        >>> residual_key("messages[2].content", "x_marker", index=0)
+        'messages[2].content[0].x_marker'
+    """
+    # Validate before rendering: mypy runs on `src/kitty` only (plan §1.3),
+    # so the annotation cannot catch a wrong argument type — the readers'
+    # callers sit in `tests/harness`, outside its gate.
+    if index is not None:
+        if index == WILDCARD:
+            raise ValueError(
+                "a residual key is a body path, never a pattern: "
+                f"index={index!r} is not an array position (§7.4.1 rule 2)"
+            )
+        if isinstance(index, bool) or not isinstance(index, int):
+            raise ValueError(f"a residual index must be an int, got {index!r}")
+        if not prefix:
+            raise ValueError(
+                f"an index needs a non-empty prefix to attach to, got prefix={prefix!r}"
+            )
+    if key == "":
+        raise ValueError("an explicitly-passed key must be non-empty — 'prefix.' is a trailing dot")
+
+    # Render in §7.4.1's own order: the index attaches to the prefix's tail,
+    # then the key joins with a dot — or the bare prefix/key stands alone,
+    # which is rule 1's whole point.
+    rendered_prefix = f"{prefix}[{index}]" if index is not None else prefix
+    if key is None:
+        return rendered_prefix
+    if not rendered_prefix:
+        return key
+    return f"{rendered_prefix}.{key}"
+
+
 def reply_part_path(index: int | str) -> str:
     """Return the path naming one part of a reply.
 

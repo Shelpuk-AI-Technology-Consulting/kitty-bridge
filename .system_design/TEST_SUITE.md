@@ -2871,7 +2871,9 @@ and the second is the one that surprises:
    `residual[x-kitty-trace]`. `verify_total` computes `set(consumed) | set(residual)` against
    `set(source)`, so the wrapped form misses `source` and raises `DroppedFieldsError`, naming the
    wrong defect. `residual_path()` renders a *delta path* for the oracle to report; it never
-   builds this mapping.
+   builds this mapping. The mapping itself is built by `contract.residual_key()` — one call
+   covers both rules and is the only spelling the seven readers use (KBR-193), so a
+   disagreement is structurally impossible at the call site.
 2. A nested key is keyed by its path from the body root with **array positions as indices** —
    `tools[0].type`, `messages[2].content[0].x_vendor_marker`, `system[0].x_vendor_marker`. It does
    **not** inherit §3.3.1a's by-name tool addressing. That convention exists because "translators
