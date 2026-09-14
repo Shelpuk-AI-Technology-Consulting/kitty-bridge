@@ -58,7 +58,7 @@ def main() -> None:
     tls_key = args.tls_key
 
     if args.config:
-        from kitty.bridge.config import load_bridge_config
+        from kitty.bridge.config import load_bridge_config, resolve_keys_file
 
         config = load_bridge_config(
             args.config,
@@ -71,7 +71,16 @@ def main() -> None:
         port = config.port
         tls_cert = config.tls_cert
         tls_key = config.tls_key
-        keys_file = config.keys_file
+        # Auth keys file (KBR-230). A named-but-missing file stops the start
+        # with one clear line; with nothing named, the default file is used
+        # when it exists and auth stays off when it does not.
+        if config.keys_file is not None and not Path(config.keys_file).exists():
+            print(
+                f"Error: Keys file not found: {config.keys_file} (keys_file in {args.config})",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        keys_file = resolve_keys_file(config)
 
         if config.resolved_log_access(background=True) and not args.no_log:
             access_log_path = str(Path(config.log_dir) / "bridge_access.log")

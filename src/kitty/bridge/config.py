@@ -22,12 +22,17 @@ def _expand_path(value: str | None) -> str | None:
 
 @dataclass
 class BridgeConfig:
-    """Resolved bridge configuration (file values + CLI overrides + defaults)."""
+    """Resolved bridge configuration (file values + CLI overrides + defaults).
+
+    ``keys_file`` is the path named by configuration, or ``None`` when nothing is
+    named — it is deliberately not defaulted; see :func:`resolve_keys_file` for
+    the effective file.
+    """
 
     host: str = _DEFAULT_HOST
     port: int = _DEFAULT_PORT
     profile: str | None = None
-    keys_file: str = _DEFAULT_KEYS_FILE
+    keys_file: str | None = None  # None = nothing named in bridge.yaml
     log_access: bool | None = None  # None = use mode default
     log_dir: str = _DEFAULT_LOG_DIR
     tls_cert: str | None = None
@@ -66,7 +71,9 @@ def load_bridge_config(
         cli_tls_key: CLI --tls-key override.
 
     Returns:
-        Fully resolved BridgeConfig.
+        Fully resolved BridgeConfig. ``keys_file`` holds what the file named
+        (possibly ``None``), not the effective path — resolve it with
+        :func:`resolve_keys_file`.
     """
     import yaml
 
@@ -94,7 +101,9 @@ def load_bridge_config(
         host=str(_get("host", cli_host, _DEFAULT_HOST)),
         port=int(_get("port", cli_port, _DEFAULT_PORT)),  # type: ignore[call-overload]  # _get returns object
         profile=_get("profile", cli_profile, None),  # type: ignore[arg-type]
-        keys_file=str(_expand_path(str(_get("keys_file", None, _DEFAULT_KEYS_FILE))) or _DEFAULT_KEYS_FILE),  # type: ignore[arg-type]
+        # Falsy values — null, "", false, 0 — count as nothing named (KBR-230):
+        # the bridge then starts with auth off rather than crashing.
+        keys_file=_expand_path(str(v)) if (v := _get("keys_file", None, None)) else None,  # type: ignore[arg-type]
         log_access=_get("log_access", cli_log_access, None),  # type: ignore[arg-type]
         log_dir=str(_expand_path(str(_get("log_dir", None, _DEFAULT_LOG_DIR))) or _DEFAULT_LOG_DIR),  # type: ignore[arg-type]
         tls_cert=_expand_path(str(v) if v is not None else None)
@@ -106,3 +115,26 @@ def load_bridge_config(
     )
 
     return config
+
+
+def resolve_keys_file(config: BridgeConfig) -> str | None:
+    """Resolve the keys file a background bridge authenticates with.
+
+    A named ``keys_file`` wins even when it does not exist — deciding how a
+    named-but-missing file fails is the runner's job (``kitty.bridge_runner``
+    refuses to start). With nothing named, the default keys file is used when
+    it exists; a fresh install with neither starts with authentication off
+    (KBR-230).
+
+    Args:
+        config: The resolved bridge configuration.
+
+    Returns:
+        The effective keys file path, or ``None`` when the bridge should
+        accept unauthenticated clients.
+    """
+    if config.keys_file is not None:
+        return config.keys_file
+    if Path(_DEFAULT_KEYS_FILE).exists():
+        return _DEFAULT_KEYS_FILE
+    return None

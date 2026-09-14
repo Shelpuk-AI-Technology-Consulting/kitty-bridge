@@ -71,6 +71,7 @@ Numbered as in the KBR-220 requirements and PR. D4 there, which folded the Windo
 | D3 | No migration of an "old" state file | The new home is the only place a bridge has ever written state: the runner line is unchanged since `bridge_runner.py` was created. The old CLI location only ever received `bridge_state.json.start.lock`, a zero-byte lock. It is left alone: deleting a lock an older kitty may hold is the riskier act, and it blocks nothing because the lock now sits beside the new state path. |
 | D5 | Where a loop cannot register signal handlers, register nothing: no `signal.signal` fallback | On Windows, `kitty bridge stop` ends the process with `TerminateProcess`, which no handler can intercept, and `stop_bridge` removes the state file itself. Ctrl+C in a foreground bridge still raises `KeyboardInterrupt`, which `asyncio.run` turns into cancellation, so `finally: stop_async()` still runs. A thread-to-loop signal bridge would add complexity for no visible gain. |
 | D6 | `stop_signals` lives in `kitty.bridge`, not a top-level leaf | Both callers (`kitty.cli.main`, `kitty.bridge_runner`) may already import `kitty.bridge`. A top-level leaf would need its own import-linter contract and an entry in every "every sibling" list. |
+| D7 | A missing keys file means auth off; a named-but-missing one refuses to start with a clear error | Before the fix a fresh install could not start a background bridge at all (`parse_keys_file`'s `FileNotFoundError`). Auth off matches the foreground bridge, `kitty claude` and the README; the default file still enables auth when it exists, so installs relying on it keep exactly the behaviour they had. Rejected: requiring a keys file — background would be the only mode demanding a hand-created secrets file. *Product owner, 2026-09-14 (KBR-230).* |
 
 ### 1.5 Known limits (recorded, not fixed here)
 
@@ -83,6 +84,41 @@ Numbered as in the KBR-220 requirements and PR. D4 there, which folded the Windo
   LaunchAgent with `KeepAlive` is restarted by launchd straight after `kitty bridge stop`.
 - **`start` waits 5 seconds.** A bridge slower than that is reported as not ready and left
   running (KBR-176).
+
+### 1.6 Configuration and authentication of a background bridge
+
+Traces to [KBR-230](https://shelpuk.atlassian.net/browse/KBR-230). `bridge.yaml` always reaches the
+child via `--config` (§1.2); `kitty.bridge.config.load_bridge_config` resolves it. Authentication is
+the keys file, and the decision table has four rows:
+
+| The configuration says | The background bridge does |
+|---|---|
+| `keys_file:` names a file that exists | Loads it; every route requires a valid Bearer key (`BridgeServer._auth_middleware`), `/healthz` included. |
+| `keys_file:` names a file that is missing | Refuses to start: one clear line naming the path and the `bridge.yaml` that named it, exit 1, no traceback. An explicit configuration is never silently ignored. |
+| Nothing named, `~/.config/kitty/bridge_keys.txt` exists | Loads the default file; auth on as in row 1. |
+| Nothing named, no default file | Starts with auth **off** — every route, `/healthz` included, answers without credentials. |
+
+`resolve_keys_file` (`kitty.bridge.config`) computes the effective file for the two "nothing named"
+rows and for `kitty bridge config`'s display, which prints `(none — auth disabled)` for the last one.
+`bridge_runner` owns row 2's refusal, beside its other startup errors (egress, profile, API key):
+the server has no printing convention, and the foreground — which never passes `keys_file` — is
+unaffected. A bare `bridge_runner` without `--config` keeps auth off; every real entry point
+(`start`, `restart`, the service units) passes `--config`.
+
+The table is evaluated **once, at start**: a keys file created or removed while a bridge runs
+changes nothing until `kitty bridge restart`. Falsy values (`keys_file:` with nothing after it,
+`""`, `false`, `0`) count as nothing named. A named path that exists but cannot be read as a keys
+file — a directory, a permission error, malformed content — fails as it always has (an exception
+from `parse_keys_file`); only a *missing* file gets row 2's one-line refusal. And row 4 combined
+with a non-loopback `host` is a real exposure, chosen with eyes open: any host that can reach the
+machine can use the bridge and its upstream key — set `keys_file` to prevent that.
+
+Why auth off rather than a required keys file: on every install before this fix a fresh start
+crashed with a traceback, so background mode worked for no new user, while the foreground and
+`kitty claude` run without a keys file and the README's only mention of one treats auth as
+conditional. Honouring the existing default keeps
+every working install unchanged, and the trust model does not move: the default bind is 127.0.0.1.
+*Product owner, 2026-09-14 (KBR-230, option (a)).*
 
 ---
 

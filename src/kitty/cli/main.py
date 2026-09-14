@@ -290,13 +290,13 @@ def main() -> None:
         from platformdirs import user_config_dir as _ucd
 
         _config_path = _Path(_ucd("kitty")) / "bridge.yaml"
-        from kitty.bridge.config import load_bridge_config
+        from kitty.bridge.config import load_bridge_config, resolve_keys_file
 
         config = load_bridge_config(_config_path)
         print(f"Host: {config.host}")
         print(f"Port: {config.port}")
         print(f"Profile: {config.profile or '(default)'}")
-        print(f"Keys file: {config.keys_file}")
+        print(f"Keys file: {resolve_keys_file(config) or '(none — auth disabled)'}")
         print(f"Log access: {config.log_access}")
         print(f"Log dir: {config.log_dir}")
         print(f"TLS cert: {config.tls_cert or '(none)'}")
