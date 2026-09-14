@@ -15,6 +15,7 @@ so each protocol's assertions are about what reaches *its* client.
 
 from __future__ import annotations
 
+import copy
 import json
 
 import aiohttp
@@ -300,8 +301,9 @@ async def _stream(
             ladder tests stay fast.
 
     Returns:
-        The server, the HTTP status, the client's body text, and how many
-        requests reached the upstream.
+        The server, the HTTP status, the client's body text, how many
+        requests reached the upstream, and the upstream request bodies in
+        arrival order.
     """
     if monkeypatch is not None:
         monkeypatch.setattr(server_module, "_BACKOFF_BASE", 0.01)
@@ -313,10 +315,11 @@ async def _stream(
     server = BridgeServer(_ProtocolLauncher(protocol), provider, "sk-test", host="127.0.0.1", port=0)
     upstream_url = server._build_upstream_url({"model": model})
     calls = {"n": 0}
+    bodies: list[dict] = []
     scripted = list(upstream_bodies)
 
     def _respond(url, **kwargs):
-        """Serve the next scripted response and count the hit.
+        """Serve the next scripted response and record the hit.
 
         The last response repeats once the script runs dry, so a defect that
         keeps the ladder walking fails on its assertions quickly instead of
@@ -324,12 +327,16 @@ async def _stream(
 
         Args:
             url: The request URL, unused.
-            **kwargs: The request parameters, unused.
+            **kwargs: The request parameters; the JSON body is recorded.
 
         Returns:
             The next scripted response as an ``aioresponses`` result.
         """
         calls["n"] += 1
+        # Deep-copied: the strip is copy-on-write on the same dict a later
+        # attempt re-serializes, so a shared reference would show the retry's
+        # state instead of what this request carried.
+        bodies.append(copy.deepcopy(kwargs.get("json") or {}))
         status, body = scripted.pop(0) if len(scripted) > 1 else scripted[0]
         return CallbackResult(status=status, body=body or "", content_type="text/event-stream")
 
@@ -348,7 +355,7 @@ async def _stream(
                     json=_client_request(protocol, model),
                 ) as resp,
             ):
-                return server, resp.status, await resp.text(), calls["n"]
+                return server, resp.status, await resp.text(), calls["n"], bodies
         finally:
             await server.stop_async()
 
@@ -391,7 +398,7 @@ async def test_the_chat_completions_stream_carries_text_thinking_and_the_whole_t
     """
     body = _render_sse(_anthropic_events(), terminate=False)
 
-    server, status, client_body, _calls = await _stream(
+    server, status, client_body, _calls, _bodies = await _stream(
         BridgeProtocol.CHAT_COMPLETIONS_API, provider_factory(), model, [(200, body)], monkeypatch
     )
 
@@ -433,7 +440,7 @@ async def test_the_responses_stream_carries_text_and_the_whole_function_call(pro
         provider_factory: Builds a Messages-wire adapter.
         model: A model that adapter serves on its Messages wire.
     """
-    _server, status, client_body, _calls = await _stream(
+    _server, status, client_body, _calls, _bodies = await _stream(
         BridgeProtocol.RESPONSES_API, provider_factory(), model, [(200, _render_sse(_anthropic_events()))]
     )
 
@@ -472,7 +479,7 @@ async def test_the_gemini_stream_carries_text_and_the_whole_function_call(provid
         provider_factory: Builds a Messages-wire adapter.
         model: A model that adapter serves on its Messages wire.
     """
-    _server, status, client_body, _calls = await _stream(
+    _server, status, client_body, _calls, _bodies = await _stream(
         BridgeProtocol.GEMINI_API, provider_factory(), model, [(200, _render_sse(_anthropic_events()))]
     )
 
@@ -511,7 +518,7 @@ async def test_a_retryable_upstream_failure_still_ends_in_content(protocol, monk
     provider, model = AnthropicAdapter(), "claude-opus-4-6"
     good = _render_sse(_anthropic_events())
 
-    _server, status, client_body, calls = await _stream(
+    _server, status, client_body, calls, _bodies = await _stream(
         protocol, provider, model, [(500, "boom"), (200, good)], monkeypatch
     )
 
@@ -553,7 +560,7 @@ async def test_an_empty_converted_stream_fires_the_empty_ladder(protocol, monkey
     ])
     good = _render_sse(_anthropic_events())
 
-    _server, status, client_body, calls = await _stream(
+    _server, status, client_body, calls, _bodies = await _stream(
         protocol, provider, model, [(200, empty), (200, good)], monkeypatch
     )
 
@@ -582,7 +589,7 @@ async def test_an_in_stream_error_event_before_emission_still_fails_over(protoco
     failure = _render_sse([{"type": "error", "error": {"type": "overloaded_error", "message": "Overloaded"}}])
     good = _render_sse(_anthropic_events())
 
-    _server, status, client_body, calls = await _stream(
+    _server, status, client_body, calls, _bodies = await _stream(
         protocol, provider, model, [(200, failure), (200, good)], monkeypatch
     )
 
@@ -604,7 +611,7 @@ async def test_a_chat_completions_in_stream_error_surfaces_instead_of_a_silent_o
     """
     failure = _render_sse([{"type": "error", "error": {"type": "overloaded_error", "message": "Overloaded"}}])
 
-    _server, status, client_body, _calls = await _stream(
+    _server, status, client_body, _calls, _bodies = await _stream(
         BridgeProtocol.CHAT_COMPLETIONS_API,
         AnthropicAdapter(),
         "claude-opus-4-6",
@@ -648,7 +655,7 @@ async def test_a_thinking_signature_rejection_strips_and_retries_the_same_backen
     provider, model = AnthropicAdapter(), "claude-opus-4-6"
     good = _render_sse(_anthropic_events())
 
-    _server, status, client_body, calls = await _stream(
+    _server, status, client_body, calls, bodies = await _stream(
         protocol,
         provider,
         model,
@@ -659,3 +666,9 @@ async def test_a_thinking_signature_rejection_strips_and_retries_the_same_backen
     assert status == 200
     assert calls == 2
     assert "hello" in client_body
+
+    # The retry carried the strip: the first request's upstream body holds the
+    # unsigned thinking block the rejection bites on, the second holds none.
+    assert len(bodies) == 2
+    assert "thinking" in json.dumps(bodies[0])
+    assert "thinking" not in json.dumps(bodies[1])

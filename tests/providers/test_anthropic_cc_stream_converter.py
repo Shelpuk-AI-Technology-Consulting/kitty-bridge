@@ -249,6 +249,15 @@ class TestEventMapping:
         """A ping yields nothing."""
         assert _chunks(self.converter, {"type": "ping"}) == []
 
+    def test_unknown_event_type_yields_nothing(self) -> None:
+        """An event type the converter does not know yields no chunks.
+
+        Contrast with the stateless translator, which passes unknown events
+        through — on a converted stream an untranslatable event must not
+        reach a Chat Completions client as foreign JSON.
+        """
+        assert _chunks(self.converter, {"type": "content_block_v3"}) == []
+
     @pytest.mark.parametrize(
         ("stop_reason", "finish_reason"),
         [("end_turn", "stop"), ("tool_use", "tool_calls"), ("max_tokens", "length"), ("stop_sequence", "stop")],

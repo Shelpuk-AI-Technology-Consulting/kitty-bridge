@@ -3152,6 +3152,14 @@ class BridgeServer:
             strip_retries = 0
             for raw_attempt in range(max_attempts + _MAX_THINKING_STRIPS):
                 attempt = raw_attempt - strip_retries
+                # The extra iterations exist only to give strips back. Without
+                # this the loop could run past the last real attempt — a
+                # `continue` that does not check `attempt` (the tool_use
+                # format fallback) would then index off the end of
+                # _EMPTY_FINAL_DELAYS. Ending here keeps the pre-strip
+                # invariant: at most `max_attempts` real attempts.
+                if attempt >= max_attempts:
+                    break
                 if attempt >= _original_max_attempts:
                     delay = _EMPTY_FINAL_DELAYS[attempt - _original_max_attempts]
                     logger.warning(
@@ -4990,6 +4998,14 @@ class BridgeServer:
             strip_retries = 0
             for raw_attempt in range(max_attempts + _MAX_THINKING_STRIPS):
                 attempt = raw_attempt - strip_retries
+                # The extra iterations exist only to give strips back. Without
+                # this the loop could run past the last real attempt — a
+                # `continue` that does not check `attempt` (the tool_use
+                # format fallback) would then index off the end of
+                # _EMPTY_FINAL_DELAYS. Ending here keeps the pre-strip
+                # invariant: at most `max_attempts` real attempts.
+                if attempt >= max_attempts:
+                    break
                 if attempt >= _original_max_attempts:
                     delay = _EMPTY_FINAL_DELAYS[attempt - _original_max_attempts]
                     logger.warning(
@@ -5960,6 +5976,14 @@ class BridgeServer:
             strip_retries = 0
             for raw_attempt in range(max_attempts + _MAX_THINKING_STRIPS):
                 attempt = raw_attempt - strip_retries
+                # The extra iterations exist only to give strips back. Without
+                # this the loop could run past the last real attempt — a
+                # `continue` that does not check `attempt` (the tool_use
+                # format fallback) would then index off the end of
+                # _EMPTY_FINAL_DELAYS. Ending here keeps the pre-strip
+                # invariant: at most `max_attempts` real attempts.
+                if attempt >= max_attempts:
+                    break
                 if attempt >= _original_max_attempts:
                     delay = _EMPTY_FINAL_DELAYS[attempt - _original_max_attempts]
                     logger.warning(
