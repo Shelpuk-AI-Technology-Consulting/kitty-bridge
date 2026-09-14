@@ -632,8 +632,9 @@ def _read_image(
 
     Raises:
         UnreadableBodyError: When the block carries no source, the source is not
-            an object, its type is none of ``base64``/``url``/``file``, or its
-            base64 payload does not decode.
+            an object, or its type is none of ``base64``/``url``/``file``. A
+            base64 payload that does not decode residualises instead — §7.4
+            rule 7 row 3 (KBR-251).
     """
     source = block.get("source")
     if not isinstance(source, dict):
@@ -650,15 +651,30 @@ def _read_image(
     if kind == "base64":
         try:
             decoded = base64.b64decode(source["data"], validate=True)
-        except (binascii.Error, ValueError) as exc:
-            raise c.UnreadableBodyError(f"{path} image data is not valid base64: {exc}") from exc
+        except (binascii.Error, ValueError):
+            # Residualised, not raised on, and the part is not dropped: §7.4
+            # rule 7 row 3 is explicit that "raising is the other wrong
+            # answer: it blinds the oracle to everything else in a request it
+            # could otherwise diff" — and the case is real rather than
+            # hypothetical, since `validate=True` rejects every RFC 2045 line
+            # break and Google's own image-understanding sample passes `-w0`
+            # to `base64(1)` precisely because its default output is wrapped.
+            # The part keeps its position with identity from the wire's own
+            # bytes — the second of `image_digest`'s recipes (KBR-192) —
+            # rather than a bare ``None`` that would defeat
+            # ``Image.__post_init__``'s XOR check.
+            raw = source["data"]
+            residual[c.residual_key(c.residual_key(path, "source"), "data")] = raw
+            digest = c.image_digest(raw.encode("utf-8"))
+        else:
+            digest = c.image_digest(decoded)
 
         _residualise(source, {"type", "data", "media_type"}, c.residual_key(path, "source"), residual)
         # The media type is excluded from the digest and carried separately, so
         # a changed media type is its own delta rather than an unexplained
         # digest change.
         return c.Image(
-            digest=c.image_digest(decoded),
+            digest=digest,
             media_type=_typed_leaf(source, "media_type", str, c.residual_key(path, "source"), residual),
             cache_control=cache_control,
         )

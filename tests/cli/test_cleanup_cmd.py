@@ -208,6 +208,30 @@ class TestAuthTokenCleanup:
         assert "ANTHROPIC_AUTH_TOKEN" not in env
         assert "ANTHROPIC_MODEL" not in env
 
+    def test_cleanup_removes_connector_opt_out(self, tmp_path: Path):
+        """KBR-245 AC-R3a: the connector opt-out key is scrubbed alongside
+        the other injected keys after a crashed legacy session."""
+        settings_path = tmp_path / "settings.json"
+        backup_path = tmp_path / "claude-settings-backup.json"
+        settings_data = {
+            "env": {
+                "ANTHROPIC_AUTH_TOKEN": "kitty-bridge-token",
+                "ENABLE_CLAUDEAI_MCP_SERVERS": "false",
+                "ANTHROPIC_MODEL": "glm-5.1",
+            },
+        }
+        settings_path.write_text(json.dumps(settings_data))
+
+        with patch("kitty.cli.cleanup_cmd._get_backup_path", return_value=backup_path):
+            exit_code = run_cleanup(settings_path=settings_path)
+        assert exit_code == 0
+
+        result = json.loads(settings_path.read_text())
+        env = result["env"]
+        assert "ANTHROPIC_AUTH_TOKEN" not in env
+        assert "ENABLE_CLAUDEAI_MCP_SERVERS" not in env
+        assert "ANTHROPIC_MODEL" not in env
+
 
 class TestBackupRestore:
     """Tests for backup-based restore in run_cleanup."""

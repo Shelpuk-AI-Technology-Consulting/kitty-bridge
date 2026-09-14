@@ -587,22 +587,22 @@ class TestContentParts:
 
         Another reader decoding the same bytes would produce a digest, and the
         two projections would then differ on an unchanged image — a permanent
-        unclaimed delta that no register row could ever explain.
+        unclaimed delta that no register row could ever explain. The part is
+        also never dropped: §7.4 rule 7 — no branch returns *no part*, or
+        every later part's index shifts (KBR-251).
         """
+        url = "data:image/png,abc"
         projected = r.ResponsesProjection().read_request(
-            captured(
-                {
-                    "input": [
-                        {
-                            "role": "user",
-                            "content": [{"type": "input_image", "image_url": "data:image/png,abc"}],
-                        }
-                    ]
-                }
-            )
+            captured({"input": [{"role": "user", "content": [{"type": "input_image", "image_url": url}]}]})
         )
 
-        assert set(projected.residual) == {"input[0].content[0]"}
+        # The digest sees the payload bytes only; the media segment parses out
+        # of the prefix and is carried separately, consistent with
+        # `image_digest`'s "media type excluded" rule.
+        assert projected.conversation.turns[0].parts == (
+            c.Image(digest=c.image_digest(b"abc"), media_type="image/png"),
+        )
+        assert projected.residual == {"input[0].content[0].image_url": url}
 
     def test_an_image_given_only_by_file_id_carries_the_id_as_its_reference(self) -> None:
         """`InputImageContent` permits `file_id` instead of `image_url`."""
@@ -611,13 +611,217 @@ class TestContentParts:
                 "input": [
                     {
                         "role": "user",
-                        "content": [{"type": "input_image", "file_id": "file-9", "detail": "auto"}],
+                        "content": [{"type": "input_image", "file_id": "file-9"}],
                     }
                 ]
             }
         )
 
         assert projected.conversation.turns[0].parts == (c.Image(ref="file-9"),)
+
+
+class TestUndecodableImagePayloads:
+    """An image the reader cannot digest keeps its place; the leaf residualises.
+
+    §7.4 rule 7 row 3 (KBR-251). The reader used to drop the part here
+    (``return None``), which shifts every later part's index and invents a
+    delta on content nobody touched — §7.4: "no branch ever returns *no
+    part*". Three input shapes the previous code conflated, each pinned
+    separately:
+
+    * an undecodable base64 data URL — digest the wire's payload string;
+    * a non-base64 ``^data:`` URL — digest the payload after the first comma,
+      with the media segment parsed out of the prefix and carried separately,
+      consistent with ``image_digest``'s "media type excluded" rule;
+    * no ``image_url`` and no usable ``file_id`` — ``opaque_digest(part)``
+      identity, mirroring Gemini's missing-``fileUri`` shape.
+    """
+
+    def test_a_undecodable_base64_data_url_residualises_the_leaf_and_keeps_the_part(self) -> None:
+        """The decode-fails branch carries the raw-bytes recipe."""
+        wrapped = base64.b64encode(b"hello world" * 8).decode("ascii")
+        wrapped = wrapped[:20] + "\n" + wrapped[20:]
+        url = f"data:image/png;base64,{wrapped}"
+
+        projected = r.ResponsesProjection().read_request(
+            captured(
+                {
+                    "input": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "input_image", "image_url": url},
+                                {"type": "input_text", "text": "and"},
+                            ],
+                        }
+                    ]
+                }
+            )
+        )
+
+        # The part keeps its place and the later part keeps its index; the
+        # digest is the raw wire bytes of the base64 payload.
+        assert projected.conversation.turns[0].parts == (
+            c.Image(digest=c.image_digest(wrapped.encode("utf-8")), media_type="image/png"),
+            c.Text("and"),
+        )
+        assert projected.residual == {"input[0].content[0].image_url": url}
+        with pytest.raises(c.ResidualFieldsError):
+            c.verify_total(projected)
+
+    def test_an_image_with_no_identity_field_keeps_its_place_under_the_opaque_digest(self) -> None:
+        """No `image_url` (absent or wrongly typed) and no usable `file_id` — the
+        ``opaque_digest`` recipe, mirroring Gemini's missing-``fileUri`` shape.
+        """
+        entry = {"type": "input_image"}
+        projected = r.ResponsesProjection().read_request(
+            captured({"input": [{"role": "user", "content": [entry, {"type": "input_text", "text": "last"}]}]})
+        )
+
+        assert projected.conversation.turns[0].parts == (
+            c.Image(digest=c.opaque_digest(entry)),
+            c.Text("last"),
+        )
+        assert projected.residual == {"input[0].content[0].image_url": None}
+        with pytest.raises(c.ResidualFieldsError):
+            c.verify_total(projected)
+
+    def test_a_wrongly_typed_image_url_residualises_the_value_and_keeps_the_part(self) -> None:
+        """A non-string `image_url` is a required-field-missing-or-wrong case (rule 7 row 2)."""
+        entry = {"type": "input_image", "image_url": 7}
+        projected = r.ResponsesProjection().read_request(captured({"input": [{"role": "user", "content": [entry]}]}))
+
+        assert projected.conversation.turns[0].parts == (c.Image(digest=c.opaque_digest(entry)),)
+        assert projected.residual == {"input[0].content[0].image_url": 7}
+        with pytest.raises(c.ResidualFieldsError):
+            c.verify_total(projected)
+
+    def test_a_wrongly_typed_image_url_residualises_even_when_file_id_carries_the_part(self) -> None:
+        """The mixed case: the malformed field must not hide inside a `ref`-only projection.
+
+        A usable `file_id` still carries the part's identity, but the
+        wrongly-typed `image_url` residualises at its own path — otherwise the
+        silent drop §7.4.1 names would live inside a projection that looks
+        clean.
+        """
+        projected = r.ResponsesProjection().read_request(
+            captured(
+                {
+                    "input": [
+                        {
+                            "role": "user",
+                            "content": [{"type": "input_image", "image_url": 7, "file_id": "f-1"}],
+                        }
+                    ]
+                }
+            )
+        )
+
+        assert projected.conversation.turns[0].parts == (c.Image(ref="f-1"),)
+        assert projected.residual == {"input[0].content[0].image_url": 7}
+        with pytest.raises(c.ResidualFieldsError):
+            c.verify_total(projected)
+
+    def test_an_unmapped_sibling_key_residualises_at_its_own_path(self) -> None:
+        """§3.3.1's "unknown fields fail closed", at depth — on every branch.
+
+        The whole-entry residuals the failure branches used to write captured
+        sibling keys as a side effect; the leaf-level residuals must not lose
+        that. A key the reader does not map (`detail`, future siblings) has to
+        land in the residual at its exact path or it vanishes silently.
+        """
+        projected = r.ResponsesProjection().read_request(
+            captured(
+                {
+                    "input": [
+                        {
+                            "role": "user",
+                            "content": [{"type": "input_image", "image_url": 7, "detail": "auto"}],
+                        }
+                    ]
+                }
+            )
+        )
+
+        assert projected.residual == {
+            "input[0].content[0].image_url": 7,
+            "input[0].content[0].detail": "auto",
+        }
+        with pytest.raises(c.ResidualFieldsError):
+            c.verify_total(projected)
+
+    def test_a_unmapped_sibling_key_also_residualises_on_the_clean_success_path(self) -> None:
+        """The sweep runs before any branch — the sibling claim is branch-independent.
+
+        A successful remote-image projection with an unmapped sibling should
+        still surface the sibling at its exact path, not silently drop it.
+        """
+        projected = r.ResponsesProjection().read_request(
+            captured(
+                {
+                    "input": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "input_image", "image_url": "https://example.test/cat.png", "detail": "auto"},
+                            ],
+                        }
+                    ]
+                }
+            )
+        )
+
+        assert projected.conversation.turns[0].parts == (c.Image(ref="https://example.test/cat.png"),)
+        assert projected.residual == {"input[0].content[0].detail": "auto"}
+        with pytest.raises(c.ResidualFieldsError):
+            c.verify_total(projected)
+
+    def test_no_image_failure_branch_drops_a_part_and_shifts_the_later_indices(self) -> None:
+        """All three failure shapes above, in one body — the index claim as one fact."""
+        wrapped = base64.b64encode(b"hello" * 8).decode("ascii")
+        wrapped = wrapped[:4] + "\n" + wrapped[4:]
+        projected = r.ResponsesProjection().read_request(
+            captured(
+                {
+                    "input": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "input_image", "image_url": f"data:image/png;base64,{wrapped}"},
+                                {"type": "input_text", "text": "last"},
+                            ],
+                        }
+                    ]
+                }
+            )
+        )
+
+        parts = projected.conversation.turns[0].parts
+        assert len(parts) == 2
+        assert parts[1] == c.Text("last")
+
+    def test_the_non_base64_and_no_identity_branches_also_keep_the_later_index(self) -> None:
+        """The index claim is not specific to the decode-fails branch."""
+        projected = r.ResponsesProjection().read_request(
+            captured(
+                {
+                    "input": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "input_image", "image_url": "data:image/png,abc"},
+                                {"type": "input_image"},
+                                {"type": "input_text", "text": "last"},
+                            ],
+                        }
+                    ]
+                }
+            )
+        )
+
+        parts = projected.conversation.turns[0].parts
+        assert len(parts) == 3
+        assert parts[2] == c.Text("last")
 
 
 class TestFunctionCall:

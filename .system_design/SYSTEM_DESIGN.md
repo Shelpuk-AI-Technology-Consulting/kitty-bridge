@@ -146,7 +146,10 @@ shell ─► kitty.cli.main.main
 - **Kitty installs no `SIGHUP` handler**, so closing an SSH terminal kills kitty and its bridge
   even if the agent survives elsewhere.
 - **For Claude Code, kitty passes its settings two ways:** environment variables, and a
-  `--settings <tmpfile>` flag whose `env` block repeats them.
+  `--settings <tmpfile>` flag whose `env` block repeats them. The env block also carries
+  `ENABLE_CLAUDEAI_MCP_SERVERS=false` (KBR-245): Claude Code's documented per-session
+  opt-out from claude.ai MCP connectors, which suppresses the banner Claude Code prints when
+  `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` shadow the user's claude.ai OAuth login.
 
 ## 3. Surviving an SSH disconnect: `--tmux` on the Claude Code agent
 

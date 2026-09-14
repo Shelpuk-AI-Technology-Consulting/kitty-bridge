@@ -194,6 +194,37 @@ class TestClaudeAdapterContextTokens:
         assert config.env_overrides["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] == "1000000"
 
 
+class TestEnableClaudeAiMcpServers:
+    """KBR-245: the launcher opts the session out of claude.ai connectors.
+
+    Claude Code prints a "claude.ai connectors are disabled" banner when an
+    auth env var shadows the user's claude.ai login. Setting
+    ``ENABLE_CLAUDEAI_MCP_SERVERS=false`` records the opt-out as deliberate
+    and the banner is not shown (Claude Code >= 2.1.63; the repo pin is
+    2.1.238).
+    """
+
+    def test_env_overrides_carries_connector_opt_out(self):
+        """The opt-out must be exactly the lowercase string "false"."""
+        adapter = ClaudeAdapter()
+        profile = _make_profile()
+        config = adapter.build_spawn_config(profile, bridge_port=4242, resolved_key="sk-test")
+
+        assert config.env_overrides["ENABLE_CLAUDEAI_MCP_SERVERS"] == "false"
+
+    def test_opt_out_key_in_settings_override_list(self):
+        """prepare_launch only writes keys from _SETTINGS_ENV_OVERRIDE_KEYS."""
+        from kitty.launchers.claude import _SETTINGS_ENV_OVERRIDE_KEYS
+
+        assert "ENABLE_CLAUDEAI_MCP_SERVERS" in _SETTINGS_ENV_OVERRIDE_KEYS
+
+    def test_opt_out_key_in_cleanup_list(self):
+        """kitty cleanup must remove the key after a crashed legacy session."""
+        from kitty.cli.cleanup_cmd import _KITTY_INJECTED_KEYS
+
+        assert "ENABLE_CLAUDEAI_MCP_SERVERS" in _KITTY_INJECTED_KEYS
+
+
 class TestInjectedKeyListsInSync:
     """AC5.5: the context-window key must be injected AND cleaned up.
 
@@ -214,3 +245,15 @@ class TestInjectedKeyListsInSync:
         from kitty.cli.cleanup_cmd import _KITTY_INJECTED_KEYS
 
         assert "CLAUDE_CODE_MAX_CONTEXT_TOKENS" in _KITTY_INJECTED_KEYS
+
+    def test_settings_and_cleanup_lists_are_identical(self):
+        """The launcher and the crash-recovery cleaner agree on every key.
+
+        Per-key membership tests above pin the keys this task knows about;
+        this set comparison is what catches the next key added to one list
+        and forgotten in the other, which per-key tests cannot see.
+        """
+        from kitty.cli.cleanup_cmd import _KITTY_INJECTED_KEYS
+        from kitty.launchers.claude import _SETTINGS_ENV_OVERRIDE_KEYS
+
+        assert set(_SETTINGS_ENV_OVERRIDE_KEYS) == set(_KITTY_INJECTED_KEYS)
