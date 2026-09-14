@@ -874,6 +874,21 @@ class TestRecoveryHold:
         assert sleeps == [300.0]
 
     @pytest.mark.asyncio
+    async def test_clamp_bites_after_elapsed_time(self):
+        """A 49 s hold (plus 1.5 jitter) burns 50.5 s; a 249 s expiry then
+        leaves 249.5 s of window, so the clamp caps the sleep at 249.5 — not
+        the 250.5 an unclamped jitter would sleep, and not a formula check the
+        loop would reject outright (50.5+249 = 299.5 < 300)."""
+        server = self._make_two_backend_server()
+        first = AllBackendsUnhealthyError([{"name": "a"}], retry_after=49)
+        second = AllBackendsUnhealthyError([{"name": "b"}], retry_after=249)
+        result, sleeps = await self._run_hold(
+            server, select_side_effect=[first, second, Mock()], jitter=1.5
+        )
+        assert result is None
+        assert sleeps == [50.5, 249.5]
+
+    @pytest.mark.asyncio
     async def test_counts_each_hold_start(self):
         server = self._make_two_backend_server()
         exc = AllBackendsUnhealthyError([{"name": "a"}], retry_after=100)
