@@ -714,6 +714,9 @@ class MessagesTranslator:
                             {"type": "tool_use", "id": tool_id, "name": func.get("name", ""), "input": {}},
                         )
                     )
+                    # Advance past the opened block (KBR-226) so a parallel call
+                    # or a following text block opens the next free index.
+                    self._content_block_index += 1
 
                 # Argument delta
                 func = tc_delta.get("function", {})
