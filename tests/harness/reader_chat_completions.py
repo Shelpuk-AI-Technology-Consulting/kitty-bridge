@@ -286,11 +286,18 @@ def _project(body: Mapping[str, Any]) -> c.Request:
             # fall-through ``else: residual[key] = value`` puts it in the
             # residual at its bare name, the run fails closed, and the
             # cross-reader comparison sees the same answer either side.
+            #
             # ``None`` is treated as absent (the cache_control precedent):
             # the wire key carries no instruction, and the bridge does
             # not invent one. ``True``/``False`` are read; ``True`` is the
-            # CC default so a body carrying ``false`` is a non-default
-            # delta the oracle names.
+            # CC default so a body carrying ``true`` is *not* written to
+            # ``extra[parallel_tool_calls]`` — §3.3.1b: "the reader writes
+            # the entry only when the wire carries a non-default value,
+            # mirroring KBR-214's forwarding rule; an absent entry and
+            # an explicit default are one request on both wires; writing
+            # both would invent a second field some providers reject and
+            # every comparison would carry". A body carrying ``false`` is
+            # a non-default delta the oracle names.
             raw = body.get("parallel_tool_calls")
             if raw is None:
                 # Absent — the key is present in the body but the value is
@@ -298,8 +305,14 @@ def _project(body: Mapping[str, Any]) -> c.Request:
                 # *consume* the key for totality: a body that explicitly
                 # sent ``null`` has named its intent to omit the field.
                 consumed.add(key)
-            elif isinstance(raw, bool):
-                extra[c.PARALLEL_TOOL_CALLS_KEY] = raw
+            elif raw is False:
+                extra[c.PARALLEL_TOOL_CALLS_KEY] = False
+                consumed.add(key)
+            elif raw is True:
+                # Default — not written. The key is consumed for totality
+                # so a body that explicitly sent ``true`` is accounted
+                # for; the absence in ``extra[parallel_tool_calls]`` is
+                # the canonical form.
                 consumed.add(key)
             else:
                 residual["parallel_tool_calls"] = raw

@@ -205,6 +205,25 @@ class TestEnvelope:
         assert projected.residual == {}
         c.verify_total(projected)
 
+    def test_parallel_tool_calls_true_is_not_written_to_extra(self) -> None:
+        """R1.5c — §3.3.1b: the entry is written only on a **non-default** wire value.
+
+        The CC default is ``true`` (parallel calls allowed). A body carrying
+        ``parallel_tool_calls: true`` writes nothing to
+        ``extra[parallel_tool_calls]`` — the absence is the canonical form,
+        and writing the default would invent a second field some providers
+        reject (and every comparison would carry). A body carrying
+        ``false`` is the non-default delta the oracle names; that case is
+        R1.4. The key is consumed for totality so a body that explicitly
+        sent ``true`` is accounted for, not silently dropped.
+        """
+        projected = _read(_minimal(parallel_tool_calls=True))
+
+        assert c.PARALLEL_TOOL_CALLS_KEY not in projected.envelope.extra
+        assert "parallel_tool_calls" in projected.consumed
+        assert projected.residual == {}
+        c.verify_total(projected)
+
     def test_a_published_extra_key_rides_at_its_wire_key(self) -> None:
         """R1.6 — every other CC control field lands at its wire key, the §3.3.1a rule."""
         projected = _read(_minimal(metadata={"trace": "abc"}, service_tier="auto"))
@@ -298,6 +317,7 @@ class TestEnvelope:
             "audio",
             "moderation",
             "function_call",
+            "functions",
         ],
         ids=[
             "store",
@@ -313,20 +333,29 @@ class TestEnvelope:
             "audio",
             "moderation",
             "function_call",
+            "functions",
         ],
     )
     def test_a_wrongly_typed_value_at_each_published_extra_key_is_carried_whole(
         self, key: str
     ) -> None:
-        """R1.6c — the wrongly-typed coverage R1.6b promised for all 13 keys.
+        """R1.6c — the wrongly-typed coverage R1.6b promised for all 14 keys.
 
-        Every key in :data:`_PUBLISHED_EXTRA_KEYS` is read with no type
-        check on the value (§3.3.1a: ``extra[<wire key>]`` is compared
-        whole). A wrongly-typed value lands at its wire key and is named
-        — the schema validator's job, not the reader's. Each parametrise
-        case carries a string, which is the wrong type for every key on
-        this list (a dict-shaped value, a list, a bool, a number), so the
-        pin covers the wrong-type case regardless of the schema's shape.
+        Every key in :data:`_PUBLISHED_EXTRA_KEYS` (all 14 members
+        including the two deprecated top-level spellings, ``functions``
+        and ``function_call``) is read with no type check on the value
+        (§3.3.1a: ``extra[<wire key>]`` is compared whole). The pin value
+        is a string — the wrong type for the nine dict-shaped keys
+        (``metadata``, ``moderation``, ``audio``, ``prediction``,
+        ``service_tier``, ``modalities``, ``user``, ``verbosity``,
+        ``reasoning_effort``, ``web_search_options``,
+        ``prompt_cache_options``, ``function_call``, ``functions``, plus
+        ``store``) and the **right** type for the string-shaped keys the
+        schema names; the test pins the carried-whole behaviour either
+        way — wrong-type on dict-shaped keys is the case R1.6b names;
+        right-type on string-shaped keys confirms the reader does not
+        enforce a type contract it was never asked to enforce. Both
+        paths land at ``extra[<key>]`` and ``verify_total`` passes.
         """
         projected = _read(_minimal(**{key: "definitely the wrong type"}))
 
