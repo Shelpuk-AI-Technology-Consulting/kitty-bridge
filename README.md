@@ -6,7 +6,7 @@
     <img src="https://img.shields.io/pypi/pyversions/kitty-bridge.svg" alt="Python version">
   </a>
   <img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT">
-  <img src="https://img.shields.io/github/actions/workflow/status/Shelpuk-AI-Technology-Consulting/kitty-bridge/ci.yml?branch=main" alt="CI">
+  <img src="https://img.shields.io/github/actions/workflow/status/Shelpuk-AI-Technology-Consulting/kitty-bridge/publish.yml" alt="Publish to PyPI">
   <a href="https://pepy.tech/projects/kitty-bridge" target="_blank" rel="noopener noreferrer">
     <img src="https://static.pepy.tech/badge/kitty-bridge" alt="Total PyPI downloads">
   </a>
