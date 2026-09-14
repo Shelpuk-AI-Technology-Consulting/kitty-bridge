@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import uuid
 from contextlib import contextmanager
+from itertools import cycle
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -23,9 +24,22 @@ _MOD = "kitty.cli.setup_cmd"
 def _mock_tty():
     """Context manager presenting both standard streams as terminals.
 
-    Both since KBR-204: the interactivity guard now requires stdout as well as stdin.
+    Both since KBR-204: the interactivity guard now requires stdout as well as
+    stdin. KBR-218 added a sibling patch on ``_handle_attached`` so the
+    "simulated interactivity" semantics survive the Windows branch of
+    ``can_interact``.
     """
-    with patch("sys.stdin.isatty", return_value=True), patch("sys.stdout.isatty", return_value=True):
+    with (
+        patch("sys.stdin.isatty", return_value=True),
+        patch("sys.stdout.isatty", return_value=True),
+        # KBR-218: Windows reads `_handle_attached`, not isatty.
+        # create=True because the attribute does not exist at the test commit.
+        patch(
+            "kitty.tui.prompts._handle_attached",
+            side_effect=cycle([True, True]),
+            create=True,
+        ),
+    ):
         yield
 
 
@@ -42,7 +56,13 @@ def cred_store(tmp_path: object) -> CredentialStore:
 class TestRunSetupWizard:
     def test_non_tty_raises(self, store: ProfileStore, cred_store: CredentialStore) -> None:
         """Setup wizard rejects non-TTY with deterministic error."""
-        with patch("sys.stdin.isatty", return_value=False), pytest.raises(Exception, match="interactive"):
+        with (
+            patch("sys.stdin.isatty", return_value=False),
+            # KBR-218: Windows reads `_handle_attached`, not isatty, and a real
+            # console on a developer's machine would otherwise decide this test.
+            patch("kitty.tui.prompts._handle_attached", return_value=False, create=True),
+            pytest.raises(Exception, match="interactive"),
+        ):
             run_setup_wizard(store, cred_store)
 
     def test_wizard_completes_all_steps(self, store: ProfileStore, cred_store: CredentialStore) -> None:

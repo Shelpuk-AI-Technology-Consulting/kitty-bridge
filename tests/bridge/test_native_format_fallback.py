@@ -305,6 +305,122 @@ class TestConvertNativeToCCFormat:
         assert user_msg["role"] == "user"
         assert user_msg["content"] == "Hello"
 
+    def test_image_beside_tool_result_is_carried(self):
+        """KBR-222: the fallback owes hop 1's mappings — an image sibling survives the retry.
+
+        KBR-178's stop sequences were lost on exactly this retry path until the
+        converter was taught hop 1's mappings; images are the same class. The
+        fallback's text-first placement is kept: the non-tool blocks come
+        before the tool messages.
+        """
+        image = {
+            "type": "image",
+            "source": {"type": "base64", "media_type": "image/png", "data": "aWNvbg=="},
+        }
+        body = {
+            "model": "claude-sonnet-4-6",
+            "max_tokens": 64,
+            "messages": [
+                {"role": "user", "content": "run it"},
+                {
+                    "role": "assistant",
+                    "content": [{"type": "tool_use", "id": "t1", "name": "Bash", "input": {}}],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "tool_result", "tool_use_id": "t1", "content": "ok"},
+                        image,
+                    ],
+                },
+            ],
+        }
+        result = _convert_native_to_cc_format(body)
+
+        sibling = result["messages"][2]
+        assert sibling["role"] == "user"
+        assert sibling["content"] == [
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,aWNvbg=="}},
+        ]
+        assert result["messages"][3] == {"role": "tool", "tool_call_id": "t1", "content": "ok"}
+
+    def test_document_rides_the_documents_key_addressed_to_its_message(self):
+        """KBR-222: a document in the retried history travels on ``_documents``, not dropped."""
+        document = {
+            "type": "document",
+            "source": {"type": "base64", "media_type": "application/pdf", "data": "cGRm"},
+        }
+        body = {
+            "model": "claude-sonnet-4-6",
+            "max_tokens": 64,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [{"type": "text", "text": "summarise"}, document],
+                }
+            ],
+        }
+        result = _convert_native_to_cc_format(body)
+
+        message = result["messages"][0]
+        assert message["content"] == "summarise"
+        assert len(result["_documents"]) == 1
+        assert result["_documents"][0]["blocks"] == [document]
+        assert result["_documents"][0]["message"] is message
+
+    def test_image_only_message_becomes_parts_not_verbatim(self):
+        """KBR-222: an image-only turn converts to a parts message, not a raw passthrough.
+
+        The old converter appended the native block list verbatim, which only
+        delivered on an adapter that forwards user content unchanged; the
+        shared builder gives the retry the same CC spelling hop 1 produces.
+        """
+        body = {
+            "model": "claude-sonnet-4-6",
+            "max_tokens": 64,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image",
+                            "source": {"type": "url", "url": "https://example.com/cat.png"},
+                        }
+                    ],
+                }
+            ],
+        }
+        result = _convert_native_to_cc_format(body)
+
+        assert result["messages"][0] == {
+            "role": "user",
+            "content": [
+                {"type": "image_url", "image_url": {"url": "https://example.com/cat.png"}},
+            ],
+        }
+        assert "_documents" not in result
+
+    def test_empty_list_user_message_passes_through_verbatim(self):
+        """A ``content: []`` user turn keeps the pre-KBR-222 passthrough, message count included.
+
+        M17's stripping leaves such turns behind and counts on message
+        indices not moving; the shared builder has nothing to build from an
+        empty list, so the original message must pass through instead of
+        vanishing from the retry.
+        """
+        body = {
+            "model": "claude-sonnet-4-6",
+            "max_tokens": 64,
+            "messages": [
+                {"role": "user", "content": "before"},
+                {"role": "user", "content": []},
+            ],
+        }
+        result = _convert_native_to_cc_format(body)
+
+        assert result["messages"][1] == {"role": "user", "content": []}
+        assert len(result["messages"]) == 2
+
     def test_mixed_content_preserves_text_and_tool_use(self):
         body = _anthropic_body_with_mixed_content()
         result = _convert_native_to_cc_format(body)

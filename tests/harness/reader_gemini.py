@@ -227,10 +227,11 @@ _BUILT_IN_TOOL_KEYS = frozenset(
 #: All nine.
 PUBLISHED_TOOL_KEYS = _BUILT_IN_TOOL_KEYS | frozenset({"functionDeclarations"})
 
-#: ``FunctionDeclaration``'s seven published members.  ``behavior``, ``response``
-#: and ``responseJsonSchema`` have no slot in :class:`~harness.contract.ToolDecl`
-#: and residualise; ``parametersJsonSchema`` is the published mutually-exclusive
-#: alternative to ``parameters`` and fills the same slot.
+#: ``FunctionDeclaration``'s seven published members. ``behavior`` slots
+#: into :class:`~harness.contract.ToolDecl.behavior` (KBR-194); ``response``
+#: and ``responseJsonSchema`` still have no slot and residualise;
+#: ``parametersJsonSchema`` is the published mutually-exclusive alternative to
+#: ``parameters`` and fills the same slot.
 PUBLISHED_FUNCTION_DECLARATION_KEYS = frozenset(
     {
         "behavior",
@@ -286,9 +287,10 @@ _OPAQUE_PART_KEYS: Mapping[str, str] = {
 }
 
 #: ``Part`` members that modify another member rather than being content of
-#: their own.  The grammar has no slot for any of them, so they residualise at
-#: their own path — ``thoughtSignature`` only when the part is not a thought,
-#: since :class:`~harness.contract.Thinking` carries it when it is.
+#: their own. ``thoughtSignature`` slots on ``Thinking`` (always) and
+#: ``ToolUse`` (a function-call part, Gemini 3's echo back — KBR-194);
+#: ``videoMetadata`` slots on ``Text`` and ``Image`` (KBR-194). The rest
+#: residualise at their own path.
 _PART_MODIFIER_KEYS = frozenset(
     {
         "audioTranscription",
@@ -307,13 +309,14 @@ PUBLISHED_PART_KEYS = _MODELLED_PART_KEYS | frozenset(_OPAQUE_PART_KEYS) | _PART
 #: ``FunctionCall``'s three published members.
 PUBLISHED_FUNCTION_CALL_KEYS = frozenset({"id", "name", "args"})
 
-#: ``FunctionResponse``'s six published members.  ``scheduling`` and
-#: ``willContinue`` govern NON_BLOCKING call scheduling, which the grammar does
-#: not model, so they residualise.
+#: ``FunctionResponse``'s six published members. ``scheduling`` slots on
+#: :class:`~harness.contract.ToolResult.scheduling` (KBR-194); ``willContinue``
+#: still has no slot and residualises (out of scope for the same ticket).
 PUBLISHED_FUNCTION_RESPONSE_KEYS = frozenset({"id", "name", "response", "parts", "scheduling", "willContinue"})
 
-#: ``Blob``'s and ``FileData``'s published members.  ``displayName`` names the
-#: blob to the model and has no slot, so it residualises.
+#: ``Blob``'s and ``FileData``'s published members. ``displayName`` slots on
+#: :class:`~harness.contract.Image.display_name` (KBR-194) — the name of the
+#: blob or file to the model.
 PUBLISHED_BLOB_KEYS = frozenset({"data", "mimeType", "displayName"})
 PUBLISHED_FILE_DATA_KEYS = frozenset({"fileUri", "mimeType", "displayName"})
 
@@ -518,26 +521,11 @@ def _aliased(
         held_key, held_value = view[name]
         if wire_key == name and held_key != name:
             view[name] = (wire_key, value)
-            residual[_join(prefix, held_key)] = held_value
+            residual[c.residual_key(prefix, held_key)] = held_value
         else:
-            residual[_join(prefix, wire_key)] = value
+            residual[c.residual_key(prefix, wire_key)] = value
 
     return view
-
-
-def _join(prefix: str, key: str) -> str:
-    """Return a residual key for ``key`` inside the object at ``prefix``.
-
-    Args:
-        prefix: The object's path from the body root, ``""`` at the top level.
-        key: The wire key.
-
-    Returns:
-        The dotted path, or the bare key at the top level — where the bare form
-        is required, because :func:`~harness.contract.verify_total` compares the
-        residual's keys against the body's own.
-    """
-    return f"{prefix}.{key}" if prefix else key
 
 
 def _residualise(
@@ -560,7 +548,7 @@ def _residualise(
     """
     for name, (wire_key, value) in view.items():
         if name not in mapped:
-            residual[_join(prefix, wire_key)] = value
+            residual[c.residual_key(prefix, wire_key)] = value
 
 
 def _typed_leaf(
@@ -605,7 +593,7 @@ def _typed_leaf(
     # `"topK": true` through as the integer 1 — a value the agent never sent.
     wrong = not isinstance(value, expected) or (isinstance(value, bool) and bool not in expected)
     if wrong:
-        residual[_join(prefix, wire_key)] = value
+        residual[c.residual_key(prefix, wire_key)] = value
         return default
 
     return value
@@ -673,8 +661,10 @@ def _project(body: Mapping[str, Any], model: str, stream: bool) -> c.Request:
     tools, tool_extra = _read_tools(view, residual)
     extra.update(tool_extra)
 
+    system, system_role = _read_system_instruction(view, residual)
     conversation = c.Conversation(
-        system=_read_system_instruction(view, residual),
+        system=system,
+        system_role=system_role,
         turns=_read_contents(view, residual),
         tools=tools,
         sampling=sampling,
@@ -795,7 +785,7 @@ def _read_tool_choice(nested: Mapping[str, tuple[str, Any]], prefix: str, residu
         return None
 
     wire_key, value = nested["functionCallingConfig"]
-    path = _join(prefix, wire_key)
+    path = c.residual_key(prefix, wire_key)
     if not isinstance(value, Mapping):
         residual[path] = value
         return None
@@ -815,7 +805,7 @@ def _read_tool_choice(nested: Mapping[str, tuple[str, Any]], prefix: str, residu
         # has already been residualised correctly by `_typed_leaf`, and `mode` is
         # by then the default it fell back to. Overwriting would tell a
         # maintainer the client sent `null` when it sent an object.
-        residual.setdefault(_join(path, config["mode"][0]), config["mode"][1])
+        residual.setdefault(c.residual_key(path, config["mode"][0]), config["mode"][1])
 
     allowed = _typed_leaf(config, "allowedFunctionNames", (list,), path, residual)
     if allowed is not None:
@@ -825,7 +815,7 @@ def _read_tool_choice(nested: Mapping[str, tuple[str, Any]], prefix: str, residu
         else:
             # A restriction to several names has no canonical form; the mode
             # still projects, so the residual names only what was lost.
-            residual[_join(path, config["allowedFunctionNames"][0])] = allowed
+            residual[c.residual_key(path, config["allowedFunctionNames"][0])] = allowed
 
     _residualise(config, PUBLISHED_FUNCTION_CALLING_CONFIG_KEYS, path, residual)
     return choice
@@ -860,7 +850,7 @@ def _read_tools(
     extra: dict[str, Any] = {}
 
     for index, entry in enumerate(entries):
-        path = f"{wire_key}[{index}]"
+        path = c.residual_key(wire_key, index=index)
         if not isinstance(entry, Mapping):
             raise c.UnreadableBodyError(f"{path} must be an object, got {type(entry).__name__}")
 
@@ -871,7 +861,7 @@ def _read_tools(
             if name in extra:
                 # A second entry re-declaring one has no second address; the
                 # first is the one `envelope.extra[<key>]` names.
-                residual[_join(path, tool[name][0])] = tool[name][1]
+                residual[c.residual_key(path, tool[name][0])] = tool[name][1]
                 continue
             extra[name] = tool[name][1]
 
@@ -903,14 +893,14 @@ def _read_function_declarations(
         return []
 
     wire_key, value = tool["functionDeclarations"]
-    path = _join(prefix, wire_key)
+    path = c.residual_key(prefix, wire_key)
     entries = _members(value)
     if entries is None:
         raise c.UnreadableBodyError(f"{path} must be a list, got {type(value).__name__}")
 
     declared: list[c.ToolDecl] = []
     for index, entry in enumerate(entries):
-        item = f"{path}[{index}]"
+        item = c.residual_key(path, index=index)
         if not isinstance(entry, Mapping):
             raise c.UnreadableBodyError(f"{item} must be an object, got {type(entry).__name__}")
 
@@ -925,9 +915,12 @@ def _read_function_declarations(
                 # Absent, not False: Gemini defines no `strict`, and P15's
                 # presence and absence must stay distinguishable.
                 strict=None,
+                # `behavior` is the NON_BLOCKING calling toggle on this
+                # declaration (KBR-194); `ToolDecl.behavior` carries it.
+                behavior=_typed_leaf(declaration, "behavior", (str,), item, residual),
             )
         )
-        _residualise(declaration, mapped, item, residual)
+        _residualise(declaration, mapped | {"behavior"}, item, residual)
 
     return declared
 
@@ -966,7 +959,7 @@ def _read_required_name(view: Mapping[str, tuple[str, Any]], path: str, residual
     name: str | None = _typed_leaf(view, "name", (str,), path, residual)
     if name is None:
         residual.setdefault(
-            _join(path, view["name"][0] if "name" in view else "name"),
+            c.residual_key(path, view["name"][0] if "name" in view else "name"),
             view["name"][1] if "name" in view else None,
         )
         return ""
@@ -1015,7 +1008,9 @@ def _read_declaration_schema(
 # --------------------------------------------------------------------------
 
 
-def _read_system_instruction(view: Mapping[str, tuple[str, Any]], residual: dict[str, Any]) -> tuple[c.Text, ...]:
+def _read_system_instruction(
+    view: Mapping[str, tuple[str, Any]], residual: dict[str, Any]
+) -> tuple[tuple[c.Text, ...], str | None]:
     """Lift ``systemInstruction`` into :attr:`~harness.contract.Conversation.system`.
 
     §3.3.1b: system instructions lift here, never into a turn, from whichever of
@@ -1026,13 +1021,15 @@ def _read_system_instruction(view: Mapping[str, tuple[str, Any]], residual: dict
         residual: The residual mapping, extended in place.
 
     Returns:
-        One entry per text part, in order.
+        One entry per text part, in order, and the role the ``Content``
+        published — ``None`` when it did not (KBR-194; ``Conversation.system_role``
+        carries it, so a dropped role is a delta at ``conversation.system_role``).
 
     Raises:
         UnreadableBodyError: When the field is not an object.
     """
     if "systemInstruction" not in view:
-        return ()
+        return (), None
 
     wire_key, value = view["systemInstruction"]
     if not isinstance(value, Mapping):
@@ -1045,7 +1042,7 @@ def _read_system_instruction(view: Mapping[str, tuple[str, Any]], residual: dict
 
     system: list[c.Text] = []
     for index, part in enumerate(parts):
-        path = f"{_join(wire_key, content['parts'][0])}[{index}]"
+        path = c.residual_key(c.residual_key(wire_key, content["parts"][0]), index=index)
         if not isinstance(part, Mapping):
             raise c.UnreadableBodyError(f"{path} must be an object, got {type(part).__name__}")
 
@@ -1057,10 +1054,11 @@ def _read_system_instruction(view: Mapping[str, tuple[str, Any]], residual: dict
             system.append(c.Text(text))
         _residualise(member, {"text"}, path, residual)
 
-    # `role` is meaningless on a system instruction and the grammar has no slot
-    # for it, so it residualises like any other key the grammar cannot carry.
-    _residualise(content, {"parts"}, wire_key, residual)
-    return tuple(system)
+    # `role` is a published member of the system `Content`; the grammar carries
+    # it at conversation scope (KBR-194) rather than residualising it.
+    role = _typed_leaf(content, "role", (str,), wire_key, residual)
+    _residualise(content, {"parts", "role"}, wire_key, residual)
+    return tuple(system), role
 
 
 def _read_contents(view: Mapping[str, tuple[str, Any]], residual: dict[str, Any]) -> tuple[c.Turn, ...]:
@@ -1092,7 +1090,7 @@ def _read_contents(view: Mapping[str, tuple[str, Any]], residual: dict[str, Any]
 
     turns: list[c.Turn] = []
     for index, member in enumerate(members):
-        path = f"{wire_key}[{index}]"
+        path = c.residual_key(wire_key, index=index)
         if not isinstance(member, Mapping):
             raise c.UnreadableBodyError(f"{path} must be an object, got {type(member).__name__}")
 
@@ -1162,14 +1160,14 @@ def _read_parts(content: Mapping[str, tuple[str, Any]], prefix: str, residual: d
         return ()
 
     wire_key, value = content["parts"]
-    path = _join(prefix, wire_key)
+    path = c.residual_key(prefix, wire_key)
     members = _members(value)
     if members is None:
         raise c.UnreadableBodyError(f"{path} must be a list or an object")
 
     parts: list[c.Part] = []
     for index, member in enumerate(members):
-        item = f"{path}[{index}]"
+        item = c.residual_key(path, index=index)
         if not isinstance(member, Mapping):
             raise c.UnreadableBodyError(f"{item} must be an object, got {type(member).__name__}")
         parts.append(_read_part(member, item, residual))
@@ -1262,8 +1260,12 @@ def _read_text(view: Mapping[str, tuple[str, Any]], path: str, residual: dict[st
         return c.Thinking(text=text, signature=signature)
 
     # An empty block is a part with an empty string, never nothing (§3.3.1).
-    _residualise(view, {"text", "thought"}, path, residual)
-    return c.Text(text)
+    # `videoMetadata` slots on `Text` (KBR-194); on a *thought* part it still
+    # residualises — `Thinking` carries no video slot, and real traffic does
+    # not attach video to a thought.
+    video_metadata = _typed_leaf(view, "videoMetadata", (dict,), path, residual)
+    _residualise(view, {"text", "thought", "videoMetadata"}, path, residual)
+    return c.Text(text, video_metadata=video_metadata)
 
 
 def _read_inline_data(view: Mapping[str, tuple[str, Any]], path: str, residual: dict[str, Any]) -> c.Image:
@@ -1286,33 +1288,39 @@ def _read_inline_data(view: Mapping[str, tuple[str, Any]], path: str, residual: 
             not decode residualises instead — see the comment below.
     """
     wire_key, value = view["inlineData"]
-    item = _join(path, wire_key)
+    item = c.residual_key(path, wire_key)
     if not isinstance(value, Mapping):
         raise c.UnreadableBodyError(f"{item} must be an object, got {type(value).__name__}")
 
     blob = _aliased(value, PUBLISHED_BLOB_KEYS, item, residual)
     raw = _typed_leaf(blob, "data", (str,), item, residual, default="")
     try:
-        decoded: bytes | None = base64.b64decode(raw, validate=True)
+        decoded = base64.b64decode(raw, validate=True)
     except (binascii.Error, ValueError):
-        # Residualised, not raised on: `Image.digest` is `str | None`, so the
-        # grammar *has* an absent value here, and §7.4.1 is explicit that
-        # "raising is the other wrong answer: it blinds the oracle to everything
-        # else in a request it could otherwise diff". The case is real rather
-        # than hypothetical — `validate=True` rejects every RFC 2045 line break,
-        # and Google's own image sample passes `-w0` to `base64(1)` precisely
+        # Residualised, not raised on: §7.4.1 is explicit that "raising is the
+        # other wrong answer: it blinds the oracle to everything else in a
+        # request it could otherwise diff". The case is real rather than
+        # hypothetical — `validate=True` rejects every RFC 2045 line break, and
+        # Google's own image sample passes `-w0` to `base64(1)` precisely
         # because its default output is wrapped. Nor is the part dropped: the
-        # index would shift and invent a delta on every later part.
-        residual[_join(item, blob["data"][0] if "data" in blob else "data")] = raw
-        decoded = None
+        # index would shift and invent a delta on every later part. The part
+        # needs an identity even so, so we digest the raw wire bytes — the
+        # second of `image_digest`'s recipes (KBR-192) — rather than carry a
+        # bare ``None`` that would defeat `Image.__post_init__`'s XOR check.
+        residual[c.residual_key(item, blob["data"][0] if "data" in blob else "data")] = raw
+        digest = c.image_digest(raw.encode("utf-8"))
+    else:
+        digest = c.image_digest(decoded)
 
-    _residualise(blob, {"data", "mimeType"}, item, residual)
-    _residualise(view, {"inlineData"}, path, residual)
+    _residualise(blob, {"data", "mimeType", "displayName"}, item, residual)
+    _residualise(view, {"inlineData", "videoMetadata"}, path, residual)
     # The media type is excluded from the digest and carried separately, so a
     # changed media type is its own delta rather than an unexplained change.
     return c.Image(
-        digest=c.image_digest(decoded) if decoded is not None else None,
+        digest=digest,
         media_type=_typed_leaf(blob, "mimeType", (str,), item, residual),
+        display_name=_typed_leaf(blob, "displayName", (str,), item, residual),
+        video_metadata=_typed_leaf(view, "videoMetadata", (dict,), path, residual),
     )
 
 
@@ -1334,17 +1342,33 @@ def _read_file_data(view: Mapping[str, tuple[str, Any]], path: str, residual: di
         UnreadableBodyError: When the file data is not an object.
     """
     wire_key, value = view["fileData"]
-    item = _join(path, wire_key)
+    item = c.residual_key(path, wire_key)
     if not isinstance(value, Mapping):
         raise c.UnreadableBodyError(f"{item} must be an object, got {type(value).__name__}")
 
     data = _aliased(value, PUBLISHED_FILE_DATA_KEYS, item, residual)
+    ref = _typed_leaf(data, "fileUri", (str,), item, residual)
+    if ref is None:
+        # `fileUri` is a required field of fileData (§7.4 rule 7 row 2): the
+        # part keeps its position, with identity from the canonical-JSON digest
+        # of the fileData blob (the `opaque_digest` recipe; no `type` to
+        # exclude — fileData is identified by its wire key, not a `type` field).
+        # The residual carries the missing key, or the wrongly-typed value
+        # `_typed_leaf` already residualised, so the run fails visibly.
+        digest = c.opaque_digest(value)
+        if "fileUri" not in data:
+            residual[c.residual_key(item, "fileUri")] = None
+    else:
+        digest = None
     projected = c.Image(
-        ref=_typed_leaf(data, "fileUri", (str,), item, residual),
+        ref=ref,
+        digest=digest,
         media_type=_typed_leaf(data, "mimeType", (str,), item, residual),
+        display_name=_typed_leaf(data, "displayName", (str,), item, residual),
+        video_metadata=_typed_leaf(view, "videoMetadata", (dict,), path, residual),
     )
-    _residualise(data, {"fileUri", "mimeType"}, item, residual)
-    _residualise(view, {"fileData"}, path, residual)
+    _residualise(data, {"fileUri", "mimeType", "displayName"}, item, residual)
+    _residualise(view, {"fileData", "videoMetadata"}, path, residual)
     return projected
 
 
@@ -1376,7 +1400,7 @@ def _read_function_call(view: Mapping[str, tuple[str, Any]], path: str, residual
             usable name residualises instead — see :func:`_read_required_name`.
     """
     wire_key, value = view["functionCall"]
-    item = _join(path, wire_key)
+    item = c.residual_key(path, wire_key)
     if not isinstance(value, Mapping):
         raise c.UnreadableBodyError(f"{item} must be an object, got {type(value).__name__}")
 
@@ -1386,9 +1410,14 @@ def _read_function_call(view: Mapping[str, tuple[str, Any]], path: str, residual
         name=name,
         arguments=_typed_leaf(call, "args", (dict,), item, residual, default={}),
         id=_typed_leaf(call, "id", (str,), item, residual),
+        # Gemini attaches `thoughtSignature` to the part, not to the
+        # ``functionCall`` payload — read it from the aliased part view and
+        # consume it at the part level so it doesn't residualise. KBR-194:
+        # Gemini 3 requires clients to echo it back verbatim on the next turn.
+        signature=_typed_leaf(view, "thoughtSignature", (str,), path, residual),
     )
     _residualise(call, PUBLISHED_FUNCTION_CALL_KEYS, item, residual)
-    _residualise(view, {"functionCall"}, path, residual)
+    _residualise(view, {"functionCall", "thoughtSignature"}, path, residual)
     return projected
 
 
@@ -1416,7 +1445,7 @@ def _read_function_response(view: Mapping[str, tuple[str, Any]], path: str, resi
         UnreadableBodyError: When the response is not an object.
     """
     wire_key, value = view["functionResponse"]
-    item = _join(path, wire_key)
+    item = c.residual_key(path, wire_key)
     if not isinstance(value, Mapping):
         raise c.UnreadableBodyError(f"{item} must be an object, got {type(value).__name__}")
 
@@ -1433,11 +1462,15 @@ def _read_function_response(view: Mapping[str, tuple[str, Any]], path: str, resi
         content=content,
         tool_use_id=_typed_leaf(answer, "id", (str,), item, residual),
         is_error=False,
+        # `scheduling` is the NON_BLOCKING calling toggle on the response
+        # side (KBR-194); `willContinue` is its twin and stays in the
+        # residual — out of scope here.
+        scheduling=_typed_leaf(answer, "scheduling", (str,), item, residual),
     )
     # `name` pairs the result with its call where no id was sent, and the
     # grammar's pairing rule is by name and position, so it is accounted for
     # rather than residualised.
-    _residualise(answer, {"response", "parts", "id", "name"}, item, residual)
+    _residualise(answer, {"response", "parts", "id", "name", "scheduling"}, item, residual)
     _residualise(view, {"functionResponse"}, path, residual)
     return projected
 
@@ -1461,14 +1494,14 @@ def _read_response_parts(answer: Mapping[str, tuple[str, Any]], prefix: str, res
         return []
 
     wire_key, value = answer["parts"]
-    path = _join(prefix, wire_key)
+    path = c.residual_key(prefix, wire_key)
     members = _members(value)
     if members is None:
         raise c.UnreadableBodyError(f"{path} must be a list or an object")
 
     images: list[c.Image] = []
     for index, member in enumerate(members):
-        item = f"{path}[{index}]"
+        item = c.residual_key(path, index=index)
         if not isinstance(member, Mapping):
             raise c.UnreadableBodyError(f"{item} must be an object, got {type(member).__name__}")
 

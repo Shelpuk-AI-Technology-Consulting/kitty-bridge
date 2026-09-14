@@ -225,6 +225,26 @@ _DATA_URL = re.compile(r"^data:([^;,]+);base64,(.*)$", re.DOTALL)
 _ANY_DATA_URL = re.compile(r"^data:", re.IGNORECASE)
 
 
+def _residualise(source: Mapping[str, Any], mapped: set[str], prefix: str, residual: dict[str, Any]) -> None:
+    """Record every key of ``source`` the reader did not map.
+
+    §3.3.1's "unknown fields fail closed", applied at depth: ``verify_total``
+    sees top-level keys only, so this is what closes the gap beneath them.
+    Mirrors ``reader_anthropic_messages._residualise`` — one spelling for one
+    rule across the readers that share it.
+
+    Args:
+        source: The object being read.
+        mapped: The keys the caller accounted for.
+        prefix: The object's path from the body root, to which each unmapped
+            key is appended.
+        residual: The residual mapping, extended in place.
+    """
+    for key, value in source.items():
+        if key not in mapped:
+            residual[c.residual_key(prefix, key)] = value
+
+
 def _mcp_tool_name(server_label: str) -> str:
     """Return the projected name of an MCP tool declaration.
 
@@ -581,7 +601,7 @@ class ResponsesProjection:
         Raises:
             UnreadableBodyError: When a ``message`` item carries an undefined role.
         """
-        path = f"input[{index}]"
+        path = c.residual_key("input", index=index)
 
         if not isinstance(item, dict):
             residual[path] = item
@@ -669,7 +689,7 @@ class ResponsesProjection:
             raise c.UnreadableBodyError(f"{path}: message role must be one of {sorted(_MESSAGE_ROLES)}, got {role!r}")
 
         raw_content = item.get("content")
-        parts = self._read_content(raw_content, f"{path}.content", residual)
+        parts = self._read_content(raw_content, c.residual_key(path, "content"), residual)
 
         # System and developer instructions lift into `conversation.system`
         # rather than becoming a turn (§3.3.1b R8.2).
@@ -689,7 +709,7 @@ class ResponsesProjection:
                     # an earlier part residualised, and would collide with the
                     # key `_read_content` already wrote — silently destroying one
                     # of two unclassified values.
-                    residual[f"{path}.content[{wire_index}]"] = entries[wire_index]
+                    residual[c.residual_key(c.residual_key(path, "content"), index=wire_index)] = entries[wire_index]
             return
 
         turns.append(c.Turn(role, [part for _, part in parts]))
@@ -724,7 +744,7 @@ class ResponsesProjection:
 
         parts: list[tuple[int, c.Part]] = []
         for offset, entry in enumerate(raw):
-            part = self._read_content_part(entry, f"{path}[{offset}]", residual, allowed)
+            part = self._read_content_part(entry, c.residual_key(path, index=offset), residual, allowed)
             if part is not None:
                 parts.append((offset, part))
 
@@ -797,7 +817,7 @@ class ResponsesProjection:
         return None
 
     @staticmethod
-    def _read_image(entry: Mapping[str, Any], path: str, residual: dict[str, Any]) -> c.Part | None:
+    def _read_image(entry: Mapping[str, Any], path: str, residual: dict[str, Any]) -> c.Image:
         """Project an ``input_image`` content part.
 
         ``contract.image_digest`` is pinned so six independently written readers
@@ -811,8 +831,18 @@ class ResponsesProjection:
             residual: Accumulator of unclassifiable values, mutated here.
 
         Returns:
-            The projected image, or ``None`` when it was residualised.
+            The projected image. Never ``None``: §7.4 rule 7 — no branch drops
+            a part, because a dropped part shifts every later part's index and
+            invents a delta on content nobody touched (KBR-251).
         """
+        # Close the depth gap for every entry the reader does not map. The
+        # published ``input_image`` keys are ``type``, ``image_url`` and
+        # ``file_id``; anything else (``detail``, future siblings) residualises
+        # at its exact path so the run fails loudly. Mirrors the Anthropic
+        # reader's block- and source-level sweeps (§3.3.1's "unknown fields
+        # fail closed").
+        _residualise(entry, {"type", "image_url", "file_id"}, path, residual)
+
         url = entry.get("image_url")
 
         if isinstance(url, str):
@@ -822,30 +852,60 @@ class ResponsesProjection:
                 try:
                     raw = base64.b64decode(payload, validate=True)
                 except (binascii.Error, ValueError):
-                    # Undecodable bytes are not an image this reader can digest,
-                    # and inventing a digest would make two unequal images
-                    # compare equal.
-                    residual[path] = entry
-                    return None
+                    # Residualised, not raised on, and the part is not dropped:
+                    # §7.4 rule 7 row 3 — "raising is the other wrong answer:
+                    # it blinds the oracle to everything else in a request it
+                    # could otherwise diff", and `validate=True` rejects every
+                    # RFC 2045 line break, so wrapped base64 is real traffic.
+                    # The identity is the wire's own bytes of the payload —
+                    # the second of `image_digest`'s recipes (KBR-192). The
+                    # media type *is* stated here and carried separately, so a
+                    # changed media type stays its own delta.
+                    residual[c.residual_key(path, "image_url")] = url
+                    return c.Image(digest=c.image_digest(payload.encode("utf-8")), media_type=media_type)
                 return c.Image(digest=c.image_digest(raw), media_type=media_type)
 
             # A data URL that is not base64 carries bytes this reader cannot
-            # canonicalise; putting it in `ref` would make it compare unequal to
-            # another reader's digest of the same image.
+            # canonicalise; putting it in `ref` would make it compare unequal
+            # to another reader's digest of the same image. The media segment
+            # *is* parseable here — anything between ``data:`` and the first
+            # ``;`` or ``,`` — and the payload sits after the first comma.
+            # Both carry through to the projected part; the digest sees only
+            # the payload bytes, so the media segment stays its own delta,
+            # consistent with `image_digest`'s "media type excluded" rule.
             if _ANY_DATA_URL.match(url):
-                residual[path] = entry
-                return None
+                residual[c.residual_key(path, "image_url")] = url
+                media_type = url[5:].split(";", 1)[0].split(",", 1)[0] or None
+                _, _, payload = url.partition(",")
+                return c.Image(digest=c.image_digest(payload.encode("utf-8")), media_type=media_type)
 
             # A remote image has no bytes to digest; the URI is the identity, the
             # same shape §3.3.1 gives Gemini's `fileData.fileUri`.
             return c.Image(ref=url)
 
+        # `image_url` present but wrongly typed is a rule-7 row-2 anomaly even
+        # when a usable `file_id` carries the part — a dropped field is the
+        # silent defect §7.4.1 names, and it would otherwise hide inside a
+        # `ref`-only projection. An *absent* `image_url` is the format's legal
+        # file_id-only shape and residualises nothing here.
+        if url is not None:
+            residual[c.residual_key(path, "image_url")] = url
+
         file_id = entry.get("file_id")
         if isinstance(file_id, str):
             return c.Image(ref=file_id)
 
-        residual[path] = entry
-        return None
+        # No identity the format defines. The part keeps its position with
+        # identity from the canonical-JSON digest of the part — the
+        # `opaque_digest` recipe, mirroring Gemini's missing-`fileUri` shape —
+        # and the residual names the missing identity key as ``None``, plus
+        # any wrongly-typed `file_id` value, so the run fails visibly at the
+        # right path.
+        if url is None:
+            residual[c.residual_key(path, "image_url")] = None
+        if file_id is not None:
+            residual[c.residual_key(path, "file_id")] = file_id
+        return c.Image(digest=c.opaque_digest(entry))
 
     def _read_function_call(self, item: Mapping[str, Any], path: str, residual: dict[str, Any]) -> c.ToolUse:
         """Project a ``function_call`` item.
@@ -863,7 +923,7 @@ class ResponsesProjection:
         # cannot see a nested coercion because `consumed` is top-level only.
         call_id = item.get("call_id")
         if call_id is not None and not isinstance(call_id, str):
-            residual[f"{path}.call_id"] = call_id
+            residual[c.residual_key(path, "call_id")] = call_id
             call_id = None
 
         # `name` is required by `FunctionToolCall` and, unlike the id, there is
@@ -872,12 +932,12 @@ class ResponsesProjection:
         # residualised too, not just a wrong type.
         name = item.get("name")
         if not isinstance(name, str):
-            residual[f"{path}.name"] = name
+            residual[c.residual_key(path, "name")] = name
             name = ""
 
         return c.ToolUse(
             name=name,
-            arguments=c.decode_arguments(item.get("arguments"), f"{path}.arguments", residual),
+            arguments=c.decode_arguments(item.get("arguments"), c.residual_key(path, "arguments"), residual),
             id=call_id,
         )
 
@@ -906,11 +966,11 @@ class ResponsesProjection:
             # unremarked. `_read_content_part` returns only members of
             # `RESULT_PART_TYPES`, so no further narrowing is needed after it.
             for _offset, part in self._read_content(
-                raw, f"{path}.output", residual, allowed=_TOOL_OUTPUT_CONTENT_TYPES
+                raw, c.residual_key(path, "output"), residual, allowed=_TOOL_OUTPUT_CONTENT_TYPES
             ):
                 content.append(part)  # type: ignore[arg-type]
         elif raw is not None:
-            residual[f"{path}.output"] = raw
+            residual[c.residual_key(path, "output")] = raw
 
         # Responses carries no error flag on a function output, so `is_error` is
         # always False here. Written down rather than left as silence: the field
@@ -968,7 +1028,7 @@ class ResponsesProjection:
                 continue
 
             if not isinstance(entries, list):
-                residual[f"{path}.{field_name}"] = entries
+                residual[c.residual_key(path, field_name)] = entries
                 continue
 
             for offset, entry in enumerate(entries):
@@ -976,7 +1036,7 @@ class ResponsesProjection:
                 if isinstance(text, str):
                     texts.append(text)
                 else:
-                    residual[f"{path}.{field_name}[{offset}]"] = entry
+                    residual[c.residual_key(c.residual_key(path, field_name), index=offset)] = entry
 
         signature = item.get("encrypted_content")
         if not isinstance(signature, str):
@@ -1021,9 +1081,9 @@ class ResponsesProjection:
             # shape at all, so it residualises whole rather than being read as a
             # built-in named `str(kind)`.
             if not isinstance(entry, dict) or not isinstance(entry.get("type"), str):
-                residual[f"tools[{index}]"] = entry
+                residual[c.residual_key("tools", index=index)] = entry
                 continue
-            tools.append(self._read_tool(entry, f"tools[{index}]", residual))
+            tools.append(self._read_tool(entry, c.residual_key("tools", index=index), residual))
 
         return tools
 
@@ -1049,12 +1109,12 @@ class ResponsesProjection:
             # mutation those checks exist to catch.
             description = entry.get("description")
             if description is not None and not isinstance(description, str):
-                residual[f"{path}.description"] = description
+                residual[c.residual_key(path, "description")] = description
                 description = None
 
             parameters = entry.get("parameters")
             if parameters is not None and not isinstance(parameters, dict):
-                residual[f"{path}.parameters"] = parameters
+                residual[c.residual_key(path, "parameters")] = parameters
                 parameters = None
 
             # Same rule as `_read_function_call`, and for a stronger reason:
@@ -1065,7 +1125,7 @@ class ResponsesProjection:
             # register row would match them by accident rather than by name.
             name = entry.get("name")
             if not isinstance(name, str):
-                residual[f"{path}.name"] = name
+                residual[c.residual_key(path, "name")] = name
                 name = ""
 
             strict = entry.get("strict")

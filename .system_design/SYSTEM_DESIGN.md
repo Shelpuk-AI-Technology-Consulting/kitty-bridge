@@ -146,7 +146,10 @@ shell ─► kitty.cli.main.main
 - **Kitty installs no `SIGHUP` handler**, so closing an SSH terminal kills kitty and its bridge
   even if the agent survives elsewhere.
 - **For Claude Code, kitty passes its settings two ways:** environment variables, and a
-  `--settings <tmpfile>` flag whose `env` block repeats them.
+  `--settings <tmpfile>` flag whose `env` block repeats them. The env block also carries
+  `ENABLE_CLAUDEAI_MCP_SERVERS=false` (KBR-245): Claude Code's documented per-session
+  opt-out from claude.ai MCP connectors, which suppresses the banner Claude Code prints when
+  `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` shadow the user's claude.ai OAuth login.
 
 ## 3. Surviving an SSH disconnect: `--tmux` on the Claude Code agent
 
@@ -346,11 +349,6 @@ the EOF-without-finish fallback: `finalize_interrupted_stream` /
 
 - A repeated id-chunk for an already-open CC tool-call index re-enters the open branch and
   stays malformed (G39's scope-out, shared with the Responses translator).
-- The server buffers `response.created` / `response.in_progress`
-  (`translate_stream_start`) for the empty-response failover and **never writes them**, so
-  every translated `/v1/responses` stream opens at `output_item.added`, mid-sentence.
-  Found by KBR-240's server-level walk; owned by
-  [KBR-242](https://shelpuk.atlassian.net/browse/KBR-242) (gap **G41**).
 
 ---
 
@@ -392,8 +390,7 @@ logic. A no means byte-identical to the pre-KBR-232 behaviour.
 | S4 | Gate and converter re-evaluated per attempt | A failover can land on a Chat Completions-wire backend mid-handler; a stale converter would mangle its Chat Completions stream. |
 | S5 | `thinking_delta` → `reasoning_content`; signatures dropped | The Chat Completions wire has no signature slot, so preservation is impossible; M17's strip-and-retry recovers the round-trip rejection instead (KBR-238). |
 | S6 | The three loops run wider by the strip budget, with an attempt correction | Same rationale KBR-238 recorded on `_stream_messages`: a strip gets its attempt back, so the empty-response schedule is not pulled forward. |
-| S7 | Cross-class re-dispatch (`_stream_messages`, KBR-249): when a plain-POST branch's failover selects a `use_custom_transport` provider, the function re-enters the custom-transport branch with the failover-selected provider as its own initial selection | The plain-POST branch cannot drive a `use_custom_transport` provider via `session.post(...)`; the bridge must speak the protocol that matches the selected backend's class. Without re-dispatch the failover silently delivers an empty `200` (the bug KBR-235 exposed). The custom-transport branch's symmetric `custom → plain` fall-through — `src/kitty/bridge/server.py:4126-4144` (the cross-mode select with the three pops) then `4270-4275` (the `continue` entering the plain block) — is unchanged in behaviour. The re-dispatch bound is `(2 * n_backends) + 1` per request so a pathological cooldown-expiry ping-pong surfaces an honest error instead of looping. |
-| S8 | Cross-class re-dispatch reuses the failover-selected provider, never re-selects | Re-selecting would consume a new draw from the deterministic test stub and break the pinned two-draw invariant; semantically, the failover already chose — the branch re-enters with that choice intact. |
+| S7 | `_stream_responses` opens the lifecycle lazily, on the first non-finish write of each attempt | `translate_stream_start` and `translate_stream_chunk` draw from the same `_seq` counter, so translating the lifecycle after the first chunk had been translated would put `sequence_number` 3 and 4 on the wire ahead of the chunk's 0, 1, 2 — the translation therefore runs speculatively at attempt start, before any chunk, and the two strings are written on the first real event and invalidated at every `translator.reset()` inside the loop (KBR-242; gap G41). Writing eagerly, before the first chunk is translated, was rejected: an all-finish first chunk is how an empty response presents, and publishing the lifecycle before the empty verdict is known would put a half-open lifecycle on the wire exactly where the failover ladder is about to retire the attempt. A purely-empty attempt publishes nothing, so KBR-247's `events_emitted` model survives; the exhausted-ladder fallback stays an empty 200 (KBR-235's territory); the error paths never open the lifecycle. Tests: `tests/bridge/test_responses_stream_lifecycle.py`, and the KBR-240 walk's opening + exact-`sequence_number` assertions |
 
 ### 5.4 Known limits
 
@@ -491,3 +488,182 @@ including raises a hold then recovers). Decisions, and why:
 Tests: `tests/bridge/test_all_backends_unhealthy.py` — `TestRecoveryHold` (L1, the
 stepped-on-sleep fake clock) and `TestArrivalHoldWiring` (HTTP against the real app;
 a real 1 s hold, jitter patched).
+
+## 7. The interactive-terminal guard
+
+### 7.1 The contract as it stands
+
+A process that calls `kitty.tui.prompts.can_interact()` (the prompt-and-menu guard shared
+by `check_tty()` and `kitty.tui.menu`) must answer truthfully whether **both** standard
+streams belong to a terminal the child can read keys from and draw on. **As Is:**
+`can_interact()` answers `sys.stdin.isatty() and sys.stdout.isatty()`. On POSIX that is
+exact — `/dev/null` is not a character device — so no Linux or macOS run has ever seen
+the defect. On Windows `isatty()` checks for *any* character device, and `NUL` is one
+(CPython [bpo-28654](https://bugs.python.org/issue28654); confirmed 2026-09-14), so
+`kitty auth openai > NUL`, or any parent process that spawns an interactive command with
+`stdin=DEVNULL, stdout=DEVNULL`, passes the guard and dies inside `prompt_toolkit` with
+`NoConsoleScreenBufferError` the moment it tries to build a Win32 screen buffer over a
+non-console stdout. KBR-187 fixed the menus' copy of the guard (raised on a piped
+stdout), KBR-204 found `check_tty` still held the stdin-only reading, and KBR-218 is the
+NUL-shaped hole KBR-204's `isatty-AND` reading cannot close.
+
+### 7.2 To Be: ask the console, not the file system
+
+On `win32`, `can_interact()` asks the console API whether each standard handle is one.
+`kernel32.GetStdHandle(-10)` (`STD_INPUT_HANDLE`) and `(-11)` (`STD_OUTPUT_HANDLE`) return
+the process's standard handles; `kernel32.GetConsoleMode(handle, byref(DWORD))` succeeds
+only when the handle names a real console — for a pipe, a file, or `NUL` it fails (the
+documented return value is zero with `GetLastError() == ERROR_INVALID_HANDLE`; the home
+code does not branch on the error code because fail-closed is the safe direction for a
+guard). On every other platform the answer is the unchanged
+`sys.stdin.isatty() and sys.stdout.isatty()`. The answer stays in exactly one place:
+`check_tty()` and `kitty.tui.menu` keep importing `can_interact` and cannot drift.
+
+**STD_ERROR_HANDLE (-12) is deliberately not consulted.** The prompt path renders to
+stdout and `print_error` (`tui/display.py`) reports to stderr, so consulting the error
+handle would add a third ctypes call without adding signal. KBR-187, KBR-204 and KBR-218
+all live on stdin/stdout; keeping that symmetry means the next reader does not have to
+reason about an edge the product has no use for.
+
+### 7.3 Decisions, and why
+
+- **One shared answer.** The KBR-187/KBR-204 history is two fixes to two copies of the same
+  predicate; the third fix goes into the one that the other two now consult
+  (`can_interact`), so the regression surface is `O(1)`, not `O(callers)`. The KBR-204
+  falsification pins this: it asserts `menu.can_interact is real` after a `prompts` patch,
+  and is the regression detector if anyone re-introduces a local copy.
+- **`GetConsoleMode`, not `isatty`, on Windows.** `isatty()` is a CRT probe that classifies
+  by file type; `GetConsoleMode` is a Windows-console probe that classifies by API.
+  Classifying by API is the only answer that distinguishes a console from the next
+  character device the OS opens, because the *next* device the kernel might grow
+  character-device semantics for is not a console either. Reading the API also matches what
+  prompt_toolkit does at the crash site (`Win32Output.get_win32_screen_buffer_info` calls
+  the same family of `kernel32` functions), so the guard and the consumer agree on what a
+  console is.
+- **Fail-closed.** Any `GetConsoleMode` failure — not a console, no handle, the process
+  started `DETACHED_PROCESS` and `GetStdHandle` returns `NULL`/`INVALID_HANDLE_VALUE` —
+  returns False. A guard that declines interactivity for a daemon started without a console
+  is correct: a daemon never calls `check_tty`, and a guard that returned True for a
+  console-less start would be lying to prompt_toolkit, which would then crash on the next
+  step anyway. **The "daemon never calls this" guarantee is contractual for
+  `kitty.bridge`** (the `Bridge must not import leaf or CLI modules` import-linter
+  contract in `pyproject.toml` forbids `kitty.tui`) **and conventional for
+  `kitty.bridge_runner`** — `bridge_runner` is a sibling top-level module, not a
+  descendant of `kitty.bridge`, and the import-linter contracts do not reach it (the
+  `kitty.io_encoding` contract's own comment names exactly this gap as the reason its
+  list enumerates every sibling). KBR-231's background bridge is the `bridge_runner`
+  case; its shutdown path does not consult `check_tty` today, and adding a prompt there
+  is held only by code review, not by the gate.
+- **POSIX untouched.** `/dev/null` is not a character device; the `isatty`-AND reading is
+  already exact there and rewriting it would be a no-op with a real risk of breaking the
+  four Linux CI legs that depend on it.
+- **`WinDLL("kernel32")` instantiation lives inside the win32 branch body, not at module
+  scope.** `ctypes` is portable and its `import` is fine at any scope, but `ctypes.WinDLL`
+  only exists on Windows — hoisting the `WinDLL(...)` call to module scope would
+  `AttributeError` at import time and break every `kitty.tui.prompts` consumer
+  (`kitty.tui.menu`, `kitty.cli.{setup,auth,egress,profile}_cmd`) on POSIX. The `bridge/
+  manage.py::_probe_pid_windows` pattern (`WinDLL` instantiation inside the function,
+  after the `sys.platform != "win32": raise` narrowing) is the local precedent and is
+  mirrored here.
+- **Adjacent `isatty` calls left alone.** Three other call sites in `src/kitty` still read
+  `isatty()` for decisions other than the interactive-prompt guard, and have the same
+  Windows `NUL` lies today: `cli/tmux_wrap.py:402` decides whether to wrap the agent in a
+  tmux client, `cli/launcher.py:290` decides whether to inherit the parent's stdin into
+  the spawned agent (`stdin_arg = sys.stdin if sys.stdin.isatty() else None`), and
+  `tui/display.py:169` decides whether to render a progress bar. None is the
+  interactive-prompt guard, and KBR-218 is scoped to `can_interact()`; touching them in
+  the same change would mix the ticket's hole with three distinct decisions, and an
+  `isatty` reading that lies about `NUL` is the documented Windows behaviour these call
+  sites have always lived with. Recorded as a known limit so the decision is reviewable.
+- **Harmonising side effect.** On Windows, `kitty auth openai < NUL` at a real console
+  used to pass the guard and EOF-loop inside the prompt; after the fix it refuses with
+  exit 2, matching the POSIX behaviour that has always been correct. This is the intended
+  consequence of the same fail-closed rule that handles `NUL`/`NUL`, and is preempted
+  here so a user filing "now my one-NUL redirect doesn't work" lands on this paragraph.
+
+### 7.4 Verification
+
+Tests extend the existing KBR-204 harness in `tests/cli/test_stream_encoding.py` (l1 by
+path default; the file's docstring records the §8.2 reason for the marker choice), a unit
+case in `tests/tui/test_prompts.py`, and the seam extension documented in §7.5. Five
+cases:
+
+1. A premise case that the child really sees `isatty == (True, True)` on Windows and
+   `(False, False)` on POSIX with `stdin=DEVNULL, stdout=DEVNULL`. The child prints its
+   report **to stderr** so the parent can read it back even with stdout discarded.
+2. The product test: `kitty egress` with both streams discarded → exit 2, TTY diagnosis on
+   **stderr specifically**, no traceback. Green on POSIX at base (the guard already
+   refuses `/dev/null`), **red on Windows until the fix**, green on Windows after. The
+   red's shape pins the mechanism: a `_CRASH_MARKERS`-bearing traceback from
+   prompt_toolkit. A TimeoutExpired there would mean the premise is wrong (a hang, not
+   the crash the ticket documents) — investigate the harness before trusting a fix.
+3. A harness falsification: the child patches `prompts.can_interact` to `lambda: True`
+   (the lie Windows tells natively for `NUL`) while `menu.can_interact` stays bound to
+   the real predicate, then runs `kitty egress`. The harness asserts the pass-through
+   signature (exit 0, no diagnosis, no crash) — so the product test's exit-2 assertion is
+   proven to be what stands between the user and silent nothing. **Red on the Windows leg
+   at the test commit too** — at base the menu's own (real) predicate is also blind for
+   `NUL`, so the child crashes inside the menu rather than declining silently — and green
+   on every leg after the fix. A watcher seeing both new tests red at the test commit is
+   seeing the expected evidence, not a harness defect.
+4. The probe's decision is a one-line pure function `_handle_attached(raw_mode: int) ->
+   bool` (the `bool(raw_mode)` interpretation, per the
+   `tests/bridge/test_bridge_management.py:842-854` house pattern that keeps ctypes as
+   plumbing and decisions as pure functions), and `tests/tui/test_prompts.py` pins it on
+   every leg: `0` → False, any nonzero → True. Separately, the same file parametrises
+   the four `(stdin_value, stdout_value)` combinations in `(True, False)`, patches
+   `_query_console_mode` (the plumbing) with
+   `side_effect=iter([1 if stdin_value else 0, 1 if stdout_value else 0])`, and leaves
+   `_handle_attached` real so it interprets each raw value — `can_interact()` returns the
+   AND, `(True, True)` → True; the three other cells → False. This is the **positive
+   direction** of the fix: every subprocess case above exercises the refusal branch,
+   so without this truth table a regression that makes `can_interact()` always False
+   on `win32` (silently refusing every real console) ships green against the whole
+   suite. The ctypes plumbing (`_query_console_mode` — `WinDLL("kernel32",
+   use_last_error=True)`, `GetStdHandle`, `GetConsoleMode`) is Windows-only inside its
+   own body and is exercised by the Windows pytest leg; the `restype` MUST be declared
+   pattern from `bridge/manage.py:147-149` keeps the HANDLE truncation trap out of
+   the helper.
+5. The existing "simulated interactivity" test seams (`_mock_tty` helpers and the
+   `True,True`/`False`-patch inlines across the seven test files) extend to patch
+   `kitty.tui.prompts._handle_attached` alongside `isatty`, in **both directions**:
+   positive sites patch it True (so the Windows CI leg reads "interactive" when the
+   test says so), negative sites patch it False. The negative direction matters on a
+   developer's Windows machine, not in CI: a `patch isatty=False` refusal test runs
+   against the *real* console probe there, and with a real console attached the probe
+   says True, so the test fails — deterministic on CI, red on a dev box, exactly the
+   environment-dependence the repo does not accept. (Found by the PR review
+   classifier; the initial wording claimed False-only patches were safe because the
+   CI probe also said False.) Without the extension, `can_interact()` no longer reads
+   `isatty` on Windows and every existing "the prompt proceeds" / "the command
+   refuses" unit test is decided by the environment rather than the patch.
+
+The `_run_child` runner gains a `stdout` pass-through (defaulting to capture, as today)
+and `_asked_for_a_terminal` tolerates a discarded stdout by reading `completed.stdout or
+b""`; this is one line and leaves every existing KBR-204 case byte-identical.
+
+### 7.5 Known limits
+
+- The three adjacent `isatty` call sites (`cli/tmux_wrap.py:402`,
+  `cli/launcher.py:290`, `tui/display.py:169`) still read `isatty()` directly for their
+  own decisions and carry the same `NUL` lies on Windows. §7.3 records why they are out
+  of KBR-218's scope; if a user-visible defect surfaces at one of them it gets its own
+  ticket, scoped to that decision alone.
+- The "simulated interactivity" test seams (§7.4 case 5) stay patched to the
+  `_handle_attached` shape, in both directions (True for proceed-expectation, False for
+  refusal-expectation): a future change to `can_interact()` that consults a *different*
+  oracle must extend the same seams again, or the Windows CI leg will regress. The list
+  (as of writing — the grep rule in §7.4 case 5 is the load-bearing invariant, this is
+  the snapshot) is `tests/tui/test_prompts.py::_mock_tty`,
+  `tests/tui/test_menu.py::_mock_tty`, `tests/tui/test_setup_wizard.py::_mock_tty`,
+  the inline `True,True` block in
+  `tests/tui/test_profile_menu.py::test_table_includes_backup_column`, the nine
+  `True,True` blocks across `tests/tui/test_egress_menu.py` (five in
+  `TestConfigureFlow`, two in `TestRemoveFlow`, two in `TestMenuShape`) plus its
+  `test_non_tty_is_rejected` False site, `tests/cli/test_auth_cmd.py::_mock_tty` plus
+  its two `run_oauth_for_provider` / `run_auth_openai` False sites, and the four
+  `stdin.isatty=False` sites plus the `True,True` block in
+  `tests/test_cli_main.py::TestNonTTYExit`. `tests/tui/test_live_checklist.py` is
+  excluded — its `stdout.isatty=True` patches drive `display.py:169`'s rendering
+  decision (an adjacent site left alone per §7.3), not the guard, and the seam
+  extension does not apply to it.

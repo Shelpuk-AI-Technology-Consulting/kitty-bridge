@@ -92,9 +92,9 @@ def _claude_code_body(*, breakpoints: bool) -> dict:
     ``tool_result``) plus the top-level automatic-caching form: seven in all,
     both TTLs represented, every one on a top-level block. The ``tool_result``
     content is a string on purpose; the nested list form is the one survivor
-    and has its own test. The image's breakpoint is lost along with the image
-    itself (KBR-222), so it shows nothing about breakpoints on its own; the
-    other six do.
+    and has its own test. The image now ships as an ``image_url`` part
+    (KBR-222), which carries no breakpoint, so it shows nothing about
+    breakpoints on its own; the other six do.
 
     Every call builds fresh nested objects, so the marked and unmarked bodies
     share nothing. Every ``tool_use`` carries an id, so the translator's
@@ -614,7 +614,8 @@ def test_the_adapter_keeps_or_drops_a_given_breakpoint_site_by_site(
 ) -> None:
     """Record, site by site, which Chat Completions breakpoints reach the Anthropic wire.
 
-    The adapter copies user content and tool-message content verbatim, so a
+    The adapter rebuilds a user ``text`` part member-for-member (KBR-222 gave
+    known parts Anthropic spellings, preserving their other members), so a
     breakpoint there survives with its position and TTL. The tool-message one is
     moved inside the ``tool_result`` block's ``content``, a depth at which it is
     not established that Anthropic honours a breakpoint, so a fix may change

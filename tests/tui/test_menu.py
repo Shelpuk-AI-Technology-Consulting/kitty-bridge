@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from itertools import cycle
 from unittest.mock import MagicMock, patch
 
 from kitty.tui.menu import CheckboxMenu, SelectionMenu
@@ -22,14 +23,27 @@ def _mock_tty(is_tty: bool = True, *, stdout_is_tty: bool | None = None):
             pass it explicitly to build the asymmetric case that KBR-187 was.
 
     Returns:
-        A context manager patching both ``isatty`` calls.
+        A context manager patching both ``isatty`` calls and the KBR-218
+        console probe interpretation (the latter load-bearing on the Windows
+        CI leg, inert on POSIX).
     """
     out = is_tty if stdout_is_tty is None else stdout_is_tty
 
     @contextmanager
     def _both():
-        with patch("sys.stdin.isatty", return_value=is_tty), patch(
-            "sys.stdout.isatty", return_value=out
+        with (
+            patch("sys.stdin.isatty", return_value=is_tty),
+            patch("sys.stdout.isatty", return_value=out),
+            # KBR-218: Windows reads `_handle_attached`, not isatty. create=True
+            # because the attribute does not exist at the test commit. cycle
+            # because a menu flow may invoke `can_interact` more than once
+            # (show() and the menu-internal checks), so the values must repeat
+            # rather than exhaust on the third call.
+            patch(
+                "kitty.tui.prompts._handle_attached",
+                side_effect=cycle([is_tty, out]),
+                create=True,
+            ),
         ):
             yield
 
