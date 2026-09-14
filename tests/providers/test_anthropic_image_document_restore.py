@@ -105,12 +105,14 @@ class TestImageRestore:
 
         A rebuilt ``text`` part keeps every member verbatim (the KBR-199 suite
         pins that); an ``image_url`` part changes shape, so its cross-wire
-        ``cache_control`` is carried explicitly and the CC ``image_url`` object
-        is not. Pins the asymmetry the rebuild chose.
+        ``cache_control`` is carried explicitly, the CC ``image_url`` object
+        is not, and nor is any other part member — ``detail``, OpenAI's own,
+        is in the input to pin that drop empirically. The exact-equality
+        assert is the pin: anything extra appearing on the block fails it.
         """
         part = {
             "type": "image_url",
-            "image_url": {"url": "data:image/png;base64,aWNvbg=="},
+            "image_url": {"url": "data:image/png;base64,aWNvbg==", "detail": "high"},
             "cache_control": {"type": "ephemeral", "ttl": "1h"},
         }
         cc = {

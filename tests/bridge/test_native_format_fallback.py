@@ -400,6 +400,27 @@ class TestConvertNativeToCCFormat:
         }
         assert "_documents" not in result
 
+    def test_empty_list_user_message_passes_through_verbatim(self):
+        """A ``content: []`` user turn keeps the pre-KBR-222 passthrough, message count included.
+
+        M17's stripping leaves such turns behind and counts on message
+        indices not moving; the shared builder has nothing to build from an
+        empty list, so the original message must pass through instead of
+        vanishing from the retry.
+        """
+        body = {
+            "model": "claude-sonnet-4-6",
+            "max_tokens": 64,
+            "messages": [
+                {"role": "user", "content": "before"},
+                {"role": "user", "content": []},
+            ],
+        }
+        result = _convert_native_to_cc_format(body)
+
+        assert result["messages"][1] == {"role": "user", "content": []}
+        assert len(result["messages"]) == 2
+
     def test_mixed_content_preserves_text_and_tool_use(self):
         body = _anthropic_body_with_mixed_content()
         result = _convert_native_to_cc_format(body)

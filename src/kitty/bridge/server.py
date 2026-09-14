@@ -815,6 +815,12 @@ def _convert_native_to_cc_format(body: dict) -> dict:
                         "content": result_content if isinstance(result_content, str) else str(result_content or ""),
                     }
                 )
+
+            # A turn with no blocks at all keeps the pre-KBR-222 verbatim
+            # passthrough: M17's stripping leaves ``content: []`` behind and
+            # counts on message indices not moving.
+            if not others and not tool_results:
+                messages.append(msg)
             continue
 
         # String content or any other role — pass through
