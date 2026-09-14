@@ -285,6 +285,9 @@ class TestNonTTYExit:
         with (
             _cli_run(["kitty", command], backends=[object()], egress=None),
             patch("sys.stdin.isatty", return_value=False),
+            # KBR-218: Windows reads `_handle_attached`, not isatty, and a real
+            # console on a developer's machine would otherwise decide this test.
+            patch("kitty.tui.prompts._handle_attached", return_value=False, create=True),
             pytest.raises(SystemExit) as exc_info,
         ):
             main()
@@ -305,6 +308,9 @@ class TestNonTTYExit:
         with (
             _cli_run(["kitty", "doctor"], backends=[], egress=None),
             patch("sys.stdin.isatty", return_value=False),
+            # KBR-218: Windows reads `_handle_attached`, not isatty, and a real
+            # console on a developer's machine would otherwise decide this test.
+            patch("kitty.tui.prompts._handle_attached", return_value=False, create=True),
             pytest.raises(SystemExit) as exc_info,
         ):
             main()
@@ -344,6 +350,9 @@ class TestNonTTYExit:
         with (
             _cli_run(argv, backends=backends, egress=None),
             patch("sys.stdin.isatty", return_value=False),
+            # KBR-218: Windows reads `_handle_attached`, not isatty, and a real
+            # console on a developer's machine would otherwise decide this test.
+            patch("kitty.tui.prompts._handle_attached", return_value=False, create=True),
             pytest.raises(SystemExit),
         ):
             main()
@@ -358,7 +367,13 @@ class TestNonTTYExit:
 
         from kitty.tui.prompts import NonTTYError, check_tty
 
-        with patch("sys.stdin.isatty", return_value=False), pytest.raises(NonTTYError):
+        with (
+            patch("sys.stdin.isatty", return_value=False),
+            # KBR-218: Windows reads `_handle_attached`, not isatty, and a real
+            # console on a developer's machine would otherwise decide this test.
+            patch("kitty.tui.prompts._handle_attached", return_value=False, create=True),
+            pytest.raises(NonTTYError),
+        ):
             check_tty()
 
     def test_other_exceptions_still_propagate(self) -> None:

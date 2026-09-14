@@ -124,7 +124,12 @@ class TestRunOauthForProvider:
         """Non-TTY environment raises NonTTYError."""
         from kitty.tui.prompts import NonTTYError
 
-        with patch("sys.stdin.isatty", return_value=False):
+        with (
+            patch("sys.stdin.isatty", return_value=False),
+            # KBR-218: Windows reads `_handle_attached`, not isatty, and a real
+            # console on a developer's machine would otherwise decide this test.
+            patch("kitty.tui.prompts._handle_attached", return_value=False, create=True),
+        ):
             from kitty.cli.auth_cmd import run_oauth_for_provider
 
             with pytest.raises(NonTTYError):
@@ -276,7 +281,12 @@ class TestAuthOpenaiProfileCreation:
         """Non-TTY environment raises NonTTYError."""
         from kitty.tui.prompts import NonTTYError
 
-        with patch("sys.stdin.isatty", return_value=False):
+        with (
+            patch("sys.stdin.isatty", return_value=False),
+            # KBR-218: Windows reads `_handle_attached`, not isatty, and a real
+            # console on a developer's machine would otherwise decide this test.
+            patch("kitty.tui.prompts._handle_attached", return_value=False, create=True),
+        ):
             from kitty.cli.auth_cmd import run_auth_openai
 
             with pytest.raises(NonTTYError):

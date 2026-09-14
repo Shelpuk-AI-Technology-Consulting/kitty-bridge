@@ -223,7 +223,13 @@ class TestMenuShape:
     def test_non_tty_is_rejected(self, store: EgressStore, cred_store: CredentialStore):
         menu = _import_menu()
 
-        with patch("sys.stdin.isatty", return_value=False), pytest.raises(Exception, match="interactive"):
+        with (
+            patch("sys.stdin.isatty", return_value=False),
+            # KBR-218: Windows reads `_handle_attached`, not isatty, and a real
+            # console on a developer's machine would otherwise decide this test.
+            patch("kitty.tui.prompts._handle_attached", return_value=False, create=True),
+            pytest.raises(Exception, match="interactive"),
+        ):
             menu(cred_store, store)
 
 

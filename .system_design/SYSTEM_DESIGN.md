@@ -615,11 +615,18 @@ cases:
    `restype` MUST be declared pattern from `bridge/manage.py:147-149` keeps the HANDLE
    truncation trap out of the helper.
 5. The existing "simulated interactivity" test seams (`_mock_tty` helpers and the
-   `True,True` inlines in seven test files) extend to patch
-   `kitty.tui.prompts._handle_attached` alongside `isatty`, so the Windows CI leg reads
-   "interactive" when the test says so. Without this extension every existing
-   "the prompt proceeds" / "the menu shows" unit test goes red on `windows-latest` after
-   the fix, because `can_interact()` no longer reads `isatty` on Windows.
+   `True,True`/`False`-patch inlines across the seven test files) extend to patch
+   `kitty.tui.prompts._handle_attached` alongside `isatty`, in **both directions**:
+   positive sites patch it True (so the Windows CI leg reads "interactive" when the
+   test says so), negative sites patch it False. The negative direction matters on a
+   developer's Windows machine, not in CI: a `patch isatty=False` refusal test runs
+   against the *real* console probe there, and with a real console attached the probe
+   says True, so the test fails — deterministic on CI, red on a dev box, exactly the
+   environment-dependence the repo does not accept. (Found by the PR review
+   classifier; the initial wording claimed False-only patches were safe because the
+   CI probe also said False.) Without the extension, `can_interact()` no longer reads
+   `isatty` on Windows and every existing "the prompt proceeds" / "the command
+   refuses" unit test is decided by the environment rather than the patch.
 
 The `_run_child` runner gains a `stdout` pass-through (defaulting to capture, as today)
 and `_asked_for_a_terminal` tolerates a discarded stdout by reading `completed.stdout or
@@ -633,17 +640,20 @@ b""`; this is one line and leaves every existing KBR-204 case byte-identical.
   of KBR-218's scope; if a user-visible defect surfaces at one of them it gets its own
   ticket, scoped to that decision alone.
 - The "simulated interactivity" test seams (§7.4 case 5) stay patched to the
-  `_handle_attached` shape: a future change to `can_interact()` that consults a
-  *different* oracle must extend the same seams again, or the Windows CI leg will
-  regress. The list (as of writing — the grep rule in §7.4 case 5 is the
-  load-bearing invariant, this is the snapshot) is
-  `tests/tui/test_prompts.py::_mock_tty`, `tests/tui/test_menu.py::_mock_tty`,
-  `tests/tui/test_setup_wizard.py::_mock_tty`, the inline `True,True` block in
+  `_handle_attached` shape, in both directions (True for proceed-expectation, False for
+  refusal-expectation): a future change to `can_interact()` that consults a *different*
+  oracle must extend the same seams again, or the Windows CI leg will regress. The list
+  (as of writing — the grep rule in §7.4 case 5 is the load-bearing invariant, this is
+  the snapshot) is `tests/tui/test_prompts.py::_mock_tty`,
+  `tests/tui/test_menu.py::_mock_tty`, `tests/tui/test_setup_wizard.py::_mock_tty`,
+  the inline `True,True` block in
   `tests/tui/test_profile_menu.py::test_table_includes_backup_column`, the nine
-  `True,True` blocks across `tests/tui/test_egress_menu.py` (five in `TestConfigureFlow`,
-  two in `TestRemoveFlow`, two in `TestMenuShape`),
-  `tests/cli/test_auth_cmd.py::_mock_tty`, and the `True,True` block in
-  `tests/test_cli_main.py::TestNonTTYExit::test_other_exceptions_still_propagate`.
-  `tests/tui/test_live_checklist.py` is excluded — its `stdout.isatty=True` patches
-  drive `display.py:169`'s rendering decision (an adjacent site left alone per
-  §7.3), not the guard, and the seam extension does not apply to it.
+  `True,True` blocks across `tests/tui/test_egress_menu.py` (five in
+  `TestConfigureFlow`, two in `TestRemoveFlow`, two in `TestMenuShape`) plus its
+  `test_non_tty_is_rejected` False site, `tests/cli/test_auth_cmd.py::_mock_tty` plus
+  its two `run_oauth_for_provider` / `run_auth_openai` False sites, and the four
+  `stdin.isatty=False` sites plus the `True,True` block in
+  `tests/test_cli_main.py::TestNonTTYExit`. `tests/tui/test_live_checklist.py` is
+  excluded — its `stdout.isatty=True` patches drive `display.py:169`'s rendering
+  decision (an adjacent site left alone per §7.3), not the guard, and the seam
+  extension does not apply to it.

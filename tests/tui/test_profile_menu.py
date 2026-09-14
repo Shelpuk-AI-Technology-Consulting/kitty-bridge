@@ -101,7 +101,13 @@ class TestRunProfileMenuGuard:
     def test_non_tty_raises(self, store: ProfileStore) -> None:
         """Profile menu rejects non-TTY with deterministic error."""
         run_profile_menu = _import_run_profile_menu()
-        with patch("sys.stdin.isatty", return_value=False), pytest.raises(Exception, match="interactive"):
+        with (
+            patch("sys.stdin.isatty", return_value=False),
+            # KBR-218: Windows reads `_handle_attached`, not isatty, and a real
+            # console on a developer's machine would otherwise decide this test.
+            patch("kitty.tui.prompts._handle_attached", return_value=False, create=True),
+            pytest.raises(Exception, match="interactive"),
+        ):
             run_profile_menu(store)
 
 

@@ -55,7 +55,13 @@ def cred_store(tmp_path: object) -> CredentialStore:
 class TestRunSetupWizard:
     def test_non_tty_raises(self, store: ProfileStore, cred_store: CredentialStore) -> None:
         """Setup wizard rejects non-TTY with deterministic error."""
-        with patch("sys.stdin.isatty", return_value=False), pytest.raises(Exception, match="interactive"):
+        with (
+            patch("sys.stdin.isatty", return_value=False),
+            # KBR-218: Windows reads `_handle_attached`, not isatty, and a real
+            # console on a developer's machine would otherwise decide this test.
+            patch("kitty.tui.prompts._handle_attached", return_value=False, create=True),
+            pytest.raises(Exception, match="interactive"),
+        ):
             run_setup_wizard(store, cred_store)
 
     def test_wizard_completes_all_steps(self, store: ProfileStore, cred_store: CredentialStore) -> None:
