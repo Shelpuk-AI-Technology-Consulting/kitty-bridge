@@ -143,10 +143,17 @@ class Text:
             rather than as a boolean because a one-hour write and a five-minute
             one are different prices, so a flattened form would hide a silently
             downgraded lifetime. **M16** claims its removal.
+        video_metadata: Gemini's ``Part.videoMetadata`` — a modifier on the
+            part rather than content of its own, carried whole as the wire
+            mapping (``{"fps": …, "startOffset": …}``) so a changed value is
+            a delta rather than a silent equivalence (KBR-194). ``None`` when
+            absent. Lives on :class:`Text` and :class:`Image`, the two parts
+            Gemini attaches video to; other part types still residualise it.
     """
 
     text: str
     cache_control: Mapping[str, Any] | None = None
+    video_metadata: Mapping[str, Any] | None = None
 
     # Every projection type sets this, so unhashability is total rather than
     # data-dependent — see the module note on multiset matching. It survives
@@ -155,8 +162,9 @@ class Text:
     __hash__ = None  # type: ignore[assignment]
 
     def __post_init__(self) -> None:
-        """Freeze the cache breakpoint in place."""
+        """Freeze the cache breakpoint and the video metadata in place."""
         object.__setattr__(self, "cache_control", _freeze_optional(self.cache_control))
+        object.__setattr__(self, "video_metadata", _freeze_optional(self.video_metadata))
 
 
 @dataclass(frozen=True)
@@ -183,12 +191,19 @@ class ToolUse:
             rather than as a boolean because a one-hour write and a five-minute
             one are different prices, so a flattened form would hide a silently
             downgraded lifetime. **M16** claims its removal.
+        signature: The vendor's thinking signature on this call — Gemini
+            attaches a ``thoughtSignature`` to the ``functionCall`` part
+            itself (not only to thought parts) and requires clients to echo it
+            back verbatim on the next turn, returning 4xx when omitted
+            (KBR-194). The analogue of :attr:`Thinking.signature`, which
+            carries the same wire field on a thought part.
     """
 
     name: str
     arguments: Mapping[str, Any] = _frozen_field()
     id: str | None = None
     cache_control: Mapping[str, Any] | None = None
+    signature: str | None = None
 
     __hash__ = None  # type: ignore[assignment]
 
@@ -304,6 +319,13 @@ class Image:
             its own delta rather than an unexplained digest change.
         media_type: The declared media type, when the format states one.
         ref: The URI, for Gemini's ``fileData.fileUri`` which carries no bytes.
+        display_name: Gemini's ``Blob.displayName`` / ``FileData.displayName``
+            — the name of the blob/file to the model for ``REFERENCE_ONLY``
+            verbalisation. ``None`` when absent (KBR-194).
+        video_metadata: Gemini's ``Part.videoMetadata`` on an
+            ``inlineData`` or ``fileData`` part — a modifier rather than
+            content, carried whole as the wire mapping. ``None`` when
+            absent. Real traffic puts it on Text and Image parts only.
         cache_control: The cache breakpoint the agent set on this block, as the
             wire mapping — ``{"type": "ephemeral"}``, or the extended form
             carrying a ``ttl``. ``None`` means no breakpoint. Carried whole
@@ -315,13 +337,16 @@ class Image:
     digest: str | None = None
     media_type: str | None = None
     ref: str | None = None
+    display_name: str | None = None
+    video_metadata: Mapping[str, Any] | None = None
     cache_control: Mapping[str, Any] | None = None
 
     __hash__ = None  # type: ignore[assignment]
 
     def __post_init__(self) -> None:
-        """Freeze the cache breakpoint in place."""
+        """Freeze the cache breakpoint and the video metadata in place."""
         object.__setattr__(self, "cache_control", _freeze_optional(self.cache_control))
+        object.__setattr__(self, "video_metadata", _freeze_optional(self.video_metadata))
 
 
 @dataclass(frozen=True)
@@ -356,6 +381,13 @@ class ToolResult:
         content: Ordered content. Not recursive: no format nests a tool call
             inside a tool result.
         is_error: Whether the tool reported failure.
+        scheduling: Gemini's ``functionResponse.scheduling`` value — the
+            NON_BLOCKING calling toggle's response-side value, ``"SILENT"`` or
+            ``"INTERRUPT"`` in the published enum, ``None`` for the default
+            (KBR-194). The declaration's :attr:`ToolDecl.behavior` carries
+            the same feature on the call side; ``willContinue`` rides on
+            Gemini's wire shape unchanged because no current route populates
+            it.
         cache_control: The cache breakpoint the agent set on this block, as the
             wire mapping — ``{"type": "ephemeral"}``, or the extended form
             carrying a ``ttl``. ``None`` means no breakpoint. Carried whole
@@ -367,6 +399,7 @@ class ToolResult:
     content: Sequence[Text | Image | Json | Opaque] = ()
     tool_use_id: str | None = None
     is_error: bool = False
+    scheduling: str | None = None
     cache_control: Mapping[str, Any] | None = None
 
     __hash__ = None  # type: ignore[assignment]
@@ -999,6 +1032,11 @@ class ToolDecl:
         strict: P15 strips this on the Responses-origin path. ``None`` means
             absent, which must stay distinct from ``False`` or that row's
             presence and absence would be indistinguishable.
+        behavior: Gemini's published ``behavior`` — the NON_BLOCKING calling
+            toggle's per-declaration value, ``"NON_BLOCKING"`` to defer or
+            ``None`` for the default BLOCKING behaviour (KBR-194). Lives at
+            declaration scope; ``functionResponse.scheduling`` rides
+            :class:`ToolResult` separately for the response half.
         cache_control: The cache breakpoint the agent set on this block, as the
             wire mapping — ``{"type": "ephemeral"}``, or the extended form
             carrying a ``ttl``. ``None`` means no breakpoint. Carried whole
@@ -1011,6 +1049,7 @@ class ToolDecl:
     description: str | None = None
     schema: Mapping[str, Any] | None = None
     strict: bool | None = None
+    behavior: str | None = None
     cache_control: Mapping[str, Any] | None = None
 
     __hash__ = None  # type: ignore[assignment]
@@ -1029,12 +1068,19 @@ class Conversation:
     Attributes:
         system: Ordered system text, lifted here from whichever of the four
             carriers the format uses (R8.2).
+        system_role: The role the source ``Content`` published on a system
+            instruction — Gemini's ``systemInstruction.role`` today, others
+            do not publish one. ``None`` when absent, which makes a dropped
+            role visible to the oracle as a positive delta at
+            ``conversation.system_role`` rather than a silent equivalence on
+            ``"user"`` (KBR-194).
         turns: Ordered turns.
         tools: Ordered tool declarations.
         sampling: Sampling parameters, keyed by :data:`SAMPLING_KEYS`.
     """
 
     system: Sequence[Text] = ()
+    system_role: str | None = None
     turns: Sequence[Turn] = ()
     tools: Sequence[ToolDecl] = ()
     sampling: Mapping[str, Any] = _frozen_field()

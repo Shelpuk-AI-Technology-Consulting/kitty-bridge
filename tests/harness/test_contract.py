@@ -391,7 +391,7 @@ class TestPartGrammar:
         """Carrying bytes would put megabytes into every failure message (R3.7)."""
         names = {f.name for f in dataclasses.fields(c.Image)}
 
-        assert names == {"digest", "media_type", "ref", "cache_control"}
+        assert names == {"digest", "media_type", "ref", "display_name", "video_metadata", "cache_control"}
 
     def test_the_documented_digest_is_sha256_over_the_decoded_bytes(self) -> None:
         """Unpinned, two readers produce different digests for one image and the corpus fails."""

@@ -673,8 +673,10 @@ def _project(body: Mapping[str, Any], model: str, stream: bool) -> c.Request:
     tools, tool_extra = _read_tools(view, residual)
     extra.update(tool_extra)
 
+    system, system_role = _read_system_instruction(view, residual)
     conversation = c.Conversation(
-        system=_read_system_instruction(view, residual),
+        system=system,
+        system_role=system_role,
         turns=_read_contents(view, residual),
         tools=tools,
         sampling=sampling,
@@ -925,9 +927,12 @@ def _read_function_declarations(
                 # Absent, not False: Gemini defines no `strict`, and P15's
                 # presence and absence must stay distinguishable.
                 strict=None,
+                # `behavior` is the NON_BLOCKING calling toggle on this
+                # declaration (KBR-194); `ToolDecl.behavior` carries it.
+                behavior=_typed_leaf(declaration, "behavior", (str,), item, residual),
             )
         )
-        _residualise(declaration, mapped, item, residual)
+        _residualise(declaration, mapped | {"behavior"}, item, residual)
 
     return declared
 
@@ -1015,7 +1020,9 @@ def _read_declaration_schema(
 # --------------------------------------------------------------------------
 
 
-def _read_system_instruction(view: Mapping[str, tuple[str, Any]], residual: dict[str, Any]) -> tuple[c.Text, ...]:
+def _read_system_instruction(
+    view: Mapping[str, tuple[str, Any]], residual: dict[str, Any]
+) -> tuple[tuple[c.Text, ...], str | None]:
     """Lift ``systemInstruction`` into :attr:`~harness.contract.Conversation.system`.
 
     §3.3.1b: system instructions lift here, never into a turn, from whichever of
@@ -1026,13 +1033,15 @@ def _read_system_instruction(view: Mapping[str, tuple[str, Any]], residual: dict
         residual: The residual mapping, extended in place.
 
     Returns:
-        One entry per text part, in order.
+        One entry per text part, in order, and the role the ``Content``
+        published — ``None`` when it did not (KBR-194; ``Conversation.system_role``
+        carries it, so a dropped role is a delta at ``conversation.system_role``).
 
     Raises:
         UnreadableBodyError: When the field is not an object.
     """
     if "systemInstruction" not in view:
-        return ()
+        return (), None
 
     wire_key, value = view["systemInstruction"]
     if not isinstance(value, Mapping):
@@ -1057,10 +1066,11 @@ def _read_system_instruction(view: Mapping[str, tuple[str, Any]], residual: dict
             system.append(c.Text(text))
         _residualise(member, {"text"}, path, residual)
 
-    # `role` is meaningless on a system instruction and the grammar has no slot
-    # for it, so it residualises like any other key the grammar cannot carry.
-    _residualise(content, {"parts"}, wire_key, residual)
-    return tuple(system)
+    # `role` is a published member of the system `Content`; the grammar carries
+    # it at conversation scope (KBR-194) rather than residualising it.
+    role = _typed_leaf(content, "role", (str,), wire_key, residual)
+    _residualise(content, {"parts", "role"}, wire_key, residual)
+    return tuple(system), role
 
 
 def _read_contents(view: Mapping[str, tuple[str, Any]], residual: dict[str, Any]) -> tuple[c.Turn, ...]:
@@ -1262,8 +1272,12 @@ def _read_text(view: Mapping[str, tuple[str, Any]], path: str, residual: dict[st
         return c.Thinking(text=text, signature=signature)
 
     # An empty block is a part with an empty string, never nothing (§3.3.1).
-    _residualise(view, {"text", "thought"}, path, residual)
-    return c.Text(text)
+    # `videoMetadata` slots on `Text` (KBR-194); on a *thought* part it still
+    # residualises — `Thinking` carries no video slot, and real traffic does
+    # not attach video to a thought.
+    video_metadata = _typed_leaf(view, "videoMetadata", (dict,), path, residual)
+    _residualise(view, {"text", "thought", "videoMetadata"}, path, residual)
+    return c.Text(text, video_metadata=video_metadata)
 
 
 def _read_inline_data(view: Mapping[str, tuple[str, Any]], path: str, residual: dict[str, Any]) -> c.Image:
@@ -1306,13 +1320,15 @@ def _read_inline_data(view: Mapping[str, tuple[str, Any]], path: str, residual: 
         residual[_join(item, blob["data"][0] if "data" in blob else "data")] = raw
         decoded = None
 
-    _residualise(blob, {"data", "mimeType"}, item, residual)
-    _residualise(view, {"inlineData"}, path, residual)
+    _residualise(blob, {"data", "mimeType", "displayName"}, item, residual)
+    _residualise(view, {"inlineData", "videoMetadata"}, path, residual)
     # The media type is excluded from the digest and carried separately, so a
     # changed media type is its own delta rather than an unexplained change.
     return c.Image(
         digest=c.image_digest(decoded) if decoded is not None else None,
         media_type=_typed_leaf(blob, "mimeType", (str,), item, residual),
+        display_name=_typed_leaf(blob, "displayName", (str,), item, residual),
+        video_metadata=_typed_leaf(view, "videoMetadata", (dict,), path, residual),
     )
 
 
@@ -1342,9 +1358,11 @@ def _read_file_data(view: Mapping[str, tuple[str, Any]], path: str, residual: di
     projected = c.Image(
         ref=_typed_leaf(data, "fileUri", (str,), item, residual),
         media_type=_typed_leaf(data, "mimeType", (str,), item, residual),
+        display_name=_typed_leaf(data, "displayName", (str,), item, residual),
+        video_metadata=_typed_leaf(view, "videoMetadata", (dict,), path, residual),
     )
-    _residualise(data, {"fileUri", "mimeType"}, item, residual)
-    _residualise(view, {"fileData"}, path, residual)
+    _residualise(data, {"fileUri", "mimeType", "displayName"}, item, residual)
+    _residualise(view, {"fileData", "videoMetadata"}, path, residual)
     return projected
 
 
@@ -1386,9 +1404,14 @@ def _read_function_call(view: Mapping[str, tuple[str, Any]], path: str, residual
         name=name,
         arguments=_typed_leaf(call, "args", (dict,), item, residual, default={}),
         id=_typed_leaf(call, "id", (str,), item, residual),
+        # Gemini attaches `thoughtSignature` to the part, not to the
+        # ``functionCall`` payload — read it from the aliased part view and
+        # consume it at the part level so it doesn't residualise. KBR-194:
+        # Gemini 3 requires clients to echo it back verbatim on the next turn.
+        signature=_typed_leaf(view, "thoughtSignature", (str,), path, residual),
     )
     _residualise(call, PUBLISHED_FUNCTION_CALL_KEYS, item, residual)
-    _residualise(view, {"functionCall"}, path, residual)
+    _residualise(view, {"functionCall", "thoughtSignature"}, path, residual)
     return projected
 
 
@@ -1433,11 +1456,15 @@ def _read_function_response(view: Mapping[str, tuple[str, Any]], path: str, resi
         content=content,
         tool_use_id=_typed_leaf(answer, "id", (str,), item, residual),
         is_error=False,
+        # `scheduling` is the NON_BLOCKING calling toggle on the response
+        # side (KBR-194); `willContinue` is its twin and stays in the
+        # residual — out of scope here.
+        scheduling=_typed_leaf(answer, "scheduling", (str,), item, residual),
     )
     # `name` pairs the result with its call where no id was sent, and the
     # grammar's pairing rule is by name and position, so it is accounted for
     # rather than residualised.
-    _residualise(answer, {"response", "parts", "id", "name"}, item, residual)
+    _residualise(answer, {"response", "parts", "id", "name", "scheduling"}, item, residual)
     _residualise(view, {"functionResponse"}, path, residual)
     return projected
 

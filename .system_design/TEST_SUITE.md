@@ -632,10 +632,14 @@ only the second consumer; §3.2.2 says why.
 | `envelope.model` · `envelope.stream` · `envelope.store` | The named control fields |
 | `envelope.extra[<wire key>]` | A format-specific control field — P2a `thinking`, P3 `reasoning`, P4 `reasoning_effort`, P10 `reasoning_split`, and P23's sixteen dropped Responses control fields. **The bare `envelope.extra` is not a legal anchor** — see below |
 | `conversation.system[<i>]` | One system text part |
+| `conversation.system_role` | The role a Gemini `systemInstruction` `Content` published — the first path form at conversation scope, added by KBR-194. `None` is the absent value, so a translated route that drops the role is a positive delta at this path. The M2 whole-body-translation row on the Gemini inbound route claims it |
 | `conversation.turns[<i>].role` · `.parts[<j>]` | A turn, or one part of it |
-| `conversation.tools[<name>].description` · `.schema` · `.strict` | A tool declaration, **by name** |
+| `conversation.tools[<name>].description` · `.schema` · `.strict` · `.behavior` | A tool declaration, **by name**. `behavior` is Gemini's NON_BLOCKING calling toggle (KBR-194) |
 | `conversation.sampling[<key>]` | One sampling parameter |
-| `conversation.system[<i>].cache_control` · `conversation.turns[<i>].parts[<j>].cache_control` · `conversation.tools[<name>].cache_control` | One cache breakpoint — **M16**. ⚠️ **A coarser row can claim these first**: a pattern is a prefix, so P5b's bare `conversation.system` and M5/M6/M7's bare `conversation.turns` subsume the breakpoint paths beneath them whenever their own triggers are met — and P5b's `MULTIPLE_SYSTEM_BLOCKS` is met by most Claude Code bodies. M16 is therefore the row that fires only where no collection-level row does; on the system blocks that means the single-block case, since P5b changes the collection's length and no `system[i]` path survives it. The field addresses the same three carriers the grammar gives it a slot on; `system_path` and `part_path` take an optional field name for it, as `tool_path` already did for P15's `.strict` |
+| `conversation.turns[<i>].parts[<j>].cache_control` · `conversation.tools[<name>].cache_control` · `conversation.system[<i>].cache_control` | One cache breakpoint — **M16**. ⚠️ **A coarser row can claim these first**: a pattern is a prefix, so P5b's bare `conversation.system` and M5/M6/M7's bare `conversation.turns` subsume the breakpoint paths beneath them whenever their own triggers are met — and P5b's `MULTIPLE_SYSTEM_BLOCKS` is met by most Claude Code bodies. M16 is therefore the row that fires only where no collection-level row does; on the system blocks that means the single-block case, since P5b changes the collection's length and no `system[i]` path survives it. The field addresses the same three carriers the grammar gives it a slot on; `system_path` and `part_path` take an optional field name for it, as `tool_path` already did for P15's `.strict` |
+| `conversation.turns[<i>].parts[<j>].signature` | A vendor thinking signature — Anthropic's on a thought part, Gemini's `thoughtSignature` on either a thought part or a `functionCall` part (KBR-194 gave the latter its `ToolUse.signature` slot). **M8**'s carrier repair produces a delta at this path |
+| `conversation.turns[<i>].parts[<j>].scheduling` | Gemini's ``functionResponse.scheduling`` — the NON_BLOCKING response-side toggle (KBR-194) |
+| `conversation.turns[<i>].parts[<j>].video_metadata` · `conversation.turns[<i>].parts[<j>].display_name` | Gemini part modifiers carried at the part path. Video understanding (``videoMetadata``) and the blob/file ``displayName`` named to the model (KBR-194) |
 | `conversation.turns` · `.system` · `.tools` · `.sampling` | A **whole collection** — M5, M6 and M7 rewrite the turns, P5b joins the system blocks, §3.3.1 pins P13/P14 to the bare `sampling` |
 | `headers[<name>]` | A header — P9a, P9b, P9c, and §4.3 C1. **Not produced by the projection diff**: `Request` carries no headers and no inbound header is forwarded, so this form addresses a per-adapter *deviation from the base header set* (§3.2.2), never a delta between two projections |
 | `residual[<path>]` | An unclassified value |
@@ -3185,13 +3189,18 @@ reader that cannot read a part must still *occupy its position*.
 > this section. T-A4 is the reference implementation; the two landed readers need conforming, and
 > that is a change to shipped code rather than a note, so it is tracked as its own ticket.
 
-> **What this reader leaves on the record.** Six fields the format publishes, real clients send, and
-> the grammar cannot carry now residualise and so **fail the first oracle run** — the same shape as
-> the `cache_control` deadline above, and tracked as its own defect rather than as a note here. The
-> sharpest is `thoughtSignature` on a `functionCall` part, which Gemini 3 *requires* clients to echo
-> back verbatim. Unlike `cache_control` the grammar nearly has the slot — `contract.py` already says
-> `Thinking.signature` carries "Anthropic's `signature` or Gemini's `thoughtSignature`" — so the fix
-> is small and specific rather than open-ended.
+> **What this reader leaves on the record — and when it was paid.** Six fields the format
+> publishes, real clients send, and the grammar could not carry residualised and so **failed the
+> first oracle run** — the same shape as the `cache_control` deadline above, tracked as its own
+> defect ([KBR-194](https://github.com/Shelpuk-AI-Technology-Consulting/kitty-bridge)). **KBR-194
+> met the deadline by growing the six slots**: `ToolUse.signature` (the sharp one — Gemini 3
+> *requires* clients to echo a functionCall's `thoughtSignature` back verbatim, and unlike
+> `cache_control` the grammar nearly had the slot, `Thinking.signature`), `Conversation.system_role`
+> for the role Google's SDKs set on `systemInstruction`, `ToolDecl.behavior` and
+> `ToolResult.scheduling` for the two halves of NON_BLOCKING calling, and `Text.video_metadata` /
+> `Image.video_metadata` / `Image.display_name` for the part modifiers. §3.3.1a grew
+> `conversation.system_role` — the first path form at conversation scope — so a register row can
+> anchor there. The Gemini reader's L1 inventory asserts all six flow into their slots.
 >
 > A second consequence, on the oracle rather than the reader: `GeminiTranslator` **discards** the
 > inbound tool-call id and synthesises one per call (`_make_tool_call_id`). Now that the §3.3.1 correction above
