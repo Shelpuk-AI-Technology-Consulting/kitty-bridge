@@ -7,10 +7,11 @@ was valid on its own. This proves the fix on the path Claude Code actually uses:
 an in-process server, a scripted Chat Completions upstream, and the client-visible
 byte stream walked end to end.
 
-Decided stream shape (REQUIREMENTS.md, KBR-226): blocks opened by parallel tool
-calls may overlap in time and need not close in order — clients key blocks by
-index — but each index opens once, closes once, closes only after it opened, and
-carries no delta outside its own start..stop window.
+Decided stream shape (KBR-226; `.system_design/TEST_SUITE.md` §6.2.2 and gap
+G39): blocks opened by parallel tool calls may overlap in time and need not
+close in order — clients key blocks by index — but each index opens once,
+closes once, closes only after it opened, and carries no delta outside its own
+start..stop window.
 """
 
 from __future__ import annotations

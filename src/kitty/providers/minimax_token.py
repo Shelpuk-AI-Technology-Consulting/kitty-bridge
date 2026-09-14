@@ -66,6 +66,19 @@ class MiniMaxTokenAnthropicAdapter(AnthropicAdapter):
     #: fields before (module docstring).  KBR-203, decision D2.
     forwards_thinking_display = False
 
+    #: Keeps the empty placeholder thinking block (register row P5e): whether
+    #: MiniMax accepts a history with no thinking block is unverified, and the
+    #: translated default must not change wire behaviour without evidence
+    #: (KBR-228 part C).
+    injects_placeholder_thinking = True
+
+    #: Restores no signed thinking blocks and no verbatim system: MiniMax's
+    #: tolerance for ``signature`` and ``redacted_thinking`` fields is
+    #: unverified, M17's recovery recognises only Anthropic's rejection
+    #: wording, and this route exists because MiniMax rejected Claude Code
+    #: fields before (KBR-228 part B; the P5d precedent).
+    forwards_thinking_signature = False
+
     #: MiniMax's Anthropic-compatible endpoint rejects bodies carrying
     #: ``output_config`` (module docstring); restoring it here would turn a
     #: request that works today into a 400.  KBR-224.
@@ -115,7 +128,10 @@ class MiniMaxTokenAnthropicAdapter(AnthropicAdapter):
 
     def translate_to_upstream(self, cc_request: dict) -> dict:
         if cc_request.get("_native_messages_request"):
-            return {k: v for k, v in cc_request.items() if k not in self._INTERNAL_KEYS}
+            result = {k: v for k, v in cc_request.items() if k not in self._INTERNAL_KEYS}
+            if "messages" in result:
+                result["messages"] = self._strip_internal_message_keys(result["messages"])
+            return result
         return super().translate_to_upstream(cc_request)
 
     def translate_from_upstream(self, raw_response: dict) -> dict:

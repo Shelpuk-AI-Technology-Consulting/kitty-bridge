@@ -674,7 +674,11 @@ def _convert_native_to_cc_format(body: dict) -> dict:
     """
     messages: list[dict] = []
 
-    # System prompt → system message
+    # System prompt → system message.  The original value rides the internal
+    # `_anthropic_system` key verbatim (KBR-228 part B), exactly as in
+    # MessagesTranslator.translate_request — this is the second Messages → CC
+    # converter, and the Anthropic adapters restore it on the retry.
+    carried_system = body.get("system")
     system = body.get("system")
     if system:
         if isinstance(system, list):
@@ -698,6 +702,13 @@ def _convert_native_to_cc_format(body: dict) -> dict:
         if role == "assistant" and isinstance(content, list):
             text_blocks = [b for b in content if isinstance(b, dict) and b.get("type") == "text"]
             tool_use_blocks = [b for b in content if isinstance(b, dict) and b.get("type") == "tool_use"]
+            # KBR-228 part B: the signed originals ride the message verbatim,
+            # as in MessagesTranslator.translate_request.
+            carried_blocks = [
+                dict(b)
+                for b in content
+                if isinstance(b, dict) and b.get("type") in ("thinking", "redacted_thinking")
+            ]
 
             if tool_use_blocks:
                 text = "\n".join(b.get("text", "") for b in text_blocks) if text_blocks else None
@@ -713,12 +724,17 @@ def _convert_native_to_cc_format(body: dict) -> dict:
                     }
                     for tu in tool_use_blocks
                 ]
+                if carried_blocks:
+                    cc_msg["_thinking_blocks"] = carried_blocks
                 messages.append(cc_msg)
                 continue
 
             # Text-only content — flatten to string
             text = "\n".join(b.get("text", "") for b in text_blocks)
-            messages.append({**msg, "content": text or None})
+            text_only = {**msg, "content": text or None}
+            if carried_blocks:
+                text_only["_thinking_blocks"] = carried_blocks
+            messages.append(text_only)
             continue
 
         if role == "user" and isinstance(content, list):
@@ -765,6 +781,10 @@ def _convert_native_to_cc_format(body: dict) -> dict:
         "messages": messages,
         "stream": body.get("stream", False),
     }
+
+    # KBR-228 part B: the verbatim system carriage, mirroring the translator.
+    if carried_system:
+        result["_anthropic_system"] = carried_system
 
     if "max_tokens" in body:
         result["max_tokens"] = body["max_tokens"]
@@ -1454,6 +1474,11 @@ class BridgeServer:
         # garbage" from "200 and clean" in an ordinary run.  Counting only —
         # it never influences health, cooldown or routing.
         self._stats_malformed_tool_use: dict[int, int] = {}
+        # KBR-228 (ticket comment 4): every M17 thinking strip, per backend.
+        # After the KBR-228 restore a strip means the history was edited and
+        # valid reasoning was lost, so a compaction-heavy session's reasoning
+        # loss must be visible in /stats, not only in a WARNING log line.
+        self._stats_thinking_stripped: dict[int, int] = {}
         self._stats_models: dict[str, dict[str, int]] = {}
         self._started_at: str | None = None
 
@@ -2281,6 +2306,7 @@ class BridgeServer:
                         "remaining_cooldown": remaining,
                         "cooldown_events": health.get("failure_count", 0),
                         "malformed_tool_use": self._stats_malformed_tool_use.get(idx, 0),
+                        "thinking_stripped": self._stats_thinking_stripped.get(idx, 0),
                     }
                 )
         else:
@@ -2297,6 +2323,7 @@ class BridgeServer:
                     "remaining_cooldown": 0,
                     "cooldown_events": 0,
                     "malformed_tool_use": self._stats_malformed_tool_use.get(-1, 0),
+                    "thinking_stripped": self._stats_thinking_stripped.get(-1, 0),
                 }
             )
         return {
@@ -2315,6 +2342,7 @@ class BridgeServer:
             "retries": self._stats_retries,
             "all_backends_unhealthy": self._stats_all_unhealthy,
             "malformed_tool_use": sum(self._stats_malformed_tool_use.values()),
+            "thinking_stripped": sum(self._stats_thinking_stripped.values()),
             "models_served": {model: dict(record) for model, record in self._stats_models.items()},
             "backends": backends,
         }
@@ -2328,6 +2356,16 @@ class BridgeServer:
         """
         idx = self._current_backend_idx
         self._stats_malformed_tool_use[idx] = self._stats_malformed_tool_use.get(idx, 0) + 1
+
+    def _record_thinking_stripped(self) -> None:
+        """Count one M17 thinking strip against the serving backend.
+
+        Surfaced by ``GET /stats`` and the shutdown summary next to
+        ``malformed_tool_use`` (KBR-228, ticket comment 4, item 2). Diagnostics
+        only: never consulted for health or routing.
+        """
+        idx = self._current_backend_idx
+        self._stats_thinking_stripped[idx] = self._stats_thinking_stripped.get(idx, 0) + 1
 
     def _backend_label(self) -> str:
         """Return a short identifier for the backend currently serving.
@@ -4063,6 +4101,7 @@ class BridgeServer:
                             ):
                                 strip_body, strip_count = upstream_body, strips_done + 1
                                 strip_retries = min(strip_retries + 1, _MAX_THINKING_STRIPS)
+                                self._record_thinking_stripped()
                                 logger.warning(
                                     "Backend rejected a thinking signature (status %d) — stripped thinking "
                                     "and retrying the same backend (strip %d, attempt %d/%d)",
@@ -5763,6 +5802,16 @@ class BridgeServer:
             )
 
         self._log_usage(cc_response.get("usage"))
+        # KBR-228 part A: the reply's internal thinking carriage is consumed by
+        # the Messages translators; a Chat Completions client gets the CC body
+        # verbatim, so the key must not leave with it.  The Responses and
+        # Gemini handlers rebuild their replies from known fields and drop it
+        # there by construction.
+        choices = cc_response.get("choices")
+        if isinstance(choices, list):
+            for choice in choices:
+                if isinstance(choice, dict) and isinstance(choice.get("message"), dict):
+                    choice["message"].pop("_thinking_blocks", None)
         return web.json_response(cc_response)
 
     async def _stream_chat_completions(
@@ -7709,6 +7758,7 @@ class BridgeServer:
                         upstream_body, last_body, thinking_strips
                     ):
                         thinking_strips += 1
+                        self._record_thinking_stripped()
                         logger.warning(
                             "Backend rejected a thinking signature (status %d) — stripped, retrying (strip %d)",
                             last_status,

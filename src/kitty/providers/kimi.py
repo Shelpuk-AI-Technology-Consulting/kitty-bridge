@@ -86,6 +86,8 @@ class KimiCodeAdapter(ProviderAdapter):
         """
         thinking_enabled = cc_request.get("_thinking_enabled")
         result = {k: v for k, v in cc_request.items() if k not in self._INTERNAL_KEYS}
+        if "messages" in result:
+            result["messages"] = self._strip_internal_message_keys(result["messages"])
 
         if thinking_enabled:
             messages = result.get("messages")

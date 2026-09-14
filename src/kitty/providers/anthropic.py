@@ -297,6 +297,28 @@ class AnthropicAdapter(ProviderAdapter):
             subclass whose upstream does not document it sets this to False, so
             an unknown field cannot turn every thinking request into a 400
             (KBR-203).
+        injects_placeholder_thinking: Whether
+            :meth:`_translate_assistant_msg` injects an empty unsigned
+            thinking block into an assistant message that lacks one while
+            thinking is active (register row P5e).  False here — the default,
+            because this class *is* the ``anthropic`` provider: the live probe
+            behind KBR-238 showed the unsigned block itself is rejected with
+            ``400 ... thinking.signature: Field required`` while a history
+            with no thinking block is accepted, so manufacturing one costs a
+            rejected round-trip per turn and M17's strip has to remove it
+            again (KBR-228 part C).  A subclass whose upstream has not been
+            shown to reject the block sets this to True to keep the old wire.
+        forwards_thinking_signature: Whether :meth:`translate_to_upstream`
+            restores the agent's signed thinking blocks and original
+            ``system`` value verbatim from the KBR-228 carriage.  True here:
+            api.anthropic.com signature-binds thinking to the conversation
+            that produced it, and only a byte-identical restore — signatures,
+            ``redacted_thinking`` and cache breakpoints included — satisfies
+            the check (KBR-228 part B).  A subclass whose upstream has never
+            been shown to accept a ``signature`` or ``redacted_thinking``
+            field sets this to False, which keeps today's wire: restoring
+            unverified fields with no recovery pattern that recognises a
+            foreign rejection would trade a verified fix for a hard failure.
         forwards_output_config: Whether :meth:`translate_to_upstream` restores
             the agent's ``output_config`` — the documented spelling of the
             effort control.  True here, because the field is on Anthropic's
@@ -305,6 +327,10 @@ class AnthropicAdapter(ProviderAdapter):
     """
 
     forwards_thinking_display: bool = True
+
+    injects_placeholder_thinking: bool = False
+
+    forwards_thinking_signature: bool = True
 
     forwards_output_config: bool = True
 
@@ -393,7 +419,21 @@ class AnthropicAdapter(ProviderAdapter):
                         elif isinstance(block, str):
                             system_parts.append(block)
 
-        if system_parts:
+        # KBR-228 part B: on the signature-binding routes the agent's own
+        # system value — blocks and cache breakpoints included — is what the
+        # thinking signatures are bound to, so it is restored verbatim from
+        # the carriage instead of this joined string.  Where the carriage is
+        # absent (a Chat Completions origin) or the upstream is unverified,
+        # today's join stands.
+        carried_system = cc_request.get("_anthropic_system")
+        if carried_system is not None and self.forwards_thinking_signature:
+            if isinstance(carried_system, list):
+                anthropic["system"] = [
+                    dict(block) if isinstance(block, dict) else block for block in carried_system
+                ]
+            else:
+                anthropic["system"] = carried_system
+        elif system_parts:
             anthropic["system"] = "\n".join(system_parts)
 
         # Translate messages
@@ -481,10 +521,12 @@ class AnthropicAdapter(ProviderAdapter):
         """Add the agent's thinking ``display`` to *thinking* where this upstream documents it.
 
         Restoring ``display`` keeps the request faithful to what the agent sent;
-        the translated route does not yet return thinking to the user (KBR-227,
-        KBR-228).  Sending it to an upstream that does not document the field
-        risks a 400 on every thinking request (KBR-203).  The value itself is
-        checked by the translator, the only writer of ``_thinking_display``.
+        since KBR-227 (streamed replies are forwarded byte-for-byte) and
+        KBR-228 part A (the non-streaming reply carries thinking through to
+        ``MessagesTranslator``) the user actually sees the thinking it asks
+        for.  Sending it to an upstream that does not document the field risks
+        a 400 on every thinking request (KBR-203).  The value itself is checked
+        by the translator, the only writer of ``_thinking_display``.
 
         Args:
             thinking: The ``adaptive`` or ``enabled`` thinking object being built.
@@ -510,9 +552,17 @@ class AnthropicAdapter(ProviderAdapter):
 
         reasoning = msg.get("reasoning_content")
         thinking_enabled = (cc_request or {}).get("_thinking_enabled")
-        if reasoning:
+        # KBR-228 part B: the signed originals, verbatim and in wire order,
+        # ahead of the rebuilt text and tool calls — thinking always precedes
+        # both on this wire, so the original order survives.  A carriage with
+        # the switch off, or none at all, rebuilds the unsigned block as
+        # before.
+        carried = msg.get("_thinking_blocks")
+        if isinstance(carried, list) and carried and self.forwards_thinking_signature:
+            content_blocks.extend(dict(block) for block in carried if isinstance(block, dict))
+        elif reasoning:
             content_blocks.append({"type": "thinking", "thinking": reasoning})
-        elif thinking_enabled:
+        elif thinking_enabled and self.injects_placeholder_thinking:
             content_blocks.append({"type": "thinking", "thinking": ""})
 
         text = msg.get("content")
@@ -589,6 +639,20 @@ class AnthropicAdapter(ProviderAdapter):
                 }
                 for tu in tool_uses
             ]
+
+        # KBR-228 part A: the reply's thinking blocks ride the CC message under
+        # an internal key, verbatim and in wire order, so the Messages client
+        # sees the model's reasoning and the next turn has signed blocks to
+        # send back.  ``thinking`` always precedes ``text``/``tool_use`` on
+        # this wire, so prepending in ``translate_response`` preserves the
+        # order the upstream produced.
+        thinking_blocks = [
+            dict(block)
+            for block in content_blocks
+            if isinstance(block, dict) and block.get("type") in ("thinking", "redacted_thinking")
+        ]
+        if thinking_blocks:
+            message["_thinking_blocks"] = thinking_blocks
 
         stop_reason = raw_response.get("stop_reason")
         finish_reason = _STOP_REASON_MAP.get(stop_reason, "stop")
