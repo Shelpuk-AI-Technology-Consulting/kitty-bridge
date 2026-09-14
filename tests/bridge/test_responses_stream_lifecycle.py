@@ -183,7 +183,12 @@ async def _post(port: int) -> bytes:
 
 @pytest.fixture
 def fast_stall(monkeypatch):
-    """Shrink the sock-read timeout and every retry delay so the timeout test stays fast."""
+    """Shrink the sock-read timeout and every retry delay so the timeout test stays fast.
+
+    The sibling ``fast_stall`` in ``test_post_emission_no_failover.py`` pairs with
+    ``short_grace``; these tests run single-backend with no transport-grace
+    interactions, so the grace shrink is not needed here.
+    """
     monkeypatch.setattr(server_module, "_STREAM_READ_TIMEOUT", 1)
     monkeypatch.setattr(server_module, "_BACKOFF_BASE", 0.001)
 

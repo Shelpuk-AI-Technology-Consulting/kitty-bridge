@@ -3455,7 +3455,7 @@ class BridgeServer:
         start_events_written = False
 
         async def _write_lifecycle_start() -> None:
-            """Write the current attempt's lifecycle opening once, on the first real event."""
+            """Write the current attempt's lifecycle opening once — whichever hook site invokes us first."""
             nonlocal start_events_written
             if start_events_written or start_events is None:
                 return
