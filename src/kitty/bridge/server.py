@@ -932,6 +932,35 @@ _NATIVE_UPSTREAM_ERROR_MESSAGE = (
 )
 # D3: stop reasons that truncate a reply, so no retry can improve one that arrives before content.
 _NATIVE_TRUNCATING_STOP_REASONS = frozenset({"max_tokens", "model_context_window_exceeded"})
+
+
+def _d3_truncation_error_body(stop_reason: str) -> dict:
+    """Build the D3 ``400`` body for a reply that truncated before any content.
+
+    Q14 D3: the body is an ``invalid_request_error`` carrying a ``reason`` marker, so the
+    agent sees a request-shaped failure it will not retry and operators can tell it from
+    any other ``400``. Shared by the native streaming branch and the non-streaming
+    Messages delivery (KBR-235) so the wording cannot drift.
+
+    Args:
+        stop_reason: The upstream stop reason that truncated the reply.
+
+    Returns:
+        The Messages API error body to return with status 400.
+    """
+    return {
+        "type": "error",
+        "error": {
+            "type": "invalid_request_error",
+            "message": (
+                "Kitty Bridge received a reply from the upstream provider that "
+                f"stopped ({stop_reason}) before producing any content."
+            ),
+            "reason": f"{stop_reason}_before_content",
+        },
+    }
+
+
 _MAX_LOGGED_HELD_BYTES = 2000  # bound on a discarded native reply's head in the DEBUG log
 
 # Error codes and patterns that indicate rate limiting or quota exhaustion.
@@ -2215,10 +2244,19 @@ class BridgeServer:
         """
         if cc_response.get("type") == "message":
             content_blocks = cc_response.get("content", [])
+            # D1 decides by type, mirroring PreambleHold._block_start_releases: any block
+            # whose type is not text/thinking/redacted_thinking is content, however unknown
+            # the type, and a text block counts when its text is non-empty (whitespace too).
             return not any(
                 isinstance(block, dict)
-                and block.get("type") in {"text", "tool_use"}
-                and (block.get("text") or block.get("id"))
+                and (
+                    block.get("type") not in {"text", "thinking", "redacted_thinking"}
+                    or (
+                        block.get("type") == "text"
+                        and isinstance(block.get("text"), str)
+                        and block.get("text") != ""
+                    )
+                )
                 for block in content_blocks
             )
         choices = cc_response.get("choices", [])
@@ -2229,6 +2267,51 @@ class BridgeServer:
         tool_calls = message.get("tool_calls", [])
         has_text = isinstance(content, str) and content.strip()
         return not has_text and not tool_calls
+
+    @staticmethod
+    def _is_non_retryable_reply(cc_response: dict) -> bool:
+        """Return True when no retry can improve on this reply, so the ladder returns it at once.
+
+        True for a reply that carries content — the ladder's success path — and for a D3
+        truncation (KBR-235): a Messages-shaped reply stopped before content by
+        ``max_tokens`` or ``model_context_window_exceeded`` is not improved by a retry,
+        so the ladder ends and the Messages handler renders the D3 ``400``.
+
+        Args:
+            cc_response: The upstream response dict, in whatever shape the upstream speaks.
+
+        Returns:
+            True when the empty-response ladder must stop and hand the reply to its caller.
+        """
+        if not BridgeServer._is_empty_cc_response(cc_response):
+            return True
+        return (
+            cc_response.get("type") == "message" and cc_response.get("stop_reason") in _NATIVE_TRUNCATING_STOP_REASONS
+        )
+
+    @staticmethod
+    def _messages_truncation_before_content(cc_response: dict) -> str | None:
+        """Return the stop reason when a Messages-shaped reply truncated before any content.
+
+        Q14 D3 (``TEST_SUITE.md`` §11): a reply whose stop reason is ``max_tokens`` or
+        ``model_context_window_exceeded`` and that carried no content is a truncation no
+        retry can improve, so the empty-response ladder ends on that attempt and the
+        Messages handler answers with the D3 ``400`` instead of a blank reply.
+
+        Args:
+            cc_response: The upstream response dict, in whatever shape the upstream speaks.
+
+        Returns:
+            The truncating stop reason, or ``None`` when the reply is not a D3 truncation.
+        """
+        if cc_response.get("type") != "message":
+            return None
+        stop_reason: str | None = cc_response.get("stop_reason")
+        if stop_reason not in _NATIVE_TRUNCATING_STOP_REASONS:
+            return None
+        if not BridgeServer._is_empty_cc_response(cc_response):
+            return None
+        return stop_reason
 
     @staticmethod
     def _chunk_has_finish_reason(chunk: dict) -> bool:
@@ -3462,8 +3545,14 @@ class BridgeServer:
                             )
                             continue
 
-                        # In balancing mode: mark unhealthy, try next backend
-                        if self._backends and self._current_backend_idx >= 0:
+                        # In balancing mode: mark unhealthy and try next backend for ANY error —
+                        # except a signature rejection recovery could not fix: that history fails
+                        # on every member alike, so it surfaces without cooling a backend (M17).
+                        if (
+                            self._backends
+                            and self._current_backend_idx >= 0
+                            and not _is_thinking_signature_error(upstream.status, error_body)
+                        ):
                             kind = (
                                 "auth"
                                 if upstream.status in _AUTH_FAILURE_STATUSES
@@ -3831,6 +3920,12 @@ class BridgeServer:
             # when `_native_messages_request` is unset (it is set only in the native branch
             # above, and cleared by the tool_use-format fallback) (KBR-237).
             if cc_response.get("type") == "message":
+                # D3 (KBR-235): a truncation before content is not delivered as a blank
+                # reply — it fails at once with a request-shaped 400 the agent will not
+                # retry, matching the native streaming branch.
+                truncation = self._messages_truncation_before_content(cc_response)
+                if truncation is not None:
+                    return web.json_response(_d3_truncation_error_body(truncation), status=400)
                 result = cc_response
             else:
                 result = translator.translate_response(cc_response, context=self._empty_response_context())
@@ -4320,8 +4415,14 @@ class BridgeServer:
                                 continue
 
                             retryable = self._should_retry_stream(upstream.status, error_body)
-                            # In balancing mode: mark unhealthy and try next backend for ANY error
-                            if self._backends and self._current_backend_idx >= 0:
+                            # In balancing mode: mark unhealthy and try next backend for ANY error —
+                            # except a signature rejection recovery could not fix: that history fails
+                            # on every member alike, so it surfaces without cooling a backend (M17).
+                            if (
+                                self._backends
+                                and self._current_backend_idx >= 0
+                                and not _is_thinking_signature_error(upstream.status, error_body)
+                            ):
                                 kind = (
                                     "auth"
                                     if upstream.status in _AUTH_FAILURE_STATUSES
@@ -4462,20 +4563,7 @@ class BridgeServer:
 
                             # D3: a truncation before any content is not improved by a retry.
                             if hold.stop_reason in _NATIVE_TRUNCATING_STOP_REASONS:
-                                return _make_error_response(
-                                    {
-                                        "type": "error",
-                                        "error": {
-                                            "type": "invalid_request_error",
-                                            "message": (
-                                                "Kitty Bridge received a reply from the upstream provider that "
-                                                f"stopped ({hold.stop_reason}) before producing any content."
-                                            ),
-                                            "reason": f"{hold.stop_reason}_before_content",
-                                        },
-                                    },
-                                    status=400,
-                                )
+                                return _make_error_response(_d3_truncation_error_body(hold.stop_reason), status=400)
 
                             # Empty reply, nothing written: the translated path's
                             # empty-response ladder, including its balancing quirk of
@@ -4624,6 +4712,10 @@ class BridgeServer:
                                                 encoded = event.encode()
                                                 await _write_client(s, encoded)
                                                 auditor.feed(encoded)
+                                                # A flushed event is as client-visible as a
+                                                # loop-written one: the emptiness gate and the
+                                                # FI-8.3 truncation guard both read this flag.
+                                                events_emitted = True
                                     except json.JSONDecodeError:
                                         logger.warning("Failed to parse flushed SSE data: %s", data_str[:200])
 
@@ -4725,10 +4817,19 @@ class BridgeServer:
                                 )
                             break
 
-                        # Check for empty response: if the translator detected an empty stream
-                        # (finish_reason but no content), buffer the fallback events and retry
-                        # instead of sending them to the client.
-                        if translator.response_was_empty and finish_events:
+                        # Check for empty response. Two shapes are empty replies: the
+                        # translator saw a finish chunk without content, or (KBR-235) the
+                        # attempt produced nothing judgeable at all — no content written and
+                        # no finish events buffered, whether the read ended cleanly, with
+                        # [DONE], or truncated before anything arrived. Both take the same
+                        # ladder below. A reply whose bytes already reached the client never
+                        # reaches that ladder: the post-emission arm inside the finish-chunk
+                        # gate ends the turn instead (§11 Q14(a), KBR-236), and the
+                        # no-finish arm additionally requires `sr is None` — `events_emitted`
+                        # counts only the current attempt, while `sr` records every write
+                        # the request ever made.
+                        empty_no_finish = not finish_events and not events_emitted and sr is None
+                        if (translator.response_was_empty and finish_events) or empty_no_finish:
                             if sr is not None:
                                 # Content from this attempt already reached the client: the
                                 # empty finish chunk judged the reply and reset the
@@ -4810,7 +4911,7 @@ class BridgeServer:
                                         retried = True
                                 else:
                                     logger.warning(
-                                        "All backends returned empty response for %s, emitting fallback",
+                                        "All backends returned empty response for %s",
                                         message_id,
                                     )
                             elif attempt < max_attempts - 1:
@@ -4828,11 +4929,36 @@ class BridgeServer:
                                 retried = True
                             else:
                                 logger.warning(
-                                    "Messages stream empty response after %d attempts, emitting fallback",
+                                    "Messages stream empty response after %d attempts for %s",
                                     max_attempts,
+                                    message_id,
                                 )
                             if retried:
                                 continue
+
+                            # KBR-235, owner decision 2026-09-14: exhausting a stream that
+                            # never produced a finish chunk ends in the D4 error, as on the
+                            # native route — not fallback text. Nothing has been written on
+                            # any attempt of this request (the gate required `sr is None`),
+                            # so the JSON error is legal; the attempt counts no completion,
+                            # and no backend health changes.
+                            if empty_no_finish:
+                                logger.warning(
+                                    "Messages stream empty (no finish chunk) after %d attempts for %s",
+                                    attempt + 1,
+                                    message_id,
+                                )
+                                return _make_error_response(
+                                    {
+                                        "type": "error",
+                                        "error": {
+                                            "type": "api_error",
+                                            "message": _NATIVE_EMPTY_REPLY_MESSAGE,
+                                            "reason": "empty_response",
+                                        },
+                                    },
+                                    status=502,
+                                )
 
                         # Write buffered finish events to client
                         s = await _ensure_prepared()
@@ -5355,8 +5481,14 @@ class BridgeServer:
                             )
                             continue
 
-                        # In balancing mode: mark unhealthy, try next backend
-                        if self._backends and self._current_backend_idx >= 0:
+                        # In balancing mode: mark unhealthy and try next backend for ANY error —
+                        # except a signature rejection recovery could not fix: that history fails
+                        # on every member alike, so it surfaces without cooling a backend (M17).
+                        if (
+                            self._backends
+                            and self._current_backend_idx >= 0
+                            and not _is_thinking_signature_error(upstream.status, error_body)
+                        ):
                             kind = (
                                 "auth"
                                 if upstream.status in _AUTH_FAILURE_STATUSES
@@ -5630,7 +5762,8 @@ class BridgeServer:
         max_attempts = len(_EMPTY_RETRY_DELAYS) + len(_EMPTY_FINAL_DELAYS) + 1
         for attempt in range(max_attempts):
             cc_response = await self._make_upstream_request(cc_request, grace=grace)
-            if not self._is_empty_cc_response(cc_response):
+            # A reply with content, or a D3 truncation (KBR-235), ends the ladder here.
+            if self._is_non_retryable_reply(cc_response):
                 return cc_response
             if attempt < len(_EMPTY_RETRY_DELAYS):
                 delay = _EMPTY_RETRY_DELAYS[attempt]
@@ -5726,7 +5859,8 @@ class BridgeServer:
 
             try:
                 cc_response = await self._make_upstream_request(cc_request, retry_rate_limit=False, grace=grace)
-                if not self._is_empty_cc_response(cc_response):
+                # A reply with content, or a D3 truncation (KBR-235), ends the failover loop here.
+                if self._is_non_retryable_reply(cc_response):
                     return cc_response
                 # Empty response — try next backend
                 last_response = cc_response
@@ -5785,13 +5919,17 @@ class BridgeServer:
                         continue
                     try:
                         cc_response = await self._make_upstream_request(cc_request, retry_rate_limit=False, grace=grace)
-                        if not self._is_empty_cc_response(cc_response):
+                        # A reply with content, or a D3 truncation (KBR-235), ends the ladder here.
+                        if self._is_non_retryable_reply(cc_response):
                             return cc_response
                         last_response = cc_response
                         continue  # empty after compaction → standard next-backend flow
                     except UpstreamError as retry_exc:
                         last_exc = retry_exc  # second failure → fall through to mark-unhealthy
-                if idx >= 0:
+                # An unrecovered signature rejection is the bridge's history, not this backend: don't cool it (M17).
+                # Read last_exc, not exc: the compaction retry above may have replaced the error.
+                final = last_exc if isinstance(last_exc, UpstreamError) else exc
+                if idx >= 0 and not _is_thinking_signature_error(final.status, final.body):
                     if exc.status == 429:
                         failure_kind = "rate_limit"
                     elif isinstance(exc.body, str) and self._is_cloudflare_block(exc.status, exc.body):
@@ -5909,7 +6047,8 @@ class BridgeServer:
             except UpstreamError as exc:
                 last_exc = exc
                 idx = self._current_backend_idx
-                if idx >= 0:
+                # Same rule as the loop above: an unrecovered signature rejection cools no backend (M17).
+                if idx >= 0 and not _is_thinking_signature_error(exc.status, exc.body):
                     if exc.status == 429:
                         failure_kind = "rate_limit"
                     elif isinstance(exc.body, str) and self._is_cloudflare_block(exc.status, exc.body):
@@ -5943,7 +6082,8 @@ class BridgeServer:
                     )
                 continue
 
-            if not self._is_empty_cc_response(cc_response):
+            # A reply with content, or a D3 truncation (KBR-235), ends the final-retry loop here.
+            if self._is_non_retryable_reply(cc_response):
                 return cc_response
             last_response = cc_response
 
@@ -6349,8 +6489,14 @@ class BridgeServer:
                             )
                             continue
 
-                        # In balancing mode: mark unhealthy, try next backend
-                        if self._backends and self._current_backend_idx >= 0:
+                        # In balancing mode: mark unhealthy and try next backend for ANY error —
+                        # except a signature rejection recovery could not fix: that history fails
+                        # on every member alike, so it surfaces without cooling a backend (M17).
+                        if (
+                            self._backends
+                            and self._current_backend_idx >= 0
+                            and not _is_thinking_signature_error(upstream.status, error_body)
+                        ):
                             kind = (
                                 "auth"
                                 if upstream.status in _AUTH_FAILURE_STATUSES

@@ -690,6 +690,70 @@ class TestEnvelopeAndConversation:
 
         assert envelope.extra["reasoning_effort"] == "high"
 
+    @pytest.mark.parametrize("key", ["thinking.budget_tokens", "a.b.c"])
+    def test_an_extra_key_containing_a_dot_is_rejected_at_construction(self, key: str) -> None:
+        """The construction-side complement of `extra_path`'s dotted-key rejection.
+
+        KBR-191: §3.3.1a declares `extra` keyed, never nested, and `extra_path()`
+        enforces it on the path-builder side — but `Envelope.__post_init__` accepted
+        the nesting form silently. Six readers written in harness code project into
+        `Envelope`; one that emits `envelope.extra["thinking.budget_tokens"]` would
+        agree with the constructor and disagree with `extra_path`, producing a
+        delta no register row can claim — the under-claiming direction §3.3.1a
+        calls unrecoverable. The guard raises, the message names §3.3.1a and the
+        residual, mirroring `extra_path()` so a future reader cannot mistake the
+        two guards for separate rules.
+
+        Parametrised over `thinking.budget_tokens` (the form §3.3.1a names) and
+        `a.b.c` (deeper than two levels) to prove the guard is key-shape, not
+        depth-shape.
+        """
+        with pytest.raises(ValueError, match=r"nested value; nesting belongs in the residual"):
+            c.Envelope(extra={key: 1024})
+
+    def test_the_dotted_key_message_names_the_offending_key(self) -> None:
+        """The message cites the offending key so a reader bug is debuggable.
+
+        A raised `ValueError` whose message omits the key would still tell future
+        maintainers *that* a vocabulary violation happened, but not *which* one —
+        and a reader emitting several such keys in one request would be the
+        hardest case to diagnose. The match here derives directly from the
+        message literal in `Envelope.__post_init__`'s body.
+        """
+        with pytest.raises(ValueError, match=r"thinking\.budget_tokens"):
+            c.Envelope(extra={"thinking.budget_tokens": 1024})
+
+    def test_a_non_dotted_extra_key_constructs_unchanged(self) -> None:
+        """The control: a flat key, and a value that is itself nested, both pass.
+
+        Reads beside `test_other_entries_in_extra_are_not_validated`, which it
+        extends. The dotted guard is structural (key-shape), not value-shape, so
+        a `thinking` key carrying a mapping value is still legal — exactly the
+        shape P2a et al. depend on.
+        """
+        envelope = c.Envelope(extra={"thinking": {"type": "enabled"}, "tool_choice": "auto"})
+
+        assert envelope.extra["thinking"] == {"type": "enabled"}
+        assert envelope.extra["tool_choice"] == "auto"
+
+    def test_the_dotted_key_guard_does_not_loosen_the_tool_choice_check(self) -> None:
+        """The new structural guard sits beside the value guard, not on top of it.
+
+        Adding a key-shape check is the moment a future refactor could silently
+        drop the `tool_choice` value check. This test pins the value guard at
+        its old strength: `AUTO` still raises (the path-builder's wire spelling,
+        which `Conversation.sampling` would also reject), the four canonical
+        forms still construct.
+        """
+        with pytest.raises(ValueError, match="tool_choice"):
+            c.Envelope(extra={c.TOOL_CHOICE_KEY: "AUTO"})
+
+        # The four legal forms still pass.
+        assert c.Envelope(extra={c.TOOL_CHOICE_KEY: "auto"}).extra[c.TOOL_CHOICE_KEY] == "auto"
+        assert c.Envelope(extra={c.TOOL_CHOICE_KEY: "any"}).extra[c.TOOL_CHOICE_KEY] == "any"
+        assert c.Envelope(extra={c.TOOL_CHOICE_KEY: "none"}).extra[c.TOOL_CHOICE_KEY] == "none"
+        assert c.Envelope(extra={c.TOOL_CHOICE_KEY: "tool:get_weather"}).extra[c.TOOL_CHOICE_KEY] == "tool:get_weather"
+
     def test_a_wire_stop_reason_is_rejected_rather_than_carried_through(self) -> None:
         """Gemini's `MAX_TOKENS` must map onto the canonical set, or the diff sees two spellings."""
         with pytest.raises(ValueError, match="stop_reason"):

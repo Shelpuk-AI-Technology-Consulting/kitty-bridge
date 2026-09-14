@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import copy
 import json
+import uuid
 
 import aiohttp
 import pytest
@@ -25,6 +26,7 @@ from aioresponses import CallbackResult, aioresponses
 from kitty.bridge import server as server_module
 from kitty.bridge.server import BridgeServer
 from kitty.launchers.base import LauncherAdapter, SpawnConfig
+from kitty.profiles.schema import Profile
 from kitty.providers.anthropic import AnthropicAdapter
 from kitty.providers.custom_anthropic import CustomAnthropicAdapter
 from kitty.providers.minimax_token import MiniMaxTokenAnthropicAdapter
@@ -678,3 +680,82 @@ async def test_a_thinking_signature_rejection_strips_and_retries_the_same_backen
     assert len(bodies) == 2
     assert "thinking" in json.dumps(bodies[0])
     assert "thinking" not in json.dumps(bodies[1])
+
+
+# ── M17: a rejection that outlives the strip cap cools no pool member ──────
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("protocol",),
+    [
+        pytest.param(BridgeProtocol.CHAT_COMPLETIONS_API, id="cc"),
+        pytest.param(BridgeProtocol.RESPONSES_API, id="responses"),
+        pytest.param(BridgeProtocol.GEMINI_API, id="gemini"),
+    ],
+)
+async def test_a_rejection_that_outlives_the_strip_cap_cools_no_pool_member(protocol, monkeypatch):
+    """M17 — a signature rejection recovery cannot fix surfaces without cooling a member.
+
+    The upstream rejects every attempt: strip one clears the transcript's
+    thinking, and the stripped retry is rejected again with nothing left to
+    strip.  The failure is kitty's history — it would fail on every member
+    alike — so neither member may be cooled, and the rejection surfaces to the
+    client instead of walking the pool.
+
+    Args:
+        protocol: The inbound protocol under test.
+        monkeypatch: Pytest fixture, collapses the retry backoff.
+    """
+    monkeypatch.setattr(server_module, "_BACKOFF_BASE", 0.01)
+    model = "claude-opus-4-6"
+    backends = []
+    for name in ("member-1", "member-2"):
+        profile = Profile(
+            name=name,
+            provider="anthropic",
+            model=model,
+            auth_ref=str(uuid.uuid4()),
+            provider_config={},
+        )
+        backends.append((AnthropicAdapter(), f"key-{name}", profile))
+    server = BridgeServer(
+        adapter=_ProtocolLauncher(protocol),
+        provider=backends[0][0],
+        resolved_key=backends[0][1],
+        model=model,
+        backends=backends,
+        host="127.0.0.1",
+        port=0,
+    )
+    upstream_url = server._build_upstream_url({"model": model})
+    calls = {"n": 0}
+    rejection = json.dumps(_SIGNATURE_REJECTION)
+
+    def _reject(url, **kwargs):
+        calls["n"] += 1
+        return CallbackResult(status=400, body=rejection)
+
+    with aioresponses(passthrough=["http://127.0.0.1"]) as mocked:
+        for _registration in range(6):
+            mocked.post(upstream_url, callback=_reject)
+        await server.start_async()
+        try:
+            async with (
+                aiohttp.ClientSession() as session,
+                session.post(
+                    f"http://127.0.0.1:{server.port}{_client_path(protocol, model)}",
+                    json=_client_request(protocol, model),
+                ) as resp,
+            ):
+                status = resp.status
+                client_body = await resp.text()
+        finally:
+            await server.stop_async()
+
+    assert status == 200, client_body
+    # The rejection is kitty's history, not the members' health: nobody cools.
+    assert all(health["healthy"] and not health.get("failure_count") for health in server._backend_health)
+    # Surfaces at once: the strip retry, then the surfaced rejection — no failover walk.
+    assert calls["n"] == 2, calls
+    assert "error" in client_body

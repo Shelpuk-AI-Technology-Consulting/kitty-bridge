@@ -156,10 +156,10 @@ non-empty residual raises. *Falsification:* a stub reader that drops an unknown 
 
 **T-W3 — register.** One entry per live row of §3.2.1 and §3.2.2. The families are M1–M17 and
 P1–P25, but the **sub-lettered rows are separate rows with separate triggers**, and the P family
-has a gap — P24 is reserved by §9.2's G26 — so the count is **48 published, 47 live**: M13 is
+has a gap — P24 is reserved by §9.2's G26 — so the count is **53 published, 52 live**: M13 is
 withdrawn (KBR-5) and excluded from the data, with the parser asserting the struck set is exactly
 `{M13}` so a new strike-through is a deliberate decision. **Read the count off the register, not
-off the ranges**; it has moved six times (M15 with KBR-144, P23 with KBR-171, M16 with KBR-167, M17 with KBR-238, P22 with KBR-149, P25 with KBR-185)
+off the ranges**; it has moved seven times (M15 with KBR-144, P23 with KBR-171, M16 with KBR-167, M17 with KBR-238, P9d–P9h with KBR-148, P22 with KBR-149, P25 with KBR-185)
 and nothing parses this sentence.
 
 Per row: id, site symbols, trigger, the projection paths it touches, conditional or not, design
