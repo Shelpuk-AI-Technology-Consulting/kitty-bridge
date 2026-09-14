@@ -8,13 +8,17 @@ builds a Chat Completions intermediate, and
 :meth:`AnthropicAdapter.translate_to_upstream` rebuilds a Messages body from it.
 
 This module records what that pair does, each fact a characterisation of today's
-behaviour that the eventual product fix is meant to turn red:
+behaviour that the eventual product fix is meant to turn red. KBR-228 part B
+turned one of them red on purpose and the test was rewritten: the adapter now
+restores the agent's ``system`` value — breakpoints included — verbatim from the
+internal carriage, so the system block's breakpoint reaches the wire again. The
+remaining characterisations:
 
-* a breakpoint on a top-level block (a tool, a system block, a message content
-  block) or at the top level of the request never reaches the wire;
-* that loss has already happened in the intermediate, so the adapter cannot
-  recover it from what it is handed;
-* the one survivor: a breakpoint nested inside a ``tool_result``'s list content
+* a breakpoint on a tool, a message content block, or at the top level of the
+  request never reaches the wire;
+* the intermediate carries the agent's breakpoints only under the internal
+  carriage keys, nowhere else;
+* the one other survivor: a breakpoint nested inside a ``tool_result``'s list content
   is copied through both hops, onto a block where it is not established that
   Anthropic honours one;
 * the adapter adds no breakpoint of its own;
@@ -88,9 +92,9 @@ def _claude_code_body(*, breakpoints: bool) -> dict:
     ``tool_result``) plus the top-level automatic-caching form: seven in all,
     both TTLs represented, every one on a top-level block. The ``tool_result``
     content is a string on purpose; the nested list form is the one survivor
-    and has its own test. The image's breakpoint is lost along with the image
-    itself (KBR-222), so it shows nothing about breakpoints on its own; the
-    other six do.
+    and has its own test. The image now ships as an ``image_url`` part
+    (KBR-222), which carries no breakpoint, so it shows nothing about
+    breakpoints on its own; the other six do.
 
     Every call builds fresh nested objects, so the marked and unmarked bodies
     share nothing. Every ``tool_use`` carries an id, so the translator's
@@ -275,21 +279,23 @@ def test_the_default_anthropic_provider_takes_the_translated_route() -> None:
     assert (type(provider), provider.use_native_messages) == (AnthropicAdapter, False)
 
 
-def test_the_default_anthropic_route_delivers_none_of_the_agents_breakpoints() -> None:
-    """Messages → Chat Completions → Messages ships none of the fixture's seven breakpoints.
+def test_the_default_anthropic_route_delivers_only_the_restored_system_carrier() -> None:
+    """Messages → Chat Completions → Messages ships one of the fixture's seven breakpoints.
 
-    This is the translation pair on the default ``anthropic`` provider's route:
-    the one a user routing Claude Code at Anthropic is most likely to be on, and
-    where someone would assume the body passes through essentially untouched.
-    Commercial consequence: the whole stable prefix (tool definitions, system
-    prompt, history) is re-billed at no less than ten times its cached rate, on
-    every turn.
+    Since KBR-228 part B the adapter restores the agent's ``system`` value
+    verbatim from the internal carriage, breakpoints included, so the marked
+    system block's 1-hour breakpoint reaches the wire again. The other six —
+    the tool, the message blocks and the top-level form — are still lost, and
+    that loss is what remains of the original headline: the stable history
+    prefix and the tool definitions are still re-billed at no less than ten
+    times their cached rate on every turn. (Restoring the rest is epic
+    KBR-197's.)
     """
     intermediate = MessagesTranslator().translate_request(_claude_code_body(breakpoints=True))
 
     wire = AnthropicAdapter().translate_to_upstream(intermediate)
 
-    assert _breakpoints(wire) == {}
+    assert _breakpoints(wire) == {"$.system[1].cache_control": _ONE_HOUR}
 
 
 def _tool_result(tool_use_id: str, *, marked: bool) -> dict:
@@ -367,38 +373,49 @@ def test_a_breakpoint_nested_in_tool_result_list_content_passes_through_both_hop
 # ── Where the loss happens: before the adapter runs ─────────────────────────
 
 
-def test_the_intermediate_handed_to_the_adapter_has_no_cache_control_field() -> None:
-    """The intermediate of the Claude Code fixture carries no ``cache_control`` key anywhere.
+def test_the_intermediate_handed_to_the_adapter_carries_cache_control_only_in_the_carriage() -> None:
+    """The intermediate's only ``cache_control`` keys sit under ``_anthropic_system``.
 
-    This is the only test here that catches the translator emitting a
-    breakpoint of its own, one the agent never set, at a site the adapter
-    drops, where the round trip would not show it. Commercial consequence of
-    such a change: cache writes nobody asked for, at a TTL nobody chose, on
-    every route that forwards the key.
+    Since KBR-228 part B the agent's verbatim system blocks ride the internal
+    carriage, breakpoints included, for the adapter to restore. This is the
+    only test here that catches the translator emitting a breakpoint of its
+    own, one the agent never set, anywhere else — at a site the adapter drops,
+    where the round trip would not show it. Commercial consequence of such a
+    change: cache writes nobody asked for, at a TTL nobody chose, on every
+    route that forwards the key.
     """
     intermediate = MessagesTranslator().translate_request(_claude_code_body(breakpoints=True))
 
-    assert _breakpoints(intermediate) == {}
+    assert _breakpoints(intermediate) == {
+        "$._anthropic_system[1].cache_control": _ONE_HOUR,
+    }
 
 
-def test_the_intermediate_cannot_tell_a_marked_body_from_an_unmarked_one() -> None:
-    """The intermediates of the marked and unmarked bodies are equal.
+def test_the_intermediate_tells_marked_from_unmarked_only_through_the_carriage() -> None:
+    """The intermediates differ only where KBR-228's carriage says they may.
 
-    Equal intermediates mean no field under *any* name carries the agent's
-    breakpoints, so an adapter cannot recover them from what it is handed. The
-    loss is at the translator (CB-1's site, register row M16), not in this
-    adapter. A fix that carries the breakpoint across, on a Chat Completions
-    content-part field or on an internal ``_``-prefixed key, turns this red, as
-    intended.
+    The marked and unmarked intermediates are equal once the internal carriage
+    keys (``_anthropic_system``, ``_thinking_blocks``) are removed — so no
+    field under any *other* name carries the agent's breakpoints. This is the
+    red the module's docstring said the carriage fix would turn: the adapter
+    now recovers the system blocks from what it is handed, and this test pins
+    that it recovers them from the carriage and nowhere else.
 
     This compares the translator with itself, which §3.3.1 forbids as an oracle
     for fidelity. It is sound here because the claim is not "the output is
-    faithful" but "the breakpoints have no effect on the output".
+    faithful" but "the breakpoints move only through the carriage".
     """
     translator = MessagesTranslator()
 
-    marked = translator.translate_request(_claude_code_body(breakpoints=True))
-    unmarked = translator.translate_request(_claude_code_body(breakpoints=False))
+    def _without_carriage(body: dict) -> dict:
+        stripped = {k: v for k, v in body.items() if k not in ("_anthropic_system", "_thinking_blocks")}
+        stripped["messages"] = [
+            {k: v for k, v in message.items() if k != "_thinking_blocks"} for message in stripped["messages"]
+        ]
+        return stripped
+
+    marked = _without_carriage(translator.translate_request(_claude_code_body(breakpoints=True)))
+    unmarked = _without_carriage(translator.translate_request(_claude_code_body(breakpoints=False)))
 
     assert marked == unmarked
 

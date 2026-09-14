@@ -54,7 +54,17 @@ _EXPECTED_KEYS: dict[str, set[str]] = {
         # where the upstream documents the field.
         "_output_config",
         "_reasoning_effort",
+        # KBR-228 part B: the agent's original system value, restored verbatim
+        # by the Anthropic-family adapters on the signature-binding routes.
+        "_anthropic_system",
         "_thinking_adaptive",
+        # KBR-225: the agent's thinking `budget_tokens` (validated here),
+        # shipped verbatim by AnthropicAdapter.
+        "_thinking_budget_tokens",
+        # KBR-228: the agent's signed thinking blocks, restored verbatim by
+        # the Anthropic-family adapters (part B); the reply direction mints
+        # the same key in `providers/anthropic.py` (part A).
+        "_thinking_blocks",
         # KBR-203: the agent's thinking `display`, restored by AnthropicAdapter.
         "_thinking_display",
         "_thinking_enabled",
@@ -69,6 +79,10 @@ _EXPECTED_KEYS: dict[str, set[str]] = {
     },
     "bridge/responses/translator.py": {"_reasoning_effort", "_thinking_enabled"},
     "bridge/server.py": {
+        # KBR-228 part B: the second Messages -> CC converter mints the same
+        # carriages the translator does.
+        "_anthropic_system",
+        "_thinking_blocks",
         "_native_messages_request",
         "_original_body",
         "_provider_config",
@@ -77,6 +91,11 @@ _EXPECTED_KEYS: dict[str, set[str]] = {
         # converter and mints the same internal key the translator does.
         "_top_k",
     },
+    # KBR-228 part A: the reply's thinking blocks ride the CC response message
+    # into the Messages translators.  The same key carries the agent's signed
+    # history upstream in part B, which mints it in the two Messages -> CC
+    # converters as well.
+    "providers/anthropic.py": {"_thinking_blocks"},
     "providers/kimi.py": {"_thinking_enabled"},
 }
 

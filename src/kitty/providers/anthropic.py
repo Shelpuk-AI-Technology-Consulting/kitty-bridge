@@ -112,6 +112,194 @@ def _image_source_from_url(url: str) -> dict:
     return {"type": "url", "url": url}
 
 
+class AnthropicCCStreamConverter:
+    """Convert one Anthropic Messages SSE stream into Chat Completions chunks.
+
+    Stateful where :meth:`AnthropicAdapter.translate_upstream_stream_event`
+    cannot be: that method maps each event in isolation, so a ``tool_use``
+    block's ``input_json_delta`` fragments have nowhere to land and every
+    tool call was lost (KBR-232).  Here a block's Chat Completions
+    ``tool_calls`` index is allocated when the block opens and every
+    fragment of its JSON is forwarded under it, thinking deltas cross as
+    ``reasoning_content``, and the finish chunk carries usage accumulated
+    from both ends of the stream.
+
+    One instance serves one upstream attempt: ``kitty.bridge`` creates it
+    when the selected backend's upstream wire is Anthropic Messages for the
+    routed model (:meth:`BridgeServer._serves_messages_wire`) and feeds it
+    each ``data:`` line before the per-chunk logic it already runs for
+    Chat Completions upstreams.  An ``error`` event passes through
+    unchanged so the handlers' in-stream error detection sees it.
+    """
+
+    def __init__(self) -> None:
+        # One id per stream: Chat Completions clients correlate a reply's
+        # chunks by it, and the old per-event ids made every chunk an orphan.
+        self._chunk_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
+        self._model = ""
+        self._input_tokens = 0
+        self._output_tokens = 0
+        # Anthropic block index → Chat Completions tool_calls index.
+        self._tool_indices: dict[int, int] = {}
+        # Blocks whose arguments arrived whole in content_block_start; their
+        # input_json_delta fragments are suppressed so arguments are not doubled.
+        self._arguments_complete: set[int] = set()
+
+    def feed(self, raw_bytes: bytes) -> list[bytes]:
+        """Convert one upstream SSE line into Chat Completions SSE lines.
+
+        Args:
+            raw_bytes: One SSE line as the handler read it, e.g.
+                ``b'event: content_block_delta\\ndata: {...}\\n\\n'``.
+
+        Returns:
+            Full ``data: `` SSE lines — Chat Completions chunks, the
+            ``data: [DONE]`` sentinel on ``message_stop``, or the input
+            unchanged for a non-JSON line and for an ``error`` event.
+            Empty when the event has no Chat Completions counterpart.
+        """
+        raw_str = raw_bytes.decode("utf-8", errors="replace").strip()
+        if not raw_str:
+            return []
+
+        # The handlers hand us one event's SSE, but an ``event:`` line may
+        # precede the payload; only the ``data:`` line is interpreted.
+        data_str = None
+        for line in raw_str.split("\n"):
+            line = line.strip()
+            if line.startswith("data:"):
+                data_str = line[5:].strip()
+
+        if data_str is None:
+            return []
+        try:
+            event = json.loads(data_str)
+        except json.JSONDecodeError:
+            return [raw_bytes]
+        if not isinstance(event, dict):
+            return [raw_bytes]
+
+        event_type = event.get("type", "")
+
+        # An in-stream failure rides a 200 on Anthropic's wire; the handlers'
+        # error detection keys on the ``type``, so the event must cross as-is.
+        if event_type == "error":
+            return [raw_bytes]
+
+        if event_type == "message_start":
+            message = event.get("message", {})
+            self._model = message.get("model", "")
+            self._input_tokens = message.get("usage", {}).get("input_tokens", 0)
+            return [self._sse_chunk({"role": "assistant"})]
+
+        if event_type == "content_block_start":
+            block = event.get("content_block", {})
+            if block.get("type") != "tool_use":
+                return []
+            index = event.get("index", 0)
+            cc_index = len(self._tool_indices)
+            self._tool_indices[index] = cc_index
+            # A populated ``input`` at the block start is the whole arguments
+            # object for providers that do not stream the JSON; Anthropic
+            # itself starts empty and streams ``input_json_delta``.
+            tool_input = block.get("input")
+            if tool_input:
+                self._arguments_complete.add(index)
+                arguments = json.dumps(tool_input)
+            else:
+                arguments = ""
+            return [
+                self._sse_chunk(
+                    {
+                        "tool_calls": [
+                            {
+                                "index": cc_index,
+                                "id": block.get("id", ""),
+                                "type": "function",
+                                "function": {"name": block.get("name", ""), "arguments": arguments},
+                            }
+                        ]
+                    }
+                )
+            ]
+
+        if event_type == "content_block_delta":
+            delta = event.get("delta", {})
+            delta_type = delta.get("type", "")
+            if delta_type == "text_delta":
+                return [self._sse_chunk({"content": delta.get("text", "")})]
+            if delta_type == "thinking_delta":
+                return [self._sse_chunk({"reasoning_content": delta.get("thinking", "")})]
+            if delta_type == "input_json_delta":
+                index = event.get("index", 0)
+                # An unknown block has no allocated index; a completed one
+                # must not grow a second copy of its arguments.
+                if index not in self._tool_indices or index in self._arguments_complete:
+                    return []
+                return [
+                    self._sse_chunk(
+                        {
+                            "tool_calls": [
+                                {
+                                    "index": self._tool_indices[index],
+                                    "function": {"arguments": delta.get("partial_json", "")},
+                                }
+                            ]
+                        }
+                    )
+                ]
+            # signature_delta and other block deltas have no CC counterpart.
+            return []
+
+        if event_type == "message_delta":
+            # Anthropic's message_delta usage is the running output total.
+            self._output_tokens = event.get("usage", {}).get("output_tokens", self._output_tokens)
+            finish_reason = _STOP_REASON_MAP.get(event.get("delta", {}).get("stop_reason"), "stop")
+            chunk = self._chunk({}, finish_reason=finish_reason)
+            chunk["usage"] = {
+                "prompt_tokens": self._input_tokens,
+                "completion_tokens": self._output_tokens,
+                "total_tokens": self._input_tokens + self._output_tokens,
+            }
+            return [f"data: {json.dumps(chunk)}\n\n".encode()]
+
+        if event_type == "message_stop":
+            return [b"data: [DONE]\n\n"]
+
+        # ping, content_block_stop, anything unknown.
+        return []
+
+    def _chunk(self, delta: dict, finish_reason: str | None = None) -> dict:
+        """Build one Chat Completions chunk payload for this stream.
+
+        Args:
+            delta: The choice delta.
+            finish_reason: The finish reason, or ``None`` mid-stream.
+
+        Returns:
+            The chunk payload, not yet SSE-wrapped.
+        """
+        return {
+            "id": self._chunk_id,
+            "object": "chat.completion.chunk",
+            "created": 0,
+            "model": self._model,
+            "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}],
+        }
+
+    def _sse_chunk(self, delta: dict, finish_reason: str | None = None) -> bytes:
+        """Wrap one chunk payload as a ``data: `` SSE line.
+
+        Args:
+            delta: The choice delta.
+            finish_reason: The finish reason, or ``None`` mid-stream.
+
+        Returns:
+            The encoded SSE line, trailing blank line included.
+        """
+        return f"data: {json.dumps(self._chunk(delta, finish_reason))}\n\n".encode()
+
+
 class AnthropicAdapter(ProviderAdapter):
     """Anthropic Messages API adapter.
 
@@ -127,6 +315,28 @@ class AnthropicAdapter(ProviderAdapter):
             subclass whose upstream does not document it sets this to False, so
             an unknown field cannot turn every thinking request into a 400
             (KBR-203).
+        injects_placeholder_thinking: Whether
+            :meth:`_translate_assistant_msg` injects an empty unsigned
+            thinking block into an assistant message that lacks one while
+            thinking is active (register row P5e).  False here — the default,
+            because this class *is* the ``anthropic`` provider: the live probe
+            behind KBR-238 showed the unsigned block itself is rejected with
+            ``400 ... thinking.signature: Field required`` while a history
+            with no thinking block is accepted, so manufacturing one costs a
+            rejected round-trip per turn and M17's strip has to remove it
+            again (KBR-228 part C).  A subclass whose upstream has not been
+            shown to reject the block sets this to True to keep the old wire.
+        forwards_thinking_signature: Whether :meth:`translate_to_upstream`
+            restores the agent's signed thinking blocks and original
+            ``system`` value verbatim from the KBR-228 carriage.  True here:
+            api.anthropic.com signature-binds thinking to the conversation
+            that produced it, and only a byte-identical restore — signatures,
+            ``redacted_thinking`` and cache breakpoints included — satisfies
+            the check (KBR-228 part B).  A subclass whose upstream has never
+            been shown to accept a ``signature`` or ``redacted_thinking``
+            field sets this to False, which keeps today's wire: restoring
+            unverified fields with no recovery pattern that recognises a
+            foreign rejection would trade a verified fix for a hard failure.
         forwards_output_config: Whether :meth:`translate_to_upstream` restores
             the agent's ``output_config`` — the documented spelling of the
             effort control.  True here, because the field is on Anthropic's
@@ -135,6 +345,10 @@ class AnthropicAdapter(ProviderAdapter):
     """
 
     forwards_thinking_display: bool = True
+
+    injects_placeholder_thinking: bool = False
+
+    forwards_thinking_signature: bool = True
 
     forwards_output_config: bool = True
 
@@ -223,7 +437,21 @@ class AnthropicAdapter(ProviderAdapter):
                         elif isinstance(block, str):
                             system_parts.append(block)
 
-        if system_parts:
+        # KBR-228 part B: on the signature-binding routes the agent's own
+        # system value — blocks and cache breakpoints included — is what the
+        # thinking signatures are bound to, so it is restored verbatim from
+        # the carriage instead of this joined string.  Where the carriage is
+        # absent (a Chat Completions origin) or the upstream is unverified,
+        # today's join stands.
+        carried_system = cc_request.get("_anthropic_system")
+        if carried_system is not None and self.forwards_thinking_signature:
+            if isinstance(carried_system, list):
+                anthropic["system"] = [
+                    dict(block) if isinstance(block, dict) else block for block in carried_system
+                ]
+            else:
+                anthropic["system"] = carried_system
+        elif system_parts:
             anthropic["system"] = "\n".join(system_parts)
 
         # Translate messages.  KBR-222: a run of CC tool messages followed by
@@ -306,12 +534,26 @@ class AnthropicAdapter(ProviderAdapter):
             # provider decide the budget automatically.
             anthropic["thinking"] = self._with_thinking_display({"type": "adaptive"}, cc_request)
         elif cc_request.get("_thinking_enabled"):
-            # Anthropic requires budget_tokens >= 1024 and budget_tokens < max_tokens.
-            max_tokens = max(anthropic.get("max_tokens", _DEFAULT_MAX_TOKENS), 1025)
-            anthropic["max_tokens"] = max_tokens
-            anthropic["thinking"] = self._with_thinking_display(
-                {"type": "enabled", "budget_tokens": max_tokens - 1}, cc_request
-            )
+            # KBR-225: the agent's own budget, when the translator carried it,
+            # ships verbatim — Anthropic renders the budget into the prompt, so
+            # deriving it from max_tokens made two requests that differ only in
+            # max_tokens miss each other's cache.  A carried budget is already
+            # valid (int, >= 1024, < max_tokens), which implies
+            # max_tokens >= 1025, so the fallback's raise below cannot trigger
+            # on this branch and max_tokens ships as sent.
+            if "_thinking_budget_tokens" in cc_request:
+                anthropic["thinking"] = self._with_thinking_display(
+                    {"type": "enabled", "budget_tokens": cc_request["_thinking_budget_tokens"]}, cc_request
+                )
+            else:
+                # Fallback for an absent or invalid agent budget (the
+                # translator carries only valid ones): derive from max_tokens.
+                # Anthropic requires budget_tokens >= 1024 and budget_tokens < max_tokens.
+                max_tokens = max(anthropic.get("max_tokens", _DEFAULT_MAX_TOKENS), 1025)
+                anthropic["max_tokens"] = max_tokens
+                anthropic["thinking"] = self._with_thinking_display(
+                    {"type": "enabled", "budget_tokens": max_tokens - 1}, cc_request
+                )
         elif cc_request.get("_thinking_enabled") is False:
             # No display here: Anthropic rejects `display` alongside `disabled`.
             anthropic["thinking"] = {"type": "disabled"}
@@ -336,10 +578,12 @@ class AnthropicAdapter(ProviderAdapter):
         """Add the agent's thinking ``display`` to *thinking* where this upstream documents it.
 
         Restoring ``display`` keeps the request faithful to what the agent sent;
-        the translated route does not yet return thinking to the user (KBR-227,
-        KBR-228).  Sending it to an upstream that does not document the field
-        risks a 400 on every thinking request (KBR-203).  The value itself is
-        checked by the translator, the only writer of ``_thinking_display``.
+        since KBR-227 (streamed replies are forwarded byte-for-byte) and
+        KBR-228 part A (the non-streaming reply carries thinking through to
+        ``MessagesTranslator``) the user actually sees the thinking it asks
+        for.  Sending it to an upstream that does not document the field risks
+        a 400 on every thinking request (KBR-203).  The value itself is checked
+        by the translator, the only writer of ``_thinking_display``.
 
         Args:
             thinking: The ``adaptive`` or ``enabled`` thinking object being built.
@@ -365,9 +609,17 @@ class AnthropicAdapter(ProviderAdapter):
 
         reasoning = msg.get("reasoning_content")
         thinking_enabled = (cc_request or {}).get("_thinking_enabled")
-        if reasoning:
+        # KBR-228 part B: the signed originals, verbatim and in wire order,
+        # ahead of the rebuilt text and tool calls — thinking always precedes
+        # both on this wire, so the original order survives.  A carriage with
+        # the switch off, or none at all, rebuilds the unsigned block as
+        # before.
+        carried = msg.get("_thinking_blocks")
+        if isinstance(carried, list) and carried and self.forwards_thinking_signature:
+            content_blocks.extend(dict(block) for block in carried if isinstance(block, dict))
+        elif reasoning:
             content_blocks.append({"type": "thinking", "thinking": reasoning})
-        elif thinking_enabled:
+        elif thinking_enabled and self.injects_placeholder_thinking:
             content_blocks.append({"type": "thinking", "thinking": ""})
 
         text = msg.get("content")
@@ -519,6 +771,20 @@ class AnthropicAdapter(ProviderAdapter):
                 }
                 for tu in tool_uses
             ]
+
+        # KBR-228 part A: the reply's thinking blocks ride the CC message under
+        # an internal key, verbatim and in wire order, so the Messages client
+        # sees the model's reasoning and the next turn has signed blocks to
+        # send back.  ``thinking`` always precedes ``text``/``tool_use`` on
+        # this wire, so prepending in ``translate_response`` preserves the
+        # order the upstream produced.
+        thinking_blocks = [
+            dict(block)
+            for block in content_blocks
+            if isinstance(block, dict) and block.get("type") in ("thinking", "redacted_thinking")
+        ]
+        if thinking_blocks:
+            message["_thinking_blocks"] = thinking_blocks
 
         stop_reason = raw_response.get("stop_reason")
         finish_reason = _STOP_REASON_MAP.get(stop_reason, "stop")

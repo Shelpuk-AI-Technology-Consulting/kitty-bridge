@@ -6,7 +6,7 @@
     <img src="https://img.shields.io/pypi/pyversions/kitty-bridge.svg" alt="Python version">
   </a>
   <img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT">
-  <img src="https://img.shields.io/github/actions/workflow/status/Shelpuk-AI-Technology-Consulting/kitty-bridge/ci.yml?branch=main" alt="CI">
+  <img src="https://img.shields.io/github/actions/workflow/status/Shelpuk-AI-Technology-Consulting/kitty-bridge/publish.yml" alt="Publish to PyPI">
   <a href="https://pepy.tech/projects/kitty-bridge" target="_blank" rel="noopener noreferrer">
     <img src="https://static.pepy.tech/badge/kitty-bridge" alt="Total PyPI downloads">
   </a>
@@ -383,6 +383,12 @@ the schema the client declared for that tool — the shape a client-side validat
 backend and as a session total, so a pool member returning well-formed-looking garbage is visible without re-running
 under `--debug`. It is a diagnostic only: it never marks a backend unhealthy or triggers failover. Run with `--debug`
 and `grep 'tool_use audit:'` for the offending payloads.
+
+`thinking_stripped` counts the thinking blocks the bridge had to strip and retry because the upstream rejected their
+signatures — which, since the signed history is carried through, means the conversation history was edited (by
+compaction or truncation) and the model lost reasoning that was still valid. It is reported per backend and as a
+session total, next to `malformed_tool_use`, and is likewise a diagnostic only: it never marks a backend unhealthy.
+A compaction-heavy session whose reasoning keeps degrading shows up here.
 
 **After the run.** `--session-summary PATH` (or `KITTY_SESSION_SUMMARY`) writes the same document to a file when the
 bridge shuts down — a small artifact CI can upload, instead of a multi-megabyte debug log:

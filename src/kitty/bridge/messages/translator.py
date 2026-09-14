@@ -266,7 +266,12 @@ class MessagesTranslator:
         """Convert a Messages API request to a Chat Completions request."""
         messages = []
 
-        # System prompt -> system message
+        # System prompt -> system message.  The original value is remembered
+        # verbatim — blocks and cache breakpoints included — and rides the
+        # internal ``_anthropic_system`` key so the Anthropic adapters can
+        # restore what the thinking signatures are bound to instead of this
+        # joined string (KBR-228 part B); every other wire strips the key.
+        carried_system = messages_request.get("system")
         system = messages_request.get("system")
         if system:
             # Anthropic allows system as a string or array of content blocks.
@@ -309,6 +314,11 @@ class MessagesTranslator:
         # it off the wire of every adapter that does not restore it.
         if documents:
             result["_documents"] = documents
+
+        # KBR-228 part B: the verbatim system carriage, set here where the
+        # joined form above has already been written into ``messages``.
+        if carried_system:
+            result["_anthropic_system"] = carried_system
 
         if "max_tokens" in messages_request:
             result["max_tokens"] = messages_request["max_tokens"]
@@ -377,6 +387,19 @@ class MessagesTranslator:
             if thinking.get("type") == "enabled":
                 result["_thinking_enabled"] = True
                 result["_reasoning_effort"] = "high"
+                # KBR-225: carry the agent's own budget so AnthropicAdapter can
+                # ship it verbatim instead of deriving one from max_tokens.
+                # Only a valid budget rides the key -- an int, at least 1024,
+                # and strictly below max_tokens (Anthropic's constraint) --
+                # because the adapter trusts the key and falls back when it is
+                # absent.  max_tokens must itself be an int: comparing against
+                # a non-int would move the malformed-input TypeError from the
+                # Anthropic-family adapter into this shared translator.  A bool
+                # budget is excluded by the floor (every bool is 0 or 1).
+                budget = thinking.get("budget_tokens")
+                max_tokens = messages_request.get("max_tokens")
+                if isinstance(budget, int) and isinstance(max_tokens, int) and 1024 <= budget < max_tokens:
+                    result["_thinking_budget_tokens"] = budget
             elif thinking.get("type") == "adaptive":
                 # Adaptive thinking — remember the original type so
                 # AnthropicAdapter can restore it verbatim.
@@ -536,6 +559,15 @@ class MessagesTranslator:
             text_parts = []
             tool_calls = []
             thinking_parts = []
+            # KBR-228 part B: the signed originals ride the message verbatim —
+            # signatures and redacted_thinking included, wire order preserved —
+            # so the Anthropic adapters can restore what their upstream
+            # signature-binds.  Every other wire strips the key.
+            thinking_blocks = [
+                dict(block)
+                for block in content
+                if isinstance(block, dict) and block.get("type") in ("thinking", "redacted_thinking")
+            ]
             for block in content:
                 if not isinstance(block, dict):
                     continue
@@ -563,6 +595,8 @@ class MessagesTranslator:
             }
             if thinking_parts:
                 result["reasoning_content"] = "\n".join(thinking_parts)
+            if thinking_blocks:
+                result["_thinking_blocks"] = thinking_blocks
             if tool_calls:
                 result["tool_calls"] = tool_calls
             return result
@@ -645,10 +679,21 @@ class MessagesTranslator:
 
         content: list[dict] = []
 
-        # reasoning_content -> thinking block (must come before text)
-        reasoning = message.get("reasoning_content")
-        if reasoning:
-            content.append({"type": "thinking", "thinking": reasoning})
+        # KBR-228 part A: an Anthropic-family upstream's reply carries its
+        # thinking blocks verbatim under ``_thinking_blocks``; they are emitted
+        # as-is, signatures included, in wire order.  Thinking always precedes
+        # text and tool_use on that wire, so prepending them preserves the
+        # order the upstream produced.  The carriage wins over
+        # ``reasoning_content``, which mirrors the same text and would
+        # duplicate it as an unsigned block.
+        carried = message.get("_thinking_blocks")
+        if isinstance(carried, list) and carried:
+            content.extend(dict(block) for block in carried if isinstance(block, dict))
+        else:
+            # reasoning_content -> thinking block (must come before text)
+            reasoning = message.get("reasoning_content")
+            if reasoning:
+                content.append({"type": "thinking", "thinking": reasoning})
 
         # Text content -> text block
         text = self._extract_text_content(message.get("content"))

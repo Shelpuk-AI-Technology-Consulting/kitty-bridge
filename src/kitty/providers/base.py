@@ -48,11 +48,28 @@ class ProviderAdapter(ABC):
             # agent's thinking `display`; AnthropicAdapter restores it onto
             # `thinking` where the upstream documents the field.
             "_thinking_display",
+            # KBR-225: written by MessagesTranslator.translate_request to carry
+            # the agent's thinking `budget_tokens` (validated there: an int,
+            # >= 1024 and < max_tokens); AnthropicAdapter ships it verbatim so
+            # the prompt cache survives a max_tokens change, and derives a
+            # budget as before when the key is absent.
+            "_thinking_budget_tokens",
             # KBR-214: carries the agent's Anthropic `metadata` to the
             # Anthropic-family adapters that restore it. Chat Completions' own
             # `metadata` is a stored-completions tag map, a different concept, so
             # stripping it here keeps it off every other provider's wire.
             "_metadata",
+            # KBR-228: carries the Anthropic reply's thinking blocks (signatures
+            # included) to the Messages translators, and the agent's signed
+            # history back to the restoring adapters.  It rides message dicts in
+            # both directions; the message-level strip keeps it off every wire
+            # that does not consume it (KBR-228 parts A and B).
+            "_thinking_blocks",
+            # KBR-228 part B: the agent's original system value (blocks and
+            # cache breakpoints included), restored verbatim by the
+            # Anthropic-family adapters whose upstream honours the
+            # thinking-binding contract.
+            "_anthropic_system",
             # KBR-224: written by MessagesTranslator.translate_request to carry the
             # agent's `output_config` — Anthropic's documented spelling of the
             # effort control — which Chat Completions has no field for.
@@ -69,6 +86,50 @@ class ProviderAdapter(ABC):
             # adapters that rely on the default translate_to_upstream().
         }
     )
+
+    #: Kitty-internal keys that ride on *message* dicts inside
+    #: ``cc_request["messages"]`` rather than on the request itself.  The
+    #: top-level strip above never sees them, so every adapter that forwards
+    #: messages through to its wire sanitises them via
+    #: :meth:`_strip_internal_message_keys`; the adapters that consume a key
+    #: are the exception, by construction of their own rebuild.
+    _INTERNAL_MESSAGE_KEYS = frozenset(
+        {
+            # KBR-228: verbatim Anthropic thinking-family blocks, signed where
+            # the upstream signed them.  Written onto assistant messages by the
+            # Messages -> CC converters (request direction) and onto the reply
+            # message by the Anthropic-family adapters (response direction).
+            "_thinking_blocks",
+        }
+    )
+
+    def _strip_internal_message_keys(self, messages: object) -> object:
+        """Return *messages* without kitty's message-level internal keys.
+
+        The counterpart of the ``_INTERNAL_KEYS`` strip for keys that ride on
+        message dicts: ``cc_request["messages"]`` is shared with the request
+        the next attempt re-serializes, so when the strip changes anything it
+        is copy-on-write and the original list and messages are untouched.
+        A list carrying none of the registered keys is returned as the same
+        object — the ordinary request pays one membership scan, no copy, and
+        the output's ``messages`` is the very list the input carried.
+
+        Args:
+            messages: The ``messages`` value of a Chat Completions request.
+
+        Returns:
+            The sanitized list, or *messages* unchanged when there was nothing
+            to remove or the value is not a list.
+        """
+        if not isinstance(messages, list):
+            return messages
+        keys = self._INTERNAL_MESSAGE_KEYS
+        if not any(isinstance(msg, dict) and keys & msg.keys() for msg in messages):
+            return messages
+        return [
+            {k: v for k, v in msg.items() if k not in keys} if isinstance(msg, dict) else msg
+            for msg in messages
+        ]
 
     @property
     @abstractmethod
@@ -435,7 +496,12 @@ class ProviderAdapter(ABC):
         Returns:
             Dict to send as JSON body to the upstream endpoint.
         """
-        return {k: v for k, v in cc_request.items() if k not in self._INTERNAL_KEYS}
+        result = {k: v for k, v in cc_request.items() if k not in self._INTERNAL_KEYS}
+        # KBR-228: message-level internal keys ride inside ``messages``, where
+        # the top-level strip above cannot reach them.
+        if "messages" in result:
+            result["messages"] = self._strip_internal_message_keys(result["messages"])
+        return result
 
     def _inject_empty_reasoning_content(self, messages: list[dict]) -> list[dict]:
         """Inject empty reasoning_content into assistant messages that lack it.

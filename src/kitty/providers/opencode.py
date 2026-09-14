@@ -110,6 +110,18 @@ class OpenCodeGoAdapter(AnthropicAdapter):
     #: document ``display``.  KBR-203, decision D2.
     forwards_thinking_display = False
 
+    #: Keeps the empty placeholder thinking block (register row P5e): whether
+    #: these upstreams accept a history with no thinking block is unverified,
+    #: and the route must not change wire behaviour without evidence
+    #: (KBR-228 part C).
+    injects_placeholder_thinking = True
+
+    #: Restores no signed thinking blocks and no verbatim system on the
+    #: Messages route: these upstreams' tolerance for ``signature`` and
+    #: ``redacted_thinking`` fields is unverified, and M17's recovery
+    #: recognises only Anthropic's rejection wording (KBR-228 part B).
+    forwards_thinking_signature = False
+
     #: The Messages route's upstreams (MiniMax rejects the field outright; Qwen
     #: does not document it) cannot safely receive ``output_config``.  KBR-224.
     forwards_output_config = False
