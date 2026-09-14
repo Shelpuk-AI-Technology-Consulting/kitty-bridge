@@ -99,20 +99,26 @@ class TestBuilderThresholdProperties:
         )
 
     def test_over_budget_filler_alone_crosses_threshold(self) -> None:
-        """The over-budget entry's CC-converted messages length exceeds the threshold.
+        """The over-budget entry's filler ALONE crosses the threshold — exactly ``threshold + 1``.
 
-        Captured WITHOUT the oversized tool_result's contribution, the filler
-        is sized so the CC-converted length is exactly ``threshold + 1`` — the
-        smallest value ``original_size > threshold`` accepts. Adding the 50 001-char
-        tool_result on top pushes the total past ``threshold + 50 000``.
+        Stripping the embedded ``tool_use`` / ``tool_result`` pair and the
+        pair's preceding "Reading the file now." assistant turn leaves the
+        filler. The metadata promises the filler's CC-converted length is
+        exactly ``threshold + 1``; this test pins that promise so a regression
+        landing the over filler at ``threshold + 10`` still passes the post-M3
+        invariant test fails THIS one — symmetric with the under entry's
+        exact-threshold assertion.
         """
         captured, met, absent = ct.build_compaction_budget_over()
         assert met == frozenset({Trigger.TOOL_RESULT_OVER_LIMIT})
         assert absent == frozenset()
-        cc_len = _cc_messages_serialized(captured)
-        assert cc_len > _COMPACTION_CHAR_THRESHOLD, (
-            f"CC-converted messages length {cc_len} not above {_COMPACTION_CHAR_THRESHOLD}; "
-            "the over entry must cross the threshold the bridge compares against"
+        cc = _translate_to_cc(captured)
+        filler_only = _filler_only_messages(cc["messages"])
+        filler_only_cc = len(json.dumps(filler_only, ensure_ascii=False))
+        assert filler_only_cc == _COMPACTION_CHAR_THRESHOLD + 1, (
+            f"filler-only CC length {filler_only_cc} != "
+            f"{_COMPACTION_CHAR_THRESHOLD + 1}; the over entry's metadata "
+            "claims the filler alone is exactly threshold + 1"
         )
 
     def test_over_budget_still_over_threshold_after_m3_truncation(self) -> None:
@@ -325,23 +331,36 @@ def _cc_messages_serialized(captured: CapturedRequest) -> int:
     return len(json.dumps(cc["messages"], ensure_ascii=False))
 
 
-def _translate_to_cc(captured: CapturedRequest) -> dict:
+def _translate_to_cc(captured: CapturedRequest) -> dict[str, object]:
     """Run ``MessagesTranslator.translate_request`` on the captured body.
 
     Returns the CC-converted request dict; callers mutate ``["messages"]``
     in place to simulate the bridge's mutation chain.
+
+    Args:
+        captured: The fixture's captured request.
+
+    Returns:
+        The CC-converted request as a JSON-shaped ``dict``; the ``messages``
+        key holds the post-translation messages list.
     """
     body = json.loads(captured.body.decode("utf-8"))
     return _TRANSLATOR.translate_request(body)
 
 
 def _apply_m3_truncation(messages: list[dict]) -> int:
-    """Run the M3 mutation sites against ``messages`` in place; return the count of truncations.
+    """Run the M3 mutation sites against ``messages`` in place.
 
     Mirrors ``server.py:7267-7294`` (CC and Anthropic-native shapes) and
     ``server.py:7314-7325`` (Responses shape, which this fixture does not
-    exercise) so the post-M3 length is exactly what the bridge would
-    observe. Used by the post-M3 over-budget tests.
+    exercise) so the post-M3 length is exactly what the bridge would observe.
+    Used by the post-M3 over-budget tests.
+
+    Args:
+        messages: The CC-converted messages list, mutated in place.
+
+    Returns:
+        The number of ``tool_result`` blocks truncated.
     """
     truncated = 0
     for msg in messages:
@@ -369,6 +388,55 @@ def _apply_m3_truncation(messages: list[dict]) -> int:
     return truncated
 
 
+def _filler_only_messages(messages: list[dict]) -> list[dict]:
+    """Return ``messages`` with the tool_use / tool_result pair stripped.
+
+    The over entry embeds one ``tool_use`` block (CC-converted to an
+    ``assistant`` message with a ``tool_calls`` list, ``content=None``) and a
+    paired ``tool_result`` user message. Stripping both — and the
+    assistant "Reading the file now." turn whose content is plain text —
+    leaves the filler-only sequence whose CC-converted length the manifest
+    promises is exactly ``_COMPACTION_CHAR_THRESHOLD + 1``.
+
+    Args:
+        messages: The CC-converted messages list.
+
+    Returns:
+        A new messages list with the tool_use/tool_result pair and the
+        "Reading the file now." plain-text assistant turn removed.
+    """
+    filler: list[dict] = []
+    skip_next = 0
+    for msg in messages:
+        if skip_next > 0:
+            skip_next -= 1
+            continue
+        # CC `assistant` message from a tool_use block: content is None and
+        # tool_calls is non-empty.
+        if msg.get("role") == "assistant" and msg.get("content") is None and msg.get("tool_calls"):
+            skip_next = 1  # the following user(tool_result) is the pair
+            continue
+        # The "Reading the file now." plain-text assistant turn — identified
+        # by content being a string (real-shaped) rather than None + tool_calls.
+        if (
+            msg.get("role") == "assistant"
+            and isinstance(msg.get("content"), str)
+            and msg.get("content", "").startswith("Reading the file now.")
+        ):
+            continue
+        # The paired user(tool_result) message — content is a list carrying a
+        # tool_result block.
+        if msg.get("role") == "user" and isinstance(msg.get("content"), list):
+            has_tool_result = any(
+                isinstance(b, dict) and b.get("type") == "tool_result"
+                for b in msg["content"]
+            )
+            if has_tool_result:
+                continue
+        filler.append(msg)
+    return filler
+
+
 #: The bridge's CC translator — used by the CC-shape measurements below.
 _TRANSLATOR = MessagesTranslator()
 
@@ -379,6 +447,13 @@ def _tool_result_string_lengths(captured: CapturedRequest) -> list[int]:
     Anthropic shape nests them as user-message content blocks; the bridge's CC
     conversion carries the string through unchanged, so the length the
     ``>`` comparison sees is this one.
+
+    Args:
+        captured: The fixture's captured request.
+
+    Returns:
+        A list of integer string lengths, one per ``tool_result`` block in
+        the body (one element for the M3-pair entries).
     """
     body = json.loads(captured.body.decode("utf-8"))
     lengths: list[int] = []
@@ -403,6 +478,13 @@ def _filler_lines(entry_id: str) -> list[str]:
     padding — they don't carry the ``Turn NNNN of`` prefix and are excluded so
     the structural assertions below only cover what this ticket is committing
     as construction.
+
+    Args:
+        entry_id: One of the budget-pair entry ids (``compaction_budget_under``
+            or ``compaction_budget_over``).
+
+    Returns:
+        A list of every non-empty text line from every filler turn.
     """
     body = json.loads((_COMMITTED_CORPUS / f"{entry_id}.body").read_text(encoding="utf-8"))
     lines: list[str] = []

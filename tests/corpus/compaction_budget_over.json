@@ -37,7 +37,7 @@
     ]
   ],
   "body_file": "compaction_budget_over.body",
-  "body_sha256": "eb6c9be06f1923de7508ba7e2e0bc78c94f978a62816e2bbe6d7f148e0a81119",
+  "body_sha256": "de1ae1775bb4d571ceb568b105cdf7bf34af750e055414ec9efba9d9da30b781",
   "wire_format": "anthropic_messages",
   "known_non_secrets": [],
   "triggers_met": [

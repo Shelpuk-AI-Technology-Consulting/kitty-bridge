@@ -2,15 +2,28 @@
 
 Plan task **T-C3** (KBR-46) ships four entries:
 
-* ``tool_result_under_limit`` — one ``tool_result`` string of exactly the limit;
-  the largest size that does NOT trigger M3.
-* ``tool_result_over_limit`` — one ``tool_result`` string of ``limit + 1``;
-  the smallest size that DOES.
-* ``compaction_budget_under`` — a transcript whose Anthropic-shape messages
-  serialise strictly below ``_COMPACTION_CHAR_THRESHOLD``; M5 complement.
-* ``compaction_budget_over`` — a transcript whose Anthropic-shape messages
-  serialise strictly above ``_COMPACTION_CHAR_THRESHOLD`` and that carries one
-  oversized tool_result so M4's second condition is also present.
+* ``tool_result_under_limit`` — one ``tool_result`` string of exactly
+  ``_TOOL_RESULT_TRUNCATION_LIMIT`` (= 50 000) chars; the largest size that
+  does NOT trigger M3.
+* ``tool_result_over_limit`` — one ``tool_result`` string of
+  ``_TOOL_RESULT_TRUNCATION_LIMIT + 1`` chars; the smallest size that DOES.
+* ``compaction_budget_under`` — a transcript whose CC-converted messages
+  serialise to exactly ``_COMPACTION_CHAR_THRESHOLD`` (= 2 800 000); the
+  largest short-circuit size on the static fallback budget. M4 complement
+  (no oversized tool result).
+* ``compaction_budget_over`` — a transcript whose CC-converted messages
+  serialise to ``_COMPACTION_CHAR_THRESHOLD + 1`` and that carries one
+  oversized ``tool_result`` so M4's second condition is also present —
+  and the filler ALONE crosses the threshold so M5 still fires after
+  M3's truncation.
+
+The bridge's M5 comparison (`server.py:6996` ``_safe_size``) measures the
+**CC-converted** messages length, not the Anthropic-Messages shape the
+fixture commits. The two shapes differ by a constant ~92 chars for this
+layout, and on the ``use_native_messages=True`` passthrough path the
+Anthropic shape is preserved. The builder sizes filler against the CC shape
+directly via ``MessagesTranslator.translate_request`` and iterates to the
+target, so the fixture lands on the boundary the bridge actually compares.
 
 The builder imports the threshold constants from :mod:`kitty.bridge.server`,
 so a constant change flows into the fixture's byte lengths and the L1
@@ -214,20 +227,17 @@ def build_compaction_budget_under() -> tuple[CapturedRequest, frozenset[Trigger]
     README records that oracle slices must resolve the profile before
     treating this entry as an M5 complement.
     """
-    messages = _padded_messages(
-        target_cc_chars=_COMPACTION_CHAR_THRESHOLD,
-        oversized_tool_result_chars=None,
-    )
+    messages = _padded_messages(target_cc_chars=_COMPACTION_CHAR_THRESHOLD)
     return _finalise(messages, met=frozenset(), absent=frozenset({Trigger.TOOL_RESULT_OVER_LIMIT}))
 
 
 def build_compaction_budget_over() -> tuple[CapturedRequest, frozenset[Trigger], frozenset[Trigger]]:
     """Build the M5 trigger case whose filler alone crosses the threshold, plus M4's request half.
 
-    The filler is sized so the CC-converted length **without** the oversized
-    tool_result is exactly ``_COMPACTION_CHAR_THRESHOLD + 1`` — the smallest
-    value the bridge's ``original_size > threshold`` accepts. The 50 001-char
-    oversized ``tool_result`` rides on top, so:
+    The filler is sized so the CC-converted length **without** the embedded
+    ``tool_use`` / ``tool_result`` pair is exactly ``_COMPACTION_CHAR_THRESHOLD + 1``
+    — the smallest value the bridge's ``original_size > threshold`` accepts. The
+    50 001-char oversized ``tool_result`` rides on top, so:
 
     * **pre-M3**, the CC-converted length is roughly ``threshold + 1 + 50 000``,
       comfortably over budget;
@@ -243,19 +253,32 @@ def build_compaction_budget_over() -> tuple[CapturedRequest, frozenset[Trigger],
     **larger** than this body's total (e.g. 1 M-token models at ~3.99 M),
     neither M5 nor M4 fires — the fixture is calibrated against the static
     fallback threshold, not against every profile.
+
+    The ``tool_use`` block carries a ``/tmp/…`` path **deliberately**: a
+    ``/home/<user>/`` path would match the scrubber's ``home_path`` rule, and
+    ``write_entry`` would rewrite the committed bytes, breaking the
+    regeneration test's byte-identity assertion.
     """
-    # Filler alone at CC-shape threshold + 1, without any tool_result: this is
-    # what guarantees the post-M3-truncation length still exceeds the
-    # threshold, because M3 removes only the tool_result's contribution.
-    messages = _padded_messages(
-        target_cc_chars=_COMPACTION_CHAR_THRESHOLD + 1,
-        oversized_tool_result_chars=None,
-    )
-    # Insert the oversized tool_result pair before the closing user turn so the
-    # conversation reads: … filler …, assistant(tool_use), user(tool_result),
-    # user(closing). The bridge's CC conversion maps the tool_result turn to a
-    # role=="tool" message with the same string content.
-    messages.insert(len(messages) - 1, _text_assistant("Reading the file now."))
+    # Filler alone at CC-shape threshold + 1: this is what guarantees the
+    # post-M3-truncation length still exceeds the threshold, because M3
+    # removes only the tool_result's contribution. The tool_use/tool_result
+    # pair is inserted around tool_name = `_TOOL_NAME` to keep the
+    # tool_result paired — an orphan would be silently dropped by the bridge's
+    # pairing validation (register row M7) on an entry that does not declare
+    # M7 in its manifest.
+    messages = _padded_messages(target_cc_chars=_COMPACTION_CHAR_THRESHOLD + 1)
+    tool_use_block = {
+        "role": "assistant",
+        "content": [
+            {
+                "type": "tool_use",
+                "id": _TOOL_USE_ID,
+                "name": _TOOL_NAME,
+                "input": {"file_path": "/tmp/kitty-bridge-threshold-pair.md"},
+            }
+        ],
+    }
+    messages.insert(len(messages) - 1, tool_use_block)
     messages.insert(len(messages) - 1, _tool_result_message(_TOOL_RESULT_TRUNCATION_LIMIT + 1))
     return _finalise(messages, met=frozenset({Trigger.TOOL_RESULT_OVER_LIMIT}), absent=frozenset())
 
@@ -391,7 +414,6 @@ def _tool_result_message(content_chars: int) -> dict:
 def _padded_messages(
     *,
     target_cc_chars: int,
-    oversized_tool_result_chars: int | None,
 ) -> list[dict]:
     """Return messages whose **CC-converted** ``json.dumps`` length equals ``target_cc_chars``.
 
@@ -405,23 +427,18 @@ def _padded_messages(
     actually compares against.
 
     The skeleton is an initial user turn, ``_N_FILLER_EXCHANGES`` user/assistant
-    exchanges with deterministic filler text, optionally a tool_use/tool_result
-    pair (when ``oversized_tool_result_chars`` is given), and a closing user
-    turn. The filler text embeds the turn index so a reviewer sampling any
-    region sees construction, and the last filler turn absorbs the rounding
-    error so the final CC-length lands on ``target_cc_chars`` exactly.
+    exchanges with deterministic filler text, and a closing user turn. The
+    filler text embeds the turn index so a reviewer sampling any region sees
+    construction, and the last filler turn absorbs the rounding error so the
+    final CC-length lands on ``target_cc_chars`` exactly.
 
     Args:
         target_cc_chars: The exact ``len(json.dumps(cc_messages, ensure_ascii=False))``
             the returned messages must hit — what ``_compact_messages`` measures.
-        oversized_tool_result_chars: Unused by this function (the over entry's
-            oversized tool_result is added by the caller). Kept in the signature
-            for symmetry with the previous API; callers pass ``None``.
 
     Returns:
         The messages list. ``_cc_messages_serialized(returned) == target_cc_chars``.
     """
-    del oversized_tool_result_chars  # caller handles the over-budget tool_result
 
     initial_user = _text_user("Read the README so I can ask follow-ups.")
     closing_user = _text_user("Thanks, that's what I needed.")

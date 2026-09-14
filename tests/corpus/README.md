@@ -334,9 +334,10 @@ honour the README's guarantees:
 * Every filler line begins `Turn NNNN of TOTAL:` and embeds its turn index — a reviewer can read
   a sample line and recognise construction, and a unique index breaks ties across 400 turns.
 * The filler is `lorem ipsum dolor sit amet, …` repeated, no special characters, no escape cost;
-  the committed file's bytes are exactly what the builder produced, byte-for-byte. The builder
-  uses `/tmp/…` (not `/home/<user>/`) for the embedded `file_path` precisely so the scrubber's
-  `home_path` rule does not rewrite the bytes between builder output and committed file.
+  the committed file's bytes are exactly what the builder produced, byte-for-byte. The over
+  entry's embedded tool_use block carries a `/tmp/…` path (deliberately — not `/home/<user>/`)
+  precisely so the scrubber's `home_path` rule does not rewrite the bytes between builder
+  output and committed file.
 
 The 2.8 MB file's mandatory review step is replaced by:
 
