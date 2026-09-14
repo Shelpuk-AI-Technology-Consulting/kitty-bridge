@@ -133,7 +133,12 @@ def _isolated_environment(home: Path, encoding: str) -> dict[str, str]:
 
 
 def _run_child(
-    argv: list[str], *, home: Path, encoding: str, stdin: int = subprocess.DEVNULL
+    argv: list[str],
+    *,
+    home: Path,
+    encoding: str,
+    stdin: int = subprocess.DEVNULL,
+    stdout: int | None = None,
 ) -> subprocess.CompletedProcess[bytes]:
     """Run a child interpreter with a fixed stream encoding and capture raw bytes.
 
@@ -143,9 +148,15 @@ def _run_child(
         encoding: Value for ``PYTHONIOENCODING``.
         stdin: What the child reads from — :data:`subprocess.DEVNULL` by
             default, or a file descriptor from :func:`_interactive_looking_stdin`.
+        stdout: Where the child writes — ``None`` (the default) captures stdout
+            into the result; any other value is passed through, e.g.
+            :data:`subprocess.DEVNULL` to discard. When stdout is discarded the
+            runner still captures stderr, which is how the refusal diagnosis
+            reaches the assertion.
 
     Returns:
-        The completed process, with ``stdout`` and ``stderr`` as :class:`bytes`.
+        The completed process, with ``stdout`` and ``stderr`` as :class:`bytes`
+        (``stdout`` is ``None`` when it was discarded).
 
     Raises:
         subprocess.TimeoutExpired: If the child has not exited within 60
@@ -162,14 +173,20 @@ def _run_child(
         [sys.executable, *argv],
         env=_isolated_environment(home, encoding),
         stdin=stdin,
-        capture_output=True,
+        stdout=subprocess.PIPE if stdout is None else stdout,
+        stderr=subprocess.PIPE,
         timeout=60,
         check=False,
     )
 
 
 def _run_kitty(
-    command: tuple[str, ...], *, home: Path, encoding: str, stdin: int = subprocess.DEVNULL
+    command: tuple[str, ...],
+    *,
+    home: Path,
+    encoding: str,
+    stdin: int = subprocess.DEVNULL,
+    stdout: int | None = None,
 ) -> subprocess.CompletedProcess[bytes]:
     """Run one kitty command in an isolated child.
 
@@ -178,11 +195,18 @@ def _run_kitty(
         home: Directory to isolate the child into.
         encoding: Value for ``PYTHONIOENCODING``.
         stdin: What the child reads from; see :func:`_run_child`.
+        stdout: Where the child writes; see :func:`_run_child`.
 
     Returns:
         The completed process, with output as :class:`bytes`.
     """
-    return _run_child(["-m", "kitty", *command], home=home, encoding=encoding, stdin=stdin)
+    return _run_child(
+        ["-m", "kitty", *command],
+        home=home,
+        encoding=encoding,
+        stdin=stdin,
+        stdout=stdout,
+    )
 
 
 def _crashed(completed: subprocess.CompletedProcess[bytes]) -> bool:
@@ -600,7 +624,7 @@ def _asked_for_a_terminal(completed: subprocess.CompletedProcess[bytes]) -> bool
         True when the child exited with :data:`TTY_REQUIRED_EXIT`, printed
         :data:`TTY_DIAGNOSIS`, and did not crash.
     """
-    output = (completed.stdout + completed.stderr).decode("utf-8", errors="replace")
+    output = ((completed.stdout or b"") + completed.stderr).decode("utf-8", errors="replace")
 
     return completed.returncode == TTY_REQUIRED_EXIT and TTY_DIAGNOSIS in output and not _crashed(completed)
 
@@ -702,6 +726,135 @@ def test_the_harness_detects_a_stdin_only_guard(tmp_path: Path) -> None:
         "(exit 0, no diagnosis, no traceback). Either the harness no longer builds the "
         "asymmetry, or `kitty.tui.prompts.can_interact` is no longer what `check_tty` "
         f"consults, and this bait no longer reverts it. exit={completed.returncode}\n{output}"
+    )
+
+
+# KBR-218 — Windows-only NUL hole KBR-204's `isatty-AND` reading cannot close.
+# The three tests below run on every CI leg. On POSIX the guard already refuses
+# `/dev/null`, so the product test and the falsification are green at the base
+# revision; the Windows leg is where the defect lives and where they turn from
+# red to green with the fix. A red Windows leg at the test commit that carries a
+# `_CRASH_MARKERS` traceback is the expected "suspected, not reproduced" evidence
+# the ticket prescribes. A TimeoutExpired instead means the harness premise is
+# wrong, not the assertion.
+
+
+def test_the_child_sees_both_streams_as_nul_reports(tmp_path: Path) -> None:
+    """Premise: the KBR-218 product test runs against the asymmetry it claims to.
+
+    On Windows ``NUL`` is a character device, so ``isatty()`` is True for it on
+    both streams — the lie the old guard believed (CPython bpo-28654). On POSIX
+    ``/dev/null`` is not a terminal, so both read False. The child reports to
+    **stderr** so the parent can read it back even with stdout discarded; the
+    report is two ``bool``s printed with a space, exactly the shape the harness
+    parses.
+    """
+    completed = _run_child(
+        [
+            "-c",
+            "import sys; print(sys.stdin.isatty(), sys.stdout.isatty(), file=sys.stderr)",
+        ],
+        home=tmp_path / "home",
+        encoding="utf-8",
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+    )
+
+    stderr = completed.stderr.decode("utf-8", errors="replace")
+    expected = ["True", "True"] if sys.platform == "win32" else ["False", "False"]
+    assert stderr.split() == expected, (
+        f"the child did not report this platform's NUL semantics; expected {expected}:\n"
+        f"stderr: {stderr}"
+    )
+
+
+def test_an_interactive_command_with_both_streams_on_nul_asks_for_a_terminal(tmp_path: Path) -> None:
+    """KBR-218: a child with both streams on NUL is refused, not crashed.
+
+    Before the fix, ``can_interact``'s ``isatty-AND`` reading returned True for
+    both ``NUL`` streams (a character device is a terminal to the CRT,
+    bpo-28654), the guard let the command in, and ``prompt_toolkit`` raised
+    ``NoConsoleScreenBufferError`` the moment it tried to build a Win32 screen
+    buffer over a non-console stdout. After the fix the guard asks the console
+    API, which refuses a non-console handle, and kitty prints its own diagnosis
+    instead of a traceback.
+
+    The assertion reads **stderr specifically**: with stdout discarded, a
+    diagnosis that lands on stdout would be invisible to a caller, and reusing
+    ``_asked_for_a_terminal`` (which reads both streams) would let that
+    regression pass unnoticed.
+
+    Args:
+        tmp_path: Per-test isolated home.
+    """
+    completed = _run_kitty(
+        ("egress",),
+        home=tmp_path / "home",
+        encoding="utf-8",
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+    )
+
+    stderr = completed.stderr.decode("utf-8", errors="replace")
+    assert completed.returncode == TTY_REQUIRED_EXIT, (
+        f"`kitty egress` with both streams discarded exited {completed.returncode} "
+        f"instead of {TTY_REQUIRED_EXIT}:\nstderr: {stderr}"
+    )
+    assert TTY_DIAGNOSIS in stderr, (
+        "the TTY diagnosis did not reach stderr; a caller discarding stdout would "
+        f"see no explanation:\nstderr: {stderr}"
+    )
+    assert not _crashed(completed), (
+        "the child crashed instead of refusing:\n"
+        f"stderr: {stderr}"
+    )
+
+
+def test_the_harness_detects_a_console_blind_guard(tmp_path: Path) -> None:
+    """KBR-218: the harness must see the defect when a blind guard is put back.
+
+    The child patches ``prompts.can_interact`` to the lie Windows tells natively
+    for ``NUL`` — always True — while ``menu.can_interact`` stays bound to the
+    real predicate (menus imported it once at module load). Then the child runs
+    the real ``main`` on ``egress``. The product test's exit-2 assertion is what
+    stands between the user and silent nothing; pinning that signature here
+    proves the assertion discriminates refusal from silence.
+
+    🔴 Red on the Windows leg at the test commit too — at the base revision the
+    menu's own (real) predicate is also blind for ``NUL``, so the child crashes
+    inside the menu rather than declining silently. Green on every leg after the
+    fix. A watcher seeing both new tests red at the test commit is seeing the
+    expected evidence, not a harness defect.
+
+    Args:
+        tmp_path: Per-test isolated home.
+    """
+    blind_the_guard = (
+        "import sys, kitty.tui.menu as menu, kitty.tui.prompts as prompts; "
+        "real = prompts.can_interact; "
+        "prompts.can_interact = lambda: True; "
+        "assert menu.can_interact is real, 'the bait reverted the menus too, or they stopped sharing it'; "
+        "sys.argv = ['kitty', 'egress']; "
+        "from kitty.cli.main import main; main()"
+    )
+    completed = _run_child(
+        ["-c", blind_the_guard],
+        home=tmp_path / "home",
+        encoding="utf-8",
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+    )
+
+    output = ((completed.stdout or b"") + completed.stderr).decode("utf-8", errors="replace")
+    assert not _asked_for_a_terminal(completed), (
+        "a console-blind guard still triggered the refusal, so the product test "
+        f"cannot tell the fix from the defect. exit={completed.returncode}\n{output}"
+    )
+    assert (completed.returncode, TTY_DIAGNOSIS in output, _crashed(completed)) == (0, False, False), (
+        "a console-blind guard did not show the KBR-218 pass-through signature (exit 0, "
+        "no diagnosis, no crash). Either the harness no longer builds the both-streams-"
+        "discarded shape, or the menus stopped holding the real predicate. "
+        f"exit={completed.returncode}\n{output}"
     )
 
 

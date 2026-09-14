@@ -3441,13 +3441,28 @@ class BridgeServer:
                     logger.debug("Client disconnected before stream EOF")
                 return sr
 
-        # Emit response.created and response.in_progress via translator
-        start_events = translator.translate_stream_start(response_id, model)
-        # We buffer start events and only write them if the response is non-empty.
-        # This prevents the client from seeing a partial message lifecycle
-        # when we failover due to an empty response.
-        for event in start_events:
-            logger.debug("Buffered start event: %s", event.split("\n", 1)[0] if "\n" in event else event[:120])
+        # The lifecycle opening (response.created / response.in_progress) is
+        # translated speculatively at the start of each attempt — before any
+        # translate_stream_chunk call, so the attempt's sequence numbers start
+        # with the lifecycle (0, 1) and content continues from 2 — and written
+        # lazily, on the first non-finish write of that attempt (KBR-242). A
+        # purely-empty attempt writes nothing, so no half-open lifecycle
+        # crosses the empty-response failover; the next attempt rebuilds the
+        # strings after its reset. Invalidating ``start_events`` at every
+        # ``translator.reset()`` site inside the loop is part of this
+        # contract, not a nicety: the strings bake in sequence numbers.
+        start_events: list[str] | None = None
+        start_events_written = False
+
+        async def _write_lifecycle_start() -> None:
+            """Write the current attempt's lifecycle opening once — whichever hook site invokes us first."""
+            nonlocal start_events_written
+            if start_events_written or start_events is None:
+                return
+            start_events_written = True
+            for event in start_events:
+                logger.debug("SSE (start) → %s", event.split("\n", 1)[0][:120])
+                await sr.write(event.encode())
 
         upstream_status = None
         terminal_status = "completed"
@@ -3493,6 +3508,13 @@ class BridgeServer:
                         max_attempts,
                     )
                     await asyncio.sleep(delay)
+                # Speculatively translate the lifecycle opening for this attempt,
+                # before any translate_stream_chunk: both draw from the same _seq
+                # counter, so the lifecycle must consume 0 and 1 before the first
+                # chunk's events. Rebuilt only after a translator.reset() (which
+                # restarts the counter) — see the invalidation sites below.
+                if start_events is None:
+                    start_events = translator.translate_stream_start(response_id, model)
                 # A Messages-wire upstream speaks Anthropic SSE, which no Responses
                 # client can read: each line is converted to a Chat Completions
                 # chunk first (KBR-232).  Re-created per attempt so a failover onto
@@ -3683,6 +3705,11 @@ class BridgeServer:
                                         last_usage = chunk.get("usage")
                                         finish_events.extend(events)
                                     else:
+                                        # Only a real event opens the lifecycle: a
+                                        # non-finish chunk that translates to nothing
+                                        # must not publish it before an empty verdict.
+                                        if events:
+                                            await _write_lifecycle_start()
                                         for event in events:
                                             logger.debug("SSE → %s", event.split("\n", 1)[0][:120])
                                             await sr.write(event.encode())
@@ -3721,6 +3748,10 @@ class BridgeServer:
                                             last_usage = chunk.get("usage")
                                             finish_events.extend(events)
                                         else:
+                                            # Same guard as the main loop above: only a
+                                            # real flushed event opens the lifecycle.
+                                            if events:
+                                                await _write_lifecycle_start()
                                             for event in events:
                                                 logger.debug("SSE (flush) → %s", event.split("\n", 1)[0][:120])
                                                 await sr.write(event.encode())
@@ -3734,6 +3765,7 @@ class BridgeServer:
                             logger.warning("Responses stream error after client events emitted; not retrying")
                         elif attempt < max_attempts - 1:
                             translator.reset()
+                            start_events = None
                             finish_events.clear()
                             self._select_backend()
                             self._normalize_model(cc_request)
@@ -3791,6 +3823,7 @@ class BridgeServer:
                     empty_no_finish = not finish_events and not events_emitted
                     if (translator.response_was_empty and finish_events) or empty_no_finish:
                         translator.reset()
+                        start_events = None
                         finish_events.clear()
                         if self._backends and self._current_backend_idx >= 0:
                             if self._any_healthy_backend() and attempt < max_attempts - 1:
@@ -3849,7 +3882,13 @@ class BridgeServer:
                                 )
                             break
 
-                    # Write buffered finish events to client
+                    # Write buffered finish events to client. The hook is
+                    # defensive: by the time control reaches a real non-empty
+                    # response the first content write already fired it, and an
+                    # EOF-without-finish empty stream (no finish events) must not
+                    # gain a half-open lifecycle it does not have today.
+                    if finish_events:
+                        await _write_lifecycle_start()
                     for event in finish_events:
                         logger.debug("SSE (finish) → %s", event.split("\n", 1)[0][:120])
                         await sr.write(event.encode())

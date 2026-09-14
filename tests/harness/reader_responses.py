@@ -225,6 +225,26 @@ _DATA_URL = re.compile(r"^data:([^;,]+);base64,(.*)$", re.DOTALL)
 _ANY_DATA_URL = re.compile(r"^data:", re.IGNORECASE)
 
 
+def _residualise(source: Mapping[str, Any], mapped: set[str], prefix: str, residual: dict[str, Any]) -> None:
+    """Record every key of ``source`` the reader did not map.
+
+    §3.3.1's "unknown fields fail closed", applied at depth: ``verify_total``
+    sees top-level keys only, so this is what closes the gap beneath them.
+    Mirrors ``reader_anthropic_messages._residualise`` — one spelling for one
+    rule across the readers that share it.
+
+    Args:
+        source: The object being read.
+        mapped: The keys the caller accounted for.
+        prefix: The object's path from the body root, to which each unmapped
+            key is appended.
+        residual: The residual mapping, extended in place.
+    """
+    for key, value in source.items():
+        if key not in mapped:
+            residual[c.residual_key(prefix, key)] = value
+
+
 def _mcp_tool_name(server_label: str) -> str:
     """Return the projected name of an MCP tool declaration.
 
@@ -797,7 +817,7 @@ class ResponsesProjection:
         return None
 
     @staticmethod
-    def _read_image(entry: Mapping[str, Any], path: str, residual: dict[str, Any]) -> c.Part | None:
+    def _read_image(entry: Mapping[str, Any], path: str, residual: dict[str, Any]) -> c.Image:
         """Project an ``input_image`` content part.
 
         ``contract.image_digest`` is pinned so six independently written readers
@@ -811,8 +831,18 @@ class ResponsesProjection:
             residual: Accumulator of unclassifiable values, mutated here.
 
         Returns:
-            The projected image, or ``None`` when it was residualised.
+            The projected image. Never ``None``: §7.4 rule 7 — no branch drops
+            a part, because a dropped part shifts every later part's index and
+            invents a delta on content nobody touched (KBR-251).
         """
+        # Close the depth gap for every entry the reader does not map. The
+        # published ``input_image`` keys are ``type``, ``image_url`` and
+        # ``file_id``; anything else (``detail``, future siblings) residualises
+        # at its exact path so the run fails loudly. Mirrors the Anthropic
+        # reader's block- and source-level sweeps (§3.3.1's "unknown fields
+        # fail closed").
+        _residualise(entry, {"type", "image_url", "file_id"}, path, residual)
+
         url = entry.get("image_url")
 
         if isinstance(url, str):
@@ -822,30 +852,60 @@ class ResponsesProjection:
                 try:
                     raw = base64.b64decode(payload, validate=True)
                 except (binascii.Error, ValueError):
-                    # Undecodable bytes are not an image this reader can digest,
-                    # and inventing a digest would make two unequal images
-                    # compare equal.
-                    residual[path] = entry
-                    return None
+                    # Residualised, not raised on, and the part is not dropped:
+                    # §7.4 rule 7 row 3 — "raising is the other wrong answer:
+                    # it blinds the oracle to everything else in a request it
+                    # could otherwise diff", and `validate=True` rejects every
+                    # RFC 2045 line break, so wrapped base64 is real traffic.
+                    # The identity is the wire's own bytes of the payload —
+                    # the second of `image_digest`'s recipes (KBR-192). The
+                    # media type *is* stated here and carried separately, so a
+                    # changed media type stays its own delta.
+                    residual[c.residual_key(path, "image_url")] = url
+                    return c.Image(digest=c.image_digest(payload.encode("utf-8")), media_type=media_type)
                 return c.Image(digest=c.image_digest(raw), media_type=media_type)
 
             # A data URL that is not base64 carries bytes this reader cannot
-            # canonicalise; putting it in `ref` would make it compare unequal to
-            # another reader's digest of the same image.
+            # canonicalise; putting it in `ref` would make it compare unequal
+            # to another reader's digest of the same image. The media segment
+            # *is* parseable here — anything between ``data:`` and the first
+            # ``;`` or ``,`` — and the payload sits after the first comma.
+            # Both carry through to the projected part; the digest sees only
+            # the payload bytes, so the media segment stays its own delta,
+            # consistent with `image_digest`'s "media type excluded" rule.
             if _ANY_DATA_URL.match(url):
-                residual[path] = entry
-                return None
+                residual[c.residual_key(path, "image_url")] = url
+                media_type = url[5:].split(";", 1)[0].split(",", 1)[0] or None
+                _, _, payload = url.partition(",")
+                return c.Image(digest=c.image_digest(payload.encode("utf-8")), media_type=media_type)
 
             # A remote image has no bytes to digest; the URI is the identity, the
             # same shape §3.3.1 gives Gemini's `fileData.fileUri`.
             return c.Image(ref=url)
 
+        # `image_url` present but wrongly typed is a rule-7 row-2 anomaly even
+        # when a usable `file_id` carries the part — a dropped field is the
+        # silent defect §7.4.1 names, and it would otherwise hide inside a
+        # `ref`-only projection. An *absent* `image_url` is the format's legal
+        # file_id-only shape and residualises nothing here.
+        if url is not None:
+            residual[c.residual_key(path, "image_url")] = url
+
         file_id = entry.get("file_id")
         if isinstance(file_id, str):
             return c.Image(ref=file_id)
 
-        residual[path] = entry
-        return None
+        # No identity the format defines. The part keeps its position with
+        # identity from the canonical-JSON digest of the part — the
+        # `opaque_digest` recipe, mirroring Gemini's missing-`fileUri` shape —
+        # and the residual names the missing identity key as ``None``, plus
+        # any wrongly-typed `file_id` value, so the run fails visibly at the
+        # right path.
+        if url is None:
+            residual[c.residual_key(path, "image_url")] = None
+        if file_id is not None:
+            residual[c.residual_key(path, "file_id")] = file_id
+        return c.Image(digest=c.opaque_digest(entry))
 
     def _read_function_call(self, item: Mapping[str, Any], path: str, residual: dict[str, Any]) -> c.ToolUse:
         """Project a ``function_call`` item.
