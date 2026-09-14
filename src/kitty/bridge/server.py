@@ -4066,7 +4066,7 @@ class BridgeServer:
 
         while True:
 
-        # Custom-transport providers (e.g. openai_subscription) return
+            # Custom-transport providers (e.g. openai_subscription) return
             # Responses API SSE.  We must collect the raw stream, parse it into
             # a Chat Completions response, translate to Messages API format, and
             # emit proper SSE events to the client.
