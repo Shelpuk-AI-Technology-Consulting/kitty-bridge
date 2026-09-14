@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from contextlib import contextmanager
+from itertools import cycle
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -24,9 +25,22 @@ _HELPER_MOD = "kitty.cli.auth_cmd.run_oauth_for_provider"
 def _mock_tty():
     """Context manager presenting both standard streams as terminals.
 
-    Both since KBR-204: the interactivity guard now requires stdout as well as stdin.
+    Both since KBR-204: the interactivity guard now requires stdout as well as
+    stdin. KBR-218 added a sibling patch on ``_handle_attached`` so the
+    "simulated interactivity" semantics survive the Windows branch of
+    ``can_interact``.
     """
-    with patch("sys.stdin.isatty", return_value=True), patch("sys.stdout.isatty", return_value=True):
+    with (
+        patch("sys.stdin.isatty", return_value=True),
+        patch("sys.stdout.isatty", return_value=True),
+        # KBR-218: Windows reads `_handle_attached`, not isatty.
+        # create=True because the attribute does not exist at the test commit.
+        patch(
+            "kitty.tui.prompts._handle_attached",
+            side_effect=cycle([True, True]),
+            create=True,
+        ),
+    ):
         yield
 
 
@@ -111,7 +125,12 @@ class TestRunOauthForProvider:
         """Non-TTY environment raises NonTTYError."""
         from kitty.tui.prompts import NonTTYError
 
-        with patch("sys.stdin.isatty", return_value=False):
+        with (
+            patch("sys.stdin.isatty", return_value=False),
+            # KBR-218: Windows reads `_handle_attached`, not isatty, and a real
+            # console on a developer's machine would otherwise decide this test.
+            patch("kitty.tui.prompts._handle_attached", return_value=False, create=True),
+        ):
             from kitty.cli.auth_cmd import run_oauth_for_provider
 
             with pytest.raises(NonTTYError):
@@ -263,7 +282,12 @@ class TestAuthOpenaiProfileCreation:
         """Non-TTY environment raises NonTTYError."""
         from kitty.tui.prompts import NonTTYError
 
-        with patch("sys.stdin.isatty", return_value=False):
+        with (
+            patch("sys.stdin.isatty", return_value=False),
+            # KBR-218: Windows reads `_handle_attached`, not isatty, and a real
+            # console on a developer's machine would otherwise decide this test.
+            patch("kitty.tui.prompts._handle_attached", return_value=False, create=True),
+        ):
             from kitty.cli.auth_cmd import run_auth_openai
 
             with pytest.raises(NonTTYError):
