@@ -917,6 +917,30 @@ class TestRecoveryHold:
         assert sleeps == [50.5, 249.5]
 
     @pytest.mark.asyncio
+    async def test_mid_loop_recoverable_transition_stops_holding(self):
+        """A raise that turns non-recoverable after a successful hold exits at
+        the next loop check: one sleep, then the exception returns."""
+        server = self._make_two_backend_server()
+        first = AllBackendsUnhealthyError([{"name": "a"}], retry_after=100)
+        second = AllBackendsUnhealthyError([{"name": "b"}], retry_after=100, recoverable=False)
+        result, sleeps = await self._run_hold(server, select_side_effect=[first, second])
+        assert result is second
+        assert sleeps == [100.0]
+
+    @pytest.mark.asyncio
+    async def test_truncated_wake_exits_through_the_near_expiry_gamble(self):
+        """The integer truncation in ``remaining`` shortens the first hold
+        (99.4 -> 99), so the wake lands while the cooldown is still live; the
+        re-selection must then exit through the 60 s near-expiry gamble instead
+        of raising again (SYSTEM_DESIGN.md §6.2)."""
+        server = self._make_two_backend_server()
+        _cool_backend(server, 0, cooldown=100, failed_at=999.4)
+        _cool_backend(server, 1, cooldown=100, failed_at=999.4)
+        result, sleeps = await self._run_hold(server)
+        assert result is None
+        assert sleeps == [99.0]
+
+    @pytest.mark.asyncio
     async def test_counts_each_hold_start(self):
         server = self._make_two_backend_server()
         exc = AllBackendsUnhealthyError([{"name": "a"}], retry_after=100)

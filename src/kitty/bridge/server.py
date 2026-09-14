@@ -1749,10 +1749,10 @@ class BridgeServer:
 
         Args:
             request: The inbound request.  The body is drained (best-effort)
-                before the first hold so the client is not left stalled
-                mid-upload, and the transport is polled before the first sleep
-                and after each wake so no upstream request is fired for a gone
-                reader.
+                before each hold so the client is not left stalled mid-upload
+                (aiohttp caches the read, so later iterations are no-ops), and
+                the transport is polled before the first sleep and after each
+                wake so no upstream request is fired for a gone reader.
 
         Returns:
             ``None`` when a backend was selected (directly or after holds), or

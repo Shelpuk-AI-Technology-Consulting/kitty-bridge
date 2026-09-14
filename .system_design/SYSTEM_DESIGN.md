@@ -456,9 +456,10 @@ including raises a hold then recovers). Decisions, and why:
   with a 0–2 s jitter so a herd of held sessions does not converge on the one
   just-recovered backend in a single instant; the clamp keeps every hold inside the
   window the formula promised.
-- **The client is protected while it waits.** Before the first hold the request body
+- **The client is protected while it waits.** Before each hold the request body
   is drained best-effort (aiohttp caches it, so the handler's later parse is
-  unchanged) so the client is not left stalled mid-upload; the transport is polled
+  unchanged and later iterations are no-ops) so the client is not left stalled
+  mid-upload; the transport is polled
   before the first sleep and after each wake — aiohttp runs with
   `handler_cancellation` off, so this is the only way to notice a hang-up
   (the `_raise_if_client_gone` pattern, KBR-241's `PreambleHold` being the sibling

@@ -227,6 +227,13 @@ automatically without restarting anything.
 Anything that makes a member unavailable counts: rate limits, exhausted quotas, expired credentials, upstream 5xx, and
 connection failures.
 
+**Held while recovery is near.** When *every* member of the pool is in cooldown at the moment a request arrives, kitty
+does not fail it outright: if at least one member will recover within the next 5 minutes, kitty holds the request, waits
+out the cooldown, and serves it then — your agent sees the answer a minute or two later instead of an error it might
+treat as fatal. If nothing will recover inside that window, kitty answers immediately with the same 503 and
+`Retry-After` as before. A client that disconnects during the hold ends it; a hung-up agent never causes background
+upstream calls.
+
 A dropped connection is given the benefit of the doubt first. For up to 30 seconds kitty retries the *same* member
 instead of cooling it down, so a brief network interruption between kitty and a provider costs a short pause rather
 than five minutes of that plan. Only a connection that keeps failing past that window counts as a failure. The same
