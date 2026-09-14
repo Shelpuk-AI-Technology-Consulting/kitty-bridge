@@ -1550,3 +1550,468 @@ class _OutputAfterExit(io.BytesIO):
         if self._exit_seen.wait(timeout=10) and self.tell() == 0:
             time.sleep(self._IN_FLIGHT_SECONDS)
         return super().read1(size)
+
+
+class TestTheWindowsConsoleDetachment:
+    """A background bridge must not share the console that started it (KBR-231).
+
+    ``start_new_session=True`` is POSIX-only: on Windows the child keeps the
+    launcher's console and its process group, so a Ctrl+C — or a closed window,
+    which delivers ``CTRL_CLOSE_EVENT`` to every attached process — ends a
+    bridge the user was told runs in the background. These cases are the
+    ticket's observation-first probe and, once fixed, its guard: the bridge
+    must be absent from the launching console, and must survive a console-wide
+    ``CTRL_BREAK_EVENT``. The break, not a Ctrl+C, is the broadcast: the vendor
+    docs state "CTRL+BREAK is always treated as a signal", so no ignore
+    attribute can mask it, and it travels the same per-console-attachment
+    channel a console close travels — ``CTRL_CLOSE_EVENT`` itself has no
+    event-generating API, so the channel is what the probe exercises.
+
+    They need a real console and real processes, so they run only on the
+    Windows leg. The skip is the kind ``TEST_SUITE.md`` §8.4 permits — the
+    console APIs do not exist on POSIX — and the gate's ``-rsfE`` keeps every
+    one of these skips named on the POSIX legs. No layer marker is carried:
+    the file's ``l1`` path default is what puts the probe on the Fast gate's
+    Windows leg, which is where the observation-first acceptance criterion
+    needs it (an ``l3`` marker would deselect it from every job, since no job
+    runs ``l3`` yet).
+    """
+
+    # How long the launcher waits: for the control child to report readiness
+    # (its PID file), for the go-file (the test reading the console snapshot
+    # and proving the blast radius), and for the control child to die of the
+    # broadcast before giving up and letting the test's own poll name the
+    # broadcast as not lethal. Whole seconds: they are stringified into the
+    # launcher script, where a rendered float would break range().
+    _GO_FILE_SECONDS = 30
+    _CONTROL_START_SECONDS = 30
+    _CONTROL_EXIT_SECONDS = 15
+
+    @staticmethod
+    def _bridge_script(state_path: str) -> str:
+        """Build the bridge stand-in: record state the way the runner does, then idle.
+
+        A ``python -c`` stand-in rather than ``kitty.bridge_runner``, which
+        would refresh the model-context catalog over the network — the same
+        rule ``TestStartBridgeWithALoudChild`` states.
+
+        Args:
+            state_path: Where the stand-in writes its ``bridge_state.json``.
+
+        Returns:
+            Python source for ``python -c``.
+        """
+        return (
+            "import json, os, time\n"
+            "state = dict(host='127.0.0.1', port=54321, profile='console',"
+            " started_at='now', tls=False, pid=os.getpid())\n"
+            f"with open({state_path + '.tmp'!r}, 'w') as f:\n"
+            "    json.dump(state, f)\n"
+            f"os.replace({state_path + '.tmp'!r}, {state_path!r})\n"
+            "time.sleep(120)\n"
+        )
+
+    @staticmethod
+    def _start_bridge_child(
+        script: str, state_path: Path, spawned: list[subprocess.Popen]
+    ) -> None:
+        """Run ``start_bridge`` with its real wiring, swapping only the child command.
+
+        Args:
+            script: Python source the child runs instead of ``bridge_runner``.
+            state_path: The state path handed to ``start_bridge``.
+            spawned: Receives the child, so the caller can kill and reap it.
+        """
+        from kitty.bridge.manage import start_bridge
+
+        real_popen = subprocess.Popen
+
+        def _spawn(_cmd, **kwargs):
+            """Start ``script`` in place of ``_cmd``, keeping every keyword argument.
+
+            Args:
+                _cmd: The command ``start_bridge`` built, which is not run.
+                **kwargs: ``start_bridge``'s own arguments to ``Popen``.
+
+            Returns:
+                subprocess.Popen: The started child.
+            """
+            child = real_popen([sys.executable, "-c", script], **kwargs)
+            spawned.append(child)
+            return child
+
+        with patch("kitty.bridge.manage.subprocess.Popen", side_effect=_spawn):
+            start_bridge(state_path=state_path, host="127.0.0.1", port=0)
+
+    @staticmethod
+    def _kill_pid(pid: int) -> None:
+        """Terminate a child the test holds no handle for, by the PID it recorded.
+
+        Args:
+            pid: The PID to end.
+
+        On Windows ``os.kill`` terminates unconditionally and needs no console,
+        which is what makes it usable on a detached child — and on a PID that
+        is already gone, which this suppresses rather than raising on.
+        """
+        with contextlib.suppress(ProcessLookupError, OSError):
+            os.kill(pid, getattr(signal, "SIGKILL", signal.SIGTERM))
+
+    @classmethod
+    def _cleanup(cls, state_path: Path, spawned: list[subprocess.Popen]) -> None:
+        """Kill and reap every child a case started, then any known only by PID.
+
+        The order matters: a handle-held child is killed and reaped first — a
+        terminated process stays alive to a PID probe until every handle is
+        gone — and only then is the PID recorded in the state file signalled,
+        so the next case's probe can never mistake a corpse for a bridge.
+
+        Args:
+            state_path: The state file a stand-in may have written its PID to.
+            spawned: The children this test still holds a ``Popen`` for.
+        """
+        recorded: int | None = None
+        with contextlib.suppress(OSError, ValueError, KeyError):
+            recorded = json.loads(state_path.read_text())["pid"]
+        for child in spawned:
+            child.kill()
+            child.wait(timeout=30)
+            if child.stdout is not None:
+                child.stdout.close()
+        if recorded is not None:
+            cls._kill_pid(recorded)
+
+    @staticmethod
+    def _console_process_pids() -> set[int]:
+        """Return the PIDs of every process attached to this process's console.
+
+        Windows-only; every caller is skipped to ``win32``.
+
+        Returns:
+            The PIDs ``GetConsoleProcessList`` reports, in no guaranteed order.
+
+        Raises:
+            RuntimeError: When the calling process has no console, or the
+                buffer was too small to hold every PID — the API stores
+                *nothing* in that case, and an empty or truncated answer must
+                fail loudly rather than read as "the bridge is not attached".
+                A probe that observed nothing is TEST_SUITE.md §8's
+                green-because-it-stopped-looking.
+        """
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.GetConsoleProcessList.argtypes = (
+            ctypes.POINTER(wintypes.DWORD),
+            wintypes.DWORD,
+        )
+        kernel32.GetConsoleProcessList.restype = wintypes.DWORD
+
+        # Generous fixed buffer, one call: a console has a handful of members,
+        # never thousands, and the count return is what proves the read whole.
+        buffer = (wintypes.DWORD * 1024)()
+        count = kernel32.GetConsoleProcessList(buffer, len(buffer))
+        if count == 0:
+            raise RuntimeError("GetConsoleProcessList reports no console for this process")
+        if count > len(buffer):
+            raise RuntimeError("GetConsoleProcessList needs more room than the probe gave it")
+        return set(buffer[:count])
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="Windows console behaviour")
+    def test_a_background_bridge_is_absent_from_the_launching_console(
+        self, tmp_path: Path
+    ):
+        """The bridge child is not a member of the console that started it.
+
+        The structural half of the claim, and the load-bearing one: console
+        control events are delivered per console attachment, so non-attachment
+        is what makes a closed window survivable. The positive control comes
+        first — the probe must see the very process asking, or an empty answer
+        would be indistinguishable from a detached bridge.
+        """
+        state_path = tmp_path / "state.json"
+        spawned: list[subprocess.Popen] = []
+        try:
+            self._start_bridge_child(self._bridge_script(str(state_path)), state_path, spawned)
+            [child] = spawned
+
+            pids = self._console_process_pids()
+            assert os.getpid() in pids, "the probe must see its own console to mean anything"
+            assert child.pid not in pids, (
+                "the bridge child shares the launcher's console, so a Ctrl+C "
+                "or a closed window in it would end the bridge (KBR-231)"
+            )
+        finally:
+            self._cleanup(state_path, spawned)
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="Windows console behaviour")
+    def test_a_background_bridge_survives_a_console_break_in_its_launching_console(
+        self, tmp_path: Path
+    ):
+        """A console-wide break in the launching console leaves the bridge running.
+
+        The causal half, and the closer analogue of a closed window. The
+        broadcast is issued by a launcher child with its **own** console, never
+        by this test process: a group-0 control event reaches every process on
+        the console, including the CI step's own shell, which no test can
+        immunise. The launcher embeds the ``Popen``-swap — the
+        ``TestStartBridgeWithALoudChild`` patch, replicated inside its own
+        interpreter — so ``start_bridge``'s real wiring starts the stand-in,
+        spawns a plainly-attached control child, and only then installs a
+        handler that returns ``TRUE`` so it survives its own broadcast. A
+        handler, unlike the ``NULL/TRUE`` ignore attribute, is not inherited by
+        child processes; the ordering matters even so, because the attribute is
+        not the only per-process state a child could arrive holding. The
+        control child's death is confirmed before the bridge's survival is
+        asserted: a broadcast that killed nothing would also "prove" the
+        bridge's survival, for the wrong reason.
+        """
+        control_path = tmp_path / "control.pid"
+        control_script = (
+            "import os, time\n"
+            f"open({str(control_path)!r}, 'w').write(str(os.getpid()))\n"
+            "time.sleep(120)\n"
+        )
+        state_path = tmp_path / "state.json"
+        snapshot_path = tmp_path / "launcher_console.json"
+        go_path = tmp_path / "go"
+        launcher_script = (
+            "import ctypes, json, os, subprocess, sys, time\n"
+            "from unittest.mock import patch\n"
+            "from kitty.bridge.manage import start_bridge\n"
+            "real_popen = subprocess.Popen\n"
+            "def spawn(_cmd, **kwargs):\n"
+            f"    return real_popen([sys.executable, '-c', {self._bridge_script(str(state_path))!r}], **kwargs)\n"
+            "with patch('kitty.bridge.manage.subprocess.Popen', side_effect=spawn):\n"
+            f"    start_bridge(state_path={str(state_path)!r}, host='127.0.0.1', port=0)\n"
+            f"control = subprocess.Popen([sys.executable, '-c', {control_script!r}],\n"
+            "    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
+            "# The control child writes its PID as its first statement: waiting\n"
+            "# for that file proves the child is fully started -- its console\n"
+            "# control machinery included -- before anything is broadcast to\n"
+            "# it. The first probe broadcast ~instantly after the spawn, and\n"
+            "# the Windows leg showed the control child alive 12 s later: an\n"
+            "# event delivered before the child could handle it is lost, not\n"
+            "# survived, and would void the whole proof.\n"
+            f"for _ in range({self._CONTROL_START_SECONDS * 20}):\n"
+            f"    if os.path.exists({str(control_path)!r}):\n"
+            "        break\n"
+            "    time.sleep(0.05)\n"
+            "else:\n"
+            "    print('control child never reported its PID', file=sys.stderr)\n"
+            "    sys.exit(5)\n"
+            "# Publish this console's members and hold the broadcast until the\n"
+            "# test has proven the blast radius and written the go-file: the\n"
+            "# break must never fire before its isolation is a checked fact.\n"
+            "buf = (ctypes.c_uint * 1024)()\n"
+            "n = ctypes.windll.kernel32.GetConsoleProcessList(buf, len(buf))\n"
+            f"json.dump(dict(launcher=os.getpid(), console=list(buf[:n])),\n"
+            f"    open({str(snapshot_path)!r}, 'w'))\n"
+            f"for _ in range({self._GO_FILE_SECONDS * 5}):\n"
+            f"    if os.path.exists({str(go_path)!r}):\n"
+            "        break\n"
+            "    time.sleep(0.2)\n"
+            "else:\n"
+            "    print('go file never arrived', file=sys.stderr)\n"
+            "    sys.exit(3)\n"
+            "# A handler that returns TRUE stops the dispatch: the launcher\n"
+            "# survives the console-wide break it is about to send. Installed\n"
+            "# only after both children exist.\n"
+            "HANDLER = ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.c_uint)(lambda event: 1)\n"
+            "ctypes.windll.kernel32.SetConsoleCtrlHandler(HANDLER, True)\n"
+            "# A failed broadcast must fail loudly: the first probe ignored\n"
+            "# this call's return value, so a broadcast that was never sent\n"
+            "# and a child that survived a sent one were indistinguishable\n"
+            "# in the recorded red run.\n"
+            "if not ctypes.windll.kernel32.GenerateConsoleCtrlEvent(1, 0):\n"
+            "    print('GenerateConsoleCtrlEvent failed', file=sys.stderr)\n"
+            "    sys.exit(4)\n"
+            "# Waiting on the control child, not on a clock: its exit is the\n"
+            "# observable that the broadcast reached the console's members. A\n"
+            "# child that outlives the wait is left running and reported: the\n"
+            "# launcher still exits 0, and the test's own poll names the\n"
+            "# broadcast as not lethal -- the failure path this test promises.\n"
+            "timed_out = False\n"
+            "try:\n"
+            f"    control.wait({self._CONTROL_EXIT_SECONDS})\n"
+            "except subprocess.TimeoutExpired:\n"
+            "    timed_out = True\n"
+            "if timed_out:\n"
+            f"    print('control child still alive after "
+            f"{self._CONTROL_EXIT_SECONDS}s', file=sys.stderr)\n"
+            "else:\n"
+            "    print('control child exit code', control.returncode,\n"
+            "        file=sys.stderr)\n"
+            "time.sleep(0.5)\n"
+        )
+        launcher = subprocess.Popen(
+            [sys.executable, "-c", launcher_script],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            # A private console for the launcher and everything it starts —
+            # the broadcast's whole blast radius. CREATE_NEW_CONSOLE is the
+            # one flag the vendor doc describes outright: "a new console that
+            # is accessible to the child process but not to the parent
+            # process", with no allocation subtleties to argue about.
+            creationflags=subprocess.CREATE_NEW_CONSOLE,
+        )
+        try:
+            # The snapshot must be read — and the blast radius proven — before
+            # the go-file authorises the broadcast: had the launcher landed on
+            # this process's console, the group-0 break would reach the CI
+            # step's shell, and this test would be manufacturing that event.
+            deadline = time.monotonic() + self._GO_FILE_SECONDS
+            while not snapshot_path.exists() and time.monotonic() < deadline:
+                time.sleep(0.2)
+            assert snapshot_path.exists(), "the launcher never published its console snapshot"
+            snapshot = json.loads(snapshot_path.read_text())
+            own_console = self._console_process_pids()
+            assert own_console, "this test has no console to be disjoint from"
+            assert snapshot["launcher"] not in own_console, (
+                "the launcher was not given its own console; the broadcast's "
+                "blast radius is not what this test assumes"
+            )
+            assert own_console.isdisjoint(snapshot["console"]), (
+                "the launcher's console and this test's console share members; "
+                "the broadcast would not be contained"
+            )
+            go_path.write_text("go")
+
+            stdout, stderr = launcher.communicate(timeout=90)
+            assert launcher.returncode == 0, (
+                f"launcher failed ({launcher.returncode}): {stderr or stdout}"
+            )
+
+            from kitty.bridge.manage import ProcessLiveness, probe_pid
+
+            control_pid = int(control_path.read_text())
+            bridge_pid = json.loads(state_path.read_text())["pid"]
+
+            deadline = time.monotonic() + 10
+            while probe_pid(control_pid) is ProcessLiveness.ALIVE and time.monotonic() < deadline:
+                time.sleep(0.2)
+            assert probe_pid(control_pid) is not ProcessLiveness.ALIVE, (
+                "the broadcast was not lethal to a console member, so it "
+                "proves nothing about the bridge"
+            )
+            assert probe_pid(bridge_pid) is ProcessLiveness.ALIVE, (
+                "the bridge died with its launching console (KBR-231)"
+            )
+        finally:
+            self._cleanup(state_path, [])
+            with contextlib.suppress(OSError, ValueError):
+                self._kill_pid(int(control_path.read_text()))
+            # A failed assertion above leaves the launcher parked in its
+            # go-file wait -- it would exit 3 by itself, but only after the
+            # whole wait budget. On the happy path this is a no-op.
+            with contextlib.suppress(OSError):
+                launcher.kill()
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="Windows console behaviour")
+    def test_bridge_stop_still_ends_a_detached_bridge(self, tmp_path: Path):
+        """``stop_bridge`` ends the bridge and clears its state, console or no console.
+
+        The ticket's AC2 tail: detachment must not outlive the user's ability
+        to stop the thing. ``os.kill`` on Windows terminates unconditionally
+        and needs no console, so this holds before the fix as well — the case
+        pins it through the change.
+        """
+        from kitty.bridge.manage import ProcessLiveness, probe_pid, stop_bridge
+
+        state_path = tmp_path / "state.json"
+        spawned: list[subprocess.Popen] = []
+        try:
+            self._start_bridge_child(self._bridge_script(str(state_path)), state_path, spawned)
+            bridge_pid = json.loads(state_path.read_text())["pid"]
+            assert probe_pid(bridge_pid) is ProcessLiveness.ALIVE
+
+            stop_bridge(state_path)
+
+            assert not state_path.exists()
+            assert probe_pid(bridge_pid) is not ProcessLiveness.ALIVE
+        finally:
+            self._cleanup(state_path, spawned)
+
+
+class TestTheBackgroundSpawnDecision:
+    """The per-platform detachment arguments ``start_bridge`` spawns the child with (KBR-231).
+
+    A pure decision is tested on every leg by handing it the platform — the
+    pattern ``test_probe_pid_never_signals_zero_on_windows`` established. That
+    the defect is Windows-only is exactly why the POSIX legs must still check
+    the Windows answer: they make up four of the six legs, and a Windows-only
+    regression test could rot unnoticed in between.
+    """
+
+    @pytest.mark.parametrize(
+        ("platform", "expected"),
+        [
+            ("win32", {"creationflags": 0x00000200 | 0x00000008}),
+            ("linux", {"start_new_session": True}),
+            ("darwin", {"start_new_session": True}),
+        ],
+    )
+    def test_the_detachment_arguments_per_platform(self, platform: str, expected: dict):
+        """Give the decision each platform and expect exactly its detachment keys.
+
+        Args:
+            platform: A ``sys.platform`` value to hand the decision.
+            expected: The keyword arguments the decision must return for it.
+        """
+        from kitty.bridge.manage import background_spawn_kwargs
+
+        assert background_spawn_kwargs(platform) == expected
+
+    def test_the_windows_flags_are_the_documented_win32_values(self):
+        """Pin the two constants to WinBase.h's literal values."""
+        from kitty.bridge import manage
+
+        # WinBase.h's values, pinned as literals: a near miss (0x2000 for 0x200,
+        # say) would still type-check and still detach nothing.
+        assert manage._CREATE_NEW_PROCESS_GROUP == 0x00000200
+        assert manage._DETACHED_PROCESS == 0x00000008
+
+    def test_the_posix_arguments_carry_no_windows_key(self):
+        """Refuse the POSIX form any ``creationflags`` key, even a falsy one."""
+        from kitty.bridge.manage import background_spawn_kwargs
+
+        # POSIX Popen raises ValueError for a nonzero creationflags, so the
+        # decision must not hand POSIX a Windows key even with a falsy value.
+        assert "creationflags" not in background_spawn_kwargs("linux")
+
+    def test_start_bridge_passes_the_decision_to_popen(self, tmp_path: Path):
+        """The spawn site runs the child under the decision's own arguments.
+
+        Captures the real ``Popen`` call and compares its detachment keys with
+        the decision for the running platform: ``start_new_session=True`` kept
+        on POSIX, ``creationflags`` on Windows, and never a key from the other.
+        """
+        from kitty.bridge import manage
+        from kitty.bridge.manage import start_bridge
+
+        captured: dict = {}
+
+        def _spawn(_cmd, **kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(poll=lambda: 1, stdout=io.BytesIO(), returncode=1)
+
+        with (
+            patch("kitty.bridge.manage.subprocess.Popen", side_effect=_spawn),
+            pytest.raises(SystemExit),
+        ):
+            start_bridge(state_path=tmp_path / "state.json", host="127.0.0.1", port=0)
+
+        detachment = {
+            key: captured[key]
+            for key in ("start_new_session", "creationflags")
+            if key in captured
+        }
+        assert detachment == manage.background_spawn_kwargs(sys.platform)
+        # And nothing else drifted at the spawn site: the pipe wiring and the
+        # merged stderr are the KBR-176 contract, the environment the egress
+        # one.
+        assert set(captured) == set(detachment) | {"stdout", "stderr", "env"}
+        assert captured["stdout"] is subprocess.PIPE
+        assert captured["stderr"] is subprocess.STDOUT
