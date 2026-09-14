@@ -2654,12 +2654,24 @@ Claude Code with none of the retry the Chat Completions path has. KBR-155 closed
 preamble hold of §11 Q14(b): `bridge/preamble_hold.py`'s `PreambleHold` is now the fourth oracle,
 judging the native stream by its release rule before any byte is written. A recorder's scripted
 Anthropic SSE success must therefore carry content — a contentless one is an empty reply and costs
-the retry ladder. **The four oracles still do not agree on every shape**, and this is recorded
-rather than smoothed over: the non-streaming judgement `_is_empty_cc_response` calls a reply of only
-`server_tool_use` or `web_search_tool_result` blocks empty (D1 does not) and retries a `max_tokens`
+the retry ladder. **The four oracles did not agree on every shape**, and this was recorded
+rather than smoothed over: the non-streaming judgement `_is_empty_cc_response` called a reply of only
+`server_tool_use` or `web_search_tool_result` blocks empty (D1 does not) and retried a `max_tokens`
 reply with no content (D3 does not), and a translated stream that yields no chunk and no
-`finish_reason` never reaches its buffered-finish check, so it is written as an empty `200`. None of
-the three is KBR-155's; each is a candidate for its own ticket.
+`finish_reason` never reached its buffered-finish check, so it was written as an empty `200`. None
+of the three was KBR-155's; each was a candidate for its own ticket. **All three closed 2026-09-14
+under KBR-235**: the no-finish translated stream takes the same ladder as any empty reply and ends
+it in the D4 error (owner decision, recorded under Q14 below); `_is_empty_cc_response`'s
+Messages-shaped arm now mirrors `PreambleHold`'s release rule — D1 judges by block type, D3 ends
+the non-streaming ladder at once with the `400` at every gate the judgement feeds. Still open,
+recorded rather than smoothed over: the translated route's **exhaustion is split** — a contentless
+reply *with* `finish_reason` still exhausts into the M12 fallback text while a no-finish stream
+exhausts into the D4 error, until the owner unifies them; the translated route has **no streaming
+D3** — a `max_tokens` finish-chunk empty stream is still retried and fallback-ized, the route's
+pre-existing finish-chunk behaviour this change deliberately did not touch; and the
+`/v1/responses` and Gemini streaming branches keep the same no-finish hole (KBR-232's territory).
+The Chat Completions-shaped arm of `_is_empty_cc_response` keeps its `.strip()` judgement — D1/D3
+are decisions about Messages-format replies.
 
 #### 7.2.2 What T-B1 settled — the provider-session recorder
 
@@ -5138,6 +5150,33 @@ found cases they did not reach and one they understated. Each is decided here, w
   (iv) Until KBR-183 lands, a timeout *after* release can still start another attempt; if that
   attempt comes back empty the stream is already open, so the branch reads `sr` — as G26 requires of
   every new branch — and ends the stream with one SSE `error` event instead of a JSON `502`.
+
+**Extended to the translated Chat Completions route by KBR-235 (owner decision, 2026-09-14).**
+The translated branch of `_stream_messages` judged an empty reply only when a chunk carrying
+`finish_reason` had arrived, so a `200` whose stream was zero bytes, `[DONE]`-only, or otherwise
+content-free with no finish chunk reached Claude Code as an empty turn — no retry, no failover,
+and the backend marked healthy. Those streams now take the same ladder as any empty reply, and
+**(b)'s preamble hold needs no translated counterpart**: the branch already withholds the finish
+events, and the no-finish shapes write nothing, so an empty attempt is still pre-emission when
+the gate judges it. The gate's no-finish arm also stands down once the request has written
+anything (`sr is not None`): `events_emitted` counts one attempt, while `sr` counts the request,
+so a request that has already written is post-emission — Q14(a)'s situation, and KBR-236's to
+fix, not the D4 path's. The exhaustion outcome was this ticket's one owner decision, and the product
+owner chose **D4, not M12**: a no-finish empty stream that exhausts the ladder ends in the same
+`502` `api_error` `reason: "empty_response"` as the native route — a `200` carrying substituted
+text is the one thing the route must never produce, and exhausting into an error opens no second
+exhaustion vocabulary. Two boundaries recorded with the decision: the contentless-with-
+`finish_reason` case keeps its M12 fallback exhaustion, so the route's exhaustion is deliberately
+split until the owner unifies it; and the translated route has **no streaming D3** — a
+`max_tokens` finish-chunk empty stream is still retried and fallback-ized, the route's
+pre-existing finish-chunk behaviour this change deliberately did not touch. The non-streaming
+judgement `_is_empty_cc_response` and the four ladders it gates were aligned with D1/D3 for
+Messages-shaped replies in the same change (§7.2.1 above): D1 by block type, mirroring
+`PreambleHold._block_start_releases`; D3 ends the ladder at once and the Messages handler returns
+the `400` with the same body the native branch builds. The branch's tail-flush write path now
+sets `events_emitted`, so content arriving in a final unterminated line counts as a write for
+both the emptiness gate and FI-8.3's truncation guard. The post-emission retry a content delta
+after the finish chunk can still trigger is KBR-236's, untouched here.
 
 **Why, and not the obvious alternative.** Three reasons, in decreasing order of how much they
 would cost to be wrong about.
