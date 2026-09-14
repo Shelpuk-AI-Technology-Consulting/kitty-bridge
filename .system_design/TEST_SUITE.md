@@ -1053,7 +1053,7 @@ list of headers we happened to think of. That posture is what surfaced F3 and F4
 |---|---|---|
 | **C1 — Request headers** | `build_upstream_headers()` constructs the set from scratch; no inbound agent header is forwarded. Four adapters supply a coding-agent `User-Agent` (P9a, P9c); every other provider — including `zai_coding`, whose set is exactly `Authorization`, `anthropic-version`, `content-type` — sends aiohttp's default. | **Gap, and inconsistent.** F1. |
 | **C2 — Request body** | The register's mutations (§3.2), JSON key ordering produced by kitty's serialisation, ~~the literal string `[Kitty Bridge: …]` (M13)~~ **— fixed, KBR-5** — and **`_effort` / `_thinking_adaptive`, which are kitty-internal and reach the wire**. With M13 gone the only bridge-introduced literal left in the body is `[Tool output truncated — original size: N chars]` (M3/M4): still a viable fingerprint, it simply does not name the product. | **Still breached by F4.** F3 closed. |
-| **C3 — Cross-attempt content and cadence** | Retries (`_MAX_RETRIES = 3`), failover, transport-blip re-connects, the empty-response ladder — and **four** paths that send a *different body* on a later attempt (M6, M8, M9, and failover re-normalisation). | §4.3 C3. Four declared exceptions. |
+| **C3 — Cross-attempt content and cadence** | Retries (`_MAX_RETRIES = 3`), failover, transport-blip re-connects, the empty-response ladder — and **five** paths that send a *different body* on a later attempt (M6, M8, M9, M17, and failover re-normalisation). | §4.3 C3. Five declared exceptions. |
 | **C4 — Transport fingerprint** | TLS/ALPN/HTTP-2 signature of aiohttp, unlike the agent's own client. `curl_cffi` is already used for the OpenAI subscription provider precisely because that provider fingerprints TLS. | **Accepted residual risk.** §4.5 — including the narrower, *provider-specific* residual KBR-161 leaves on the OpenAI login leg, which the general argument does **not** cover. |
 | **C5 — Connection lifecycle** | `_build_client_session` uses `TCPConnector(limit=…, force_close=True)` — a fresh TCP and TLS connection for **every** upstream request, no keep-alive reuse. The agent's client does not behave that way. | **Gap.** A cheap, non-TLS fingerprint — arguably more detectable than C4. §4.3 C5. |
 
@@ -2028,7 +2028,7 @@ each show how easily one goes vacuous.
 | Transparency oracle over the corpus (§3.3), per adapter × model × transport | No unclaimed delta; every conditional row exercised with trigger **and** complement |
 | Bridge-introduced vendor token (§4.3 C2) | An inbound `kitty` string survives byte-identically; an injected vendor message is caught |
 | Sealed network (§5.2), all three phases, per transport (§5.5) | Positive control passes; zero connections with the proxy down; the falsification control fails the harness |
-| Cross-attempt content (§4.3 C3) | Transport-blip and empty-response retries byte-identical; each of M6, M8, M9 and failover re-normalisation fires only under its own trigger |
+| Cross-attempt content (§4.3 C3) | Transport-blip and empty-response retries byte-identical; each of M6, M8, M9, M17 and failover re-normalisation fires only under its own trigger |
 | Connection lifecycle (§4.3 C5) | Distinct-connection count per session, against the native baseline |
 | **Streaming recovery — content, not just grammar** (below) | Four injection points; no duplication, no replayed tool calls, no spliced arguments — and, per §11 Q14, exactly one upstream request at the recorder for the three post-emission points |
 | Client disconnect during a stream | Upstream connection released; the backend not marked unhealthy for a client-side fault |
@@ -4935,10 +4935,10 @@ upstream rejects the request otherwise — and every one means a setting the age
 does nothing. Today each logs at DEBUG. A one-line warning at launch would make it visible at
 the cost of noise.
 
-**Q6 — Which of the four body-changing retry paths are acceptable (§4.3 C3)?** M6, M8, M9 and
+**Q6 — Which of the five body-changing retry paths are acceptable (§4.3 C3)?** M6, M8, M9, M17 and
 failover re-normalisation each send a different payload on a later attempt, and a provider that
-hashes bodies sees all four. The alternative in each case is to fail the turn, which is worse for
-the user. Declare all four as exceptions, or close some?
+hashes bodies sees all five. The alternative in each case is to fail the turn, which is worse for
+the user. Declare all five as exceptions, or close some?
 
 **Q7 — Should `force_close=True` stay (C5, §4.5)?** It prevents port exhaustion but produces a
 connection pattern unlike the agent's own. Keep, or trade for keep-alive parity? §5.2.1 is
