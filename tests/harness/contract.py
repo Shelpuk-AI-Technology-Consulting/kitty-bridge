@@ -1582,7 +1582,7 @@ def tool_path(name: str, field_name: str | None = None) -> str:
 def header_path(name: str) -> str:
     """Return the path naming one request header.
 
-    P9a, P9b and P9c change headers rather than the body, and §4.3 C1 asserts on
+    The P9 header rows change headers rather than the body, and §4.3 C1 asserts on
     the exact header set.
 
     Args:
