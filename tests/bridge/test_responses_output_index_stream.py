@@ -8,12 +8,13 @@ items at slot 0 and closed slot 0 twice. This proves the fix on the path Codex
 actually uses: an in-process server, a scripted Chat Completions upstream, and
 the client-visible byte stream walked end to end.
 
-Decided stream shape (REQUIREMENTS.md, KBR-240; same decision as KBR-226's G39):
-items may overlap in time and need not close in order — clients key items by
-``item_id`` and position by ``output_index`` — but each index opens once, closes
-once, closes only after it opened, and carries no delta outside its own item.
-The ``function_call_arguments`` events carry ``output_index`` too: the vendor
-grammar defines it there as a required field.
+Decided stream shape (KBR-240; `.system_design/SYSTEM_DESIGN.md` §4.2, the same
+decision as G39/KBR-226): items may overlap in time and need not close in
+order — clients key items by ``item_id`` and position by ``output_index`` —
+but each index opens once, closes once, closes only after it opened, and
+carries no delta outside its own item. The ``function_call_arguments`` events
+carry ``output_index`` too: the vendor grammar defines it there as a required
+field.
 """
 
 from __future__ import annotations

@@ -1340,6 +1340,27 @@ class TestOutputItemIndices:
         assert output_types == ["reasoning", "message"]
         assert completed[0]["response"]["output"][0]["summary"][0]["text"] == "working it out"
 
+    def test_synthesize_closes_text_stripped_to_nothing_before_a_call(self):
+        """EOF with thinking-tag-only text plus a tool call closes both.
+
+        The synthesize path closes items by whether they *opened*, not by
+        whether their text survived tag-stripping — the timeout-shaped twin of
+        ``test_completed_array_includes_item_whose_text_stripped_to_nothing``,
+        which walks the finish path. The two paths use different predicates
+        and emit in different orders, so neither covers the other.
+        """
+        self._feed({"content": "<اخل>weighing it</اخل>"})
+        self._feed({"tool_calls": [self._tool_call(0, "call_a", '{"path": "a"}')]})
+
+        final_events = [
+            _parse_sse_event(raw) for raw in self.t.synthesize_completed_events(self.resp_id, "m")
+        ]
+        assert self._done_indices(final_events) == [0, 1]
+        completed = [d for name, d in final_events if name == "response.completed"]
+        output_types = [item["type"] for item in completed[0]["response"]["output"]]
+        assert output_types == ["message", "function_call"]
+        assert completed[0]["response"]["output"][0]["content"][0]["text"] == ""
+
     def test_reset_restarts_allocation_at_zero(self):
         """A second stream on a reused translator allocates from 0 again."""
         self._feed({"content": "First stream."})
