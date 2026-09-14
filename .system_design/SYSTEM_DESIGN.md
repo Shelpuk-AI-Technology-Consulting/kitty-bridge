@@ -277,3 +277,81 @@ prints `kitty exited with code N - press Enter to close` and waits for a line or
   later Claude release; the cost of drift is a name mismatch, not a failure.
 - If the inner Python cannot start at all (e.g. the interpreter was removed), nothing holds the
   pane; the outer kitty still deletes the environment file.
+
+## 4. Backend health, cooldowns, and the arrival recovery hold
+
+### 4.1 The state machine as it stands
+
+Each backend of a balancing pool carries a health record
+(`BridgeServer._backend_health`). A failure marks it unhealthy for a cooldown whose
+length depends on the kind: `rate_limit` from the provider's own retry hint,
+`hard`/`cloudflare` from `backend_cooldown` (default 300 s; capped at 30 s for a
+one-backend pool), `transport`/`stream` on an escalating ladder, `auth` for 900 s,
+`entitlement` for 24 h. On request arrival `_select_backend()` picks among healthy
+backends (backup tier held out while a primary lives); when **every** backend is
+cooling it either gambles on a near-expiry backend (soonest recovery ≤ 60 s,
+`_ALL_UNHEALTHY_FAST_FAIL_THRESHOLD`) or raises `AllBackendsUnhealthyError`, which the
+four protocol handlers answer with an immediate per-protocol 503 carrying
+`Retry-After` and the per-backend causes.
+
+### 4.2 KBR-243: hold the arrival while recovery fits inside the window
+
+An immediate 503 makes Claude Code abandon the turn even when the outage is seconds
+from ending; the operator's session then stalls until a human re-sends. **To Be:**
+when selection fails on arrival, `_select_backend_or_hold()` holds the request while
+the soonest expiry fits strictly inside `_RECOVERY_HOLD_WINDOW` (300 s) of the arrival
+— sleep to the expiry, re-select, proceed — and answers with the today-shaped 503
+built from the **latest** failure only once no recovery fits. `/stats` gains
+`recovery_holds` (hold starts; `all_backends_unhealthy` keeps counting raise events,
+including raises a hold then recovers). Decisions, and why:
+
+- **Arrival only.** The reported failure mode is the arrival 503 (the ticket's log:
+  the agent quits at second zero). Mid-ladder exhaustion is a different path whose
+  post-emission side is governed by the Q14/KBR-163 rule that the bridge never retries
+  or holds once bytes reached the client; blanket mid-ladder holds would have to be
+  proven per transport and are deliberately out of scope.
+- **Uniform across cooldown kinds.** The hold does not filter `rate_limit` from
+  `hard`/`transport`/`cloudflare` — the same uniformity as the existing 60 s
+  near-expiry gamble, which also does not care why a backend cools. `auth` (900 s)
+  and `entitlement` (24 h) exceed the window and 503 immediately; in the narrow band
+  where their *remainder* fits, one ≤300 s hold precedes the 503 — acceptable for a
+  session that is already dead.
+- **No polling: sleep exactly to the expiry.** Cooldown expiry is deterministic
+  monotonic arithmetic, so waking at `retry_after` wastes nothing. The integer
+  truncation in `remaining` can wake the loop ≤1 s early; the re-selection then exits
+  through the existing near-expiry gamble, which is what that branch is for.
+- **Strict window.** A recovery exactly 300 s away 503s immediately: a 300 s silent
+  hold sits on common client idle-timeout edges and buys nothing over an immediate
+  503 carrying `Retry-After: 300`. The window is hard-coded from the ticket
+  ("within the next 300 seconds"); a configuration knob waits for an operator asking
+  for one.
+- **`recoverable=False` on the no-stream-capable raise.** That raise fabricates
+  `retry_after=300` (§4.1's streaming filter — unreachable at arrival today, kept as
+  hardening): its number is not a recovery time, so the hold must never sleep on it.
+- **Jitter, clamped.** Each hold sleeps `min(retry_after + jitter, window − elapsed)`
+  with a 0–2 s jitter so a herd of held sessions does not converge on the one
+  just-recovered backend in a single instant; the clamp keeps every hold inside the
+  window the formula promised.
+- **The client is protected while it waits.** Before the first hold the request body
+  is drained best-effort (aiohttp caches it, so the handler's later parse is
+  unchanged) so the client is not left stalled mid-upload; the transport is polled
+  before the first sleep and after each wake — aiohttp runs with
+  `handler_cancellation` off, so this is the only way to notice a hang-up
+  (the `_raise_if_client_gone` pattern, KBR-241's `PreambleHold` being the sibling
+  hold) — and a gone client ends the hold with no upstream request fired for it.
+- **Client-side deadlines.** The binding deadline for a held request is Claude Code's
+  streaming first-byte watchdog (~5 min unset default); `API_TIMEOUT_MS` (10 min
+  default) is the outer cap. A client that aborts re-sends, and the re-sent request
+  re-enters the hold benignly — a new arrival under the same formula. SSE keep-alive
+  pings would let holds run longer still, but are deferred as an accepted cost
+  (keep-alive semantics differ across the four served protocols, and inventing bytes
+  on three of them is an I2 exposure); revisit if field reports show clients idling
+  out mid-hold.
+- **Empty-pool profiles are untouched.** A profile without a backends list never
+  raises on arrival and never holds; a one-element balancing list holds like any
+  pool. Graceful shutdown may wait behind held sessions up to aiohttp's
+  `shutdown_timeout` (60 s default) — accepted, bounded.
+
+Tests: `tests/bridge/test_all_backends_unhealthy.py` — `TestRecoveryHold` (L1, the
+stepped-on-sleep fake clock) and `TestArrivalHoldWiring` (HTTP against the real app;
+a real 1 s hold, jitter patched).
