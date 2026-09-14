@@ -489,3 +489,19 @@ class TestBridgeConfigReportsTheEffectiveKeysFile:
         code, output = install.kitty("bridge", "config")
         assert code == 0, f"kitty bridge config failed:\n{output}"
         assert f"Keys file: {default}" in output, output
+
+    def test_a_named_missing_keys_file_is_flagged_in_the_display(self, kitty_install_without_keys: KittyInstall):
+        """A named-but-missing keys file does not display like a working one (KBR-230).
+
+        §1.6's row 2 and row 1 must be distinguishable on screen, or the user
+        reads auth-on from a `bridge start` that will be refused.
+        """
+        install = kitty_install_without_keys
+        named = install.root / "absent" / "keys.txt"
+        (install.config_dir / "bridge.yaml").write_text(
+            f"host: 127.0.0.1\nport: 0\nkeys_file: {named}\n", encoding="utf-8"
+        )
+
+        code, output = install.kitty("bridge", "config")
+        assert code == 0, f"kitty bridge config failed:\n{output}"
+        assert f"Keys file: {named} (not found" in output, output

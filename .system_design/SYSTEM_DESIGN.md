@@ -99,7 +99,9 @@ the keys file, and the decision table has four rows:
 | Nothing named, no default file | Starts with auth **off** — every route, `/healthz` included, answers without credentials. |
 
 `resolve_keys_file` (`kitty.bridge.config`) computes the effective file for the two "nothing named"
-rows and for `kitty bridge config`'s display, which prints `(none — auth disabled)` for the last one.
+rows and for `kitty bridge config`'s display, which prints `(none — auth disabled)` for the last one
+and marks a named-but-missing file `(not found — start will be refused)`, so row 2 never displays
+like row 1.
 `bridge_runner` owns row 2's refusal, beside its other startup errors (egress, profile, API key):
 the server has no printing convention, and the foreground — which never passes `keys_file` — is
 unaffected. A bare `bridge_runner` without `--config` keeps auth off; every real entry point

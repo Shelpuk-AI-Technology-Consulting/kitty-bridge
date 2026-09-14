@@ -296,7 +296,13 @@ def main() -> None:
         print(f"Host: {config.host}")
         print(f"Port: {config.port}")
         print(f"Profile: {config.profile or '(default)'}")
-        print(f"Keys file: {resolve_keys_file(config) or '(none — auth disabled)'}")
+        # Row 2 of SYSTEM_DESIGN.md §1.6 must not display like row 1: name the
+        # missing file, or the user reads auth-on from a start that will refuse.
+        _keys = resolve_keys_file(config)
+        if config.keys_file is not None and _keys is not None and not _Path(_keys).exists():
+            print(f"Keys file: {_keys} (not found — start will be refused)")
+        else:
+            print(f"Keys file: {_keys or '(none — auth disabled)'}")
         print(f"Log access: {config.log_access}")
         print(f"Log dir: {config.log_dir}")
         print(f"TLS cert: {config.tls_cert or '(none)'}")
