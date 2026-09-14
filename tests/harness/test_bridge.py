@@ -20,8 +20,10 @@ import ast
 import asyncio
 import json
 import socket
+import time
 import uuid
 from pathlib import Path
+from typing import Any
 
 import aiohttp
 import pytest
@@ -57,6 +59,61 @@ from kitty.providers.base import ProviderAdapter
 from kitty.providers.minimax_token import MiniMaxTokenAnthropicAdapter
 from kitty.providers.vertex import VertexAIAdapter
 
+
+def _curl_cffi_setup(certs, tmp_path: Path) -> tuple[dict[str, Any], str]:
+    """Return the curl_cffi transport's kwargs and OAuth key.
+
+    The transport's recorder terminates TLS with the harness certificate and
+    its adapter must trust the same CA, so the row's construction needs both
+    the session-scoped ``certs`` fixture and a written OAuth session file.
+
+    Args:
+        certs: The session-scoped throwaway certificate set.
+        tmp_path: The pytest-provided temporary directory.
+
+    Returns:
+        A ``(transport_kwargs, oauth_key)`` pair. ``transport_kwargs`` carries
+        the TLS context and CA path; ``oauth_key`` is a session-file path the
+        adapter can load.
+    """
+    from harness.connect_proxy import server_ssl_context
+    from harness.curl_cffi import CurlCffiTransport  # noqa: F401  (import registers the transport)
+
+    ca_path = tmp_path / "kbr41-ca.pem"
+    ca_path.write_bytes(Path(str(certs.ca)).read_bytes())
+    kwargs = {
+        "ssl_context": server_ssl_context(certs.target_cert, certs.target_key),
+        "ca_cert": ca_path,
+    }
+    return kwargs, _seed_oauth_session(tmp_path)
+
+
+def _seed_oauth_session(tmp_path: Path) -> str:
+    """Write an OAuth session file whose tokens are not due to refresh.
+
+    Args:
+        tmp_path: Where to write the file.
+
+    Returns:
+        The path to the saved session JSON. Fresh tokens keep the refresh
+        path — and with it the clock — out of the conformance check.
+    """
+    from kitty.auth.oauth_session import OAuthSession
+
+    now = time.time()
+    session = OAuthSession(
+        client_id="app_test",
+        access_token="at_fresh",
+        refresh_token="rt_fresh",
+        id_token="eyJhbGciOiJIUzI1NiJ9.e30.fake_sig",
+        api_key=None,
+        access_token_expires_at=now + 3600,
+        api_key_expires_at=now + 3600,
+        _file_path=str(tmp_path / "oauth_session.json"),
+    )
+    session.save()
+    return str(session._file_path)
+
 #: One row per registered transport: the module that registers it, its registry
 #: name, the upstream format to construct it with, and **the inbound route that
 #: exercises it**. Each of T-B1 (KBR-40), T-B2 (KBR-41) and T-B3 (KBR-42) adds
@@ -72,16 +129,17 @@ from kitty.providers.vertex import VertexAIAdapter
 #: This lives here and not in ``bridge.py`` on purpose: the structural guard
 #: forbids that module importing an Epic B one, and registry completeness is a
 #: property of the suite, not of the core.
-CONFORMANCE_CASES: tuple[tuple[str, str, WireFormat, InboundProtocol], ...] = (
-    ("harness.bridge", "aiohttp", WireFormat.ANTHROPIC_MESSAGES, InboundProtocol.MESSAGES),
-    ("harness.provider_aiohttp", "provider_aiohttp", WireFormat.OLLAMA_CHAT, InboundProtocol.CHAT_COMPLETIONS),
+CONFORMANCE_CASES: tuple[tuple[str, str, WireFormat, InboundProtocol, Any], ...] = (
+    ("harness.bridge", "aiohttp", WireFormat.ANTHROPIC_MESSAGES, InboundProtocol.MESSAGES, None),
+    ("harness.provider_aiohttp", "provider_aiohttp", WireFormat.OLLAMA_CHAT, InboundProtocol.CHAT_COMPLETIONS, None),
+    ("harness.curl_cffi", "curl_cffi", WireFormat.OPENAI_RESPONSES, InboundProtocol.RESPONSES, _curl_cffi_setup),
 )
 
 #: What the modules above are expected to have registered between them. Derived
 #: from the rows, **not** from ``REGISTERED_HERE``: that tuple is the core's own
 #: registration and is pinned to one entry, so deriving from it would mean an
 #: Epic B author's single new row still failed the completeness check.
-EXPECTED_TRANSPORTS: frozenset[str] = frozenset(name for _module, name, _fmt, _route in CONFORMANCE_CASES)
+EXPECTED_TRANSPORTS: frozenset[str] = frozenset(name for _module, name, _fmt, _route, _key in CONFORMANCE_CASES)
 
 #: Both formats the primary recorder serves, with the inbound route that matches
 #: each — the pair every end-to-end case below is parametrised over.
@@ -189,9 +247,12 @@ class TestTheRegistry:
 
     def test_an_unknown_name_raises_and_names_what_is_registered(self) -> None:
         """The message has to be actionable: the likely cause is a missing import."""
+        # A name no Epic B transport claims, chosen because it is a plausible
+        # misspelling of one that exists — "curl_cffi" was the probe until T-B2
+        # registered it for real.
         with pytest.raises(LookupError, match="aiohttp") as excinfo:
-            transport("curl_cffi", WireFormat.CHAT_COMPLETIONS)
-        assert "curl_cffi" in str(excinfo.value)
+            transport("cur_cffi", WireFormat.CHAT_COMPLETIONS)
+        assert "cur_cffi" in str(excinfo.value)
 
     def test_this_module_registers_exactly_one_transport(self) -> None:
         """Pin ``bridge.py``'s own registration, not the process-wide registry.
@@ -1042,12 +1103,13 @@ class TestTheConformanceCheck:
         await assert_transport_reaches_its_recorder(transport("aiohttp", fmt))
 
     @pytest.mark.parametrize(
-        ("module", "name", "fmt", "route"),
+        ("module", "name", "fmt", "route", "setup"),
         list(CONFORMANCE_CASES),
-        ids=[name for _module, name, _fmt, _route in CONFORMANCE_CASES],
+        ids=[name for _module, name, _fmt, _route, _setup in CONFORMANCE_CASES],
     )
     async def test_every_registered_transport_passes(
-        self, module: str, name: str, fmt: WireFormat, route: InboundProtocol
+        self, module: str, name: str, fmt: WireFormat, route: InboundProtocol, setup: Any,
+        tmp_path: Path, certs
     ) -> None:
         """The meta-test: a transport inherits the check by registering.
 
@@ -1070,12 +1132,23 @@ class TestTheConformanceCheck:
             name: A registered transport name.
             fmt: The upstream format to construct it with.
             route: The inbound route that exercises it.
+            setup: ``None`` for a transport the registry can build on its own,
+                or a callable taking ``(certs, tmp_path)`` and returning a
+                ``(transport_kwargs, key)`` pair. The curl_cffi row carries
+                the callable because its recorder terminates TLS (needs the
+                harness certificate) and its adapter reads a session-file path
+                rather than the fixture's literal key.
+            tmp_path: The pytest-provided temporary directory.
+            certs: The session-scoped throwaway certificate set.
         """
         import importlib
 
         importlib.import_module(module)
 
-        await assert_transport_reaches_its_recorder(transport(name, fmt), protocol=route)
+        extra_kwargs, resolved_key = ({}, None) if setup is None else setup(certs, tmp_path)
+        await assert_transport_reaches_its_recorder(
+            transport(name, fmt, **extra_kwargs), protocol=route, key=resolved_key
+        )
 
     def test_the_meta_test_iterates_a_complete_set_not_whatever_was_imported(self) -> None:
         """ "Non-empty" would report success for a category it never ran.
@@ -1089,7 +1162,7 @@ class TestTheConformanceCheck:
         """
         import importlib
 
-        for module, _name, _fmt, _route in CONFORMANCE_CASES:
+        for module, _name, _fmt, _route, _key in CONFORMANCE_CASES:
             importlib.import_module(module)
 
         assert set(registered_transports()) == EXPECTED_TRANSPORTS, (

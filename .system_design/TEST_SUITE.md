@@ -2610,8 +2610,8 @@ same interface to the tests:
 | Recorder | Serves | Observes |
 |---|---|---|
 | aiohttp server — bridge sessions | the 20 default-transport adapters | The primary; speaks Anthropic Messages and Chat Completions |
-| aiohttp server — provider sessions | `ollama_cloud`, and the `openai_subscription` **OAuth login leg** | Those adapters build their own sessions and never touch `_session_for`, so the bridge recorder never sees them. The OAuth leg runs at startup, before anything else has been proven (§5.5). The **refresh** leg moved to `curl_cffi` in KBR-161 and is the row below's (§7.2.2) |
-| curl_cffi-reachable server | `openai_subscription` serving path | Must terminate TLS with the harness certificate; the only place `_cc_to_responses` output (P13, P17) can be seen |
+| aiohttp server — provider sessions | `ollama_cloud`, and the `openai_subscription` **OAuth login leg** | Those adapters build their own sessions and never touch `_session_for`, so the bridge recorder never sees them. The OAuth leg runs at startup, before anything else has been proven (§5.5). The **refresh** leg moved to `curl_cffi` in KBR-161 and is the row below's (§7.2.3) |
+| curl_cffi-reachable server | `openai_subscription` serving path, and the OAuth **refresh** leg | Terminates TLS with the harness certificate and observes at socket level (§7.2.3); the only place `_cc_to_responses` output (P13, P17) can be seen, and the only recorder on the refresh leg's stack |
 | botocore endpoint override | `bedrock` | Points the client at the local recorder rather than AWS; observes the Converse payload **after** the transport's `modelId`/`stream` pops (P18) |
 
 Each records every request in full: method, scheme, host, path, **query**, **headers with
@@ -2809,6 +2809,71 @@ be mistaken for a hole.
 
 [KBR-40]: https://shelpuk.atlassian.net/browse/KBR-40
 [KBR-25]: https://shelpuk.atlassian.net/browse/KBR-25
+
+#### 7.2.3 What T-B2 settled — the curl_cffi recorder, harness TLS, and the refresh leg
+
+**Delivered by T-B2 ([KBR-41]) in `tests/harness/curl_recorder.py` and
+`tests/harness/curl_cffi.py`**, registered as `curl_cffi` with a `CONFORMANCE_CASES` row naming
+`OPENAI_RESPONSES` and the `/v1/responses` inbound route — the tidy case KBR-31's final review
+round opened by adding that mapping to `protocol_for`.
+
+**It subclasses T-W4's recorder, for §7.2.2's same reason.** The vocabulary is overridden —
+the served format (`OPENAI_RESPONSES`), the suffix table (`/responses` and `/oauth/token`), and
+what a minimal success is, which for this transport is an OpenAI Responses SSE stream carrying at
+least one `output_text.delta` (the adapter always sends `stream: true`, P17, so a non-streaming
+JSON success would be the wrong shape and cost the ladder). Everything the conformance suite
+judges is inherited unchanged.
+
+**TLS is terminated by the recorder with the harness certificate.** The `certs` fixture and
+`server_ssl_context` from :mod:`harness.connect_proxy` are reused, so one throwaway CA signs every
+TLS endpoint the harness presents. The recorder's bind site takes the resulting `SSLContext`
+directly; nothing in `src/kitty` learns about it, and the client side trusts the same CA through
+the adapter's own `CODEX_CA_CERTIFICATE` seam (`_resolve_ca_cert_path`, matching Codex CLI's
+`custom_ca.rs`).
+
+**§7.2.1's connection-logging limitation is resolved at socket level, by owner decision.** The
+recorder's `Server` subclass logs every accept in the **protocol factory**, which asyncio calls
+before the TLS handshake begins — so a connection that opens and then fails negotiation still
+produces a `ConnectionRecord`. The peer port is not visible to the factory (the accepted socket
+has not yet been handed to anything), so the record is created with `peer_port = -1` and filled in
+by `connection_made` on handshake success. A record that keeps `-1` is honest evidence: the
+connection existed, no peer ever identified itself over TLS, and §5.2.1's bypass shape is a
+connection that carries no request regardless of what it sent. `check_connection_logged` is not
+weakened by this — the conformance driver's probes all complete the handshake, so every port it
+opens is filled in before the check runs; the failed-handshake shape has its own falsification
+case against `recorder.connections` directly.
+
+**The OAuth refresh leg is served by this recorder and reaches it through a second seam.** The
+refresh leg addresses :mod:`kitty.auth.oauth_session`'s `OAUTH_TOKEN_URL`, which is **a different
+constant from the login leg's** (`kitty.auth.openai_oauth.OAUTH_TOKEN_URL`), so T-B1's
+`oauth_token_endpoint` seam does not apply — §7.2.2's warning is load-bearing here.
+`oauth_refresh_endpoint(recorder)` follows T-B1's shape: read the constant, swap, restore in a
+``finally``, raise `AttributeError` when the name is gone. A transport that swapped the wrong
+constant would send a real request to `auth.openai.com`, which is the failure this guard exists
+to prevent.
+
+**The serving leg reaches the recorder through a module-constant swap, not a base-URL redirect.**
+`OpenAISubscriptionAdapter` never reads `provider_config["base_url"]` (§7.5.2's custom-transport
+rule) — its upstream path is `_CODEX_BACKEND_URL`, a module constant on
+:mod:`kitty.providers.openai_subscription`. `bind()` returns the recorder's own URL in place of
+that constant, the same read-swap-restore shape as the refresh leg's seam, so a request the
+product meant for `chatgpt.com` reaches the recorder instead. **`bind()` is therefore not
+idempotent across recorder restarts**, and every call after the first returns the same adapter
+instance (it owns two session pools whose lifetime :meth:`stop` must close — the reason
+§7.5.2's "one adapter per transport, reused" applies doubly here).
+
+**Redaction is the transport's decision, not the capture type's.** `CapturedRequest` stays a
+raw-bytes carrier — T-C6's malformed body must reach a reader untouched — and the refresh leg's
+`client_secret` and `refresh_token` are the only credentials this recorder's traffic carries in a
+body. The masking lives on `CurlCffiTransport.captures`: applied per capture, returning a fresh
+object, so the recorder's own list stays raw by construction. **Not a `redact_body` method on the
+`UpstreamTransport` Protocol, deliberately**: the Protocol is `@runtime_checkable` and three
+suites assert `isinstance(..., UpstreamTransport)` on instances, so a Protocol member must be
+implemented by every instance — the two existing transports would each need a no-op definition,
+which is the opposite of "inherit without change". The first draft's protocol-method shape was
+falsified by that contract; what survived is the inlined helper.
+
+[KBR-41]: https://shelpuk.atlassian.net/browse/KBR-41
 
 ### 7.3 Recording CONNECT proxy
 

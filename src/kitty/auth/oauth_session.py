@@ -2,10 +2,13 @@
 
 The token endpoint is reached through a :class:`~kitty.auth.token_transport.TokenTransport`
 rather than an ``aiohttp`` session (KBR-161).  The OpenAI subscription provider
-supplies the same impersonating ``curl_cffi`` session it uses for the API leg,
-so a provider sees one client for one account instead of two -- an impersonated
-Codex CLI for prompts and an anonymous Python client, on a different TLS
-fingerprint, for the token refreshes interleaved with them.
+supplies a ``curl_cffi`` session built by the same builder as the API leg's — a
+second session by design (see
+:attr:`~kitty.providers.openai_subscription.OpenAISubscriptionAdapter._oauth_curl_session`),
+identical in impersonation, CA bundle and egress mapping, so a provider still sees
+one client for one account.  The interactive login leg in
+:mod:`kitty.auth.openai_oauth` still uses aiohttp — it has no adapter to borrow
+a session from.
 """
 
 from __future__ import annotations
