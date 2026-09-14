@@ -55,6 +55,9 @@ _EXPECTED_KEYS: dict[str, set[str]] = {
         # by the Anthropic-family adapters on the signature-binding routes.
         "_anthropic_system",
         "_thinking_adaptive",
+        # KBR-225: the agent's thinking `budget_tokens` (validated here),
+        # shipped verbatim by AnthropicAdapter.
+        "_thinking_budget_tokens",
         # KBR-228: the agent's signed thinking blocks, restored verbatim by
         # the Anthropic-family adapters (part B); the reply direction mints
         # the same key in `providers/anthropic.py` (part A).
