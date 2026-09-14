@@ -160,6 +160,29 @@ class TestTheProcedureDescribesTheTool:
         assert "rotate" in README.read_text(encoding="utf-8").lower()
 
 
+class TestTheProcedureListsTheThresholdPairs:
+    """KBR-46 (T-C3): the procedure must name every entry id it ships.
+
+    AC-4 in ``.requirements/20260914T185833Z_kbr46_corpus_thresholds/REQUIREMENTS.md``
+    guards the threshold-pair section by read — that "by read" is exactly the
+    silent regression this guard replaces.
+    """
+
+    def test_every_threshold_pair_entry_is_named(self) -> None:
+        """The four KBR-46 entry ids must each appear in the README's prose."""
+        text = README.read_text(encoding="utf-8")
+        for entry_id in (
+            "tool_result_under_limit",
+            "tool_result_over_limit",
+            "compaction_budget_under",
+            "compaction_budget_over",
+        ):
+            assert entry_id in text, (
+                f"the README does not name the entry id {entry_id!r}; the T-C3 section "
+                "documents each id and a future revision dropped one"
+            )
+
+
 class TestTheCorpusIsAnIndependentOracle:
     """§3.3.1: the oracle must not be written in terms of the code under test."""
 

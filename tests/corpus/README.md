@@ -269,6 +269,83 @@ that belongs to the task capturing those entries: **T-C3 and T-C4 decide** wheth
 real thing or to synthesise a padded construction — plan §6 already blesses synthesis for exactly
 those two entries — and to record what replaces the review step either way.
 
+### Threshold-pair entries (T-C3) — what replaces the review step
+
+T-C3 ships four synthetic entries pinned against two thresholds from `src/kitty/bridge/server.py`:
+
+| Entry id | Measured property | M3 / M4 / M5 coverage |
+|---|---|---|
+| `tool_result_under_limit` | one `tool_result` string content of length exactly `_TOOL_RESULT_TRUNCATION_LIMIT` (= 50 000) — the largest non-triggering size (the bridge's three sites compare with strict `>`) | M3 complement; M4 has no oversized result either |
+| `tool_result_over_limit` | one `tool_result` string content of length `_TOOL_RESULT_TRUNCATION_LIMIT + 1` (= 50 001) — the smallest triggering size | M3 trigger case |
+| `compaction_budget_under` | `len(json.dumps(messages, ensure_ascii=False)) == _COMPACTION_CHAR_THRESHOLD` (= 2 800 000) — the static `_compact_messages` short-circuit side (`<=`) | M5 short-circuit on every profile whose budget ≥ 2 800 000; M4 complement (no oversized tool result) |
+| `compaction_budget_over` | `len(json.dumps(messages, ensure_ascii=False)) == _COMPACTION_CHAR_THRESHOLD + 1` — one past the short-circuit side | M5 trigger for every profile (the body exceeds the conservative worst-case budget ceiling); also the M4 request half (oversized tool result embedded) |
+
+#### Why the budget pairs use the static constant
+
+The bridge's runtime trigger is not the static constant — it is the **profile-derived**
+`messages_budget = max_chars - overhead - 10_000`, where `max_chars = min(tokens_to_chars(context_tokens), _MAX_REQUEST_CHARS)`
+(`src/kitty/bridge/server.py:7597`, `:7214-7238`). For the default 200 K-token model that gives a
+budget around ~790 K chars; for an unknown model the budget falls back to `_MAX_REQUEST_CHARS`
+(4 M). The static `_COMPACTION_CHAR_THRESHOLD` (2 800 000) is the conservative upper bound of any
+profile's derived budget and the constant the bridge uses when `_compact_messages` is called with
+`max_messages_chars=None` (`server.py:7012`).
+
+That gives two directional facts the fixtures **must** satisfy and one they **must not**:
+
+* **`compaction_budget_over` (threshold + 1) is M5-trigger for every profile.** A body past the
+  worst-case budget ceiling is past every smaller profile's budget too. This makes the entry a
+  universally usable M5 trigger case.
+* **`compaction_budget_under` (exactly at the threshold) is the largest short-circuit size.** On
+  profiles whose derived budget is ≥ 2 800 000 the bridge short-circuits and the body is an M5
+  complement. On smaller-budget profiles (the default 200 K-token model gives ~790 K) the body
+  would also trigger M5 — the fixture is **not** a profile-independent complement. Oracle slices
+  that resolve a budget below 2 800 000 must NOT reuse this fixture as the M5 complement; they
+  build their own.
+
+The under-side claim is profile-conditional by design — declaring `over_compaction_budget`
+absent in the manifest would be false on a 200 K-token profile. §"Triggers have three states"
+above forbids declaring triggers whose truth depends on the profile, so M5 is **not** named in
+either entry's manifest; oracle slices (T-D4+) declare it at the call site that resolves the
+profile. M4 (`compaction_ran_with_oversized_tool_result`) is similarly pipeline-state-dependent
+and not declared; `compaction_budget_over` carries the request-property half (oversized tool
+result present), and an oracle slice supplies the compaction-engaged half at call time.
+
+#### Why the bodies are padded construction
+
+The two small pairs are real-shaped synthetic conversations; the two budget pairs are **padded
+construction**, synthesised per plan §6 because a capture cannot be aimed at exactly the limit
+(M3) or exactly the threshold (M5) and survive scrubbing at that size. The padded bodies
+honour the README's guarantees:
+
+* The skeleton (initial user turn, closing user turn, the optional tool_use/tool_result pair) is
+  reviewable in one screen.
+* Every filler line begins `Turn NNNN of TOTAL:` and embeds its turn index — a reviewer can read
+  a sample line and recognise construction, and a unique index breaks ties across 400 turns.
+* The filler is `lorem ipsum dolor sit amet, …` repeated, no special characters, no escape cost;
+  the committed file's bytes are exactly what the builder produced, byte-for-byte. The builder
+  uses `/tmp/…` (not `/home/<user>/`) for the embedded `file_path` precisely so the scrubber's
+  `home_path` rule does not rewrite the bytes between builder output and committed file.
+
+The 2.8 MB file's mandatory review step is replaced by:
+
+1. Review the **builder** (`tests/harness/corpus_thresholds.py`) — the generator is small and the
+   only thing a reviewer needs to understand; the artifact is mechanical.
+2. The L1 regeneration test in `tests/harness/test_corpus_thresholds.py` pins every committed
+   `<id>.body` file's SHA-256 to what the builder produces right now, and asserts
+   `scrub(captured) == captured` so a future scrubber pattern (or a future filler that triggers
+   one) breaks the test before the committed file exists. A hand edit of the `.body` or `.json`
+   breaks the same test.
+3. The L2 lint (`tests/harness/test_corpus_lint.py`) runs the scrubber's `findings` over every
+   committed entry, so a future scrubber rule that started matching filler text (e.g. on a
+   word-boundary difference) would fail the gate rather than the padding slipping through.
+4. The L2 README guard (`TestTheProcedureListsTheThresholdPairs`) reads the committed README and
+   fails if any of the four entry ids disappears — replacing the "by read" verification with a
+   committed guard.
+
+The constants the pairs straddle are named in `src/kitty/bridge/server.py` (and the builder
+imports them); if either constant ever changes, the regeneration test fails on the first CI run
+after the change, and a maintainer updates the fixture alongside.
+
 **Who reviewed.** A `reviewed_by` field was considered and rejected: an unverifiable
 self-attestation creates the appearance of an audit trail without the substance. Git already
 records who authored the commit that adds an entry, and the pull request records who approved it.
