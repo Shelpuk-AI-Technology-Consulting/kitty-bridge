@@ -309,13 +309,14 @@ PUBLISHED_PART_KEYS = _MODELLED_PART_KEYS | frozenset(_OPAQUE_PART_KEYS) | _PART
 #: ``FunctionCall``'s three published members.
 PUBLISHED_FUNCTION_CALL_KEYS = frozenset({"id", "name", "args"})
 
-#: ``FunctionResponse``'s six published members.  ``scheduling`` and
-#: ``willContinue`` govern NON_BLOCKING call scheduling, which the grammar does
-#: not model, so they residualise.
+#: ``FunctionResponse``'s six published members. ``scheduling`` slots on
+#: :class:`~harness.contract.ToolResult.scheduling` (KBR-194); ``willContinue``
+#: still has no slot and residualises (out of scope for the same ticket).
 PUBLISHED_FUNCTION_RESPONSE_KEYS = frozenset({"id", "name", "response", "parts", "scheduling", "willContinue"})
 
-#: ``Blob``'s and ``FileData``'s published members.  ``displayName`` names the
-#: blob to the model and has no slot, so it residualises.
+#: ``Blob``'s and ``FileData``'s published members. ``displayName`` slots on
+#: :class:`~harness.contract.Image.display_name` (KBR-194) — the name of the
+#: blob or file to the model.
 PUBLISHED_BLOB_KEYS = frozenset({"data", "mimeType", "displayName"})
 PUBLISHED_FILE_DATA_KEYS = frozenset({"fileUri", "mimeType", "displayName"})
 
