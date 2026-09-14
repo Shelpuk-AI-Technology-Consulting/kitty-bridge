@@ -391,6 +391,8 @@ logic. A no means byte-identical to the pre-KBR-232 behaviour.
 | S5 | `thinking_delta` → `reasoning_content`; signatures dropped | The Chat Completions wire has no signature slot, so preservation is impossible; M17's strip-and-retry recovers the round-trip rejection instead (KBR-238). |
 | S6 | The three loops run wider by the strip budget, with an attempt correction | Same rationale KBR-238 recorded on `_stream_messages`: a strip gets its attempt back, so the empty-response schedule is not pulled forward. |
 | S7 | `_stream_responses` opens the lifecycle lazily, on the first non-finish write of each attempt | `translate_stream_start` and `translate_stream_chunk` draw from the same `_seq` counter, so translating the lifecycle after the first chunk had been translated would put `sequence_number` 3 and 4 on the wire ahead of the chunk's 0, 1, 2 — the translation therefore runs speculatively at attempt start, before any chunk, and the two strings are written on the first real event and invalidated at every `translator.reset()` inside the loop (KBR-242; gap G41). Writing eagerly, before the first chunk is translated, was rejected: an all-finish first chunk is how an empty response presents, and publishing the lifecycle before the empty verdict is known would put a half-open lifecycle on the wire exactly where the failover ladder is about to retire the attempt. A purely-empty attempt publishes nothing, so KBR-247's `events_emitted` model survives; the exhausted-ladder fallback stays an empty 200 (KBR-235's territory); the error paths never open the lifecycle. Tests: `tests/bridge/test_responses_stream_lifecycle.py`, and the KBR-240 walk's opening + exact-`sequence_number` assertions |
+| S8 | Cross-class re-dispatch (`_stream_messages`, KBR-249): when a plain-POST branch's failover selects a `use_custom_transport` provider, the function re-enters the custom-transport branch with the failover-selected provider as its own initial selection | The plain-POST branch cannot drive a `use_custom_transport` provider via `session.post(...)`; the bridge must speak the protocol that matches the selected backend's class. Without re-dispatch the failover silently delivers an empty `200` (the bug KBR-235 exposed). The custom-transport branch's symmetric `custom → plain` fall-through — `src/kitty/bridge/server.py:4185-4204` (the cross-mode select with the three pops) then `4265-4270` (the `continue` entering the plain block) — is unchanged in behaviour. The re-dispatch bound is `(2 * n_backends) + 1` per request so a pathological cooldown-expiry ping-pong surfaces an honest error instead of looping; the cap-hit error carries `"reason": "cross_class_exhaustion"` so a client that branches on `reason` can tell it apart from `empty_response` and `upstream_error` (D4, KBR-241). |
+| S9 | Cross-class re-dispatch reuses the failover-selected provider, never re-selects | Re-selecting would consume a new draw from the deterministic test stub and break the pinned two-draw invariant; semantically, the failover already chose — the branch re-enters with that choice intact. |
 
 ### 5.4 Known limits
 
@@ -402,14 +404,23 @@ logic. A no means byte-identical to the pre-KBR-232 behaviour.
   error surfaces to the client (which is still the fix: the per-event translator used to
   swallow the error and deliver a truncated success).
 - **The KBR-249 dispatch defect exists in three sibling handlers too.**
-  `_stream_responses` (`src/kitty/bridge/server.py:3563, 3718, 3751`),
-  `_stream_chat_completions` (`6766, 6965, 6995`),
-  and `_stream_gemini` (`5759, 5900, 5921`) have plain-POST
-  branches whose failovers call `_select_backend()` without a
-  transport-class guard, just like `_stream_messages` did before KBR-249.
-  The fix shape is identical; KBR-249 scopes to `/v1/messages` because
-  that is where the test sits (PR #131's CI). A sibling ticket per
-  handler is owed.
+  Each has a plain-POST branch whose failovers call `_select_backend()`
+  without a transport-class guard, just like `_stream_messages` did
+  before KBR-249. The fix shape is identical; KBR-249 scopes to
+  `/v1/messages` because that is where the test sits (PR #131's CI).
+  A sibling ticket per handler is owed. Representative plain-POST
+  failover sites on the current `main` head:
+
+  - `_stream_responses` (`src/kitty/bridge/server.py:3605, 3770, 3804`).
+    The cross-mode fall-through at `:3395` is the symmetric custom→plain
+    path, not the bug.
+  - `_stream_gemini` (`:5818, 5959, 5980`).
+  - `_stream_chat_completions` (`:6825, 7024, 7054`).
+
+  (Line numbers verified against this branch's HEAD; if the design
+  doc and the source diverge again, run `git grep -n "self._select_backend()"`
+  and reject any matches that are inside the custom-transport branch's
+  cross-mode fall-through — those don't have the defect.)
 ## 6. Backend health, cooldowns, and the arrival recovery hold
 
 ### 6.1 The state machine as it stands
