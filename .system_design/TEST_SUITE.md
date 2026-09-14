@@ -2130,7 +2130,12 @@ written live — so the ladder put a second attempt on the stream that already c
 exhaustion failing over onto a Messages-wire backend ended in the "retry came back empty" error
 the ticket reproduced). It now reads `sr` and ends the turn like every other post-emission
 failure, under row 2's oracle; no backend is charged, keeping the empty ladder's no-quarantine
-health model. One residual
+health model. KBR-247 (2026-09-14) closed the same gap on the **standard** (non-custom-transport)
+`_stream_responses` and `_stream_gemini` empty-response verdicts (`server.py` 3766 and 5677 on
+origin/main `d6079fd`): each route's empty check ran the failover / backoff ladder without
+consulting emission, and the same empty-finish-then-content shape put a second attempt's events on
+a stream the client already had bytes on. The guard lands on both routes; the terminal shape per
+route is decided in §11 Q14 (2026-09-14, this ticket). One residual
 differs in its *ending*, not in its recovery: a post-emission **transport** drop on the translated
 `/v1/messages` path still closes with `end_turn` + `message_stop` rather than the error event
 (KBR-183's decision D2, carried as a scope addition on KBR-99, so the second, third and fourth rows
@@ -5329,6 +5334,51 @@ the `400` with the same body the native branch builds. The branch's tail-flush w
 sets `events_emitted`, so content arriving in a final unterminated line counts as a write for
 both the emptiness gate and FI-8.3's truncation guard. The post-emission retry a content delta
 after the finish chunk can still trigger is KBR-236's, untouched here.
+
+**Extended to the standard `/v1/responses` and `/v1/gemini` empty-response verdicts by KBR-247
+(owner decisions, 2026-09-14).** Each route's empty check
+(`if translator.response_was_empty and finish_events:`) ran the failover / backoff ladder without
+consulting emission, so an upstream that sent an empty finish chunk first and content after put a
+second attempt's events on a stream the client already had bytes on — KBR-236's shape on the two
+routes whose in-stream error arms already read `events_emitted`; the empty verdict was the one
+unguarded site on each. Both now read a per-request `_request_emitted` flag (declared outside the
+attempt loop because `sr` is prepared eagerly on these routes — unlike `_stream_messages`, where
+lazy preparation lets `sr is not None` itself answer "has the request written?") and, when the
+request has written anything, end the turn per Q14(a): buffered finish events dropped, exactly one
+upstream request, no health charge (the empty ladder's no-quarantine model). **The terminal shape
+per route is the route's own existing in-stream error convention, ratified rather than invented**
+— the same principle as reason 2 below:
+
+- **/v1/responses**: one SSE `error` event (`responses_format_error`,
+  `code: "upstream_error"`), then `response.completed` with `status: "incomplete"`
+  (`synthesize_completed_events` closes any half-open item the client saw open), then EOF. The
+  buffered `response.created` / `response.in_progress` stay unwritten: KBR-242's separate defect
+  is not fixed by this guard, and the ticket's decision keeps the two independent — if KBR-242
+  later starts writing the starts, this ending already reads as a lifecycle that *began*.
+- **/v1/gemini**: a single SSE `data: {"error": {"code": <code>, "message": <message>}}` event,
+  then EOF — `streamGenerateContent`'s SSE has no typed completion event, so there is nothing to
+  close and nothing to synthesize.
+
+What was deliberately not chosen: opening the Responses lifecycle inside this guard (coupling
+KBR-247 to KBR-242's shape decision), and a Messages-uniform error-only ending on Responses
+(Codex CLI keys the lifecycle off `response.completed`; dropping it would break the client the
+route exists to serve). Pre-emission empty verdicts keep today's ladder on both routes, pinned by
+`tests/bridge/test_empty_response_retry.py`.
+
+**The post-content in-stream error shape** (Q14(a), design-review 2026-09-14). When the
+empty-finish-then-content path is followed by an upstream error chunk matching
+`_is_upstream_stream_error`, `_stream_responses`'s in-stream-error exhaustion arm would
+historically fall through to the empty-verdict check, and KBR-247 would then have fired its
+post-emission guard on top of the exhaustion arm's terminal error event — two `error` events
+followed by `response.completed`, violating the "one terminal error" property above. The fix is
+a `break` inside the `events_emitted` branch of the exhaustion arm (`server.py` ~3749), matching
+`_stream_messages` (which always broke after `finalize_interrupted_stream`) and
+`_stream_gemini` (which already broke on `events_emitted` at its exhaustion arm). The no-events
+branch is untouched: a pre-emission exhausted attempt still falls through to the empty ladder,
+which is what AC-2 requires. Regression: `tests/bridge/test_post_emission_no_failover.py`
+`TestResponsesEmptyVerdictAfterContent::test_empty_verdict_then_in_stream_error_emits_one_error`
+pins exactly one `error` event followed by `response.completed` with `status: "incomplete"` for
+the empty-then-content-then-error sequence.
 
 **Why, and not the obvious alternative.** Three reasons, in decreasing order of how much they
 would cost to be wrong about.
