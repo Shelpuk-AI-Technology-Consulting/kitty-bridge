@@ -192,6 +192,7 @@ def format_function_call_arguments_delta_event(
     seq: int,
     response_id: str,
     item_id: str,
+    output_index: int,
     call_id: str,
     delta: str,
 ) -> str:
@@ -203,6 +204,7 @@ def format_function_call_arguments_delta_event(
             "sequence_number": seq,
             "response_id": response_id,
             "item_id": item_id,
+            "output_index": output_index,
             "call_id": call_id,
             "delta": delta,
         },
@@ -213,6 +215,7 @@ def format_function_call_arguments_done_event(
     seq: int,
     response_id: str,
     item_id: str,
+    output_index: int,
     call_id: str,
     arguments: str,
 ) -> str:
@@ -224,6 +227,7 @@ def format_function_call_arguments_done_event(
             "sequence_number": seq,
             "response_id": response_id,
             "item_id": item_id,
+            "output_index": output_index,
             "call_id": call_id,
             "arguments": arguments,
         },

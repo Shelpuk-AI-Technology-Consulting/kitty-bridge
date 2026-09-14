@@ -216,6 +216,40 @@ class TestIsToolUseFormatError:
 
 
 class TestConvertNativeToCCFormat:
+    def test_carries_signed_thinking_and_system_verbatim(self):
+        """KBR-228 part B: the fallback converter is a second Messages -> CC hop.
+
+        It owes the same carriage as ``MessagesTranslator.translate_request``:
+        the assistant's signed thinking blocks and the original ``system`` ride
+        internal keys so the Anthropic adapters can restore them verbatim on
+        the retry.  Without them, a failover retry rebuilds the history
+        unsigned and api.anthropic.com rejects the turn again.
+        """
+        body = {
+            "model": "claude-sonnet-4-6",
+            "system": [{"type": "text", "text": "Be brief.", "cache_control": {"type": "ephemeral"}}],
+            "max_tokens": 64,
+            "messages": [
+                {"role": "user", "content": "hi"},
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "thinking", "thinking": "Reply briefly.", "signature": "sig-9"},
+                        {"type": "text", "text": "Hello."},
+                    ],
+                },
+            ],
+        }
+        result = _convert_native_to_cc_format(body)
+
+        assert result["_anthropic_system"] == body["system"]
+        assistant = [m for m in result["messages"] if m["role"] == "assistant"]
+        assert assistant[0]["_thinking_blocks"] == [
+            {"type": "thinking", "thinking": "Reply briefly.", "signature": "sig-9"},
+        ]
+        # The CC-facing translation is unchanged.
+        assert assistant[0]["content"] == "Hello."
+
     def test_system_prompt_becomes_system_message(self):
         body = _anthropic_body_with_tool_use()
         result = _convert_native_to_cc_format(body)
