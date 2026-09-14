@@ -14,7 +14,8 @@ Symbols are named, not line-numbered, for the reason `TEST_SUITE.md` gives.
 
 Traces to [KBR-220](https://shelpuk.atlassian.net/browse/KBR-220) and the Windows stop-handler
 defect fixed with it. Related: KBR-154, KBR-176 and KBR-219 (how `start` reads and waits on the
-child), and KBR-180 (probing a PID on Windows).
+child), KBR-180 (probing a PID on Windows), and KBR-231 (detaching the child from the launching
+console on Windows).
 
 ### 1.1 Components
 
@@ -72,11 +73,10 @@ Numbered as in the KBR-220 requirements and PR. D4 there, which folded the Windo
 | D5 | Where a loop cannot register signal handlers, register nothing: no `signal.signal` fallback | On Windows, `kitty bridge stop` ends the process with `TerminateProcess`, which no handler can intercept, and `stop_bridge` removes the state file itself. Ctrl+C in a foreground bridge still raises `KeyboardInterrupt`, which `asyncio.run` turns into cancellation, so `finally: stop_async()` still runs. A thread-to-loop signal bridge would add complexity for no visible gain. |
 | D6 | `stop_signals` lives in `kitty.bridge`, not a top-level leaf | Both callers (`kitty.cli.main`, `kitty.bridge_runner`) may already import `kitty.bridge`. A top-level leaf would need its own import-linter contract and an entry in every "every sibling" list. |
 | D7 | A missing keys file means auth off; a named-but-missing one refuses to start with a clear error | Before the fix a fresh install could not start a background bridge at all (`parse_keys_file`'s `FileNotFoundError`). Auth off matches the foreground bridge, `kitty claude` and the README; the default file still enables auth when it exists, so installs relying on it keep exactly the behaviour they had. Rejected: requiring a keys file — background would be the only mode demanding a hand-created secrets file. *Product owner, 2026-09-14 (KBR-230).* |
+| D8 | On Windows the background bridge child is started detached: `DETACHED_PROCESS \| CREATE_NEW_PROCESS_GROUP` | `start_new_session=True` is POSIX-only, and CPython's Windows `Popen` accepts it and ignores it, so a "background" bridge kept the launcher's console: Ctrl+C there, or closing the window, ended a bridge the user was told runs in the background (KBR-231). Observed on the Windows leg first, per the ticket's first acceptance criterion; the probe lives beside its guard in `tests/bridge/test_bridge_management.py::TestTheWindowsConsoleDetachment`. `DETACHED_PROCESS` gives the child no console at all, so no console event of any console can reach it — the Windows analogue of the `setsid()` `start_new_session` runs on POSIX. `CREATE_NEW_PROCESS_GROUP` additionally disables Ctrl+C group-wide — scoped claim, since `CTRL_BREAK` is always delivered, but a detached child has no console to receive any of it on. `CREATE_NO_WINDOW` (the ticket's alternative) was rejected: it still allocates a hidden console, keeping the child console-attached and costing a `conhost.exe` per bridge, and the vendor docs state it is ignored beside `DETACHED_PROCESS` anyway. The flags are integer literals in `manage.py` because `subprocess` imports those names from `_winapi` on Windows only, and the decision (`background_spawn_kwargs`) returns key-disjoint dicts because POSIX `Popen` raises `ValueError` on a nonzero `creationflags`. Scope: `start_bridge` only — service units run `bridge_runner` directly under a manager that already detaches them. |
 
 ### 1.5 Known limits (recorded, not fixed here)
 
-- **A Windows "background" bridge shares the user's console.** `start_new_session=True` is
-  POSIX-only, so closing that console or pressing Ctrl+C in it ends the bridge.
 - **A Windows bridge never shuts down gracefully when stopped.** `TerminateProcess` skips
   `stop_async`, so an opt-in session summary (`KITTY_SESSION_SUMMARY`) is not written.
 - **Services running as another account are outside the contract.** The NSSM script sets no
