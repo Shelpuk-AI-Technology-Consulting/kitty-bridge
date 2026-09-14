@@ -1149,3 +1149,77 @@ class TestGeminiEmptyVerdictAfterContent:
         assert error_payloads[0]["error"]["code"] == 502
         # AC-1: the errored turn is not counted as a completion.
         assert server._model_stats("test-model")["completions"] == 0
+
+    @pytest.mark.asyncio
+    async def test_pre_emission_empty_response_still_fails_over(self):
+        """A pre-emission empty verdict on /v1/gemini still walks the ladder, unchanged by this guard.
+
+        The Gemini route's empty-verdict check is structurally separate from
+        the Responses route's (`_stream_gemini` lines 5776-5809 versus
+        `_stream_responses` lines 3837-3871), and `test_empty_response_retry.py`
+        only exercises `/v1/messages`. A regression that broke only the
+        Gemini pre-emission ladder would pass the existing suite, so this
+        class carries the same negative control the Responses class carries:
+        an empty verdict before any byte reached the client must still walk
+        the failover / retry ladder to completion on a healthy backend.
+        """
+        pure_empty = (
+            b'data: {"id":"c1","choices":[{"index":0,"delta":{},'
+            b'"finish_reason":"stop"}],"model":"test-model","usage":null}\n\n'
+            b"data: [DONE]\n\n"
+        )
+        server = _make_responses_server(2)
+        # Pin the draw: backend-0 first (empty), then backend-1 (full).
+        _pick = iter([0, 1])
+
+        def _fixed_select(self=server):
+            """Select backends in the scripted order, without the weighted draw."""
+            idx = next(_pick)
+            provider, key, profile = server._backends[idx]
+            server._active_provider = provider
+            server._active_key = key
+            server._active_model = profile.model
+            server._active_provider_config = profile.provider_config or {}
+            server._current_backend_idx = idx
+
+        server._select_backend = _fixed_select
+
+        with aioresponses(passthrough=["http://127.0.0.1"]) as m:
+            m.post(
+                "https://api0.example.com/v1/chat/completions",
+                body=pure_empty,
+                headers={"Content-Type": "text/event-stream"},
+                repeat=True,
+            )
+            m.post(
+                "https://api1.example.com/v1/chat/completions",
+                body=_CC_FULL_STREAM,
+                headers={"Content-Type": "text/event-stream"},
+                repeat=True,
+            )
+            port = await server.start_async()
+            try:
+                async with (
+                    aiohttp.ClientSession() as session,
+                    session.post(
+                        f"http://127.0.0.1:{port}/v1beta/models/test-model:streamGenerateContent",
+                        json=_GEMINI_REQUEST,
+                        timeout=aiohttp.ClientTimeout(total=30),
+                    ) as resp,
+                ):
+                    body = await resp.read()
+            finally:
+                await server.stop_async()
+        posts = sum(
+            len(calls) for (method, _), calls in m.requests.items() if method == "POST"
+        )
+        assert posts >= 2, "the pre-emission ladder must still walk on Gemini"
+        # The successful retry completed normally — no terminal error event
+        # crossed the wire (the empty verdict was caught before any byte).
+        error_blocks = body.split(b"\n\n")
+        error_payloads = [
+            json.loads(block.split(b"data: ", 1)[1].decode())
+            for block in error_blocks
+            if block.startswith(b"data: {") and b'"error":' in block
+        ]
+        assert error_payloads == [], "the successful retry must complete, not error"
