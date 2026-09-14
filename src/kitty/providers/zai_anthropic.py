@@ -46,6 +46,15 @@ class ZaiAnthropicAdapter(AnthropicAdapter):
     #: route must not change wire behaviour without evidence (KBR-228 part C).
     injects_placeholder_thinking = True
 
+    #: Restores the agent's signed thinking blocks and original system
+    #: verbatim (KBR-228 part B) — inherited ``True`` deliberately, spelled out
+    #: here so the choice is visible next to its neighbours' opt-outs.  This
+    #: adapter's primary path is native passthrough, which already ships the
+    #: agent's raw signed blocks unchanged; the translated rebuild (used for
+    #: non-native clients and balancing re-serialization) restoring the same
+    #: bytes only matches what the upstream already receives.
+    forwards_thinking_signature = True
+
     @property
     def provider_type(self) -> str:
         return "zai_coding"

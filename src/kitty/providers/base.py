@@ -91,10 +91,11 @@ class ProviderAdapter(ABC):
 
         The counterpart of the ``_INTERNAL_KEYS`` strip for keys that ride on
         message dicts: ``cc_request["messages"]`` is shared with the request
-        the next attempt re-serializes, so this is copy-on-write and the
-        original list and messages are untouched.  A list carrying none of the
-        registered keys is returned as-is, so the ordinary request pays one
-        membership scan and no copy.
+        the next attempt re-serializes, so when the strip changes anything it
+        is copy-on-write and the original list and messages are untouched.
+        A list carrying none of the registered keys is returned as the same
+        object — the ordinary request pays one membership scan, no copy, and
+        the output's ``messages`` is the very list the input carried.
 
         Args:
             messages: The ``messages`` value of a Chat Completions request.

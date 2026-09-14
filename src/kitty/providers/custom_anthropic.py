@@ -41,6 +41,17 @@ class CustomAnthropicAdapter(AnthropicAdapter):
     #: unverified (KBR-228 part C).
     injects_placeholder_thinking = True
 
+    #: Restores the agent's signed thinking blocks and original system
+    #: verbatim (KBR-228 part B) — inherited ``True`` deliberately, spelled out
+    #: here so the choice is visible next to its neighbours' opt-outs.  This
+    #: adapter's primary path is native passthrough, which already ships the
+    #: agent's raw signed blocks unchanged; the translated rebuild (used for
+    #: non-native clients and balancing re-serialization) restoring the same
+    #: bytes only matches what the upstream already receives.  The user chose
+    #: this upstream personally, and its default endpoint is api.anthropic.com,
+    #: where the binding contract is verified.
+    forwards_thinking_signature = True
+
     @property
     def provider_type(self) -> str:
         return "custom_anthropic"
