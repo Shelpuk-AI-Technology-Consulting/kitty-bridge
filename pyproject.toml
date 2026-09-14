@@ -57,6 +57,7 @@ dev = [
     "build>=1.0",
     "hatchling>=1.0",
     "twine>=4.0",
+    "hypothesis>=6.100",
 ]
 
 [tool.hatch.build.targets.wheel]
