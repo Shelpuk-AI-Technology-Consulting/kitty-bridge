@@ -211,6 +211,65 @@ class TestNonStreamingResponseCarriage:
         assert "_thinking_blocks" not in json.loads(text)
 
 
+def _signed_sse_reply() -> str:
+    """Render a thinking-then-text Anthropic SSE stream, signature included.
+
+    Returns:
+        The SSE body.
+    """
+    events = [
+        {
+            "type": "message_start",
+            "message": {
+                "id": "msg_s1",
+                "type": "message",
+                "role": "assistant",
+                "model": "claude-sonnet-4-6",
+                "content": [],
+                "usage": {"input_tokens": 10, "output_tokens": 0},
+            },
+        },
+        {"type": "content_block_start", "index": 0, "content_block": {"type": "thinking", "thinking": ""}},
+        {"type": "content_block_delta", "index": 0, "delta": {"type": "thinking_delta", "thinking": "I recall."}},
+        {
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "signature_delta", "signature": "sig-stream-1"},
+        },
+        {"type": "content_block_stop", "index": 0},
+        {"type": "content_block_start", "index": 1, "content_block": {"type": "text", "text": ""}},
+        {"type": "content_block_delta", "index": 1, "delta": {"type": "text_delta", "text": "It is 18C."}},
+        {"type": "content_block_stop", "index": 1},
+        {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 5}},
+        {"type": "message_stop"},
+    ]
+    return "".join(f"event: {e['type']}\ndata: {json.dumps(e)}\n\n" for e in events)
+
+
+class TestStreamingResponseCarriage:
+    """The streamed reply's thinking reaches the client byte-for-byte (AC-1, streaming half).
+
+    KBR-227 forwards a Messages-wire upstream's stream verbatim, so the client
+    already receives thinking and signature events; this pins that guarantee
+    for thinking specifically.  Were the stream routed through the Chat
+    Completions chunk translator again, every ``thinking_delta`` and
+    ``signature_delta`` would be dropped and this test would fail.
+    """
+
+    @pytest.mark.asyncio
+    async def test_signed_thinking_events_reach_the_streaming_client(self):
+        status, text, _calls = await _drive(
+            _translated_server(), [(200, _signed_sse_reply())], stream=True
+        )
+        assert status == 200
+        assert "thinking_delta" in text
+        assert "I recall." in text
+        assert '"signature_delta"' in text
+        assert "sig-stream-1" in text
+        assert "It is 18C." in text
+        assert "message_stop" in text
+
+
 class TestFollowUpTurnRestoresTheSignedHistory:
     """The client's signed blocks and system go back upstream byte-identical (AC-2).
 
