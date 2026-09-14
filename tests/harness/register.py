@@ -642,7 +642,10 @@ _PROVIDER_ROWS: tuple[MutationRow, ...] = (
         site=("kitty/providers/anthropic.py:AnthropicAdapter.translate_to_upstream",),
         trigger=Trigger.ANTHROPIC_THINKING_ENABLED,
         # Two effects, two paths: it raises the agent's own max_tokens (the
-        # user-visible half) and sets the thinking budget.
+        # user-visible half) and sets the thinking budget. Since KBR-225 these
+        # apply only on the fallback branch -- a valid agent budget ships
+        # verbatim and the row is met with no delta on either path (the M15
+        # precedent).
         paths=(c.sampling_path("max_tokens"), c.extra_path("thinking")),
         conditional=True,
         design_ref="§3.2.2",
