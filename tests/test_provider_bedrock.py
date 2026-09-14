@@ -1087,8 +1087,10 @@ class TestTheEndpointUrlSeam:
             )
 
         assert captured_session_kwargs.get("profile_name") == "harness-profile", (
-            "the SSO branch was not taken — this test is pinned to the SSO half of the if/else, "
-            "so a credentials-branch test passing here means the if/else moved"
+            "the SSO branch was not taken; if the if/else moved to "
+            "is_sso_mode=False for resolved_key='sso', the credentials branch's "
+            "parse_aws_credentials would raise ProviderError on the colonless key "
+            "before this assertion ran, surfacing the regression even louder than this assert"
         )
         assert captured_kwargs.get("endpoint_url") == "http://recorder:9", (
             "the test-harness seam did not reach the SSO branch's boto3 client; "
