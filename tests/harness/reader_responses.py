@@ -581,7 +581,7 @@ class ResponsesProjection:
         Raises:
             UnreadableBodyError: When a ``message`` item carries an undefined role.
         """
-        path = f"input[{index}]"
+        path = c.residual_key("input", index=index)
 
         if not isinstance(item, dict):
             residual[path] = item
@@ -669,7 +669,7 @@ class ResponsesProjection:
             raise c.UnreadableBodyError(f"{path}: message role must be one of {sorted(_MESSAGE_ROLES)}, got {role!r}")
 
         raw_content = item.get("content")
-        parts = self._read_content(raw_content, f"{path}.content", residual)
+        parts = self._read_content(raw_content, c.residual_key(path, "content"), residual)
 
         # System and developer instructions lift into `conversation.system`
         # rather than becoming a turn (§3.3.1b R8.2).
@@ -689,7 +689,7 @@ class ResponsesProjection:
                     # an earlier part residualised, and would collide with the
                     # key `_read_content` already wrote — silently destroying one
                     # of two unclassified values.
-                    residual[f"{path}.content[{wire_index}]"] = entries[wire_index]
+                    residual[c.residual_key(c.residual_key(path, "content"), index=wire_index)] = entries[wire_index]
             return
 
         turns.append(c.Turn(role, [part for _, part in parts]))
@@ -724,7 +724,7 @@ class ResponsesProjection:
 
         parts: list[tuple[int, c.Part]] = []
         for offset, entry in enumerate(raw):
-            part = self._read_content_part(entry, f"{path}[{offset}]", residual, allowed)
+            part = self._read_content_part(entry, c.residual_key(path, index=offset), residual, allowed)
             if part is not None:
                 parts.append((offset, part))
 
@@ -863,7 +863,7 @@ class ResponsesProjection:
         # cannot see a nested coercion because `consumed` is top-level only.
         call_id = item.get("call_id")
         if call_id is not None and not isinstance(call_id, str):
-            residual[f"{path}.call_id"] = call_id
+            residual[c.residual_key(path, "call_id")] = call_id
             call_id = None
 
         # `name` is required by `FunctionToolCall` and, unlike the id, there is
@@ -872,12 +872,12 @@ class ResponsesProjection:
         # residualised too, not just a wrong type.
         name = item.get("name")
         if not isinstance(name, str):
-            residual[f"{path}.name"] = name
+            residual[c.residual_key(path, "name")] = name
             name = ""
 
         return c.ToolUse(
             name=name,
-            arguments=c.decode_arguments(item.get("arguments"), f"{path}.arguments", residual),
+            arguments=c.decode_arguments(item.get("arguments"), c.residual_key(path, "arguments"), residual),
             id=call_id,
         )
 
@@ -906,11 +906,11 @@ class ResponsesProjection:
             # unremarked. `_read_content_part` returns only members of
             # `RESULT_PART_TYPES`, so no further narrowing is needed after it.
             for _offset, part in self._read_content(
-                raw, f"{path}.output", residual, allowed=_TOOL_OUTPUT_CONTENT_TYPES
+                raw, c.residual_key(path, "output"), residual, allowed=_TOOL_OUTPUT_CONTENT_TYPES
             ):
                 content.append(part)  # type: ignore[arg-type]
         elif raw is not None:
-            residual[f"{path}.output"] = raw
+            residual[c.residual_key(path, "output")] = raw
 
         # Responses carries no error flag on a function output, so `is_error` is
         # always False here. Written down rather than left as silence: the field
@@ -968,7 +968,7 @@ class ResponsesProjection:
                 continue
 
             if not isinstance(entries, list):
-                residual[f"{path}.{field_name}"] = entries
+                residual[c.residual_key(path, field_name)] = entries
                 continue
 
             for offset, entry in enumerate(entries):
@@ -976,7 +976,7 @@ class ResponsesProjection:
                 if isinstance(text, str):
                     texts.append(text)
                 else:
-                    residual[f"{path}.{field_name}[{offset}]"] = entry
+                    residual[c.residual_key(c.residual_key(path, field_name), index=offset)] = entry
 
         signature = item.get("encrypted_content")
         if not isinstance(signature, str):
@@ -1021,9 +1021,9 @@ class ResponsesProjection:
             # shape at all, so it residualises whole rather than being read as a
             # built-in named `str(kind)`.
             if not isinstance(entry, dict) or not isinstance(entry.get("type"), str):
-                residual[f"tools[{index}]"] = entry
+                residual[c.residual_key("tools", index=index)] = entry
                 continue
-            tools.append(self._read_tool(entry, f"tools[{index}]", residual))
+            tools.append(self._read_tool(entry, c.residual_key("tools", index=index), residual))
 
         return tools
 
@@ -1049,12 +1049,12 @@ class ResponsesProjection:
             # mutation those checks exist to catch.
             description = entry.get("description")
             if description is not None and not isinstance(description, str):
-                residual[f"{path}.description"] = description
+                residual[c.residual_key(path, "description")] = description
                 description = None
 
             parameters = entry.get("parameters")
             if parameters is not None and not isinstance(parameters, dict):
-                residual[f"{path}.parameters"] = parameters
+                residual[c.residual_key(path, "parameters")] = parameters
                 parameters = None
 
             # Same rule as `_read_function_call`, and for a stronger reason:
@@ -1065,7 +1065,7 @@ class ResponsesProjection:
             # register row would match them by accident rather than by name.
             name = entry.get("name")
             if not isinstance(name, str):
-                residual[f"{path}.name"] = name
+                residual[c.residual_key(path, "name")] = name
                 name = ""
 
             strict = entry.get("strict")

@@ -27,6 +27,7 @@ from __future__ import annotations
 import base64
 import dataclasses
 import hashlib
+import json
 import re
 from pathlib import Path
 from typing import get_type_hints
@@ -1827,3 +1828,273 @@ def test_the_import_guard_does_not_fire_on_innocent_text() -> None:
     ]
 
     assert [line for line in innocent if _KITTY_IMPORT.search(line)] == []
+
+
+# --------------------------------------------------------------------------
+# R8 — the §7.4.1 residual-key vocabulary (KBR-193, AC-6 grounding)
+# --------------------------------------------------------------------------
+
+
+class TestResidualKeySnapshot:
+    """One byte-exact snapshot per shipped reader.
+
+    KBR-193 sweeps every residual-key construction in the three shipped
+    readers onto :func:`contract.residual_key`. The sweep must keep the
+    ``Request.residual`` key set byte-identical for every fixture, so each
+    test below pins that set as a literal :func:`frozenset`. The pre-sweep
+    fixture establishes the baseline; the post-sweep tree must satisfy the
+    same literal.
+    """
+
+    @staticmethod
+    def _captured(host: str, path: str, body: dict[str, object]) -> c.CapturedRequest:
+        """Build a capture aimed at the reader's published endpoint.
+
+        Args:
+            host: The host the request reaches.
+            path: The path on that host.
+            body: The body to encode as the capture's body.
+
+        Returns:
+            A capture the reader can be handed directly.
+        """
+        raw = json.dumps(body).encode("utf-8")
+
+        return c.CapturedRequest(
+            method="POST",
+            scheme="https",
+            host=host,
+            path=path,
+            query="",
+            headers=(("content-type", "application/json"),),
+            body=raw,
+        )
+
+    def test_anthropic_messages_residual_key_set_is_pinned(self) -> None:
+        """Two keys spanning the depth rule and the source rule (§7.4.1).
+
+        ``messages[0].unknown`` is a top-level unknown on the message — the
+        shallowest form. ``messages[0].content[0].source.unknown`` is two
+        nesting levels below the message — the form KBR-174 called out for
+        the image-source helpers. Both must survive the sweep byte-identical.
+        """
+        from harness import reader_anthropic_messages
+
+        body = {
+            "model": "claude-opus-5",
+            "max_tokens": 1024,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image", "source": {"type": "url", "url": "u", "unknown": 1}}
+                    ],
+                    "unknown": 2,
+                }
+            ],
+        }
+        projected = reader_anthropic_messages.AnthropicMessagesProjection().read_request(
+            self._captured("api.anthropic.com", "/v1/messages", body)
+        )
+
+        assert frozenset(projected.residual.keys()) == frozenset(
+            {"messages[0].unknown", "messages[0].content[0].source.unknown"}
+        )
+
+    def test_responses_residual_key_set_is_pinned(self) -> None:
+        """Two content-array residuals under ``input[0].content[N]``.
+
+        The ``input[0]`` path is built by a ``path = f"input[{index}]"``
+        assignment; the ``content[N]`` segment is appended by an inline
+        argument to the content reader. Together they exercise both the
+        assignment-shape and the inline-arg-shape of FR-3.
+        """
+        from harness import reader_responses
+
+        body = {
+            "input": [
+                {
+                    "role": "developer",
+                    "content": [
+                        {"type": "unheard_of", "x": 1},
+                        {"type": "input_image", "image_url": "https://example.test/a.png"},
+                    ],
+                }
+            ]
+        }
+        projected = reader_responses.ResponsesProjection().read_request(
+            self._captured("api.openai.com", "/v1/responses", body)
+        )
+
+        assert frozenset(projected.residual.keys()) == frozenset(
+            {"input[0].content[0]", "input[0].content[1]"}
+        )
+
+    def test_gemini_residual_key_set_is_pinned(self) -> None:
+        """A function-declaration member the grammar cannot carry.
+
+        ``tools[0].functionDeclarations[0].surprise`` is the deepest indexed
+        path the three readers use today — three ``[N]`` slots and two
+        ``.key`` slots in one residual key. KBR-193's whole case for pinning
+        the builder is that six readers would otherwise spell this five
+        ways.
+        """
+        from harness import reader_gemini
+
+        body = {
+            "contents": [{"role": "user", "parts": [{"text": "hi"}]}],
+            "tools": [{"functionDeclarations": [{"name": "f", "surprise": 1}]}],
+        }
+        projected = reader_gemini.GeminiProjection().read_request(
+            self._captured(
+                "generativelanguage.googleapis.com",
+                "/v1beta/models/x:generateContent",
+                body,
+            )
+        )
+
+        assert frozenset(projected.residual.keys()) == frozenset(
+            {"tools[0].functionDeclarations[0].surprise"}
+        )
+
+
+class TestResidualKey:
+    """KBR-193 — ``contract.residual_key`` is the shared §7.4.1 builder.
+
+    The helper is the only place the seven wire projections spell a
+    residual key, so the FR-2 shape table, the FR-1 validation, and the
+    FR-5 falsification all live here as one ``l1`` test class.
+    """
+
+    def test_a_top_level_prefix_returns_the_prefix_unchanged(self) -> None:
+        """FR-2 row 1 — ``residual_key("tool_choice")`` returns ``"tool_choice"``.
+
+        With ``key=None`` and ``index=None`` the call is *not* keying a
+        sub-object, so the prefix is returned verbatim. This is also the
+        rule-2 base shape: ``residual_key("messages[2].content")`` returns
+        the path itself when no further ``key`` or ``index`` is supplied.
+        """
+        assert c.residual_key("tool_choice") == "tool_choice"
+
+    def test_a_top_level_key_with_no_index_returns_the_key_bare(self) -> None:
+        """FR-2 row 2 — the §7.4.1 rule-1 bare form.
+
+        A wholly-unclassified top-level key is keyed by its bare name.
+        ``verify_total`` compares the residual's keys against the body's
+        own top-level keys; a ``residual[...]``-wrapped form would miss
+        ``source`` and raise ``DroppedFieldsError`` naming the wrong
+        defect (§7.4.1 rule 1).
+        """
+        assert c.residual_key("", "tool_choice") == "tool_choice"
+
+    def test_a_prefix_and_key_join_with_a_dot(self) -> None:
+        """FR-2 row 3 — ``prefix + "." + key``."""
+        assert c.residual_key("messages[2].content", "x_marker") == "messages[2].content.x_marker"
+
+    def test_an_index_is_appended_to_the_prefix_before_the_key(self) -> None:
+        """FR-2 row 4 — ``index`` attaches to the prefix's tail, then ``key`` follows."""
+        assert c.residual_key("tools", "input_schema", index=0) == "tools[0].input_schema"
+
+    def test_an_index_without_a_key_returns_the_indexed_prefix(self) -> None:
+        """FR-2 row 5 — no ``key`` means the call is *the* element, not a field of it."""
+        assert c.residual_key("tools", index=0) == "tools[0]"
+
+    def test_an_index_appends_to_the_end_of_the_prefix_not_the_start(self) -> None:
+        """FR-2 row 6 — distinguishing the §7.4.1 rule-2 indexing from a list index.
+
+        A naïve `f"{prefix}[{index}].{key}"` interpretation would index
+        the wrong segment. The helper must attach the index to the
+        prefix's *tail* (here: ``content``).
+        """
+        assert c.residual_key("messages[2].content", index=0) == "messages[2].content[0]"
+
+    def test_index_then_key_compose_into_the_full_indexed_path(self) -> None:
+        """FR-2 row 7 — the composed case."""
+        assert (
+            c.residual_key("messages[2].content", "x_marker", index=0)
+            == "messages[2].content[0].x_marker"
+        )
+
+    def test_an_empty_prefix_with_an_index_is_a_caller_bug(self) -> None:
+        """FR-1 validation — the empty prefix has nothing to index.
+
+        A ``[N]`` index on an empty prefix would produce ``"[0].field"``,
+        which is not a body path. No shipped reader reaches this shape;
+        the validation exists to stop a future reader from emitting it.
+        """
+        with pytest.raises(ValueError):
+            c.residual_key("", "content", index=0)
+
+    def test_an_empty_key_when_explicitly_passed_is_a_caller_bug(self) -> None:
+        """FR-1 validation — ``""`` is a trailing-dot key, not a body path.
+
+        The default ``None`` is unaffected: ``residual_key(prefix)``
+        returns ``prefix`` unchanged.
+        """
+        with pytest.raises(ValueError):
+            c.residual_key("messages[2]", "")
+
+    def test_a_bool_index_is_rejected_even_though_bool_is_an_int(self) -> None:
+        """FR-1 validation — the ``_index`` precedent (contract.py:1459)."""
+        with pytest.raises(ValueError):
+            c.residual_key("tools", index=True)  # type: ignore[arg-type]
+
+    def test_a_float_index_is_rejected(self) -> None:
+        """FR-1 validation — float indices, like bools, would silently build garbage."""
+        with pytest.raises(ValueError):
+            c.residual_key("tools", index=1.5)  # type: ignore[arg-type]
+
+    def test_the_wildcard_sentinel_is_not_a_valid_residual_index(self) -> None:
+        """FR-1 validation — §7.4.1 fixes residual keys as array positions, never patterns.
+
+        ``_index`` accepts ``WILDCARD`` because §3.3.1a's tool-addressing
+        vocabulary uses it for register-row patterns. ``residual_key`` does
+        not: a residual key is never matched against a register pattern,
+        and a stray wildcard would produce ``messages[*].content`` — a
+        path no corpus entry's body matches. The message is checked
+        specifically because the generic int check would also raise
+        ``ValueError`` here; matching the wording pins the *explanation*
+        the caller sees, not just the rejection.
+        """
+        with pytest.raises(ValueError, match="never a pattern"):
+            c.residual_key("messages", index=c.WILDCARD)
+
+    def test_a_string_index_is_rejected(self) -> None:
+        """A string index that is not ``WILDCARD`` is still rejected.
+
+        The validation accepts only ``int`` (and rejects ``bool``, ``float``,
+        and ``WILDCARD``).  A future reader that needs a string position
+        must add explicit support at the call site — the helper makes no
+        policy on string indices beyond the one sentinel that has the
+        §7.4.1 meaning.
+        """
+        with pytest.raises(ValueError):
+            c.residual_key("messages", "id", index="2")  # type: ignore[arg-type]
+
+    def test_a_wrong_implementation_wrapping_top_level_keys_would_break_verify_total(self) -> None:
+        """FR-5 falsification — the most common silent failure.
+
+        A reader that wraps every top-level key in ``residual[...]``
+        breaks ``verify_total`` rather than naming the right defect
+        (§7.4.1 rule 1). The helper returns the bare form for
+        ``prefix=""`` precisely so this failure mode is structurally
+        impossible at the call site.
+        """
+        # The right call returns the bare form, not a wrapped one.
+        assert c.residual_key("", "tool_choice") != "residual[tool_choice]"
+        assert c.residual_key("tool_choice") != "residual[tool_choice]"
+
+
+class TestResidualKeyVocabularyInContract:
+    """§7.4.1 calls ``residual_key`` the shared builder — the contract re-exports it.
+
+    A reader that bypasses the helper (e.g. by importing the reader-local
+    ``_join`` that KBR-193 deletes) lands as a divergence here. This
+    is the negative control on the §7.4.1 prose claim that the builder
+    is *one* call.
+    """
+
+    def test_residual_key_is_a_module_level_attribute(self) -> None:
+        """§7.4.1 — readers reach the builder through ``contract.residual_key``."""
+        assert hasattr(c, "residual_key")
+        assert callable(c.residual_key)

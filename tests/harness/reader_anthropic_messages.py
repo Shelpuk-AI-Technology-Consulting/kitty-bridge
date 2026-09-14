@@ -312,7 +312,7 @@ def _read_system(value: Any, residual: dict[str, Any]) -> tuple[c.Text, ...]:
         if not isinstance(text, str):
             raise c.UnreadableBodyError(f"system[{index}] text must be a string, got {type(text).__name__}")
 
-        path = f"system[{index}]"
+        path = c.residual_key("system", index=index)
         _residualise(block, {"type", "text", "cache_control"}, path, residual)
         parts.append(c.Text(text, cache_control=_read_cache_control(block, path, residual)))
 
@@ -356,24 +356,24 @@ def _read_tools(value: Any, residual: dict[str, Any]) -> tuple[c.ToolDecl, ...]:
         # would not: the oracle could not report anything else about the body.
         schema = tool.get("input_schema")
         if schema is not None and not isinstance(schema, dict):
-            residual[f"tools[{index}].input_schema"] = schema
+            residual[c.residual_key("tools", "input_schema", index=index)] = schema
             schema = None
 
         declared.append(
             c.ToolDecl(
                 name=tool["name"],
-                description=_typed_leaf(tool, "description", str, f"tools[{index}]", residual),
+                description=_typed_leaf(tool, "description", str, c.residual_key("tools", index=index), residual),
                 schema=schema,
                 # Absent, not False: the Messages format defines no `strict`,
                 # and P15's presence and absence must stay distinguishable.
                 strict=None,
-                cache_control=_read_cache_control(tool, f"tools[{index}]", residual),
+                cache_control=_read_cache_control(tool, c.residual_key("tools", index=index), residual),
             )
         )
         # Indexed, not by name (§7.4.1): a residual key is the body's own path,
         # and §3.3.1a's by-name tool addressing is a delta-path convention whose
         # reason — translators reorder declarations — is about comparison.
-        _residualise(tool, _TOOL_KEYS, f"tools[{index}]", residual)
+        _residualise(tool, _TOOL_KEYS, c.residual_key("tools", index=index), residual)
 
     return tuple(declared)
 
@@ -422,7 +422,7 @@ def _read_turns(value: Any, residual: dict[str, Any]) -> tuple[c.Turn, ...]:
 
         parts = _read_content(message["content"], index, residual)
         turns.append(c.Turn(role=role, parts=_clause_three(role, parts)))
-        _residualise(message, {"role", "content"}, f"messages[{index}]", residual)
+        _residualise(message, {"role", "content"}, c.residual_key("messages", index=index), residual)
 
     return _normalise_turns(turns)
 
@@ -453,7 +453,7 @@ def _read_content(value: Any, message_index: int, residual: dict[str, Any]) -> t
 
     parts: list[c.Part] = []
     for index, block in enumerate(value):
-        path = f"messages[{message_index}].content[{index}]"
+        path = c.residual_key(c.residual_key("messages", "content", index=message_index), index=index)
         parts.append(_read_block(block, path, residual))
 
     return tuple(parts)
@@ -519,7 +519,7 @@ def _read_block(block: Any, path: str, residual: dict[str, Any], *, nested: bool
         # raised, for the reason given there.
         arguments = block.get("input")
         if arguments is not None and not isinstance(arguments, dict):
-            residual[f"{path}.input"] = arguments
+            residual[c.residual_key(path, "input")] = arguments
             arguments = None
 
         _residualise(block, {"type", "name", "input", "id", "cache_control"}, path, residual)
@@ -537,7 +537,7 @@ def _read_block(block: Any, path: str, residual: dict[str, Any], *, nested: bool
         # value the grammar already carries, so there is one to fall back to.
         is_error = block.get("is_error", False)
         if not isinstance(is_error, bool):
-            residual[f"{path}.is_error"] = is_error
+            residual[c.residual_key(path, "is_error")] = is_error
             is_error = False
 
         _residualise(
@@ -598,19 +598,19 @@ def _read_image(
         except (binascii.Error, ValueError) as exc:
             raise c.UnreadableBodyError(f"{path} image data is not valid base64: {exc}") from exc
 
-        _residualise(source, {"type", "data", "media_type"}, f"{path}.source", residual)
+        _residualise(source, {"type", "data", "media_type"}, c.residual_key(path, "source"), residual)
         # The media type is excluded from the digest and carried separately, so
         # a changed media type is its own delta rather than an unexplained
         # digest change.
         return c.Image(
             digest=c.image_digest(decoded),
-            media_type=_typed_leaf(source, "media_type", str, f"{path}.source", residual),
+            media_type=_typed_leaf(source, "media_type", str, c.residual_key(path, "source"), residual),
             cache_control=cache_control,
         )
 
     if kind == "url":
-        _residualise(source, {"type", "url"}, f"{path}.source", residual)
-        ref = _typed_leaf(source, "url", str, f"{path}.source", residual)
+        _residualise(source, {"type", "url"}, c.residual_key(path, "source"), residual)
+        ref = _typed_leaf(source, "url", str, c.residual_key(path, "source"), residual)
         # `url` is a required field of a url-sourced image (§7.4 rule 7 row 2):
         # if it is missing or wrongly typed the part keeps its position with
         # identity from the canonical-JSON digest of the source dict (the
@@ -623,8 +623,8 @@ def _read_image(
         )
 
     if kind == "file":
-        _residualise(source, {"type", "file_id"}, f"{path}.source", residual)
-        ref = _typed_leaf(source, "file_id", str, f"{path}.source", residual)
+        _residualise(source, {"type", "file_id"}, c.residual_key(path, "source"), residual)
+        ref = _typed_leaf(source, "file_id", str, c.residual_key(path, "source"), residual)
         return c.Image(
             ref=ref,
             digest=None if ref is not None else c.opaque_digest(source),
@@ -668,7 +668,7 @@ def _read_result_content(
 
     parts: list[c.Text | c.Image | c.Json | c.Opaque] = []
     for index, block in enumerate(value):
-        member_path = f"{path}.content[{index}]"
+        member_path = c.residual_key(c.residual_key(path, "content"), index=index)
         if not isinstance(block, dict):
             raise c.UnreadableBodyError(f"{member_path} must be an object, got {type(block).__name__}")
         if "type" not in block:
@@ -776,7 +776,7 @@ def _typed_leaf(
     """
     value = source.get(key, default)
     if value is not None and not isinstance(value, expected):
-        residual[f"{path}.{key}" if path else key] = value
+        residual[c.residual_key(path, key)] = value
         return default
     return value
 
@@ -819,7 +819,7 @@ def _read_cache_control(
     # permits none. Both residualise at the field's own path and fail the run
     # with it named, which is the signal §3.3.1 asks for.
     if not permitted or not isinstance(value, dict):
-        residual[f"{path}.cache_control"] = value
+        residual[c.residual_key(path, "cache_control")] = value
         return None
 
     return value
@@ -842,7 +842,7 @@ def _residualise(
     """
     for key, value in source.items():
         if key not in mapped:
-            residual[f"{prefix}.{key}"] = value
+            residual[c.residual_key(prefix, key)] = value
 
 
 def _clause_three(role: str, parts: Sequence[c.Part]) -> tuple[c.Part, ...]:
