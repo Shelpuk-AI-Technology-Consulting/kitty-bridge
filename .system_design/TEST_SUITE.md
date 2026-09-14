@@ -362,7 +362,9 @@ shapes that question, and it is one of four:
   scripted-recorder test, not from the corpus.
 * **`PROFILE`** — derived from the profile (the compaction budget from the profile's model, and
   on a balancing profile from the smallest context in the pool — ``M1`` additionally: the
-  profile sets the model). Declared at the call site that resolves the profile.
+  profile sets the model; ``P9g`` non-Entra credential, ``P9d`` ChatGPT account id present:
+  the profile's configured credential or OAuth authentication token decides them).
+  Declared at the call site that resolves the profile.
 
 Compound triggers — `GEMINI_NON_STREAMING` is the canonical case (``GEMINI_PROTOCOL`` ROUTE
 on the route, then the request's stream flag — REQUEST there) — classify on the
@@ -2506,16 +2508,19 @@ trigger, and `corpus.NOT_CORPUS_DECIDABLE` is *derived* from that classification
 rather than hand-listed (KBR-186). Five RESPONSE rows (`M6`/`M8`/`M9`/`M12`/`M17`)
 are discharged by a named scripted-recorder test, not by an entry; four ROUTE
 rows (`M2`/`M16` non-native upstream wire, `M10` Gemini protocol, `P13` CC-origin
-path) and three PROFILE rows (`M1` profile sets model, `M4`/`M5` compaction
-budget) are likewise declined in the manifest — every one is met at the route
-or profile that resolves it, not by the inbound request. The loader refuses all
-eleven plus `ALWAYS` in both lists; the earlier hand list stopped at the five
-RESPONSE rows plus `ALWAYS`, which is the drift the derivation removes. With
-the classification in place, **T-D8 *can* now read corpus coverage** for every
+path) and five PROFILE rows (`M1` profile sets model, `M4`/`M5` compaction
+budget, `P9g` non-Entra credential, `P9d` ChatGPT account id present) are
+likewise declined in the manifest — every one is met at the route or profile
+that resolves it, not by the inbound request. The loader refuses all thirteen
+plus `ALWAYS` in both lists; the earlier hand list stopped at the five RESPONSE
+rows plus `ALWAYS`, which is the drift the derivation removes. With the
+classification in place, **T-D8 *can* now read corpus coverage** for every
 conditional REQUEST row (the set T-C1–T-C6 populate), with the RESPONSE rows
 discharged by the scripted-recorder test and ROUTE/PROFILE rows having no
-corpus complement to find. G21's over-declaration hazard is closed for the
-whole vocabulary rather than the cases the repository happened to prove in
+corpus complement to find (the `P9d` row's complement is discharged by the
+L1 pins in `tests/providers/test_openai_subscription.py`, not the corpus,
+because the trigger is PROFILE). G21's over-declaration hazard is closed for
+the whole vocabulary rather than the cases the repository happened to prove in
 text.
 
 **T-C7's connection-pattern baseline is a different artifact.** This format carries the *header*
