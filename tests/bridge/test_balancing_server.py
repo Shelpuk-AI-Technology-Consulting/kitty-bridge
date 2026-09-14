@@ -1037,6 +1037,12 @@ class TestBalancingAllCustomTransport:
                         f"cap-hit message should mention a usable-backend "
                         f"exhaustion, got {msg!r}"
                     )
+                    # Every pre-stream exhaustion 502 on this handler carries a
+                    # "reason" marker (D4, KBR-241); the cap-hit must sit in the
+                    # same family so clients can branch on it.
+                    assert body.get("error", {}).get("reason") == "cross_class_exhaustion", (
+                        f"cap-hit 502 should carry reason=cross_class_exhaustion, got {body!r}"
+                    )
         finally:
             await server.stop_async()
 

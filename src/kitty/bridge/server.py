@@ -5394,6 +5394,12 @@ class BridgeServer:
                                 "Upstream backends exhausted (the bridge could not "
                                 "land on a usable backend on this request)"
                             ),
+                            # Every other pre-stream exhaustion 502 on this handler
+                            # carries a "reason" marker (D4, KBR-241): keep the cap-hit
+                            # in the same family so a client that branches on "reason"
+                            # sees a distinguishable outcome rather than an unlabelled
+                            # 502.
+                            "reason": "cross_class_exhaustion",
                         },
                     },
                     status=502,

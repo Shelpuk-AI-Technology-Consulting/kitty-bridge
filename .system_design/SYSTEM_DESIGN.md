@@ -392,7 +392,7 @@ logic. A no means byte-identical to the pre-KBR-232 behaviour.
 | S4 | Gate and converter re-evaluated per attempt | A failover can land on a Chat Completions-wire backend mid-handler; a stale converter would mangle its Chat Completions stream. |
 | S5 | `thinking_delta` → `reasoning_content`; signatures dropped | The Chat Completions wire has no signature slot, so preservation is impossible; M17's strip-and-retry recovers the round-trip rejection instead (KBR-238). |
 | S6 | The three loops run wider by the strip budget, with an attempt correction | Same rationale KBR-238 recorded on `_stream_messages`: a strip gets its attempt back, so the empty-response schedule is not pulled forward. |
-| S7 | Cross-class re-dispatch (`_stream_messages`, KBR-249): when a plain-POST branch's failover selects a `use_custom_transport` provider, the function re-enters the custom-transport branch with the failover-selected provider as its own initial selection | The plain-POST branch cannot drive a `use_custom_transport` provider via `session.post(...)`; the bridge must speak the protocol that matches the selected backend's class. Without re-dispatch the failover silently delivers an empty `200` (the bug KBR-235 exposed). The custom-transport branch's symmetric `custom → plain` fall-through — `src/kitty/bridge/server.py:4109` (the cross-mode select) then `4254-4259` (the `continue` entering the plain block) — is unchanged in behaviour. The re-dispatch bound is `(2 * n_backends) + 1` per request so a pathological cooldown-expiry ping-pong surfaces an honest error instead of looping. |
+| S7 | Cross-class re-dispatch (`_stream_messages`, KBR-249): when a plain-POST branch's failover selects a `use_custom_transport` provider, the function re-enters the custom-transport branch with the failover-selected provider as its own initial selection | The plain-POST branch cannot drive a `use_custom_transport` provider via `session.post(...)`; the bridge must speak the protocol that matches the selected backend's class. Without re-dispatch the failover silently delivers an empty `200` (the bug KBR-235 exposed). The custom-transport branch's symmetric `custom → plain` fall-through — `src/kitty/bridge/server.py:4126-4144` (the cross-mode select with the three pops) then `4270-4275` (the `continue` entering the plain block) — is unchanged in behaviour. The re-dispatch bound is `(2 * n_backends) + 1` per request so a pathological cooldown-expiry ping-pong surfaces an honest error instead of looping. |
 | S8 | Cross-class re-dispatch reuses the failover-selected provider, never re-selects | Re-selecting would consume a new draw from the deterministic test stub and break the pinned two-draw invariant; semantically, the failover already chose — the branch re-enters with that choice intact. |
 
 ### 5.4 Known limits
@@ -405,10 +405,9 @@ logic. A no means byte-identical to the pre-KBR-232 behaviour.
   error surfaces to the client (which is still the fix: the per-event translator used to
   swallow the error and deliver a truncated success).
 - **The KBR-249 dispatch defect exists in three sibling handlers too.**
-  `_stream_responses` (`src/kitty/bridge/server.py:3570-3585, 3725-3740, 3758-3773`
-  — plain-branch failover sites whose `_select_backend()` calls are now +7
-  deeper), `_stream_chat_completions` (`6514-6529, 6713-6728, 6743-6758`),
-  and `_stream_gemini` (`5507-5522, 5648-5663, 5668-5683`) have plain-POST
+  `_stream_responses` (`src/kitty/bridge/server.py:3563, 3718, 3751`),
+  `_stream_chat_completions` (`6766, 6965, 6995`),
+  and `_stream_gemini` (`5759, 5900, 5921`) have plain-POST
   branches whose failovers call `_select_backend()` without a
   transport-class guard, just like `_stream_messages` did before KBR-249.
   The fix shape is identical; KBR-249 scopes to `/v1/messages` because
