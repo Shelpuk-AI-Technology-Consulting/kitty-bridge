@@ -4,11 +4,14 @@ The native Messages path forwards upstream bytes verbatim, so before the hold
 existed an empty reply reached Claude Code before anything could judge it.
 :class:`~kitty.bridge.preamble_hold.PreambleHold` withholds the stream's leading
 bytes until content arrives. These tests pin the release rule decided in
-``.system_design/TEST_SUITE.md`` §11 Q14(b) and its amendments D1, D2 and D5, and
-the verbatim-replay guarantee that keeps the path a passthrough.
+``.system_design/TEST_SUITE.md`` §11 Q14(b) and its amendments D1 and D5 — with
+D2 as amended by KBR-241: an ``error`` event before content is recorded for the
+caller to retry on, not delivered — and the verbatim-replay guarantee that keeps
+the path a passthrough.
 
 Covers ``.requirements/20260913T134250Z_native_preamble_hold`` R1, R2, R3 and the
-stop-reason half of R6.
+stop-reason half of R6, plus
+``.requirements/20260913T234738Z_kbr241_preemission_error_recovery`` R1 and R2.
 """
 
 from __future__ import annotations
@@ -227,22 +230,80 @@ class TestReleaseRule:
         )
         assert hold.feed(MESSAGE_START + start) != b""
 
-    def test_error_event_releases(self):
-        """D2: the provider's own error is passed through, not judged empty."""
+    def test_error_event_is_recorded_not_released(self):
+        """D2 as amended by KBR-241: a pre-content error is judged, not delivered."""
         hold = PreambleHold()
-        assert hold.feed(MESSAGE_START + ERROR_EVENT) != b""
-        assert hold.released is True
+        assert hold.feed(MESSAGE_START + ERROR_EVENT) == b""
+        assert hold.released is False
+        assert hold.error_seen is True
+        assert hold.error_event == {"type": "error", "error": {"type": "overloaded_error", "message": "Overloaded"}}
 
-    def test_error_type_releases_without_an_event_name(self):
-        """D2: a shim that sends only ``data:`` lines still delivers its error."""
+    def test_error_type_records_without_an_event_name(self):
+        """A shim that sends only ``data:`` lines still has its error recognised."""
         hold = PreambleHold()
         bare = b'data: {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}\n\n'
-        assert hold.feed(MESSAGE_START + bare) != b""
+        assert hold.feed(MESSAGE_START + bare) == b""
+        assert hold.released is False
+        assert hold.error_seen is True
+        assert hold.error_event == {"type": "error", "error": {"type": "overloaded_error", "message": "Overloaded"}}
 
-    def test_error_event_name_releases_even_when_its_data_is_not_json(self):
-        """D2: the SDK raises on ``event: error`` by name, so a shim's unparseable error body is still an error."""
+    def test_error_event_name_records_even_when_its_data_is_not_json(self):
+        """The SDK raises on ``event: error`` by name, so a shim's unparseable error body is still an error."""
         hold = PreambleHold()
-        assert hold.feed(MESSAGE_START + b"event: error\ndata: upstream exploded\n\n") != b""
+        assert hold.feed(MESSAGE_START + b"event: error\ndata: upstream exploded\n\n") == b""
+        assert hold.released is False
+        assert hold.error_seen is True
+        assert hold.error_event is None
+
+    def test_error_event_data_line_is_recorded_as_received(self):
+        """The data line fills the payload whatever it holds; only its ``error`` dict is usable later."""
+        hold = PreambleHold()
+        odd = b'event: error\ndata: {"type":"content_block_delta","index":0}\n\n'
+        assert hold.feed(MESSAGE_START + odd) == b""
+        assert hold.released is False
+        assert hold.error_seen is True
+        assert hold.error_event == {"type": "content_block_delta", "index": 0}
+
+    def test_second_error_overwrites_the_first(self):
+        """Last error wins, as the last stop_reason does."""
+        hold = PreambleHold()
+        second = _sse("error", {"type": "error", "error": {"type": "api_error", "message": "later"}})
+        assert hold.feed(MESSAGE_START + ERROR_EVENT + second) == b""
+        assert hold.error_event == {"type": "error", "error": {"type": "api_error", "message": "later"}}
+
+    def test_error_event_completes_only_at_its_blank_line(self):
+        """KBR-241: a chunk boundary between the name line and the data line must not truncate the payload."""
+        hold = PreambleHold()
+        assert hold.feed(MESSAGE_START + b"event: error\n") == b""
+        assert hold.error_seen is True
+        assert hold.error_event_complete is False
+        assert hold.feed(b'data: {"type":"error","error":{"type":"overloaded_error"}}\n\n') == b""
+        assert hold.error_event == {"type": "error", "error": {"type": "overloaded_error"}}
+        assert hold.error_event_complete is True
+
+    def test_error_event_completes_at_a_following_event_header(self):
+        """A shim that omits the blank line still ends the error event at the next ``event:`` line."""
+        hold = PreambleHold()
+        assert hold.feed(MESSAGE_START + b'event: error\ndata: {"type":"error"}\nevent: ping\n') == b""
+        assert hold.error_event_complete is True
+
+    def test_bare_data_error_completes_at_its_blank_line(self):
+        """The type-only error shape has no name line: its blank line alone must complete it."""
+        hold = PreambleHold()
+        assert hold.feed(MESSAGE_START + b'data: {"type":"error","error":{"type":"overloaded_error"}}\n') == b""
+        assert hold.error_seen is True
+        assert hold.error_event_complete is False
+        assert hold.feed(b"\n") == b""
+        assert hold.error_event == {"type": "error", "error": {"type": "overloaded_error"}}
+        assert hold.error_event_complete is True
+
+    def test_bare_data_error_completes_at_a_following_event_header(self):
+        """And a following header completes it too — `_error_seen` alone gates, not the header's name."""
+        hold = PreambleHold()
+        assert hold.feed(MESSAGE_START + b'data: {"type":"error","error":{"type":"overloaded_error"}}\n') == b""
+        assert hold.error_event_complete is False
+        assert hold.feed(b"event: ping\n\n") == b""
+        assert hold.error_event_complete is True
 
     def test_missing_data_type_falls_back_to_the_event_name(self):
         """The SDK fills a missing ``type`` from the SSE event name; a type-less delta is judged as one."""
@@ -250,10 +311,13 @@ class TestReleaseRule:
         typeless = b'event: content_block_delta\ndata: {"index":0,"delta":{"type":"text_delta","text":"Hi"}}\n\n'
         assert hold.feed(MESSAGE_START + typeless) != b""
 
-    def test_error_event_name_releases_with_no_data_line(self):
+    def test_error_event_name_records_with_no_data_line(self):
         """The SDK's SSE decoder dispatches a data-less ``event: error`` and raises on it."""
         hold = PreambleHold()
-        assert hold.feed(MESSAGE_START + b"event: error\n\n") != b""
+        assert hold.feed(MESSAGE_START + b"event: error\n\n") == b""
+        assert hold.released is False
+        assert hold.error_seen is True
+        assert hold.error_event is None
 
     def test_event_name_does_not_leak_past_its_blank_line(self):
         """A type-less data line after an event has ended is not judged by that event's name."""
@@ -332,10 +396,8 @@ class TestVerbatimReplay:
                 "content_block_start",
                 {"type": "content_block_start", "index": 1, "content_block": {"type": "text", "text": "Hi"}},
             ),
-            b"event: error\ndata: upstream exploded\n\n",
-            b'data: {"type":"error","error":{"type":"overloaded_error"}}\n\n',
         ],
-        ids=["text_delta", "tool_use_start", "prefilled_text_start", "error_by_name", "error_by_type"],
+        ids=["text_delta", "tool_use_start", "prefilled_text_start"],
     )
     def test_every_split_point_replays_the_stream_exactly(self, trigger):
         """Chunks arrive on arbitrary byte boundaries; each trigger may straddle any of them."""
@@ -345,6 +407,40 @@ class TestVerbatimReplay:
             out = _feed_all(hold, [stream[:cut], stream[cut:]])
             assert out == stream, f"split at byte {cut} changed the bytes"
             assert hold.released is True, f"split at byte {cut} never released"
+
+    @pytest.mark.parametrize(
+        "trigger",
+        [
+            b"event: error\ndata: upstream exploded\n\n",
+            b'data: {"type":"error","error":{"type":"overloaded_error"}}\n\n',
+        ],
+        ids=["error_by_name", "error_by_type"],
+    )
+    def test_error_trigger_is_held_with_its_bytes_verbatim(self, trigger):
+        """D2 as amended: an error ends nothing — the hold keeps every byte for the caller to judge."""
+        stream = MESSAGE_START + EMPTY_TEXT_START + trigger
+        for cut in range(len(stream) + 1):
+            hold = PreambleHold()
+            out = _feed_all(hold, [stream[:cut], stream[cut:]])
+            assert out == b"", f"split at byte {cut} released an error stream"
+            assert hold.released is False, f"split at byte {cut} released on an error"
+            assert hold.error_seen is True, f"split at byte {cut} missed the error"
+            assert hold.head(len(stream)) == stream, f"split at byte {cut} changed the held bytes"
+
+    def test_content_after_an_error_still_releases(self):
+        """R2: the judge is unchanged for content — an error first does not eat a later release."""
+        hold = PreambleHold()
+        out = hold.feed(MESSAGE_START + ERROR_EVENT + TEXT_DELTA)
+        assert out == MESSAGE_START + ERROR_EVENT + TEXT_DELTA
+        assert hold.released is True
+
+    def test_cap_fails_open_even_after_an_error_trigger(self):
+        """D5 boundary: the cap still fails open past an unjudged error, delivering as today."""
+        hold = PreambleHold(max_held_bytes=len(MESSAGE_START + ERROR_EVENT))
+        assert hold.feed(MESSAGE_START + ERROR_EVENT) == b""
+        assert hold.feed(THINKING_START) != b""
+        assert hold.released is True
+        assert hold.error_seen is True
 
     def test_release_happens_only_once_the_trigger_line_is_complete(self):
         stream = MESSAGE_START + TEXT_DELTA
@@ -372,3 +468,17 @@ class TestStopReason:
         hold = PreambleHold()
         hold.feed(MESSAGE_START + MESSAGE_STOP)
         assert hold.stop_reason is None
+
+    def test_stop_reason_after_an_error_is_not_recorded(self):
+        """KBR-241: the error is terminal, so a later stop reason is noise — in any chunk framing."""
+        hold = PreambleHold()
+        assert _feed_all(hold, [MESSAGE_START + ERROR_EVENT + MAX_TOKENS + MESSAGE_STOP]) == b""
+        assert hold.stop_reason is None
+        assert hold.error_seen is True
+
+    def test_stop_reason_before_an_error_is_recorded(self):
+        """A truncation that preceded the error stands, and the 400 will govern at the held end."""
+        hold = PreambleHold()
+        assert hold.feed(MESSAGE_START + MAX_TOKENS + ERROR_EVENT) == b""
+        assert hold.stop_reason == "max_tokens"
+        assert hold.error_seen is True

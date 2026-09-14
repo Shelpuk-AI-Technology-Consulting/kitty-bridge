@@ -2076,7 +2076,10 @@ an already-`200` response and are raised to the caller, never resumed. **I2** is
 
 The empty-stream case does not reach these rows at all: per Q14(b) the native passthrough holds
 its leading events until the first content event, so a contentless reply is still pre-emission
-when it is detected. That is KBR-155's to implement; the rows here assume it.
+when it is detected. That is KBR-155's to implement; the rows here assume it. Since KBR-241
+(2026-09-14) neither does a pre-content `error` event: the hold records it and the attempt takes
+the pre-emission ladder, so the post-emission rows keep governing only failures that follow
+content that actually reached the client.
 
 `/stats` remains authoritative for attribution, but not for the reason this paragraph used to give.
 Since KBR-183 no stream switches backend after its first byte, and `/v1/messages` prepares its
@@ -5031,6 +5034,9 @@ change traded, recorded here because each is a behaviour the translated branch h
 - **A pre-content `error` event is forwarded and the backend marked healthy**, as on native passthrough.
   The translated branch failed over on it, and on these routes that worked — while every successful
   stream arrived empty. Restoring failover is **KBR-233**; the preamble hold is its natural home.
+  *(Resolved 2026-09-14: KBR-233 was closed NOT-fixed pending a fresh owner decision, and KBR-241
+  supplied it — the hold now records a pre-content error event and the ladder runs, on every
+  Messages-wire route; see D2's amendment.)*
 - **Post-emission timeout failover (G26 / KBR-183) becomes reachable** on these routes, because bytes now
   reach the client.
 - **A forwarded stream is counted as one completion** (`_log_usage(None)`), for native routes too, which
@@ -5091,6 +5097,38 @@ found cases they did not reach and one they understated. Each is decided here, w
   fills a missing `data.type` from the event name. **Also as before:** a released error-only
   stream counts as a completed attempt, so its backend is marked healthy — the translated path
   quarantines on an in-stream error, and closing that difference is not this decision's.
+
+  **Amended by the product owner, 2026-09-14 (KBR-241; supersedes KBR-233's "closed, NOT
+  fixed"): a pre-content error event is no longer delivered — it is judged, and the attempt
+  takes the ordinary pre-emission ladder.** KBR-233 had asked for exactly this and was closed on
+  the recorded condition that revisiting it "needs a fresh owner decision amending D2 in §11
+  first"; KBR-241, filed an hour after that closure after the owner's own session was stopped
+  by this error a second time, is that decision — confirmed in conversation as recover
+  **pre-emission only**, with Q14(a) untouched. What the amendment keeps of D2: the recognition
+  rule (name or `data.type`, decided at the name line, as the SDK decides) and the exhaustion
+  rationale — when the ladder runs out, the client receives the **provider's payload
+  re-embedded** (`502`, with only `reason: "upstream_error"` added inside its `error` object),
+  because the provider's error type is what the client is written against; this deliberately
+  departs from Q9/D4's "names the product" precedent, so the body is not mistaken for a defect
+  or "fixed" into kitty's own wording later. When the error was seen but its payload is too
+  malformed to deliver (no `error` object, unparseable data), the marker still says
+  `upstream_error` and the wording is kitty's own (Q9) — an errored ladder never reports
+  `empty_response`, which would be false reporting against D4's own rationale for the marker.
+  What it changes: the hold records the error
+  (`error_seen`, `error_event`, `error_event_complete` — a chunk boundary may fall between the
+  name line and its data line, and reading stops only when the event's lines have all arrived)
+  and is deaf to everything after it (a later `message_delta` stop reason records nothing, so
+  the judge's answer cannot depend on how the stream was chunked); the handler stops reading at
+  the completed error event and runs the empty ladder. Two differences are **kept, not closed**:
+  the health model stays the empty ladder's — no quarantine, unlike the CC-wire path's in-stream
+  cooldown — and the two wires now also exhaust differently, the CC-wire generic body carrying
+  neither the provider payload nor a reason marker. The `sr is not None` arm ends an
+  already-open stream with the provider's payload raw, or kitty's upstream-error wording when
+  the payload is unusable. Three accepted residues: error-then-content
+  reaches the client only when both arrive in one chunk (the SDK raises on the event, so that
+  content was wasted anyway); the D5 cap still fails open past an unjudged error, delivering as
+  before this amendment; and a stream that stalls *inside* the error event (name line seen, no
+  blank line) still ends at the read timeout, since judging it early would truncate the event.
 - **D3 — a truncation before content fails at once with a `400`.** A reply whose stop reason is
   `max_tokens` or `model_context_window_exceeded` and that carried no content gets
   `invalid_request_error` with `reason: "<stop_reason>_before_content"`, and the ladder ends on

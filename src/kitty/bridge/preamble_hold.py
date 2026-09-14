@@ -20,10 +20,14 @@ The release rule, with the reasons recorded in Q14(b) and its amendments:
 - a ``content_block_start`` whose block already carries content — any type
   other than ``text``, ``thinking`` and ``redacted_thinking``, or a ``text``
   block started with non-empty text (D1: such blocks may send no delta);
-- an ``error`` event, which is the provider's to deliver (D2) — recognised by
-  its SSE ``event:`` name as well as its ``data.type``, because the official
-  SDK raises on the name alone;
 - more than :data:`MAX_HELD_BYTES` held, where the hold fails open (D5).
+
+An ``error`` event is not a release trigger: D2 as amended by KBR-241 records it
+instead — recognised by its SSE ``event:`` name as well as its ``data.type``,
+because the official SDK raises on the name alone — and the caller retries on
+it while every byte stays held. The error is terminal, so the judge is deaf to
+whatever follows it: a later ``message_delta`` stop reason records nothing,
+which keeps the answer independent of how the stream was chunked.
 """
 
 from __future__ import annotations
@@ -60,6 +64,13 @@ class PreambleHold:
             the stream was held, or ``None``. After the stream ends unreleased,
             ``"max_tokens"`` or ``"model_context_window_exceeded"`` means the
             reply was truncated before any content.
+        error_event: The parsed ``data:`` object of the last error event seen
+            while held, as received, or ``None``. Callers use it only when its
+            ``error`` value is a dict.
+
+    The :attr:`error_seen` and :attr:`error_event_complete` properties report
+    whether an error event arrived while held and whether its lines have all
+    been seen; the caller that stops reading on an error waits for the latter.
     """
 
     def __init__(self, *, max_held_bytes: int = MAX_HELD_BYTES) -> None:
@@ -78,12 +89,30 @@ class PreambleHold:
         # The current event's SSE `event:` name, which stands in for a missing `data.type`.
         self._event_name: str | None = None
         self._released = False
+        self._error_seen = False
+        self._error_complete = False
+        self.error_event: dict | None = None
         self.stop_reason: str | None = None
 
     @property
     def released(self) -> bool:
         """bool: Whether the hold has released and bytes now pass straight through."""
         return self._released
+
+    @property
+    def error_seen(self) -> bool:
+        """bool: Whether an upstream error event arrived while the stream was held."""
+        return self._error_seen
+
+    @property
+    def error_event_complete(self) -> bool:
+        """bool: Whether the error event's lines have all been seen.
+
+        A chunk boundary can fall between the ``event: error`` name line and its
+        ``data:`` line; the caller that stops reading on the error must wait for
+        this, or it truncates the event mid-line and loses the payload.
+        """
+        return self._error_complete
 
     @property
     def held_size(self) -> int:
@@ -141,6 +170,10 @@ class PreambleHold:
     def _is_release_line(self, line: bytes) -> bool:
         """Decide whether one complete SSE line ends the hold.
 
+        Error lines never release; scanning one records ``error_seen``, and once
+        the error event's lines end (blank line or next header) also
+        ``_error_complete`` — a side effect the ``False`` returns hide.
+
         Args:
             line: One line without its newline; a trailing ``\\r`` is tolerated.
 
@@ -148,10 +181,21 @@ class PreambleHold:
             ``True`` when the line is an event the release rule counts.
         """
         if line.startswith(b"event:"):
+            # A new event header also ends the previous event, whatever it was.
+            # `_error_seen` is monotone and only set by an error line, so it alone
+            # gates completion — the error's own header name need not be on record.
+            if self._error_seen:
+                self._error_complete = True
             self._event_name = line[6:].strip().decode("utf-8", errors="replace")
-            # D2: the SDK dispatches and raises on `event: error` even with no data line at all.
-            return self._event_name == "error"
+            # D2 as amended by KBR-241: the SDK dispatches and raises on `event: error`
+            # even with no data line at all, so the name alone records the error — a
+            # following data line only fills `error_event`.
+            if self._event_name == "error":
+                self._error_seen = True
+            return False
         if not line.strip():
+            if self._error_seen:
+                self._error_complete = True
             self._event_name = None
             return False
         if not line.startswith(b"data:"):
@@ -162,6 +206,13 @@ class PreambleHold:
             # Untrusted bytes: a 4300-digit integer or deep nesting must not escape as an error.
             return False
         if not isinstance(event, dict):
+            return False
+
+        # An error line is terminal: record it as received and hold — the caller gates
+        # on `error.error` being a dict before using the payload.
+        if self._event_name == "error" or event.get("type") == "error":
+            self._error_seen = True
+            self.error_event = event
             return False
 
         event_type = event.get("type", self._event_name)
@@ -179,11 +230,15 @@ class PreambleHold:
             # D6: an empty text chunk is no more content than an empty text block start.
             return not (delta_type == "text_delta" and delta.get("text") == "")
         if event_type == "message_delta":
+            # Post-terminal deafness: a stop reason after an error is noise, and the
+            # contract must not depend on whether both arrived in one chunk.
+            if self._error_seen:
+                return False
             delta = event.get("delta")
             if isinstance(delta, dict) and isinstance(delta.get("stop_reason"), str):
                 self.stop_reason = delta["stop_reason"]
             return False
-        return event_type == "error"
+        return False
 
     def _block_start_releases(self, event: dict) -> bool:
         """Judge a ``content_block_start``, remembering thinking blocks by index.
