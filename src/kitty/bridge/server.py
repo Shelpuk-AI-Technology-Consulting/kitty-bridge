@@ -2109,6 +2109,27 @@ class BridgeServer:
         return not has_text and not tool_calls
 
     @staticmethod
+    def _is_non_retryable_reply(cc_response: dict) -> bool:
+        """Return True when no retry can improve on this reply, so the ladder returns it at once.
+
+        True for a reply that carries content — the ladder's success path — and for a D3
+        truncation (KBR-235): a Messages-shaped reply stopped before content by
+        ``max_tokens`` or ``model_context_window_exceeded`` is not improved by a retry,
+        so the ladder ends and the Messages handler renders the D3 ``400``.
+
+        Args:
+            cc_response: The upstream response dict, in whatever shape the upstream speaks.
+
+        Returns:
+            True when the empty-response ladder must stop and hand the reply to its caller.
+        """
+        if not BridgeServer._is_empty_cc_response(cc_response):
+            return True
+        return (
+            cc_response.get("type") == "message" and cc_response.get("stop_reason") in _NATIVE_TRUNCATING_STOP_REASONS
+        )
+
+    @staticmethod
     def _messages_truncation_before_content(cc_response: dict) -> str | None:
         """Return the stop reason when a Messages-shaped reply truncated before any content.
 
@@ -5494,9 +5515,8 @@ class BridgeServer:
         max_attempts = len(_EMPTY_RETRY_DELAYS) + len(_EMPTY_FINAL_DELAYS) + 1
         for attempt in range(max_attempts):
             cc_response = await self._make_upstream_request(cc_request, grace=grace)
-            # D3 (KBR-235): a truncation before content is returned at once — the ladder
-            # ends on that attempt, and the Messages handler renders the D3 400.
-            if not self._is_empty_cc_response(cc_response) or self._messages_truncation_before_content(cc_response):
+            # A reply with content, or a D3 truncation (KBR-235), ends the ladder here.
+            if self._is_non_retryable_reply(cc_response):
                 return cc_response
             if attempt < len(_EMPTY_RETRY_DELAYS):
                 delay = _EMPTY_RETRY_DELAYS[attempt]
@@ -5592,8 +5612,8 @@ class BridgeServer:
 
             try:
                 cc_response = await self._make_upstream_request(cc_request, retry_rate_limit=False, grace=grace)
-                # D3 (KBR-235): a truncation before content ends the failover loop at once.
-                if not self._is_empty_cc_response(cc_response) or self._messages_truncation_before_content(cc_response):
+                # A reply with content, or a D3 truncation (KBR-235), ends the failover loop here.
+                if self._is_non_retryable_reply(cc_response):
                     return cc_response
                 # Empty response — try next backend
                 last_response = cc_response
@@ -5652,10 +5672,8 @@ class BridgeServer:
                         continue
                     try:
                         cc_response = await self._make_upstream_request(cc_request, retry_rate_limit=False, grace=grace)
-                        # D3 (KBR-235): a truncation before content ends the ladder at once.
-                        if not self._is_empty_cc_response(cc_response) or self._messages_truncation_before_content(
-                            cc_response
-                        ):
+                        # A reply with content, or a D3 truncation (KBR-235), ends the ladder here.
+                        if self._is_non_retryable_reply(cc_response):
                             return cc_response
                         last_response = cc_response
                         continue  # empty after compaction → standard next-backend flow
@@ -5813,8 +5831,8 @@ class BridgeServer:
                     )
                 continue
 
-            # D3 (KBR-235): a truncation before content ends the final-retry loop at once.
-            if not self._is_empty_cc_response(cc_response) or self._messages_truncation_before_content(cc_response):
+            # A reply with content, or a D3 truncation (KBR-235), ends the final-retry loop here.
+            if self._is_non_retryable_reply(cc_response):
                 return cc_response
             last_response = cc_response
 
