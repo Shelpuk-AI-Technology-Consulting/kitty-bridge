@@ -1605,3 +1605,193 @@ class TestGeminiNoFinishEmptyStream:
         events = _parse_sse(body)
         assert all("error" not in e for e in events), "no terminal error event on a content-only stream"
         await server.stop_async()
+
+
+# -- KBR-250 review pins ------------------------------------------------------
+# Two shapes the automated review found unpinned: (1) the in-stream-error
+# exhaustion `break` (a re-introduced fall-through would double-write a
+# terminal event), and (2) the translator-semantic claim that a content-then-
+# empty-finish stream never fires the empty-response gate on these routes
+# (the reason the messages-branch post-emission arm is absent here).
+
+
+class TestResponsesInStreamErrorExhaustion:
+    """The in-stream-error exhaustion on /v1/responses writes exactly one terminal event (KBR-250 review pin)."""
+
+    @pytest.fixture(autouse=True)
+    def _no_retry_delays(self, monkeypatch):
+        """Zero every retry delay; the tests count attempts, never time them."""
+        monkeypatch.setattr(_server_module, "_BACKOFF_BASE", 0.0)
+        monkeypatch.setattr(_server_module, "_EMPTY_RETRY_DELAYS", [0.0, 0.0])
+        monkeypatch.setattr(_server_module, "_EMPTY_FINAL_DELAYS", [0.0, 0.0])
+
+    @pytest.mark.asyncio
+    async def test_every_attempt_in_stream_error_writes_one_terminal_event(self):
+        """Every attempt erroring in-stream ends in one upstream_error event, not two.
+
+        Pre-KBR-250 the exhaustion path fell through to the empty-response gate
+        and (with the new no-finish arm) would have written a second
+        ``empty_response`` terminal event after ``upstream_error``. The KBR-250
+        ``break`` prevents that; this test pins it. Non-balancing: the failover
+        re-selects the single backend each attempt, so the exhaustion branch is
+        reached after the full ladder budget.
+        """
+        server = _make_server(1)
+        port = await server.start_async()
+        url = f"http://127.0.0.1:{port}/v1/responses"
+
+        with aioresponses(passthrough=["http://127.0.0.1"]) as m:
+            m.post(
+                "https://api.example.com/v1/chat/completions",
+                body='data: {"error": {"type": "overloaded_error", "message": "overloaded"}}\n\n'
+                "data: [DONE]\n\n",
+                repeat=True,
+            )
+
+            async with aiohttp.ClientSession() as session, session.post(url, json=_responses_request()) as resp:
+                assert resp.status == 200
+                body = await resp.text()
+                posts = _posts(m)
+
+        assert posts == 6, "the single-backend streaming ladder budget"
+        events = _parse_sse(body)
+        errors = [e for e in events if e.get("type") == "error"]
+        assert len(errors) == 1, "exactly one terminal error event; a second would mean the fall-through returned"
+        assert errors[0]["code"] == "upstream_error", "the in-stream-error label, not empty_response"
+        completed = [e for e in events if e.get("type") == "response.completed"]
+        assert len(completed) == 1
+        await server.stop_async()
+
+    @pytest.mark.asyncio
+    async def test_content_then_empty_finish_never_fires_the_empty_gate(self):
+        """A stream with content then an empty finish chunk is not empty: the gate never fires.
+
+        Pins the translator-semantic reason the messages-branch post-emission
+        arm is absent on this route: ``ResponsesTranslator.response_was_empty``
+        judges the whole response's accumulated content, so content followed by
+        a content-less finish chunk is not an empty reply and must be delivered.
+        """
+        server = _make_balancing_server(1)
+        port = await server.start_async()
+        url = f"http://127.0.0.1:{port}/v1/responses"
+
+        with aioresponses(passthrough=["http://127.0.0.1"]) as m:
+            m.post(
+                "https://api0.example.com/v1/chat/completions",
+                body='data: {"choices":[{"delta":{"content":"Hello"}}]}\n\n'
+                'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n'
+                "data: [DONE]\n\n",
+            )
+
+            async with aiohttp.ClientSession() as session, session.post(url, json=_responses_request()) as resp:
+                assert resp.status == 200
+                body = await resp.text()
+                posts = _posts(m)
+
+        assert posts == 1, "content was delivered; a retry would duplicate it"
+        assert "Hello" in body
+        events = _parse_sse(body)
+        assert all(e.get("type") != "error" for e in events), (
+            "the gate never fires on a content-carrying stream (whole-response emptiness)"
+        )
+        assert sum(1 for e in events if e.get("type") == "response.completed") == 1
+        await server.stop_async()
+
+
+class TestGeminiInStreamErrorExhaustion:
+    """The in-stream-error exhaustion on /v1beta Gemini writes one terminal event.
+
+    Also pins the content-then-empty-finish shape as never firing the
+    empty-response gate (KBR-250 review pins).
+    """
+
+    @pytest.fixture(autouse=True)
+    def _no_retry_delays(self, monkeypatch):
+        """Zero every retry delay; the tests count attempts, never time them."""
+        monkeypatch.setattr(_server_module, "_BACKOFF_BASE", 0.0)
+        monkeypatch.setattr(_server_module, "_EMPTY_RETRY_DELAYS", [0.0, 0.0])
+        monkeypatch.setattr(_server_module, "_EMPTY_FINAL_DELAYS", [0.0, 0.0])
+
+    def _url(self, port: int) -> str:
+        """The Gemini streaming URL for the pinned model path."""
+        return f"http://127.0.0.1:{port}/v1beta/models/test-model:streamGenerateContent"
+
+    @pytest.mark.asyncio
+    async def test_every_attempt_in_stream_error_ends_the_stream_without_a_second_event(self):
+        """Every attempt erroring in-stream ends in one upstream_error event, not two.
+
+        Pre-KBR-250 the exhaustion path fell through to the empty-response gate
+        and (with the new no-finish arm) would have written a second
+        ``empty_response`` terminal event after ``upstream_error``. The KBR-250
+        ``break`` preserves the pre-KBR-250 gemini behavior on this path: no
+        upstream_error write before the gate, so no second event can appear
+        after it. This test pins that the body carries no terminal error
+        event at all (the stream ends incomplete with no diagnostic, which is
+        the gemini branch's pre-existing behavior — a separate decision).
+        Non-balancing: the failover re-selects the single backend each
+        attempt, so the exhaustion branch is reached after the full ladder
+        budget.
+        """
+        server = _make_server(1)
+        port = await server.start_async()
+
+        with aioresponses(passthrough=["http://127.0.0.1"]) as m:
+            m.post(
+                "https://api.example.com/v1/chat/completions",
+                body='data: {"error": {"type": "overloaded_error", "message": "overloaded"}}\n\n'
+                "data: [DONE]\n\n",
+                repeat=True,
+            )
+
+            async with (
+                aiohttp.ClientSession() as session,
+                session.post(self._url(port), json=_gemini_request()) as resp,
+            ):
+                assert resp.status == 200
+                body = await resp.text()
+                posts = _posts(m)
+
+        assert posts == 6, "the single-backend streaming ladder budget"
+        events = _parse_sse(body)
+        errors = [e for e in events if "error" in e]
+        assert len(errors) == 0, (
+            "no terminal error event: a regression that adds an upstream_error "
+            "write before the gate would let the new no-finish arm add a second one"
+        )
+        await server.stop_async()
+
+    @pytest.mark.asyncio
+    async def test_content_then_empty_finish_never_fires_the_empty_gate(self):
+        """A stream with content then an empty finish chunk is not empty: the gate never fires.
+
+        Pins the translator-semantic reason the messages-branch post-emission
+        arm is absent on this route: ``GeminiTranslator.response_was_empty``
+        judges the whole response's accumulated content, so content followed by
+        a content-less finish chunk is not an empty reply and must be delivered.
+        """
+        server = _make_balancing_server(1)
+        port = await server.start_async()
+
+        with aioresponses(passthrough=["http://127.0.0.1"]) as m:
+            m.post(
+                "https://api0.example.com/v1/chat/completions",
+                body='data: {"choices":[{"delta":{"content":"Hello"}}]}\n\n'
+                'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n'
+                "data: [DONE]\n\n",
+            )
+
+            async with (
+                aiohttp.ClientSession() as session,
+                session.post(self._url(port), json=_gemini_request()) as resp,
+            ):
+                assert resp.status == 200
+                body = await resp.text()
+                posts = _posts(m)
+
+        assert posts == 1, "content was delivered; a retry would duplicate it"
+        assert "Hello" in body
+        events = _parse_sse(body)
+        assert all("error" not in e for e in events), (
+            "the gate never fires on a content-carrying stream (whole-response emptiness)"
+        )
+        await server.stop_async()

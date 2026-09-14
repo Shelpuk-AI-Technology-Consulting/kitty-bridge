@@ -724,7 +724,9 @@ The response is a `502` carrying `"reason": "empty_response"` for clients that e
 (`/v1/responses` to Codex CLI; `/v1beta/...:streamGenerateContent` to Gemini CLI) the
 exhaustion is delivered inside the open stream as an SSE error event carrying the
 route-specific D4 discriminator — `code: "empty_response"` on the Responses wire,
-`reason: "empty_response"` inside the nested `error` object on the Gemini wire —
+`reason: "empty_response"` inside the nested `error` object on the Gemini wire
+(where the integer `code: 502` matches the messages branch's exhaustion status,
+mirroring its timeout/exception `code: 504`/`code: 500` precedent) —
 followed by the stream's normal lifecycle closer. The HTTP status stays
 `200 text/event-stream` throughout; the discriminator inside the payload marks the
 stream as an exhausted-empty one, distinguishable from any other terminal event.

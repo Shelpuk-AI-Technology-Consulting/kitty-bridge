@@ -2756,8 +2756,7 @@ branches `sr.prepare(request)` at the top, so lazy-prepare is out of scope); the
 branch's post-emission arm is deliberately NOT mirrored on these two routes because
 `ResponsesTranslator` and `GeminiTranslator` set `response_was_empty` against the whole
 response's accumulated content, not the finish chunk's content, making the post-emission arm
-structurally unreachable — the design decision is recorded in `.requirements/` and the Q14
-amendment below. The Chat Completions-shaped arm of `_is_empty_cc_response` keeps its `.strip()`
+structurally unreachable — the design decision is recorded in the Q14 amendment below. The Chat Completions-shaped arm of `_is_empty_cc_response` keeps its `.strip()`
 judgement — D1/D3 are decisions about Messages-format replies.
 
 #### 7.2.2 What T-B1 settled — the provider-session recorder
@@ -5365,9 +5364,12 @@ a finish chunk with no content has accumulated content → `response_was_empty` 
 the gate does not fire → no post-emission arm is reachable. The `empty_no_finish` arm
 requires `not events_emitted` on the current attempt, which also cannot be true when
 content has been written. The two routes therefore carry no `request_emitted` flag and no
-post-emission guard; minimum code, no defensive scaffolding for an impossible scenario. If
-a future translator change makes the emptiness check chunk-scoped on these routes too, the
-post-emission arm is the obvious next step — the same shape KBR-235 added on messages.
+post-emission guard; minimum code, no defensive scaffolding for an impossible scenario. The
+shape is locked in by `TestResponsesInStreamErrorExhaustion::test_content_then_empty_finish_never_fires_the_empty_gate`
+and the gemini mirror in `tests/bridge/test_empty_response_retry.py` — a regression that
+makes the gate fire on a content-carrying stream fails them both. If a future translator
+change makes the emptiness check chunk-scoped on these routes too, the post-emission arm is
+the obvious next step — the same shape KBR-235 added on messages.
 
 **JSON 502 alternative.** The branches `sr.prepare(request)` at the top of each handler,
 before any upstream POST, so aiohttp cannot later replace the prepared `StreamResponse`
