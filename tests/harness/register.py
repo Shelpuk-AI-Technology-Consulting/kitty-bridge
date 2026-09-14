@@ -345,7 +345,14 @@ _BRIDGE_ROWS: tuple[MutationRow, ...] = (
     ),
     MutationRow(
         id="M3",
-        site=(f"{_SERVER}:BridgeServer._truncate_oversized_tool_results",),
+        site=(
+            f"{_SERVER}:BridgeServer._truncate_oversized_tool_results",
+            # The Responses-subscription route ships the raw inbound body, so
+            # the mutation is performed there on the Responses-shaped `input`
+            # itself; the CC-shape site truncates a copy that never ships on
+            # that route (KBR-169).
+            f"{_SERVER}:BridgeServer._truncate_oversized_responses_outputs",
+        ),
         trigger=Trigger.TOOL_RESULT_OVER_LIMIT,
         # The truncated content lives in one ToolResult part. Anchoring at
         # `conversation.turns` would claim a dropped turn as well.
@@ -393,7 +400,15 @@ _BRIDGE_ROWS: tuple[MutationRow, ...] = (
     ),
     MutationRow(
         id="M7",
-        site=(f"{_SERVER}:BridgeServer._validate_tool_call_pairing",),
+        site=(
+            f"{_SERVER}:BridgeServer._validate_tool_call_pairing",
+            # The Responses-subscription route applies the pairing rule to the
+            # Responses-shaped `input`, and `_prune_compacted_responses_input`
+            # re-runs it after compaction — pruning an earlier wire group can
+            # orphan a later output (KBR-169).
+            f"{_SERVER}:BridgeServer._drop_orphan_responses_tool_outputs",
+            f"{_SERVER}:BridgeServer._prune_compacted_responses_input",
+        ),
         trigger=Trigger.ORPHAN_TOOL_RESULT,
         # Dropping an orphan renumbers the parts after it and can empty a turn,
         # so the collection is again the narrowest anchor that survives.
@@ -810,7 +825,7 @@ _PROVIDER_ROWS: tuple[MutationRow, ...] = (
         # would match -- a bracket-free pattern segment claims a bracketed member
         # of itself -- and it is still the wrong anchor, because `extra` is where
         # the *injections* live: a bare anchor on this trigger would also claim
-        # the `reasoning` injection §9.2's G23 registers at
+        # the `reasoning` injection P22 (§9.2's G23) claims at
         # `envelope.extra[reasoning]` on this same route, so P22 could be deleted
         # with nothing going red.
         #
@@ -826,11 +841,34 @@ _PROVIDER_ROWS: tuple[MutationRow, ...] = (
         # detects a vendor revision (§8's determinism rules; G24's shape), so the
         # trade is a loud one-line failure against a silent absorbed row.
         #
-        # `P22` is skipped deliberately -- §9.2's G23 reserves it for KBR-149,
-        # and an id is how every ticket refers to a row.
+        # `P22` was skipped deliberately -- §9.2's G23 reserved it for KBR-149,
+        # which has since landed it; an id is how every ticket refers to a row.
         paths=tuple(c.extra_path(key) for key in _CODEX_DROPPED_CONTROL_FIELDS),
         conditional=False,
         design_ref="§3.2.2 · §3.3.1a · §3.3.1b",
+    ),
+    MutationRow(
+        id="P22",
+        site=(
+            f"{_SUBSCRIPTION}:OpenAISubscriptionAdapter._prepare_responses_body",
+            f"{_SUBSCRIPTION}:OpenAISubscriptionAdapter._cc_to_responses",
+            f"{_SUBSCRIPTION}:OpenAISubscriptionAdapter.make_request",
+            f"{_SUBSCRIPTION}:OpenAISubscriptionAdapter.stream_request",
+        ),
+        trigger=Trigger.REASONING_EFFORT_PRESENT,
+        # P3's signal in the Codex spelling, on the one adapter whose request
+        # path never reaches `translate_to_upstream`, so P4 cannot cover it
+        # (§3.2.3). Four sites, not the three the gap walk counted: the
+        # CC-origin builder `_cc_to_responses` injects from the same key and
+        # predates the ticket (KBR-149). At effort `"none"` the trigger is
+        # met-but-inert (the P5c precedent), so the assertion-2 complement
+        # needs a corpus entry carrying an effort, not a `"none"` one. The
+        # enum carries the request-side clause only: the Responses-origin
+        # precedence gate (a caller-sent truthy `reasoning` wins) lives in
+        # the §3.2.2 trigger cell; the closed vocabulary has no member for it.
+        paths=(c.extra_path("reasoning"),),
+        conditional=True,
+        design_ref="§3.2.2",
     ),
     MutationRow(
         id="P15",

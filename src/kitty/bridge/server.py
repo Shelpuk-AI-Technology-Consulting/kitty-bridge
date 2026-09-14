@@ -235,6 +235,46 @@ def _user_has_tool_result(msg: dict) -> bool:
     return bool(_user_native_tool_result_ids(msg))
 
 
+def _drop_orphan_response_outputs(items: list) -> tuple[list, list]:
+    """Split a Responses ``input`` array into kept items and orphan outputs.
+
+    The Responses-shape pairing rule, mirroring
+    :meth:`BridgeServer._validate_tool_call_pairing`'s Chat-Completions half: a
+    ``function_call_output`` survives only when a **preceding**
+    ``function_call`` declared its ``call_id`` — an output before its call is
+    an orphan, and a missing or falsy ``call_id`` is undeclared. Everything
+    else passes through in order.
+
+    Args:
+        items: The Responses ``input`` items.
+
+    Returns:
+        A ``(kept, dropped_ids)`` pair; ``kept`` preserves the input order.
+    """
+    seen_call_ids: set = set()
+    kept: list = []
+    dropped_ids: list = []
+    for item in items:
+        if not isinstance(item, dict):
+            kept.append(item)
+            continue
+        item_type = item.get("type")
+        if item_type == "function_call":
+            call_id = item.get("call_id")
+            if call_id:
+                seen_call_ids.add(call_id)
+            kept.append(item)
+        elif item_type == "function_call_output":
+            call_id = item.get("call_id")
+            if call_id and call_id in seen_call_ids:
+                kept.append(item)
+            else:
+                dropped_ids.append(call_id)
+        else:
+            kept.append(item)
+    return kept, dropped_ids
+
+
 def _is_tool_use_format_error(status: int, body: object) -> bool:
     """Return True if the upstream error indicates a tool_use format mismatch.
 
@@ -873,8 +913,15 @@ _EMPTY_FINAL_DELAYS = [20.0, 40.0]  # final delays before emitting empty-respons
 _NATIVE_EMPTY_REPLY_MESSAGE = (
     "Kitty Bridge received an empty reply from the upstream provider on every attempt. Retry the request."
 )
-_NATIVE_EMPTY_AFTER_EMISSION_MESSAGE = (
-    "Kitty Bridge lost the upstream reply mid-stream and the retry came back empty. Retry the request."
+# The post-emission empty verdict's terminal error, shared by the preamble hold's
+# guarded-dead arm and the translated branch's empty-response check (KBR-236). Downstream
+# only, so it names the product (Q9). It reports an empty response arriving after content,
+# not a retry: since KBR-183 (timeouts) and KBR-236 (the translated empty-response retry)
+# no route can put a second attempt on an open client stream, so the previous "the retry
+# came back empty" wording described a mechanism that no longer exists.
+_EMPTY_RESPONSE_AFTER_EMISSION_MESSAGE = (
+    "Kitty Bridge received an empty response from the upstream provider after content had "
+    "already been sent. Retry the request."
 )
 # KBR-241: the error variant's kitty wording, for attempts whose error payload was too
 # malformed to deliver. Names the product (Q9) and reports what happened — an upstream
@@ -942,6 +989,17 @@ _STREAM_READ_TIMEOUT = 120  # seconds — upstream must respond with first byte 
 _SINGLE_BACKEND_COOLDOWN_CAP = 30  # seconds — cap cooldown for single-backend profiles
 _CLOUDFLARE_FIRST_HIT_COOLDOWN = 15  # seconds — short cooldown for first Cloudflare block
 _ALL_UNHEALTHY_FAST_FAIL_THRESHOLD = 60  # seconds — fast-fail if soonest retry exceeds this
+# KBR-243: when every backend is cooling down, an arrival is held instead of
+# 503ing while the soonest recovery fits strictly inside this window.
+_RECOVERY_HOLD_WINDOW = 300  # seconds — the ticket's "within the next 300 seconds"
+# De-synchronises concurrent held sessions so a herd does not converge on the
+# one just-recovered backend in a single instant.
+_RECOVERY_HOLD_JITTER_SECONDS = 2.0
+
+
+def _recovery_hold_jitter() -> float:
+    """Return a random de-synchronisation delay for a recovery hold, in seconds."""
+    return random.uniform(0.0, _RECOVERY_HOLD_JITTER_SECONDS)
 # A blip on the wire between kitty and the provider is not a provider outage.
 # Before this window existed, the first connection reset cost the backend a full
 # cooldown, and the failover spread the damage to its siblings until every
@@ -970,11 +1028,25 @@ _CAUSE_HEADLINES: dict[str, str] = {
 
 
 class AllBackendsUnhealthyError(Exception):
-    """Raised when all backends are unhealthy and the soonest retry exceeds the fast-fail threshold."""
+    """Raised when all backends are unhealthy and the soonest retry exceeds the fast-fail threshold.
 
-    def __init__(self, backends: list[dict], retry_after: int) -> None:
+    Attributes:
+        backends: Per-backend status dicts (name, reason, remaining_cooldown).
+        retry_after: Soonest cooldown expiry, in seconds.
+        recoverable: True when ``retry_after`` is a real cooldown expiry the
+            arrival recovery hold may sleep on (KBR-243). Only the
+            no-stream-capable raise sets False: its 300 is fabricated, not a
+            recovery time, so waiting would stall a request no backend can
+            ever serve.
+    """
+
+    def __init__(self, backends: list[dict], retry_after: int, *, recoverable: bool = True) -> None:
         self.backends = backends
         self.retry_after = retry_after
+        # False when retry_after is not a recovery time at all (the "no
+        # stream-capable backend" raise fabricates a 300); the recovery hold
+        # must never sleep on one.
+        self.recoverable = recoverable
         super().__init__(f"All {len(backends)} backends unhealthy; retry_after={retry_after}s")
 
 
@@ -1496,6 +1568,9 @@ class BridgeServer:
         self._stats_failovers = 0
         self._stats_retries = 0
         self._stats_all_unhealthy = 0
+        # KBR-243 recovery holds started — counted per hold sleep, not per
+        # request, so a request held twice reports twice.
+        self._stats_recovery_holds = 0
         self._stats_backend_attempts: dict[int, int] = {}
         # Malformed tool_use responses per backend index (issue #33).  Counted
         # rather than only logged because the WARNING reaches a handler only
@@ -1677,7 +1752,9 @@ class BridgeServer:
                     for idx in range(n)
                 ]
                 self._stats_all_unhealthy += 1
-                raise AllBackendsUnhealthyError(backend_status, 300)
+                # Not a cooldown: no amount of waiting makes a backend
+                # stream-capable, so the recovery hold must skip this raise.
+                raise AllBackendsUnhealthyError(backend_status, 300, recoverable=False)
             candidates = []
             backend_status = []
             now = time.monotonic()
@@ -1726,6 +1803,89 @@ class BridgeServer:
             return provider, key, profile.model, profile.provider_config, idx  # type: ignore[union-attr]
 
         return self._provider, self._resolved_key, self._model, self.__dict__.get("_provider_config") or {}, -1
+
+    @staticmethod
+    def _client_gone(request: web.Request) -> bool:
+        """Return True when the client connection is closed or closing.
+
+        aiohttp runs with ``handler_cancellation`` off, so a disconnected
+        client does not cancel the handler; the connection is polled the same
+        way ``_raise_if_client_gone`` does during a native preamble hold.
+
+        Args:
+            request: The inbound request whose transport is checked.
+
+        Returns:
+            True when the client can no longer read the eventual response.
+        """
+        return request.transport is None or request.transport.is_closing()
+
+    async def _select_backend_or_hold(self, request: web.Request) -> AllBackendsUnhealthyError | None:
+        """Select a backend, holding the request while recovery is near (KBR-243).
+
+        On arrival with every backend cooling down, an immediate 503 makes the
+        agent abandon the turn even though the outage is seconds from ending.
+        While the soonest cooldown expiry falls strictly inside
+        ``_RECOVERY_HOLD_WINDOW`` of the arrival, the request is held instead:
+        sleep to the expiry (plus jitter, clamped to the window), re-select,
+        and proceed the moment a backend is available.  The 503 is returned —
+        built from the *latest* selection failure — only when no recovery fits
+        inside the window, the raise is not a cooldown at all
+        (``recoverable=False``), or the client disappears.
+
+        Args:
+            request: The inbound request.  The body is drained (best-effort)
+                before each hold so the client is not left stalled mid-upload
+                (aiohttp caches the read, so later iterations are no-ops), and
+                the transport is polled before the first sleep and after each
+                wake so no upstream request is fired for a gone reader.
+
+        Returns:
+            ``None`` when a backend was selected (directly or after holds), or
+            the final :class:`AllBackendsUnhealthyError` to answer the request
+            with.
+        """
+        try:
+            self._select_backend()
+            return None
+        except AllBackendsUnhealthyError as exc:
+            pending = exc
+        arrival = time.monotonic()
+        while pending.recoverable:
+            elapsed = time.monotonic() - arrival
+            if elapsed + pending.retry_after >= _RECOVERY_HOLD_WINDOW:
+                break
+            self._stats_recovery_holds += 1
+            # The client may be mid-upload of a large body: drain it (cached,
+            # so the handler's later parse is unchanged) before going quiet,
+            # best-effort — a failed read must not abort the hold.
+            try:
+                await request.read()
+            except Exception:
+                logger.debug("Recovery hold could not drain the request body", exc_info=True)
+            if self._client_gone(request):
+                return pending
+            sleep_for = min(
+                pending.retry_after + _recovery_hold_jitter(),
+                _RECOVERY_HOLD_WINDOW - elapsed,
+            )
+            logger.warning(
+                "All backends cooling down; holding request for %.0fs (recovery hold)",
+                sleep_for,
+            )
+            await asyncio.sleep(sleep_for)
+            if self._client_gone(request):
+                return pending
+            try:
+                self._select_backend()
+                logger.info(
+                    "Backend recovered after %.0fs recovery hold; proceeding",
+                    time.monotonic() - arrival,
+                )
+                return None
+            except AllBackendsUnhealthyError as fresh:
+                pending = fresh
+        return pending
 
     def _get_backend_family(self, index: int) -> str:
         if not self._backends or index < 0 or index >= len(self._backends):
@@ -2363,6 +2523,9 @@ class BridgeServer:
         seeing a 503; and ``requests`` counts requests that *reached a
         backend*, so one rejected because the whole pool was in cooldown raises
         ``all_backends_unhealthy`` without incrementing ``requests``.
+        ``recovery_holds`` (KBR-243) counts hold *starts* — sleeps begun while
+        waiting out a cooldown — not requests, so one request held twice
+        reports twice.
 
         Returns:
             A JSON-serialisable dict describing the session.
@@ -2424,6 +2587,7 @@ class BridgeServer:
             "failovers": self._stats_failovers,
             "retries": self._stats_retries,
             "all_backends_unhealthy": self._stats_all_unhealthy,
+            "recovery_holds": self._stats_recovery_holds,
             "malformed_tool_use": sum(self._stats_malformed_tool_use.values()),
             "thinking_stripped": sum(self._stats_thinking_stripped.values()),
             "models_served": {model: dict(record) for model, record in self._stats_models.items()},
@@ -3008,9 +3172,8 @@ class BridgeServer:
     # ── Responses API handler ─────────────────────────────────────────────
 
     async def _handle_responses(self, request: web.Request) -> web.StreamResponse:
-        try:
-            self._select_backend()
-        except AllBackendsUnhealthyError as exc:
+        exc = await self._select_backend_or_hold(request)
+        if exc is not None:
             return self._all_unhealthy_response(exc, style="openai_responses")
         try:
             body = await request.json()
@@ -3042,7 +3205,20 @@ class BridgeServer:
 
         try:
             translator = ResponsesTranslator()
+            # KBR-169: on a custom-transport provider the shipped body is built
+            # from `_original_body` — this very dict — so the route's M3 and M7
+            # protections must run on it directly; the CC-shape passes below
+            # rewrite a copy that never ships on this route.
+            if self._active_provider.use_custom_transport:
+                self._truncate_oversized_responses_outputs(body)
+                self._drop_orphan_responses_tool_outputs(body)
             cc_request = translator.translate_request(body)
+            # The selector's baseline: identity-matched against the
+            # post-compaction list to prune this body to the surviving
+            # conversation (KBR-169). Empty when the body will not ship raw.
+            pre_compaction_messages = (
+                list(cc_request["messages"]) if self._active_provider.use_custom_transport else []
+            )
             self._normalize_model(cc_request)
             self._active_provider.normalize_request(cc_request)
 
@@ -3056,6 +3232,13 @@ class BridgeServer:
                 self._apply_compaction(cc_request)
             except CompactionFailedError:
                 return self._compaction_failed_response(style="openai_responses")
+
+            # KBR-169: compaction pruned the CC copy — prune the Responses body
+            # to the surviving conversation, or the wire ships un-compacted.
+            if self._active_provider.use_custom_transport and pre_compaction_messages:
+                self._prune_compacted_responses_input(
+                    body, pre_compaction_messages, cc_request["messages"], translator
+                )
 
             # P4: Context size guardrail
             size_error = self._check_request_size(cc_request)
@@ -3655,9 +3838,8 @@ class BridgeServer:
     # ── Messages API handler ──────────────────────────────────────────────
 
     async def _handle_messages(self, request: web.Request) -> web.StreamResponse:
-        try:
-            self._select_backend()
-        except AllBackendsUnhealthyError as exc:
+        exc = await self._select_backend_or_hold(request)
+        if exc is not None:
             return self._all_unhealthy_response(exc, style="anthropic")
         try:
             body = await request.json()
@@ -4337,7 +4519,12 @@ class BridgeServer:
                             # An earlier attempt already wrote (the KBR-183 failover), so a JSON
                             # error cannot follow: per Q14(a) the open stream ends in an error event.
                             if sr is not None:
-                                # Guarded-dead post-KBR-183; if it ever runs, the terminal error is
+                                # Guarded-dead post-KBR-183, and post-KBR-236 again (that fix
+                                # removed the translated empty-response retry, the last route
+                                # that could hand an open stream here); kept because a future
+                                # route that reached it must not fall through to the
+                                # pre-emission ladder, which would retry with sr open — the
+                                # exact hazard. If it ever runs, the terminal error is
                                 # the provider's own when this attempt carried a usable one, and
                                 # kitty's error wording otherwise — never the empty-reply message,
                                 # which would misreport an errored attempt as an empty one.
@@ -4356,7 +4543,7 @@ class BridgeServer:
                                         "type": "error",
                                         "error": {
                                             "type": "api_error",
-                                            "message": _NATIVE_EMPTY_AFTER_EMISSION_MESSAGE,
+                                            "message": _EMPTY_RESPONSE_AFTER_EMISSION_MESSAGE,
                                         },
                                     }
                                 await _write_client(sr, messages_format_error(terminal_error).encode())
@@ -4623,13 +4810,56 @@ class BridgeServer:
                         # attempt produced nothing judgeable at all — no content written and
                         # no finish events buffered, whether the read ended cleanly, with
                         # [DONE], or truncated before anything arrived. Both take the same
-                        # ladder below. The no-finish arm also requires `sr is None`:
-                        # `events_emitted` counts only the current attempt, while `sr`
-                        # records every write the request ever made — a request that has
-                        # already written stands down here (Q14(a): post-emission there is
-                        # no retry; that shape is KBR-236's).
+                        # ladder below. A reply whose bytes already reached the client never
+                        # reaches that ladder: the post-emission arm inside the finish-chunk
+                        # gate ends the turn instead (§11 Q14(a), KBR-236), and the
+                        # no-finish arm additionally requires `sr is None` — `events_emitted`
+                        # counts only the current attempt, while `sr` records every write
+                        # the request ever made.
                         empty_no_finish = not finish_events and not events_emitted and sr is None
                         if (translator.response_was_empty and finish_events) or empty_no_finish:
+                            if sr is not None:
+                                # Content from this attempt already reached the client: the
+                                # empty finish chunk judged the reply and reset the
+                                # translator, so content arriving after it was written live
+                                # (§11 Q14(a), KBR-236). No second attempt may follow what
+                                # the client saw: close the blocks it saw open, drop the
+                                # buffered fallback events, and end in one terminal error.
+                                # The stop fallback mirrors the post-emission failure arm
+                                # below; nothing reaches it today, because every live
+                                # emitting write re-opens a block after the verdict's reset.
+                                # No health charge: a polite empty reply keeps the empty
+                                # ladder's no-quarantine model.
+                                logger.warning(
+                                    "Messages stream empty response after content was emitted for %s; ending the turn",
+                                    message_id,
+                                )
+                                block_stops = translator.close_open_blocks()
+                                if not block_stops:
+                                    block_stops = _stops_for_blocks_the_client_saw(finish_events)
+                                try:
+                                    for stop in block_stops:
+                                        stop_bytes = stop.encode()
+                                        await _write_client(sr, stop_bytes)
+                                        auditor.feed(stop_bytes)
+                                except ClientDisconnectedError:
+                                    logger.debug(
+                                        "Client disconnected before open blocks were closed for %s", message_id
+                                    )
+                                auditor.finish()
+                                await _write_client(
+                                    sr,
+                                    messages_format_error(
+                                        {
+                                            "type": "error",
+                                            "error": {
+                                                "type": "api_error",
+                                                "message": _EMPTY_RESPONSE_AFTER_EMISSION_MESSAGE,
+                                            },
+                                        }
+                                    ).encode(),
+                                )
+                                break
                             retried = False
                             if self._backends and self._current_backend_idx >= 0:
                                 if self._any_healthy_backend() and attempt < max_attempts - 1:
@@ -4924,9 +5154,8 @@ class BridgeServer:
 
     async def _handle_gemini(self, request: web.Request) -> web.StreamResponse:
         """Handle Gemini generateContent / streamGenerateContent requests."""
-        try:
-            self._select_backend()
-        except AllBackendsUnhealthyError as exc:
+        exc = await self._select_backend_or_hold(request)
+        if exc is not None:
             return self._all_unhealthy_response(exc, style="google")
         model_from_path = request.match_info["model"]
 
@@ -5854,9 +6083,8 @@ class BridgeServer:
         also expects CC format.  We only apply model normalization and provider
         normalization.
         """
-        try:
-            self._select_backend()
-        except AllBackendsUnhealthyError as exc:
+        exc = await self._select_backend_or_hold(request)
+        if exc is not None:
             return self._all_unhealthy_response(exc, style="openai_chat")
         try:
             body = await request.json()
@@ -6977,6 +7205,178 @@ class BridgeServer:
                         count += 1
 
         return count
+
+    def _truncate_oversized_responses_outputs(self, body: dict) -> int:
+        """Shrink any oversized ``function_call_output`` string in a Responses body.
+
+        The Responses-route twin of :meth:`_truncate_oversized_tool_results`
+        (register row **M3**): on ``openai_subscription`` the adapter builds the
+        shipped body from the raw inbound Responses body, so the CC-shape pass
+        truncates a copy that never leaves the machine there (KBR-169). Same
+        limit, same notice text.
+
+        Only string outputs are truncated; list-form outputs are left
+        untouched, exactly like the CC-shape pass.
+
+        Args:
+            body: The normalized Responses request, mutated in place.
+
+        Returns:
+            The number of oversized outputs truncated.
+        """
+        count = 0
+        for item in body.get("input") or []:
+            if (
+                isinstance(item, dict)
+                and item.get("type") == "function_call_output"
+                and isinstance(item.get("output"), str)
+                and len(item["output"]) > _TOOL_RESULT_TRUNCATION_LIMIT
+            ):
+                original_len = len(item["output"])
+                item["output"] = f"[Tool output truncated — original size: {original_len:,} chars]"
+                count += 1
+        return count
+
+    def _drop_orphan_responses_tool_outputs(self, body: dict) -> int:
+        """Drop ``function_call_output`` items whose call was never declared.
+
+        The Responses-route twin of :meth:`_validate_tool_call_pairing`
+        (register row **M7**): an orphan output triggers upstream error 2013,
+        and on ``openai_subscription`` the CC-shape pass validates a copy that
+        never ships (KBR-169). The rule lives in
+        :func:`_drop_orphan_response_outputs`; this wrapper applies it to the
+        request body and logs what it dropped, as the CC-shape pass does.
+
+        Args:
+            body: The normalized Responses request, mutated in place.
+
+        Returns:
+            The number of orphan outputs dropped.
+        """
+        items = body.get("input")
+        if not items:
+            return 0
+        kept, dropped = _drop_orphan_response_outputs(items)
+        if dropped:
+            body["input"] = kept
+            logger.warning(
+                "Responses tool-call pairing: dropped %d orphan tool output(s) with "
+                "call id(s) not matching any preceding function_call: %s",
+                len(dropped),
+                dropped,
+            )
+        return len(dropped)
+
+    def _prune_compacted_responses_input(
+        self,
+        body: dict,
+        pre_compaction_messages: list[dict],
+        compacted_messages: list[dict],
+        translator: ResponsesTranslator,
+    ) -> int:
+        """Prune a Responses body's ``input`` to the conversation compaction kept.
+
+        The Responses-route arm of register row **M5** (KBR-169): on
+        ``openai_subscription`` the shipped body is built from the raw inbound
+        Responses body, so ``_apply_compaction``'s decision must be carried
+        back onto it or the wire ships the un-compacted conversation.
+
+        The decision itself is never re-made here — this method consumes the
+        compaction that already ran. Survival is matched by message **identity**
+        against the pre-compaction snapshot, never by position, so an edited
+        message matches nothing and its items are dropped: the failure mode is
+        over-compaction, never an unprotected oversized body. Two pieces of
+        selection policy do live here, because they exist nowhere else:
+
+        * **Riding items** (``reasoning`` and types the translation skips) are
+          owned by the next assistant message,
+          :meth:`ResponsesTranslator.walk_input_items` reports the ownership.
+        * **Wire-group atomicity**: a run of riding items plus the run of
+          ``function_call`` items after it plus the run of
+          ``function_call_output`` items after that moves as one group. The
+          CC-shape grouper translates each call to its own assistant message
+          and can split one wire hop across the pruning boundary; shipping a
+          call without its riding reasoning (or leaving a reasoning item
+          stranded after its group) is a hard 400 from the Responses API, in
+          both directions.
+
+        A final idempotent sweep of the orphan rule drops outputs whose
+        declaring call was pruned from an earlier wire group.
+
+        Args:
+            body: The normalized Responses request, whose ``input`` is pruned
+                in place.
+            pre_compaction_messages: The translated message list as it was
+                before compaction, shared dicts with ``compacted_messages``.
+            compacted_messages: The post-compaction message list.
+            translator: The translator that produced the CC request from
+                ``body``; its walk supplies the item ownership.
+
+        Returns:
+            The number of input items removed.
+        """
+        items = body.get("input")
+        if not items or len(compacted_messages) >= len(pre_compaction_messages):
+            return 0
+
+        _, owners = translator.walk_input_items(body)
+
+        def _kind(item: object) -> str:
+            if isinstance(item, dict):
+                item_type = item.get("type")
+                if item_type == "function_call":
+                    return "call"
+                if item_type == "function_call_output":
+                    return "output"
+                if item_type == "reasoning" or "role" not in item:
+                    return "riding"
+            return "message"
+
+        # A message survived iff its exact object is in the compacted list;
+        # an item survives iff the message carrying it did.
+        survived = {id(m) for m in compacted_messages}
+        keep: list[bool] = []
+        for owner in owners:
+            keep.append(owner is not None and id(pre_compaction_messages[owner]) in survived)
+
+        # Wire-group atomicity: any survivor keeps its whole group.
+        def _absorb_hop(start: int) -> int:
+            end = start
+            while end < len(items) and _kind(items[end]) == "call":
+                end += 1
+            while end < len(items) and _kind(items[end]) == "output":
+                end += 1
+            return end
+
+        i = 0
+        while i < len(items):
+            start_kind = _kind(items[i])
+            end = i + 1
+            if start_kind == "riding":
+                while end < len(items) and _kind(items[end]) == "riding":
+                    end += 1
+                if end < len(items) and _kind(items[end]) == "call":
+                    end = _absorb_hop(end)
+            elif start_kind == "call":
+                end = _absorb_hop(i)
+            if any(keep[g] for g in range(i, end)):
+                for g in range(i, end):
+                    keep[g] = True
+            i = end
+
+        # Final pairing sweep: an output whose call was pruned from an earlier
+        # group must not ship either.
+        kept, _dropped = _drop_orphan_response_outputs(
+            [item for item, kept_flag in zip(items, keep, strict=True) if kept_flag]
+        )
+        if len(kept) < len(items):
+            body["input"] = kept
+            logger.info(
+                "Responses input pruned to match compaction: %d -> %d items",
+                len(items),
+                len(kept),
+            )
+        return len(items) - len(kept)
 
     @staticmethod
     def _is_oversized_request(cc_request: dict) -> bool:

@@ -99,11 +99,11 @@ _SHAPES: tuple[tuple[str, str], ...] = (
 
 
 class TestTheRowsThemselves:
-    """§3.2 publishes 45 live rows; the data must be those rows and no others."""
+    """§3.2 publishes 46 live rows; the data must be those rows and no others."""
 
     def test_the_register_holds_every_live_row(self) -> None:
-        """17 bridge-level rows less the withdrawn M13, plus 29 provider-level."""
-        assert len(r.REGISTER) == 45
+        """17 bridge-level rows less the withdrawn M13, plus 30 provider-level."""
+        assert len(r.REGISTER) == 46
 
     def test_the_register_is_a_tuple_and_not_a_list(self) -> None:
         """`mypy` does not run over `tests/`, so the annotation is not enforcement.
@@ -346,7 +346,7 @@ class TestThePathsEachRowTouches:
         The bare form *matches* — a bracket-free pattern segment claims a
         bracketed member of itself — so nothing else in this suite would notice a
         row using it. `extra` is where the injections live (P2a, P2b, P3, P4, P10
-        and G23's `reasoning` row), so a bare anchor would claim a registered
+        and P22's `reasoning` row), so a bare anchor would claim a registered
         *injection* on the same route as a registered *drop*.
 
         P13/P14's bare `conversation.sampling` is not a precedent, and §3.3.1a
@@ -387,9 +387,9 @@ class TestThePathsEachRowTouches:
         """The regression case for the rule above, on the row that wanted to break it.
 
         KBR-171. P23 claims sixteen dropped control fields on the
-        Responses-origin path; G23 registers an injected `reasoning` on the same
-        route. Over-claiming is silent, so the boundary is asserted rather than
-        left to the anchoring comment.
+        Responses-origin path; P22 (§9.2's G23) claims an injected `reasoning`
+        on the same route. Over-claiming is silent, so the boundary is asserted
+        rather than left to the anchoring comment.
         """
         p23 = next(row for row in r.REGISTER if row.id == "P23")
 
@@ -397,6 +397,26 @@ class TestThePathsEachRowTouches:
         assert len(p23.paths) == len(set(p23.paths)) == 16
         assert all(path.startswith("envelope.extra[") for path in p23.paths)
         assert not any(c.path_matches(path, c.extra_path("reasoning")) for path in p23.paths)
+
+    def test_p22_claims_the_reasoning_injection_across_all_four_sites(self) -> None:
+        """The positive counterpart of the guard above: G23's row, landed (KBR-149).
+
+        The gap walk counted three injection sites; the fourth --
+        `_cc_to_responses`, the CC-origin builder P13 names -- injects from the
+        same key and predates the ticket, so the row names all four. P23 may
+        not reach this address (the guard above); P22 is the row that may.
+        """
+        p22 = next(row for row in r.REGISTER if row.id == "P22")
+
+        assert p22.trigger is r.Trigger.REASONING_EFFORT_PRESENT
+        assert p22.paths == (c.extra_path("reasoning"),)
+        assert p22.conditional is True
+        assert p22.site == (
+            "kitty/providers/openai_subscription.py:OpenAISubscriptionAdapter._prepare_responses_body",
+            "kitty/providers/openai_subscription.py:OpenAISubscriptionAdapter._cc_to_responses",
+            "kitty/providers/openai_subscription.py:OpenAISubscriptionAdapter.make_request",
+            "kitty/providers/openai_subscription.py:OpenAISubscriptionAdapter.stream_request",
+        )
 
     def test_p15_is_anchored_at_strict_and_not_at_the_whole_tool(self) -> None:
         """The regression case §3.3.1a names by hand.
