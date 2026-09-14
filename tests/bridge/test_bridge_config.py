@@ -36,6 +36,15 @@ class TestBridgeConfigParsing:
         # from "configured and missing" (a clear startup error).
         assert config.keys_file is None
 
+    @pytest.mark.parametrize("yaml_value", ['null', '""', "false", "0"])
+    def test_falsy_keys_file_values_count_as_nothing_named(self, tmp_path: Path, yaml_value: str):
+        _write_yaml(tmp_path / "bridge.yaml", f"keys_file: {yaml_value}")
+        config = load_bridge_config(tmp_path / "bridge.yaml")
+        # Every falsy scalar counts as nothing named (SYSTEM_DESIGN.md §1.6):
+        # a typo like `keys_file: 0` yields auth off, not a crash on a path
+        # named "False" or "0".
+        assert config.keys_file is None
+
     def test_full_config(self, tmp_path: Path):
         _write_yaml(
             tmp_path / "bridge.yaml",
