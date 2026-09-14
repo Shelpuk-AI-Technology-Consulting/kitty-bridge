@@ -73,12 +73,12 @@ unexercised — §1.4 again.  Recorded as gap G21 in §9.2 and carried by `KBR-1
 
 **These guards prove the register is *well-formed*, never that it is *complete*.**  A mutation the
 product performs that neither §3.2 nor this module records is invisible to all of them; only the
-wire-level guard (§6.2.3, T-G2) can catch that.  Four omissions are already known and filed —
-`KBR-148` (headers), `KBR-149` (`openai_subscription` injecting `reasoning` from
-`_reasoning_effort`, which P4 cannot cover because `translate_to_upstream` never runs on that
-adapter's request path), `KBR-184` (P13's CC-origin twin) and `KBR-185` (an allowlisted field
-dropped for being falsy).  Every one was found by reading the code by hand; none was found by a
-guard.  Do not read a green suite as "the register is the whole truth".
+wire-level guard (§6.2.3, T-G2) can catch that.  Two omissions are already known and filed —
+`KBR-148` (headers) and `KBR-184` (P13's CC-origin twin).  (`KBR-149` and `KBR-185` were on this
+list too and have since landed as register rows P22 and P25; the list is kept to the still-open
+tickets so it does not disagree with §9.2's struck-through rows.)  Every one was found by reading
+the code by hand; none was found by a guard.  Do not read a green suite as "the register is the
+whole truth".
 
 ⚠️ **Anchoring discipline.**  §3.3.1a: a path pattern is a **prefix**, claiming
 its node and everything beneath it.  A row must therefore be anchored at the
