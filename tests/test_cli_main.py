@@ -371,6 +371,8 @@ class TestNonTTYExit:
             _cli_run(["kitty", "setup"], backends=[object()], egress=None),
             patch("sys.stdin.isatty", return_value=True),
             patch("sys.stdout.isatty", return_value=True),
+            # KBR-218: Windows reads `_handle_attached`, not isatty.
+            patch("kitty.tui.prompts._handle_attached", return_value=True, create=True),
             patch("kitty.cli.setup_cmd.run_setup_wizard", side_effect=RuntimeError("wizard exploded")),
             pytest.raises(RuntimeError, match="wizard exploded"),
         ):

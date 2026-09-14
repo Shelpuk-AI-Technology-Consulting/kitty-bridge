@@ -24,9 +24,22 @@ _HELPER_MOD = "kitty.cli.auth_cmd.run_oauth_for_provider"
 def _mock_tty():
     """Context manager presenting both standard streams as terminals.
 
-    Both since KBR-204: the interactivity guard now requires stdout as well as stdin.
+    Both since KBR-204: the interactivity guard now requires stdout as well as
+    stdin. KBR-218 added a sibling patch on ``_handle_attached`` so the
+    "simulated interactivity" semantics survive the Windows branch of
+    ``can_interact``.
     """
-    with patch("sys.stdin.isatty", return_value=True), patch("sys.stdout.isatty", return_value=True):
+    with (
+        patch("sys.stdin.isatty", return_value=True),
+        patch("sys.stdout.isatty", return_value=True),
+        # KBR-218: Windows reads `_handle_attached`, not isatty.
+        # create=True because the attribute does not exist at the test commit.
+        patch(
+            "kitty.tui.prompts._handle_attached",
+            side_effect=iter([True, True]),
+            create=True,
+        ),
+    ):
         yield
 
 

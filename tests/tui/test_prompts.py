@@ -26,18 +26,33 @@ def _mock_tty(is_tty: bool = True, *, stdout_is_tty: bool | None = None):
             pass it explicitly to build the asymmetric case.
 
     Returns:
-        A context manager patching both ``isatty`` calls.
+        A context manager patching both ``isatty`` calls and the KBR-218 console
+        probe interpretation.
     """
     out = is_tty if stdout_is_tty is None else stdout_is_tty
 
     @contextmanager
     def _both():
-        """Hold both ``isatty`` patches for the duration of the block.
+        """Hold both ``isatty`` patches and the probe patch for the block.
 
         Yields:
             None. The patched state applies inside the ``with`` block.
         """
-        with patch("sys.stdin.isatty", return_value=is_tty), patch("sys.stdout.isatty", return_value=out):
+        with (
+            patch("sys.stdin.isatty", return_value=is_tty),
+            patch("sys.stdout.isatty", return_value=out),
+            # KBR-218: on Windows ``can_interact`` consults ``_handle_attached``
+            # rather than ``isatty``. Patching it keeps the helper's "simulated
+            # interactivity" semantics intact on the Windows CI leg. The patch
+            # is inert on POSIX (can_interact takes the ``isatty`` branch);
+            # ``create=True`` because the attribute does not exist at the test
+            # commit — the fix commit adds it.
+            patch(
+                "kitty.tui.prompts._handle_attached",
+                side_effect=iter([is_tty, out]),
+                create=True,
+            ),
+        ):
             yield
 
     return _both()
@@ -236,3 +251,80 @@ def test_prompts_and_menus_give_one_answer_to_can_this_process_interact(
         f"stdin_is_tty={stdin_is_tty}, stdout_is_tty={stdout_is_tty}: check_tty refuses={refuses}, "
         f"SelectionMenu declined={select_declined}, CheckboxMenu declined={checkbox_declined}"
     )
+
+
+# KBR-218 — the Windows console probe. The ctypes plumbing is Windows-only
+# plumbing; the interpretation (`GetConsoleMode` returned nonzero ⇒ the handle
+# names a real console) is the decision, extracted as the pure function
+# `_handle_attached` and pinned here on every leg. The truth table pins the
+# AND-composition `can_interact()` performs over the two handle probes.
+
+
+@pytest.mark.parametrize(
+    ("raw_mode", "expected"),
+    [(0, False), (1, True), (0x1F, True)],
+    ids=["zero-refuses", "one-attaches", "nonzero-sentinel-attaches"],
+)
+def test_handle_attached_interprets_a_console_mode_return(raw_mode: int, expected: bool) -> None:
+    """KBR-218: ``GetConsoleMode``'s return value, not its mode, decides.
+
+    ``GetConsoleMode`` writes the console's mode flags into its out-parameter
+    and returns a BOOL — nonzero when the handle names a real console, zero on
+    any failure (not a console, no handle, a process started without one). The
+    interpretation is ``bool(raw)`` and it is a pure function so it can be
+    pinned on every leg with raw values; the ctypes call that produces the raw
+    value is Windows-only plumbing (see ``.system_design/SYSTEM_DESIGN.md`` §7.4,
+    the same shape ``tests/bridge/test_bridge_management.py`` uses for
+    ``_probe_pid_windows``).
+
+    Args:
+        raw_mode: The raw DWORD ``GetConsoleMode`` returned.
+        expected: What ``_handle_attached`` must report for it.
+    """
+    from kitty.tui import prompts
+
+    assert prompts._handle_attached(raw_mode) is expected
+
+
+@pytest.mark.parametrize(
+    ("stdin_attached", "stdout_attached", "expected"),
+    [(True, True, True), (True, False, False), (False, True, False), (False, False, False)],
+)
+def test_can_interact_and_composes_the_console_probe(
+    monkeypatch: pytest.MonkeyPatch,
+    stdin_attached: bool,
+    stdout_attached: bool,
+    expected: bool,
+) -> None:
+    """KBR-218: on Windows the guard ANDs the probe over both standard handles.
+
+    The ctypes call is Windows-only plumbing; the AND-composition is a decision,
+    and it is pinned here on every leg by patching the interpretation seam.
+    ``side_effect=iter([...])`` feeds the first probe call the stdin value and
+    the second the stdout value, so the assertion really exercises
+    ``can_interact``'s AND over two calls. ``sys.platform`` is forced to
+    ``win32`` so the Windows branch is reachable on every leg.
+
+    This is the positive direction of the fix: every subprocess case exercises
+    the refusal branch, so without this table a regression that makes
+    ``can_interact()`` always False on ``win32`` (silently refusing every real
+    console) ships green against the whole suite.
+
+    Args:
+        monkeypatch: Pytest patcher, restored after the test.
+        stdin_attached: What the probe reports for standard input.
+        stdout_attached: What the probe reports for standard output.
+        expected: What ``can_interact()`` must answer for that combination.
+    """
+    import sys as _sys
+
+    from kitty.tui import prompts
+
+    monkeypatch.setattr(
+        prompts,
+        "_handle_attached",
+        MagicMock(side_effect=iter([stdin_attached, stdout_attached])),
+    )
+    monkeypatch.setattr(_sys, "platform", "win32")
+
+    assert prompts.can_interact() is expected
