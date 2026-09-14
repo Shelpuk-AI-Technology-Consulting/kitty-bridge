@@ -134,16 +134,26 @@ class TestDocumentRestore:
     """``_documents`` entries are spliced back into their own turn."""
 
     def test_document_reaches_the_wire_inside_its_own_turn(self):
-        """Two documents in two turns each land in the turn that carried them."""
+        """Two documents in two turns each land in the turn that carried them.
+
+        The first document carries a ``cache_control`` breakpoint — the hop-1
+        pin (`test_document_block_breakpoint_survives_on_the_internal_key`)
+        stops at the internal key, this one closes the wire half: the splice
+        is verbatim, breakpoint included.
+        """
         other_document = {
             "type": "document",
             "source": {"type": "base64", "media_type": "application/pdf", "data": "cGRmMg=="},
+        }
+        first_document = {
+            **_PDF_BLOCK,
+            "cache_control": {"type": "ephemeral", "ttl": "1h"},
         }
         wire = _route(
             _messages_body(
                 {
                     "role": "user",
-                    "content": [{"type": "text", "text": "first"}, dict(_PDF_BLOCK)],
+                    "content": [{"type": "text", "text": "first"}, first_document],
                 },
                 {
                     "role": "user",
@@ -153,7 +163,7 @@ class TestDocumentRestore:
         )
         assert wire["messages"][0]["content"] == [
             {"type": "text", "text": "first"},
-            _PDF_BLOCK,
+            first_document,
         ]
         assert wire["messages"][1]["content"] == [
             {"type": "text", "text": "second"},

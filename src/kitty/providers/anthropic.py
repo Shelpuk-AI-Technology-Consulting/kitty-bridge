@@ -98,7 +98,11 @@ def _image_source_from_url(url: str) -> dict:
     """Convert a CC ``image_url`` value into an Anthropic ``image`` source.
 
     A ``data:<media_type>;base64,<data>`` URI becomes a base64 source; anything
-    else is forwarded as a URL source for the upstream to validate (KBR-222).
+    else — an empty string, an ``http(s)`` URL, a malformed URI — becomes a URL
+    source and reaches the upstream's validator. This function validates
+    nothing itself: an upstream that cannot honour the value reports it better
+    than a silent drop or repair would (KBR-222; hop 1's ``continue`` for
+    source types it cannot spell is the other half of that stance).
 
     Args:
         url: The ``url`` member of a CC ``image_url`` content part.
