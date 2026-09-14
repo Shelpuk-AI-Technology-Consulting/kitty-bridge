@@ -33,7 +33,7 @@ from __future__ import annotations
 import base64
 import json
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from typing import Any
 
 from harness import contract as c
@@ -1139,7 +1139,10 @@ def _read_cache_control(
 
 
 def _residualise(
-    source: Mapping[str, Any], mapped: set[str], prefix: str, residual: dict[str, Any]
+    source: Mapping[str, Any],
+    mapped: Collection[str],
+    prefix: str,
+    residual: dict[str, Any],
 ) -> None:
     """Record every key of ``source`` the reader did not map.
 
@@ -1147,7 +1150,11 @@ def _residualise(
 
     Args:
         source: The object being read.
-        mapped: The keys the caller accounted for.
+        mapped: The keys the caller accounted for. Accepts a ``set`` or a
+            ``frozenset`` — the per-block call sites build a fresh ``set``
+            from a literal, while :data:`_TOOL_KEYS` is a ``frozenset`` so a
+            reader cannot quietly grow it mid-request. Mirrors the Anthropic
+            reader's widened signature.
         prefix: The object's path from the body root, to which each unmapped
             key is appended.
         residual: The residual mapping, extended in place.

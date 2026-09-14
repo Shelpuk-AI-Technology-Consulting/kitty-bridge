@@ -592,7 +592,7 @@ class TestMessages:
         c.verify_total(projected)
 
     def test_unknown_keys_on_a_tool_choice_residualise(self) -> None:
-        """R3.x — a body that names extra keys on a tool_choice object or its
+        """R3.14 — a body that names extra keys on a tool_choice object or its
         member has them residualised at their own paths.
 
         Round 9 caught a silent drop on every key the reader does not
@@ -618,7 +618,7 @@ class TestMessages:
             c.verify_total(projected)
 
     def test_unknown_keys_on_an_allowed_tools_member_residualise(self) -> None:
-        """R3.x — same shape on the ``allowed_tools`` branch: every key the
+        """R3.15 — same shape on the ``allowed_tools`` branch: every key the
         reader does not model residuals at its own path."""
         projected = _read(
             _minimal(
