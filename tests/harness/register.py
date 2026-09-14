@@ -151,6 +151,7 @@ class Trigger(Enum):
     THINKING_SIGNALLED_OR_INFERRED = "thinking_signalled_or_inferred"
     CC_ORIGIN_PATH = "cc_origin_path"
     RESPONSES_ORIGIN_PATH = "responses_origin_path"
+    ALLOWLISTED_FIELD_IS_FALSY = "allowlisted_field_is_falsy"
 
 
 # --------------------------------------------------------------------------
@@ -269,7 +270,7 @@ _ALWAYS = Trigger.ALWAYS
 #: DEBUG log; the body is an explicit `if` chain, and six of its branches test
 #: truthiness rather than presence (only `parallel_tool_calls` tests presence),
 #: so an *allowlisted* field with a falsy value is dropped as well and is **not**
-#: claimed here. That residue is G27 / `KBR-185`.
+#: claimed here. That residue is claimed by P25 (G27 / `KBR-185`).
 _CODEX_DROPPED_CONTROL_FIELDS: tuple[str, ...] = (
     "background",
     "context_management",
@@ -867,6 +868,37 @@ _PROVIDER_ROWS: tuple[MutationRow, ...] = (
         # precedence gate (a caller-sent truthy `reasoning` wins) lives in
         # the §3.2.2 trigger cell; the closed vocabulary has no member for it.
         paths=(c.extra_path("reasoning"),),
+        conditional=True,
+        design_ref="§3.2.2",
+    ),
+    MutationRow(
+        id="P25",
+        site=(f"{_SUBSCRIPTION}:OpenAISubscriptionAdapter._prepare_responses_body",),
+        trigger=Trigger.ALLOWLISTED_FIELD_IS_FALSY,
+        # The allowlist's residue: membership is not what carries a field
+        # through, so an *allowlisted* field whose value is falsy is dropped
+        # anyway by the truthiness branches (`include: []`, `reasoning: {}` --
+        # both legal under `CreateResponse`; the reader projects by presence,
+        # so each is a present-inbound, absent-upstream delta). Enumerated in
+        # data but NOT derived the way P23's are: that derivation recomputes
+        # allowlist minus reader table, while this set needs "whose falsy form
+        # is legal", which is a vendor-schema judgment no artifact in the tree
+        # holds (G24's posture -- nothing detects a revision).
+        #
+        # `tool_choice` is truthiness-gated on the same chain and is an extra
+        # key, but it is deliberately NOT claimed: `tool_choice: ""` is not a
+        # legal `CreateResponse` value, so that branch is unreachable with a
+        # falsy value today. The `instructions`/`input`/`tools` branches are
+        # likewise truthiness-gated but project to no `envelope.extra` path.
+        #
+        # P22's interaction: the two triggers are predicates on different
+        # request fields and can co-occur (falsy `reasoning` beside a
+        # non-`none` effort). In that state the `elif` injects
+        # `{"effort": ...}`, so the upstream projection carries a `reasoning`
+        # key with the injected value and P22's injection claims the address;
+        # P25's drop is provably absent there. The rows' claims on
+        # `envelope.extra[reasoning]` do not overlap.
+        paths=(c.extra_path("include"), c.extra_path("reasoning")),
         conditional=True,
         design_ref="§3.2.2",
     ),
