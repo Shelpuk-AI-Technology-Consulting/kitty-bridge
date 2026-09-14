@@ -2032,7 +2032,7 @@ each show how easily one goes vacuous.
 | Connection lifecycle (§4.3 C5) | Distinct-connection count per session, against the native baseline |
 | **Streaming recovery — content, not just grammar** (below) | Four injection points; no duplication, no replayed tool calls, no spliced arguments — and, per §11 Q14, exactly one upstream request at the recorder for the three post-emission points |
 | Client disconnect during a stream | Upstream connection released; the backend not marked unhealthy for a client-side fault |
-| All backends unhealthy | The 503 arrives in each protocol's native error envelope |
+| All backends unhealthy | The 503 arrives in each protocol's native error envelope — but only once no recovery fits inside KBR-243's 300 s arrival-recovery window (`SYSTEM_DESIGN.md` §6.2); inside it the request is held and served |
 | Oversized request | Rejected with the protocol's own error shape, not a raw 413 |
 | `_backend_context` isolation | Concurrent requests never observe each other's backend selection. **Deterministic, so it belongs here, not in the load profile.** |
 

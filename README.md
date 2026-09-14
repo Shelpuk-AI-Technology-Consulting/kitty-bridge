@@ -227,6 +227,13 @@ automatically without restarting anything.
 Anything that makes a member unavailable counts: rate limits, exhausted quotas, expired credentials, upstream 5xx, and
 connection failures.
 
+**Held while recovery is near.** When *every* member of the pool is in cooldown at the moment a request arrives, kitty
+does not fail it outright: if at least one member will recover within the next 5 minutes, kitty holds the request, waits
+out the cooldown, and serves it then — your agent sees the answer a minute or two later instead of an error it might
+treat as fatal. If nothing will recover inside that window, kitty answers immediately with the same 503 and
+`Retry-After` as before. A client that disconnects during the hold ends it; a hung-up agent never causes background
+upstream calls.
+
 A dropped connection is given the benefit of the doubt first. For up to 30 seconds kitty retries the *same* member
 instead of cooling it down, so a brief network interruption between kitty and a provider costs a short pause rather
 than five minutes of that plan. Only a connection that keeps failing past that window counts as a failure. The same
@@ -389,6 +396,11 @@ signatures — which, since the signed history is carried through, means the con
 compaction or truncation) and the model lost reasoning that was still valid. It is reported per backend and as a
 session total, next to `malformed_tool_use`, and is likewise a diagnostic only: it never marks a backend unhealthy.
 A compaction-heavy session whose reasoning keeps degrading shows up here.
+
+`recovery_holds` counts the arrival recovery holds: each time the bridge held a request because *every* member of the
+pool was cooling down but at least one would recover within 5 minutes (each held wait counts once, so a request held
+twice counts twice). A rising count says providers are throttling the pool; a high count with no failed requests says
+the hold is doing its job — agents are riding out short outages instead of failing.
 
 **After the run.** `--session-summary PATH` (or `KITTY_SESSION_SUMMARY`) writes the same document to a file when the
 bridge shuts down — a small artifact CI can upload, instead of a multi-megabyte debug log:

@@ -953,6 +953,17 @@ _STREAM_READ_TIMEOUT = 120  # seconds — upstream must respond with first byte 
 _SINGLE_BACKEND_COOLDOWN_CAP = 30  # seconds — cap cooldown for single-backend profiles
 _CLOUDFLARE_FIRST_HIT_COOLDOWN = 15  # seconds — short cooldown for first Cloudflare block
 _ALL_UNHEALTHY_FAST_FAIL_THRESHOLD = 60  # seconds — fast-fail if soonest retry exceeds this
+# KBR-243: when every backend is cooling down, an arrival is held instead of
+# 503ing while the soonest recovery fits strictly inside this window.
+_RECOVERY_HOLD_WINDOW = 300  # seconds — the ticket's "within the next 300 seconds"
+# De-synchronises concurrent held sessions so a herd does not converge on the
+# one just-recovered backend in a single instant.
+_RECOVERY_HOLD_JITTER_SECONDS = 2.0
+
+
+def _recovery_hold_jitter() -> float:
+    """Return a random de-synchronisation delay for a recovery hold, in seconds."""
+    return random.uniform(0.0, _RECOVERY_HOLD_JITTER_SECONDS)
 # A blip on the wire between kitty and the provider is not a provider outage.
 # Before this window existed, the first connection reset cost the backend a full
 # cooldown, and the failover spread the damage to its siblings until every
@@ -981,11 +992,25 @@ _CAUSE_HEADLINES: dict[str, str] = {
 
 
 class AllBackendsUnhealthyError(Exception):
-    """Raised when all backends are unhealthy and the soonest retry exceeds the fast-fail threshold."""
+    """Raised when all backends are unhealthy and the soonest retry exceeds the fast-fail threshold.
 
-    def __init__(self, backends: list[dict], retry_after: int) -> None:
+    Attributes:
+        backends: Per-backend status dicts (name, reason, remaining_cooldown).
+        retry_after: Soonest cooldown expiry, in seconds.
+        recoverable: True when ``retry_after`` is a real cooldown expiry the
+            arrival recovery hold may sleep on (KBR-243). Only the
+            no-stream-capable raise sets False: its 300 is fabricated, not a
+            recovery time, so waiting would stall a request no backend can
+            ever serve.
+    """
+
+    def __init__(self, backends: list[dict], retry_after: int, *, recoverable: bool = True) -> None:
         self.backends = backends
         self.retry_after = retry_after
+        # False when retry_after is not a recovery time at all (the "no
+        # stream-capable backend" raise fabricates a 300); the recovery hold
+        # must never sleep on one.
+        self.recoverable = recoverable
         super().__init__(f"All {len(backends)} backends unhealthy; retry_after={retry_after}s")
 
 
@@ -1507,6 +1532,9 @@ class BridgeServer:
         self._stats_failovers = 0
         self._stats_retries = 0
         self._stats_all_unhealthy = 0
+        # KBR-243 recovery holds started — counted per hold sleep, not per
+        # request, so a request held twice reports twice.
+        self._stats_recovery_holds = 0
         self._stats_backend_attempts: dict[int, int] = {}
         # Malformed tool_use responses per backend index (issue #33).  Counted
         # rather than only logged because the WARNING reaches a handler only
@@ -1688,7 +1716,9 @@ class BridgeServer:
                     for idx in range(n)
                 ]
                 self._stats_all_unhealthy += 1
-                raise AllBackendsUnhealthyError(backend_status, 300)
+                # Not a cooldown: no amount of waiting makes a backend
+                # stream-capable, so the recovery hold must skip this raise.
+                raise AllBackendsUnhealthyError(backend_status, 300, recoverable=False)
             candidates = []
             backend_status = []
             now = time.monotonic()
@@ -1737,6 +1767,89 @@ class BridgeServer:
             return provider, key, profile.model, profile.provider_config, idx  # type: ignore[union-attr]
 
         return self._provider, self._resolved_key, self._model, self.__dict__.get("_provider_config") or {}, -1
+
+    @staticmethod
+    def _client_gone(request: web.Request) -> bool:
+        """Return True when the client connection is closed or closing.
+
+        aiohttp runs with ``handler_cancellation`` off, so a disconnected
+        client does not cancel the handler; the connection is polled the same
+        way ``_raise_if_client_gone`` does during a native preamble hold.
+
+        Args:
+            request: The inbound request whose transport is checked.
+
+        Returns:
+            True when the client can no longer read the eventual response.
+        """
+        return request.transport is None or request.transport.is_closing()
+
+    async def _select_backend_or_hold(self, request: web.Request) -> AllBackendsUnhealthyError | None:
+        """Select a backend, holding the request while recovery is near (KBR-243).
+
+        On arrival with every backend cooling down, an immediate 503 makes the
+        agent abandon the turn even though the outage is seconds from ending.
+        While the soonest cooldown expiry falls strictly inside
+        ``_RECOVERY_HOLD_WINDOW`` of the arrival, the request is held instead:
+        sleep to the expiry (plus jitter, clamped to the window), re-select,
+        and proceed the moment a backend is available.  The 503 is returned —
+        built from the *latest* selection failure — only when no recovery fits
+        inside the window, the raise is not a cooldown at all
+        (``recoverable=False``), or the client disappears.
+
+        Args:
+            request: The inbound request.  The body is drained (best-effort)
+                before each hold so the client is not left stalled mid-upload
+                (aiohttp caches the read, so later iterations are no-ops), and
+                the transport is polled before the first sleep and after each
+                wake so no upstream request is fired for a gone reader.
+
+        Returns:
+            ``None`` when a backend was selected (directly or after holds), or
+            the final :class:`AllBackendsUnhealthyError` to answer the request
+            with.
+        """
+        try:
+            self._select_backend()
+            return None
+        except AllBackendsUnhealthyError as exc:
+            pending = exc
+        arrival = time.monotonic()
+        while pending.recoverable:
+            elapsed = time.monotonic() - arrival
+            if elapsed + pending.retry_after >= _RECOVERY_HOLD_WINDOW:
+                break
+            self._stats_recovery_holds += 1
+            # The client may be mid-upload of a large body: drain it (cached,
+            # so the handler's later parse is unchanged) before going quiet,
+            # best-effort — a failed read must not abort the hold.
+            try:
+                await request.read()
+            except Exception:
+                logger.debug("Recovery hold could not drain the request body", exc_info=True)
+            if self._client_gone(request):
+                return pending
+            sleep_for = min(
+                pending.retry_after + _recovery_hold_jitter(),
+                _RECOVERY_HOLD_WINDOW - elapsed,
+            )
+            logger.warning(
+                "All backends cooling down; holding request for %.0fs (recovery hold)",
+                sleep_for,
+            )
+            await asyncio.sleep(sleep_for)
+            if self._client_gone(request):
+                return pending
+            try:
+                self._select_backend()
+                logger.info(
+                    "Backend recovered after %.0fs recovery hold; proceeding",
+                    time.monotonic() - arrival,
+                )
+                return None
+            except AllBackendsUnhealthyError as fresh:
+                pending = fresh
+        return pending
 
     def _get_backend_family(self, index: int) -> str:
         if not self._backends or index < 0 or index >= len(self._backends):
@@ -2320,6 +2433,9 @@ class BridgeServer:
         seeing a 503; and ``requests`` counts requests that *reached a
         backend*, so one rejected because the whole pool was in cooldown raises
         ``all_backends_unhealthy`` without incrementing ``requests``.
+        ``recovery_holds`` (KBR-243) counts hold *starts* — sleeps begun while
+        waiting out a cooldown — not requests, so one request held twice
+        reports twice.
 
         Returns:
             A JSON-serialisable dict describing the session.
@@ -2381,6 +2497,7 @@ class BridgeServer:
             "failovers": self._stats_failovers,
             "retries": self._stats_retries,
             "all_backends_unhealthy": self._stats_all_unhealthy,
+            "recovery_holds": self._stats_recovery_holds,
             "malformed_tool_use": sum(self._stats_malformed_tool_use.values()),
             "thinking_stripped": sum(self._stats_thinking_stripped.values()),
             "models_served": {model: dict(record) for model, record in self._stats_models.items()},
@@ -2965,9 +3082,8 @@ class BridgeServer:
     # ── Responses API handler ─────────────────────────────────────────────
 
     async def _handle_responses(self, request: web.Request) -> web.StreamResponse:
-        try:
-            self._select_backend()
-        except AllBackendsUnhealthyError as exc:
+        exc = await self._select_backend_or_hold(request)
+        if exc is not None:
             return self._all_unhealthy_response(exc, style="openai_responses")
         try:
             body = await request.json()
@@ -3632,9 +3748,8 @@ class BridgeServer:
     # ── Messages API handler ──────────────────────────────────────────────
 
     async def _handle_messages(self, request: web.Request) -> web.StreamResponse:
-        try:
-            self._select_backend()
-        except AllBackendsUnhealthyError as exc:
+        exc = await self._select_backend_or_hold(request)
+        if exc is not None:
             return self._all_unhealthy_response(exc, style="anthropic")
         try:
             body = await request.json()
@@ -4871,9 +4986,8 @@ class BridgeServer:
 
     async def _handle_gemini(self, request: web.Request) -> web.StreamResponse:
         """Handle Gemini generateContent / streamGenerateContent requests."""
-        try:
-            self._select_backend()
-        except AllBackendsUnhealthyError as exc:
+        exc = await self._select_backend_or_hold(request)
+        if exc is not None:
             return self._all_unhealthy_response(exc, style="google")
         model_from_path = request.match_info["model"]
 
@@ -5797,9 +5911,8 @@ class BridgeServer:
         also expects CC format.  We only apply model normalization and provider
         normalization.
         """
-        try:
-            self._select_backend()
-        except AllBackendsUnhealthyError as exc:
+        exc = await self._select_backend_or_hold(request)
+        if exc is not None:
             return self._all_unhealthy_response(exc, style="openai_chat")
         try:
             body = await request.json()
