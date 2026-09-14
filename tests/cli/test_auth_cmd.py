@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from contextlib import contextmanager
+from itertools import cycle
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -36,7 +37,7 @@ def _mock_tty():
         # create=True because the attribute does not exist at the test commit.
         patch(
             "kitty.tui.prompts._handle_attached",
-            side_effect=iter([True, True]),
+            side_effect=cycle([True, True]),
             create=True,
         ),
     ):

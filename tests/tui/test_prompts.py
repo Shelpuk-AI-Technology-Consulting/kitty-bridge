@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from contextlib import contextmanager
+from itertools import cycle
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -46,10 +47,14 @@ def _mock_tty(is_tty: bool = True, *, stdout_is_tty: bool | None = None):
             # interactivity" semantics intact on the Windows CI leg. The patch
             # is inert on POSIX (can_interact takes the ``isatty`` branch);
             # ``create=True`` because the attribute does not exist at the test
-            # commit — the fix commit adds it.
+            # commit — the fix commit adds it. ``cycle`` because the patched
+            # block may invoke ``can_interact`` more than once (a wizard /
+            # OAuth flow calls ``check_tty`` at the top level and again inside
+            # each prompt), so the values must repeat rather than exhaust on
+            # the third call.
             patch(
                 "kitty.tui.prompts._handle_attached",
-                side_effect=iter([is_tty, out]),
+                side_effect=cycle([is_tty, out]),
                 create=True,
             ),
         ):

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from itertools import cycle
 from unittest.mock import MagicMock, patch
 
 from kitty.tui.menu import CheckboxMenu, SelectionMenu
@@ -34,10 +35,13 @@ def _mock_tty(is_tty: bool = True, *, stdout_is_tty: bool | None = None):
             patch("sys.stdin.isatty", return_value=is_tty),
             patch("sys.stdout.isatty", return_value=out),
             # KBR-218: Windows reads `_handle_attached`, not isatty. create=True
-            # because the attribute does not exist at the test commit.
+            # because the attribute does not exist at the test commit. cycle
+            # because a menu flow may invoke `can_interact` more than once
+            # (show() and the menu-internal checks), so the values must repeat
+            # rather than exhaust on the third call.
             patch(
                 "kitty.tui.prompts._handle_attached",
-                side_effect=iter([is_tty, out]),
+                side_effect=cycle([is_tty, out]),
                 create=True,
             ),
         ):

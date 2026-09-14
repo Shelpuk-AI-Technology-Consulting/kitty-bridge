@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import uuid
 from contextlib import contextmanager
+from itertools import cycle
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -35,7 +36,7 @@ def _mock_tty():
         # create=True because the attribute does not exist at the test commit.
         patch(
             "kitty.tui.prompts._handle_attached",
-            side_effect=iter([True, True]),
+            side_effect=cycle([True, True]),
             create=True,
         ),
     ):

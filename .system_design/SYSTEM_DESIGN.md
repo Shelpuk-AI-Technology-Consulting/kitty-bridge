@@ -604,16 +604,18 @@ cases:
    plumbing and decisions as pure functions), and `tests/tui/test_prompts.py` pins it on
    every leg: `0` → False, any nonzero → True. Separately, the same file parametrises
    the four `(stdin_value, stdout_value)` combinations in `(True, False)`, patches
-   `_handle_attached` with `side_effect=iter([stdin_value, stdout_value])`, and asserts
-   `can_interact()` returns the AND — `(True, True)` → True; the three other cells →
-   False. This is the **positive direction** of the fix: every subprocess case above
-   exercises the refusal branch, so without this truth table a regression that makes
-   `can_interact()` always False on `win32` (silently refusing every real console) ships
-   green against the whole suite. The ctypes plumbing (`_query_console_mode` —
-   `WinDLL("kernel32", use_last_error=True)`, `GetStdHandle`, `GetConsoleMode`) is
-   Windows-only inside its own body and is exercised by the Windows pytest leg; the
-   `restype` MUST be declared pattern from `bridge/manage.py:147-149` keeps the HANDLE
-   truncation trap out of the helper.
+   `_query_console_mode` (the plumbing) with
+   `side_effect=iter([1 if stdin_value else 0, 1 if stdout_value else 0])`, and leaves
+   `_handle_attached` real so it interprets each raw value — `can_interact()` returns the
+   AND, `(True, True)` → True; the three other cells → False. This is the **positive
+   direction** of the fix: every subprocess case above exercises the refusal branch,
+   so without this truth table a regression that makes `can_interact()` always False
+   on `win32` (silently refusing every real console) ships green against the whole
+   suite. The ctypes plumbing (`_query_console_mode` — `WinDLL("kernel32",
+   use_last_error=True)`, `GetStdHandle`, `GetConsoleMode`) is Windows-only inside its
+   own body and is exercised by the Windows pytest leg; the `restype` MUST be declared
+   pattern from `bridge/manage.py:147-149` keeps the HANDLE truncation trap out of
+   the helper.
 5. The existing "simulated interactivity" test seams (`_mock_tty` helpers and the
    `True,True`/`False`-patch inlines across the seven test files) extend to patch
    `kitty.tui.prompts._handle_attached` alongside `isatty`, in **both directions**:
