@@ -149,10 +149,17 @@ class ResponsesTranslator:
 
     def __init__(self) -> None:
         self._tool_call_buffers: dict[int, ToolCallBuffer] = {}
-        self._tool_call_meta: dict[int, dict] = {}  # index -> {id, name, call_id, item_id}
+        # Keyed by the CC tool-call index (a routing key); "output_index" is
+        # the Responses slot allocated for the item, never the CC index.
+        self._tool_call_meta: dict[int, dict] = {}  # index -> {call_id, name, item_id, output_index}
         self._accumulated_text: str = ""
         self._accumulated_reasoning: str = ""
         self._seq: int = 0
+        # One counter positions every output item (reasoning, text, calls):
+        # the Responses grammar's output_index, allocated when an item opens.
+        self._next_output_index: int = 0
+        self._text_output_index: int = 0
+        self._reasoning_output_index: int = 0
         # Empty string means "not started"; every read is a truthiness test.
         self._text_item_id: str = ""
         self._reasoning_item_id: str = ""
@@ -172,6 +179,9 @@ class ResponsesTranslator:
         self._accumulated_text = ""
         self._accumulated_reasoning = ""
         self._seq = 0
+        self._next_output_index = 0
+        self._text_output_index = 0
+        self._reasoning_output_index = 0
         self._text_item_id = ""
         self._reasoning_item_id = ""
         self._text_started = False
@@ -182,6 +192,17 @@ class ResponsesTranslator:
         seq = self._seq
         self._seq += 1
         return seq
+
+    def _allocate_output_index(self) -> int:
+        """Allocate the next ``output_index`` for a newly opened output item.
+
+        One counter positions every output item the translator opens. The
+        upstream Chat Completions tool-call index only routes argument deltas
+        to their buffer; it never becomes a Responses ``output_index``.
+        """
+        index = self._next_output_index
+        self._next_output_index += 1
+        return index
 
     # ── Stream lifecycle ───────────────────────────────────────────────────
 
@@ -483,6 +504,7 @@ class ResponsesTranslator:
         if self._text_started:
             return
         self._text_item_id = f"msg_{uuid.uuid4().hex[:24]}"
+        self._text_output_index = self._allocate_output_index()
         self._text_started = True
 
     def _ensure_reasoning_item_started(self, response_id: str) -> None:
@@ -490,6 +512,7 @@ class ResponsesTranslator:
         if self._reasoning_started:
             return
         self._reasoning_item_id = f"rs_{uuid.uuid4().hex[:24]}"
+        self._reasoning_output_index = self._allocate_output_index()
         self._reasoning_started = True
 
     def translate_stream_chunk(
@@ -514,7 +537,7 @@ class ResponsesTranslator:
                 events.append(
                     format_output_item_added_event(
                         seq=self._next_seq(),
-                        output_index=0,
+                        output_index=self._reasoning_output_index,
                         item={
                             "id": self._reasoning_item_id,
                             "type": "reasoning",
@@ -534,7 +557,7 @@ class ResponsesTranslator:
                 events.append(
                     format_output_item_added_event(
                         seq=self._next_seq(),
-                        output_index=0,
+                        output_index=self._text_output_index,
                         item={
                             "id": self._text_item_id,
                             "type": "message",
@@ -549,7 +572,7 @@ class ResponsesTranslator:
                     format_content_part_added_event(
                         seq=self._next_seq(),
                         item_id=self._text_item_id,
-                        output_index=0,
+                        output_index=self._text_output_index,
                         content_index=0,
                         part={"type": "output_text", "text": ""},
                     )
@@ -561,7 +584,7 @@ class ResponsesTranslator:
                     seq=self._next_seq(),
                     response_id=response_id,
                     item_id=self._text_item_id,
-                    output_index=0,
+                    output_index=self._text_output_index,
                     content_index=0,
                     delta=content,
                 )
@@ -578,10 +601,14 @@ class ResponsesTranslator:
                     call_id = tc_delta["id"]
                     func = tc_delta.get("function", {})
                     item_id = f"fc_{uuid.uuid4().hex[:24]}"
+                    # The Responses slot is allocated here; the CC index only
+                    # routes later argument deltas to this meta entry.
+                    fc_index = self._allocate_output_index()
                     self._tool_call_meta[idx] = {
                         "call_id": call_id,
                         "name": func.get("name", ""),
                         "item_id": item_id,
+                        "output_index": fc_index,
                     }
                     self._tool_call_buffers[idx] = ToolCallBuffer()
                     # Emit output_item.added for function call
@@ -596,7 +623,7 @@ class ResponsesTranslator:
                     events.append(
                         format_output_item_added_event(
                             seq=self._next_seq(),
-                            output_index=idx,
+                            output_index=fc_index,
                             item=fc_item,
                         )
                     )
@@ -612,6 +639,7 @@ class ResponsesTranslator:
                             seq=self._next_seq(),
                             response_id=response_id,
                             item_id=meta["item_id"],
+                            output_index=meta["output_index"],
                             call_id=meta["call_id"],
                             delta=arg_delta,
                         )
@@ -644,7 +672,7 @@ class ResponsesTranslator:
             events.append(
                 format_output_item_done_event(
                     seq=self._next_seq(),
-                    output_index=0,
+                    output_index=self._reasoning_output_index,
                     item={
                         "type": "reasoning",
                         "id": self._reasoning_item_id,
@@ -661,7 +689,7 @@ class ResponsesTranslator:
                 format_output_text_done_event(
                     seq=self._next_seq(),
                     item_id=self._text_item_id,
-                    output_index=0,
+                    output_index=self._text_output_index,
                     content_index=0,
                     text=clean_text,
                 )
@@ -671,7 +699,7 @@ class ResponsesTranslator:
                 format_content_part_done_event(
                     seq=self._next_seq(),
                     item_id=self._text_item_id,
-                    output_index=0,
+                    output_index=self._text_output_index,
                     content_index=0,
                     part={"type": "output_text", "text": clean_text},
                 )
@@ -680,7 +708,7 @@ class ResponsesTranslator:
             events.append(
                 format_output_item_done_event(
                     seq=self._next_seq(),
-                    output_index=0,
+                    output_index=self._text_output_index,
                     item={
                         "id": self._text_item_id,
                         "type": "message",
@@ -706,6 +734,7 @@ class ResponsesTranslator:
                     seq=self._next_seq(),
                     response_id=response_id,
                     item_id=meta["item_id"],
+                    output_index=meta["output_index"],
                     call_id=meta["call_id"],
                     arguments=final_args,
                 )
@@ -715,7 +744,7 @@ class ResponsesTranslator:
             events.append(
                 format_output_item_done_event(
                     seq=self._next_seq(),
-                    output_index=idx,
+                    output_index=meta["output_index"],
                     item={
                         "type": "function_call",
                         "id": meta["item_id"],
@@ -727,37 +756,49 @@ class ResponsesTranslator:
                 )
             )
 
-        # Build output items for the completed response
-        output_items: list[dict] = []
+        # Build output items for the completed response, ordered by the
+        # allocated output_index: opening order can differ from slot order.
+        # Every opened item appears, so array position equals output_index.
+        indexed_output: list[tuple[int, dict]] = []
         if self._reasoning_started and self._reasoning_item_id:
-            output_items.append(
-                {
-                    "type": "reasoning",
-                    "id": self._reasoning_item_id,
-                    "summary": [{"type": "summary_text", "text": self._accumulated_reasoning}],
-                }
+            indexed_output.append(
+                (
+                    self._reasoning_output_index,
+                    {
+                        "type": "reasoning",
+                        "id": self._reasoning_item_id,
+                        "summary": [{"type": "summary_text", "text": self._accumulated_reasoning}],
+                    },
+                )
             )
-        if clean_text:
-            output_items.append(
-                {
-                    "type": "message",
-                    "role": "assistant",
-                    "content": [{"type": "output_text", "text": clean_text}],
-                }
+        if self._text_started and self._text_item_id:
+            indexed_output.append(
+                (
+                    self._text_output_index,
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": clean_text}],
+                    },
+                )
             )
         for idx in self._tool_call_buffers:
             meta = self._tool_call_meta[idx]
             final_args = finalized_args.get(idx, "{}")
-            output_items.append(
-                {
-                    "type": "function_call",
-                    "id": meta["item_id"],
-                    "call_id": meta["call_id"],
-                    "name": meta["name"],
-                    "arguments": final_args,
-                    "status": "completed" if status == "completed" else "incomplete",
-                }
+            indexed_output.append(
+                (
+                    meta["output_index"],
+                    {
+                        "type": "function_call",
+                        "id": meta["item_id"],
+                        "call_id": meta["call_id"],
+                        "name": meta["name"],
+                        "arguments": final_args,
+                        "status": "completed" if status == "completed" else "incomplete",
+                    },
+                )
             )
+        output_items = [item for _, item in sorted(indexed_output, key=lambda pair: pair[0])]
 
         # Build completed event
         usage = chunk.get("usage") or {}
@@ -790,22 +831,48 @@ class ResponsesTranslator:
 
         Called when the upstream stream ends without emitting a finish_reason chunk,
         to ensure the client always receives the full lifecycle before EOF.
-        Returns empty list only when status is completed and no content/tool calls
-        were accumulated, preventing duplicate completion after normal finish chunks.
+        Returns an empty list only when no item was opened and nothing was
+        accumulated (status completed), preventing duplicate completion after
+        normal finish chunks; an item that opened — even one whose text later
+        stripped to nothing — is closed here so no added event is left without
+        its done.
         """
         clean_text = self._clean_text()
-        if status == "completed" and not clean_text and not self._tool_call_buffers and not self._accumulated_reasoning:
+        # An item whose events already reached the client must be closed here,
+        # even when its text stripped to nothing: an opened-but-never-closed
+        # item is the defect this counter exists to prevent.
+        if (
+            status == "completed"
+            and not clean_text
+            and not self._tool_call_buffers
+            and not self._accumulated_reasoning
+            and not self._text_started
+        ):
             return []
 
         events: list[str] = []
 
+        # Close reasoning item if started
+        if self._reasoning_started and self._reasoning_item_id:
+            events.append(
+                format_output_item_done_event(
+                    seq=self._next_seq(),
+                    output_index=self._reasoning_output_index,
+                    item={
+                        "type": "reasoning",
+                        "id": self._reasoning_item_id,
+                        "summary": [{"type": "summary_text", "text": self._accumulated_reasoning}],
+                    },
+                )
+            )
+
         # Close text content
-        if self._text_started and self._text_item_id and clean_text:
+        if self._text_started and self._text_item_id:
             events.append(
                 format_output_text_done_event(
                     seq=self._next_seq(),
                     item_id=self._text_item_id,
-                    output_index=0,
+                    output_index=self._text_output_index,
                     content_index=0,
                     text=clean_text,
                 )
@@ -814,7 +881,7 @@ class ResponsesTranslator:
                 format_content_part_done_event(
                     seq=self._next_seq(),
                     item_id=self._text_item_id,
-                    output_index=0,
+                    output_index=self._text_output_index,
                     content_index=0,
                     part={"type": "output_text", "text": clean_text},
                 )
@@ -822,7 +889,7 @@ class ResponsesTranslator:
             events.append(
                 format_output_item_done_event(
                     seq=self._next_seq(),
-                    output_index=0,
+                    output_index=self._text_output_index,
                     item={
                         "id": self._text_item_id,
                         "type": "message",
@@ -847,6 +914,7 @@ class ResponsesTranslator:
                     seq=self._next_seq(),
                     response_id=response_id,
                     item_id=meta["item_id"],
+                    output_index=meta["output_index"],
                     call_id=meta["call_id"],
                     arguments=final_args,
                 )
@@ -854,7 +922,7 @@ class ResponsesTranslator:
             events.append(
                 format_output_item_done_event(
                     seq=self._next_seq(),
-                    output_index=idx,
+                    output_index=meta["output_index"],
                     item={
                         "type": "function_call",
                         "id": meta["item_id"],
@@ -866,29 +934,49 @@ class ResponsesTranslator:
                 )
             )
 
-        # Build response.completed
-        output_items: list[dict] = []
-        if clean_text:
-            output_items.append(
-                {
-                    "type": "message",
-                    "role": "assistant",
-                    "content": [{"type": "output_text", "text": clean_text}],
-                }
+        # Build response.completed's output, ordered by the allocated
+        # output_index: opening order can differ from slot order. Every opened
+        # item appears, so array position equals output_index throughout.
+        indexed_output: list[tuple[int, dict]] = []
+        if self._reasoning_started and self._reasoning_item_id:
+            indexed_output.append(
+                (
+                    self._reasoning_output_index,
+                    {
+                        "type": "reasoning",
+                        "id": self._reasoning_item_id,
+                        "summary": [{"type": "summary_text", "text": self._accumulated_reasoning}],
+                    },
+                )
+            )
+        if self._text_started and self._text_item_id:
+            indexed_output.append(
+                (
+                    self._text_output_index,
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": clean_text}],
+                    },
+                )
             )
         for idx in self._tool_call_buffers:
             meta = self._tool_call_meta[idx]
             final_args = finalized_args.get(idx, "{}")
-            output_items.append(
-                {
-                    "type": "function_call",
-                    "id": meta["item_id"],
-                    "call_id": meta["call_id"],
-                    "name": meta["name"],
-                    "arguments": final_args,
-                    "status": "completed" if status == "completed" else "incomplete",
-                }
+            indexed_output.append(
+                (
+                    meta["output_index"],
+                    {
+                        "type": "function_call",
+                        "id": meta["item_id"],
+                        "call_id": meta["call_id"],
+                        "name": meta["name"],
+                        "arguments": final_args,
+                        "status": "completed" if status == "completed" else "incomplete",
+                    },
+                )
             )
+        output_items = [item for _, item in sorted(indexed_output, key=lambda pair: pair[0])]
 
         response_data = {
             "object": "response",

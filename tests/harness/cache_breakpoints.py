@@ -56,6 +56,17 @@ MIN_PREFIX_WORDS = 2 * 4096
 #: Anthropic allows at most four breakpoints per request, the top-level one included.
 _MAX_BREAKPOINTS = 4
 
+#: Kitty's internal carriage keys — named locally because this module imports
+#: nothing from ``src/kitty`` (§3.3.1's independence rule); the registry they
+#: mirror is ``ProviderAdapter._INTERNAL_KEYS`` in ``src/kitty/providers/base.py``.
+#: After KBR-228 the Messages -> CC intermediate carries the agent's verbatim
+#: system blocks and thinking blocks under these keys as *cargo*: they are not
+#: the wire this detector measures, so their breakpoints are not findings.  If
+#: kitty ever mints a carriage key this list misses, the KBR-198/KBR-199
+#: characterisations fail loudly and force the update — the drift corrects
+#: itself in the red.
+_KITTY_CARRIAGE_KEYS = frozenset({"_anthropic_system", "_thinking_blocks"})
+
 _MODEL = "claude-sonnet-5"
 _TOOL_NAME = "read_file"
 _TOOL_USE_ID = "toolu_01CacheBreakpointFixture"
@@ -195,7 +206,9 @@ def find_breakpoints(node: Any) -> list[Any]:
 
     A breakpoint is the value of any key whose name contains ``cache_control``, or
     any value equal to :data:`BREAKPOINT`, wherever it sits. A matched value is not
-    searched further, so each breakpoint is counted once.
+    searched further, so each breakpoint is counted once.  Kitty's internal
+    carriage keys (:data:`_KITTY_CARRIAGE_KEYS`) are skipped entire: their
+    breakpoints ride as cargo on an intermediate body, not on a wire.
 
     Args:
         node: A JSON-shaped structure of dicts, lists and scalars.
@@ -206,6 +219,8 @@ def find_breakpoints(node: Any) -> list[Any]:
     found: list[Any] = []
     if isinstance(node, dict):
         for key, value in node.items():
+            if key in _KITTY_CARRIAGE_KEYS:
+                continue
             if (isinstance(key, str) and "cache_control" in key) or value == BREAKPOINT:
                 found.append(value)
             else:
