@@ -555,6 +555,87 @@ class TestMessages:
         assert len(projected.conversation.turns) == 1
         assert projected.residual == {}
 
+    def test_a_system_content_part_with_cache_control_projects_it(self) -> None:
+        """R3.2b — a system/developer content part may carry a ``cache_control``.
+
+        Real traffic rarely carries a breakpoint on a system part, but the
+        schema permits it and a silent drop would be the M16-shaped loss
+        the residual rule exists to prevent. Round 9 caught the silent
+        drop on system content parts; the fix residualises every other
+        key the grammar does not model, and ``cache_control`` rides on
+        the part's ``cache_control`` slot.
+        """
+        projected = _read(
+            {
+                "model": "gpt-6-astra",
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "Be brief.",
+                                "cache_control": {"type": "ephemeral"},
+                            }
+                        ],
+                    },
+                    {"role": "user", "content": "Hi"},
+                ],
+            }
+        )
+
+        system = projected.conversation.system[0]
+        assert isinstance(system, c.Text)
+        assert system.text == "Be brief."
+        assert system.cache_control == {"type": "ephemeral"}
+        assert projected.residual == {}
+        c.verify_total(projected)
+
+    def test_unknown_keys_on_a_tool_choice_residualise(self) -> None:
+        """R3.x — a body that names extra keys on a tool_choice object or its
+        member has them residualised at their own paths.
+
+        Round 9 caught a silent drop on every key the reader does not
+        explicitly model. The fix is per-branch: after extracting the
+        needed keys, every other key on the tool_choice object (and its
+        member, when the shape has a member) residuals at its own path.
+        A body carrying a stray ``metadata`` next to ``tool_choice`` is
+        one the bridge does not silently swallow.
+        """
+        projected = _read(
+            _minimal(
+                tool_choice={
+                    "type": "function",
+                    "function": {"name": "get_weather"},
+                    "metadata": "trace-abc",
+                }
+            )
+        )
+
+        assert projected.envelope.extra["tool_choice"] == "tool:get_weather"
+        assert projected.residual == {"tool_choice.metadata": "trace-abc"}
+        with pytest.raises(c.ResidualFieldsError):
+            c.verify_total(projected)
+
+    def test_unknown_keys_on_an_allowed_tools_member_residualise(self) -> None:
+        """R3.x — same shape on the ``allowed_tools`` branch: every key the
+        reader does not model residuals at its own path."""
+        projected = _read(
+            _minimal(
+                tool_choice={
+                    "type": "allowed_tools",
+                    "allowed_tools": {"mode": "auto", "metadata": "trace-abc"},
+                }
+            )
+        )
+
+        assert projected.envelope.extra["tool_choice"] == "auto"
+        assert projected.residual == {
+            "tool_choice.allowed_tools.metadata": "trace-abc"
+        }
+        with pytest.raises(c.ResidualFieldsError):
+            c.verify_total(projected)
+
     def test_a_user_string_content_is_one_text_part(self) -> None:
         """R3.3 — string content is shorthand for one text block."""
         projected = _read(

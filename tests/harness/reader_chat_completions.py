@@ -329,7 +329,7 @@ def _project(body: Mapping[str, Any]) -> c.Request:
             residual[key] = value
 
     messages = body.get("messages")
-    system = _read_system_messages(messages)
+    system = _read_system_messages(messages, residual)
     turns = _read_messages(messages, residual)
 
     conversation = c.Conversation(
@@ -359,7 +359,9 @@ def _project(body: Mapping[str, Any]) -> c.Request:
     )
 
 
-def _read_system_messages(value: Any) -> tuple[c.Text, ...]:
+def _read_system_messages(
+    value: Any, residual: dict[str, Any]
+) -> tuple[c.Text, ...]:
     """Lift ``system`` and ``developer`` messages into ordered text parts.
 
     Runs as a second pass over ``messages`` because :class:`~harness.contract.
@@ -369,12 +371,14 @@ def _read_system_messages(value: Any) -> tuple[c.Text, ...]:
 
     Args:
         value: The ``messages`` field, absent or a list of messages.
+        residual: The residual mapping, extended with any content-part key the
+            grammar cannot carry.
 
     Returns:
         The system text, in order.
 
     Raises:
-        UnreadableBodyError: Propagated from :func:`_read_one_message`.
+        UnreadableBodyError: Propagated from :func:`_system_parts`.
     """
     if value is None:
         return ()
@@ -382,16 +386,20 @@ def _read_system_messages(value: Any) -> tuple[c.Text, ...]:
     parts: list[c.Text] = []
     for index, message in enumerate(value):
         if isinstance(message, dict) and message.get("role") in _SYSTEM_ROLES:
-            parts.extend(_system_parts(message, index))
+            parts.extend(_system_parts(message, index, residual))
     return tuple(parts)
 
 
-def _system_parts(message: Mapping[str, Any], index: int) -> tuple[c.Text, ...]:
+def _system_parts(
+    message: Mapping[str, Any], index: int, residual: dict[str, Any]
+) -> tuple[c.Text, ...]:
     """Read one system or developer message's content into text parts.
 
     Args:
         message: The message object.
         index: The message's position, for residual keys.
+        residual: The residual mapping, extended with any content-part key
+            the grammar cannot carry.
 
     Returns:
         The message's text parts, in order.
@@ -423,7 +431,16 @@ def _system_parts(message: Mapping[str, Any], index: int) -> tuple[c.Text, ...]:
             raise c.UnreadableBodyError(
                 f"messages[{index}].content[{part_index}] text must be a string"
             )
-        parts.append(c.Text(text))
+        # Read cache_control onto the part — a system or developer message
+        # is rare to carry one, but the schema permits it on content parts,
+        # and a silent drop would be the M16-shaped loss the residual rule
+        # exists to prevent. Residualise every key the grammar does not
+        # model on this part, so an unknown field is named rather than
+        # swallowed.
+        part_path = f"messages[{index}].content[{part_index}]"
+        cache_control = _read_cache_control(part, part_path, residual)
+        _residualise(part, {"type", "text", *_CACHE_KEYS}, part_path, residual)
+        parts.append(c.Text(text, cache_control=cache_control))
     return tuple(parts)
 
 
@@ -987,7 +1004,9 @@ def _read_tool_choice(value: Any, residual: dict[str, Any]) -> str:
     kind = value.get("type")
     if kind in _TOOL_CHOICE_BY_NAME:
         # The named form. `function` and `custom` carry their member's `name`
-        # — the shape §3.3.1b maps to `tool:<name>`.
+        # — the shape §3.3.1b maps to `tool:<name>`. Residualise every other
+        # key the reader does not model, on both the `tool_choice` object and
+        # its member, so an unknown field is named rather than swallowed.
         member_key = "function" if kind == "function" else "custom"
         member = value.get(member_key)
         if not isinstance(member, dict):
@@ -999,6 +1018,12 @@ def _read_tool_choice(value: Any, residual: dict[str, Any]) -> str:
             raise c.UnreadableBodyError(
                 f"tool_choice type {kind!r} requires a {member_key}.name string"
             )
+        for key, item in value.items():
+            if key != "type" and key != member_key:
+                residual[f"tool_choice.{key}"] = item
+        for key, item in member.items():
+            if key != "name":
+                residual[f"tool_choice.{member_key}.{key}"] = item
         return f"tool:{name}"
 
     if kind == "allowed_tools":
@@ -1020,13 +1045,19 @@ def _read_tool_choice(value: Any, residual: dict[str, Any]) -> str:
             raise c.UnreadableBodyError(
                 f"tool_choice.allowed_tools.mode must be one of {sorted(_TOOL_CHOICE_ALLOWED_MODES)}, got {mode!r}"
             )
-        if "tools" in allowed:
-            # The list is part of the wire shape but not the canonical
-            # form; residualising at the member's path keeps totality and
-            # names what was sent rather than silently swallowing it.
-            residual["tool_choice.allowed_tools.tools"] = allowed["tools"]
+        for key, item in value.items():
+            if key != "type" and key != "allowed_tools":
+                residual[f"tool_choice.{key}"] = item
+        for key, item in allowed.items():
+            if key != "mode":
+                residual[f"tool_choice.allowed_tools.{key}"] = item
         return _TOOL_CHOICE_ALLOWED_MODES[mode]
 
+    # A `type` this reader does not recognise residuals whole: the caller
+    # wraps the value in `extra[tool_choice]`, and a body carrying an
+    # unknown `type` is one the bridge cannot faithfully forward. The
+    # reader-side failure mode is UnreadableBodyError, which is the
+    # T-A1 precedent.
     raise c.UnreadableBodyError(f"unrecognised tool_choice type {kind!r}")
 
 
