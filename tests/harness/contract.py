@@ -143,10 +143,17 @@ class Text:
             rather than as a boolean because a one-hour write and a five-minute
             one are different prices, so a flattened form would hide a silently
             downgraded lifetime. **M16** claims its removal.
+        video_metadata: Gemini's ``Part.videoMetadata`` — a modifier on the
+            part rather than content of its own, carried whole as the wire
+            mapping (``{"fps": …, "startOffset": …}``) so a changed value is
+            a delta rather than a silent equivalence (KBR-194). ``None`` when
+            absent. Lives on :class:`Text` and :class:`Image`, the two parts
+            Gemini attaches video to; other part types still residualise it.
     """
 
     text: str
     cache_control: Mapping[str, Any] | None = None
+    video_metadata: Mapping[str, Any] | None = None
 
     # Every projection type sets this, so unhashability is total rather than
     # data-dependent — see the module note on multiset matching. It survives
@@ -155,8 +162,9 @@ class Text:
     __hash__ = None  # type: ignore[assignment]
 
     def __post_init__(self) -> None:
-        """Freeze the cache breakpoint in place."""
+        """Freeze the cache breakpoint and the video metadata in place."""
         object.__setattr__(self, "cache_control", _freeze_optional(self.cache_control))
+        object.__setattr__(self, "video_metadata", _freeze_optional(self.video_metadata))
 
 
 @dataclass(frozen=True)
@@ -183,12 +191,19 @@ class ToolUse:
             rather than as a boolean because a one-hour write and a five-minute
             one are different prices, so a flattened form would hide a silently
             downgraded lifetime. **M16** claims its removal.
+        signature: The vendor's thinking signature on this call — Gemini
+            attaches a ``thoughtSignature`` to the ``functionCall`` part
+            itself (not only to thought parts) and requires clients to echo it
+            back verbatim on the next turn, returning 4xx when omitted
+            (KBR-194). The analogue of :attr:`Thinking.signature`, which
+            carries the same wire field on a thought part.
     """
 
     name: str
     arguments: Mapping[str, Any] = _frozen_field()
     id: str | None = None
     cache_control: Mapping[str, Any] | None = None
+    signature: str | None = None
 
     __hash__ = None  # type: ignore[assignment]
 
@@ -297,13 +312,30 @@ class Opaque:
 class Image:
     """An image, identified by digest rather than carried as bytes.
 
+    **The pairing is enforced, both ways.** ``digest`` is ``None`` iff ``ref``
+    is not ``None``: neither set projects every image identically (KBR-179's
+    blindness for ``Opaque``); both set lets two readers populate the pair
+    differently for one image and report a phantom delta on content neither
+    altered. Closed means enforced — the same posture :class:`Turn` takes on
+    roles and :class:`Conversation` on sampling keys, and the analogue of
+    :class:`Reply`'s "``stop_reason_raw`` is only for ``'other'``".
+
     Attributes:
-        digest: Lowercase hex SHA-256 of the *decoded* image bytes, or ``None``
-            when the format carries a reference instead. ``media_type`` is
-            deliberately **not** part of the digest, so a changed media type is
-            its own delta rather than an unexplained digest change.
+        digest: Lowercase hex SHA-256 of the *decoded* image bytes, or of
+            the *raw encoded* bytes when the wire payload cannot be decoded
+            (see :func:`image_digest` and §7.4 rule 7 row 3 — KBR-192).
+            ``media_type`` is deliberately **not** part of the digest, so a
+            changed media type is its own delta rather than an unexplained
+            digest change.
         media_type: The declared media type, when the format states one.
         ref: The URI, for Gemini's ``fileData.fileUri`` which carries no bytes.
+        display_name: Gemini's ``Blob.displayName`` / ``FileData.displayName``
+            — the name of the blob/file to the model for ``REFERENCE_ONLY``
+            verbalisation. ``None`` when absent (KBR-194).
+        video_metadata: Gemini's ``Part.videoMetadata`` on an
+            ``inlineData`` or ``fileData`` part — a modifier rather than
+            content, carried whole as the wire mapping. ``None`` when
+            absent. Real traffic puts it on Text and Image parts only.
         cache_control: The cache breakpoint the agent set on this block, as the
             wire mapping — ``{"type": "ephemeral"}``, or the extended form
             carrying a ``ttl``. ``None`` means no breakpoint. Carried whole
@@ -315,13 +347,34 @@ class Image:
     digest: str | None = None
     media_type: str | None = None
     ref: str | None = None
+    display_name: str | None = None
+    video_metadata: Mapping[str, Any] | None = None
     cache_control: Mapping[str, Any] | None = None
 
     __hash__ = None  # type: ignore[assignment]
 
     def __post_init__(self) -> None:
-        """Freeze the cache breakpoint in place."""
+        """Enforce the digest/ref XOR and freeze the cache breakpoint and the video metadata.
+
+        Raises:
+            ValueError: When ``digest`` and ``ref`` are both ``None`` or both
+                set. A vocabulary or pairing declared but checked nowhere is a
+                comment, not a rule — the same posture this module takes on
+                every other closed invariant.
+        """
+        # Both-None projects every image identically (KBR-179's blindness for
+        # Opaque); both-set lets two readers populate the pair differently and
+        # report a phantom delta on content neither altered.
+        if (self.digest is None) == (self.ref is None):
+            raise ValueError(
+                "Image.digest and Image.ref must be set together — exactly one "
+                "of them must be None. Both-None is the blindness KBR-179 names "
+                "for Opaque; both-set lets two readers populate the pair "
+                f"differently for one image (got digest={self.digest!r}, ref={self.ref!r})."
+            )
+
         object.__setattr__(self, "cache_control", _freeze_optional(self.cache_control))
+        object.__setattr__(self, "video_metadata", _freeze_optional(self.video_metadata))
 
 
 @dataclass(frozen=True)
@@ -356,6 +409,13 @@ class ToolResult:
         content: Ordered content. Not recursive: no format nests a tool call
             inside a tool result.
         is_error: Whether the tool reported failure.
+        scheduling: Gemini's ``functionResponse.scheduling`` value — the
+            NON_BLOCKING calling toggle's response-side value, ``"SILENT"`` or
+            ``"INTERRUPT"`` in the published enum, ``None`` for the default
+            (KBR-194). The declaration's :attr:`ToolDecl.behavior` carries
+            the same feature on the call side; ``willContinue`` rides on
+            Gemini's wire shape unchanged because no current route populates
+            it.
         cache_control: The cache breakpoint the agent set on this block, as the
             wire mapping — ``{"type": "ephemeral"}``, or the extended form
             carrying a ``ttl``. ``None`` means no breakpoint. Carried whole
@@ -367,6 +427,7 @@ class ToolResult:
     content: Sequence[Text | Image | Json | Opaque] = ()
     tool_use_id: str | None = None
     is_error: bool = False
+    scheduling: str | None = None
     cache_control: Mapping[str, Any] | None = None
 
     __hash__ = None  # type: ignore[assignment]
@@ -645,7 +706,7 @@ class CapturedReply:
 
 
 def image_digest(raw: bytes) -> str:
-    """Return the canonical digest of decoded image bytes.
+    """Return the canonical digest of image bytes.
 
     Pinned so that six independently written readers agree.  Anthropic sends
     base64 plus a media type, Chat Completions a data URL, Converse raw bytes
@@ -653,9 +714,23 @@ def image_digest(raw: bytes) -> str:
     reader and the Chat Completions reader would produce different digests for
     the same image and §7.1's image corpus entry would fail on every run.
 
+    Two recipes are carried by the one function, distinguished by what the
+    caller passes rather than by the algorithm:
+
+    * **Decoded image bytes** — the canonical case, when the base64 payload
+      decoded cleanly.
+    * **Raw encoded bytes** — when the payload cannot be decoded, the reader
+      digests the wire's own bytes (e.g. ``raw.encode("utf-8")`` of the wrapped
+      base64 string) so the part keeps its identity and its position
+      (§7.4 rule 7 row 3; KBR-192). Two differently-wrapped blobs of one payload
+      digest differently — the compromise is pinned by
+      ``TestImageDigestRecipe``.
+
     Args:
-        raw: The decoded image bytes. The media type is deliberately excluded,
-            so a changed media type shows as its own delta.
+        raw: The image bytes to digest — decoded for the canonical case, raw
+            encoded bytes when the payload cannot be decoded. The media type is
+            deliberately excluded, so a changed media type shows as its own
+            delta.
 
     Returns:
         Lowercase hex SHA-256 of ``raw``.
@@ -999,6 +1074,11 @@ class ToolDecl:
         strict: P15 strips this on the Responses-origin path. ``None`` means
             absent, which must stay distinct from ``False`` or that row's
             presence and absence would be indistinguishable.
+        behavior: Gemini's published ``behavior`` — the NON_BLOCKING calling
+            toggle's per-declaration value, ``"NON_BLOCKING"`` to defer or
+            ``None`` for the default BLOCKING behaviour (KBR-194). Lives at
+            declaration scope; ``functionResponse.scheduling`` rides
+            :class:`ToolResult` separately for the response half.
         cache_control: The cache breakpoint the agent set on this block, as the
             wire mapping — ``{"type": "ephemeral"}``, or the extended form
             carrying a ``ttl``. ``None`` means no breakpoint. Carried whole
@@ -1011,6 +1091,7 @@ class ToolDecl:
     description: str | None = None
     schema: Mapping[str, Any] | None = None
     strict: bool | None = None
+    behavior: str | None = None
     cache_control: Mapping[str, Any] | None = None
 
     __hash__ = None  # type: ignore[assignment]
@@ -1029,12 +1110,19 @@ class Conversation:
     Attributes:
         system: Ordered system text, lifted here from whichever of the four
             carriers the format uses (R8.2).
+        system_role: The role the source ``Content`` published on a system
+            instruction — Gemini's ``systemInstruction.role`` today, others
+            do not publish one. ``None`` when absent, which makes a dropped
+            role visible to the oracle as a positive delta at
+            ``conversation.system_role`` rather than a silent equivalence on
+            ``"user"`` (KBR-194).
         turns: Ordered turns.
         tools: Ordered tool declarations.
         sampling: Sampling parameters, keyed by :data:`SAMPLING_KEYS`.
     """
 
     system: Sequence[Text] = ()
+    system_role: str | None = None
     turns: Sequence[Turn] = ()
     tools: Sequence[ToolDecl] = ()
     sampling: Mapping[str, Any] = _frozen_field()

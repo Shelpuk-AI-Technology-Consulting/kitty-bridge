@@ -24,6 +24,7 @@ that work separately.
 
 from __future__ import annotations
 
+import base64
 import dataclasses
 import hashlib
 import re
@@ -391,7 +392,7 @@ class TestPartGrammar:
         """Carrying bytes would put megabytes into every failure message (R3.7)."""
         names = {f.name for f in dataclasses.fields(c.Image)}
 
-        assert names == {"digest", "media_type", "ref", "cache_control"}
+        assert names == {"digest", "media_type", "ref", "display_name", "video_metadata", "cache_control"}
 
     def test_the_documented_digest_is_sha256_over_the_decoded_bytes(self) -> None:
         """Unpinned, two readers produce different digests for one image and the corpus fails."""
@@ -1693,6 +1694,63 @@ class TestOpaqueRejectsANonCanonicalKind:
         assert len(item_types) == 27
         for kind in item_types:
             assert c.Opaque(kind).kind == kind
+
+
+class TestImagePairing:
+    """The XOR pairing of ``digest`` and ``ref``, enforced both ways (KBR-192).
+
+    Mirrors :class:`TestReplyRejects` — the construction check is what makes the
+    pairing a rule rather than a comment. An ``Image`` carrying neither projects
+    every image identically (KBR-179's shape for ``Opaque``); one carrying both
+    is worse, because two readers could populate the pair differently for one
+    image and report a delta on content neither altered.
+    """
+
+    def test_neither_digest_nor_ref_is_rejected(self) -> None:
+        """The "neither" case is the blindness the ticket names (KBR-192, KBR-179)."""
+        with pytest.raises(ValueError, match="digest.*ref|ref.*digest"):
+            c.Image()
+
+    def test_both_digest_and_ref_are_rejected(self) -> None:
+        """The "both" case lets two readers populate the pair differently and show a phantom delta."""
+        with pytest.raises(ValueError, match="digest.*ref|ref.*digest"):
+            c.Image(digest="d", ref="r")
+
+    def test_only_digest_is_accepted(self) -> None:
+        """Control: the guard above would pass if construction rejected everything."""
+        image = c.Image(digest="d")
+
+        assert image.digest == "d" and image.ref is None
+
+    def test_only_ref_is_accepted(self) -> None:
+        """Control: a Gemini ``fileData.fileUri`` carries a URI and no bytes (R6.4)."""
+        image = c.Image(ref="files/example")
+
+        assert image.digest is None and image.ref == "files/example"
+
+
+class TestImageDigestRecipe:
+    """The raw-bytes recipe for undecodable payloads, the second of ``image_digest``'s uses.
+
+    The undecodable-payload branch in :func:`tests.harness.reader_gemini._read_inline_data`
+    hashes the wrapped base64 string the wire carried — different wraps digest differently.
+    That is the compromise: the part keeps its identity and its position (KBR-179's
+    blindness is closed) at the cost of two differently-wrapped blobs of the same payload
+    comparing unequal. Pinning this in code so a future translator that normalises
+    whitespace cannot silently change the part's identity (KBR-192 AC-9).
+    """
+
+    def test_two_wraps_of_one_payload_digest_differently(self) -> None:
+        """The raw-bytes recipe is wrapping-sensitive — the compromise made explicit.
+
+        Two differently-wrapped base64 strings of one payload (8 bytes of zeros) project
+        to two distinct digests; the oracle will see the second as a new image.
+        """
+
+        unwrapped = base64.b64encode(b"\x00" * 8).decode("ascii")
+        wrapped = unwrapped[:4] + "\n" + unwrapped[4:]
+
+        assert c.image_digest(unwrapped.encode("utf-8")) != c.image_digest(wrapped.encode("utf-8"))
 
 
 def test_unreadable_body_error_is_named_by_the_contract() -> None:

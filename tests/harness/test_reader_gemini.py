@@ -742,12 +742,31 @@ class TestTools:
         assert projected.conversation.tools[0].schema == {"type": "object"}
         assert projected.residual == {"tools[0].functionDeclarations[0].parametersJsonSchema": {"type": "array"}}
 
-    @pytest.mark.parametrize("key", ["behavior", "response", "responseJsonSchema"])
+    @pytest.mark.parametrize("key", ["response", "responseJsonSchema"])
     def test_a_declaration_member_the_grammar_cannot_carry_residualises(self, key: str) -> None:
-        """R6.10 — `ToolDecl` has four slots and the format publishes seven keys."""
+        """R6.10 — `ToolDecl` has five slots; ``response`` and ``responseJsonSchema``
+        still residualise because no current route populates them as tool-side
+        output-shape slots. ``behavior`` moved to its own slot (KBR-194)."""
         projected = project_untotalled({"tools": [{"functionDeclarations": [{"name": "f", key: "x"}]}]})
 
         assert projected.residual == {f"tools[0].functionDeclarations[0].{key}": "x"}
+
+    def test_behavior_on_a_function_declaration_flows_into_the_slot(self) -> None:
+        """KBR-194 — `ToolDecl.behavior` carries `behavior` (NON_BLOCKING calling)."""
+        projected = project(
+            {"tools": [{"functionDeclarations": [{"name": "f", "behavior": "NON_BLOCKING"}]}]}
+        )
+
+        assert projected.conversation.tools[0] == c.ToolDecl(
+            name="f",
+            behavior="NON_BLOCKING",
+        )
+
+    def test_an_absent_behavior_leaves_the_slot_none(self) -> None:
+        """`None` is the absent value — a missing behavior is distinguishable from ``"BLOCKING"``."""
+        projected = project({"tools": [{"functionDeclarations": [{"name": "f"}]}]})
+
+        assert projected.conversation.tools[0].behavior is None
 
     def test_a_declaration_with_no_usable_name_residualises_rather_than_raising(self) -> None:
         """§3.3.1b settles this, and not the way the leaf rule usually goes.
@@ -823,12 +842,27 @@ class TestSystemInstruction:
         assert projected.conversation.system == ()
         assert projected.residual == {"systemInstruction.parts[0].fileData": {"fileUri": "files/example"}}
 
-    def test_a_role_on_a_system_instruction_residualises(self) -> None:
-        """`Conversation.system` has no role slot, and the grammar cannot carry one."""
-        projected = project_untotalled({"systemInstruction": {"role": "user", "parts": [{"text": "be brief"}]}})
+    def test_a_role_on_a_system_instruction_becomes_system_role(self) -> None:
+        """KBR-194 — `Conversation.system_role` carries the role the `Content` published.
+
+        The schema publishes one role on the system `Content`, not one per
+        text part, so the grammar mirrors it at conversation scope. A dropped
+        role becomes a positive delta at `conversation.system_role`, which a
+        register row on the Gemini inbound route claims.
+        """
+        projected = project(
+            {"systemInstruction": {"role": "user", "parts": [{"text": "be brief"}]}}
+        )
 
         assert projected.conversation.system == (c.Text("be brief"),)
-        assert projected.residual == {"systemInstruction.role": "user"}
+        assert projected.conversation.system_role == "user"
+
+    def test_an_absent_role_leaves_system_role_none(self) -> None:
+        """`None` is the absent value — not `"user"`, so a dropped role is visible."""
+        projected = project({"systemInstruction": {"parts": [{"text": "be brief"}]}})
+
+        assert projected.conversation.system == (c.Text("be brief"),)
+        assert projected.conversation.system_role is None
 
 
 class TestTurns:
@@ -907,16 +941,15 @@ class TestParts:
 
         assert projected.conversation.turns[0].parts == (c.Thinking("hmm", signature="sig"),)
 
-    def test_a_signature_on_a_part_that_is_not_a_thought_residualises(self) -> None:
-        """R6.10 — `ToolUse` has no signature slot, so there is nowhere to put it.
+    def test_a_signature_on_a_function_call_carries_onto_the_tool_use(self) -> None:
+        """R6.10a — Gemini attaches `thoughtSignature` to the `functionCall` part.
 
-        Gemini 2.5 and later attach a `thoughtSignature` to a `functionCall`
-        part and clients echo it back, so this **will** fail the oracle run on
-        real traffic — the same shape as KBR-167's block-level `cache_control`.
-        That is the correct signal: the grammar cannot carry it, and a reader
-        that dropped it would hide a field a translator could silently lose.
+        Gemini 2.5 and later require clients to echo it back verbatim on the
+        next turn, and return a 4xx when it is omitted — so a signature on a
+        `functionCall` part is traffic, not noise. `ToolUse.signature` carries
+        it, the analogue of `Thinking.signature` on the thought part.
         """
-        projected = project_untotalled(
+        projected = project(
             {
                 "contents": [
                     {
@@ -927,8 +960,109 @@ class TestParts:
             }
         )
 
-        assert projected.conversation.turns[0].parts == (c.ToolUse("f"),)
-        assert projected.residual == {"contents[0].parts[0].thoughtSignature": "sig"}
+        assert projected.conversation.turns[0].parts == (c.ToolUse("f", signature="sig"),)
+
+    def test_video_metadata_on_a_text_part_flows_into_the_slot(self) -> None:
+        """KBR-194 — `Text.video_metadata` carries `videoMetadata` on a text part.
+
+        Video understanding lives on a text part that references a video via
+        ``fileData``. The grammar slots the metadata on the text it modifies.
+        """
+        projected = project(
+            {
+                "contents": [
+                    {
+                        "parts": [{"text": "describe", "videoMetadata": {"fps": 1.0, "startOffset": "PT0S"}}],
+                    }
+                ]
+            }
+        )
+
+        assert projected.conversation.turns[0].parts == (
+            c.Text("describe", video_metadata={"fps": 1.0, "startOffset": "PT0S"}),
+        )
+
+    def test_video_metadata_on_an_inline_data_part_flows_into_the_image_slot(self) -> None:
+        """KBR-194 — `Image.video_metadata` carries the metadata on a Blob.
+
+        `videoMetadata` is a Part-level modifier; on an ``inlineData`` part the
+        metadata sits at the Part scope alongside the data member.
+        """
+        projected = project(
+            {
+                "contents": [
+                    {
+                        "parts": [
+                            {
+                                "inlineData": {
+                                    "mimeType": "video/mp4",
+                                    "data": _PIXEL,
+                                },
+                                "videoMetadata": {"fps": 24.0},
+                            }
+                        ]
+                    }
+                ]
+            }
+        )
+
+        assert projected.conversation.turns[0].parts == (
+            c.Image(
+                digest=c.image_digest(base64.b64decode(_PIXEL)),
+                media_type="video/mp4",
+                video_metadata={"fps": 24.0},
+            ),
+        )
+
+    def test_video_metadata_on_a_file_data_part_flows_into_the_image_slot(self) -> None:
+        """KBR-194 — `Image.video_metadata` carries the metadata on a FileData reference."""
+        projected = project(
+            {
+                "contents": [
+                    {
+                        "parts": [
+                            {
+                                "fileData": {
+                                    "mimeType": "video/mp4",
+                                    "fileUri": "files/example",
+                                },
+                                "videoMetadata": {"fps": 30.0},
+                            }
+                        ]
+                    }
+                ]
+            }
+        )
+
+        assert projected.conversation.turns[0].parts == (
+            c.Image(
+                digest=None,
+                media_type="video/mp4",
+                ref="files/example",
+                video_metadata={"fps": 30.0},
+            ),
+        )
+
+    def test_a_signature_on_a_thought_part_does_not_reach_the_tool_use(self) -> None:
+        """A signature belongs to the part it modifies, never to its neighbours."""
+        projected = project(
+            {
+                "contents": [
+                    {
+                        "role": "model",
+                        "parts": [
+                            {"text": "hmm", "thought": True, "thoughtSignature": "sig"},
+                            {"functionCall": {"name": "f"}},
+                        ],
+                    }
+                ]
+            }
+        )
+
+        assert projected.conversation.turns[0].parts == (
+            c.Thinking("hmm", signature="sig"),
+            c.ToolUse("f", signature=None),
+        )
 
     def test_inline_data_is_identified_by_the_digest_of_its_decoded_bytes(self) -> None:
         """R6.4 — §3.3.1: the media type is carried separately, not digested.
@@ -956,6 +1090,18 @@ class TestParts:
             c.Image(digest=None, media_type="audio/mpeg", ref="files/example"),
         )
 
+    def test_file_data_with_no_file_uri_keeps_its_position_and_carries_identity(self) -> None:
+        """KBR-192 — a missing ``fileUri`` is a required-field absent (R7.3); the
+        part must keep its position with identity from the canonical JSON of the
+        blob, and the residual records the missing key.
+        """
+        projected = project_untotalled({"contents": [{"parts": [{"fileData": {}}]}]})
+
+        assert projected.conversation.turns[0].parts == (
+            c.Image(digest=c.opaque_digest({}), media_type=None, ref=None),
+        )
+        assert projected.residual == {"contents[0].parts[0].fileData.fileUri": None}
+
     def test_a_function_call_carries_the_published_optional_id(self) -> None:
         """R6.4 — Gemini `v1beta` publishes `FunctionCall.id`, contrary to §3.3.1's note.
 
@@ -982,6 +1128,69 @@ class TestParts:
         projected = project({"contents": [{"role": "model", "parts": [{"functionCall": {"name": "f"}}]}]})
 
         assert projected.conversation.turns[0].parts == (c.ToolUse(name="f", arguments={}),)
+
+    def test_scheduling_on_a_function_response_flows_into_the_slot(self) -> None:
+        """KBR-194 — `ToolResult.scheduling` carries the NON_BLOCKING half of the feature."""
+        projected = project(
+            {
+                "contents": [
+                    {
+                        "parts": [
+                            {
+                                "functionResponse": {
+                                    "name": "f",
+                                    "response": {},
+                                    "scheduling": "SILENT",
+                                }
+                            }
+                        ]
+                    }
+                ]
+            }
+        )
+
+        assert projected.conversation.turns[0].parts[0] == c.ToolResult(
+            content=(c.Json({}),),
+            tool_use_id=None,
+            is_error=False,
+            scheduling="SILENT",
+        )
+
+    def test_an_absent_scheduling_leaves_the_slot_none(self) -> None:
+        """`None` is the absent value — a missing scheduling is distinguishable from ``"SILENT"``."""
+        projected = project(
+            {"contents": [{"parts": [{"functionResponse": {"name": "f", "response": {}}}]}]}
+        )
+
+        assert projected.conversation.turns[0].parts[0].scheduling is None
+
+    def test_will_continue_remains_out_of_scope(self) -> None:
+        """`willContinue` is the NON_BLOCKING twin of `scheduling`, still residualising.
+
+        Out of scope for KBR-194; a future corpus entry that exercises it
+        should decide whether it earns a slot or rides `scheduling`.
+        """
+        projected = project_untotalled(
+            {
+                "contents": [
+                    {
+                        "parts": [
+                            {
+                                "functionResponse": {
+                                    "name": "f",
+                                    "response": {},
+                                    "willContinue": True,
+                                }
+                            }
+                        ]
+                    }
+                ]
+            }
+        )
+
+        assert projected.residual == {
+            "contents[0].parts[0].functionResponse.willContinue": True
+        }
 
     def test_a_function_response_carries_its_struct_as_json(self) -> None:
         """R6.4 — §3.3.1: "Gemini's `functionResponse.response` is a bare struct"."""
@@ -1097,17 +1306,51 @@ class TestParts:
         "key",
         [
             "partMetadata",
-            "videoMetadata",
             "mediaResolution",
             "mediaProcessing",
             "audioTranscription",
         ],
     )
     def test_a_part_modifier_with_no_slot_residualises(self, key: str) -> None:
-        """R6.10 — §7.4.1: a key the mapping does not consume residualises."""
+        """R6.10 — §7.4.1: a key the mapping does not consume residualises.
+
+        `videoMetadata` is no longer in this list: KBR-194 gave it a slot on
+        `Text` and `Image`, the two parts real traffic attaches video to. On
+        other part types (functionCall, functionResponse, opaque) it still
+        residualises at its part-level path — the slot does not exist there.
+        """
         projected = project_untotalled({"contents": [{"parts": [{"text": "hi", key: {"a": 1}}]}]})
 
         assert projected.residual == {f"contents[0].parts[0].{key}": {"a": 1}}
+
+    @pytest.mark.parametrize(
+        "part",
+        [
+            # A thought part — `Thinking` carries no video slot.
+            {"thought": True, "text": "hmm"},
+            # A tool call — `ToolUse` carries no video slot.
+            {"functionCall": {"name": "f"}},
+            # A tool response — `ToolResult` carries no video slot.
+            {"functionResponse": {"name": "f", "response": {}}},
+        ],
+    )
+    def test_video_metadata_on_a_non_text_non_image_part_residualises(self, part: Any) -> None:
+        """KBR-194 scoped `videoMetadata` to `Text` and `Image`.
+
+        On `Thought`, `ToolUse` and `ToolResult` the modifier still
+        residualises at its part-level path — those parts carry no
+        `video_metadata` slot, and real traffic does not attach video to
+        them. Pinned so a future reader that quietly consumes it on one of
+        these dispatchers is caught: the source-scan guard at
+        `test_the_table_covers_every_leaf_the_reader_guards` covers
+        `_typed_leaf` call sites, not the `_residualise` mapped-set choices
+        on the part dispatchers, so this assertion is the only safety net.
+        """
+        body = dict(part)
+        body["videoMetadata"] = {"fps": 1.0}
+        projected = project_untotalled({"contents": [{"parts": [body]}]})
+
+        assert projected.residual == {"contents[0].parts[0].videoMetadata": {"fps": 1.0}}
 
     @pytest.mark.parametrize(
         ("part", "case"),
@@ -1698,30 +1941,47 @@ class TestEvidencedAndUnpublishedShapes:
         assert projected.conversation.turns[0].parts == (c.ToolResult(content=[c.Json({})]),)
 
     @pytest.mark.parametrize(
-        ("member", "payload"),
+        ("member", "payload", "expected_name", "expected_mime"),
         [
-            ("inlineData", {"mimeType": "image/png", "data": "", "displayName": "my.png"}),
-            ("fileData", {"fileUri": "files/example", "displayName": "my.pdf"}),
+            ("inlineData", {"mimeType": "image/png", "data": "", "displayName": "my.png"}, "my.png", "image/png"),
+            (
+                "fileData",
+                {"fileUri": "files/example", "mimeType": "application/pdf", "displayName": "my.pdf"},
+                "my.pdf",
+                "application/pdf",
+            ),
         ],
     )
-    def test_a_display_name_on_a_media_part_residualises(self, member: str, payload: Any) -> None:
-        """`Image` has three fields and none of them names the blob to the model."""
-        projected = project_untotalled({"contents": [{"parts": [{member: payload}]}]})
+    def test_a_display_name_on_a_media_part_flows_into_the_slot(
+        self, member: str, payload: Any, expected_name: str, expected_mime: str
+    ) -> None:
+        """KBR-194 — `Image.display_name` carries the name to the model."""
+        projected = project({"contents": [{"parts": [{member: payload}]}]})
+        image = projected.conversation.turns[0].parts[0]
 
-        assert projected.residual == {f"contents[0].parts[0].{member}.displayName": payload["displayName"]}
+        assert image.display_name == expected_name
+        assert image.media_type == expected_mime
+        # The name is carried beside the digest, never inside it — a changed
+        # display name must stay its own delta rather than rewrite the digest.
+        if member == "inlineData":
+            assert image.digest == c.image_digest(b"")
+        else:
+            assert image.digest is None and image.ref == "files/example"
 
 
 class TestResidualsExpectedOnRealTraffic:
-    """The residualisations that will fail the first oracle run, gathered.
+    """The six fields real traffic carries, and the KBR-194 slots each now fills.
 
-    §7.4.1 says of the identical `cache_control` case: "That is the correct
-    signal and it is also a deadline." Each of these is a field the format
-    publishes, real clients send, and the grammar cannot carry — so each fails
-    the run until T-W2 grows a slot or a declared-ignored mechanism.
+    KBR-194's own class docstring recorded the deadline the other way: "§7.4.1
+    says of the identical `cache_control` case: 'That is the correct signal and
+    it is also a deadline.'" Each of these was a field the format publishes,
+    real clients send, and the grammar could not carry — so each failed the run
+    until T-W2 grew it a slot. This ticket grew the six slots; the cases now
+    assert the value flows into its slot and the residual stays empty.
 
-    All **six** are listed and asserted together, so the ticket that closes them
-    has one inventory rather than six scattered findings — and so that a later
-    reader cannot mistake any of them for an accident.
+    All **six** are listed and asserted together, exactly as before, so the
+    inventory survives as the record of what moved and a later reader cannot
+    mistake any of them for an accident.
 
     A `VALIDATED` tool-calling mode is deliberately **not** here. It also
     residualises, but it is a gap in `TOOL_CHOICE_VALUES` — a closed vocabulary
@@ -1731,37 +1991,44 @@ class TestResidualsExpectedOnRealTraffic:
     it.
     """
 
-    CASES: dict[str, tuple[Any, str]] = {
+    CASES: dict[str, tuple[Any, str, Any]] = {
         # Gemini 3 *requires* clients to echo a functionCall's thoughtSignature
-        # back verbatim, so this fires on every tool turn.
+        # back verbatim, so this fires on every tool turn. KBR-194 gave it
+        # `ToolUse.signature`.
         "thoughtSignature on a functionCall": (
             {"contents": [{"role": "model", "parts": [{"functionCall": {"name": "f"}, "thoughtSignature": "s"}]}]},
             "contents[0].parts[0].thoughtSignature",
+            lambda p: p.conversation.turns[0].parts[0] == c.ToolUse("f", signature="s"),
         ),
         # Google's own SDKs set a role on the system instruction.
         "role on a systemInstruction": (
             {"systemInstruction": {"role": "user", "parts": [{"text": "hi"}]}},
             "systemInstruction.role",
+            lambda p: p.conversation.system_role == "user",
         ),
         # NON_BLOCKING function calling, a live feature.
         "behavior on a functionDeclaration": (
             {"tools": [{"functionDeclarations": [{"name": "f", "behavior": "NON_BLOCKING"}]}]},
             "tools[0].functionDeclarations[0].behavior",
+            lambda p: p.conversation.tools[0] == c.ToolDecl(name="f", behavior="NON_BLOCKING"),
         ),
         # The scheduling half of the same feature.
         "scheduling on a functionResponse": (
             {"contents": [{"parts": [{"functionResponse": {"name": "f", "response": {}, "scheduling": "SILENT"}}]}]},
             "contents[0].parts[0].functionResponse.scheduling",
+            lambda p: p.conversation.turns[0].parts[0].scheduling == "SILENT",
         ),
         # Video understanding, also live.
         "videoMetadata on a part": (
             {"contents": [{"parts": [{"text": "x", "videoMetadata": {"fps": 1.0}}]}]},
             "contents[0].parts[0].videoMetadata",
+            lambda p: p.conversation.turns[0].parts[0] == c.Text("x", video_metadata={"fps": 1.0}),
         ),
         # Naming a blob or file to the model, which `Image` has no slot for.
         "displayName on a media part": (
             {"contents": [{"parts": [{"fileData": {"fileUri": "files/x", "displayName": "my.pdf"}}]}]},
             "contents[0].parts[0].fileData.displayName",
+            lambda p: p.conversation.turns[0].parts[0] == c.Image(ref="files/x", display_name="my.pdf"),
         ),
     }
 
@@ -1775,14 +2042,21 @@ class TestResidualsExpectedOnRealTraffic:
         assert len(self.CASES) == 6
 
     @pytest.mark.parametrize("case", sorted(CASES))
-    def test_it_residualises_at_the_path_the_ticket_names(self, case: str) -> None:
-        """Each fails closed, at a path a maintainer can act on."""
-        body, path = self.CASES[case]
-        projected = project_untotalled(body)
+    def test_it_flows_into_the_slot_kbr194_gave_it(self, case: str) -> None:
+        """KBR-194 closed the deadline: each field now has a grammar slot.
 
-        assert path in projected.residual
-        with pytest.raises(c.ResidualFieldsError):
-            c.verify_total(projected)
+        Each case asserts **both** halves — the wire value lands in its new
+        slot, *and* the residual is empty so `verify_total` accepts. The old
+        residual path is asserted absent, so a regression that returns the
+        field to the residual fails loudly rather than silently.
+        """
+        body, old_residual_path, slot_check = self.CASES[case]
+        projected = project(body)
+
+        assert slot_check(projected), f"{case} did not reach its KBR-194 slot"
+        assert old_residual_path not in projected.residual, (
+            f"{case} regressed: {old_residual_path} is back in the residual"
+        )
 
     def test_a_validated_mode_is_not_quietly_mapped_onto_a_near_neighbour(self) -> None:
         """The alternative to residualising, and why it is worse.
@@ -1921,12 +2195,29 @@ class TestEveryOptionalLeafFailsClosed:
         "blob.data undecodable": (
             {"contents": [{"parts": [{"inlineData": {"mimeType": "image/png", "data": "aGk=\n"}}]}]},
             "contents[0].parts[0].inlineData.data",
-            lambda p: p.conversation.turns[0].parts[0] == c.Image(media_type="image/png"),
+            lambda p: p.conversation.turns[0].parts[0] == c.Image(
+                digest=c.image_digest(b"aGk=\n"), media_type="image/png",
+            ),
         ),
         "part.thought": (
             {"contents": [{"parts": [{"text": "x", "thought": "yes"}]}]},
             "contents[0].parts[0].thought",
             lambda p: p.conversation.turns[0].parts[0] == c.Text("x"),
+        ),
+        "functionCall.thoughtSignature": (
+            {"contents": [{"role": "model", "parts": [{"functionCall": {"name": "f"}, "thoughtSignature": 7}]}]},
+            "contents[0].parts[0].thoughtSignature",
+            lambda p: p.conversation.turns[0].parts[0] == c.ToolUse("f"),
+        ),
+        "functionDeclaration.behavior": (
+            {"tools": [{"functionDeclarations": [{"name": "f", "behavior": {"a": 1}}]}]},
+            "tools[0].functionDeclarations[0].behavior",
+            lambda p: p.conversation.tools[0] == c.ToolDecl(name="f"),
+        ),
+        "systemInstruction.role": (
+            {"systemInstruction": {"role": 7, "parts": [{"text": "hi"}]}},
+            "systemInstruction.role",
+            lambda p: p.conversation.system_role is None,
         ),
         "part.thoughtSignature": (
             {"contents": [{"parts": [{"text": "x", "thought": True, "thoughtSignature": 7}]}]},
@@ -1941,12 +2232,41 @@ class TestEveryOptionalLeafFailsClosed:
         "fileData.fileUri": (
             {"contents": [{"parts": [{"fileData": {"fileUri": ["a"]}}]}]},
             "contents[0].parts[0].fileData.fileUri",
-            lambda p: p.conversation.turns[0].parts[0].ref is None,
+            # `ref` falls back to the absent value; the part keeps its identity
+            # through the canonical-JSON digest of the fileData blob (KBR-192).
+            lambda p: p.conversation.turns[0].parts[0].ref is None
+            and p.conversation.turns[0].parts[0].digest
+            == c.opaque_digest({"fileUri": ["a"]}),
         ),
         "fileData.mimeType": (
             {"contents": [{"parts": [{"fileData": {"fileUri": "files/x", "mimeType": 7}}]}]},
             "contents[0].parts[0].fileData.mimeType",
             lambda p: p.conversation.turns[0].parts[0].media_type is None,
+        ),
+        "blob.displayName": (
+            {"contents": [{"parts": [{"inlineData": {"mimeType": "image/png", "data": "", "displayName": 7}}]}]},
+            "contents[0].parts[0].inlineData.displayName",
+            lambda p: p.conversation.turns[0].parts[0].display_name is None,
+        ),
+        "fileData.displayName": (
+            {"contents": [{"parts": [{"fileData": {"fileUri": "files/x", "displayName": 7}}]}]},
+            "contents[0].parts[0].fileData.displayName",
+            lambda p: p.conversation.turns[0].parts[0].display_name is None,
+        ),
+        "text.videoMetadata": (
+            {"contents": [{"parts": [{"text": "x", "videoMetadata": 7}]}]},
+            "contents[0].parts[0].videoMetadata",
+            lambda p: p.conversation.turns[0].parts[0].video_metadata is None,
+        ),
+        "inlineData.videoMetadata": (
+            {"contents": [{"parts": [{"inlineData": {"mimeType": "video/mp4", "data": ""}, "videoMetadata": 7}]}]},
+            "contents[0].parts[0].videoMetadata",
+            lambda p: p.conversation.turns[0].parts[0].video_metadata is None,
+        ),
+        "fileData.videoMetadata": (
+            {"contents": [{"parts": [{"fileData": {"fileUri": "files/x"}, "videoMetadata": 7}]}]},
+            "contents[0].parts[0].videoMetadata",
+            lambda p: p.conversation.turns[0].parts[0].video_metadata is None,
         ),
         "functionCall.args": (
             {"contents": [{"parts": [{"functionCall": {"name": "f", "args": ["ab", "cd"]}}]}]},
@@ -1962,6 +2282,11 @@ class TestEveryOptionalLeafFailsClosed:
             {"contents": [{"parts": [{"functionResponse": {"name": "f", "response": "ok"}}]}]},
             "contents[0].parts[0].functionResponse.response",
             lambda p: p.conversation.turns[0].parts[0].content == (),
+        ),
+        "functionResponse.scheduling": (
+            {"contents": [{"parts": [{"functionResponse": {"name": "f", "response": {}, "scheduling": 7}}]}]},
+            "contents[0].parts[0].functionResponse.scheduling",
+            lambda p: p.conversation.turns[0].parts[0].scheduling is None,
         ),
         "functionResponse.id": (
             {"contents": [{"parts": [{"functionResponse": {"name": "f", "response": {}, "id": 7}}]}]},
@@ -2343,9 +2668,11 @@ class TestUnionMemberValues:
             {"contents": [{"parts": [{"inlineData": {"mimeType": "image/png", "data": wrapped}}, {"text": "and"}]}]}
         )
 
-        # The part keeps its place and the later part keeps its index.
+        # The part keeps its place and the later part keeps its index; the
+        # digest is the raw wire bytes per `image_digest`'s second recipe
+        # (KBR-192), so the part still has identity.
         assert projected.conversation.turns[0].parts == (
-            c.Image(digest=None, media_type="image/png"),
+            c.Image(digest=c.image_digest(wrapped.encode("utf-8")), media_type="image/png"),
             c.Text("and"),
         )
         assert projected.residual == {"contents[0].parts[0].inlineData.data": wrapped}

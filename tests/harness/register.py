@@ -73,13 +73,13 @@ unexercised — §1.4 again.  Recorded as gap G21 in §9.2 and carried by `KBR-1
 
 **These guards prove the register is *well-formed*, never that it is *complete*.**  A mutation the
 product performs that neither §3.2 nor this module records is invisible to all of them; only the
-wire-level guard (§6.2.3, T-G2) can catch that.  Three omissions are already known and filed —
-`KBR-149` (`openai_subscription` injecting `reasoning` from
-`_reasoning_effort`, which P4 cannot cover because `translate_to_upstream` never runs on that
-adapter's request path), `KBR-184` (P13's CC-origin twin) and `KBR-185` (an allowlisted field
-dropped for being falsy); the fourth, `KBR-148` (headers), closed with rows P9d–P9h.  Every one
-was found by reading the code by hand; none was found by a
-guard.  Do not read a green suite as "the register is the whole truth".
+wire-level guard (§6.2.3, T-G2) can catch that.  One omission is already known and filed —
+`KBR-184` (P13's CC-origin twin).  The other three on this list have since landed: `KBR-148`
+(headers) closed with rows P9d–P9h, `KBR-149` (the `openai_subscription` reasoning injection)
+with P22, and `KBR-185` (an allowlisted field dropped for being falsy) with P25.  The list is
+kept to the still-open ticket so it does not disagree with §9.2's struck-through rows.  Every
+one was found by reading the code by hand; none was found by a guard.  Do not read a green
+suite as "the register is the whole truth".
 
 ⚠️ **Anchoring discipline.**  §3.3.1a: a path pattern is a **prefix**, claiming
 its node and everything beneath it.  A row must therefore be anchored at the
@@ -225,6 +225,10 @@ class Trigger(Enum):
     THINKING_SIGNALLED_OR_INFERRED = ("thinking_signalled_or_inferred", ArrangingBy.REQUEST)
     CC_ORIGIN_PATH = ("cc_origin_path", ArrangingBy.ROUTE)
     RESPONSES_ORIGIN_PATH = ("responses_origin_path", ArrangingBy.REQUEST)
+    # An allowlisted field whose value is falsy (`include: []`, `reasoning: {}`)
+    # is dropped by the truthiness branches — decided by the inbound request's
+    # own field values, so REQUEST (KBR-186's classification).
+    ALLOWLISTED_FIELD_IS_FALSY = ("allowlisted_field_is_falsy", ArrangingBy.REQUEST)
     # Both decided by the resolved profile, not by the inbound request:
     # NON_ENTRA_CREDENTIAL reads the profile's configured `api_key`
     # (``AzureOpenAIAdapter.build_upstream_headers``); CHATGPT_ACCOUNT_ID_PRESENT
@@ -378,7 +382,7 @@ _ALWAYS = Trigger.ALWAYS
 #: DEBUG log; the body is an explicit `if` chain, and six of its branches test
 #: truthiness rather than presence (only `parallel_tool_calls` tests presence),
 #: so an *allowlisted* field with a falsy value is dropped as well and is **not**
-#: claimed here. That residue is G27 / `KBR-185`.
+#: claimed here. That residue is claimed by P25 (G27 / `KBR-185`).
 _CODEX_DROPPED_CONTROL_FIELDS: tuple[str, ...] = (
     "background",
     "context_management",
@@ -1076,6 +1080,37 @@ _PROVIDER_ROWS: tuple[MutationRow, ...] = (
         # precedence gate (a caller-sent truthy `reasoning` wins) lives in
         # the §3.2.2 trigger cell; the closed vocabulary has no member for it.
         paths=(c.extra_path("reasoning"),),
+        conditional=True,
+        design_ref="§3.2.2",
+    ),
+    MutationRow(
+        id="P25",
+        site=(f"{_SUBSCRIPTION}:OpenAISubscriptionAdapter._prepare_responses_body",),
+        trigger=Trigger.ALLOWLISTED_FIELD_IS_FALSY,
+        # The allowlist's residue: membership is not what carries a field
+        # through, so an *allowlisted* field whose value is falsy is dropped
+        # anyway by the truthiness branches (`include: []`, `reasoning: {}` --
+        # both legal under `CreateResponse`; the reader projects by presence,
+        # so each is a present-inbound, absent-upstream delta). Enumerated in
+        # data but NOT derived the way P23's are: that derivation recomputes
+        # allowlist minus reader table, while this set needs "whose falsy form
+        # is legal", which is a vendor-schema judgment no artifact in the tree
+        # holds (G24's posture -- nothing detects a revision).
+        #
+        # `tool_choice` is truthiness-gated on the same chain and is an extra
+        # key, but it is deliberately NOT claimed: `tool_choice: ""` is not a
+        # legal `CreateResponse` value, so that branch is unreachable with a
+        # falsy value today. The `instructions`/`input`/`tools` branches are
+        # likewise truthiness-gated but project to no `envelope.extra` path.
+        #
+        # P22's interaction: the two triggers are predicates on different
+        # request fields and can co-occur (falsy `reasoning` beside a
+        # non-`none` effort). In that state the `elif` injects
+        # `{"effort": ...}`, so the upstream projection carries a `reasoning`
+        # key with the injected value and P22's injection claims the address;
+        # P25's drop is provably absent there. The rows' claims on
+        # `envelope.extra[reasoning]` do not overlap.
+        paths=(c.extra_path("include"), c.extra_path("reasoning")),
         conditional=True,
         design_ref="§3.2.2",
     ),

@@ -1097,12 +1097,25 @@ class OpenAISubscriptionAdapter(OpenAIAdapter):
                     input_items.append(item)
 
             elif role == "user":
-                if content:
+                # KBR-222: a list-form content flattens to its text parts --
+                # str() would put a Python repr of the parts list into the
+                # prompt. An image-only list flattens to empty text and is
+                # then dropped by the truthiness check (G28-shaped residue).
+                text = (
+                    content
+                    if isinstance(content, str)
+                    else "\n".join(
+                        part.get("text", "")
+                        for part in content
+                        if isinstance(part, dict) and part.get("type") == "text"
+                    )
+                )
+                if text:
                     input_items.append(
                         {
                             "type": "message",
                             "role": "user",
-                            "content": [{"type": "input_text", "text": str(content)}],
+                            "content": [{"type": "input_text", "text": text}],
                         }
                     )
 
