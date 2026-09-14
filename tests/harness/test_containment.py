@@ -28,11 +28,13 @@ bypass into the product.
 ``test_bridge.py`` and ``test_vertical_slice.py``. The reason is §8.2's and
 only §8.2's: ``l3`` is in ``PENDING_ACTIVATION_LAYERS``, so an ``l3`` marker
 today would leave the containment harness's correctness checked by no job at
-all. §8.2 lists this module so T-K6 inherits the relocation.
+all. §8.2 names this module as the T-E1 bullet, so T-K6 inherits the
+relocation.
 """
 
 from __future__ import annotations
 
+import contextlib
 import socket
 from collections.abc import AsyncGenerator
 
@@ -50,6 +52,9 @@ from harness.containment import (
     register_containment_transport,
     registered_containment_transports,
 )
+from harness.containment import (
+    instance as report_instance,
+)
 from harness.contract import WireFormat
 
 # ── Fixtures ───────────────────────────────────────────────────────────────
@@ -59,7 +64,7 @@ from harness.contract import WireFormat
 def capability_report() -> CapabilityReport:
     """A fresh capability report per test, so unit assertions are independent.
 
-    The subsystem-wide singleton (:func:`harness.containment.report_singleton`)
+    The subsystem-wide singleton (:func:`harness.containment.instance`)
     is the wire T-E2..T-E5 record into and T-E9's completeness gate reads.
     T-E1's own unit tests use a fresh report so a ``record()`` in one test
     cannot leak into another's assertion.
@@ -124,6 +129,23 @@ class TestMonkeypatchedResolver:
         with pytest.raises(socket.gaierror):
             socket.getaddrinfo("upstream.kitty-test.invalid", 9001, type=socket.SOCK_STREAM)
 
+    def test_deferral_passes_a_hostname_through_to_the_real_resolver(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A hostname-shaped deferral under the patch lands on the real resolver.
+
+        AC-R2's "example.com returns the real result" maps cleanly to this:
+        any name other than ``host`` is dispatched to the un-patched resolver.
+        An RFC-2606 ``.invalid`` name raises ``gaierror`` from the real
+        resolver — the same shape the negative test above asserts, here
+        observed *under* the patch.
+        """
+        with (
+            monkeypatched_aiohttp_resolver(monkeypatch, "upstream.kitty-test.invalid", 9001),
+            pytest.raises(socket.gaierror),
+        ):
+            socket.getaddrinfo("other.invalid", 80, type=socket.SOCK_STREAM)
+
 
 # ── R3: the capability report ──────────────────────────────────────────────
 
@@ -169,6 +191,38 @@ class TestCapabilityReport:
         with pytest.raises(ValueError, match="outcome"):
             capability_report.record("bridge_aiohttp", "passed")  # type: ignore[arg-type]
 
+    def test_singleton_exposes_every_transport_not_attempted(self) -> None:
+        """``report_singleton`` (a.k.a. ``instance``) hands back the same four rows on call."""
+        report = report_instance()
+        names = sorted(report.entries())
+        assert names == ["botocore", "bridge_aiohttp", "curl_cffi", "provider_aiohttp"]
+        outcomes = {entry.outcome for entry in report.entries().values()}
+        assert outcomes == {Outcome.NOT_ATTEMPTED}
+        # Same instance every call (in this process): the singleton is the
+        # wire T-E2..T-E5 record into and T-E9's gate reads.
+        assert report_instance() is report
+
+    def test_require_completeness_raises_when_any_transport_pending(
+        self, capability_report: CapabilityReport
+    ) -> None:
+        """``require_completeness`` is what the future T-E9 completeness gate calls."""
+        capability_report.record("bridge_aiohttp", Outcome.PROVEN)
+        capability_report.record("curl_cffi", Outcome.PROVEN)
+        capability_report.record("provider_aiohttp", Outcome.PROVEN)
+        capability_report.record("botocore", Outcome.PROVEN)
+        # No `pending` rows; the gate stays quiet.
+        capability_report.require_completeness()
+
+        fresh = CapabilityReport()
+        fresh.record("bridge_aiohttp", Outcome.PROVEN)
+        with pytest.raises(AssertionError) as excinfo:
+            fresh.require_completeness()
+        # The message names every pending transport so a CI failure is
+        # diagnosable without a re-run.
+        message = str(excinfo.value)
+        for name in ("curl_cffi", "provider_aiohttp", "botocore"):
+            assert name in message, f"missing pending transport {name!r} in gate message"
+
 
 # ── R1: the sealed-network harness ─────────────────────────────────────────
 
@@ -202,7 +256,7 @@ class TestSealedNetwork:
         old_port = net.proxy.port
         try:
             await net.stop()
-            with pytest.raises((ConnectionRefusedError, OSError)):
+            with pytest.raises(OSError):  # ConnectionRefusedError is an OSError subclass.
                 await _connect_to("127.0.0.1", old_port)
 
             await net.start()
@@ -212,6 +266,36 @@ class TestSealedNetwork:
                 await net.stop()
         finally:
             await net.stop()  # Idempotent (T-W5's contract).
+
+    async def test_stop_releases_the_recorder_even_if_the_proxy_stop_raises(
+        self, certs: CertFiles
+    ) -> None:
+        """The recorder stops even when the proxy's ``stop()`` raised (review M3).
+
+        ``ConnectProxy.stop`` can raise ``TimeoutError`` on a stuck client. A
+        teardown that stops there would leak the recorder's port for the rest
+        of the session. The defect this test catches is a ``stop()`` that
+        does not wrap the proxy's stop in ``try/finally`` — a sibling copy
+        without the guard would leave the recorder running when the proxy's
+        stop raised.
+        """
+        net = SealedNetwork(WireFormat.ANTHROPIC_MESSAGES, certs=certs)
+        await net.start()
+        recorder = net.recorder
+
+        # Force the proxy's stop to raise so the guard is exercised.
+        async def _raising_stop() -> None:
+            raise TimeoutError("forced by test")
+
+        net.proxy.stop = _raising_stop  # type: ignore[method-assign]
+        with contextlib.suppress(TimeoutError):
+            await net.stop()
+
+        # `RecordingUpstream.stop()` clears its runner, and `port` then
+        # raises — the observable that says "the recorder is really stopped",
+        # not merely "harness forgot about it".
+        with pytest.raises(RuntimeError, match="not running"):
+            _ = recorder.port
 
 
 # ── R4: the containment transport extension interface ──────────────────────
@@ -238,6 +322,25 @@ class TestContainmentRegistry:
 
 class TestBridgeAiohttpContainment:
     """``BridgeAiohttpContainment.drive_phase_1`` — the direct leg T-E2 builds on."""
+
+    def test_direct_route_is_a_context_manager_over_sealed_network(
+        self, sealed_network: SealedNetwork
+    ) -> None:
+        """The protocol exposes ``direct_route``; the default implementation yields once.
+
+        T-E3..T-E5 override this with their own transport-specific override
+        (curl_cffi's ``--resolve`` mapping, botocore's ``endpoint_url``, the
+        provider-aiohttp session's resolver hook). The bridge-aiohttp default
+        is a no-op ``yield`` — the mechanism it needs (``socket.getaddrinfo``
+        mapping) lives on ``drive_phase_1``, which enters
+        ``self.direct_route(harness)`` so the override is in scope.
+        """
+        transport = BridgeAiohttpContainment()
+
+        # The no-op ``direct_route`` is enterable and yields once; whatever
+        # the with-body does runs inside.
+        with transport.direct_route(sealed_network):
+            pass  # Body ran; the with-block completed without raising.
 
     async def test_drive_phase_1_one_request_reaches_the_recorder_directly(
         self,
@@ -273,18 +376,20 @@ class TestBridgeAiohttpContainment:
         """Falsification (plan §1.4): a wrong-port resolver must make the green path fail.
 
         The defect is "the resolver maps the harness hostname to a port with no
-        listener". The bridge's aiohttp client attempts to connect, the kernel
-        refuses, the bridge answers an error to the test client, the recorder
-        receives nothing. The green assertion ``captures == 1`` is what catches
-        it on a run where the resolver mapping is silently dropped.
+        listener". The bridge's aiohttp client attempts to connect, the
+        kernel refuses; the test's outer ``aiohttp.ClientSession`` then times
+        out at ``_DRIVE_TIMEOUT`` while the bridge grinds its outbound
+        connect-retry ladder (``_EMPTY_RETRY_DELAYS = [5.0, 15.0]``,
+        ``server.py:924``); the drive's ``status`` comes back as ``-1`` and
+        ``text`` carries the ``TimeoutError`` repr. The recorder receives
+        nothing in any of those shapes, which is what the green assertion
+        ``captures == 1`` catches.
 
-        **Cost: ~30 s.** The bridge's outbound connect retry ladder
-        (``_EMPTY_RETRY_DELAYS`` + ``sock_connect=30``) fires before it answers,
-        and ``stop_async()`` then waits for the in-flight handlers to drain.
-        ``stop_async`` cannot be skipped — the alternative is the very defect
-        §7.3's drain logic exists to prevent. The cost is the price of a real
-        bridge-level falsification; the only way to make this test fast is to
-        stop driving a real bridge, which would falsify a different claim.
+        **Cost: ~30 s.** The 10-second client timeout plus ``stop_async()``
+        waiting out the bridge's in-flight retries is the price of driving
+        a real bridge rather than a stub; the only way to make this test
+        fast is to stop driving a real bridge, which would falsify a
+        different claim.
         """
         broken_port = _find_closed_port()
         result = await BridgeAiohttpContainment().drive_phase_1(

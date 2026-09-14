@@ -75,10 +75,10 @@ __all__ = [
     "ReportEntry",
     "SealedNetwork",
     "get_containment_transport",
+    "instance",
     "monkeypatched_aiohttp_resolver",
     "register_containment_transport",
     "registered_containment_transports",
-    "report_singleton",
 ]
 
 #: Default wire format. The harness's recorder answers in this format and the
@@ -150,8 +150,16 @@ class CapabilityReport:
         self._entries: dict[str, ReportEntry] = {name: ReportEntry() for name in self._TRANSPORT_NAMES}
 
     def entries(self) -> dict[str, ReportEntry]:
-        """Return every row in the report, in registration order."""
-        return self._entries
+        """Return every row in the report, in registration order.
+
+        Returns:
+            A shallow copy of the internal map. The copy is what callers see
+            — the report's :meth:`record` updates its private state, and
+            returning the live dict would let a reader hold a stale snapshot
+            through a write and silently absorb a future verdict on a stale
+            row.
+        """
+        return dict(self._entries)
 
     def entry(self, name: str) -> ReportEntry:
         """Return the row for ``name``.
@@ -229,37 +237,51 @@ class CapabilityReport:
         """
         return tuple(name for name, entry in self._entries.items() if entry.outcome is Outcome.NOT_ATTEMPTED)
 
+    def require_completeness(self) -> None:
+        """Raise when any transport's verdict is still ``not_attempted``.
+
+        The future T-E9 completeness gate (§5.3) calls this; the call site is
+        a separate ticket. T-E1 ships the assertion so the gate has a single,
+        named seam to call — three separate tickets inventing their own
+        completeness check is the kind of coordination failure the milestone
+        structure exists to prevent.
+
+        Raises:
+            AssertionError: When at least one transport is still
+                ``not_attempted``. The message names every pending transport
+                in registration order so a CI failure is diagnosable without
+                a re-run.
+        """
+        pending = self.not_attempted_names()
+        if pending:
+            raise AssertionError(
+                f"containment completeness gate failed; verdicts still pending: {sorted(pending)}"
+            )
+        return tuple(name for name, entry in self._entries.items() if entry.outcome is Outcome.NOT_ATTEMPTED)
+
 
 #: The in-process singleton T-E2..T-E5 reach through and T-E9 reads.
 #: Initialised lazily so importing the module does not mutate the report.
 _REPORT: CapabilityReport | None = None
 
 
-def report_singleton() -> CapabilityReport:
+def instance() -> CapabilityReport:
     """Return the process-wide capability report.
 
+    Constructed lazily on first call. Subsequent calls in the same process
+    return the same object, which is what the future T-E9 completeness gate
+    reads and what T-E2..T-E5 record into: an in-process view that one
+    process's slices have all written their verdict into.
+
     Returns:
-        The same :class:`CapabilityReport` instance every call. The first call
-        constructs it; subsequent calls return the same object. A reset seam
-        exists at the file level so a test process with mixed slices sees the
-        verdict of every slice that ran.
+        The same :class:`CapabilityReport` instance every call. T-E1's own
+        unit tests construct a fresh :class:`CapabilityReport` directly so a
+        ``record()`` in one test cannot leak into another's assertion.
     """
     global _REPORT
     if _REPORT is None:
         _REPORT = CapabilityReport()
     return _REPORT
-
-
-def _reset_report_singleton() -> None:
-    """Replace the singleton with a fresh report (test-only seam).
-
-    The reset is intentional and conservative: any call to ``record()`` from
-    a previous test is dropped along with the old report. T-E1's own tests
-    do not use this — they construct a fresh :class:`CapabilityReport`
-    directly — but exposing the seam keeps sibling work straightforward.
-    """
-    global _REPORT
-    _REPORT = None
 
 
 # ── The monkeypatched resolver (§5.3 direct-leg seam) ──────────────────────
@@ -367,6 +389,12 @@ class SealedNetwork:
         to it; the order is therefore fixed and recorded here, not at the call
         site, so sibling slices do not see a half-started harness.
 
+        A failed proxy start releases the recorder — ``__aenter__`` propagates
+        the exception and ``__aexit__`` is never called on the failed entry,
+        so without this guard the recorder would hold its port for the rest of
+        the session. ``BridgeFixture.start`` carries the same guard for the
+        same reason.
+
         Raises:
             OSError: When the kernel refuses a port — a transient I/O error
                 the caller may choose to retry. ``pytest.fail`` is *not* the
@@ -379,10 +407,19 @@ class SealedNetwork:
         await recorder.start()
         self._recorder = recorder
 
-        # Proxy second, with the resolve map keyed on the recorder's port.
-        target = f"{HARNESS_UPSTREAM_HOST}:{self._recorder.port}"
-        proxy = ConnectProxy(resolve={target: ("127.0.0.1", self._recorder.port)})
-        await proxy.start(server_ssl_context(self._certs.proxy_cert, self._certs.proxy_key))
+        try:
+            # Proxy second, with the resolve map keyed on the recorder's port.
+            target = f"{HARNESS_UPSTREAM_HOST}:{self._recorder.port}"
+            proxy = ConnectProxy(resolve={target: ("127.0.0.1", self._recorder.port)})
+            await proxy.start(server_ssl_context(self._certs.proxy_cert, self._certs.proxy_key))
+        except BaseException:
+            await recorder.stop()
+            self._recorder = None
+            raise
+
+        # Assigned only on success, so a failed start leaves both handles
+        # ``None`` and a subsequent :meth:`stop` is a no-op rather than a
+        # double-close.
         self._proxy = proxy
 
     async def stop(self) -> None:
@@ -391,14 +428,22 @@ class SealedNetwork:
         Idempotent: a test that stops the proxy mid-run is still followed by
         the harness's teardown, and the seam T-W5 ships gives the proxy's
         ``stop()`` the same property.
+
+        The recorder stops even if the proxy's stop raised — ``ConnectProxy.stop``
+        can ``raise TimeoutError`` when its drain deadline (5 s) expires on a
+        stuck client, and a teardown that stops there would leak the recorder.
+        The recorder's stop is unconditional; the proxy's error is re-raised
+        to the caller.
         """
         proxy, self._proxy = self._proxy, None
         recorder, self._recorder = self._recorder, None
 
-        if proxy is not None:
-            await proxy.stop()
-        if recorder is not None:
-            await recorder.stop()
+        try:
+            if proxy is not None:
+                await proxy.stop()
+        finally:
+            if recorder is not None:
+                await recorder.stop()
 
     async def __aenter__(self) -> SealedNetwork:
         """Start the pair on entry."""
@@ -536,6 +581,26 @@ class ContainmentTransport(Protocol):
 
     name: str
 
+    def direct_route(self, harness: SealedNetwork) -> Iterator[None]:
+        """Return a context manager that puts the **direct**-leg override in scope.
+
+        The bridge-aiohttp default is a no-op ``yield`` — its own direct-route
+        mechanism (``monkeypatched_aiohttp_resolver``) is applied inside
+        :meth:`drive_phase_1` because the patch is via ``socket.getaddrinfo``
+        and lives on the harness's :func:`monkeypatch` fixture. T-E3..T-E5
+        override this to apply **their** per-transport direct-route overrides:
+        curl_cffi's ``--resolve`` mapping, botocore's ``endpoint_url``, the
+        provider-aiohttp session's resolver hook. ``drive_phase_1`` enters
+        ``self.direct_route(harness)`` so the override is in scope for the
+        drive's outbound call.
+
+        Args:
+            harness: The sealed network the request will be driven against.
+
+        Yields:
+            ``None``. The body of the with-block is the drive.
+        """
+
     async def drive_phase_1(
         self,
         harness: SealedNetwork,
@@ -642,6 +707,24 @@ class BridgeAiohttpContainment(ContainmentTransport):
     #: request, not that the bridge parsed an interesting body.
     _MODEL: ClassVar[str] = "harness-model"
 
+    @contextlib.contextmanager
+    def direct_route(self, harness: SealedNetwork) -> Iterator[None]:
+        """Yield once — the bridge-aiohttp direct route has no override to apply.
+
+        The bridge-aiohttp mechanism (``monkeypatched_aiohttp_resolver``) is
+        applied inside :meth:`drive_phase_1` so the ``resolver_port``
+        falsification seam lives on the method that uses it. T-E3..T-E5
+        override this instead: curl_cffi's ``--resolve`` mapping, botocore's
+        ``endpoint_url``, the provider-aiohttp session's resolver hook.
+
+        Args:
+            harness: The sealed network the request will be driven against.
+
+        Yields:
+            ``None``.
+        """
+        yield
+
     async def drive_phase_1(
         self,
         harness: SealedNetwork,
@@ -676,10 +759,22 @@ class BridgeAiohttpContainment(ContainmentTransport):
 
         target_port = harness.upstream_port if resolver_port is None else resolver_port
 
-        # The resolver is scoped to ``with`` so a test that drives more than
-        # one request inside the same monkeypatch fixture does not leave a
-        # stale mapping. The teardown goes through ``monkeypatch``.
-        with monkeypatched_aiohttp_resolver(monkeypatch, harness.upstream_host, target_port):
+        # The per-transport direct route in scope around the drive, then the
+        # harness's resolver mapping. The direct route is the override point
+        # T-E3..E5 use; the resolver mapping is the bridge-aiohttp mechanism.
+        with (
+            self.direct_route(harness),
+            # Scoped so a test that drives more than one request inside the
+            # same monkeypatch fixture does not leave a stale mapping. The
+            # teardown goes through ``monkeypatch``.
+            monkeypatched_aiohttp_resolver(monkeypatch, harness.upstream_host, target_port),
+        ):
+            # `BridgeServer` is constructed directly rather than through
+            # `BridgeFixture`: `AiohttpTransport.bind()` returns
+            # `{"base_url": self._recorder.base_url}` — the loopback URL —
+            # and §5.3's whole point is that the bridge reaches the
+            # harness **by its non-loopback name**, not by the recorder's
+            # own. Bypassing the fixture here is intentional, not lazy.
             adapter = CustomAnthropicAdapter()
             server = BridgeServer(
                 None,  # type: ignore[arg-type]
