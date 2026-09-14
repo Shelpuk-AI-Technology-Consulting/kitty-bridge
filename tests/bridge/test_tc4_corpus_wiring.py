@@ -226,6 +226,10 @@ class TestTheEntriesReachTheirPaths:
         server._apply_compaction(cc_request)
 
         after = len(json.dumps(cc_request["messages"], ensure_ascii=False))
+        assert after == before, (
+            "pre-flight compaction must short-circuit below the threshold; "
+            f"got body {after} chars, expected {before} (no compaction)"
+        )
         assert after > _OVERSIZED_INPUT_THRESHOLD, (
             "the M6 entry must remain over the recovery gate after pre-flight; "
             "otherwise the upstream has no reason to 413"
@@ -235,34 +239,62 @@ class TestTheEntriesReachTheirPaths:
         """The well-paired property is structural, not enforced by test discipline.
 
         This is the anti-F25 half for the M6 entry: if an authoring drift added
-        a ``role: tool`` message whose ``tool_call_id`` has no matching
-        ``tool_calls[].id`` earlier in the conversation, pre-flight pairing
-        validation would silently drop it (or, worse, send the conversation
-        upstream as empty). The wiring test ``test_the_m6_entry_survives...``
-        uses a budget larger than the body so ``_compact_messages``
-        short-circuits and the orphan never gets a chance to be dropped — so
-        the well-paired property would not be caught there. This test names
-        the property structurally.
+        an orphan tool reference, pre-flight pairing validation would silently
+        drop it (or, worse, send the conversation upstream as empty). The
+        wiring test ``test_the_m6_entry_survives...`` uses a budget larger than
+        the body so ``_compact_messages`` short-circuits and the orphan never
+        gets a chance to be dropped — so the well-paired property would not be
+        caught there. This test names the property structurally.
+
+        Both orphan shapes the pairing rule handles are checked: the Chat
+        Completions ``role: tool`` message with a ``tool_call_id``, and the
+        Anthropic-native ``tool_result`` content block with a ``tool_use_id``
+        whose ``tool_use`` no assistant turn carries. The entry is inbound
+        Anthropic Messages, so the native shape is the one a real drift would
+        introduce.
         """
         entry = _load_entry("m6_recovery_oversized_paired")
         body = json.loads(entry.request.body)
 
-        tool_call_ids: set[str] = set()
-        orphan_tool_ids: list[str] = []
+        # Chat Completions shape: assistant ``tool_calls[].id`` declares, a
+        # later ``role: tool`` message consumes.
+        cc_call_ids: set[str] = set()
+        orphan_cc_ids: list[str] = []
+        # Anthropic-native shape: assistant ``tool_use.id`` declares, a later
+        # user ``tool_result.tool_use_id`` consumes.
+        native_use_ids: set[str] = set()
+        orphan_native_ids: list[str] = []
+
         for message in body["messages"]:
             role = message.get("role")
+            content = message.get("content")
             if role == "assistant":
                 for call in message.get("tool_calls") or ():
                     if isinstance(call, dict) and isinstance(call.get("id"), str):
-                        tool_call_ids.add(call["id"])
+                        cc_call_ids.add(call["id"])
+                if isinstance(content, list):
+                    for block in content:
+                        if isinstance(block, dict) and isinstance(block.get("id"), str):
+                            native_use_ids.add(block["id"])
             elif role == "tool":
                 tool_call_id = message.get("tool_call_id")
-                if isinstance(tool_call_id, str) and tool_call_id not in tool_call_ids:
-                    orphan_tool_ids.append(tool_call_id)
+                if isinstance(tool_call_id, str) and tool_call_id not in cc_call_ids:
+                    orphan_cc_ids.append(tool_call_id)
+            elif role == "user" and isinstance(content, list):
+                for block in content:
+                    if not isinstance(block, dict) or block.get("type") != "tool_result":
+                        continue
+                    tool_use_id = block.get("tool_use_id")
+                    if isinstance(tool_use_id, str) and tool_use_id not in native_use_ids:
+                        orphan_native_ids.append(tool_use_id)
 
-        assert not orphan_tool_ids, (
+        assert not orphan_cc_ids, (
             "the M6 entry must carry no orphan tool messages; "
-            f"found orphan tool_call_ids={orphan_tool_ids}"
+            f"found orphan tool_call_ids={orphan_cc_ids}"
+        )
+        assert not orphan_native_ids, (
+            "the M6 entry must carry no orphan tool_result blocks; "
+            f"found orphan tool_use_ids={orphan_native_ids}"
         )
 
     def test_the_m5_irreducible_entry_survives_compaction_unchanged(self) -> None:
@@ -314,6 +346,10 @@ class TestTheEntriesReachTheirPaths:
         # if compaction empties the list.
         assert cc_request["messages"], (
             "the user turn must survive the system-prompt-over-window shape"
+        )
+        assert any(m.get("role") == "user" for m in cc_request["messages"]), (
+            "the user turn must survive the system-prompt-over-window shape; "
+            f"got roles={[m.get('role') for m in cc_request['messages']]}"
         )
 
 
