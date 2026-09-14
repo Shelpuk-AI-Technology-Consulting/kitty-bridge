@@ -317,7 +317,10 @@ class BedrockRecordingUpstream(RecordingUpstream):
         The recording half of the lookup, overridden rather than extended
         because the three recorders' suffix tables are disjoint: none serves
         a format another does, so a shared table would only ever answer a
-        request one of them could not reply to.
+        request one of them could not reply to. **Called from
+        :meth:`_default_responder`** for the recording side effect, not for
+        its return value (the responder dispatches on the path suffix
+        directly, since P18 pops ``stream`` from the body).
 
         Args:
             path: The request's raw path.
@@ -355,11 +358,13 @@ class BedrockRecordingUpstream(RecordingUpstream):
         """
         # Called for its recording side effect as much as its answer: every
         # reply this recorder sends is Converse-shaped, but a path that
-        # selected none has to be reported at teardown.
-        matched = format_for_bedrock_path(captured.path)
-        if matched is None:
-            self.unmatched.append(captured.path)
-            matched = self.default_format
+        # selected none has to be reported at teardown. The override on
+        # ``_format_for`` does that recording; calling it here (rather than
+        # re-implementing the lookup and the unmatched-path append) is what
+        # keeps the recording half of the dispatch in one place — the same
+        # recipe ``ProviderRecordingUpstream`` follows, and the reason this
+        # subclass mirrors the override's signature.
+        self._format_for(captured.path)
 
         if captured.path.endswith(BEDROCK_CONVERSE_STREAM_SUFFIX):
             encoded = encode_eventstream(bedrock_success_stream_events())

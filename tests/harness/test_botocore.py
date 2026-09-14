@@ -442,18 +442,37 @@ class TestThroughARealBridge:
     """R1, R4, R5 — the claim the whole delivery exists to support."""
 
     async def test_a_request_reaches_the_recorder_as_converse(self) -> None:
-        """The user's text survives the bridge's CC → Converse translation."""
+        """The user's text survives the bridge's CC → Converse translation.
+
+        The inbound CC body is also asserted on, not only on the capture:
+        the non-streaming reply is otherwise judged only by the fixture
+        ``status == 200``, which cannot tell a correct translation from a
+        plausible-but-empty one (the streaming path has this in
+        :meth:`test_a_streamed_request_via_the_bridge_yields_finish_reason`
+        — this test carries the non-streaming half, so a regression in
+        ``translate_from_upstream`` that returned a contentless CC body
+        would be caught at the boundary the client sees).
+        """
         subject = BotocoreTransport(FORMAT)
         sent = marker()
 
         async with BridgeFixture(subject) as fixture:
-            status, _text = await fixture.post(inbound_path(ROUTE), minimal_inbound_body(ROUTE, sent))
+            status, text = await fixture.post(inbound_path(ROUTE), minimal_inbound_body(ROUTE, sent))
             captures = list(subject.captures)
 
         assert status == 200
         assert len(captures) == 1
         assert captures[0].path.endswith(BEDROCK_CONVERSE_SUFFIX)
         assert sent.encode() in (captures[0].body or b"")
+
+        # The non-streaming CC reply, as the client sees it: non-empty
+        # content and a finish reason. Without this the test above proves
+        # only that a 200 arrived, which a plausible-but-empty translation
+        # also satisfies.
+        reply = json.loads(text)
+        choice = reply["choices"][0]
+        assert choice["message"]["content"], "the reply reads as empty, which costs the retry ladder"
+        assert choice["finish_reason"] == "stop"
 
     async def test_the_capture_lacks_modelid_and_stream(self) -> None:
         """P18's mutation is observable on the wire.

@@ -991,3 +991,62 @@ class TestItCachesNoTransport:
         adapter._get_boto3_client("AKIAEXAMPLE:secret-key", {"region": "us-east-1"})
 
         assert set(vars(adapter)) == before
+
+
+class TestTheEndpointUrlSeam:
+    """KBR-42 — ``provider_config["endpoint_url"]`` is the test-harness seam.
+
+    T-B3's transport points the botocore client at the local recorder by
+    setting this key.  Production profiles do not carry it (so the kwarg
+    is opt-in), and a regression that dropped the new key from
+    ``_get_boto3_client`` while keeping the rest of the method intact would
+    still be caught by the harness integration — but only at the **flow**
+    level, not the **kwarg** level.  These tests pin the kwarg at the layer
+    where the production change lives, so a future refactor cannot silently
+    regress it.
+    """
+
+    def test_endpoint_url_is_passed_to_the_boto3_client_when_set(self) -> None:
+        adapter = BedrockAdapter()
+        sentinel = MagicMock()
+        captured_kwargs: dict = {}
+
+        def _capture(*args: object, **kwargs: object) -> MagicMock:
+            captured_kwargs.update(kwargs)
+            return sentinel
+
+        with patch("boto3.Session") as session_cls:
+            session_cls.return_value.client.side_effect = _capture
+            adapter._get_boto3_client(
+                "AKIAEXAMPLE:secret",
+                {"endpoint_url": "http://recorder:9", "region": "us-east-1"},
+            )
+
+        assert captured_kwargs.get("endpoint_url") == "http://recorder:9", (
+            "the test-harness seam was not forwarded to the boto3 client; "
+            "the botocore endpoint-override recorder (T-B3) cannot point at the loopback"
+        )
+
+    def test_endpoint_url_is_omitted_when_provider_config_lacks_it(self) -> None:
+        """Profiles without the key must behave as before KBR-42.
+
+        Production profiles do not carry ``endpoint_url``; passing it
+        through to ``session.client(..., endpoint_url=None)`` raises on some
+        botocore versions and is silently ignored on others, so the seam
+        must consume the key only when truthy.
+        """
+        adapter = BedrockAdapter()
+        captured_kwargs: dict = {}
+
+        def _capture(*args: object, **kwargs: object) -> MagicMock:
+            captured_kwargs.update(kwargs)
+            return MagicMock()
+
+        with patch("boto3.Session") as session_cls:
+            session_cls.return_value.client.side_effect = _capture
+            adapter._get_boto3_client("AKIAEXAMPLE:secret", {"region": "us-east-1"})
+
+        assert "endpoint_url" not in captured_kwargs, (
+            "endpoint_url must not be passed when the profile does not set it; "
+            "production profiles do not, and some botocore versions raise on None"
+        )

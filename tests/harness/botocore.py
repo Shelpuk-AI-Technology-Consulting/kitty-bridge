@@ -59,6 +59,15 @@ class HarnessBedrockAdapter(BedrockAdapter):
     which the product honours, this override exists for the fixture only and
     never runs in production: production profiles resolve a real key through
     the same ``parse_aws_credentials``, unchanged.
+
+    **SSO branch is intentionally un-overridden.** ``is_sso_mode`` returns
+    True for ``""`` and ``"sso"`` and routes through ``boto3.Session(
+    profile_name=…, region_name=…)`` *before* ``parse_aws_credentials``
+    runs. The harness key ``"harness-key"`` is the only value that
+    exercises this override today — a future test that set the resolved
+    key to ``""`` or ``"sso"`` would silently fall into the SSO branch and
+    use whatever credentials the test machine has. Production profiles
+    ship a real key, so the brittleness is contained to the harness.
     """
 
     def parse_aws_credentials(self, raw: str) -> tuple[str, ...]:
