@@ -201,3 +201,30 @@ class TestOutputConfigAndTopLevelEffortAreIndependent:
 
         assert shipped["effort"] == "high"
         assert shipped["output_config"] == {"effort": "low"}
+
+    @pytest.mark.parametrize(
+        ("adapter", "model"),
+        [
+            (MiniMaxTokenAnthropicAdapter(), None),
+            (OpenCodeGoAdapter(), "minimax-m2.7"),
+            (ZaiAnthropicAdapter(), None),
+        ],
+        ids=["minimax_token", "opencode_go", "zai_coding"],
+    )
+    def test_effort_ships_but_output_config_is_withheld(self, adapter, model):
+        """The asymmetric design, in one case: the undocumented spelling rides, the documented one is withheld.
+
+        On these upstreams top-level ``effort`` is restored (P5d, unchanged by
+        KBR-224) while ``output_config`` is withheld — the agent's effort choice
+        keeps reaching them through the spelling they have always accepted, and
+        a regression in either direction (restoring ``output_config`` here, or
+        dropping ``effort``) trips this one named case.
+
+        Args:
+            adapter: An Anthropic-family adapter that withholds ``output_config``.
+            model: A Messages-routed model for an adapter that routes by model.
+        """
+        shipped = _ship(adapter, _messages_body(output_config={"effort": "low"}, effort="high"), model=model)
+
+        assert shipped.get("effort") == "high"
+        assert "output_config" not in shipped
