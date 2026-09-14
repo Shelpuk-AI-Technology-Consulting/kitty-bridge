@@ -28,7 +28,17 @@ import pytest
 
 from harness import corpus as k
 from harness.contract import REDACTED_HEADERS, REDACTED_QUERY_KEYS, CapturedRequest, WireFormat
-from harness.register import Trigger
+from harness.register import ArrangingBy, Trigger
+
+#: The REQUEST-classified triggers, sorted by name — the positive-control
+#: population for the loader tests.  Computed from the classification so a
+#: reclassification moves a trigger between this list and
+#: :data:`harness.corpus.NOT_CORPUS_DECIDABLE` in the same edit (F1 pins the
+#: table; F2 and F3 here pin the consequences).
+_CORPUS_DECIDABLE_TRIGGERS = sorted(
+    (t for t in Trigger if getattr(t, "arranged_by", None) is ArrangingBy.REQUEST),
+    key=lambda t: t.name,
+)
 
 #: A body shaped like a real Claude Code request and carrying **no** secret:
 #: a thinking-block signature, a ``toolu_`` identifier, a base64 image, a large
@@ -1530,55 +1540,21 @@ class TestKnownNonSecrets:
             k.load_entry(path)
 
 
-class TestTriggersAnEntryCannotArrange:
-    """G21's over-declaration hazard, closed for the cases the repository proves."""
-
-    @pytest.mark.parametrize(
-        "name",
-        [
-            "upstream_empty_response",
-            "thinking_roundtrip_rejected",
-            "native_tool_use_format_error",
-            "upstream_rejected_oversized_on_balancing",
-            "thinking_signature_rejected",
-        ],
-    )
-    def test_a_response_trigger_cannot_be_declared(self, tmp_path: Path, name: str) -> None:
-        """These five are decided by the upstream, not by the request.
-
-        `register.py`'s own docstring names each one; an entry claiming it would
-        be claiming something it is not the thing that decides, which is exactly
-        the over-declaration that makes the oracle pass over a broken bridge.
-        """
-        path = manifest_for(tmp_path, triggers_met=[name])
-
-        with pytest.raises(k.CorpusEntryError, match="cannot arrange"):
-            k.load_entry(path)
-
-    def test_always_cannot_be_declared(self, tmp_path: Path) -> None:
-        """The register calls it "the absence of a condition, not a condition".
-
-        Declaring it met is noise; declaring it absent is false.
-        """
-        path = manifest_for(tmp_path, triggers_absent=["always"])
-
-        with pytest.raises(k.CorpusEntryError, match="cannot arrange"):
-            k.load_entry(path)
-
-    def test_a_request_trigger_is_still_accepted(self, tmp_path: Path) -> None:
-        """The positive control: the guard must not reject what the corpus is for."""
-        path = manifest_for(tmp_path, triggers_met=["tool_result_over_limit"])
-
-        assert Trigger.TOOL_RESULT_OVER_LIMIT in k.load_entry(path).triggers_met
-
-
 class TestNotCorpusDecidableIsDerivedFromArrangingBy:
     """KBR-186 — the corpus loader's refusal set is derived, not hand-listed.
 
     The hand-listed ``NOT_CORPUS_DECIDABLE`` of six members (ALWAYS plus the
-    five RESPONSE triggers) drifts from the register's classification as soon
-    as a new trigger ships.  This class pins the derivation so the two cannot
-    drift, and falsifies the rule for every member of the derived set.
+    five RESPONSE triggers) drifted from the register's classification the
+    moment a new ROUTE or PROFILE trigger shipped.  This class pins the
+    derivation so the two cannot drift, and falsifies the rule for every member
+    of the derived set.
+
+    Note: the pre-KBR-186 ``TestTriggersAnEntryCannotArrange`` (three tests,
+    hard-coded against five RESPONSE names plus ``ALWAYS`` plus a positive
+    control) is now fully subsumed — every case is covered here, and the
+    refusal test is parametrised over the derived set itself so any future
+    member is covered automatically.  It was deleted as dead code in the same
+    change that made it dead.
     """
 
     @pytest.fixture
@@ -1604,12 +1580,14 @@ class TestNotCorpusDecidableIsDerivedFromArrangingBy:
     def test_not_corpus_decidable_matches_the_derived_set(
         self, expected_not_corpus_decidable: frozenset[Trigger]
     ) -> None:
-        """F2 — the corpus rule and the register classification cannot drift.
+        """F2 — the derivation formula and the exported set agree.
 
-        A hand-edit to ``NOT_CORPUS_DECIDABLE`` that adds or removes a member
-        in a way the classification does not endorse fails here.  The
-        derivation is the **only** definition of the set in the codebase; this
-        test is the guard that nothing reintroduces a second copy.
+        Both sides are computed from ``Trigger.arranged_by``, so by construction
+        they cannot disagree on a reclassification.  This test is the guard
+        against a *different* failure mode: a hand-edit to ``NOT_CORPUS_DECIDABLE``
+        that adds or removes a member in a way the formula does not endorse.
+        Reintroducing a hand list — the very drift this ticket removes — fails
+        here.
         """
         assert expected_not_corpus_decidable == k.NOT_CORPUS_DECIDABLE
 
@@ -1621,13 +1599,21 @@ class TestNotCorpusDecidableIsDerivedFromArrangingBy:
     ) -> None:
         """F3 — every derived non-REQUEST trigger is refused in both lists.
 
-        The ticket's own falsification: "A RESPONSE trigger reclassified as
-        REQUEST must make the corpus loader accept a manifest it should refuse."
-        The reclassification moves the trigger out of the derived set, so this
-        parametrisation stops covering it (and ``test_not_corpus_decidable_matches_the_derived_set``
-        above fails first).  Both halves fail for different reasons, and a
-        future contributor who edits either half cannot make the other green by
-        coincidence.
+        The ticket's own falsification, realised: "A RESPONSE trigger
+        reclassified as REQUEST must make the corpus loader accept a manifest
+        it should refuse."  The chain is two-step:
+
+        1. The reclassification moves the trigger out of the derived set
+           (the formula is ``t.arranged_by != REQUEST``), so this parametrisation
+           stops covering it.
+        2. ``test_classification_matches_the_specified_table`` (F1) fails
+           first because the pinned table disagrees with the new
+           ``arranged_by`` value.  The loader then accepts a manifest naming
+           the reclassified trigger — the ticket's stated consequence.
+
+        F2 is a tautology on the formula and so does not fail under the
+        reclassification; the gate against a wrong classification is F1, and
+        F3 demonstrates the consequence.
         """
         path = manifest_for(tmp_path, triggers_met=[trigger.value])
         with pytest.raises(k.CorpusEntryError, match="cannot arrange"):
@@ -1637,7 +1623,7 @@ class TestNotCorpusDecidableIsDerivedFromArrangingBy:
         with pytest.raises(k.CorpusEntryError, match="cannot arrange"):
             k.load_entry(path)
 
-    @pytest.mark.parametrize("trigger", sorted(Trigger, key=lambda t: t.name))
+    @pytest.mark.parametrize("trigger", _CORPUS_DECIDABLE_TRIGGERS)
     def test_a_corpus_decidable_trigger_is_accepted_in_both_lists_and_ignored_when_silent(
         self, tmp_path: Path, trigger: Trigger
     ) -> None:
@@ -1649,11 +1635,6 @@ class TestNotCorpusDecidableIsDerivedFromArrangingBy:
         a complement.  Exercising all three legs (met, absent, silent) is what
         catches that.
         """
-        from harness.register import ArrangingBy
-
-        if getattr(trigger, "arranged_by", None) is not ArrangingBy.REQUEST:
-            pytest.skip(f"{trigger.name} is not corpus-decidable")
-
         path = manifest_for(tmp_path, triggers_met=[trigger.value])
         assert trigger in k.load_entry(path).triggers_met
 
