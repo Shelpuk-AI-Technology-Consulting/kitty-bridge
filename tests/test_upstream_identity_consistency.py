@@ -99,11 +99,10 @@ import ast
 import base64
 import contextlib
 import inspect
-import io
 import json
 import re
 import sys
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from pathlib import Path
 from typing import NamedTuple
 
@@ -889,14 +888,16 @@ def header_set_violation(headers: Mapping[str, str], expected: Mapping[str, str]
 def forbidden_violation(headers: Mapping[str, str]) -> str | None:
     """Check the bridge-introduced-content forbidden set.
 
-    Two prohibitions (per ``TEST_SUITE.md`` §4.3 C1): no header **name** or
-    **value** may contain ``kitty`` in any casing (a bridge-introduced
-    literal), and no header name may start with ``X-Kitty-`` (the bridge's
-    own attribution headers are downstream-only).  User-supplied credentials
-    can in principle contain either substring; this assertion is run over
-    the *fixed* test fixtures, where the swept values are the constant
-    credential strings and the frozen literals — so a real hit is a real
-    defect, not a false positive on user content.
+    One prohibition, scanned twice (per ``TEST_SUITE.md`` §4.3 C1): no
+    header **name** or **value** may contain ``kitty`` in any casing — a
+    bridge-introduced literal would be the cheap fingerprint
+    ``X-Kitty-Foo`` would be too, since ``X-Kitty-*`` is the downstream-
+    only attribution header family and contains ``kitty`` as a substring,
+    so the same scan catches both.  User-supplied credentials can in
+    principle contain ``kitty``; this assertion is run over the *fixed*
+    test fixtures, where the swept values are the constant credential
+    strings and the frozen literals — so a real hit is a real defect, not
+    a false positive on user content.
 
     Args:
         headers: The dict an adapter produced.
@@ -905,7 +906,7 @@ def forbidden_violation(headers: Mapping[str, str]) -> str | None:
         A violation message, or ``None`` if no prohibited name or value
         appears.
     """
-    name_hits = sorted(name for name in headers if "kitty" in name.lower() or name.lower().startswith("x-kitty-"))
+    name_hits = sorted(name for name in headers if "kitty" in name.lower())
     value_hits = sorted(
         name for name, value in headers.items() if isinstance(value, str) and "kitty" in value.lower()
     )
@@ -1593,7 +1594,7 @@ class _BytesBody:
         """Return the full body bytes."""
         return self._data
 
-    def stream(self, chunk_size: int = 1024) -> io.BytesIO:
+    def stream(self, chunk_size: int = 1024) -> Iterator[bytes]:
         """Yield the body in ``chunk_size`` chunks, generator-style."""
         yield self._data
 
@@ -1663,6 +1664,12 @@ async def _echo(_chunk: bytes) -> None:
 #: turns this test red with a clear message.  This is the bedrock §6.2.4
 #: dependency contract; ``tests/test_curl_cffi_transport_contract.py``
 #: carries the same shape for ``curl_cffi``.
+#:
+#: **Note on the version pin.**  This file pins the *contract* but does not
+#: pin botocore's version in ``pyproject.toml`` — that is T-G11's scope
+#: (declare ``botocore`` as an explicit dependency, with the version
+#: floor this contract was measured against).  Until T-G11 lands, a
+#: botocore upgrade is a known cause of red on this test.
 _BEDROCK_EXPECTED_NAMES: frozenset[str] = frozenset(
     {
         "Authorization",
