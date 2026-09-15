@@ -8,14 +8,23 @@ mutmut with a static fallback), so the thing most likely to drift
 is the JSON shape it consumes (``exit_code_by_key``) and the bucket
 routing.
 
-Five tests pin the contract, plus a sixth for the unknown-exit-code path:
+Eleven tests pin the contract (five for ``bucket_mutants`` and its
+score formula; five for ``main``'s loud-failure exit-code contract;
+one for the renderer's ``__unmatched__`` asymmetry):
 
 * the JSON shape — what the script reads from each ``.meta`` file,
   what key names it tolerates, and what it does with malformed input;
 * the bucket routing — given a known mutant key in a known target
   group, it lands in that group with the expected status;
 * the score formula — a hand-computed ratio the script's table
-  matches.
+  matches, plus the ``skipped``-drops-from-both-sides case;
+* the unknown-exit-code path — an exit code not in the table
+  buckets as ``suspicious`` and is reported in the stderr summary;
+* ``main``'s four exit codes — 0 (clean), 1 (each of three guard
+  branches: zero-total, no_tests, not_checked), 2 (no ``.meta``
+  files);
+* the ``__unmatched__`` asymmetry — visible in the rendered table,
+  not a guard-failure condition.
 
 **Layer.** L2 — the subject is a config-like artifact (the aggregator
 plus its scope) that consumes a data format edited by mutmut and
@@ -362,21 +371,45 @@ def test_main_exits_zero_when_a_group_is_fully_tested(
 
 
 def test_render_markdown_table_renders_but_does_not_fail_on_unmatched(
-    capsys: pytest.CaptureFixture,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
 ) -> None:
     """``__unmatched__`` mutants appear in the table but do not fail the run.
 
-    Pins the explicit asymmetry in the design: ``__unmatched__`` is a
-    signal of mis-scope (a hand-added glob for a file outside the
-    registry, or vice versa), but it is not a guard-failure condition
-    — the run completed cleanly. The aggregator emits the row so a
-    reader sees the count, and the per-group guards catch the
-    actual mis-scope (zero-total group).
+    Pins both halves of the explicit asymmetry in the design
+    (round-7 review: the previous version only pinned the renderer's
+    half). ``__unmatched__`` is rendered (visible to a reader) AND
+    is not a guard-failure condition in ``main()`` (the run
+    completed cleanly even with unscoped mutants). The fixture seeds
+    one killed mutant per non-deferred group (clearing all three
+    guard branches) plus an additional unscoped mutant that lands
+    in ``__unmatched__``; the assertion checks ``main`` exits 0 and
+    the unmatched row appears in stdout.
     """
-    # Stat.total is a computed property: supply field values, not the
-    # computed total. 5 unexamined mutants = not_checked=5.
-    stats = {group: agg.Stat() for group in agg.TARGET_GROUPS}
-    stats["__total__"] = agg.Stat(killed=1, survived=1)
-    stats["__unmatched__"] = agg.Stat(not_checked=5)  # 5 unexamined mutants
-    table_lines = agg.render_markdown_table(stats)
-    assert "__unmatched__" in table_lines
+    monkeypatch.setattr(agg, "_MUTANTS_ROOT", tmp_path)
+    _meta(
+        tmp_path,
+        exit_codes={
+            # One killed mutant per non-deferred group so the three
+            # guard branches don't fire (total > 0, no_tests == 0,
+            # not_checked == 0 per group).
+            "kitty.validation.x__killed__mutmut_1": 1,
+            "kitty.providers.openai_subscription.x__convert_content_types__mutmut_1": 1,
+            "kitty.providers.model_context.x__resolve_catalog__mutmut_1": 1,
+            "kitty.egress.x__should_bypass__mutmut_1": 1,
+            "kitty.bridge.engine.x__map_finish_reason__mutmut_1": 1,
+            "kitty.providers.anthropic.xǁAnthropicAdapterǁtranslate_to_upstream__mutmut_1": 1,
+            # Plus one unscoped mutant — its module is not in the
+            # registry, so it lands in __unmatched__ with no_tests=1
+            # (a finished run, just outside scope).
+            "kitty.unknown_module.x__foo__mutmut_1": 1,
+        },
+    )
+    rc = agg.main()
+    captured = capsys.readouterr()
+    # Half 1: rendered, visible to a reader.
+    assert "__unmatched__" in captured.out
+    # Half 2: not a guard-failure condition.
+    assert rc == 0, f"main should exit 0 with __unmatched__ present, got {rc}"
+    assert captured.err == "", (
+        f"unexpected stderr noise on clean run with unmatched: {captured.err!r}"
+    )
