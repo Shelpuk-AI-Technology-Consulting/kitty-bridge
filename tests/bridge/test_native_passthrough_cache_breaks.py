@@ -94,6 +94,9 @@ from harness import cache_breakpoints as cb
 
 from kitty.bridge.server import BridgeServer
 from kitty.launchers.base import LauncherAdapter
+from kitty.providers.base import ProviderAdapter
+from kitty.providers.custom_anthropic import CustomAnthropicAdapter
+from kitty.providers.minimax_token import MiniMaxTokenAnthropicAdapter
 from kitty.providers.zai_anthropic import ZaiAnthropicAdapter
 from kitty.types import BridgeProtocol
 
@@ -123,7 +126,7 @@ class _FakeLauncher(LauncherAdapter):
         return BridgeProtocol.MESSAGES_API
 
     def build_spawn_config(
-        self, profile: Any, bridge_port: int, resolved_key: str, *, model: str | None = None
+        self, profile: Any, bridge_port: int, resolved_key: str, *, context_tokens: int | None = None
     ) -> dict:
         return {}
 
@@ -145,6 +148,14 @@ def _breakpoint_paths(node: Any, path: tuple[Any, ...] = ()) -> Iterable[tuple[A
     yields the *position* of each key. A matched key is not recursed into —
     the breakpoint dict has no nested ``cache_control``, and the detector
     does not search the value either.
+
+    Args:
+        node: A JSON-shaped structure of dicts, lists and scalars.
+        path: The path leading to *node*; callers omit it, recursion
+            accumulates it.
+
+    Yields:
+        One path per ``cache_control`` key found, outermost key first.
     """
     if isinstance(node, dict):
         for key, value in node.items():
@@ -164,6 +175,13 @@ def _make_request(body: Any) -> Any:
     request surface, then instance-patches ``json`` so the parsed body is
     *body* by identity — load-bearing for the shallow-copy test, where the
     branch must write into a *copy* of the dict we hold.
+
+    Args:
+        body: The object ``await request.json()`` returns — the same object
+            the caller holds, not a copy.
+
+    Returns:
+        A request usable with ``BridgeServer._handle_messages``.
     """
     request = make_mocked_request("POST", "/v1/messages")
     # ``transport.is_closing()`` defaults to a truthy Mock; the stream handler
@@ -189,6 +207,18 @@ async def _capture_wire_body(
     runs and records its result, then raises ``_StopBeforeWire`` so the
     handler returns a 500 instead of opening a real TCP socket. The 500 is
     swallowed at the call site.
+
+    Args:
+        monkeypatch: The calling test's patch context; the spy is undone
+            with it.
+        server: The bridge to drive.
+        body: The inbound request body; handed to ``_make_request``.
+
+    Returns:
+        The single wire-bound body ``_upstream_body_for`` produced.
+
+    Raises:
+        AssertionError: When the drive produced zero or several wire bodies.
     """
     captures: list[Any] = []
     original = BridgeServer._upstream_body_for
@@ -368,10 +398,17 @@ class _StubStreamUpstream:
     """
 
     def __init__(self, status: int, text: str) -> None:
+        """Store the status and body text the handler will read.
+
+        Args:
+            status: HTTP status code returned to the handler.
+            text: Plain-text body returned by ``await upstream.text()``.
+        """
         self.status = status
         self._text = text
 
     async def text(self) -> str:
+        """Return the configured body text."""
         return self._text
 
 
@@ -386,10 +423,28 @@ class _StubSession:
     def __init__(
         self, factory: Callable[[int], _StubStreamUpstream], attempt_index: dict[str, int]
     ) -> None:
+        """Stash the factory and the shared attempt counter.
+
+        Args:
+            factory: Callable mapping attempt index to a stub upstream.
+            attempt_index: Mutable counter shared with the drive; ``post``
+                increments and reads it to pick the factory's input.
+        """
         self._factory = factory
         self._attempt_index = attempt_index
 
     def post(self, url: str, *, json: Any = None, headers: Any = None, timeout: Any = None) -> _AsyncCtx:
+        """Return a context manager yielding the next stub upstream.
+
+        Args:
+            url: Matched by the streaming loop but irrelevant under the stub.
+            json: Outgoing body; ignored by the stub.
+            headers: Outgoing headers; ignored by the stub.
+            timeout: Request timeout; ignored by the stub.
+
+        Returns:
+            A context manager whose ``__aenter__`` yields the next upstream.
+        """
         idx = self._attempt_index["n"]
         self._attempt_index["n"] += 1
         return _AsyncCtx(self._factory(idx))
@@ -399,12 +454,19 @@ class _AsyncCtx:
     """An async context manager yielding a fixed value, like ``session.post(...)``."""
 
     def __init__(self, value: Any) -> None:
+        """Stash the value the context manager yields.
+
+        Args:
+            value: The object returned by ``__aenter__``.
+        """
         self._value = value
 
     async def __aenter__(self) -> Any:
+        """Return the stashed value."""
         return self._value
 
     async def __aexit__(self, *exc: object) -> bool:
+        """Never suppress; return ``False``."""
         return False
 
 
@@ -425,6 +487,16 @@ async def _drive_streaming_fallback(
       ``upstream_factory(attempt_index)``, so the test hands back a
       400-with-tool-use-wording on attempt 0 and a non-retryable 400 on
       attempt 1, terminating the loop. No socket is ever opened.
+
+    Args:
+        monkeypatch: The calling test's patch context.
+        server: The bridge to drive; must have ``use_native_messages`` true.
+        body: The inbound request body; handed to ``_make_request``.
+        upstream_factory: Maps attempt index to the stub upstream's status
+            and text.
+
+    Returns:
+        Every wire-bound body ``_upstream_body_for`` produced, in order.
     """
     captures: list[dict] = []
     original_upstream_body_for = BridgeServer._upstream_body_for
@@ -452,7 +524,15 @@ async def _drive_streaming_fallback(
 
 
 def _fallback_factory() -> Callable[[int], _StubStreamUpstream]:
-    """Upstream factory: attempt 0 returns a tool-use-format 400; attempt 1 a plain 400."""
+    """Build the upstream factory that forces the M9 fallback once.
+
+    The first attempt's body matches ``_is_tool_use_format_error`` (forcing
+    the converter to run); every later attempt returns a 400 with a message
+    that no retryable classifier matches, breaking the streaming loop.
+
+    Returns:
+        A factory suitable for ``_drive_streaming_fallback``.
+    """
 
     def factory(attempt: int) -> _StubStreamUpstream:
         if attempt == 0:
@@ -468,33 +548,67 @@ def _fallback_factory() -> Callable[[int], _StubStreamUpstream]:
     return factory
 
 
-_SURVIVES_ON_ZAI = {"system", "document"}
-_LOST_SITES = tuple(s for s in cb.SITES if s not in _SURVIVES_ON_ZAI)
+#: The sites that survive the M9 fallback per native adapter.
+#:
+#: * ``zai_anthropic`` and ``custom_anthropic`` set
+#:   ``forwards_thinking_signature = True``, so the rebuild restores the
+#:   ``_anthropic_system`` carriage verbatim — ``system`` survives alongside
+#:   the always-restored ``_documents`` carriage.
+#: * ``minimax_token`` sets the flag False: its rebuild re-joins the system
+#:   messages to one string, so ``system`` is lost. ``document`` still
+#:   survives (the ``_documents`` restore is not gated on the flag).
+_SURVIVES_ON_ADAPTER: dict[str, frozenset[str]] = {
+    "zai_anthropic": frozenset({"system", "document"}),
+    "custom_anthropic": frozenset({"system", "document"}),
+    "minimax_token": frozenset({"document"}),
+}
+
+_FALLBACK_ADAPTERS: tuple[tuple[str, Callable[[], ProviderAdapter]], ...] = (
+    ("zai_anthropic", ZaiAnthropicAdapter),
+    ("custom_anthropic", CustomAnthropicAdapter),
+    (
+        "minimax_token",
+        lambda: MiniMaxTokenAnthropicAdapter(native_messages=True),
+    ),
+)
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("site", cb.SITES)
+@pytest.mark.parametrize("adapter_name, adapter_factory", _FALLBACK_ADAPTERS, ids=[a[0] for a in _FALLBACK_ADAPTERS])
 async def test_m9_fallback_preserves_carriage_breakpoints_and_loses_the_rest(
-    monkeypatch: pytest.MonkeyPatch, site: str
+    monkeypatch: pytest.MonkeyPatch,
+    site: str,
+    adapter_name: str,
+    adapter_factory: Callable[[], ProviderAdapter],
 ) -> None:
-    """The M9 fallback's breakpoint behaviour is pinned per site.
+    """The M9 fallback's breakpoint behaviour is pinned per site × per adapter.
 
     Drives the streaming native route to force ``_convert_native_to_cc_format``
     (the tool_use format-error fallback): the upstream first returns a 400
     whose body matches ``_is_tool_use_format_error``; the bridge converts and
-    retries; the test captures both wire bodies. Per site:
+    retries; the test captures both wire bodies. Two axes are pinned:
 
-    * ``system`` and ``document`` survive the retry at full value — the
-      ``_anthropic_system`` and ``_documents`` carriages are carried and
-      restored by the rebuild.
-    * the other eight sites are absent in the retry — the rebuild flattened
-      them.
-    * for ``tool_result_nested``, additionally assert the rebuild flattens
-      ``tool_result.content`` to a string. Anthropic's honouring of a
-      breakpoint at that depth is not established (KBR-200 comment 4), and
-      the test pins the **mechanism** rather than the upstream's semantics.
+    * **Per site** (10 values): what the converter preserves vs. drops.
+    * **Per native adapter** (3 values): which carriers the rebuild restores.
+      The split is gated by the adapter's flags:
+
+      - ``system`` survives on the adapters that set
+        ``forwards_thinking_signature = True`` (``zai_anthropic``,
+        ``custom_anthropic``); ``minimax_token``'s flag is False and its
+        rebuild joins system to a string.
+      - ``document`` survives on all three — the ``_documents`` restore is
+        not flag-gated.
+
+    The per-site + per-adapter cross-product proves the gate, not just one
+    half of it: a regression that breaks the ``_documents`` restore on
+    ``minimax_token``'s native-opt-in path is caught here, and a regression
+    that drops the ``_anthropic_system`` carriage on either signature-
+    binding adapter is caught here too. For ``tool_result_nested`` the
+    rebuild flattens ``tool_result.content`` to a string on every adapter —
+    the mechanism pin catches a regression that un-flattens it.
     """
-    server = BridgeServer(_FakeLauncher(), ZaiAnthropicAdapter(), "sk-zai-test123", host="127.0.0.1", port=0)
+    server = BridgeServer(_FakeLauncher(), adapter_factory(), "sk-test-key", host="127.0.0.1", port=0)
     body = cb.build_request(site)
     body["stream"] = True
     captures = await _drive_streaming_fallback(monkeypatch, server, body, _fallback_factory())
@@ -505,16 +619,20 @@ async def test_m9_fallback_preserves_carriage_breakpoints_and_loses_the_rest(
 
     # Post-fallback capture: the rebuild.
     retry = captures[1]
-    if site in _SURVIVES_ON_ZAI:
+    survives = _SURVIVES_ON_ADAPTER[adapter_name]
+    if site in survives:
         assert cb.find_breakpoints(retry) == [dict(cb.BREAKPOINT)], (
-            f"site {site!r} survives the fallback via _anthropic_system / _documents carriage"
+            f"site {site!r} survives the M9 fallback on {adapter_name!r} via "
+            "the _anthropic_system / _documents carriage"
         )
     else:
         assert cb.find_breakpoints(retry) == [], (
-            f"site {site!r} should be lost on the M9 fallback"
+            f"site {site!r} should be lost on the M9 fallback for {adapter_name!r}"
         )
 
-    # Mechanism pin for tool_result_nested: the rebuild flattens content.
+    # Mechanism pin for tool_result_nested: the rebuild flattens content on
+    # every adapter (verified at the serialization boundary rather than from
+    # the converter output, so the pin catches a regression at either layer).
     # The retry body is Anthropic-shaped (rebuilt from the CC intermediate by
     # ``AnthropicAdapter.translate_to_upstream``), so the relevant block type
     # is ``tool_result``, not the CC shape's ``tool``.

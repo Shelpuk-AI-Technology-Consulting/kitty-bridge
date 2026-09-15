@@ -84,6 +84,11 @@ def test_normalize_request_preserves_breakpoint_full_value(native_adapter: Provi
     ``find_breakpoints`` must return the same dict — equal by value, not only
     by key name. A future normaliser that strips ``ttl`` and leaves a
     five-minute-only breakpoint would still go red here.
+
+    **Tripwire framing.** This test passes trivially today because every
+    native-capable adapter inherits the base no-op (none overrides
+    ``normalize_request``). The assertion's job is to go red the day one of
+    them does and the override touches a breakpoint.
     """
     body = cb.build_request(site)
     before = cb.find_breakpoints(body)
@@ -94,18 +99,21 @@ def test_normalize_request_preserves_breakpoint_full_value(native_adapter: Provi
     assert cb.find_breakpoints(body) == before
 
 
-@pytest.mark.parametrize("site", cb.SITES)
-def test_normalize_request_does_not_reorder_or_edit_tools(
-    native_adapter: ProviderAdapter, site: str
-) -> None:
+def test_normalize_request_does_not_reorder_or_edit_tools(native_adapter: ProviderAdapter) -> None:
     """``normalize_request`` does not reorder or edit the tool declarations.
 
     Anthropic's cache hierarchy makes tool edits the most destructive change a
-    normaliser could make — it invalidates every level after ``tools``. The
-    assertion is on the tools array at the request's top level, irrespective
-    of the breakpoint site.
+    normaliser could make — it invalidates every level after ``tools``.
+    Asserted against the fixture's tool array; the breakpoint site is
+    irrelevant (the tools array is the same for every site).
+
+    **Tripwire framing.** Same as
+    :func:`test_normalize_request_preserves_breakpoint_full_value`: passes
+    trivially today because no native adapter overrides
+    ``normalize_request``. The assertion's job is to go red the day one
+    does and the override touches the tools array.
     """
-    body = cb.build_request(site)
+    body = cb.build_request("tool")
     tools_before = copy.deepcopy(body["tools"])
 
     native_adapter.normalize_request(body)
