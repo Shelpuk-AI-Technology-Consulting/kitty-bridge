@@ -78,6 +78,58 @@ class TestTheCommittedCorpus:
         assert {path.name for path in CORPUS.glob("*.body")} == claimed
 
 
+#: The three T-C4 entries (KBR-47). Their manifest-level claims are contract
+#: claims — what the corpus format demands of a synthetic entry — so they sit
+#: here at L2 with the rest of this module, not beside the behaviour-level
+#: wiring tests in `tests/bridge/test_tc4_corpus_wiring.py` (that file is L1
+#: and drives the entries through the real compactor).
+TC4_ENTRY_IDS = (
+    "m6_recovery_oversized_paired",
+    "m5_irreducible_single_final_turn",
+    "system_prompt_over_window_compacts_normally",
+)
+
+
+class TestTheTc4Entries:
+    """KBR-47's manifest-level claims, per the ticket's second comment."""
+
+    @pytest.mark.parametrize("entry_id", TC4_ENTRY_IDS)
+    def test_each_is_synthetic_with_a_recorded_construction(self, entry_id: str) -> None:
+        """`origin: synthetic`, and the note says both why and how constructed.
+
+        A maintainer reading the manifest must not mistake 600 KB of filler
+        for a capture, and must know what replaced the human-review step for
+        a body too large to read by eye.
+        """
+        entry = k.load_entry(CORPUS / f"{entry_id}.json")
+
+        assert entry.origin == "synthetic"
+        note = entry.origin_note.lower()
+        assert "constructed" in note, "the note must say the size is constructed"
+        assert "review" in note, "the note must name the review-step replacement (§7.1.1)"
+
+    @pytest.mark.parametrize("entry_id", TC4_ENTRY_IDS)
+    def test_each_declares_no_triggers(self, entry_id: str) -> None:
+        """M6 is loader-refused and M5's budget is profile-derived (§7.1).
+
+        Silence is the honest state for these entries: the triggers are
+        decided at the test that resolves them, which is the L1 wiring module
+        and the L3 scripted-recorder test.
+        """
+        entry = k.load_entry(CORPUS / f"{entry_id}.json")
+
+        assert entry.triggers_met == frozenset()
+        assert entry.triggers_absent == frozenset()
+
+    @pytest.mark.parametrize("entry_id", TC4_ENTRY_IDS)
+    def test_each_is_an_inbound_messages_request(self, entry_id: str) -> None:
+        """The corpus stores inbound requests — Claude Code's wire format."""
+        entry = k.load_entry(CORPUS / f"{entry_id}.json")
+
+        assert entry.request.path == "/v1/messages"
+        assert entry.request.method == "POST"
+
+
 class TestTheCorpusIsProtectedFromLineEndingTranslation:
     """`.gitattributes` is the first line of defence; the digest is the second."""
 

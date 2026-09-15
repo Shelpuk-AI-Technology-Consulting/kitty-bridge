@@ -270,26 +270,33 @@ def registered_transports() -> tuple[str, ...]:
     return tuple(sorted(_TRANSPORTS))
 
 
-def transport(name: str, fmt: WireFormat, *, responder: Responder | None = None) -> UpstreamTransport:
+def transport(name: str, fmt: WireFormat, *, responder: Responder | None = None, **kwargs: Any) -> UpstreamTransport:
     """Build a registered transport.
 
     Args:
         name: A registered transport name.
         fmt: The upstream wire format it should serve.
         responder: What to reply with; the transport's own default when omitted.
+        **kwargs: Forwarded to the factory. Reserved for transport-specific
+            configuration the registry factory declares — the curl_cffi
+            transport's TLS context and CA path, for instance. A factory that
+            does not name a kwarg rejects it with ``TypeError``, so the call
+            site sees the misconfiguration immediately rather than silently
+            building a transport without the security it required.
 
     Returns:
         An unstarted transport.
 
     Raises:
         LookupError: When ``name`` is not registered.
+        TypeError: When ``kwargs`` names a parameter the factory does not accept.
     """
     try:
         factory = _TRANSPORTS[name]
     except KeyError:
         raise LookupError(f"no transport named {name!r}; registered: {registered_transports()}") from None
 
-    return factory(fmt, responder=responder)
+    return factory(fmt, responder=responder, **kwargs)
 
 
 def marker() -> str:
@@ -701,6 +708,11 @@ class BridgeFixture:
     transport: UpstreamTransport
     model: str | None = MODEL
     backend_models: Sequence[str] | None = None
+    #: The bridge's resolved credential. Most adapters ignore this; the OpenAI
+    #: subscription provider reads it as a path to an OAuth session file, so
+    #: the curl_cffi transport must hand in a path that resolves to a real
+    #: JSON file. Defaults to :data:`_KEY` for the transports that ignore it.
+    key: str = _KEY
     server: BridgeServer | None = field(init=False, default=None)
     _port: int = field(init=False, default=0, repr=False)
 
@@ -741,7 +753,7 @@ class BridgeFixture:
             self.server = BridgeServer(
                 None,  # type: ignore[arg-type]
                 adapter,
-                _KEY,
+                self.key,
                 model=self.model,
                 provider_config=provider_config,
             )
@@ -753,7 +765,7 @@ class BridgeFixture:
             self.server = BridgeServer(
                 None,  # type: ignore[arg-type]
                 adapter,
-                _KEY,
+                self.key,
                 model=self.model,
                 backends=backends,
             )
@@ -884,7 +896,7 @@ class BridgeFixture:
 
 
 async def assert_transport_reaches_its_recorder(
-    subject: UpstreamTransport, *, protocol: InboundProtocol | None = None
+    subject: UpstreamTransport, *, protocol: InboundProtocol | None = None, key: str | None = None
 ) -> None:
     """Assert a registered transport actually carries a bridge's request.
 
@@ -907,6 +919,10 @@ async def assert_transport_reaches_its_recorder(
         subject: An unstarted transport. Started and stopped by this function.
         protocol: The inbound route to drive; the one matching the transport's
             declared format by default.
+        key: The bridge's resolved credential; :data:`_KEY` when omitted. Most
+            adapters ignore it. The OpenAI subscription provider reads it as a
+            path to an OAuth session file, so a transport on that adapter names
+            a path that resolves.
 
     Raises:
         AssertionError: When the bridge did not reach *this* transport's
@@ -917,7 +933,11 @@ async def assert_transport_reaches_its_recorder(
     route = protocol if protocol is not None else protocol_for(subject.format)
     sent = marker()
 
-    async with BridgeFixture(subject) as fixture:
+    fixture_kwargs: dict[str, Any] = {}
+    if key is not None:
+        fixture_kwargs["key"] = key
+
+    async with BridgeFixture(subject, **fixture_kwargs) as fixture:
         status, text = await fixture.post(inbound_path(route), minimal_inbound_body(route, sent))
         captures = list(subject.captures)
 

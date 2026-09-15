@@ -200,14 +200,14 @@ class TestTheParserReadsTheDesignDocument:
 
     def test_the_parser_reads_both_tables(self, markdown: str) -> None:
         """A parser that read only §3.2.1 would still look healthy on the M rows."""
-        assert len([i for i in r.parse_register_markdown(markdown).live_ids if i.startswith("M")]) == 16
+        assert len([i for i in r.parse_register_markdown(markdown).live_ids if i.startswith("M")]) == 24
         assert len([i for i in r.parse_register_markdown(markdown).live_ids if i.startswith("P")]) == 36
 
     def test_the_parser_reads_the_unconditional_list(self, markdown: str) -> None:
         """§3.2.2's closing paragraph is the only place the exemption is written down."""
         parsed = r.parse_register_markdown(markdown)
 
-        assert len(parsed.unconditional_ids) == 28
+        assert len(parsed.unconditional_ids) == 34
         assert {"M14", "P20", "P21"} <= set(parsed.unconditional_ids)
 
     def test_a_document_with_no_register_tables_is_an_error_not_an_empty_result(self) -> None:

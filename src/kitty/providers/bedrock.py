@@ -138,6 +138,13 @@ class BedrockAdapter(ProviderAdapter):
 
         Uses AWS credentials from resolved_key or SSO profile from
         provider_config.
+
+        ``provider_config["endpoint_url"]`` is the test-harness seam: the
+        recording upstream (T-B3) points botocore at a local aiohttp server
+        by setting this key. Production profiles do not carry it, so the
+        key is consumed only when truthy — passing ``None`` raises on
+        some botocore versions and is silently ignored on others, and the
+        contract must be one or the other.
         """
         try:
             import boto3
@@ -155,6 +162,10 @@ class BedrockAdapter(ProviderAdapter):
             from botocore.config import Config as _BotoConfig
 
             client_kwargs["config"] = _BotoConfig(proxies=egress.proxies_dict())
+
+        endpoint_url = provider_config.get("endpoint_url")
+        if endpoint_url:
+            client_kwargs["endpoint_url"] = endpoint_url
 
         if self.is_sso_mode(resolved_key):
             profile_name = self.get_profile_name(provider_config)
