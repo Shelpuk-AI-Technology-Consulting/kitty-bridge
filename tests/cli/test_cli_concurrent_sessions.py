@@ -75,10 +75,6 @@ _VENV_PYTHON = sys.executable
 _POLL_INTERVAL_SECONDS = 0.05
 _READY_TIMEOUT_SECONDS = 30.0
 
-# Subprocess ceiling. The primed cache keeps every scenario well under a
-# second of work; a hang here is a product defect the timeout turns visible.
-_CHILD_TIMEOUT_SECONDS = 120.0
-
 # Teardown ceiling per child. Teardown is supposed to be near-instant
 # (SIGTERM-forward-and-exit runs in well under a second on a healthy child);
 # 30 s is generous headroom for a loaded CI runner while bounding the worst
@@ -224,7 +220,12 @@ class _Sandbox:
     Attributes:
         root: The sandbox root (pytest's ``tmp_path``).
         home: The children's ``$HOME``.
+        bin_dir: Directory holding the stub ``claude`` binary, prepended to
+            ``PATH``.
+        tmp: Sandbox temp directory (all three temp vars point here).
         global_settings: The user-global ``~/.claude/settings.json``.
+        cache_dir: The platformdirs cache dir resolved under the redirect.
+        config_dir: The platformdirs config dir resolved under the redirect.
         cache_file: The model-context override cache platformdirs resolves.
         env: The child environment (identical for both children — they are
             two invocations of the same user, not two users).
@@ -472,13 +473,39 @@ def _spawn_launch_child(sandbox: _Sandbox, name: str) -> subprocess.Popen[str]:
     # quirk where the second dup wins and the first stream ends up wherever
     # fd 1 started, which loses half the child's output.
     log_handle = log_path.open("wb")
+    # start_new_session (POSIX) makes the driver a session leader, so its
+    # pid equals its process-group id — which is what lets _kill_child_tree
+    # take the stub ``claude`` grandchild down with it. Only the POSIX-only
+    # scenario tests spawn children; the Windows legs skip before reaching
+    # this helper.
     return subprocess.Popen(  # noqa: S603 — fixed argv, sandboxed env
         [str(_VENV_PYTHON), str(driver_path), str(spec_path)],
         env=sandbox.env,
         cwd=str(sandbox.tmp),
         stdout=log_handle,
         stderr=subprocess.STDOUT,
+        start_new_session=True,
     )
+
+
+def _kill_child_tree(proc: subprocess.Popen[str]) -> None:
+    """Kill a launch child and its whole process group; reap it.
+
+    The driver runs in its own session (``start_new_session=True`` at
+    spawn), and the stub ``claude`` it spawns shares that group — so
+    killing the group takes ``exec sleep 300`` down with the driver, where
+    killing the driver alone would leave the stub orphaned for its
+    remaining sleep. The pgid is the driver's own pid by construction.
+    Every failure is suppressed: this is teardown for an already-failing
+    test and must never mask the original error.
+
+    Args:
+        proc: The launch child whose group to kill.
+    """
+    with contextlib.suppress(Exception):
+        os.killpg(proc.pid, signal.SIGKILL)
+    with contextlib.suppress(Exception):
+        proc.wait()
 
 
 def _child_log_text(sandbox: _Sandbox, name: str) -> str:
@@ -531,8 +558,7 @@ def _wait_for_session_record(sandbox: _Sandbox, name: str, proc: subprocess.Pope
         if proc.poll() is not None:
             break
         time.sleep(_POLL_INTERVAL_SECONDS)
-    proc.kill()
-    proc.wait()
+    _kill_child_tree(proc)
     raise AssertionError(
         f"launch child {name!r} never recorded its session file "
         f"(exit code {proc.returncode})\n--- child {name} log ---\n{_child_log_text(sandbox, name)}"
@@ -563,9 +589,7 @@ def _wait_for_stub(sandbox: _Sandbox, procs: list[subprocess.Popen[str]]) -> Non
             break
         time.sleep(_POLL_INTERVAL_SECONDS)
     for proc in procs:
-        proc.kill()
-    for proc in procs:
-        proc.wait()
+        _kill_child_tree(proc)
     raise AssertionError(
         "the stub claude binary never ran in either child"
         f"\n--- child a log ---\n{_child_log_text(sandbox, 'a')}"
@@ -581,7 +605,9 @@ def _terminate_children(procs: list[subprocess.Popen[str]]) -> None:
     (``exec sleep 300``) — into the rest of the suite. Every scenario calls
     this from a ``finally``. SIGTERM first (launch_async forwards it to the
     stub, so the whole process tree exits through the product's own path);
-    escalate to kill for a child that ignores it. The wait is bounded by
+    a child that ignores it is killed together with its process group —
+    :meth:`_kill_child_tree` — so the sleeping stub cannot outlive the
+    driver. The wait is bounded by
     ``_TEARDOWN_TIMEOUT_SECONDS`` per child — teardown must not turn a
     hung-child defect into a four-minute stall before the original
     assertion surfaces. Failures here are suppressed so the original
@@ -600,10 +626,7 @@ def _terminate_children(procs: list[subprocess.Popen[str]]) -> None:
         try:
             proc.wait(timeout=_TEARDOWN_TIMEOUT_SECONDS)
         except subprocess.TimeoutExpired:
-            with contextlib.suppress(Exception):
-                proc.kill()
-            with contextlib.suppress(Exception):
-                proc.wait()
+            _kill_child_tree(proc)
 
 
 def _session_port(session_path: Path) -> int:
@@ -621,8 +644,11 @@ def _session_port(session_path: Path) -> int:
     """
     assert session_path.exists(), f"session file {session_path} is missing"
     body = json.loads(session_path.read_text(encoding="utf-8"))
-    base_url = body["env"]["ANTHROPIC_BASE_URL"]
-    assert base_url.startswith("http://127.0.0.1:"), f"unexpected base URL {base_url!r}"
+    env_block = body.get("env") if isinstance(body, dict) else None
+    base_url = env_block.get("ANTHROPIC_BASE_URL") if isinstance(env_block, dict) else None
+    assert isinstance(base_url, str) and base_url.startswith("http://127.0.0.1:"), (
+        f"session file {session_path} carries no loopback base URL — full content: {body!r}"
+    )
     return int(base_url.rsplit(":", 1)[1])
 
 
@@ -718,6 +744,12 @@ def test_concurrent_sessions_do_not_touch_the_global_settings(sandbox: _Sandbox)
         _wait_for_session_record(sandbox, "a", proc_a)
         _wait_for_session_record(sandbox, "b", proc_b)
         _wait_for_stub(sandbox, [proc_a, proc_b])
+
+        # The mid-flight claim needs both children genuinely mid-flight: a
+        # child that died between its barrier and this check would make the
+        # global-identity sample say "while both sessions run" falsely.
+        assert proc_a.poll() is None, "child a exited before the mid-flight check"
+        assert proc_b.poll() is None, "child b exited before the mid-flight check"
 
         # Mid-flight: both sessions fully prepared, neither has exited —
         # the point where the pre-#22 design had already rewritten the
