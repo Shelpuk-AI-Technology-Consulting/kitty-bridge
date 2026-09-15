@@ -202,6 +202,11 @@ class Trigger(Enum):
     NATIVE_TOOL_USE_FORMAT_ERROR = ("native_tool_use_format_error", ArrangingBy.RESPONSE)
     GEMINI_PROTOCOL = ("gemini_protocol", ArrangingBy.ROUTE)
     GEMINI_NON_STREAMING = ("gemini_non_streaming", ArrangingBy.REQUEST)
+    # The inbound Gemini functionCall/functionResponse carries no ``id``
+    # (KBR-195). REQUEST — a property of the inbound body, decidable per
+    # corpus entry — so §3.3.2 assertion 2 owes a complement, delivered with
+    # T-D5 (Gemini corpus entries).
+    GEMINI_INBOUND_ID_ABSENT = ("gemini_inbound_id_absent", ArrangingBy.REQUEST)
 
     # Bridge-level, response path.
     UPSTREAM_EMPTY_RESPONSE = ("upstream_empty_response", ArrangingBy.RESPONSE)
@@ -214,6 +219,17 @@ class Trigger(Enum):
     MULTIPLE_SYSTEM_BLOCKS = ("multiple_system_blocks", ArrangingBy.REQUEST)
     ANTHROPIC_THINKING_ENABLED = ("anthropic_thinking_enabled", ArrangingBy.REQUEST)
     ADAPTIVE_THINKING_KEYS_PRESENT = ("adaptive_thinking_keys_present", ArrangingBy.REQUEST)
+    # KBR-44 (2026-09-14, B1-A): the row's deferred comment anticipated this
+    # trigger. The translator emits `_output_config` and `_effort` in
+    # independent `if`s (translator.py:425-426 vs :438-439), and the adapter
+    # restores `output_config` on `_output_config is not None` alone
+    # (anthropic.py:572-577) — so a request carrying `output_config` with no
+    # `thinking` and no top-level `effort` produces a delta at
+    # `envelope.extra[output_config]` with P5d's `ADAPTIVE_THINKING_KEYS_PRESENT`
+    # unmet. A separate trigger is the design's own plan and §3.2.2's P5d
+    # trigger-cell wording ("or output_config present") already anticipated it
+    # as data-orphan until this row landed.
+    OUTPUT_CONFIG_PRESENT = ("output_config_present", ArrangingBy.REQUEST)
     ASSISTANT_TURN_LACKS_THINKING_BLOCK = (
         "assistant_turn_lacks_thinking_block",
         ArrangingBy.REQUEST,
@@ -673,6 +689,114 @@ _BRIDGE_ROWS: tuple[MutationRow, ...] = (
         conditional=True,
         design_ref="§3.2.1 · §3.3.1a · §4.3 C3",
     ),
+    MutationRow(
+        id="M18",
+        site=("kitty/bridge/gemini/translator.py:GeminiTranslator._translate_content",),
+        trigger=Trigger.GEMINI_INBOUND_ID_ABSENT,
+        # KBR-195, functionCall half. When the inbound Gemini functionCall
+        # carries no ``id``, the translator synthesises a fresh
+        # ``call_<uuid>`` — the Chat Completions wire requires one, and the
+        # delta is real: the upstream projection carries a synthetic id
+        # where the Gemini reader projected absence. Conditional, because
+        # the complement (a corpus entry whose functionCall carries an id)
+        # is plainly writeable and arrives with T-D5.
+        #
+        # Kept distinguishable from M19 by ``paths`` (``id`` vs
+        # ``tool_use_id``) — the axis
+        # ``test_no_two_rows_are_indistinguishable`` keys on — not by the
+        # site, which both rows share.
+        paths=(c.part_path(c.WILDCARD, c.WILDCARD, "id"),),
+        conditional=True,
+        design_ref="§3.2.1",
+    ),
+    MutationRow(
+        id="M19",
+        site=("kitty/bridge/gemini/translator.py:GeminiTranslator._translate_content",),
+        trigger=Trigger.GEMINI_INBOUND_ID_ABSENT,
+        # KBR-195, functionResponse half — M18's tool-result twin. The
+        # synthesised id lands on the tool message's ``tool_call_id``, not
+        # on the call's ``id``, so the row anchors at the other field.
+        # Kept distinguishable from M18 by ``paths`` — the axis
+        # ``test_no_two_rows_are_indistinguishable`` keys on — not by the
+        # site.
+        paths=(c.part_path(c.WILDCARD, c.WILDCARD, "tool_use_id"),),
+        conditional=True,
+        design_ref="§3.2.1",
+    ),
+    MutationRow(
+        id="M20",
+        site=("kitty/bridge/gemini/translator.py:GeminiTranslator.translate_request",),
+        trigger=Trigger.NON_NATIVE_UPSTREAM_WIRE,
+        # KBR-194 gave the Gemini reader a slot for the role a
+        # ``systemInstruction`` Content published; Chat Completions has no
+        # equivalent, so the translation drops it and the reader's positive
+        # value meets the upstream's absence at this path. §3.3.1a's
+        # path-table cell used to name M2 as the claiming row; it names
+        # this row since KBR-195 — M2 takes the escape and is never
+        # path-matched.
+        paths=("conversation.system_role",),
+        conditional=False,
+        design_ref="§3.2.1 · §3.3.1a",
+    ),
+    MutationRow(
+        id="M21",
+        site=("kitty/bridge/gemini/translator.py:GeminiTranslator.translate_request",),
+        trigger=Trigger.NON_NATIVE_UPSTREAM_WIRE,
+        # Gemini's NON_BLOCKING calling toggle on a function declaration
+        # (KBR-194) has no Chat Completions equivalent, so
+        # ``_translate_tools`` drops it. Anchored at the field, not the
+        # whole tool — a coarser anchor would claim a deleted tool
+        # description, one of §3.3.1's own falsification cases (§3.3.1a).
+        paths=(c.tool_path(c.WILDCARD, "behavior"),),
+        conditional=False,
+        design_ref="§3.2.1 · §3.3.1a",
+    ),
+    MutationRow(
+        id="M22",
+        site=("kitty/bridge/gemini/translator.py:GeminiTranslator.translate_request",),
+        trigger=Trigger.NON_NATIVE_UPSTREAM_WIRE,
+        # Gemini's ``thoughtSignature`` on a ``functionCall`` part
+        # (KBR-194) has no Chat Completions equivalent, so the translation
+        # drops it. M8 also produces a delta at this path, but with a
+        # RESPONSE trigger (a thinking round-trip rejection) — the two are
+        # distinguishable by trigger, site and the narrower field anchor
+        # here, and on a plain Gemini→CC request M8's trigger is not met.
+        paths=(c.part_path(c.WILDCARD, c.WILDCARD, "signature"),),
+        conditional=False,
+        design_ref="§3.2.1 · §3.3.1a",
+    ),
+    MutationRow(
+        id="M23",
+        site=("kitty/bridge/gemini/translator.py:GeminiTranslator.translate_request",),
+        trigger=Trigger.NON_NATIVE_UPSTREAM_WIRE,
+        # Gemini's ``functionResponse.scheduling`` — the NON_BLOCKING
+        # response-side toggle (KBR-194) — has no Chat Completions
+        # equivalent, so the translation drops it.
+        paths=(c.part_path(c.WILDCARD, c.WILDCARD, "scheduling"),),
+        conditional=False,
+        design_ref="§3.2.1 · §3.3.1a",
+    ),
+    MutationRow(
+        id="M24",
+        site=("kitty/bridge/gemini/translator.py:GeminiTranslator.translate_request",),
+        trigger=Trigger.NON_NATIVE_UPSTREAM_WIRE,
+        # Gemini part-level ``videoMetadata`` (KBR-194) has no Chat
+        # Completions equivalent, so the translation drops it.
+        paths=(c.part_path(c.WILDCARD, c.WILDCARD, "video_metadata"),),
+        conditional=False,
+        design_ref="§3.2.1 · §3.3.1a",
+    ),
+    MutationRow(
+        id="M25",
+        site=("kitty/bridge/gemini/translator.py:GeminiTranslator.translate_request",),
+        trigger=Trigger.NON_NATIVE_UPSTREAM_WIRE,
+        # The blob/file ``displayName`` named to the model on an image part
+        # (KBR-194) has no Chat Completions equivalent, so the translation
+        # drops it.
+        paths=(c.part_path(c.WILDCARD, c.WILDCARD, "display_name"),),
+        conditional=False,
+        design_ref="§3.2.1 · §3.3.1a",
+    ),
 )
 
 # --------------------------------------------------------------------------
@@ -770,15 +894,35 @@ _PROVIDER_ROWS: tuple[MutationRow, ...] = (
         paths=(c.extra_path("thinking"), c.extra_path("effort")),
         conditional=True,
         design_ref="§3.2.2",
-        # KBR-186 (deferred output_config P-row, KBR-224 scope): the
-        # `envelope.extra[output_config]` address is not yet claimed because
-        # no captured corpus entry carries the field — a row whose conditional
-        # trigger is met but unclaimed manufactures a false I1 breach
-        # (§3.3.1a). The would-be trigger `output_config_present` is REQUEST
-        # (a request either carries the field or not), so the row + the first
-        # corpus entry carrying `output_config` land together later. Until
-        # then, per-destination scope is prose here, mirroring the `display`
-        # withholding row (KBR-139 precedent).
+        # KBR-44 (2026-09-14): the `envelope.extra[output_config]` address,
+        # deferred here since KBR-224, landed on the row below (P5f) under its
+        # own trigger, because the translator emits `_output_config`
+        # independently of `_effort` and of thinking (translator.py:425-426
+        # vs :438-439) — extending this row under its existing trigger would
+        # have left the output_config-only case unclaimed (the false I1
+        # breach §3.3.1a warns about). P5d's trigger is now thinking/effort
+        # only; see P5f for the output_config restore.
+    ),
+    MutationRow(
+        id="P5f",
+        site=("kitty/providers/anthropic.py:AnthropicAdapter.translate_to_upstream",),
+        trigger=Trigger.OUTPUT_CONFIG_PRESENT,
+        # KBR-224 / KBR-44: restore the agent's `output_config` (Anthropic's
+        # documented spelling of the effort control) where the upstream
+        # documents the field. Separate row and trigger, because the
+        # translator's `output_config` and `effort` emissions are two
+        # independent `if`s — the co-occurrence this row once assumed
+        # (its KBR-186 deferred comment) is an observation about Claude Code's
+        # behaviour, not a register invariant.
+        paths=(c.extra_path("output_config"),),
+        conditional=True,
+        design_ref="§3.2.2",
+        # First corpus entry carrying `output_config`: KBR-44's
+        # `effort_configured` capture (T-C1). Until a corpus entry carries the
+        # field, no oracle run can see the withhold — the pairing rule
+        # (§3.3.1a: a row whose conditional trigger is met but unclaimed
+        # manufactures a false I1 breach) is what this row and the entry land
+        # together.
     ),
     MutationRow(
         id="P5e",

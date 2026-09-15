@@ -114,10 +114,11 @@ class GeminiTranslator:
             for part in parts:
                 fr = part.get("functionResponse")
                 if fr:
+                    # Echo the inbound wire id; synthesise only when absent (KBR-195).
                     results.append(
                         {
                             "role": "tool",
-                            "tool_call_id": self._make_tool_call_id(fr["name"]),
+                            "tool_call_id": fr.get("id") or self._make_tool_call_id(fr["name"]),
                             "content": json.dumps(fr.get("response", {})),
                         }
                     )
@@ -131,9 +132,10 @@ class GeminiTranslator:
             for part in parts:
                 fc = part.get("functionCall")
                 if fc:
+                    # Echo the inbound wire id; synthesise only when absent (KBR-195).
                     tool_calls.append(
                         {
-                            "id": self._make_tool_call_id(fc["name"]),
+                            "id": fc.get("id") or self._make_tool_call_id(fc["name"]),
                             "type": "function",
                             "function": {
                                 "name": fc["name"],
