@@ -3034,8 +3034,12 @@ policy in separate modules — continued one layer up. What it provides:
   the real resolver. It is ``getaddrinfo``, not an aiohttp ``Resolver`` instance, because
   ``_build_client_session`` builds its own ``TCPConnector`` with no injection point (§5.3). The
   default (no-``aiodns``) build selects ``ThreadedResolver`` as ``DefaultResolver``, which reaches
-  ``getaddrinfo`` in a worker thread; if ``aiodns`` is ever added, ``AsyncResolver`` is chosen
-  instead and this patch has no effect — pyproject pins no ``aiodns`` extra, so the seam holds
+  ``getaddrinfo`` in a worker thread; if ``aiodns`` ≥ 3.2 (the version whose ``DNSResolver``
+  exposes ``getaddrinfo``) ever becomes importable, ``AsyncResolver`` is chosen instead and this
+  patch has no effect. **KBR-259** pins that premise in code —
+  `test_containment.py::TestMonkeypatchedResolver::test_default_resolver_is_threaded` fails
+  loudly, naming ``AsyncResolver`` and ``aiodns``, the day the flip happens — so the seam no
+  longer rests on this prose alone. pyproject pins no ``aiodns`` extra, so the seam holds
   today. ``/etc/hosts`` stays out — no administrator rights on CI runners.
 - **The per-transport capability report** — `CapabilityReport`, an in-process singleton over the
   four §5.5 transports, every entry initialised ``not_attempted``; ``proven``, ``unsupported``
@@ -4278,7 +4282,8 @@ separately.)
   falsification is driven through the adapter rather than through the bridge.
 - **T-E1 (KBR-61):** `tests/harness/test_containment.py` drives a real `BridgeServer` against the
   sealed-network harness (`ConnectProxy` + recording upstream) in two cases — one green, one
-  falsification. The other 22 cases run in **~1.0–1.8 s**, measured across five runs, of which
+  falsification. The other 23 cases (KBR-259 added this module's resolver pin test, a ~0.3 s
+  case) run in **~0.9–2.1 s**, re-measured across three runs, of which
   the slowest is one `sealed_network` setup (recorder + proxy + TLS certs); the range comes from
   `openssl`-generated throwaway certs, whose cost varies with runner load. The falsification case
   (`test_drive_phase_1_with_a_broken_resolver_records_zero_connections`) takes **~30 s** because

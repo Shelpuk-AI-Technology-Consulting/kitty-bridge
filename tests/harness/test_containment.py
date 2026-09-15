@@ -29,7 +29,11 @@ bypass into the product.
 only §8.2's: ``l3`` is in ``PENDING_ACTIVATION_LAYERS``, so an ``l3`` marker
 today would leave the containment harness's correctness checked by no job at
 all. §8.2 names this module as the T-E1 bullet, so T-K6 inherits the
-relocation.
+relocation. ``test_default_resolver_is_threaded``
+([KBR-259](https://shelpuk.atlassian.net/browse/KBR-259)) pins the aiohttp
+``DefaultResolver`` premise of ``monkeypatched_aiohttp_resolver``; it belongs
+to the same l1 cohort, so the pin and the seam move together when T-K6
+activates the Subsystem job.
 """
 
 from __future__ import annotations
@@ -40,6 +44,7 @@ import socket
 import ssl
 from collections.abc import AsyncGenerator
 
+import aiohttp
 import pytest
 
 from harness import containment
@@ -147,6 +152,38 @@ class TestMonkeypatchedResolver:
             pytest.raises(socket.gaierror),
         ):
             socket.getaddrinfo("other.invalid", 80, type=socket.SOCK_STREAM)
+
+    def test_default_resolver_is_threaded(self) -> None:
+        """Pin aiohttp's ``DefaultResolver`` to ``ThreadedResolver`` (TEST_SUITE.md §5.3).
+
+        The direct-leg seam this class tests — ``monkeypatched_aiohttp_resolver``
+        — works only because the connector the bridge builds resolves through
+        ``socket.getaddrinfo``. With no resolver injected, ``TCPConnector``
+        picks ``aiohttp.resolver.DefaultResolver``; in the no-``aiodns`` build
+        that is ``ThreadedResolver``, whose ``resolve`` calls ``loop.getaddrinfo``.
+        Adding ``aiodns`` ≥ 3.2 (the version whose ``DNSResolver`` exposes
+        ``getaddrinfo``) flips the selection at aiohttp import time to
+        ``AsyncResolver``, which resolves via c-ares and never calls
+        ``socket.getaddrinfo``: the patch silently stops working and every
+        §5.2.2 phase-1 positive control fails for the wrong reason.
+
+        The message names both ``AsyncResolver`` and ``aiodns`` so a future
+        failure points at the cause, and preempts the false-alarm path (a
+        future aiohttp default that still routes through ``socket.getaddrinfo``):
+        update this pin deliberately rather than delete it.
+        """
+        assert aiohttp.resolver.DefaultResolver is aiohttp.resolver.ThreadedResolver, (
+            "aiohttp's DefaultResolver is "
+            f"{aiohttp.resolver.DefaultResolver.__name__}, not ThreadedResolver: "
+            "an aiodns install flips aiohttp.resolver.DefaultResolver to "
+            "AsyncResolver, which resolves via c-ares and never calls "
+            "socket.getaddrinfo, so monkeypatched_aiohttp_resolver "
+            "(tests/harness/containment.py) silently stops working and every "
+            "§5.2.2 phase-1 positive control fails for the wrong reason "
+            "(TEST_SUITE.md §5.3). If a future aiohttp default still routes "
+            "through socket.getaddrinfo, update this pin deliberately rather "
+            "than delete it."
+        )
 
 
 # ── R3: the capability report ──────────────────────────────────────────────
