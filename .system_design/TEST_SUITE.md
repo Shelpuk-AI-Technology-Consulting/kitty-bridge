@@ -959,7 +959,7 @@ agree on a canonical form. They are six separate tasks, so the agreement is part
 
 Then write one **hand-written reader per wire format** — Anthropic Messages, Chat Completions,
 OpenAI Responses, Gemini, Bedrock Converse, Ollama `/api/chat` — each written directly against
-that format's published shape and **importing nothing from `src/kitty/bridge`**. Six small
+that format's published shape and **importing nothing from `src/kitty`**. Six small
 readers, each independent of whatever kitty code produces that format. The oracle compares
 `project(inbound)` with `project(captured_upstream_bytes)`, field by field, across all three
 parts.
@@ -3083,7 +3083,7 @@ because a tool is absent is indistinguishable from one that proves it.
 **The projections (§3.3.1)** are the load-bearing piece: one hand-written reader per wire format —
 Anthropic Messages, Chat Completions, OpenAI Responses, Gemini, Bedrock Converse, Ollama
 `/api/chat` — each mapping a serialized body to the common `Conversation` form and **importing
-nothing from `src/kitty/bridge`**. They are test code that the whole of I1 rests on, so they get
+nothing from `src/kitty`**. They are test code that the whole of I1 rests on, so they get
 their own L1 tests, written against each format's published examples rather than against kitty's
 output.
 
@@ -3437,7 +3437,7 @@ different ways, which makes it the only rule here that is also a correction.
 | Rule | Binds |
 |---|---|
 | 1 — the route as a reader input | Gemini alone; no other format puts routing in the inbound URL (§3.3.5) |
-| 2 — a nested control field flattens to its leaf published key | **T-A5**, whose `inferenceConfig` and `toolConfig` nest the same way |
+| 2 — a nested control field flattens to its leaf published key | **T-A5**, whose `inferenceConfig` and `toolConfig` nest the same way, and **T-A6**, whose `options` is the same flattening pattern |
 | 3 — ProtoJSON's two spellings, and case-insensitive enum values | Google formats; a **Vertex** reader, if one is ever added, inherits it |
 | 4 — `envelope.extra` keyed by the *published* spelling | every reader of a format with more than one legal spelling, so today rule 3's set |
 | 5 — a capability toggle the wire does not name is control, not a `ToolDecl` | **T-A5** and **T-A6** |
