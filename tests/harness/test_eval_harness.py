@@ -273,8 +273,15 @@ def test_validate_arms_rejects_duplicate_arm_names() -> None:
     The run record's per-arm tallies are keyed by name; two arms with
     the same name would collapse into one tally and silently halve the
     evidence.
+
+    The two same-named arms carry **distinct** executors so a
+    contrived conjunctive-condition mutant (``and first.executor is
+    second.executor``) cannot satisfy the gate by accident.
     """
-    arms = [ArmSpec(name="kitty", executor=_always_pass), ArmSpec(name="kitty", executor=_always_pass)]
+    arms = [
+        ArmSpec(name="kitty", executor=_always_pass),
+        ArmSpec(name="kitty", executor=lambda task, sample_index: ModelReply(reply=f"alt {task.id}")),
+    ]
     with pytest.raises(ValueError, match="distinct"):
         validate_arms(arms)
 
