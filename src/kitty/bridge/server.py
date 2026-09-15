@@ -3637,7 +3637,7 @@ class BridgeServer:
                                                 "Re-dispatch cap reached (%d crossings, cap %d); "
                                                 "not crossing plain → custom",
                                                     _crossings, _max_crossings,
-                                                    )
+                                                )
                                             _cross_cap_hit = True
                                             break
                                         _crossings += 1
@@ -3737,8 +3737,8 @@ class BridgeServer:
                                             if self._backends and self._current_backend_idx >= 0:
                                                 cooldown = self._get_stream_error_cooldown(self._current_backend_idx)
                                                 self._mark_backend_unhealthy(
-                                self._current_backend_idx, cooldown=cooldown
-                            )
+                                                    self._current_backend_idx, cooldown=cooldown
+                                                )
                                                 if self._any_healthy_backend():
                                                     stream_error = True
                                                     done = True
@@ -3830,7 +3830,7 @@ class BridgeServer:
                                             "Re-dispatch cap reached (%d crossings, cap %d); "
                                             "not crossing plain → custom",
                                                 _crossings, _max_crossings,
-                                                )
+                                            )
                                         _cross_cap_hit = True
                                         break
                                     _crossings += 1
@@ -3914,7 +3914,7 @@ class BridgeServer:
                                                 "Re-dispatch cap reached (%d crossings, cap %d); "
                                                 "not crossing plain → custom",
                                                     _crossings, _max_crossings,
-                                                    )
+                                                )
                                             _cross_cap_hit = True
                                             break
                                         _crossings += 1
@@ -4625,7 +4625,7 @@ class BridgeServer:
                                                         "Re-dispatch cap reached (%d crossings, cap %d); "
                                                         "not crossing plain → custom for %s",
                                                         _crossings, _max_crossings, message_id,
-                                                    )
+                                                        )
                                                     _cross_cap_hit = True
                                                     break
                                                 _crossings += 1
@@ -4753,7 +4753,7 @@ class BridgeServer:
                                                     "Re-dispatch cap reached (%d crossings, cap %d); "
                                                     "not crossing plain → custom for %s",
                                                     _crossings, _max_crossings, message_id,
-                                                )
+                                                    )
                                                 _cross_cap_hit = True
                                                 break
                                             _crossings += 1
@@ -4925,7 +4925,7 @@ class BridgeServer:
                                                     "Re-dispatch cap reached (%d crossings, cap %d); "
                                                     "not crossing plain → custom for %s",
                                                     _crossings, _max_crossings, message_id,
-                                                )
+                                                    )
                                                 _cross_cap_hit = True
                                                 break
                                             _crossings += 1
@@ -5155,7 +5155,7 @@ class BridgeServer:
                                                 "Re-dispatch cap reached (%d crossings, cap %d); "
                                                 "not crossing plain → custom for %s",
                                                 _crossings, _max_crossings, message_id,
-                                            )
+                                                )
                                             _cross_cap_hit = True
                                             break
                                         _crossings += 1
@@ -5276,7 +5276,7 @@ class BridgeServer:
                                                     "Re-dispatch cap reached (%d crossings, cap %d); "
                                                     "not crossing plain → custom for %s",
                                                     _crossings, _max_crossings, message_id,
-                                                )
+                                                    )
                                                 _cross_cap_hit = True
                                                 break
                                             _crossings += 1
@@ -5325,7 +5325,7 @@ class BridgeServer:
                                                         "Re-dispatch cap reached (%d crossings, cap %d); "
                                                         "not crossing plain → custom for %s",
                                                         _crossings, _max_crossings, message_id,
-                                                    )
+                                                        )
                                                     _cross_cap_hit = True
                                                     break
                                                 _crossings += 1
@@ -5516,7 +5516,7 @@ class BridgeServer:
                                                     "Re-dispatch cap reached (%d crossings, cap %d); "
                                                     "not crossing plain → custom for %s",
                                                     _crossings, _max_crossings, message_id,
-                                                )
+                                                    )
                                                 _cross_cap_hit = True
                                                 break
                                             _crossings += 1
@@ -5623,7 +5623,7 @@ class BridgeServer:
                     _crossings,
                     _max_crossings,
                     message_id,
-                )
+                    )
                 return _make_error_response(
                     {
                         "type": "error",
@@ -6023,7 +6023,7 @@ class BridgeServer:
                                                 "Re-dispatch cap reached (%d crossings, cap %d); "
                                                 "not crossing plain → custom",
                                                     _crossings, _max_crossings,
-                                                    )
+                                                )
                                             _cross_cap_hit = True
                                             break
                                         _crossings += 1
@@ -6117,8 +6117,8 @@ class BridgeServer:
                                             if self._backends and self._current_backend_idx >= 0:
                                                 cooldown = self._get_stream_error_cooldown(self._current_backend_idx)
                                                 self._mark_backend_unhealthy(
-                                self._current_backend_idx, cooldown=cooldown
-                            )
+                                                    self._current_backend_idx, cooldown=cooldown
+                                                )
                                                 if self._any_healthy_backend():
                                                     stream_error = True
                                                     done = True
@@ -6190,7 +6190,7 @@ class BridgeServer:
                                             "Re-dispatch cap reached (%d crossings, cap %d); "
                                             "not crossing plain → custom",
                                                 _crossings, _max_crossings,
-                                                )
+                                            )
                                         _cross_cap_hit = True
                                         break
                                     _crossings += 1
@@ -6262,7 +6262,7 @@ class BridgeServer:
                                                 "Re-dispatch cap reached (%d crossings, cap %d); "
                                                 "not crossing plain → custom",
                                                     _crossings, _max_crossings,
-                                                    )
+                                                )
                                             _cross_cap_hit = True
                                             break
                                         _crossings += 1
@@ -7194,7 +7194,7 @@ class BridgeServer:
                                                 "Re-dispatch cap reached (%d crossings, cap %d); "
                                                 "not crossing plain → custom",
                                                     _crossings, _max_crossings,
-                                                    )
+                                                )
                                             _cross_cap_hit = True
                                             break
                                         _crossings += 1
@@ -7307,8 +7307,8 @@ class BridgeServer:
                                             if self._backends and self._current_backend_idx >= 0:
                                                 cooldown = self._get_stream_error_cooldown(self._current_backend_idx)
                                                 self._mark_backend_unhealthy(
-                                self._current_backend_idx, cooldown=cooldown
-                            )
+                                                    self._current_backend_idx, cooldown=cooldown
+                                                )
                                             stream_error = True
                                             done = True
                                             break
@@ -7420,7 +7420,7 @@ class BridgeServer:
                                             "Re-dispatch cap reached (%d crossings, cap %d); "
                                             "not crossing plain → custom",
                                                 _crossings, _max_crossings,
-                                                )
+                                            )
                                         _cross_cap_hit = True
                                         break
                                     _crossings += 1
@@ -7475,7 +7475,7 @@ class BridgeServer:
                                                 "Re-dispatch cap reached (%d crossings, cap %d); "
                                                 "not crossing plain → custom",
                                                     _crossings, _max_crossings,
-                                                    )
+                                                )
                                             _cross_cap_hit = True
                                             break
                                         _crossings += 1
