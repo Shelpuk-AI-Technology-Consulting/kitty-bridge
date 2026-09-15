@@ -109,11 +109,13 @@ reference after that point is the outcome to avoid.
 
 ## What is NOT in this baseline
 
-- The six socket/process modules listed above (`tests/test_egress_https_proxy.py`,
-  `tests/bridge/test_host_port_config.py`, `tests/test_cli_main.py`,
-  `tests/bridge/test_tls_support.py`, `tests/bridge/test_bridge_state.py`,
-  `tests/auth/test_openai_oauth.py`) — they run under `-m l1` and dilute
-  the numbers; see the provisional caveat.
+- The socket/process modules TEST_SUITE.md §8.2 enumerates (twelve,
+  named there so T-K6 inherits a list rather than a search) — they
+  run under `-m l1` today and dilute the numbers; see the provisional
+  caveat. Earlier copies of this paragraph carried a shorter six-file
+  list from the KBR-88 Jira comment of 2026-09-08, which has since
+  drifted from §8.2's authoritative enumeration; citing §8.2 instead
+  of re-listing stops the next drift.
 - `tests/cli/test_stream_encoding.py` (38 child interpreters per run) — its
   cost is paid once at stats collection, not per mutant: `only_mutate`
   excludes `kitty.io_encoding` from generation, so no mutant carries those

@@ -41,14 +41,34 @@ from mutmut_scope import (
 pytestmark = pytest.mark.l2
 
 # Known-positive anchor: a real mangled mutant key for a target already
-# in the registry, from a mutmut run that did generate it. The pattern
-# for the ``supporting`` group's ``kitty.validation`` entry must match it;
-# if the mangling rules in ``mangled_patterns`` drift from what mutmut
-# actually emits, this test catches it before the recorded baseline does.
-# The key below was sampled from mutants/src/kitty/validation.py.meta on
+# in the registry, from a mutmut run that did generate it. The whole-module
+# pattern ``kitty.validation.*`` must match it — this proves the *module
+# path* part of the pattern derivation, not the *mangler prefix* (fnmatch's
+# ``*`` absorbs the prefix, so a mangler drift would still match). The
+# specific-function pin below catches mangler drift; the two assertions
+# together cover what one alone cannot.
+# The key was sampled from mutants/src/kitty/validation.py.meta on
 # 2026-09-15 (T-H1 trial run); it is the first entry in that file.
 KNOWN_VALIDATION_MUTANT_KEY = (
     "kitty.validation.x__unusable_url_result__mutmut_1"
+)
+
+# Specific-function pin (catches mangler-prefix drift). The registry's
+# ``openai_subscription`` group carries ``_convert_content_types`` as a
+# module-level function; its derived pattern is therefore
+# ``kitty.providers.openai_subscription.x__convert_content_types__mutmut_*``.
+# Character-level equality to the derived pattern pins the mangler rule
+# exactly (any change to ``mangled_patterns``'s top-level branch would
+# change this string). The negative control below rejects the unmangled
+# name, proving the pattern distinguishes mangled from unmangled — a
+# mutmut that dropped the ``x_`` prefix would emit
+# ``kitty.providers.openai_subscription._convert_content_types__mutmut_N``,
+# which the pattern must NOT fnmatch.
+EXPECTED_SPECIFIC_PATTERN = (
+    "kitty.providers.openai_subscription.x__convert_content_types__mutmut_*"
+)
+UNMANGLED_ORIGINAL_NAME = (
+    "kitty.providers.openai_subscription._convert_content_types"
 )
 
 
@@ -58,13 +78,16 @@ def test_every_registry_target_resolves_against_live_source() -> None:
         resolve_target(target)  # AssertionError names the failing row
 
 
-def test_pattern_for_validation_module_matches_a_real_mutant_key() -> None:
-    """The mangling rules produce a pattern that fnmatches a known key.
+def test_whole_module_pattern_matches_a_real_mutant_key() -> None:
+    """A whole-module pattern in the registry fnmatches a real mutant key.
 
-    This is the regression catch: if ``mangled_patterns`` ever drifts from
-    mutmut's ``make_mutant_key``, the aggregation script — which uses
-    these patterns to bucket mutants per group — reports zero mutants in
-    this group, which a ``pytest`` rerun would not detect on its own.
+    Proves only the *module path* part of the pattern derivation. The
+    ``supporting`` group's ``kitty.validation`` entry produces the
+    pattern ``kitty.validation.*``; fnmatch's ``*`` absorbs the
+    ``x_`` / ``xǁ`` mangler prefix, so a mutmut that dropped the
+    prefix would still match. The mangler-prefix pin lives in the next
+    test; both are needed because neither one alone covers what the
+    previous draft claimed this test did.
     """
     pattern = patterns_for("supporting")
     assert any(
@@ -73,6 +96,33 @@ def test_pattern_for_validation_module_matches_a_real_mutant_key() -> None:
         f"pattern set for `supporting` group does not fnmatch the known "
         f"validation mutant key {KNOWN_VALIDATION_MUTANT_KEY!r}; "
         f"got {pattern!r}"
+    )
+
+
+def test_specific_function_pattern_is_pinned_and_rejects_unmangled() -> None:
+    """A specific-function pattern is character-equal to the derivation
+    AND rejects the unmangled original name.
+
+    The derivation in :func:`mutmut_scope.mangled_patterns` for a
+    top-level function appends ``x_`` to the function name. A change
+    to that rule (a future mutmut that drops the prefix, or a typo in
+    the derivation) changes this exact string; the character-equality
+    assertion catches it. The negative control then proves the pattern
+    is doing useful work — it would be worthless if it matched the
+    unmangled name, since mutmut never emits unmangled names.
+    """
+    derived = patterns_for("openai_subscription")
+    assert EXPECTED_SPECIFIC_PATTERN in derived, (
+        f"derived pattern set {derived!r} does not contain the expected "
+        f"specific-function pattern {EXPECTED_SPECIFIC_PATTERN!r}; "
+        f"the mangling derivation has drifted from its known shape"
+    )
+    assert not any(
+        fnmatch.fnmatch(UNMANGLED_ORIGINAL_NAME, p) for p in derived
+    ), (
+        f"a derived pattern fnmatches the unmangled name "
+        f"{UNMANGLED_ORIGINAL_NAME!r}; the pattern is not pinning the "
+        f"mangler prefix and would match anything"
     )
 
 

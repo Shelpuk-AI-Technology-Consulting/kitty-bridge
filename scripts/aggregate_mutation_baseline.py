@@ -34,29 +34,61 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
-sys.path.insert(0, "tests")
+# Resolve the repo root from this file's path so the script runs from
+# any cwd. Both inputs (``mutants/``) and the ``tests/`` import below
+# depend on a stable root; deriving it from ``__file__`` once is cheaper
+# than threading flags through the CLI for two callers (record-the-
+# baseline and the test that exercises ``bucket_mutants`` against a
+# synthetic fixture).
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_REPO_ROOT / "tests"))
 from mutmut_scope import DEFERRED_GROUPS, TARGET_GROUPS, patterns_for  # noqa: E402
 
-# mutmut's `status_by_exit_code` (mutmut/stats.py), as a lookup table so we
-# can translate the per-mutant exit codes the `.meta` files carry.
-STATUS_BY_EXIT_CODE = {
-    1: "killed",
-    3: "killed",  # pytest internal error
-    0: "survived",
-    5: "no_tests",
-    33: "no_tests",
-    34: "skipped",
-    35: "suspicious",
-    36: "timeout",
-    37: "caught_by_type_check",
-    None: "not_checked",
-    -24: "timeout",
-    24: "timeout",
-    152: "timeout",
-    255: "timeout",
-    -11: "segfault",
-    -9: "segfault",
-}
+_MUTANTS_ROOT = _REPO_ROOT / "mutants"
+
+
+# mutmut's `status_by_exit_code` (mutmut/stats.py) maps exit codes to
+# status names. Try to import it from the installed mutmut (the only
+# source of truth that follows mutmut's own version); fall back to the
+# static table when the import fails (older mutmut 2.x did not export
+# it, and a future 3.x release that re-numbers an exit code is a
+# contract change the script's caller should notice, not be silently
+# wrong about). ``mutmut`` is a dev extra, so the import can fail in a
+# production install — the fallback is the right thing there.
+def _build_status_by_exit_code() -> dict[int | None, str]:
+    """Return mutmut's ``status_by_exit_code`` if importable, else a static table.
+
+    The static table is verified against mutmut 3.8.0 (the version this
+    ticket's baseline ran on). A future 3.x release that re-numbers an
+    exit code will be picked up by the import branch when mutmut is
+    installed; the static fallback preserves the script's behaviour when
+    it isn't.
+    """
+    try:
+        from mutmut.stats import status_by_exit_code as live  # type: ignore
+    except ImportError:
+        return {
+            1: "killed",
+            3: "killed",  # pytest internal error counts as a kill
+            0: "survived",
+            5: "no_tests",
+            33: "no_tests",
+            34: "skipped",
+            35: "suspicious",
+            36: "timeout",
+            37: "caught by type check",
+            None: "not_checked",
+            -24: "timeout",
+            24: "timeout",
+            152: "timeout",
+            255: "timeout",
+            -11: "segfault",
+            -9: "segfault",
+        }
+    return dict(live)
+
+
+STATUS_BY_EXIT_CODE: dict[int | None, str] = _build_status_by_exit_code()
 
 
 @dataclass
@@ -105,7 +137,31 @@ class Stat:
 
 def collect_meta_files() -> list[Path]:
     """Find every per-file ``.meta`` JSON under ``mutants/``."""
-    return sorted(Path("mutants/src").rglob("*.meta"))
+    return sorted(_MUTANTS_ROOT.glob("src/**/*.meta"))
+
+
+# Map mutmut's space-separated status names (whatever the installed
+# version's ``status_by_exit_code`` returns) to ``Stat`` field names.
+# Unknown names default to ``suspicious`` (the same default mutmut
+# uses for unknown exit codes), keeping a future 3.x release that adds
+# a new status name visible in the bucket counts.
+_STATUS_TO_FIELD = {
+    "killed": "killed",
+    "survived": "survived",
+    "no tests": "no_tests",
+    "no_tests": "no_tests",  # underscore spelling, some mutmut versions
+    "skipped": "skipped",
+    "suspicious": "suspicious",
+    "timeout": "timeout",
+    "caught by type check": "caught_by_type_check",
+    "segfault": "segfault",
+    "not checked": "not_checked",
+    "not_checked": "not_checked",  # underscore spelling, some mutmut versions
+    # "check was interrupted by user" has no Stat field; those
+    # mutants are unexamined (the run was stopped), so bucket them
+    # alongside ``not_checked``.
+    "check was interrupted by user": "not_checked",
+}
 
 
 def bucket_mutants(
@@ -137,7 +193,13 @@ def bucket_mutants(
     for meta_path in meta_files:
         data = json.loads(meta_path.read_text())
         for mutant_key, exit_code in data.get("exit_code_by_key", {}).items():
-            status = STATUS_BY_EXIT_CODE.get(exit_code, "suspicious")
+            raw_status = STATUS_BY_EXIT_CODE.get(exit_code, "suspicious")
+            field = _STATUS_TO_FIELD.get(raw_status)
+            if field is None:
+                # A new mutmut status name we don't recognise; bucket
+                # as suspicious so the count is visible and the script
+                # does not silently drop the mutant.
+                field = "suspicious"
 
             # Decide the group. Order matters: a mutant that matches
             # multiple groups is bucketed by the first. `mutmut run` is
@@ -154,9 +216,9 @@ def bucket_mutants(
                     break
 
             target = out[matched_group or "__unmatched__"]
-            setattr(target, status, getattr(target, status) + 1)
+            setattr(target, field, getattr(target, field) + 1)
             setattr(
-                out["__total__"], status, getattr(out["__total__"], status) + 1
+                out["__total__"], field, getattr(out["__total__"], field) + 1
             )
 
     return out
