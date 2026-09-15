@@ -19,10 +19,12 @@ What this module owns:
   ``_build_client_session`` builds its own ``TCPConnector`` with no injection
   point (§5.3). The default (no-``aiodns``) build selects ``ThreadedResolver``
   as ``DefaultResolver``, which reaches ``getaddrinfo`` in a worker thread; if
-  ``aiodns`` is ever added, ``AsyncResolver`` is chosen instead and this
-  patch has no effect — ``pyproject.toml`` pins no ``aiodns`` extra, so the
-  seam holds today. ``/etc/hosts`` is left alone — no administrator rights
-  on CI runners.
+  ``aiodns`` ≥ 3.2 is ever added, ``AsyncResolver`` is chosen instead and
+  this patch has no effect — the pin
+  ``tests/harness/test_containment.py::TestMonkeypatchedResolver::test_default_resolver_is_threaded``
+  ([KBR-259](https://shelpuk.atlassian.net/browse/KBR-259)) goes red the day
+  that happens. ``pyproject.toml`` pins no ``aiodns`` extra, so the seam holds
+  today. ``/etc/hosts`` is left alone — no administrator rights on CI runners.
 * **The per-transport capability report** — :class:`CapabilityReport` initialised
   with the four §5.5 transports (``bridge_aiohttp``, ``provider_aiohttp``,
   ``curl_cffi``, ``botocore``), every entry ``not_attempted``; ``record``
@@ -306,11 +308,13 @@ def monkeypatched_aiohttp_resolver(mp: pytest.MonkeyPatch, host: str, port: int)
     builds its own ``TCPConnector`` with no injection point (§5.3). In the
     default (no-``aiodns``) build the connector's ``DefaultResolver`` is
     ``ThreadedResolver``, which reaches ``socket.getaddrinfo`` in a worker
-    thread — the seam this patch takes. If ``aiodns`` is ever installed,
-    ``DefaultResolver`` becomes ``AsyncResolver``, which bypasses
-    ``socket.getaddrinfo`` entirely and the patch has no effect; a guard
-    against that regression is a deliberate next change, not something this
-    seam quietly absorbs (``pyproject.toml`` pins no ``aiodns`` extra today).
+    thread — the seam this patch takes. If ``aiodns`` ≥ 3.2 is ever
+    installed, ``DefaultResolver`` becomes ``AsyncResolver``, which bypasses
+    ``socket.getaddrinfo`` entirely and the patch has no effect; the pin
+    ``tests/harness/test_containment.py::TestMonkeypatchedResolver::test_default_resolver_is_threaded``
+    ([KBR-259](https://shelpuk.atlassian.net/browse/KBR-259)) keeps this
+    honest — when ``aiodns`` lands the pin goes red and names the cause.
+    ``pyproject.toml`` pins no ``aiodns`` extra today.
 
     ``monkeypatch.setattr(socket, "getaddrinfo", ...)`` reverts when ``mp``
     finalises, so the context manager is re-entry safe across the suite.
