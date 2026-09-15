@@ -949,3 +949,62 @@ async def assert_transport_reaches_its_recorder(
     #    since `__aexit__` raises first either way, and an assertion nothing can
     #    kill is the thing plan section 1.4 objects to. `_MisdeclaredTransport`
     #    falsifies the teardown call instead.
+
+
+async def assert_fixture_reached_its_recorder(
+    fixture: BridgeFixture, *, marker: str, status: int
+) -> None:
+    """Assert a **started** fixture's recorder carries exactly one marked request.
+
+    The started-fixture twin of :func:`assert_transport_reaches_its_recorder`:
+    the same three in-body assertions, minus the lifecycle. The original owns a
+    transport end to end — it starts the fixture, drives the one request, and
+    tears it down — which is what its falsification suite and the
+    transport-completeness meta-test need. A Gherkin scenario cannot use that
+    shape: its ``When`` step drives the request and its ``Then`` step asserts,
+    against a fixture the scenario's own fixture started. This helper is the
+    assertion half of the same check for that caller, so the acceptance layer
+    binds to it (§6.4.1: "every scenario binds to an L3 harness rather than
+    re-implementing one") instead of inlining a weaker copy of these checks.
+
+    The teardown assertion is again the caller's, by construction: the fixture
+    was started outside, so its ``stop()`` — which asserts teardown cleanliness
+    — runs in the scenario fixture, not here.
+
+    Args:
+        fixture: A **started** fixture that has served at least the one request
+            the caller means to verify. Lifecycle is the caller's.
+        marker: The :func:`marker` string the caller sent, to be found in the
+            captured body.
+        status: The status the caller's own request returned, to be asserted
+            ``200``.
+
+    Raises:
+        AssertionError: When the recorder did not carry *this* fixture's
+            request, exactly once, with this marker, with the client served —
+            the same three defects :func:`assert_transport_reaches_its_recorder`
+            detects, reachable here by handing the wrong ``marker`` or
+            ``status``, or by driving a second request. Falsified in
+            ``test_bridge_falsification.py`` alongside the original's four.
+    """
+    name = fixture.transport.name
+    captures = list(fixture.captures)
+
+    # The same three assertions, in the same order, with the same failure
+    # vocabulary as the original — a reader of one message should be able to
+    # find its twin without a second decode pass.
+    assert len(captures) == 1, (
+        f"transport {name!r} holds {len(captures)} capture(s), expected exactly 1: "
+        f"0 means the bridge reached some other upstream and every assertion built "
+        f"on this fixture would be quantified over nothing; more than 1 means a retry "
+        f"ladder fired, so the binding cannot be told from a broken one"
+    )
+
+    assert marker.encode() in (captures[0].body or b""), (
+        f"transport {name!r} captured a request whose body does not carry the "
+        f"marker {marker!r}; the capture cannot see the content under test"
+    )
+
+    assert status == 200, (
+        f"transport {name!r} captured the request correctly but the bridge answered {status}"
+    )

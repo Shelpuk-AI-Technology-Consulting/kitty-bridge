@@ -90,10 +90,13 @@ PENDING_ACTIVATION_LAYERS: Mapping[str, str] = {
 
 _FALLBACK_LAYER = "l1"
 
-# Longest-prefix-first. One entry today; the shape is what matters, because
-# every later plan task that adds a directory of tests adds a row here rather
-# than a marker to each of its files.
-_PATH_DEFAULTS: tuple[tuple[str, str], ...] = (("tests/integration/", "agent_live"),)
+# Longest-prefix-first. The shape is what matters, because every later plan
+# task that adds a directory of tests adds a row here rather than a marker to
+# each of its files.
+_PATH_DEFAULTS: tuple[tuple[str, str], ...] = (
+    ("tests/integration/", "agent_live"),
+    ("tests/acceptance/", "acceptance"),
+)
 
 # A pytest invocation, anchored on the command position so that
 # `pip install pytest-xdist` is not read as a test job.
