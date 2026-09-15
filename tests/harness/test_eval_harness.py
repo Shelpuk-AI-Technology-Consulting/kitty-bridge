@@ -176,7 +176,16 @@ def test_classify_upstream_failure_429_yields_rate_limit() -> None:
 
 
 def test_classify_upstream_failure_5xx_yields_upstream_error() -> None:
-    """REQ 5 — any other non-2xx upstream reply is UPSTREAM_ERROR."""
+    """REQ 5 — any non-2xx, non-429 upstream reply is UPSTREAM_ERROR.
+
+    The 400 case is the boundary the prose names: a 400 the executor
+    cannot tell apart from any other upstream error lands as
+    ``UpstreamFailure`` and classifies to ``UPSTREAM_ERROR``. A content-
+    moderation 400 should arrive pre-classified as ``UpstreamRefusal``,
+    not as a plain ``UpstreamFailure``. Asserting 400 here kills the
+    ``==`` → ``<=`` off-by-one mutant the falsification culture requires.
+    """
+    assert classify(UpstreamFailure(status=400, body={"error": "bad"})) is TrialCategory.UPSTREAM_ERROR
     assert classify(UpstreamFailure(status=500, body={"error": "boom"})) is TrialCategory.UPSTREAM_ERROR
     assert classify(UpstreamFailure(status=503, body={"error": "unavailable"})) is TrialCategory.UPSTREAM_ERROR
 
@@ -195,6 +204,32 @@ def test_classify_unexpected_exception_yields_harness_fault() -> None:
     the category without re-raising.
     """
     assert classify(UnclassifiedError(exc=OSError("bridge bind failed"))) is TrialCategory.HARNESS_FAULT
+
+
+def test_classify_model_reply_without_verdict_raises_value_error() -> None:
+    """REQ 5 (guard) — a ModelReply without a verdict is a runner contract error.
+
+    The runner is documented to compute the acceptance check before
+    classifying; calling ``classify`` without a verdict means the
+    runner forgot its own contract. The guard raises rather than
+    silently defaulting, which would let the omission pass into the
+    record as an ambiguous category.
+    """
+    with pytest.raises(ValueError, match="requires a Verdict"):
+        classify(ModelReply(reply="anything"))
+
+
+def test_classify_unknown_outcome_variant_raises_type_error() -> None:
+    """REQ 5 (guard) — an outcome variant ``classify`` does not know is a programming error.
+
+    The defensive guard exists so a future ``RawOutcome`` variant added
+    without updating this function is reported loudly rather than
+    silently dropping to ``HARNESS_FAULT`` (which would hide the
+    omission entirely). The test pins the guard itself so a maintainer
+    who replaces the ``raise`` with a silent default is caught.
+    """
+    with pytest.raises(TypeError, match="unknown type"):
+        classify("not a RawOutcome")  # type: ignore[arg-type]
 
 
 # ── Helpers ─────────────────────────────────────────────────────────────────
