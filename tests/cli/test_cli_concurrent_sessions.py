@@ -79,6 +79,12 @@ _READY_TIMEOUT_SECONDS = 30.0
 # second of work; a hang here is a product defect the timeout turns visible.
 _CHILD_TIMEOUT_SECONDS = 120.0
 
+# Teardown ceiling per child. Teardown is supposed to be near-instant
+# (SIGTERM-forward-and-exit runs in well under a second on a healthy child);
+# 30 s is generous headroom for a loaded CI runner while bounding the worst
+# case if a hang happens to be on the teardown path.
+_TEARDOWN_TIMEOUT_SECONDS = 30.0
+
 # The pristine user-global content, as bytes: what the "user" had before any
 # kitty session. Byte identity, not JSON semantics, is the assertion.
 _PRISTINE_GLOBAL = b'{\n  "model": "opus",\n  "env": {"API_TIMEOUT_MS": "3000000"}\n}\n'
@@ -86,6 +92,37 @@ _PRISTINE_GLOBAL = b'{\n  "model": "opus",\n  "env": {"API_TIMEOUT_MS": "3000000
 # Primed model-context cache body: an empty override map is valid catalog
 # content (_body_is_valid accepts any JSON object) and short-circuits refresh.
 _PRIMED_CACHE_BODY = b"{}"
+
+
+def _redirect_paths(tmp_root: Path, home: Path) -> dict[str, str]:
+    """Build the path-redirect mapping every sandboxed process shares.
+
+    The single source of the 11 path overrides: ``_sandbox_env`` applies it
+    to the child environment and :class:`_Sandbox.__init__` feeds it to
+    ``_platformdirs_paths_under`` so the primed cache resolves to the same
+    file the children see. One mapping, two consumers — a new redirect key
+    is added here once, never twice.
+
+    Args:
+        tmp_root: Sandbox directory the session files and child logs go to.
+        home: Sandbox home directory.
+
+    Returns:
+        The redirect mapping, from environment variable to sandbox path.
+    """
+    return {
+        "HOME": str(home),
+        "USERPROFILE": str(home),
+        "XDG_CONFIG_HOME": str(home / ".config"),
+        "XDG_CACHE_HOME": str(home / ".cache"),
+        "XDG_DATA_HOME": str(home / ".local" / "share"),
+        "XDG_STATE_HOME": str(home / ".local" / "state"),
+        "APPDATA": str(home / "AppData" / "Roaming"),
+        "LOCALAPPDATA": str(home / "AppData" / "Local"),
+        "TMPDIR": str(tmp_root),
+        "TEMP": str(tmp_root),
+        "TMP": str(tmp_root),
+    }
 
 
 def _sandbox_env(tmp_root: Path, home: Path, bin_dir: Path) -> dict[str, str]:
@@ -108,21 +145,7 @@ def _sandbox_env(tmp_root: Path, home: Path, bin_dir: Path) -> dict[str, str]:
         The child environment dictionary.
     """
     env = os.environ.copy()
-    env.update(
-        {
-            "HOME": str(home),
-            "USERPROFILE": str(home),
-            "XDG_CONFIG_HOME": str(home / ".config"),
-            "XDG_CACHE_HOME": str(home / ".cache"),
-            "XDG_DATA_HOME": str(home / ".local" / "share"),
-            "XDG_STATE_HOME": str(home / ".local" / "state"),
-            "APPDATA": str(home / "AppData" / "Roaming"),
-            "LOCALAPPDATA": str(home / "AppData" / "Local"),
-            "TMPDIR": str(tmp_root),
-            "TEMP": str(tmp_root),
-            "TMP": str(tmp_root),
-        }
-    )
+    env.update(_redirect_paths(tmp_root, home))
     # A developer shell may carry a kitty egress gateway; the sandbox has no
     # such config and must not inherit one.
     env.pop("KITTY_EGRESS_PROXY", None)
@@ -222,19 +245,7 @@ class _Sandbox:
         for directory in (self.home, self.bin_dir, self.tmp, self.home / ".claude"):
             directory.mkdir(parents=True, exist_ok=True)
 
-        redirect = {
-            "HOME": str(self.home),
-            "USERPROFILE": str(self.home),
-            "XDG_CONFIG_HOME": str(self.home / ".config"),
-            "XDG_CACHE_HOME": str(self.home / ".cache"),
-            "XDG_DATA_HOME": str(self.home / ".local" / "share"),
-            "XDG_STATE_HOME": str(self.home / ".local" / "state"),
-            "APPDATA": str(self.home / "AppData" / "Roaming"),
-            "LOCALAPPDATA": str(self.home / "AppData" / "Local"),
-            "TMPDIR": str(self.tmp),
-            "TEMP": str(self.tmp),
-            "TMP": str(self.tmp),
-        }
+        redirect = _redirect_paths(self.tmp, self.home)
         self.env = _sandbox_env(self.tmp, self.home, self.bin_dir)
         self.global_settings = self.home / ".claude" / "settings.json"
         self.cache_dir, self.config_dir = _platformdirs_paths_under(redirect)
@@ -562,54 +573,7 @@ def _wait_for_stub(sandbox: _Sandbox, procs: list[subprocess.Popen[str]]) -> Non
     )
 
 
-def _wait_for_exit(proc: subprocess.Popen[str], sandbox: _Sandbox, name: str) -> int:
-    """Wait for one launch child to exit, failing with its log on hang.
-
-    Args:
-        proc: The launch child.
-        sandbox: Its sandbox (for the log path).
-        name: The child's letter, for the failure message.
-
-    Returns:
-        The exit code.
-
-    Raises:
-        AssertionError: When the child does not exit inside the timeout.
-    """
-    try:
-        return proc.wait(timeout=_CHILD_TIMEOUT_SECONDS)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        proc.wait()
-        raise AssertionError(
-            f"launch child {name!r} did not exit within {_CHILD_TIMEOUT_SECONDS}s"
-            f"\n--- child {name} log ---\n{_child_log_text(sandbox, name)}"
-        ) from None
-
-
-def _signal_and_reap(proc: subprocess.Popen[str], sandbox: _Sandbox, name: str) -> int:
-    """Signal one launch child to end its session and reap it.
-
-    SIGTERM is what a user's Ctrl-C path delivers: ``launch_async`` forwards
-    it to the stub, the stub dies, and the ``finally`` block — the cleanup
-    path under test — removes the session file. The mapped exit code
-    (``128 + SIGTERM``) is expected but not the assertion; the file cleanup
-    is.
-
-    Args:
-        proc: The launch child.
-        sandbox: Its sandbox.
-        name: The child's letter.
-
-    Returns:
-        The child's exit code.
-    """
-    if proc.poll() is None:
-        proc.send_signal(signal.SIGTERM)
-    return _wait_for_exit(proc, sandbox, name)
-
-
-def _terminate_children(procs: list[subprocess.Popen[str]], sandbox: _Sandbox) -> None:
+def _terminate_children(procs: list[subprocess.Popen[str]]) -> None:
     """End any still-running launch children; never mask a test failure.
 
     A mid-flight assertion failure would otherwise leak two live launch
@@ -617,13 +581,14 @@ def _terminate_children(procs: list[subprocess.Popen[str]], sandbox: _Sandbox) -
     (``exec sleep 300``) — into the rest of the suite. Every scenario calls
     this from a ``finally``. SIGTERM first (launch_async forwards it to the
     stub, so the whole process tree exits through the product's own path);
-    escalate to kill for a child that ignores it. Failures here are
-    suppressed so the original assertion error survives teardown.
+    escalate to kill for a child that ignores it. The wait is bounded by
+    ``_TEARDOWN_TIMEOUT_SECONDS`` per child — teardown must not turn a
+    hung-child defect into a four-minute stall before the original
+    assertion surfaces. Failures here are suppressed so the original
+    assertion error survives teardown.
 
     Args:
         procs: The launch children to end.
-        sandbox: Their sandbox (unused by the teardown itself; kept for
-            signature symmetry with the reap helpers).
     """
     for proc in procs:
         if proc.poll() is None:
@@ -633,7 +598,7 @@ def _terminate_children(procs: list[subprocess.Popen[str]], sandbox: _Sandbox) -
         if proc.poll() is not None:
             continue
         try:
-            proc.wait(timeout=_CHILD_TIMEOUT_SECONDS)
+            proc.wait(timeout=_TEARDOWN_TIMEOUT_SECONDS)
         except subprocess.TimeoutExpired:
             with contextlib.suppress(Exception):
                 proc.kill()
@@ -721,10 +686,8 @@ def test_concurrent_sessions_each_get_their_own_settings_file(sandbox: _Sandbox)
     finally:
         # Leak containment: a mid-flight assertion failure must not leave two
         # live launch children (bridge servers + sleeping stubs) running.
-        _terminate_children([proc_a, proc_b], sandbox)
+        _terminate_children([proc_a, proc_b])
 
-    _signal_and_reap(proc_a, sandbox, "a")
-    _signal_and_reap(proc_b, sandbox, "b")
     sandbox.assert_cache_untouched()
 
 
@@ -764,10 +727,7 @@ def test_concurrent_sessions_do_not_touch_the_global_settings(sandbox: _Sandbox)
         )
     finally:
         # Leak containment: see AC-1's ``finally`` above.
-        _terminate_children([proc_a, proc_b], sandbox)
-
-    _signal_and_reap(proc_a, sandbox, "a")
-    _signal_and_reap(proc_b, sandbox, "b")
+        _terminate_children([proc_a, proc_b])
 
     assert sandbox.global_settings.read_bytes() == _PRISTINE_GLOBAL, (
         "the user-global settings file was modified by the session lifecycles"
@@ -823,7 +783,7 @@ def test_second_session_start_does_not_disturb_the_first(sandbox: _Sandbox) -> N
         # exited, and the SIGTERM path is the same one the happy flow uses,
         # so teardown and success end the sessions identically.
         to_end = [proc_a] + ([proc_b] if proc_b is not None else [])
-        _terminate_children(to_end, sandbox)
+        _terminate_children(to_end)
 
     # Both children were ended via SIGTERM (the Ctrl-C path): the mapped
     # exit code is not the assertion, the file-cleanup outcome is.
@@ -874,6 +834,9 @@ def test_shared_settings_path_clobber_is_visible_to_the_probe(tmp_path: Path) ->
     # read-and-compare oracle the AC-1/AC-3 assertions perform. Calling it
     # here ties the control to that oracle: a future bug in ``_session_port``
     # (e.g. reading a stale mtime sibling) would not survive the control.
-    port = _session_port(shared)
-    assert port == 10002, "the shared-file write did not clobber — the probe's premise is broken"
-    assert port != 10001, "the probe cannot distinguish a clobber from isolation"
+    # One assertion suffices: a probe bug that reported the first write
+    # (or any value but the second writer's) fails here — the integer
+    # complement (``!= 10001``) is implied and would be a tautology.
+    assert _session_port(shared) == 10002, (
+        "the shared-file write did not clobber — the probe's premise is broken"
+    )
