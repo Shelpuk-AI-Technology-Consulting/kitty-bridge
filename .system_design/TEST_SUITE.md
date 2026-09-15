@@ -4060,11 +4060,12 @@ separately.)
   the slowest is one `sealed_network` setup (recorder + proxy + TLS certs); the range comes from
   `openssl`-generated throwaway certs, whose cost varies with runner load. The falsification case
   (`test_drive_phase_1_with_a_broken_resolver_records_zero_connections`) takes **~30 s** because
-  the bridge's outbound connect-retry ladder (`_EMPTY_RETRY_DELAYS = [5.0, 15.0]`,
-  `server.py:924`) plus `stop_async` drain cost is the price of driving a real bridge against a
-  deliberately broken resolver. The cost is on the *failure* path; the green path completes in
-  ~0.01 s. Reclassifying the module to `l3` is T-K6's call — the runtime figure is what the
-  Subsystem job's budget must carry.
+  `_make_upstream_request`'s `_wait_out_transport_blip` (`server.py:8579`) sleeps through
+  `_TRANSPORT_GRACE_DELAYS = (2.0, 4.0, 8.0, 16.0)` (`server.py:1030`) summing to
+  `_TRANSPORT_GRACE_PERIOD = 30.0` (`server.py:1029`) when the resolver is closed, and
+  `stop_async` drains the in-flight handlers. The cost is on the *failure* path; the green path
+  completes in ~0.01 s. Reclassifying the module to `l3` is T-K6's call — the runtime figure is
+  what the Subsystem job's budget must carry.
 - **KBR-144:** `tests/bridge/test_responses_string_input.py` starts a real `BridgeServer` on an
   ephemeral port in four of its classes, following the existing convention of
   `tests/bridge/test_crash_resilience.py` rather than inventing a second one. The whole module

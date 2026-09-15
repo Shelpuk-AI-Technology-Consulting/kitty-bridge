@@ -34,6 +34,7 @@ relocation.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import socket
 import ssl
@@ -416,9 +417,11 @@ class TestBridgeAiohttpContainment:
         The defect is "the resolver maps the harness hostname to a port with no
         listener". The bridge's aiohttp client attempts to connect, the
         kernel refuses; the test's outer ``aiohttp.ClientSession`` then times
-        out at ``_DRIVE_TIMEOUT`` while the bridge grinds its outbound
-        connect-retry ladder (``_EMPTY_RETRY_DELAYS = [5.0, 15.0]``,
-        ``server.py:924``); the drive's ``status`` comes back as ``-1`` and
+        out at ``_DRIVE_TIMEOUT`` while :meth:`BridgeServer._make_upstream_request`'s
+        :meth:`_wait_out_transport_blip` (server.py:8579) sleeps through
+        ``_TRANSPORT_GRACE_DELAYS = (2.0, 4.0, 8.0, 16.0)`` (server.py:1030,
+        summing to ``_TRANSPORT_GRACE_PERIOD = 30.0``, server.py:1029); the
+        drive's ``status`` comes back as ``-1`` and
         ``text`` carries the ``TimeoutError`` repr. The recorder receives
         nothing in any of those shapes, which is what the green assertion
         ``captures == 1`` catches.
@@ -475,7 +478,5 @@ async def _connect_to(host: str, port: int) -> None:
     Raises:
         ConnectionRefusedError: When nothing is listening on ``port``.
     """
-    import asyncio
-
     _reader, writer = await asyncio.open_connection(host, port)
     writer.close()
