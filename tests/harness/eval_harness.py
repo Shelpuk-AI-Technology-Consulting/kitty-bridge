@@ -27,7 +27,7 @@ from __future__ import annotations
 import json
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass, fields
+from dataclasses import MISSING, dataclass, fields
 from enum import Enum
 from typing import Any, TypeAlias
 
@@ -214,7 +214,13 @@ class RunConfig:
         # Every required field unset is refused, naming the field. The
         # message is the only diagnostic a CI log gets, so the field name
         # is load-bearing and asserted by the falsification case (F1).
+        #
+        # Defaulted fields are skipped: a future ``field(default=None)``
+        # on an optional pin would otherwise be rejected by this loop
+        # even when the operator passed ``None`` intentionally.
         for field in fields(self):
+            if field.default is not MISSING or field.default_factory is not MISSING:
+                continue
             if getattr(self, field.name) is None:
                 raise ValueError(
                     f"RunConfig.{field.name} is unset; every field that defines "
@@ -427,6 +433,17 @@ def validate_arms(arms: Sequence[ArmSpec]) -> None:
     if first.name == second.name:
         raise ValueError(
             f"the two arms must have distinct names; both are named {first.name!r}"
+        )
+
+    # Two arms with the same executor callable collapse the
+    # bridge-vs-direct distinction without any visible signal — the
+    # per-arm tally still has two distinct keys (names are different),
+    # but every trial hits the same path. Refused at the gate so the
+    # foot-gun trips before a single trial runs.
+    if first.executor is second.executor:
+        raise ValueError(
+            "the two arms must have distinct executors; both share the same "
+            "callable, which collapses the bridge-vs-direct distinction"
         )
 
 
@@ -650,6 +667,18 @@ class RunRecord:
                 raise ValueError(
                     f"RunRecord.from_json: trial {index} is missing key {exc.args[0]!r}"
                 ) from exc
+            # ``TrialRecord.duration_seconds`` is documented as
+            # non-negative; the runner enforces it on write, so a
+            # negative value in a parsed file is either a tampered
+            # artifact or a bug somewhere else in the harness. The
+            # docstring's contract is checked here so the violation
+            # surfaces at the boundary ``from_json`` is, not later
+            # when T-K3's consumer reads the field.
+            if trials[-1].duration_seconds < 0:
+                raise ValueError(
+                    f"RunRecord.from_json: trial {index} has negative "
+                    f"duration_seconds={trials[-1].duration_seconds}"
+                )
 
         per_arm_raw = raw["per_arm"]
         if not isinstance(per_arm_raw, dict):
@@ -808,7 +837,14 @@ def _detail_of(outcome: RawOutcome, verdict: Verdict | None) -> str:
     if isinstance(outcome, TimedOut):
         return "timed_out"
     if isinstance(outcome, UnclassifiedError):
-        return f"{type(outcome.exc).__name__}: {outcome.exc}"
+        # The category carries the diagnosis; ``detail`` records only
+        # the exception class name, not the message. Exception messages
+        # can carry URLs with embedded credentials (e.g. an aiohttp
+        # ``ClientConnectorError`` carries the URL with userinfo in its
+        # args), and the detail string lands in the persisted JSON
+        # artifact T-K12 ships to disk. The harness-side log can carry
+        # the full message; the durable record does not.
+        return type(outcome.exc).__name__
     # Defensive: classify() raises on an unknown variant, so reaching
     # here means a new variant slipped past it. Mirror the same error.
     raise TypeError(

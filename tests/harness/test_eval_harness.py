@@ -256,8 +256,22 @@ async def _always_pass(task: TaskSpec, sample_index: int) -> RawOutcome:
 
 def test_validate_arms_accepts_two_distinct_arms() -> None:
     """REQ 3 — exactly two arms with distinct names is the legal shape."""
-    arms = [ArmSpec(name="kitty", executor=_always_pass), ArmSpec(name="direct", executor=_always_pass)]
+    arms = [ArmSpec(name="kitty", executor=_always_pass), ArmSpec(name="direct", executor=_always_pass_directly)]
     validate_arms(arms)  # must not raise
+
+
+def test_validate_arms_rejects_same_executor_object() -> None:
+    """REQ 3' — distinct names are necessary but not sufficient.
+
+    Two arms sharing a callable collapse the bridge-vs-direct
+    distinction without any visible signal: the per-arm tally still
+    has two distinct keys, but every trial hits the same path. The
+    gate refuses at the boundary so the foot-gun trips before the
+    loop, not in T-K3's downstream consumer.
+    """
+    arms = [ArmSpec(name="kitty", executor=_always_pass), ArmSpec(name="direct", executor=_always_pass)]
+    with pytest.raises(ValueError, match="distinct executors"):
+        validate_arms(arms)
 
 
 def test_validate_arms_rejects_a_single_arm() -> None:
@@ -312,6 +326,7 @@ async def test_run_eval_executes_the_full_grid() -> None:
     # The grid is iterated arm → task → sample, so the trial ordering is
     # (kitty, t1, 0), (kitty, t1, 1), (direct, t1, 0), (direct, t1, 1).
     assert [trial.sample_index for trial in record.trials] == [0, 1, 0, 1]
+    assert [trial.arm for trial in record.trials] == ["kitty", "kitty", "direct", "direct"]
     assert all(trial.category is TrialCategory.SUCCESS for trial in record.trials)
 
 
@@ -618,9 +633,26 @@ def _accepting_task(task_id: str = "t1") -> TaskSpec:
     return TaskSpec(id=task_id, prompt="say something", acceptance_check=lambda _reply: Verdict.PASS)
 
 
-def _two_arms(executor: object = _always_pass) -> list[ArmSpec]:
-    """Two legal arms sharing the given executor."""
-    return [ArmSpec(name="kitty", executor=executor), ArmSpec(name="direct", executor=executor)]  # type: ignore[arg-type]
+def _two_arms(
+    kitty_executor: object = _always_pass,
+    direct_executor: object | None = None,
+) -> list[ArmSpec]:
+    """Two legal arms, each carrying a distinct executor.
+
+    ``validate_arms`` refuses two arms that share the same callable;
+    the test helpers here are no exception. The default second arm
+    executor is a distinct lambda whose body produces a reply
+    identical in meaning to ``_always_pass`` but distinct in identity,
+    so the helpers stay usable for tests that do not care which arm
+    returns what.
+    """
+    if direct_executor is None:
+        direct_executor = _always_pass_directly
+
+    return [
+        ArmSpec(name="kitty", executor=kitty_executor),  # type: ignore[arg-type]
+        ArmSpec(name="direct", executor=direct_executor),  # type: ignore[arg-type]
+    ]
 
 
 def _always_replying(word: str) -> ArmExecutor:
@@ -630,17 +662,42 @@ def _always_replying(word: str) -> ArmExecutor:
     return _reply
 
 
+async def _always_pass_directly(task: TaskSpec, sample_index: int) -> RawOutcome:
+    """A second trivial async executor with a distinct identity.
+
+    Same behaviour as :func:`_always_pass`, but a different function
+    object so two-arm helpers do not trip the distinct-executor rule
+    in :func:`validate_arms`.
+    """
+    return ModelReply(reply=f"direct for {task.id} #{sample_index}")
+
+
 def _stepping_clock(steps: list[float]) -> Callable[[], float]:
     """A fake clock handing out the given values in order.
 
     Two calls per trial (start, end), so a run of N trials consumes
     2N values. Raising when exhausted is the point: a runner that
     calls the clock a different number of times than the contract
-    says should fail loudly, not wrap around.
+    says should fail loudly, not wrap around. The exception is a
+    :class:`RuntimeError` whose message names the contract, not the
+    bare :class:`StopIteration` that ``next`` would raise — a
+    maintainer reading a CI log needs to see *which* contract was
+    violated, not a confusing generator-internal signal.
     """
     yielded = iter(steps)
+    consumed = 0
 
     def _next() -> float:
-        return next(yielded)
+        nonlocal consumed
+        try:
+            value = next(yielded)
+        except StopIteration as exc:
+            raise RuntimeError(
+                f"stepping_clock exhausted after {consumed} calls; the runner's "
+                "clock contract is two calls per trial (start, end), so a run "
+                "of N trials must consume exactly 2N values"
+            ) from exc
+        consumed += 1
+        return value
 
     return _next
