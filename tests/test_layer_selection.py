@@ -464,6 +464,17 @@ class TestTheWholeSuiteIsCoherent:
             # assertion (`t-g1-endpoint-table`, KBR-9) lands red until the
             # README correction closes that defect.
             "tests/test_readme_table_guards.py",
+            # KBR-88 (T-H1). A §6.2.3 source-vs-source contract: the mutmut
+            # scope registry (the machine-readable form of TEST_SUITE.md
+            # section 6.1's mutation-target table) must agree with the live
+            # source. Two artifacts edited by hand, held against each other.
+            "tests/test_mutmut_scope.py",
+            # KBR-88 (T-H1). A §6.2.3 contract against mutmut's per-file
+            # `.meta` JSON shape and the aggregator's bucket routing --
+            # the script is mutmut-coupled (its exit-code mapping comes
+            # from the installed mutmut), and the bucket routing is the
+            # other side of the registry agreement the scope guard tests.
+            "tests/test_aggregate_mutation_baseline.py",
         }
 
         actual = {
