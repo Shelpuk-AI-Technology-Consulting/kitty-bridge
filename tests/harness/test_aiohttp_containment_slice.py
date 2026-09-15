@@ -326,50 +326,6 @@ class TestPhase3Falsification:
         )
 
 
-# ── Verdict recording (R5) ───────────────────────────────────────────────
-
-
-@pytest.mark.skipif(_AIOHTTP_NEEDS_311, reason=_AIOHTTP_SKIP_REASON)
-class TestSliceVerdict:
-    """The verdict gate's precondition: every phase actually ran and passed.
-
-    Skipped on Python <3.11 alongside phases 2/2b/3 (TLS-in-TLS, bpo-44011):
-    the assertion's premise — every phase actually ran — is false on those
-    interpreters, and a red verdict test would make CI red for a slice
-    that has been honestly *not* proven on that Python rather than
-    honestly proven.
-
-    The recording itself lives in the session finaliser in
-    :mod:`tests.harness.conftest`, which runs **after** every test in this
-    process — this class asserts the *precondition* the finaliser reads, so
-    a phase rename that drifts from the conftest's name set fails loudly
-    here rather than silently producing an unrecorded or falsely-`proven`
-    verdict.
-    """
-
-    def test_every_phase_actually_ran_and_passed(self) -> None:
-        """One tracked outcome per phase, all ``PASSED``.
-
-        The assertion names any missing or non-passing phase so the fix is
-        local: a rename means editing
-        :data:`tests.harness.conftest._PHASE_TEST_NAMES`; a skip means the
-        interpreter's TLS-in-TLS floor was not met and the verdict is
-        correctly not recorded.
-        """
-        assert len(_phase_outcomes) == len(_PHASE_TEST_NAMES), (
-            f"phase outcomes tracked for {len(_phase_outcomes)} test(s), expected "
-            f"{len(_PHASE_TEST_NAMES)}: a phase test renamed or removed without "
-            "updating the conftest's name set, or a phase never ran"
-        )
-        for name in sorted(_PHASE_TEST_NAMES):
-            assert name in _phase_outcomes, f"phase {name!r} never ran"
-            assert _phase_outcomes[name] is _PhaseOutcome.PASSED, (
-                f"phase {name!r} outcome is {_phase_outcomes[name].value}: the slice "
-                "verdict is correctly not recorded (T-E9's gate will see "
-                "not_attempted until every phase passes on this interpreter)"
-            )
-
-
 # ── Drive with egress (R1) — the green path the phases rest on ────────────
 
 
@@ -457,3 +413,64 @@ class TestDriveWithEgress:
             f"proxy resolve map is missing {target!r}: the CONNECT target has no "
             "loopback translation"
         )
+
+
+# ── Verdict recording (R5) ───────────────────────────────────────────────
+#
+# Deliberately the LAST test class in the file: pytest's default collection
+# order runs tests in declaration order within a file, so the verdict test
+# below runs after every phase test and after the drive baseline. That
+# ordering is what makes `TestSliceVerdict`'s assertion (one tracked outcome
+# per phase, all PASSED) hold — a plugin that reorders tests (pytest-randomly
+# and similar are not pinned today, but they have been frequent accidental
+# dependencies) would reorder this class ahead of the phase classes and the
+# assertion would fail with "phase outcomes tracked for 0 test(s)". The
+# conftest's own session-finaliser records PROVEN regardless of order; only
+# the assertion's surface form depends on this ordering. Keep this class last
+# when adding new tests, and note the dependency here if a reordering plugin
+# is ever adopted.
+
+
+@pytest.mark.skipif(_AIOHTTP_NEEDS_311, reason=_AIOHTTP_SKIP_REASON)
+class TestSliceVerdict:
+    """The verdict gate's precondition: every phase actually ran and passed.
+
+    Skipped on Python <3.11 alongside phases 2/2b/3 (TLS-in-TLS, bpo-44011):
+    the assertion's premise — every phase actually ran — is false on those
+    interpreters, and a red verdict test would make CI red for a slice
+    that has been honestly *not* proven on that Python rather than
+    honestly proven.
+
+    The recording itself lives in the session finaliser in
+    :mod:`tests.harness.conftest`, which runs **after** every test in this
+    process — this class asserts the *precondition* the finaliser reads, so
+    a phase rename that drifts from the conftest's name set fails loudly
+    here rather than silently producing an unrecorded or falsely-`proven`
+    verdict.
+
+    **Ordering.** This is the last test class in the file so pytest's
+    default collection order runs it after every phase test; see the module
+    comment above for what to do if a reordering plugin is ever adopted.
+    """
+
+    def test_every_phase_actually_ran_and_passed(self) -> None:
+        """One tracked outcome per phase, all ``PASSED``.
+
+        The assertion names any missing or non-passing phase so the fix is
+        local: a rename means editing
+        :data:`tests.harness.conftest._PHASE_TEST_NAMES`; a skip means the
+        interpreter's TLS-in-TLS floor was not met and the verdict is
+        correctly not recorded.
+        """
+        assert len(_phase_outcomes) == len(_PHASE_TEST_NAMES), (
+            f"phase outcomes tracked for {len(_phase_outcomes)} test(s), expected "
+            f"{len(_PHASE_TEST_NAMES)}: a phase test renamed or removed without "
+            "updating the conftest's name set, or a phase never ran"
+        )
+        for name in sorted(_PHASE_TEST_NAMES):
+            assert name in _phase_outcomes, f"phase {name!r} never ran"
+            assert _phase_outcomes[name] is _PhaseOutcome.PASSED, (
+                f"phase {name!r} outcome is {_phase_outcomes[name].value}: the slice "
+                "verdict is correctly not recorded (T-E9's gate will see "
+                "not_attempted until every phase passes on this interpreter)"
+            )

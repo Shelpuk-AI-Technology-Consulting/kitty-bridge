@@ -3,12 +3,14 @@
 This conftest applies to every test under :mod:`tests/harness/`. It serves
 two purposes, both narrow:
 
-* the ``pytest_runtest_makereport`` hook populates a per-phase outcome
-  dictionary :data:`_phase_outcomes`, used by the **T-E2** slice's verdict
-  gate to record ``Outcome.PROVEN`` only when every §5.2.2 phase actually
-  ran and passed on the current interpreter;
+* the ``pytest_runtest_makereport`` hook populates per-phase outcome
+  dictionaries :data:`_phase_outcomes` (call phase) and
+  :data:`_phase_teardown_outcomes` (teardown phase), used by the **T-E2**
+  slice's verdict gate to record ``Outcome.PROVEN`` only when every §5.2.2
+  phase actually ran, passed, and came back clean on the current
+  interpreter;
 * the ``_record_slice_verdict_at_session_end`` session-scope fixture reads
-  the dictionary at teardown, asserts the sibling rows are untouched, and
+  the dictionaries at teardown, asserts the sibling rows are untouched, and
   writes ``PROVEN`` iff every phase is ``PASSED``.
 
 The mechanism is what makes AC-R5 honest. A test that records ``PROVEN``
@@ -16,6 +18,16 @@ itself would pass with the four phases deleted, and on Python <3.11 — where
 phases 2/2b/3 skip because of TLS-in-TLS — would record ``PROVEN`` after
 phase 1 alone. The hook is a falsifiable witness to "every phase ran" — the
 verdict cannot be written without that witness agreeing.
+
+**A note for sibling slices (T-E3..T-E5).** The verdict recording is the
+session-finaliser's job, and it runs **after** every test in the process,
+not per file — so an autouse ``reset_for_test()`` in a sibling's test
+module cannot erase a verdict that has not been written yet, and the
+finaliser writes its own row regardless of what any earlier reset did.
+The reset seam is for *per-test isolation* (each test sees an untouched
+report), not for verdict erasure; sibling slices that follow this
+template should put their own finaliser in this conftest (or in their own
+scoped conftest) rather than calling ``record()`` from a test body.
 """
 
 from __future__ import annotations
@@ -68,8 +80,18 @@ _SLICE_FILE_PREFIX = "tests/harness/test_aiohttp_containment_slice.py::"
 _VERDICT_ROW = "bridge_aiohttp"
 
 #: Populated by :func:`pytest_runtest_makereport` as phase tests complete.
-#: Read by the session-finaliser verdict gate below.
+#: Read by the session-finaliser verdict gate below. Keyed on test method
+#: name; the value is the *call*-phase outcome. A phase test whose teardown
+#: fails is not "passed" for the slice-verdict's purposes, so the finaliser
+#: also consults :data:`_phase_teardown_outcomes`.
 _phase_outcomes: dict[str, _PhaseOutcome] = {}
+
+#: The teardown-phase outcome for each tracked phase test, same keys as
+#: :data:`_phase_outcomes`. Absent for a phase that never reached teardown
+#: (setup-skipped phases, for instance), which the finaliser treats as
+#: vacuously clean — pytest's overall verdict for such a test comes from
+#: setup, not teardown.
+_phase_teardown_outcomes: dict[str, _PhaseOutcome] = {}
 
 
 @pytest.hookimpl(tryfirst=True, hookwrapper=True)
@@ -79,7 +101,10 @@ def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo[None]) ->
     Fires once per phase (setup / call / teardown) of every test in the
     process; only items that are both in the T-E2 slice file *and* named in
     :data:`_PHASE_TEST_NAMES` get recorded, so sibling slices and unrelated
-    harness tests leave the dictionary alone.
+    harness tests leave the dictionary alone. Both the **call** and the
+    **teardown** phase are recorded: a phase whose body passed but whose
+    ``finally`` (say, a ``SealedNetwork.stop()`` drain) errored must not
+    count as "the slice ran" for the verdict gate.
 
     Args:
         item: The test item being reported.
@@ -87,16 +112,20 @@ def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo[None]) ->
     """
     outcome = yield
     rep = outcome.get_result()  # type: ignore[attr-defined]
-    if rep.when != "call":
+    if rep.when not in ("call", "teardown"):
         return
     if not item.nodeid.startswith(_SLICE_FILE_PREFIX) or item.name not in _PHASE_TEST_NAMES:
         return
     if rep.passed:
-        _phase_outcomes[item.name] = _PhaseOutcome.PASSED
+        verdict = _PhaseOutcome.PASSED
     elif rep.skipped:
-        _phase_outcomes[item.name] = _PhaseOutcome.SKIPPED
+        verdict = _PhaseOutcome.SKIPPED
     else:
-        _phase_outcomes[item.name] = _PhaseOutcome.FAILED
+        verdict = _PhaseOutcome.FAILED
+    if rep.when == "call":
+        _phase_outcomes[item.name] = verdict
+    else:
+        _phase_teardown_outcomes[item.name] = verdict
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -105,17 +134,19 @@ def _record_slice_verdict_at_session_end() -> Iterator[None]:
 
     The verdict is a **consequence** of the phases having run and passed, not
     something a test can write on its own behalf: the finaliser reads
-    :data:`_phase_outcomes`, which only :func:`pytest_runtest_makereport`
-    fills in from real call reports. Three failure shapes, all of which leave
-    the singleton's ``bridge_aiohttp`` row ``not_attempted`` — the claim
-    T-E9's completeness gate reads, honest about what actually ran on this
-    interpreter:
+    :data:`_phase_outcomes` and :data:`_phase_teardown_outcomes`, which only
+    :func:`pytest_runtest_makereport` fills in from real call reports. Four
+    failure shapes, all of which leave the singleton's ``bridge_aiohttp`` row
+    ``not_attempted`` — the claim T-E9's completeness gate reads, honest
+    about what actually ran on this interpreter:
 
     - a phase test deleted or renamed → the length check fails;
     - a phase skipped at setup (``@pytest.mark.skipif``, the Python <3.11
       TLS-in-TLS path) → the hook never reaches that test's ``call``, so no
       entry is recorded and the length check fails;
-    - a phase failed or runtime-skipped → the all-passed check fails.
+    - a phase failed or runtime-skipped → the all-passed check fails;
+    - a phase whose body passed but whose teardown errored → the
+      teardown-outcomes check fails.
 
     Before writing, the finaliser also asserts the sibling rows are still
     ``not_attempted`` — the only row this module is allowed to mutate is
@@ -129,6 +160,12 @@ def _record_slice_verdict_at_session_end() -> Iterator[None]:
     if (
         len(_phase_outcomes) == len(_PHASE_TEST_NAMES)
         and all(outcome is _PhaseOutcome.PASSED for outcome in _phase_outcomes.values())
+        # A teardown failure after a passing body still means the test did
+        # not come back clean, so the slice cannot claim "ran and passed".
+        and all(
+            outcome is _PhaseOutcome.PASSED
+            for outcome in _phase_teardown_outcomes.values()
+        )
     ):
         entries = report_instance().entries()
         untouched = [
@@ -150,4 +187,5 @@ __all__ = [
     "_VERDICT_ROW",
     "_PhaseOutcome",
     "_phase_outcomes",
+    "_phase_teardown_outcomes",
 ]
