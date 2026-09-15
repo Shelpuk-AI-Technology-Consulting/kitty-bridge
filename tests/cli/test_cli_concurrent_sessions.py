@@ -654,7 +654,11 @@ def _session_port(session_path: Path) -> int:
     assert isinstance(base_url, str) and base_url.startswith("http://127.0.0.1:"), (
         f"session file {session_path} carries no loopback base URL — full content: {body!r}"
     )
-    return int(base_url.rsplit(":", 1)[1])
+    port_text = base_url.rsplit(":", 1)[1]
+    assert port_text.isdigit(), (
+        f"session file {session_path} base URL {base_url!r} carries a non-numeric port"
+    )
+    return int(port_text)
 
 
 @pytest.fixture()
