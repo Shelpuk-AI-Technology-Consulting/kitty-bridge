@@ -4034,8 +4034,8 @@ class BridgeServer:
                     "Re-dispatch cap reached (%d crossings, cap %d); surfacing "
                     "cross-class exhaustion for %s",
                     _crossings,
-                    _max_crossings,                    response_id,
-
+                    _max_crossings,
+                    response_id,
                 )
                 terminal_status = "incomplete"
                 error_event = responses_format_error(
@@ -5622,7 +5622,7 @@ class BridgeServer:
                     "cross-class exhaustion for %s",
                     _crossings,
                     _max_crossings,
-                message_id,
+                    message_id,
                     )
                 return _make_error_response(
                     {
@@ -6366,7 +6366,6 @@ class BridgeServer:
                     "cross-class exhaustion",
                     _crossings,
                     _max_crossings,
-
                 )
                 error_payload = {
                     "error": {
@@ -7550,7 +7549,6 @@ class BridgeServer:
                     "cross-class exhaustion",
                     _crossings,
                     _max_crossings,
-
                 )
                 error_payload = {
                     "error": {

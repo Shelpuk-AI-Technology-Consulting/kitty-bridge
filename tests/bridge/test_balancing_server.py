@@ -1222,6 +1222,8 @@ class TestBalancingAllCustomTransport:
         route_path: str,
         request_body: dict,
         discriminator: str,
+        *,
+        absent_discriminators: tuple[str, ...] = (),
     ):
         """Drive one request until the cross-class hop cap fires; return the body.
 
@@ -1318,6 +1320,17 @@ class TestBalancingAllCustomTransport:
             f"cap-hit body should carry an event with {discriminator}="
             f"cross_class_exhaustion, got {text[:500]!r}"
         )
+        # Fields a route must NOT carry. §5.3 S8 gives each route exactly one
+        # D4 discriminator for the cap-hit (plus `reason` on Responses as the
+        # parent KBR-241 marker): Chat Completions carries `type` alone — if a
+        # regression adds `reason` there, clients branching on `reason` would
+        # see a shape the design doc does not define.
+        absent_text = text
+        for absent in absent_discriminators:
+            assert f'"{absent}": "cross_class_exhaustion"' not in absent_text, (
+                f"cap-hit event must NOT carry {absent}="
+                f"cross_class_exhaustion, got {text[:500]!r}"
+            )
         # The full standard wording, not just a fragment.
         assert "could not land on a usable backend" in text, (
             f"cap-hit message should carry the standard wording, got {text[:500]!r}"
@@ -1348,11 +1361,18 @@ class TestBalancingAllCustomTransport:
 
     @pytest.mark.asyncio
     async def test_chat_completions_stream_re_dispatch_cap_surfaces_error_event(self):
-        """Hop-cap hit on /v1/chat/completions surfaces the route's error event (KBR-254)."""
+        """Hop-cap hit on /v1/chat/completions surfaces the route's error event (KBR-254).
+
+        Chat Completions's D4 discriminator is `type` alone — §5.3 S8 says it
+        must NOT carry `reason`. The `absent_discriminators=("reason",)`
+        below pins that absence so a regression that adds `reason` to the CC
+        cap-hit fails this test.
+        """
         status, _body = await self._run_cap_hit(
             "/v1/chat/completions",
             {"model": "test-model", "messages": [{"role": "user", "content": "hi"}], "stream": True},
             discriminator="type",
+            absent_discriminators=("reason",),
         )
         assert status == 200
 
