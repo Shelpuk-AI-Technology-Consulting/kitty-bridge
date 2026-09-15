@@ -24,6 +24,7 @@ committed*, which is this module's whole job.
 from __future__ import annotations
 
 import ast
+import re
 from pathlib import Path
 
 import pytest
@@ -88,6 +89,42 @@ TC4_ENTRY_IDS = (
     "m5_irreducible_single_final_turn",
     "system_prompt_over_window_compacts_normally",
 )
+
+#: The five T-C1 entries (KBR-44). Four captured from real Claude Code 2.1.238
+#: driven against the local recorder; the fifth (`no_output_config`) is the
+#: P5f synthetic complement. Their wiring-level claims (what each entry's
+#: triggers_met/triggers_absent declare, and how they were scrubbed) live in
+#: this module's freshness + manifest tests, not in a per-task wiring module —
+#: T-C1's entries are oracle *input*, not behaviour triggers, so the L2 lint
+#: is the right home for their contract-level claims.
+TC1_ENTRY_IDS = (
+    "plain_turn",
+    "tools_declared",
+    "tool_use_and_tool_result",
+    "effort_configured",
+    "no_output_config",
+)
+
+#: The two P25 synthetic entries (KBR-185 / KBR-44's capture pass). The
+#: `ALLOWLISTED_FIELD_IS_FALSY` trigger case and complement for a Responses-
+#: wire body — synthetic because no Responses-format client exists in this
+#: repository's capture environment.
+P25_ENTRY_IDS = (
+    "allowlisted_field_falsy",
+    "allowlisted_field_absent",
+)
+
+#: Every committed entry must be owned by a documented task. `format_example`
+#: is T-W6's worked example and stays (its own origin_note records why).
+#: When a new task adds entries, add its IDs here AND to its wiring/lint
+#: module — an entry in the corpus without an owner here is fixture data no
+#: test loads, no lint scans by id, and no task owns.
+OWNED_ENTRY_IDS = {
+    "format_example",
+    *TC4_ENTRY_IDS,
+    *TC1_ENTRY_IDS,
+    *P25_ENTRY_IDS,
+}
 
 
 class TestTheTc4Entries:
@@ -210,6 +247,219 @@ class TestTheProcedureDescribesTheTool:
         who has just made the mistake will find it.
         """
         assert "rotate" in README.read_text(encoding="utf-8").lower()
+
+
+class TestTheCommittedCorpusIsFresh:
+    """The refresh cadence is enforced, not just written down.
+
+    Two workflows install Claude Code (`claude-code-review.yml:785` and
+    `tmux-disconnect.yml:98`); both spell the pin as ``bash -s -- X.Y.Z``. The
+    guard fails when either drifts, when the two disagree, or when the
+    committed corpus's captured entries no longer name that version. Reading
+    the pin from the workflow file — not a second copy of ``2.1.238`` in the
+    test — is what stops the two from diverging silently.
+    """
+
+    #: The exact shape the install line takes. Anchored on the installer URL
+    #: and ``bash -s --`` so a generic ``pip install X.Y.Z`` elsewhere cannot
+    #: be mistaken for the pin. The version arm is a strict semver triple
+    #: (no pre-release / build tags) followed by a boundary
+    #: (``\\s|"\\|'`` — the quote closes the shell's argument) so a relaxed
+    #: match does not greedily consume ``2.1.238`` out of ``2.1.238-rc1``.
+    _INSTALL_LINE = re.compile(
+        r"claude\.ai/install\.sh\s*\|\s*bash\s+-s\s+--\s+(?P<version>\d+\.\d+\.\d+)(?=[\s\"']|\Z)"
+    )
+
+    def _workflow_paths(self) -> tuple[Path, Path]:
+        """Both workflow files that pin the CLI. Two sites, one pin."""
+        return (
+            ROOT / ".github" / "workflows" / "claude-code-review.yml",
+            ROOT / ".github" / "workflows" / "tmux-disconnect.yml",
+        )
+
+    def _pin_from(self, path: Path) -> str:
+        """Return the pin named by ``path``'s install line, or raise.
+
+        Args:
+            path: A workflow file expected to contain the install line.
+
+        Returns:
+            The bare semver triple.
+
+        Raises:
+            AssertionError: When the install line is missing or its version
+                is not a strict ``X.Y.Z`` triple.
+        """
+        text = path.read_text(encoding="utf-8")
+        match = self._INSTALL_LINE.search(text)
+        assert match is not None, (
+            f"{path.name} no longer carries the Claude Code install line "
+            "(`curl -fsSL https://claude.ai/install.sh | bash -s -- X.Y.Z`); "
+            "the freshness guard cannot read its pin"
+        )
+        return match.group("version")
+
+    def _assert_pins_agree(self, review_path: Path, tmux_path: Path) -> str:
+        """Assert both workflow files name the same pin and return it.
+
+        Args:
+            review_path: One workflow file expected to carry the install line.
+            tmux_path: The other.
+
+        Returns:
+            The pin both name.
+
+        Raises:
+            AssertionError: When either install line is missing or the two
+                pins disagree.
+        """
+        review_pin = self._pin_from(review_path)
+        tmux_pin = self._pin_from(tmux_path)
+
+        assert review_pin == tmux_pin, (
+            f"the two workflows disagree on the Claude Code pin: "
+            f"{review_path.name} installs {review_pin!r}, {tmux_path.name} installs {tmux_pin!r}. "
+            "Update both to the same version."
+        )
+        return review_pin
+
+    def test_both_workflows_install_the_same_pinned_version(self) -> None:
+        """One pin, two sites — the guard reads both and asserts they agree.
+
+        A bump of one and not the other leaves the corpus "fresh" against a
+        pin that no longer describes the CLI CI actually runs. A bump of
+        **both** passes here by design — that case is the corpus guard's
+        (`test_the_committed_corpus_passes_the_freshness_guard`), whose
+        captured entries name the old pin. No version literal lives in this
+        file: two copies of one value is how they drift, which is what this
+        guard exists to prevent.
+        """
+        review, tmux = self._workflow_paths()
+        self._assert_pins_agree(review, tmux)
+
+
+    def test_a_workflow_whose_install_line_disappears_fails_loudly(self, tmp_path: Path) -> None:
+        """A reformat that drops the literal must surface, not pass vacuously.
+
+        The whole-token regex (``tests/test_ci_capability_inventory.py:103``)
+        documents this same shape: a guard that stringified the version would
+        quietly lose its anchor.
+        """
+        # Build a workflow whose pin line is gone (the version is now a comment).
+        broken = tmp_path / "workflow.yml"
+        broken.write_text(
+            "# review installs claude-code but the literal is commented out\n"
+            "# bash -s -- 2.1.238\n",
+            encoding="utf-8",
+        )
+
+        with pytest.raises(AssertionError, match="install line"):
+            self._pin_from(broken)
+
+    def test_a_workflow_pinning_a_non_semver_version_is_refused(self, tmp_path: Path) -> None:
+        r"""A relaxed version arm would let ``2.1.238-rc1`` slip through.
+
+        The pin's contract is ``X.Y.Z``; the workflow's literal is the
+        canonical form. A pre-release tag is a different pin — the corpus
+        should not pretend otherwise. The strict ``\d+\.\d+\.\d+`` arm with
+        a trailing boundary refuses to match it, which the helper reports
+        as "no install line" because the install line *as parsed* does not
+        exist.
+        """
+        relaxed = tmp_path / "workflow.yml"
+        relaxed.write_text(
+            "curl -fsSL https://claude.ai/install.sh | bash -s -- 2.1.238-rc1\n",
+            encoding="utf-8",
+        )
+
+        with pytest.raises(AssertionError, match="install line"):
+            self._pin_from(relaxed)
+
+    def test_a_workflow_whose_pin_disagrees_with_its_twin_fails_loudly(self, tmp_path: Path) -> None:
+        """The forward direction of the agreement check — the harder half.
+
+        ``tests/test_ci_capability_inventory.py:838-843`` documents that a
+        substring compare cannot catch this: ``bash -s -- 2.1.238`` contains
+        ``bash -s -- 2.1.23``. The whole-token regex and the strict version
+        arm together close that gap.
+
+        Two ``tmp_path`` copies pin to disagreeing versions — no mutation of
+        the real workflows, so a SIGKILL'd ``pytest`` cannot leave a drifted
+        tree behind.
+        """
+        review = tmp_path / "claude-code-review.yml"
+        review.write_text(
+            "curl -fsSL https://claude.ai/install.sh | bash -s -- 2.1.238\n",
+            encoding="utf-8",
+        )
+        tmux = tmp_path / "tmux-disconnect.yml"
+        tmux.write_text(
+            "curl -fsSL https://claude.ai/install.sh | bash -s -- 2.1.9\n",
+            encoding="utf-8",
+        )
+
+        with pytest.raises(AssertionError, match="disagree"):
+            self._assert_pins_agree(review, tmux)
+
+    def test_the_committed_corpus_passes_the_freshness_guard(self) -> None:
+        """Binds the workflow artifacts to the corpus — the guard's whole point.
+
+        Red until the corpus ships its first captured entry (the guard raises
+        "no captured entries" by design); green the moment T-C1 commits its
+        five.
+        """
+        review, _ = self._workflow_paths()
+        pin = self._pin_from(review)
+
+        k.assert_captured_from_matches_pin(k.load_corpus(CORPUS), pin)
+
+
+class TestTheCommittedCorpusHasNoOrphanEntries:
+    """Every committed entry must be owned by a documented task.
+
+    The per-task wiring tests (T-C1's L2 lint here, T-C4's
+    ``tests/bridge/test_tc4_corpus_wiring.py``, P25's manifest checks)
+    each assert *their* entries are committed. The complementary
+    guarantee — that *no* other entry is — has to live somewhere with a
+    cross-task allowlist, which is here.
+
+    An entry in the corpus without an owner is fixture data no test loads,
+    no lint scans by id, and no task owns — exactly the shape
+    ``format_example``'s own origin_note warns about. ``OWNED_ENTRY_IDS``
+    is the allowlist; adding a new task's entries goes there AND to that
+    task's own wiring or lint module.
+    """
+
+    def test_every_committed_entry_is_owned(self) -> None:
+        """No orphan entries — the corpus is the union of known task sets.
+
+        The negation of this assertion (``unexpected: [...]``) names the
+        orphans so the maintainer can decide whether to add them to the
+        allowlist or delete them.
+        """
+        committed = {entry.id for entry in k.load_corpus(CORPUS)}
+
+        orphans = sorted(committed - OWNED_ENTRY_IDS)
+        assert orphans == [], (
+            f"orphan corpus entries (no documented task owns them): {orphans}; "
+            "either add them to OWNED_ENTRY_IDS in tests/harness/test_corpus_lint.py "
+            "or delete them from tests/corpus/"
+        )
+
+    def test_every_owned_entry_is_committed(self) -> None:
+        """No entry on the allowlist is missing from the corpus.
+
+        The inverse check catches a task that documented entries in the
+        allowlist but forgot to commit them — the wiring would still pass
+        otherwise.
+        """
+        committed = {entry.id for entry in k.load_corpus(CORPUS)}
+
+        missing = sorted(OWNED_ENTRY_IDS - committed)
+        assert missing == [], (
+            f"owned entries not committed: {missing}; an entry in OWNED_ENTRY_IDS "
+            "but not in tests/corpus/ is a documented entry with no fixture"
+        )
 
 
 class TestTheCorpusIsAnIndependentOracle:

@@ -1348,6 +1348,68 @@ def entries_without(entries: Iterable[CorpusEntry], trigger: Trigger) -> tuple[C
 # --------------------------------------------------------------------------
 
 
+#: The exact form a captured ``captured_from`` must take.
+#:
+#: Anchored on both ends so a bare ``2.1.238`` (the workflow's spelling) or a
+#: ``v``-prefixed form (a tag operator reflex) fail the parse, not silently
+#: mismatch. A substring comparison against the pin would wave both through and
+#: the README's documented form would drift one letter at a time.
+CAPTURED_FROM_PATTERN = re.compile(r"claude-code/(\d+)\.(\d+)\.(\d+)\Z")
+
+
+#: A bare ``X.Y.Z`` triple — the form the workflow install line spells.
+_PIN_PATTERN = re.compile(r"(\d+)\.(\d+)\.(\d+)\Z")
+
+
+def _version_triple(text: str, *, label: str) -> tuple[int, int, int]:
+    """Return ``(major, minor, patch)`` from ``text``.
+
+    Args:
+        text: A bare ``"2.1.238"`` string — what the workflow install line
+            spells. Not the ``claude-code/2.1.238`` form; that is parsed by
+            :func:`captured_from_version`.
+        label: What to name the value in a malformed-input refusal, so the
+            message points the operator at the right artifact (the pin, or
+            the captured ``captured_from``).
+
+    Returns:
+        The version triple.
+
+    Raises:
+        CorpusEntryError: When ``text`` is not a strict ``X.Y.Z`` triple.
+    """
+    match = _PIN_PATTERN.match(text)
+    if match is None:
+        raise CorpusEntryError(
+            f"{label} {text!r} is not a bare X.Y.Z triple (the form the workflow install line spells)"
+        )
+    return int(match.group(1)), int(match.group(2)), int(match.group(3))
+
+
+def captured_from_version(entry: CorpusEntry) -> tuple[int, int, int]:
+    """Return the version triple named by ``entry.captured_from``.
+
+    Args:
+        entry: The corpus entry.
+
+    Returns:
+        The parsed version triple.
+
+    Raises:
+        CorpusEntryError: When ``captured_from`` is not the canonical
+            ``claude-code/X.Y.Z`` form. A bare version or a ``v``-prefix would
+            satisfy a substring compare against the pin, so the canonical
+            form is enforced rather than assumed.
+    """
+    match = CAPTURED_FROM_PATTERN.match(entry.captured_from)
+    if match is None:
+        raise CorpusEntryError(
+            f"{entry.id}: captured_from is {entry.captured_from!r}; it must be exactly "
+            "'claude-code/<X.Y.Z>' (e.g. 'claude-code/2.1.238') — see tests/corpus/README.md"
+        )
+    return int(match.group(1)), int(match.group(2)), int(match.group(3))
+
+
 def captured_only(entries: Iterable[CorpusEntry]) -> tuple[CorpusEntry, ...]:
     """Return the entries that are evidence rather than construction.
 
@@ -1430,3 +1492,57 @@ def assert_corpus_clean(entries: Sequence[CorpusEntry]) -> None:
             "corpus-lint: committed entries carry credentials, identifiers or stale "
             "exemptions:\n  " + "\n  ".join(problems)
         )
+
+
+def assert_captured_from_matches_pin(entries: Sequence[CorpusEntry], pin: str) -> None:
+    """Fail unless every captured entry names the pinned Claude Code version.
+
+    The refresh cadence — re-capture when the pinned Claude Code version
+    changes, owner decision 2026-09-12 — is unactionable if nothing fails
+    when the pin moves. This guard is the *enforcement* the cadence lacked:
+    a bump in either of the two workflows that install Claude Code (the
+    reviewer's and the tmux-disconnect's, both pinning the same ``X.Y.Z``)
+    fails the gate until the corpus is re-captured.
+
+    The comparison parses both sides to a ``(major, minor, patch)`` triple
+    rather than string-matching ``f"claude-code/{pin}"`` against
+    ``entry.captured_from`` — the latter would let ``2.1.238`` and
+    ``claude-code/2.1.238`` disagree (the README's documented form vs the
+    workflow's spelling), and a substring compare would let ``v2.1.238``
+    pass against the pin (the ``2.1.23`` substring trap the CI pin-inventory
+    test documents at ``tests/test_ci_capability_inventory.py:838-843``).
+    The canonical form is enforced, not assumed.
+
+    Args:
+        entries: The corpus, normally :func:`load_corpus`'s output.
+        pin: The Claude Code version the workflows pin, as a bare ``"X.Y.Z"``
+            string (the form ``bash -s -- X.Y.Z`` spells).
+
+    Raises:
+        CorpusEntryError: When ``captured_only(entries)`` is empty (the
+            vacuous-pass refusal — a guard over nothing cannot pass by
+            looking); when ``pin`` is not a strict ``X.Y.Z`` triple; when any
+            captured entry's ``captured_from`` is not the canonical
+            ``claude-code/X.Y.Z`` form; or when any captured entry's version
+            does not equal the pin.
+    """
+    captured = captured_only(entries)
+    if not captured:
+        raise CorpusEntryError(
+            "no captured entries in the corpus: the freshness guard cannot pass by having "
+            "nothing to check (see tests/corpus/README.md — refresh cadence is unactionable "
+            "without evidence)"
+        )
+
+    pinned = _version_triple(pin, label="pin")
+    pinned_str = ".".join(str(p) for p in pinned)
+
+    for corpus_entry in captured:
+        entry_triple = captured_from_version(corpus_entry)
+        entry_str = ".".join(str(p) for p in entry_triple)
+        if entry_triple != pinned:
+            raise CorpusEntryError(
+                f"{corpus_entry.id}: captured_from {corpus_entry.captured_from!r} names "
+                f"version {entry_str!r}; the pin is {pinned_str!r} — re-capture against "
+                "the pinned Claude Code (see tests/corpus/README.md)"
+            )
