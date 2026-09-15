@@ -1,0 +1,32 @@
+{
+  "id": "allowlisted_field_falsy",
+  "description": "P25 trigger case — a Responses-format request whose allowlisted field `include` carries a falsy value ([]). The truthiness branch in `OpenAISubscriptionAdapter._prepare_responses_body` drops it (P25's `include` path). `responses_origin_path` met: the wire is Responses-shaped.",
+  "origin": "synthetic",
+  "origin_note": "Synthetic (not captured). No Responses-format client is available in this repository's capture environment — the openai_responses wire is sent by Codex CLI / similar, not Claude Code, and the corpus captures only what this repository's driven agents send. Constructed against the OpenAI CreateResponse schema (verified 2026-09-14 against openai/openai-openapi master: `include: []` legal — no minItems; `reasoning: {}` legal — all members optional).",
+  "captured_from": "",
+  "captured_at": "",
+  "method": "POST",
+  "scheme": "https",
+  "host": "api.openai.com",
+  "path": "/v1/responses",
+  "query": "",
+  "headers": [
+    [
+      "host",
+      "api.openai.com"
+    ],
+    [
+      "content-type",
+      "application/json"
+    ]
+  ],
+  "body_file": "allowlisted_field_falsy.body",
+  "body_sha256": "6d4a25560b7f5dc0705fe1aee71d05f6925c017b9f6d881ae997277b8f4ec637",
+  "wire_format": "openai_responses",
+  "known_non_secrets": [],
+  "triggers_met": [
+    "allowlisted_field_is_falsy",
+    "responses_origin_path"
+  ],
+  "triggers_absent": []
+}

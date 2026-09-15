@@ -1,0 +1,33 @@
+{
+  "id": "allowlisted_field_absent",
+  "description": "P25 complement — a Responses-format request with neither `include` nor `reasoning` present. P25's drop branch is provably absent here, so the §3.3.2 assertion 2 complement (P25 conditional, REQUEST) is discharged. `responses_origin_path` met: the wire is Responses-shaped.",
+  "origin": "synthetic",
+  "origin_note": "Synthetic (not captured). No Responses-format client is available in this repository's capture environment — the openai_responses wire is sent by Codex CLI / similar, not Claude Code, and the corpus captures only what this repository's driven agents send. Constructed against the OpenAI CreateResponse schema (verified 2026-09-14 against openai/openai-openapi master: `include: []` legal — no minItems; `reasoning: {}` legal — all members optional).",
+  "captured_from": "",
+  "captured_at": "",
+  "method": "POST",
+  "scheme": "https",
+  "host": "api.openai.com",
+  "path": "/v1/responses",
+  "query": "",
+  "headers": [
+    [
+      "host",
+      "api.openai.com"
+    ],
+    [
+      "content-type",
+      "application/json"
+    ]
+  ],
+  "body_file": "allowlisted_field_absent.body",
+  "body_sha256": "1c6d7f6826de90ebdd2c7e65d7ddd271970328e8290925135b4a898e964cd9e0",
+  "wire_format": "openai_responses",
+  "known_non_secrets": [],
+  "triggers_met": [
+    "responses_origin_path"
+  ],
+  "triggers_absent": [
+    "allowlisted_field_is_falsy"
+  ]
+}

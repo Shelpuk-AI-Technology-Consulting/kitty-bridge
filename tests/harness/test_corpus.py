@@ -510,6 +510,110 @@ class TestProvenanceIsRequired:
             k.load_entry(path)
 
 
+class TestTheFreshnessGuard:
+    """Every captured entry must name the pinned Claude Code version.
+
+    The refresh cadence (re-capture when the pin changes) is unactionable if
+    nothing fails when the pin moves — the corpus would go silently stale,
+    the museum of a protocol nobody speaks §7.1 warns about. These drive the
+    guard over constructed entries; the L2 test in
+    :mod:`tests.harness.test_corpus_lint` binds it to the committed corpus
+    and the workflow files.
+    """
+
+    def test_a_captured_entry_at_the_pin_passes(self) -> None:
+        """The matching case, so the refusals below are not the only path."""
+        entries = [
+            entry(origin=k.CAPTURED, origin_note="", captured_from="claude-code/2.1.238", captured_at="2026-09-14"),
+            entry(
+                id="other",
+                origin=k.CAPTURED,
+                origin_note="",
+                captured_from="claude-code/2.1.238",
+                captured_at="2026-09-14",
+            ),
+        ]
+
+        k.assert_captured_from_matches_pin(entries, "2.1.238")
+
+    def test_a_captured_entry_at_another_version_fails_naming_both(self) -> None:
+        """The bump the guard exists to catch: the pin moved, the capture did not.
+
+        Both versions are named so the operator can tell at a glance whether
+        the corpus is behind or ahead of the pin.
+        """
+        stale = entry(
+            origin=k.CAPTURED,
+            origin_note="",
+            captured_from="claude-code/1.2.3",
+            captured_at="2026-09-14",
+        )
+
+        with pytest.raises(k.CorpusEntryError, match=r"1\.2\.3.*2\.1\.238"):
+            k.assert_captured_from_matches_pin([stale], "2.1.238")
+
+    def test_a_malformed_captured_from_is_refused_not_reported_as_stale(self) -> None:
+        """The canonical form is enforced, not assumed.
+
+        ``2.1.238`` (bare) and ``claude-code/v2.1.238`` would both satisfy a
+        substring check against the pin, so a string comparison would wave
+        them through — and the README's documented spelling would drift one
+        ``v`` at a time. Refusing the form makes the drift a lint failure
+        instead.
+        """
+        for malformed in ("2.1.238", "claude-code/v2.1.238", "claude-code/2.1", "claude-code/x.y.z"):
+            bad = entry(
+                origin=k.CAPTURED, origin_note="", captured_from=malformed, captured_at="2026-09-14"
+            )
+
+            with pytest.raises(k.CorpusEntryError, match="captured_from is"):
+                k.assert_captured_from_matches_pin([bad], "2.1.238")
+
+    def test_no_captured_entries_fails_the_guard(self) -> None:
+        """The vacuous-pass trap: a guard over nothing cannot pass by looking.
+
+        This is :func:`~harness.corpus.assert_corpus_clean`'s empty-corpus
+        refusal, narrowed to the captured half — a corpus of only synthetic
+        entries (T-W6's starting state) satisfies "every captured entry
+        matches" by having no captured entries to check.
+        """
+        synthetic_only = [entry(), entry(id="another")]
+
+        with pytest.raises(k.CorpusEntryError, match="no captured entries"):
+            k.assert_captured_from_matches_pin(synthetic_only, "2.1.238")
+
+    def test_synthetic_entries_do_not_count(self) -> None:
+        """Only `captured_only()`'s half is guarded.
+
+        ``format_example`` carries ``captured_from: ""`` by design; the guard
+        must not read that as "stale" or the worked example would fail the
+        gate it exists to illustrate.
+        """
+        mixed = [
+            entry(),
+            entry(
+                id="real",
+                origin=k.CAPTURED,
+                origin_note="",
+                captured_from="claude-code/2.1.238",
+                captured_at="2026-09-14",
+            ),
+        ]
+
+        k.assert_captured_from_matches_pin(mixed, "2.1.238")
+
+    def test_a_malformed_pin_is_refused(self) -> None:
+        """A pin the parser cannot read is a broken workflow, not a stale corpus.
+
+        Failing here rather than reporting every entry stale keeps the
+        failure's cause in the failure's message.
+        """
+        one = entry(origin=k.CAPTURED, origin_note="", captured_from="claude-code/2.1.238", captured_at="2026-09-14")
+
+        with pytest.raises(k.CorpusEntryError, match="pin"):
+            k.assert_captured_from_matches_pin([one], "stable")
+
+
 class TestTriggersHaveThreeStates:
     """Met, explicitly absent, and silent — and silence is not absence."""
 

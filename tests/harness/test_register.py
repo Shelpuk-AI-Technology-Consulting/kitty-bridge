@@ -128,17 +128,18 @@ _SHAPES: tuple[tuple[str, str], ...] = (
 
 
 class TestTheRowsThemselves:
-    """§3.2 publishes 52 live rows; the data must be those rows and no others."""
+    """§3.2 publishes 61 live rows; the data must be those rows and no others."""
 
     def test_the_register_holds_every_live_row(self) -> None:
-        """24 bridge-level rows less the withdrawn M13, plus 36 provider-level.
+        """24 bridge-level rows less the withdrawn M13, plus 37 provider-level.
 
         The +8 over the pre-KBR-195 count is the eight Gemini inbound rows
-        KBR-195 added (M18, M19, M20..M25). This literal is the +8
-        no-reflow damage test — a future change that drops a row or adds
-        one without updating the guard fails loudly.
+        KBR-195 added (M18..M25). The +1 over the pre-KBR-44 count is P5f
+        (KBR-44). Both literals are the +9 no-reflow damage test — a
+        future change that drops a row or adds one without updating the
+        guard fails loudly.
         """
-        assert len(r.REGISTER) == 60
+        assert len(r.REGISTER) == 61
 
     def test_the_register_is_a_tuple_and_not_a_list(self) -> None:
         """`mypy` does not run over `tests/`, so the annotation is not enforcement.
@@ -628,6 +629,7 @@ class TestTheTriggerArrangingBy:
             r.Trigger.ASSISTANT_TURN_LACKS_THINKING_BLOCK: r.ArrangingBy.REQUEST,
             r.Trigger.NON_STREAMING_MAX_TOKENS_OVER_4096: r.ArrangingBy.REQUEST,
             r.Trigger.THINKING_SIGNALLED_OR_INFERRED: r.ArrangingBy.REQUEST,
+            r.Trigger.OUTPUT_CONFIG_PRESENT: r.ArrangingBy.REQUEST,
             r.Trigger.CC_ORIGIN_PATH: r.ArrangingBy.ROUTE,
             r.Trigger.RESPONSES_ORIGIN_PATH: r.ArrangingBy.REQUEST,
             r.Trigger.ALLOWLISTED_FIELD_IS_FALSY: r.ArrangingBy.REQUEST,

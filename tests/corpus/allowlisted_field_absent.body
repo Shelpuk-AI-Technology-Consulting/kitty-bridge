@@ -1,0 +1,9 @@
+{
+  "model": "kbr-44-synthetic-p25",
+  "input": [
+    {
+      "role": "user",
+      "content": "synthetic fixture for the P25 complement"
+    }
+  ]
+}
