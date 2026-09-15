@@ -435,7 +435,7 @@ class OpenAISubscriptionAdapter(OpenAIAdapter):
         - Accept: text/event-stream (Codex backend requires streaming)
         - No Origin/Referer (not a browser request)
         - Authorization: Bearer (from OAuth)
-        - ChatGPT-Account-ID: from JWT (if present)
+        - ChatGPT-Account-Id: from JWT (if present)
 
         NOTE: Do NOT set ``originator: codex_cli_rs`` **on this body**.  The
         Codex *backend* (``api.openai.com/v1/responses``) triggers strict tool
