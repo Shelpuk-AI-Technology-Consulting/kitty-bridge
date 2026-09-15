@@ -1,0 +1,47 @@
+{
+  "id": "tool_result_under_limit",
+  "description": "One tool_result of exactly 50000 chars — the largest non-triggering size against the bridge's strict `>` comparison. M3 complement.",
+  "origin": "synthetic",
+  "origin_note": "Synthetic, not captured: a captured tool result cannot be aimed at exactly the 50000-char boundary and survive scrubbing at that size, since scrubbing shortens bodies. Calibrated against _TOOL_RESULT_TRUNCATION_LIMIT in src/kitty/bridge/server.py.",
+  "captured_from": "",
+  "captured_at": "",
+  "method": "POST",
+  "scheme": "http",
+  "host": "127.0.0.1",
+  "path": "/v1/messages",
+  "query": "",
+  "headers": [
+    [
+      "Host",
+      "127.0.0.1"
+    ],
+    [
+      "Accept",
+      "application/json"
+    ],
+    [
+      "Content-Type",
+      "application/json"
+    ],
+    [
+      "X-Api-Key",
+      "<redacted:credential_header>"
+    ],
+    [
+      "anthropic-version",
+      "2023-06-01"
+    ],
+    [
+      "anthropic-beta",
+      "claude-code-20250219"
+    ]
+  ],
+  "body_file": "tool_result_under_limit.body",
+  "body_sha256": "45719d4a85f71eb7e3730a79b261bffeeef2033daed21a6f1cd5dea09e2950ee",
+  "wire_format": "anthropic_messages",
+  "known_non_secrets": [],
+  "triggers_met": [],
+  "triggers_absent": [
+    "tool_result_over_limit"
+  ]
+}
