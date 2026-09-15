@@ -19,6 +19,7 @@ every file added to this repository writes LF; this file does too.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 
 import pytest
@@ -441,6 +442,27 @@ async def test_run_eval_classifies_a_trial_raising_oserror_as_harness_fault_and_
     assert kitty_tally[TrialCategory.SUCCESS] == 2
     assert direct_tally[TrialCategory.SUCCESS] == 3
     assert direct_tally[TrialCategory.HARNESS_FAULT] == 0
+
+
+async def test_run_eval_lets_operator_interrupt_propagate() -> None:
+    """F3' — ``except Exception`` (not ``BaseException``) is the F3 mechanism.
+
+    A future change that widened the per-trial catch to ``except
+    BaseException`` would silently swallow ``KeyboardInterrupt`` /
+    ``asyncio.CancelledError`` — operator signals that should abort a
+    long nightly, not become a ``HARNESS_FAULT`` data point. The test
+    raises ``asyncio.CancelledError`` (a ``BaseException`` subclass in
+    3.8+) from an executor and asserts the runner re-raises it rather
+    than wrapping it as ``UnclassifiedError``.
+    """
+
+    async def _canceller(_task: TaskSpec, _sample_index: int) -> RawOutcome:
+        raise asyncio.CancelledError()
+
+    arms = _two_arms(_canceller)
+
+    with pytest.raises(asyncio.CancelledError):
+        await run_eval(_fully_pinned(n_samples=1), [_accepting_task()], arms)
 
 
 # ── Helpers ─────────────────────────────────────────────────────────────────
