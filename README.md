@@ -750,12 +750,29 @@ it apart — or, if the provider's error payload was too malformed to deliver, k
 the same `"reason": "upstream_error"`. Either way an errored ladder is never reported as an empty one. Simply
 resend; if it persists, the provider is failing outright — switch backend or wait it out.
 
-### A 502 whose error carries `"reason": "cross_class_exhaustion"`
+### A cap-hit error carrying `"cross_class_exhaustion"`
 
-Balanced profiles only, streaming `/v1/messages` only. Every backend in the pool failed and the bridge could not
-find a usable one — including backends it tried but could not drive because the two halves of the pool speak
-different protocols. Nothing reached the agent; simply resend. If it persists, the pool is failing outright —
-check the backends' own health or add a backend of the protocol that is not represented.
+Balanced profiles only, all four streaming routes (`/v1/messages`,
+`/v1/responses`, `/v1beta/.../streamGenerateContent`,
+`/v1/chat/completions`). Every backend in the pool failed and the
+bridge could not find a usable one — including backends it tried but
+could not drive because the two halves of the pool speak different
+protocols. The terminal event is route-specific:
+
+- `/v1/messages` returns a bare JSON `502` with the message body.
+- The three other routes keep their SSE response stream open and emit
+  the route's D4-family error event in-stream — the client sees a
+  `200` with an `error` event whose `code` (Responses) / `reason`
+  (Gemini) / `type` (Chat Completions) field reads
+  `"cross_class_exhaustion"`, plus the standard message wording
+  *"Upstream backends exhausted (the bridge could not land on a usable
+  backend on this request)"*. The status line on the wire stays `200`
+  because those routes prepare their SSE response eagerly at handler
+  entry and cannot rewrite the status after the fact.
+
+Nothing reached the agent; simply resend. If it persists, the pool
+is failing outright — check the backends' own health or add a backend
+of the protocol that is not represented.
 
 ### "Kitty Bridge received a reply from the upstream provider that stopped (max_tokens) before producing any content"
 
