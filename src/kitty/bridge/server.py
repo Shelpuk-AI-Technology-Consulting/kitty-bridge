@@ -3333,337 +3333,451 @@ class BridgeServer:
         )
         await sr.prepare(request)
 
-        # Custom-transport providers handle their own HTTP requests.
-        # For Responses API, pass the original body so the provider can
-        # forward it directly without CC round-trip translation.
-        if self._active_provider.use_custom_transport:
-            cc_request["_resolved_key"] = self._active_key
-            cc_request["_provider_config"] = self._active_provider_config
-            cc_request["_original_body"] = body
-            self._log_backend_selection()
+        # KBR-254: transport-class dispatch loop. Mirrors `_stream_messages` (KBR-249,
+        # §5.3 S8/S9 of SYSTEM_DESIGN.md). A streaming branch whose failover selects a
+        # provider of the other transport class re-dispatches here so the matching
+        # branch drives the response. The hop cap bounds pathological cooldown-expiry
+        # ping-pong; mirroring `_stream_messages`'s `(2 * n_backends) + 1` bound.
+        _crossings = 0
+        _max_crossings = (2 * (len(self._backends) if self._backends else 1)) + 1
+        while True:
+            _cross_mode_to_custom = False
+            _cross_cap_hit = False
 
-            n_backends = len(self._backends) if self._backends else 1
-            _bytes_written = False
+            # Custom-transport providers handle their own HTTP requests.
+            # For Responses API, pass the original body so the provider can
+            # forward it directly without CC round-trip translation.
+            if self._active_provider.use_custom_transport:
+                cc_request["_resolved_key"] = self._active_key
+                cc_request["_provider_config"] = self._active_provider_config
+                cc_request["_original_body"] = body
+                self._log_backend_selection()
 
-            async def _tracked_write(data: bytes) -> None:
-                nonlocal _bytes_written
-                _bytes_written = True
-                await sr.write(data)
-
-            for attempt in range(n_backends):
+                n_backends = len(self._backends) if self._backends else 1
                 _bytes_written = False
-                try:
-                    await self._active_provider.stream_request(cc_request, _tracked_write)
-                except Exception as exc:
-                    logger.warning("Custom-transport stream failed: %s", exc)
-                    if self._backends and self._current_backend_idx >= 0:
-                        kind = self._provider_error_failure_kind(exc)
-                        self._mark_backend_unhealthy(
-                            self._current_backend_idx,
-                            failure_kind=kind,
-                            cooldown=self._retry_after_from_exc(exc),
-                        )
-                        # Once the provider wrote to the client, another backend would append its attempt (§11 Q14(a)).
-                        if (
-                            not _bytes_written
-                            and self._any_healthy_backend(require_streaming=True)
-                            and attempt < n_backends - 1
-                        ):
-                            try:
-                                self._select_backend(require_streaming=True)
-                            except AllBackendsUnhealthyError as all_unhealthy:
-                                logger.warning(
-                                    "All streaming backends unhealthy (fast-fail), retry_after=%ds",
-                                    all_unhealthy.retry_after,
+
+                async def _tracked_write(data: bytes) -> None:
+                    nonlocal _bytes_written
+                    _bytes_written = True
+                    await sr.write(data)
+
+                for attempt in range(n_backends):
+                    _bytes_written = False
+                    try:
+                        await self._active_provider.stream_request(cc_request, _tracked_write)
+                    except Exception as exc:
+                        logger.warning("Custom-transport stream failed: %s", exc)
+                        if self._backends and self._current_backend_idx >= 0:
+                            kind = self._provider_error_failure_kind(exc)
+                            self._mark_backend_unhealthy(
+                                self._current_backend_idx,
+                                failure_kind=kind,
+                                cooldown=self._retry_after_from_exc(exc),
+                            )
+                            # Once the provider wrote to the client, another backend
+                            # would append its attempt (§11 Q14(a)).
+                            if (
+                                not _bytes_written
+                                and self._any_healthy_backend(require_streaming=True)
+                                and attempt < n_backends - 1
+                            ):
+                                try:
+                                    self._select_backend(require_streaming=True)
+                                except AllBackendsUnhealthyError as all_unhealthy:
+                                    logger.warning(
+                                        "All streaming backends unhealthy (fast-fail), retry_after=%ds",
+                                        all_unhealthy.retry_after,
+                                    )
+                                    break
+                                self._normalize_model(cc_request)
+                                self._active_provider.normalize_request(cc_request)
+                                cc_request["_resolved_key"] = self._active_key
+                                cc_request["_provider_config"] = self._active_provider_config
+                                logger.info(
+                                    "Custom-transport failover: attempt %d/%d (%s), switching backend",
+                                    attempt + 1,
+                                    n_backends,
+                                    exc,
+                                )
+                                continue
+                            # No custom-transport backend healthy — try cross-mode failover to standard backend.
+                            # Only safe when no bytes were emitted to sr yet.
+                            if not _bytes_written and self._any_healthy_backend() and attempt < n_backends - 1:
+                                try:
+                                    self._select_backend()
+                                except AllBackendsUnhealthyError:
+                                    logger.warning("Cross-mode failover: all backends unhealthy")
+                                    break
+                                self._normalize_model(cc_request)
+                                self._active_provider.normalize_request(cc_request)
+                                cc_request.pop("_resolved_key", None)
+                                cc_request.pop("_provider_config", None)
+                                cc_request.pop("_original_body", None)
+                                logger.info(
+                                    "Cross-mode failover: attempt %d/%d (%s), switching to standard backend",
+                                    attempt + 1,
+                                    n_backends,
+                                    exc,
                                 )
                                 break
-                            self._normalize_model(cc_request)
-                            self._active_provider.normalize_request(cc_request)
-                            cc_request["_resolved_key"] = self._active_key
-                            cc_request["_provider_config"] = self._active_provider_config
-                            logger.info(
-                                "Custom-transport failover: attempt %d/%d (%s), switching backend",
-                                attempt + 1,
-                                n_backends,
-                                exc,
-                            )
-                            continue
-                        # No custom-transport backend healthy — try cross-mode failover to standard backend.
-                        # Only safe when no bytes were emitted to sr yet.
-                        if not _bytes_written and self._any_healthy_backend() and attempt < n_backends - 1:
-                            try:
-                                self._select_backend()
-                            except AllBackendsUnhealthyError:
-                                logger.warning("Cross-mode failover: all backends unhealthy")
-                                break
-                            self._normalize_model(cc_request)
-                            self._active_provider.normalize_request(cc_request)
-                            cc_request.pop("_resolved_key", None)
-                            cc_request.pop("_provider_config", None)
-                            cc_request.pop("_original_body", None)
-                            logger.info(
-                                "Cross-mode failover: attempt %d/%d (%s), switching to standard backend",
-                                attempt + 1,
-                                n_backends,
-                                exc,
-                            )
-                            break
-                    # All backends exhausted or single-backend mode — surface error
-                    error_msg = self._custom_transport_error_message(exc)
-                    error_status, _ = self._map_provider_error(exc)
-                    error_code = "rate_limit_exhausted" if error_status == 429 else "upstream_error"
-                    error_event = responses_format_error(
-                        {"code": error_code, "message": error_msg},
-                        seq=translator._next_seq(),
+                        # All backends exhausted or single-backend mode — surface error
+                        error_msg = self._custom_transport_error_message(exc)
+                        error_status, _ = self._map_provider_error(exc)
+                        error_code = "rate_limit_exhausted" if error_status == 429 else "upstream_error"
+                        error_event = responses_format_error(
+                            {"code": error_code, "message": error_msg},
+                            seq=translator._next_seq(),
+                        )
+                        try:
+                            await sr.write(error_event.encode())
+                        except (ConnectionResetError, BrokenPipeError, OSError):
+                            logger.debug("Client disconnected before error event")
+                        break
+                    upstream_status: int | None = 200
+                    break
+
+                cc_request.pop("_resolved_key", None)
+                cc_request.pop("_provider_config", None)
+                cc_request.pop("_original_body", None)
+                # If cross-mode failover switched to a non-custom-transport provider,
+                # fall through to the standard streaming path below.
+                if not self._active_provider.use_custom_transport:
+                    logger.info(
+                        "Cross-mode failover: entering standard streaming path with %s",
+                        type(self._active_provider).__name__,
                     )
+                else:
                     try:
-                        await sr.write(error_event.encode())
+                        await sr.write_eof()
                     except (ConnectionResetError, BrokenPipeError, OSError):
-                        logger.debug("Client disconnected before error event")
-                    break
-                upstream_status: int | None = 200
-                break
+                        logger.debug("Client disconnected before stream EOF")
+                    return sr
 
-            cc_request.pop("_resolved_key", None)
-            cc_request.pop("_provider_config", None)
-            cc_request.pop("_original_body", None)
-            # If cross-mode failover switched to a non-custom-transport provider,
-            # fall through to the standard streaming path below.
-            if not self._active_provider.use_custom_transport:
-                logger.info(
-                    "Cross-mode failover: entering standard streaming path with %s",
-                    type(self._active_provider).__name__,
-                )
-            else:
-                try:
-                    await sr.write_eof()
-                except (ConnectionResetError, BrokenPipeError, OSError):
-                    logger.debug("Client disconnected before stream EOF")
-                return sr
+            # The lifecycle opening (response.created / response.in_progress) is
+            # translated speculatively at the start of each attempt — before any
+            # translate_stream_chunk call, so the attempt's sequence numbers start
+            # with the lifecycle (0, 1) and content continues from 2 — and written
+            # lazily, on the first non-finish write of that attempt (KBR-242). A
+            # purely-empty attempt writes nothing, so no half-open lifecycle
+            # crosses the empty-response failover; the next attempt rebuilds the
+            # strings after its reset. Invalidating ``start_events`` at every
+            # ``translator.reset()`` site inside the loop is part of this
+            # contract, not a nicety: the strings bake in sequence numbers.
+            start_events: list[str] | None = None
+            start_events_written = False
 
-        # The lifecycle opening (response.created / response.in_progress) is
-        # translated speculatively at the start of each attempt — before any
-        # translate_stream_chunk call, so the attempt's sequence numbers start
-        # with the lifecycle (0, 1) and content continues from 2 — and written
-        # lazily, on the first non-finish write of that attempt (KBR-242). A
-        # purely-empty attempt writes nothing, so no half-open lifecycle
-        # crosses the empty-response failover; the next attempt rebuilds the
-        # strings after its reset. Invalidating ``start_events`` at every
-        # ``translator.reset()`` site inside the loop is part of this
-        # contract, not a nicety: the strings bake in sequence numbers.
-        start_events: list[str] | None = None
-        start_events_written = False
+            async def _write_lifecycle_start() -> None:
+                """Write the current attempt's lifecycle opening once — whichever hook site invokes us first.
 
-        async def _write_lifecycle_start() -> None:
-            """Write the current attempt's lifecycle opening once — whichever hook site invokes us first."""
-            nonlocal start_events_written
-            if start_events_written or start_events is None:
-                return
-            start_events_written = True
-            for event in start_events:
-                logger.debug("SSE (start) → %s", event.split("\n", 1)[0][:120])
-                await sr.write(event.encode())
+                ``start_events`` is late-bound: the closure reads the live variable at
+                call time, and that variable is rebuilt after every
+                ``translator.reset()`` (KBR-242 contract) and at each KBR-254
+                cross-class re-dispatch. The ``# noqa: B023`` silence is load-bearing
+                — the loop-over-variable pattern is correct here.
+                """
+                nonlocal start_events_written
+                if start_events_written or start_events is None:  # noqa: B023
+                    return
+                start_events_written = True
+                for event in start_events:  # noqa: B023
+                    logger.debug("SSE (start) → %s", event.split("\n", 1)[0][:120])
+                    await sr.write(event.encode())
 
-        upstream_status = None
-        terminal_status = "completed"
-        last_usage: dict | None = None
-        try:
-            url = self._build_upstream_url(cc_request)
-            headers = self._build_upstream_headers(cc_request)
-            # Logged after the body is built, as the other three handlers do:
-            # serialization can refuse (KBR-126), and logging first would record
-            # a POST that never happens.
-            upstream_body = self._active_provider.translate_to_upstream(cc_request)
-            logger.debug("Upstream POST → %s", url)
+            upstream_status = None
+            terminal_status = "completed"
+            last_usage: dict | None = None
+            try:
+                url = self._build_upstream_url(cc_request)
+                headers = self._build_upstream_headers(cc_request)
+                # Logged after the body is built, as the other three handlers do:
+                # serialization can refuse (KBR-126), and logging first would record
+                # a POST that never happens.
+                upstream_body = self._active_provider.translate_to_upstream(cc_request)
+                logger.debug("Upstream POST → %s", url)
 
-            stream_timeout = aiohttp.ClientTimeout(total=None, sock_connect=30, sock_read=_STREAM_READ_TIMEOUT)
+                stream_timeout = aiohttp.ClientTimeout(total=None, sock_connect=30, sock_read=_STREAM_READ_TIMEOUT)
 
-            # Retry loop with backend failover for balancing mode
-            n_backends = len(self._backends) if self._backends else 1
-            _original_max_attempts = (_MAX_RETRIES + 1) * n_backends
-            max_attempts = _original_max_attempts + len(_EMPTY_FINAL_DELAYS)
-            transport_grace = TransportGrace()
-            # A thinking strip gets its attempt back (KBR-238): the loop runs
-            # wider by the strip budget and the ordinal is corrected below, so
-            # strips never pull the empty-response schedule forward.
-            strip_body: dict | None = None
-            strip_count = 0
-            strip_retries = 0
-            for raw_attempt in range(max_attempts + _MAX_THINKING_STRIPS):
-                attempt = raw_attempt - strip_retries
-                # The extra iterations exist only to give strips back. Without
-                # this the loop could run past the last real attempt — a
-                # `continue` that does not check `attempt` (the tool_use
-                # format fallback) would then index off the end of
-                # _EMPTY_FINAL_DELAYS. Ending here keeps the pre-strip
-                # invariant: at most `max_attempts` real attempts.
-                if attempt >= max_attempts:
-                    break
-                if attempt >= _original_max_attempts:
-                    delay = _EMPTY_FINAL_DELAYS[attempt - _original_max_attempts]
-                    logger.warning(
-                        "Empty upstream response: final retry in %.1fs (%d/%d)",
-                        delay,
-                        attempt + 1,
-                        max_attempts,
+                # Retry loop with backend failover for balancing mode
+                n_backends = len(self._backends) if self._backends else 1
+                _original_max_attempts = (_MAX_RETRIES + 1) * n_backends
+                max_attempts = _original_max_attempts + len(_EMPTY_FINAL_DELAYS)
+                transport_grace = TransportGrace()
+                # A thinking strip gets its attempt back (KBR-238): the loop runs
+                # wider by the strip budget and the ordinal is corrected below, so
+                # strips never pull the empty-response schedule forward.
+                strip_body: dict | None = None
+                strip_count = 0
+                strip_retries = 0
+                for raw_attempt in range(max_attempts + _MAX_THINKING_STRIPS):
+                    attempt = raw_attempt - strip_retries
+                    # The extra iterations exist only to give strips back. Without
+                    # this the loop could run past the last real attempt — a
+                    # `continue` that does not check `attempt` (the tool_use
+                    # format fallback) would then index off the end of
+                    # _EMPTY_FINAL_DELAYS. Ending here keeps the pre-strip
+                    # invariant: at most `max_attempts` real attempts.
+                    if attempt >= max_attempts:
+                        break
+                    if attempt >= _original_max_attempts:
+                        delay = _EMPTY_FINAL_DELAYS[attempt - _original_max_attempts]
+                        logger.warning(
+                            "Empty upstream response: final retry in %.1fs (%d/%d)",
+                            delay,
+                            attempt + 1,
+                            max_attempts,
+                        )
+                        await asyncio.sleep(delay)
+                    # Speculatively translate the lifecycle opening for this attempt,
+                    # before any translate_stream_chunk: both draw from the same _seq
+                    # counter, so the lifecycle must consume 0 and 1 before the first
+                    # chunk's events. Rebuilt only after a translator.reset() (which
+                    # restarts the counter) — see the invalidation sites below.
+                    if start_events is None:
+                        start_events = translator.translate_stream_start(response_id, model)
+                    # A Messages-wire upstream speaks Anthropic SSE, which no Responses
+                    # client can read: each line is converted to a Chat Completions
+                    # chunk first (KBR-232).  Re-created per attempt so a failover onto
+                    # a Chat Completions-wire backend re-evaluates the gate.
+                    stream_converter = AnthropicCCStreamConverter() if self._serves_messages_wire(cc_request) else None
+                    upstream = await self._open_upstream_stream(
+                        url, upstream_body, headers, stream_timeout, transport_grace
                     )
-                    await asyncio.sleep(delay)
-                # Speculatively translate the lifecycle opening for this attempt,
-                # before any translate_stream_chunk: both draw from the same _seq
-                # counter, so the lifecycle must consume 0 and 1 before the first
-                # chunk's events. Rebuilt only after a translator.reset() (which
-                # restarts the counter) — see the invalidation sites below.
-                if start_events is None:
-                    start_events = translator.translate_stream_start(response_id, model)
-                # A Messages-wire upstream speaks Anthropic SSE, which no Responses
-                # client can read: each line is converted to a Chat Completions
-                # chunk first (KBR-232).  Re-created per attempt so a failover onto
-                # a Chat Completions-wire backend re-evaluates the gate.
-                stream_converter = AnthropicCCStreamConverter() if self._serves_messages_wire(cc_request) else None
-                upstream = await self._open_upstream_stream(
-                    url, upstream_body, headers, stream_timeout, transport_grace
-                )
-                async with upstream:
-                    upstream_status = upstream.status
-                    logger.debug("Upstream response status: %d", upstream.status)
-                    logger.debug("Upstream response headers: %s", dict(upstream.headers))
+                    async with upstream:
+                        upstream_status = upstream.status
+                        logger.debug("Upstream response status: %d", upstream.status)
+                        logger.debug("Upstream response headers: %s", dict(upstream.headers))
 
-                    if upstream.status not in (200, 201):
-                        error_body = await upstream.text()
+                        if upstream.status not in (200, 201):
+                            error_body = await upstream.text()
 
-                        # Cloudflare challenge — never retryable, abort immediately
-                        if self._is_cloudflare_block(upstream.status, error_body):
-                            _log_cloudflare_block(upstream.status, error_body)
+                            # Cloudflare challenge — never retryable, abort immediately
+                            if self._is_cloudflare_block(upstream.status, error_body):
+                                _log_cloudflare_block(upstream.status, error_body)
+                                error_msg = self._translate_upstream_error(upstream.status, error_body)
+                                error_event = responses_format_error(
+                                    {"code": "upstream_error", "message": error_msg},
+                                    seq=translator._next_seq(),
+                                )
+                                await sr.write(error_event.encode())
+                                if self._backends and self._current_backend_idx >= 0:
+                                    self._mark_backend_unhealthy(self._current_backend_idx, failure_kind="cloudflare")
+                                break
+
+                            # Native-passthrough tool_use format mismatch — convert
+                            # to CC and retry the same backend without marking it
+                            # unhealthy.  The native Anthropic format is the
+                            # preferred format; only fall back when the upstream
+                            # proves it cannot handle tool_use content blocks.
+                            if (
+                                _is_tool_use_format_error(upstream.status, error_body)
+                                and cc_request.get("_native_messages_request")
+                                and _has_tool_use_blocks(body)
+                            ):
+                                logger.warning(
+                                    "tool_use format mismatch (status %d) — converting to CC and retrying same backend",
+                                    upstream.status,
+                                )
+                                cc_request = _convert_native_to_cc_format(body)
+                                cc_request["_native_messages_request"] = False
+                                self._normalize_model(cc_request)
+                                self._active_provider.normalize_request(cc_request)
+                                upstream_body = self._active_provider.translate_to_upstream(cc_request)
+                                continue
+
+                            # A signature the API will not verify is the bridge's history, not a sick
+                            # backend: strip the broken thinking and retry the same backend
+                            # (KBR-238; scope addition on KBR-232).  Strips are counted per
+                            # serialized body, so a failover's rebuilt body starts over.
+                            strips_done = strip_count if strip_body is upstream_body else 0
+                            if (
+                                attempt < max_attempts - 1
+                                and _is_thinking_signature_error(upstream.status, error_body)
+                                and _recover_rejected_thinking(upstream_body, error_body, strips_done)
+                            ):
+                                strip_body, strip_count = upstream_body, strips_done + 1
+                                strip_retries = min(strip_retries + 1, _MAX_THINKING_STRIPS)
+                                logger.warning(
+                                    "Backend rejected a thinking signature (status %d) — stripped thinking "
+                                    "and retrying the same backend (strip %d, attempt %d/%d)",
+                                    upstream.status,
+                                    strip_count,
+                                    attempt + 1,
+                                    max_attempts,
+                                )
+                                continue
+
+                            # In balancing mode: mark unhealthy and try next backend for ANY error —
+                            # except a signature rejection recovery could not fix: that history fails
+                            # on every member alike, so it surfaces without cooling a backend (M17).
+                            if (
+                                self._backends
+                                and self._current_backend_idx >= 0
+                                and not _is_thinking_signature_error(upstream.status, error_body)
+                            ):
+                                kind = (
+                                    "auth"
+                                    if upstream.status in _AUTH_FAILURE_STATUSES
+                                    else ("rate_limit" if upstream.status == 429 else "hard")
+                                )
+                                self._mark_backend_unhealthy(self._current_backend_idx, failure_kind=kind)
+                                if self._any_healthy_backend() and attempt < max_attempts - 1:
+                                    self._select_backend()
+                                    self._normalize_model(cc_request)
+                                    self._active_provider.normalize_request(cc_request)
+                                    # KBR-254: cross-class failover — this branch cannot drive a
+                                    # custom-transport provider via session.post(...). Re-dispatch into
+                                    # the custom-transport branch with the failover-selected provider
+                                    # as its initial selection (no further _select_backend call);
+                                    # the non-2xx arm has no reset of its own, so the guard resets the
+                                    # translator and invalidates the lifecycle strings (KBR-242
+                                    # contract) so their state does not leak into the re-entry.
+                                    if self._active_provider.use_custom_transport:
+                                        if _crossings >= _max_crossings:
+                                            logger.warning(
+                                                "Re-dispatch cap reached (%d crossings, cap %d); "
+                                                "not crossing plain → custom",
+                                                    _crossings, _max_crossings,
+                                                    )
+                                            _cross_cap_hit = True
+                                            break
+                                        _crossings += 1
+                                        translator.reset()
+                                        start_events = None
+                                        logger.info(
+                                            "Re-dispatching plain → custom after transport-class "
+                                            "failover (attempt %d, %d crossings)",
+                                            attempt + 1, _crossings,
+                                            )
+                                        _cross_mode_to_custom = True
+                                        break
+                                    url = self._build_upstream_url(cc_request)
+                                    headers = self._build_upstream_headers(cc_request)
+                                    upstream_body = self._active_provider.translate_to_upstream(cc_request)
+                                    logger.info(
+                                        "Responses stream failover: backend attempt %d/%d (status %d), "
+                                        "switching backend",
+                                        attempt + 1,
+                                        max_attempts,
+                                        upstream.status,
+                                    )
+                                    continue
+                            elif self._should_retry_stream(upstream.status, error_body) and attempt < max_attempts - 1:
+                                delay = _BACKOFF_BASE * (2 ** (attempt % (_MAX_RETRIES + 1)))
+                                logger.debug(
+                                    "Upstream %d, retrying in %.1fs (%d/%d)",
+                                    upstream.status,
+                                    delay,
+                                    attempt + 1,
+                                    max_attempts,
+                                )
+                                await asyncio.sleep(delay)
+                                continue
+
+                            # No healthy backends left or non-balancing mode — surface error to agent
+                            logger.error("Upstream error %d: %s", upstream.status, error_body)
+                            terminal_status = "incomplete"
                             error_msg = self._translate_upstream_error(upstream.status, error_body)
                             error_event = responses_format_error(
                                 {"code": "upstream_error", "message": error_msg},
                                 seq=translator._next_seq(),
                             )
                             await sr.write(error_event.encode())
-                            if self._backends and self._current_backend_idx >= 0:
-                                self._mark_backend_unhealthy(self._current_backend_idx, failure_kind="cloudflare")
                             break
 
-                        # Native-passthrough tool_use format mismatch — convert
-                        # to CC and retry the same backend without marking it
-                        # unhealthy.  The native Anthropic format is the
-                        # preferred format; only fall back when the upstream
-                        # proves it cannot handle tool_use content blocks.
-                        if (
-                            _is_tool_use_format_error(upstream.status, error_body)
-                            and cc_request.get("_native_messages_request")
-                            and _has_tool_use_blocks(body)
-                        ):
-                            logger.warning(
-                                "tool_use format mismatch (status %d) — converting to CC and retrying same backend",
-                                upstream.status,
+                        # Success path — stream the response
+                        line_buffer = bytearray()  # F23+F24: byte-based buffering
+                        chunk_count = 0
+                        done = False
+                        stream_error = False
+                        events_emitted = False
+                        finish_events: list[str] = []  # buffered finish events
+                        async for chunk_bytes in upstream.content:
+                            chunk_count += 1
+                            logger.debug("Upstream chunk #%d (%d bytes)", chunk_count, len(chunk_bytes))
+                            if done:
+                                break
+                            try:
+                                complete_lines = _append_sse_chunk(line_buffer, chunk_bytes)
+                            except ValueError:
+                                logger.error("SSE line exceeded maximum buffer size")
+                                stream_error = True
+                                done = True
+                                break
+                            for line in complete_lines:
+                                if not line:
+                                    continue
+                                if line.startswith("data: "):
+                                    # KBR-232: on a Messages-wire upstream the line is an
+                                    # Anthropic event; the converter's output lines re-enter
+                                    # the same body below and are never re-fed to it.
+                                    upstream_lines = (
+                                        [
+                                            converted.decode("utf-8").removesuffix("\n\n")
+                                            for converted in stream_converter.feed(f"{line}\n\n".encode())
+                                        ]
+                                        if stream_converter is not None
+                                        else [line]
+                                    )
+                                    for line in upstream_lines:
+                                        data_str = line[6:]
+                                        if data_str.strip() == "[DONE]":
+                                            logger.debug("Upstream [DONE] sentinel received")
+                                            done = True
+                                            break
+                                        try:
+                                            chunk = json.loads(data_str)
+                                        except json.JSONDecodeError:
+                                            logger.warning("Failed to parse upstream SSE data: %s", data_str[:200])
+                                            continue
+                                        # In balancing mode: detect in-stream errors and failover
+                                        if self._is_upstream_stream_error(chunk):
+                                            logger.warning(
+                                                "Upstream sent error in stream chunk: %s", json.dumps(chunk)[:500]
+                                            )
+                                            if self._backends and self._current_backend_idx >= 0:
+                                                cooldown = self._get_stream_error_cooldown(self._current_backend_idx)
+                                                self._mark_backend_unhealthy(
+                                self._current_backend_idx, cooldown=cooldown
                             )
-                            cc_request = _convert_native_to_cc_format(body)
-                            cc_request["_native_messages_request"] = False
-                            self._normalize_model(cc_request)
-                            self._active_provider.normalize_request(cc_request)
-                            upstream_body = self._active_provider.translate_to_upstream(cc_request)
-                            continue
+                                                if self._any_healthy_backend():
+                                                    stream_error = True
+                                                    done = True
+                                                    break
+                                            # No healthy backends — skip the error chunk, let terminal error handle it
+                                            stream_error = True
+                                            done = True
+                                            break
+                                        events = translator.translate_stream_chunk(response_id, chunk)
+                                        # Buffer finish events to detect empty responses before writing
+                                        if self._chunk_has_finish_reason(chunk):
+                                            last_usage = chunk.get("usage")
+                                            finish_events.extend(events)
+                                        else:
+                                            # Only a real event opens the lifecycle: a
+                                            # non-finish chunk that translates to nothing
+                                            # must not publish it before an empty verdict.
+                                            if events:
+                                                await _write_lifecycle_start()
+                                            for event in events:
+                                                logger.debug("SSE → %s", event.split("\n", 1)[0][:120])
+                                                await sr.write(event.encode())
+                                                events_emitted = True
+                                    if done:
+                                        break
 
-                        # A signature the API will not verify is the bridge's history, not a sick
-                        # backend: strip the broken thinking and retry the same backend
-                        # (KBR-238; scope addition on KBR-232).  Strips are counted per
-                        # serialized body, so a failover's rebuilt body starts over.
-                        strips_done = strip_count if strip_body is upstream_body else 0
-                        if (
-                            attempt < max_attempts - 1
-                            and _is_thinking_signature_error(upstream.status, error_body)
-                            and _recover_rejected_thinking(upstream_body, error_body, strips_done)
-                        ):
-                            strip_body, strip_count = upstream_body, strips_done + 1
-                            strip_retries = min(strip_retries + 1, _MAX_THINKING_STRIPS)
-                            logger.warning(
-                                "Backend rejected a thinking signature (status %d) — stripped thinking "
-                                "and retrying the same backend (strip %d, attempt %d/%d)",
-                                upstream.status,
-                                strip_count,
-                                attempt + 1,
-                                max_attempts,
-                            )
-                            continue
-
-                        # In balancing mode: mark unhealthy and try next backend for ANY error —
-                        # except a signature rejection recovery could not fix: that history fails
-                        # on every member alike, so it surfaces without cooling a backend (M17).
-                        if (
-                            self._backends
-                            and self._current_backend_idx >= 0
-                            and not _is_thinking_signature_error(upstream.status, error_body)
-                        ):
-                            kind = (
-                                "auth"
-                                if upstream.status in _AUTH_FAILURE_STATUSES
-                                else ("rate_limit" if upstream.status == 429 else "hard")
-                            )
-                            self._mark_backend_unhealthy(self._current_backend_idx, failure_kind=kind)
-                            if self._any_healthy_backend() and attempt < max_attempts - 1:
-                                self._select_backend()
-                                self._normalize_model(cc_request)
-                                self._active_provider.normalize_request(cc_request)
-                                url = self._build_upstream_url(cc_request)
-                                headers = self._build_upstream_headers(cc_request)
-                                upstream_body = self._active_provider.translate_to_upstream(cc_request)
-                                logger.info(
-                                    "Responses stream failover: backend attempt %d/%d (status %d), switching backend",
-                                    attempt + 1,
-                                    max_attempts,
-                                    upstream.status,
-                                )
-                                continue
-                        elif self._should_retry_stream(upstream.status, error_body) and attempt < max_attempts - 1:
-                            delay = _BACKOFF_BASE * (2 ** (attempt % (_MAX_RETRIES + 1)))
-                            logger.debug(
-                                "Upstream %d, retrying in %.1fs (%d/%d)",
-                                upstream.status,
-                                delay,
-                                attempt + 1,
-                                max_attempts,
-                            )
-                            await asyncio.sleep(delay)
-                            continue
-
-                        # No healthy backends left or non-balancing mode — surface error to agent
-                        logger.error("Upstream error %d: %s", upstream.status, error_body)
-                        terminal_status = "incomplete"
-                        error_msg = self._translate_upstream_error(upstream.status, error_body)
-                        error_event = responses_format_error(
-                            {"code": "upstream_error", "message": error_msg},
-                            seq=translator._next_seq(),
+                        logger.debug(
+                            "Upstream stream ended. chunks=%d done=%s remaining_buffer=%d bytes",
+                            chunk_count,
+                            done,
+                            len(line_buffer),
                         )
-                        await sr.write(error_event.encode())
-                        break
 
-                    # Success path — stream the response
-                    line_buffer = bytearray()  # F23+F24: byte-based buffering
-                    chunk_count = 0
-                    done = False
-                    stream_error = False
-                    events_emitted = False
-                    finish_events: list[str] = []  # buffered finish events
-                    async for chunk_bytes in upstream.content:
-                        chunk_count += 1
-                        logger.debug("Upstream chunk #%d (%d bytes)", chunk_count, len(chunk_bytes))
-                        if done:
-                            break
-                        try:
-                            complete_lines = _append_sse_chunk(line_buffer, chunk_bytes)
-                        except ValueError:
-                            logger.error("SSE line exceeded maximum buffer size")
-                            stream_error = True
-                            done = True
-                            break
-                        for line in complete_lines:
-                            if not line:
-                                continue
+                        # Flush remaining buffer (last chunk without trailing \n)
+                        if not done and line_buffer:
+                            line = line_buffer.decode("utf-8", errors="replace").strip()
+                            logger.debug("Flushing remaining buffer: %s", line[:500])
                             if line.startswith("data: "):
-                                # KBR-232: on a Messages-wire upstream the line is an
-                                # Anthropic event; the converter's output lines re-enter
-                                # the same body below and are never re-fed to it.
+                                # KBR-232: same conversion as the main loop above.
                                 upstream_lines = (
                                     [
                                         converted.decode("utf-8").removesuffix("\n\n")
@@ -3674,259 +3788,276 @@ class BridgeServer:
                                 )
                                 for line in upstream_lines:
                                     data_str = line[6:]
-                                    if data_str.strip() == "[DONE]":
-                                        logger.debug("Upstream [DONE] sentinel received")
-                                        done = True
-                                        break
-                                    try:
-                                        chunk = json.loads(data_str)
-                                    except json.JSONDecodeError:
-                                        logger.warning("Failed to parse upstream SSE data: %s", data_str[:200])
-                                        continue
-                                    # In balancing mode: detect in-stream errors and failover
-                                    if self._is_upstream_stream_error(chunk):
-                                        logger.warning(
-                                            "Upstream sent error in stream chunk: %s", json.dumps(chunk)[:500]
-                                        )
-                                        if self._backends and self._current_backend_idx >= 0:
-                                            cooldown = self._get_stream_error_cooldown(self._current_backend_idx)
-                                            self._mark_backend_unhealthy(self._current_backend_idx, cooldown=cooldown)
-                                            if self._any_healthy_backend():
-                                                stream_error = True
-                                                done = True
-                                                break
-                                        # No healthy backends — skip the error chunk, let terminal error handle it
-                                        stream_error = True
-                                        done = True
-                                        break
-                                    events = translator.translate_stream_chunk(response_id, chunk)
-                                    # Buffer finish events to detect empty responses before writing
-                                    if self._chunk_has_finish_reason(chunk):
-                                        last_usage = chunk.get("usage")
-                                        finish_events.extend(events)
-                                    else:
-                                        # Only a real event opens the lifecycle: a
-                                        # non-finish chunk that translates to nothing
-                                        # must not publish it before an empty verdict.
-                                        if events:
-                                            await _write_lifecycle_start()
-                                        for event in events:
-                                            logger.debug("SSE → %s", event.split("\n", 1)[0][:120])
-                                            await sr.write(event.encode())
-                                            events_emitted = True
-                                if done:
-                                    break
+                                    if data_str.strip() != "[DONE]":
+                                        try:
+                                            chunk = json.loads(data_str)
+                                            events = translator.translate_stream_chunk(response_id, chunk)
+                                            if self._chunk_has_finish_reason(chunk):
+                                                last_usage = chunk.get("usage")
+                                                finish_events.extend(events)
+                                            else:
+                                                # Same guard as the main loop above: only a
+                                                # real flushed event opens the lifecycle.
+                                                if events:
+                                                    await _write_lifecycle_start()
+                                                for event in events:
+                                                    logger.debug("SSE (flush) → %s", event.split("\n", 1)[0][:120])
+                                                    await sr.write(event.encode())
+                                                    events_emitted = True
+                                        except json.JSONDecodeError:
+                                            logger.warning("Failed to parse flushed SSE data: %s", data_str[:200])
 
-                    logger.debug(
-                        "Upstream stream ended. chunks=%d done=%s remaining_buffer=%d bytes",
-                        chunk_count,
-                        done,
-                        len(line_buffer),
-                    )
-
-                    # Flush remaining buffer (last chunk without trailing \n)
-                    if not done and line_buffer:
-                        line = line_buffer.decode("utf-8", errors="replace").strip()
-                        logger.debug("Flushing remaining buffer: %s", line[:500])
-                        if line.startswith("data: "):
-                            # KBR-232: same conversion as the main loop above.
-                            upstream_lines = (
-                                [
-                                    converted.decode("utf-8").removesuffix("\n\n")
-                                    for converted in stream_converter.feed(f"{line}\n\n".encode())
-                                ]
-                                if stream_converter is not None
-                                else [line]
-                            )
-                            for line in upstream_lines:
-                                data_str = line[6:]
-                                if data_str.strip() != "[DONE]":
-                                    try:
-                                        chunk = json.loads(data_str)
-                                        events = translator.translate_stream_chunk(response_id, chunk)
-                                        if self._chunk_has_finish_reason(chunk):
-                                            last_usage = chunk.get("usage")
-                                            finish_events.extend(events)
-                                        else:
-                                            # Same guard as the main loop above: only a
-                                            # real flushed event opens the lifecycle.
-                                            if events:
-                                                await _write_lifecycle_start()
-                                            for event in events:
-                                                logger.debug("SSE (flush) → %s", event.split("\n", 1)[0][:120])
-                                                await sr.write(event.encode())
-                                                events_emitted = True
-                                    except json.JSONDecodeError:
-                                        logger.warning("Failed to parse flushed SSE data: %s", data_str[:200])
-
-                    # Handle in-stream error failover
-                    if stream_error:
-                        if events_emitted:
-                            logger.warning("Responses stream error after client events emitted; not retrying")
-                        elif attempt < max_attempts - 1:
-                            translator.reset()
-                            start_events = None
-                            finish_events.clear()
-                            self._select_backend()
-                            self._normalize_model(cc_request)
-                            self._active_provider.normalize_request(cc_request)
-                            url = self._build_upstream_url(cc_request)
-                            headers = self._build_upstream_headers(cc_request)
-                            upstream_body = self._active_provider.translate_to_upstream(cc_request)
-                            logger.info(
-                                "Responses stream failover: in-stream error (no output yet), "
-                                "backend attempt %d/%d, switching backend",
-                                attempt + 1,
-                                max_attempts,
-                            )
-                            continue
-                        # No more backends — emit error event and mark incomplete.
-                        # KBR-250: break here, so the exhausted in-stream error
-                        # does not fall through to the empty-response gate below
-                        # (the no-finish arm would otherwise write a second
-                        # terminal error event after this one; the messages
-                        # branch has always ended its in-stream-error exhaustion
-                        # with a break).
-                        terminal_status = "incomplete"
-                        error_event = responses_format_error(
-                            {"code": "upstream_error", "message": "All upstream providers returned errors"},
-                            seq=translator._next_seq(),
-                        )
-                        try:
-                            await sr.write(error_event.encode())
-                        except (ConnectionResetError, BrokenPipeError, OSError):
-                            logger.debug(
-                                "Client disconnected before error could be sent for %s",
-                                response_id,
-                            )
-                        break
-
-                    # Check for empty response. KBR-250 extends the gate with
-                    # the no-finish arm (`empty_no_finish`) so a stream whose
-                    # upstream produced no finish chunk (zero bytes, [DONE]-only,
-                    # or truncated before any chunk) enters the same ladder as
-                    # the finish-chunk-empty case. When the ladder exhausts and
-                    # the entry was the no-finish arm, write the D4 SSE error
-                    # event and let the post-loop synthesize response.completed
-                    # with status="incomplete" and write_eof. The
-                    # `code: "empty_response"` field is the D4 discriminator on
-                    # the Responses wire (TEST_SUITE.md §11 Q14, KBR-235).
-                    #
-                    # No post-emission arm here, unlike KBR-235 on `/v1/messages`:
-                    # `ResponsesTranslator.response_was_empty` is whole-response-
-                    # scoped (accumulated text + tools + reasoning), so a stream
-                    # that wrote content cannot have `response_was_empty` True
-                    # and `empty_no_finish` requires `not events_emitted` on the
-                    # current attempt. The post-emission arm is structurally
-                    # unreachable on this route — see TEST_SUITE.md §11 Q14
-                    # amendment.
-                    empty_no_finish = not finish_events and not events_emitted
-                    if (translator.response_was_empty and finish_events) or empty_no_finish:
-                        translator.reset()
-                        start_events = None
-                        finish_events.clear()
-                        if self._backends and self._current_backend_idx >= 0:
-                            if self._any_healthy_backend() and attempt < max_attempts - 1:
+                        # Handle in-stream error failover
+                        if stream_error:
+                            if events_emitted:
+                                logger.warning("Responses stream error after client events emitted; not retrying")
+                            elif attempt < max_attempts - 1:
+                                translator.reset()
+                                start_events = None
+                                finish_events.clear()
                                 self._select_backend()
                                 self._normalize_model(cc_request)
                                 self._active_provider.normalize_request(cc_request)
+                                # KBR-254: cross-class failover — this branch cannot drive a
+                                # custom-transport provider via session.post(...). Re-dispatch into
+                                # the custom-transport branch with the failover-selected provider
+                                # as its initial selection (no further _select_backend call); the
+                                # arm above already reset the translator and the lifecycle
+                                # strings, so their state does not leak into the re-entry.
+                                if self._active_provider.use_custom_transport:
+                                    if _crossings >= _max_crossings:
+                                        logger.warning(
+                                            "Re-dispatch cap reached (%d crossings, cap %d); "
+                                            "not crossing plain → custom",
+                                                _crossings, _max_crossings,
+                                                )
+                                        _cross_cap_hit = True
+                                        break
+                                    _crossings += 1
+                                    # Arm above already reset the translator + lifecycle strings.
+                                    logger.info(
+                                        "Re-dispatching plain → custom after transport-class "
+                                        "failover (attempt %d, %d crossings)",
+                                        attempt + 1, _crossings,
+                                        )
+                                    _cross_mode_to_custom = True
+                                    break
                                 url = self._build_upstream_url(cc_request)
                                 headers = self._build_upstream_headers(cc_request)
                                 upstream_body = self._active_provider.translate_to_upstream(cc_request)
                                 logger.info(
-                                    "Responses stream empty response: attempt %d/%d, switching backend",
+                                    "Responses stream failover: in-stream error (no output yet), "
+                                    "backend attempt %d/%d, switching backend",
                                     attempt + 1,
                                     max_attempts,
                                 )
                                 continue
-                            logger.warning(
-                                "All backends returned empty response for %s, emitting fallback",
-                                response_id,
-                            )
-                        elif attempt < max_attempts - 1:
-                            delay = _BACKOFF_BASE * (2 ** (attempt % (_MAX_RETRIES + 1)))
-                            logger.warning(
-                                "Responses stream empty response: retrying in %.1fs (%d/%d)",
-                                delay,
-                                attempt + 1,
-                                max_attempts,
-                            )
-                            await asyncio.sleep(delay)
-                            continue
-                        else:
-                            logger.warning(
-                                "Responses stream empty response after %d attempts, emitting fallback",
-                                max_attempts,
-                            )
-
-                        if empty_no_finish:
-                            # D4 exhaustion: no prior emission, every attempt
-                            # empty. Write the D4 SSE error event and let the
-                            # post-loop synthesize response.completed(incomplete)
-                            # and write_eof.
+                            # No more backends — emit error event and mark incomplete.
+                            # KBR-250: break here, so the exhausted in-stream error
+                            # does not fall through to the empty-response gate below
+                            # (the no-finish arm would otherwise write a second
+                            # terminal error event after this one; the messages
+                            # branch has always ended its in-stream-error exhaustion
+                            # with a break).
                             terminal_status = "incomplete"
                             error_event = responses_format_error(
-                                {
-                                    "code": "empty_response",
-                                    "message": _NATIVE_EMPTY_REPLY_MESSAGE,
-                                },
+                                {"code": "upstream_error", "message": "All upstream providers returned errors"},
                                 seq=translator._next_seq(),
                             )
                             try:
                                 await sr.write(error_event.encode())
                             except (ConnectionResetError, BrokenPipeError, OSError):
                                 logger.debug(
-                                    "Client disconnected before empty-response exhaustion "
-                                    "error could be sent for %s",
+                                    "Client disconnected before error could be sent for %s",
                                     response_id,
                                 )
                             break
 
-                    # Write buffered finish events to client. The hook is
-                    # defensive: by the time control reaches a real non-empty
-                    # response the first content write already fired it, and an
-                    # EOF-without-finish empty stream (no finish events) must not
-                    # gain a half-open lifecycle it does not have today.
-                    if finish_events:
-                        await _write_lifecycle_start()
-                    for event in finish_events:
-                        logger.debug("SSE (finish) → %s", event.split("\n", 1)[0][:120])
-                        await sr.write(event.encode())
-                    self._log_usage(last_usage)
-                    # Mark backend healthy on clean stream completion
-                    if self._backends and self._current_backend_idx >= 0:
-                        self._mark_backend_healthy(self._current_backend_idx)
-                    break  # Exit retry loop
-        except asyncio.TimeoutError:
-            terminal_status = "incomplete"
-            logger.error("Upstream POST timed out after %ds for %s", _STREAM_READ_TIMEOUT, response_id)
-            error_event = responses_format_error(
-                {
-                    "code": "timeout",
-                    "message": (
-                        f"Upstream provider timed out ({_STREAM_READ_TIMEOUT}s). Try /clear to reduce context size."
-                    ),
-                },
-                seq=translator._next_seq(),
-            )
-            try:
-                await sr.write(error_event.encode())
-            except (ConnectionResetError, BrokenPipeError, OSError):
-                logger.debug("Client disconnected before timeout error could be sent for %s", response_id)
-        except (ConnectionResetError, BrokenPipeError, OSError):
-            logger.debug("Client disconnected during Responses API streaming for %s", response_id)
-        except Exception as exc:
-            terminal_status = "incomplete"
-            logger.exception("Exception in _stream_responses: %s", exc)
-            error_event = responses_format_error(
-                {"code": "internal_error", "message": str(exc)},
-                seq=translator._next_seq(),
-            )
-            try:
-                await sr.write(error_event.encode())
-            except (ConnectionResetError, BrokenPipeError, OSError):
-                logger.debug("Client disconnected before error could be sent for %s", response_id)
+                        # Check for empty response. KBR-250 extends the gate with
+                        # the no-finish arm (`empty_no_finish`) so a stream whose
+                        # upstream produced no finish chunk (zero bytes, [DONE]-only,
+                        # or truncated before any chunk) enters the same ladder as
+                        # the finish-chunk-empty case. When the ladder exhausts and
+                        # the entry was the no-finish arm, write the D4 SSE error
+                        # event and let the post-loop synthesize response.completed
+                        # with status="incomplete" and write_eof. The
+                        # `code: "empty_response"` field is the D4 discriminator on
+                        # the Responses wire (TEST_SUITE.md §11 Q14, KBR-235).
+                        #
+                        # No post-emission arm here, unlike KBR-235 on `/v1/messages`:
+                        # `ResponsesTranslator.response_was_empty` is whole-response-
+                        # scoped (accumulated text + tools + reasoning), so a stream
+                        # that wrote content cannot have `response_was_empty` True
+                        # and `empty_no_finish` requires `not events_emitted` on the
+                        # current attempt. The post-emission arm is structurally
+                        # unreachable on this route — see TEST_SUITE.md §11 Q14
+                        # amendment.
+                        empty_no_finish = not finish_events and not events_emitted
+                        if (translator.response_was_empty and finish_events) or empty_no_finish:
+                            translator.reset()
+                            start_events = None
+                            finish_events.clear()
+                            if self._backends and self._current_backend_idx >= 0:
+                                if self._any_healthy_backend() and attempt < max_attempts - 1:
+                                    self._select_backend()
+                                    self._normalize_model(cc_request)
+                                    self._active_provider.normalize_request(cc_request)
+                                    # KBR-254: cross-class failover — this branch cannot drive a
+                                    # custom-transport provider via session.post(...). Re-dispatch into
+                                    # the custom-transport branch with the failover-selected provider
+                                    # as its initial selection (no further _select_backend call); the
+                                    # arm above already reset the translator and the lifecycle
+                                    # strings, so their state does not leak into the re-entry.
+                                    if self._active_provider.use_custom_transport:
+                                        if _crossings >= _max_crossings:
+                                            logger.warning(
+                                                "Re-dispatch cap reached (%d crossings, cap %d); "
+                                                "not crossing plain → custom",
+                                                    _crossings, _max_crossings,
+                                                    )
+                                            _cross_cap_hit = True
+                                            break
+                                        _crossings += 1
+                                        # Arm above already reset the translator + lifecycle strings.
+                                        logger.info(
+                                            "Re-dispatching plain → custom after transport-class "
+                                            "failover (attempt %d, %d crossings)",
+                                            attempt + 1, _crossings,
+                                            )
+                                        _cross_mode_to_custom = True
+                                        break
+                                    url = self._build_upstream_url(cc_request)
+                                    headers = self._build_upstream_headers(cc_request)
+                                    upstream_body = self._active_provider.translate_to_upstream(cc_request)
+                                    logger.info(
+                                        "Responses stream empty response: attempt %d/%d, switching backend",
+                                        attempt + 1,
+                                        max_attempts,
+                                    )
+                                    continue
+                                logger.warning(
+                                    "All backends returned empty response for %s, emitting fallback",
+                                    response_id,
+                                )
+                            elif attempt < max_attempts - 1:
+                                delay = _BACKOFF_BASE * (2 ** (attempt % (_MAX_RETRIES + 1)))
+                                logger.warning(
+                                    "Responses stream empty response: retrying in %.1fs (%d/%d)",
+                                    delay,
+                                    attempt + 1,
+                                    max_attempts,
+                                )
+                                await asyncio.sleep(delay)
+                                continue
+                            else:
+                                logger.warning(
+                                    "Responses stream empty response after %d attempts, emitting fallback",
+                                    max_attempts,
+                                )
 
+                            if empty_no_finish:
+                                # D4 exhaustion: no prior emission, every attempt
+                                # empty. Write the D4 SSE error event and let the
+                                # post-loop synthesize response.completed(incomplete)
+                                # and write_eof.
+                                terminal_status = "incomplete"
+                                error_event = responses_format_error(
+                                    {
+                                        "code": "empty_response",
+                                        "message": _NATIVE_EMPTY_REPLY_MESSAGE,
+                                    },
+                                    seq=translator._next_seq(),
+                                )
+                                try:
+                                    await sr.write(error_event.encode())
+                                except (ConnectionResetError, BrokenPipeError, OSError):
+                                    logger.debug(
+                                        "Client disconnected before empty-response exhaustion "
+                                        "error could be sent for %s",
+                                        response_id,
+                                    )
+                                break
+
+                        # Write buffered finish events to client. The hook is
+                        # defensive: by the time control reaches a real non-empty
+                        # response the first content write already fired it, and an
+                        # EOF-without-finish empty stream (no finish events) must not
+                        # gain a half-open lifecycle it does not have today.
+                        if finish_events:
+                            await _write_lifecycle_start()
+                        for event in finish_events:
+                            logger.debug("SSE (finish) → %s", event.split("\n", 1)[0][:120])
+                            await sr.write(event.encode())
+                        self._log_usage(last_usage)
+                        # Mark backend healthy on clean stream completion
+                        if self._backends and self._current_backend_idx >= 0:
+                            self._mark_backend_healthy(self._current_backend_idx)
+                        break  # Exit retry loop
+            except asyncio.TimeoutError:
+                terminal_status = "incomplete"
+                logger.error("Upstream POST timed out after %ds for %s", _STREAM_READ_TIMEOUT, response_id)
+                error_event = responses_format_error(
+                    {
+                        "code": "timeout",
+                        "message": (
+                            f"Upstream provider timed out ({_STREAM_READ_TIMEOUT}s). Try /clear to reduce context size."
+                        ),
+                    },
+                    seq=translator._next_seq(),
+                )
+                try:
+                    await sr.write(error_event.encode())
+                except (ConnectionResetError, BrokenPipeError, OSError):
+                    logger.debug("Client disconnected before timeout error could be sent for %s", response_id)
+            except (ConnectionResetError, BrokenPipeError, OSError):
+                logger.debug("Client disconnected during Responses API streaming for %s", response_id)
+            except Exception as exc:
+                terminal_status = "incomplete"
+                logger.exception("Exception in _stream_responses: %s", exc)
+                error_event = responses_format_error(
+                    {"code": "internal_error", "message": str(exc)},
+                    seq=translator._next_seq(),
+                )
+                try:
+                    await sr.write(error_event.encode())
+                except (ConnectionResetError, BrokenPipeError, OSError):
+                    logger.debug("Client disconnected before error could be sent for %s", response_id)
+
+
+            # Dispatch-loop routing (KBR-254). Every plain-POST crossing site
+            # ran pre-emission, so a re-dispatch here starts the matching branch
+            # on a fresh attempt of the same request.
+            if _cross_mode_to_custom:
+                continue
+            if _cross_cap_hit:
+                logger.warning(
+                    "Re-dispatch cap reached (%d crossings, cap %d); surfacing "
+                    "cross-class exhaustion for %s",
+                    _crossings,
+                    _max_crossings,                    response_id,
+
+                )
+                terminal_status = "incomplete"
+                error_event = responses_format_error(
+                    {
+                        "code": "cross_class_exhaustion",
+                        "message": (
+                            "Upstream backends exhausted (the bridge could not "
+                            "land on a usable backend on this request)"
+                        ),
+                        "reason": "cross_class_exhaustion",
+                    },
+                    seq=translator._next_seq(),
+                )
+                try:
+                    await sr.write(error_event.encode())
+                except (ConnectionResetError, BrokenPipeError, OSError):
+                    logger.debug(
+                        "Client disconnected before error could be sent for %s",
+                        response_id,
+                    )
+                break
+            break
         # Ensure response.completed lifecycle is always sent before EOF
         try:
             synthesize_events = translator.synthesize_completed_events(
@@ -5636,293 +5767,383 @@ class BridgeServer:
         last_usage: dict | None = None
         stream_ok = False  # Set True only on clean completion
 
-        # Custom-transport providers handle their own HTTP requests.
-        if self._active_provider.use_custom_transport:
-            cc_request["_resolved_key"] = self._active_key
-            cc_request["_provider_config"] = self._active_provider_config
-            self._log_backend_selection()
+        # KBR-254: transport-class dispatch loop. Mirrors `_stream_messages` (KBR-249,
+        # §5.3 S8/S9 of SYSTEM_DESIGN.md). A streaming branch whose failover selects a
+        # provider of the other transport class re-dispatches here so the matching
+        # branch drives the response. The hop cap bounds pathological cooldown-expiry
+        # ping-pong; mirroring `_stream_messages`'s `(2 * n_backends) + 1` bound.
+        _crossings = 0
+        _max_crossings = (2 * (len(self._backends) if self._backends else 1)) + 1
+        while True:
+            _cross_mode_to_custom = False
+            _cross_cap_hit = False
 
-            n_backends = len(self._backends) if self._backends else 1
-            _bytes_written = False
+            # Custom-transport providers handle their own HTTP requests.
+            if self._active_provider.use_custom_transport:
+                cc_request["_resolved_key"] = self._active_key
+                cc_request["_provider_config"] = self._active_provider_config
+                self._log_backend_selection()
 
-            async def _tracked_write(data: bytes) -> None:
-                nonlocal _bytes_written
-                _bytes_written = True
-                await sr.write(data)
-
-            for attempt in range(n_backends):
+                n_backends = len(self._backends) if self._backends else 1
                 _bytes_written = False
-                try:
-                    await self._active_provider.stream_request(cc_request, _tracked_write)
-                except Exception as exc:
-                    logger.warning("Custom-transport stream failed: %s", exc)
-                    if self._backends and self._current_backend_idx >= 0:
-                        kind = self._provider_error_failure_kind(exc)
-                        self._mark_backend_unhealthy(
-                            self._current_backend_idx,
-                            failure_kind=kind,
-                            cooldown=self._retry_after_from_exc(exc),
-                        )
-                        # Once the provider wrote to the client, another backend would append its attempt (§11 Q14(a)).
-                        if (
-                            not _bytes_written
-                            and self._any_healthy_backend(require_streaming=True)
-                            and attempt < n_backends - 1
-                        ):
-                            translator.reset()  # F22: clear stale tool buffers before same-mode failover
-                            try:
-                                self._select_backend(require_streaming=True)
-                            except AllBackendsUnhealthyError as all_unhealthy:
-                                logger.warning(
-                                    "All streaming backends unhealthy (fast-fail), retry_after=%ds",
-                                    all_unhealthy.retry_after,
+
+                async def _tracked_write(data: bytes) -> None:
+                    nonlocal _bytes_written
+                    _bytes_written = True
+                    await sr.write(data)
+
+                for attempt in range(n_backends):
+                    _bytes_written = False
+                    try:
+                        await self._active_provider.stream_request(cc_request, _tracked_write)
+                    except Exception as exc:
+                        logger.warning("Custom-transport stream failed: %s", exc)
+                        if self._backends and self._current_backend_idx >= 0:
+                            kind = self._provider_error_failure_kind(exc)
+                            self._mark_backend_unhealthy(
+                                self._current_backend_idx,
+                                failure_kind=kind,
+                                cooldown=self._retry_after_from_exc(exc),
+                            )
+                            # Once the provider wrote to the client, another backend
+                            # would append its attempt (§11 Q14(a)).
+                            if (
+                                not _bytes_written
+                                and self._any_healthy_backend(require_streaming=True)
+                                and attempt < n_backends - 1
+                            ):
+                                translator.reset()  # F22: clear stale tool buffers before same-mode failover
+                                try:
+                                    self._select_backend(require_streaming=True)
+                                except AllBackendsUnhealthyError as all_unhealthy:
+                                    logger.warning(
+                                        "All streaming backends unhealthy (fast-fail), retry_after=%ds",
+                                        all_unhealthy.retry_after,
+                                    )
+                                    break
+                                self._normalize_model(cc_request)
+                                self._active_provider.normalize_request(cc_request)
+                                cc_request["_resolved_key"] = self._active_key
+                                cc_request["_provider_config"] = self._active_provider_config
+                                logger.info(
+                                    "Custom-transport failover: attempt %d/%d (%s), switching backend",
+                                    attempt + 1,
+                                    n_backends,
+                                    exc,
+                                )
+                                continue
+                            # No custom-transport backend healthy — try cross-mode failover to standard backend.
+                            # Only safe when no bytes were emitted to sr yet.
+                            if not _bytes_written and self._any_healthy_backend() and attempt < n_backends - 1:
+                                try:
+                                    self._select_backend()
+                                except AllBackendsUnhealthyError:
+                                    logger.warning("Cross-mode failover: all backends unhealthy")
+                                    break
+                                self._normalize_model(cc_request)
+                                translator.reset()  # F22: clear stale tool buffers before cross-mode failover
+                                self._active_provider.normalize_request(cc_request)
+                                cc_request.pop("_resolved_key", None)
+                                cc_request.pop("_provider_config", None)
+                                logger.info(
+                                    "Cross-mode failover: attempt %d/%d (%s), switching to standard backend",
+                                    attempt + 1,
+                                    n_backends,
+                                    exc,
                                 )
                                 break
-                            self._normalize_model(cc_request)
-                            self._active_provider.normalize_request(cc_request)
-                            cc_request["_resolved_key"] = self._active_key
-                            cc_request["_provider_config"] = self._active_provider_config
-                            logger.info(
-                                "Custom-transport failover: attempt %d/%d (%s), switching backend",
-                                attempt + 1,
-                                n_backends,
-                                exc,
-                            )
-                            continue
-                        # No custom-transport backend healthy — try cross-mode failover to standard backend.
-                        # Only safe when no bytes were emitted to sr yet.
-                        if not _bytes_written and self._any_healthy_backend() and attempt < n_backends - 1:
-                            try:
-                                self._select_backend()
-                            except AllBackendsUnhealthyError:
-                                logger.warning("Cross-mode failover: all backends unhealthy")
-                                break
-                            self._normalize_model(cc_request)
-                            translator.reset()  # F22: clear stale tool buffers before cross-mode failover
-                            self._active_provider.normalize_request(cc_request)
-                            cc_request.pop("_resolved_key", None)
-                            cc_request.pop("_provider_config", None)
-                            logger.info(
-                                "Cross-mode failover: attempt %d/%d (%s), switching to standard backend",
-                                attempt + 1,
-                                n_backends,
-                                exc,
-                            )
-                            break
-                    # All backends exhausted or single-backend mode — surface error
-                    error_msg = self._custom_transport_error_message(exc)
-                    error_status, _ = self._map_provider_error(exc)
-                    error_code = error_status if error_status != 502 else "stream_error"
-                    error_sse = f"data: {json.dumps({'error': {'code': error_code, 'message': error_msg}})}\n\n"
-                    try:
-                        await sr.write(error_sse.encode())
-                    except (ConnectionResetError, BrokenPipeError, OSError):
-                        logger.debug("Client disconnected before error event")
+                        # All backends exhausted or single-backend mode — surface error
+                        error_msg = self._custom_transport_error_message(exc)
+                        error_status, _ = self._map_provider_error(exc)
+                        error_code = error_status if error_status != 502 else "stream_error"
+                        error_sse = f"data: {json.dumps({'error': {'code': error_code, 'message': error_msg}})}\n\n"
+                        try:
+                            await sr.write(error_sse.encode())
+                        except (ConnectionResetError, BrokenPipeError, OSError):
+                            logger.debug("Client disconnected before error event")
+                        break
                     break
-                break
 
-            cc_request.pop("_resolved_key", None)
-            cc_request.pop("_provider_config", None)
-            # If cross-mode failover switched to a non-custom-transport provider,
-            # fall through to the standard streaming path below.
-            if not self._active_provider.use_custom_transport:
-                logger.info(
-                    "Cross-mode failover: entering standard streaming path with %s",
-                    type(self._active_provider).__name__,
-                )
-            else:
-                try:
-                    await sr.write_eof()
-                except (ConnectionResetError, BrokenPipeError, OSError):
-                    logger.debug("Client disconnected before stream EOF")
-                return sr
-
-        try:
-            url = self._build_upstream_url(cc_request)
-            headers = self._build_upstream_headers(cc_request)
-            upstream_body = self._active_provider.translate_to_upstream(cc_request)
-            logger.debug("Upstream POST → %s", url)
-
-            stream_timeout = aiohttp.ClientTimeout(total=None, sock_connect=30, sock_read=_STREAM_READ_TIMEOUT)
-
-            # Retry loop with backend failover for balancing mode
-            n_backends = len(self._backends) if self._backends else 1
-            _original_max_attempts = (_MAX_RETRIES + 1) * n_backends
-            max_attempts = _original_max_attempts + len(_EMPTY_FINAL_DELAYS)
-            transport_grace = TransportGrace()
-            # A thinking strip gets its attempt back (KBR-238): the loop runs
-            # wider by the strip budget and the ordinal is corrected below, so
-            # strips never pull the empty-response schedule forward.
-            strip_body: dict | None = None
-            strip_count = 0
-            strip_retries = 0
-            for raw_attempt in range(max_attempts + _MAX_THINKING_STRIPS):
-                attempt = raw_attempt - strip_retries
-                # The extra iterations exist only to give strips back. Without
-                # this the loop could run past the last real attempt — a
-                # `continue` that does not check `attempt` (the tool_use
-                # format fallback) would then index off the end of
-                # _EMPTY_FINAL_DELAYS. Ending here keeps the pre-strip
-                # invariant: at most `max_attempts` real attempts.
-                if attempt >= max_attempts:
-                    break
-                if attempt >= _original_max_attempts:
-                    delay = _EMPTY_FINAL_DELAYS[attempt - _original_max_attempts]
-                    logger.warning(
-                        "Empty upstream response: final retry in %.1fs (%d/%d)",
-                        delay,
-                        attempt + 1,
-                        max_attempts,
+                cc_request.pop("_resolved_key", None)
+                cc_request.pop("_provider_config", None)
+                # If cross-mode failover switched to a non-custom-transport provider,
+                # fall through to the standard streaming path below.
+                if not self._active_provider.use_custom_transport:
+                    logger.info(
+                        "Cross-mode failover: entering standard streaming path with %s",
+                        type(self._active_provider).__name__,
                     )
-                    await asyncio.sleep(delay)
-                # A Messages-wire upstream speaks Anthropic SSE, which no Gemini
-                # client can read: each line is converted to a Chat Completions
-                # chunk first (KBR-232).  Re-created per attempt so a failover onto
-                # a Chat Completions-wire backend re-evaluates the gate.
-                stream_converter = AnthropicCCStreamConverter() if self._serves_messages_wire(cc_request) else None
-                upstream = await self._open_upstream_stream(
-                    url, upstream_body, headers, stream_timeout, transport_grace
-                )
-                async with upstream:
-                    logger.debug("Upstream response status: %d", upstream.status)
+                else:
+                    try:
+                        await sr.write_eof()
+                    except (ConnectionResetError, BrokenPipeError, OSError):
+                        logger.debug("Client disconnected before stream EOF")
+                    return sr
 
-                    if upstream.status not in (200, 201):
-                        error_body = await upstream.text()
+            try:
+                url = self._build_upstream_url(cc_request)
+                headers = self._build_upstream_headers(cc_request)
+                upstream_body = self._active_provider.translate_to_upstream(cc_request)
+                logger.debug("Upstream POST → %s", url)
 
-                        # Cloudflare challenge — never retryable, abort immediately
-                        if self._is_cloudflare_block(upstream.status, error_body):
-                            _log_cloudflare_block(upstream.status, error_body)
-                            error_msg = self._translate_upstream_error(upstream.status, error_body)
-                            error_sse = (
-                                f"data: {json.dumps({'error': {'code': 'upstream_error', 'message': error_msg}})}\n\n"
-                            )
-                            try:
-                                await sr.write(error_sse.encode())
-                            except (ConnectionResetError, BrokenPipeError, OSError):
-                                logger.debug("Client disconnected before Cloudflare error event")
-                            if self._backends and self._current_backend_idx >= 0:
-                                self._mark_backend_unhealthy(self._current_backend_idx, failure_kind="cloudflare")
-                            break
+                stream_timeout = aiohttp.ClientTimeout(total=None, sock_connect=30, sock_read=_STREAM_READ_TIMEOUT)
 
-                        logger.error("Upstream error %d: %s", upstream.status, error_body)
+                # Retry loop with backend failover for balancing mode
+                n_backends = len(self._backends) if self._backends else 1
+                _original_max_attempts = (_MAX_RETRIES + 1) * n_backends
+                max_attempts = _original_max_attempts + len(_EMPTY_FINAL_DELAYS)
+                transport_grace = TransportGrace()
+                # A thinking strip gets its attempt back (KBR-238): the loop runs
+                # wider by the strip budget and the ordinal is corrected below, so
+                # strips never pull the empty-response schedule forward.
+                strip_body: dict | None = None
+                strip_count = 0
+                strip_retries = 0
+                for raw_attempt in range(max_attempts + _MAX_THINKING_STRIPS):
+                    attempt = raw_attempt - strip_retries
+                    # The extra iterations exist only to give strips back. Without
+                    # this the loop could run past the last real attempt — a
+                    # `continue` that does not check `attempt` (the tool_use
+                    # format fallback) would then index off the end of
+                    # _EMPTY_FINAL_DELAYS. Ending here keeps the pre-strip
+                    # invariant: at most `max_attempts` real attempts.
+                    if attempt >= max_attempts:
+                        break
+                    if attempt >= _original_max_attempts:
+                        delay = _EMPTY_FINAL_DELAYS[attempt - _original_max_attempts]
+                        logger.warning(
+                            "Empty upstream response: final retry in %.1fs (%d/%d)",
+                            delay,
+                            attempt + 1,
+                            max_attempts,
+                        )
+                        await asyncio.sleep(delay)
+                    # A Messages-wire upstream speaks Anthropic SSE, which no Gemini
+                    # client can read: each line is converted to a Chat Completions
+                    # chunk first (KBR-232).  Re-created per attempt so a failover onto
+                    # a Chat Completions-wire backend re-evaluates the gate.
+                    stream_converter = AnthropicCCStreamConverter() if self._serves_messages_wire(cc_request) else None
+                    upstream = await self._open_upstream_stream(
+                        url, upstream_body, headers, stream_timeout, transport_grace
+                    )
+                    async with upstream:
+                        logger.debug("Upstream response status: %d", upstream.status)
 
-                        # Native-passthrough tool_use format mismatch — convert
-                        # to CC and retry the same backend.
-                        if (
-                            _is_tool_use_format_error(upstream.status, error_body)
-                            and cc_request.get("_native_messages_request")
-                            and _has_tool_use_blocks(cc_request)
-                        ):
-                            logger.warning(
-                                "tool_use format mismatch (status %d) — converting to CC and retrying same backend",
-                                upstream.status,
-                            )
-                            cc_request = _convert_native_to_cc_format(cc_request)
-                            cc_request["_native_messages_request"] = False
-                            self._normalize_model(cc_request)
-                            self._active_provider.normalize_request(cc_request)
-                            url = self._build_upstream_url(cc_request)
-                            headers = self._build_upstream_headers(cc_request)
-                            upstream_body = self._active_provider.translate_to_upstream(cc_request)
-                            continue
+                        if upstream.status not in (200, 201):
+                            error_body = await upstream.text()
 
-                        # A signature the API will not verify is the bridge's history, not a sick
-                        # backend: strip the broken thinking and retry the same backend
-                        # (KBR-238; scope addition on KBR-232).  Strips are counted per
-                        # serialized body, so a failover's rebuilt body starts over.
-                        strips_done = strip_count if strip_body is upstream_body else 0
-                        if (
-                            attempt < max_attempts - 1
-                            and _is_thinking_signature_error(upstream.status, error_body)
-                            and _recover_rejected_thinking(upstream_body, error_body, strips_done)
-                        ):
-                            strip_body, strip_count = upstream_body, strips_done + 1
-                            strip_retries = min(strip_retries + 1, _MAX_THINKING_STRIPS)
-                            logger.warning(
-                                "Backend rejected a thinking signature (status %d) — stripped thinking "
-                                "and retrying the same backend (strip %d, attempt %d/%d)",
-                                upstream.status,
-                                strip_count,
-                                attempt + 1,
-                                max_attempts,
-                            )
-                            continue
+                            # Cloudflare challenge — never retryable, abort immediately
+                            if self._is_cloudflare_block(upstream.status, error_body):
+                                _log_cloudflare_block(upstream.status, error_body)
+                                error_msg = self._translate_upstream_error(upstream.status, error_body)
+                                error_sse = (
+                                    f"data: {json.dumps({'error': {'code': 'upstream_error', 'message': error_msg}})}"
+                                    "\n\n"
+                                )
+                                try:
+                                    await sr.write(error_sse.encode())
+                                except (ConnectionResetError, BrokenPipeError, OSError):
+                                    logger.debug("Client disconnected before Cloudflare error event")
+                                if self._backends and self._current_backend_idx >= 0:
+                                    self._mark_backend_unhealthy(self._current_backend_idx, failure_kind="cloudflare")
+                                break
 
-                        # In balancing mode: mark unhealthy and try next backend for ANY error —
-                        # except a signature rejection recovery could not fix: that history fails
-                        # on every member alike, so it surfaces without cooling a backend (M17).
-                        if (
-                            self._backends
-                            and self._current_backend_idx >= 0
-                            and not _is_thinking_signature_error(upstream.status, error_body)
-                        ):
-                            kind = (
-                                "auth"
-                                if upstream.status in _AUTH_FAILURE_STATUSES
-                                else ("rate_limit" if upstream.status == 429 else "hard")
-                            )
-                            self._mark_backend_unhealthy(self._current_backend_idx, failure_kind=kind)
-                            if self._any_healthy_backend() and attempt < max_attempts - 1:
-                                translator.reset()  # F22: clear stale tool buffers
-                                self._select_backend()
+                            logger.error("Upstream error %d: %s", upstream.status, error_body)
+
+                            # Native-passthrough tool_use format mismatch — convert
+                            # to CC and retry the same backend.
+                            if (
+                                _is_tool_use_format_error(upstream.status, error_body)
+                                and cc_request.get("_native_messages_request")
+                                and _has_tool_use_blocks(cc_request)
+                            ):
+                                logger.warning(
+                                    "tool_use format mismatch (status %d) — converting to CC and retrying same backend",
+                                    upstream.status,
+                                )
+                                cc_request = _convert_native_to_cc_format(cc_request)
+                                cc_request["_native_messages_request"] = False
                                 self._normalize_model(cc_request)
                                 self._active_provider.normalize_request(cc_request)
                                 url = self._build_upstream_url(cc_request)
                                 headers = self._build_upstream_headers(cc_request)
                                 upstream_body = self._active_provider.translate_to_upstream(cc_request)
-                                logger.info(
-                                    "Gemini stream failover: backend attempt %d/%d (status %d), switching backend",
+                                continue
+
+                            # A signature the API will not verify is the bridge's history, not a sick
+                            # backend: strip the broken thinking and retry the same backend
+                            # (KBR-238; scope addition on KBR-232).  Strips are counted per
+                            # serialized body, so a failover's rebuilt body starts over.
+                            strips_done = strip_count if strip_body is upstream_body else 0
+                            if (
+                                attempt < max_attempts - 1
+                                and _is_thinking_signature_error(upstream.status, error_body)
+                                and _recover_rejected_thinking(upstream_body, error_body, strips_done)
+                            ):
+                                strip_body, strip_count = upstream_body, strips_done + 1
+                                strip_retries = min(strip_retries + 1, _MAX_THINKING_STRIPS)
+                                logger.warning(
+                                    "Backend rejected a thinking signature (status %d) — stripped thinking "
+                                    "and retrying the same backend (strip %d, attempt %d/%d)",
+                                    upstream.status,
+                                    strip_count,
                                     attempt + 1,
                                     max_attempts,
-                                    upstream.status,
                                 )
                                 continue
-                        elif self._should_retry_stream(upstream.status, error_body) and attempt < max_attempts - 1:
-                            delay = _BACKOFF_BASE * (2 ** (attempt % (_MAX_RETRIES + 1)))
-                            logger.debug(
-                                "Upstream %d, retrying in %.1fs (%d/%d)",
-                                upstream.status,
-                                delay,
-                                attempt + 1,
-                                max_attempts,
-                            )
-                            await asyncio.sleep(delay)
-                            continue
 
-                        # No healthy backends left or non-balancing mode — surface error to agent
-                        error_msg = self._translate_upstream_error(upstream.status, error_body)
-                        error_sse = (
-                            f"data: {json.dumps({'error': {'code': upstream.status, 'message': error_msg}})}\n\n"
-                        )
-                        try:
-                            await sr.write(error_sse.encode())
-                        except (ConnectionResetError, BrokenPipeError, OSError):
-                            logger.debug("Client disconnected before upstream error could be sent")
-                        break
-
-                    # Success path — stream the response
-                    line_buffer = bytearray()  # F23+F24: byte-based buffering
-                    done = False
-                    stream_error = False
-                    events_emitted = False
-                    finish_events: list[str] = []  # buffered finish events
-                    async for chunk_bytes in upstream.content:
-                        if done:
-                            break
-                        try:
-                            complete_lines = _append_sse_chunk(line_buffer, chunk_bytes)
-                        except ValueError:
-                            logger.error("SSE line exceeded maximum buffer size")
-                            stream_error = True
-                            done = True
-                            break
-                        for line in complete_lines:
-                            if not line:
+                            # In balancing mode: mark unhealthy and try next backend for ANY error —
+                            # except a signature rejection recovery could not fix: that history fails
+                            # on every member alike, so it surfaces without cooling a backend (M17).
+                            if (
+                                self._backends
+                                and self._current_backend_idx >= 0
+                                and not _is_thinking_signature_error(upstream.status, error_body)
+                            ):
+                                kind = (
+                                    "auth"
+                                    if upstream.status in _AUTH_FAILURE_STATUSES
+                                    else ("rate_limit" if upstream.status == 429 else "hard")
+                                )
+                                self._mark_backend_unhealthy(self._current_backend_idx, failure_kind=kind)
+                                if self._any_healthy_backend() and attempt < max_attempts - 1:
+                                    translator.reset()  # F22: clear stale tool buffers
+                                    self._select_backend()
+                                    self._normalize_model(cc_request)
+                                    self._active_provider.normalize_request(cc_request)
+                                    # KBR-254: cross-class failover — this branch cannot drive a
+                                    # custom-transport provider via session.post(...). Re-dispatch into
+                                    # the custom-transport branch with the failover-selected provider
+                                    # as its initial selection (no further _select_backend call); the
+                                    # arm above already reset the translator (F22), so its stale
+                                    # tool buffers do not leak into the re-entry.
+                                    if self._active_provider.use_custom_transport:
+                                        if _crossings >= _max_crossings:
+                                            logger.warning(
+                                                "Re-dispatch cap reached (%d crossings, cap %d); "
+                                                "not crossing plain → custom",
+                                                    _crossings, _max_crossings,
+                                                    )
+                                            _cross_cap_hit = True
+                                            break
+                                        _crossings += 1
+                                        # Arm above already reset the translator (F22).
+                                        logger.info(
+                                            "Re-dispatching plain → custom after transport-class "
+                                            "failover (attempt %d, %d crossings)",
+                                            attempt + 1, _crossings,
+                                            )
+                                        _cross_mode_to_custom = True
+                                        break
+                                    url = self._build_upstream_url(cc_request)
+                                    headers = self._build_upstream_headers(cc_request)
+                                    upstream_body = self._active_provider.translate_to_upstream(cc_request)
+                                    logger.info(
+                                        "Gemini stream failover: backend attempt %d/%d (status %d), switching backend",
+                                        attempt + 1,
+                                        max_attempts,
+                                        upstream.status,
+                                    )
+                                    continue
+                            elif self._should_retry_stream(upstream.status, error_body) and attempt < max_attempts - 1:
+                                delay = _BACKOFF_BASE * (2 ** (attempt % (_MAX_RETRIES + 1)))
+                                logger.debug(
+                                    "Upstream %d, retrying in %.1fs (%d/%d)",
+                                    upstream.status,
+                                    delay,
+                                    attempt + 1,
+                                    max_attempts,
+                                )
+                                await asyncio.sleep(delay)
                                 continue
+
+                            # No healthy backends left or non-balancing mode — surface error to agent
+                            error_msg = self._translate_upstream_error(upstream.status, error_body)
+                            error_sse = (
+                                f"data: {json.dumps({'error': {'code': upstream.status, 'message': error_msg}})}\n\n"
+                            )
+                            try:
+                                await sr.write(error_sse.encode())
+                            except (ConnectionResetError, BrokenPipeError, OSError):
+                                logger.debug("Client disconnected before upstream error could be sent")
+                            break
+
+                        # Success path — stream the response
+                        line_buffer = bytearray()  # F23+F24: byte-based buffering
+                        done = False
+                        stream_error = False
+                        events_emitted = False
+                        finish_events: list[str] = []  # buffered finish events
+                        async for chunk_bytes in upstream.content:
+                            if done:
+                                break
+                            try:
+                                complete_lines = _append_sse_chunk(line_buffer, chunk_bytes)
+                            except ValueError:
+                                logger.error("SSE line exceeded maximum buffer size")
+                                stream_error = True
+                                done = True
+                                break
+                            for line in complete_lines:
+                                if not line:
+                                    continue
+                                if line.startswith("data: "):
+                                    # KBR-232: on a Messages-wire upstream the line is an
+                                    # Anthropic event; the converter's output lines re-enter
+                                    # the same body below and are never re-fed to it.
+                                    upstream_lines = (
+                                        [
+                                            converted.decode("utf-8").removesuffix("\n\n")
+                                            for converted in stream_converter.feed(f"{line}\n\n".encode())
+                                        ]
+                                        if stream_converter is not None
+                                        else [line]
+                                    )
+                                    for line in upstream_lines:
+                                        data_str = line[6:]
+                                        if data_str.strip() == "[DONE]":
+                                            done = True
+                                            break
+                                        try:
+                                            chunk = json.loads(data_str)
+                                        except json.JSONDecodeError:
+                                            logger.warning("Failed to parse upstream SSE data: %s", data_str[:200])
+                                            continue
+                                        # In balancing mode: detect in-stream errors and failover
+                                        if self._is_upstream_stream_error(chunk):
+                                            logger.warning(
+                                                "Upstream sent error in stream chunk: %s", json.dumps(chunk)[:500]
+                                            )
+                                            if self._backends and self._current_backend_idx >= 0:
+                                                cooldown = self._get_stream_error_cooldown(self._current_backend_idx)
+                                                self._mark_backend_unhealthy(
+                                self._current_backend_idx, cooldown=cooldown
+                            )
+                                                if self._any_healthy_backend():
+                                                    stream_error = True
+                                                    done = True
+                                                    break
+                                            # No healthy backends — skip the error chunk, let terminal error handle it
+                                            stream_error = True
+                                            done = True
+                                            break
+                                        events = translator.translate_stream_chunk(chunk)
+                                        # Buffer finish events to detect empty responses before writing
+                                        if self._chunk_has_finish_reason(chunk):
+                                            last_usage = chunk.get("usage")
+                                            finish_events.extend(events)
+                                        else:
+                                            for event in events:
+                                                await sr.write(event.encode())
+                                                events_emitted = True
+                                    if done:
+                                        break
+
+                        # Flush remaining buffer
+                        if not done and line_buffer:
+                            line = line_buffer.decode("utf-8", errors="replace").strip()
                             if line.startswith("data: "):
-                                # KBR-232: on a Messages-wire upstream the line is an
-                                # Anthropic event; the converter's output lines re-enter
-                                # the same body below and are never re-fed to it.
+                                # KBR-232: same conversion as the main loop above.
                                 upstream_lines = (
                                     [
                                         converted.decode("utf-8").removesuffix("\n\n")
@@ -5933,209 +6154,237 @@ class BridgeServer:
                                 )
                                 for line in upstream_lines:
                                     data_str = line[6:]
-                                    if data_str.strip() == "[DONE]":
-                                        done = True
-                                        break
-                                    try:
-                                        chunk = json.loads(data_str)
-                                    except json.JSONDecodeError:
-                                        logger.warning("Failed to parse upstream SSE data: %s", data_str[:200])
-                                        continue
-                                    # In balancing mode: detect in-stream errors and failover
-                                    if self._is_upstream_stream_error(chunk):
-                                        logger.warning(
-                                            "Upstream sent error in stream chunk: %s", json.dumps(chunk)[:500]
-                                        )
-                                        if self._backends and self._current_backend_idx >= 0:
-                                            cooldown = self._get_stream_error_cooldown(self._current_backend_idx)
-                                            self._mark_backend_unhealthy(self._current_backend_idx, cooldown=cooldown)
-                                            if self._any_healthy_backend():
-                                                stream_error = True
-                                                done = True
-                                                break
-                                        # No healthy backends — skip the error chunk, let terminal error handle it
-                                        stream_error = True
-                                        done = True
-                                        break
-                                    events = translator.translate_stream_chunk(chunk)
-                                    # Buffer finish events to detect empty responses before writing
-                                    if self._chunk_has_finish_reason(chunk):
-                                        last_usage = chunk.get("usage")
-                                        finish_events.extend(events)
-                                    else:
-                                        for event in events:
-                                            await sr.write(event.encode())
-                                            events_emitted = True
-                                if done:
-                                    break
+                                    if data_str.strip() != "[DONE]":
+                                        try:
+                                            chunk = json.loads(data_str)
+                                            events = translator.translate_stream_chunk(chunk)
+                                            if self._chunk_has_finish_reason(chunk):
+                                                last_usage = chunk.get("usage")
+                                                finish_events.extend(events)
+                                            else:
+                                                for event in events:
+                                                    await sr.write(event.encode())
+                                                    events_emitted = True
+                                        except json.JSONDecodeError:
+                                            logger.warning("Failed to parse flushed SSE data: %s", data_str[:200])
 
-                    # Flush remaining buffer
-                    if not done and line_buffer:
-                        line = line_buffer.decode("utf-8", errors="replace").strip()
-                        if line.startswith("data: "):
-                            # KBR-232: same conversion as the main loop above.
-                            upstream_lines = (
-                                [
-                                    converted.decode("utf-8").removesuffix("\n\n")
-                                    for converted in stream_converter.feed(f"{line}\n\n".encode())
-                                ]
-                                if stream_converter is not None
-                                else [line]
-                            )
-                            for line in upstream_lines:
-                                data_str = line[6:]
-                                if data_str.strip() != "[DONE]":
-                                    try:
-                                        chunk = json.loads(data_str)
-                                        events = translator.translate_stream_chunk(chunk)
-                                        if self._chunk_has_finish_reason(chunk):
-                                            last_usage = chunk.get("usage")
-                                            finish_events.extend(events)
-                                        else:
-                                            for event in events:
-                                                await sr.write(event.encode())
-                                                events_emitted = True
-                                    except json.JSONDecodeError:
-                                        logger.warning("Failed to parse flushed SSE data: %s", data_str[:200])
-
-                    # Handle in-stream error failover
-                    if stream_error:
-                        if events_emitted:
-                            logger.warning("Gemini stream error after client events emitted; not retrying")
-                            break
-                        if attempt < max_attempts - 1:
-                            translator.reset()  # F22: clear stale tool buffers
-                            self._select_backend()
-                            self._normalize_model(cc_request)
-                            self._active_provider.normalize_request(cc_request)
-                            url = self._build_upstream_url(cc_request)
-                            headers = self._build_upstream_headers(cc_request)
-                            upstream_body = self._active_provider.translate_to_upstream(cc_request)
-                            logger.info(
-                                "Gemini stream failover: in-stream error, backend attempt %d/%d, switching backend",
-                                attempt + 1,
-                                max_attempts,
-                            )
-                            continue
-                        # No more backends — error already logged, stream continues to end.
-                        # KBR-250: break here so the exhausted in-stream error
-                        # does not fall through to the empty-response gate below
-                        # (the no-finish arm would otherwise write a second
-                        # terminal error after the stream ends). The messages
-                        # branch has always ended its in-stream-error exhaustion
-                        # this way. Gemini did not write a terminal error on this
-                        # path before KBR-250 either; the break preserves that.
-                        done = True
-                        break
-
-                    # Check for empty response. KBR-250 extends the gate with
-                    # the no-finish arm (`empty_no_finish`) so a stream whose
-                    # upstream produced no finish chunk (zero bytes, [DONE]-only,
-                    # or truncated before any chunk) enters the same ladder as
-                    # the finish-chunk-empty case. When the ladder exhausts and
-                    # the entry was the no-finish arm, write the D4 SSE error
-                    # event and let the post-loop write_eof without the
-                    # healthy-mark. The `reason: "empty_response"` field is the
-                    # D4 discriminator on the Gemini wire (TEST_SUITE.md §11
-                    # Q14, KBR-235).
-                    #
-                    # No post-emission arm here, unlike KBR-235 on `/v1/messages`:
-                    # `GeminiTranslator.response_was_empty` is whole-response-
-                    # scoped (accumulated text + tools), so a stream that wrote
-                    # content cannot have `response_was_empty` True and
-                    # `empty_no_finish` requires `not events_emitted` on the
-                    # current attempt. The post-emission arm is structurally
-                    # unreachable on this route — see TEST_SUITE.md §11 Q14
-                    # amendment.
-                    empty_no_finish = not finish_events and not events_emitted
-                    if (translator.response_was_empty and finish_events) or empty_no_finish:
-                        translator.reset()
-                        finish_events.clear()
-                        if self._backends and self._current_backend_idx >= 0:
-                            if self._any_healthy_backend() and attempt < max_attempts - 1:
+                        # Handle in-stream error failover
+                        if stream_error:
+                            if events_emitted:
+                                logger.warning("Gemini stream error after client events emitted; not retrying")
+                                break
+                            if attempt < max_attempts - 1:
+                                translator.reset()  # F22: clear stale tool buffers
                                 self._select_backend()
                                 self._normalize_model(cc_request)
                                 self._active_provider.normalize_request(cc_request)
+                                # KBR-254: cross-class failover — this branch cannot drive a
+                                # custom-transport provider via session.post(...). Re-dispatch into
+                                # the custom-transport branch with the failover-selected provider
+                                # as its initial selection (no further _select_backend call); the
+                                # arm above already reset the translator (F22), so its stale
+                                # tool buffers do not leak into the re-entry.
+                                if self._active_provider.use_custom_transport:
+                                    if _crossings >= _max_crossings:
+                                        logger.warning(
+                                            "Re-dispatch cap reached (%d crossings, cap %d); "
+                                            "not crossing plain → custom",
+                                                _crossings, _max_crossings,
+                                                )
+                                        _cross_cap_hit = True
+                                        break
+                                    _crossings += 1
+                                    # Arm above already reset the translator (F22).
+                                    logger.info(
+                                        "Re-dispatching plain → custom after transport-class "
+                                        "failover (attempt %d, %d crossings)",
+                                        attempt + 1, _crossings,
+                                        )
+                                    _cross_mode_to_custom = True
+                                    break
                                 url = self._build_upstream_url(cc_request)
                                 headers = self._build_upstream_headers(cc_request)
                                 upstream_body = self._active_provider.translate_to_upstream(cc_request)
                                 logger.info(
-                                    "Gemini stream empty response: attempt %d/%d, switching backend",
+                                    "Gemini stream failover: in-stream error, backend attempt %d/%d, switching backend",
                                     attempt + 1,
                                     max_attempts,
                                 )
                                 continue
-                            logger.warning(
-                                "All backends returned empty response, emitting fallback",
-                            )
-                        elif attempt < max_attempts - 1:
-                            delay = _BACKOFF_BASE * (2 ** (attempt % (_MAX_RETRIES + 1)))
-                            logger.warning(
-                                "Gemini stream empty response: retrying in %.1fs (%d/%d)",
-                                delay,
-                                attempt + 1,
-                                max_attempts,
-                            )
-                            await asyncio.sleep(delay)
-                            continue
-                        else:
-                            logger.warning(
-                                "Gemini stream empty response after %d attempts, emitting fallback",
-                                max_attempts,
-                            )
-
-                        if empty_no_finish:
-                            # D4 exhaustion: no prior emission, every attempt
-                            # empty. Write the D4 SSE error event and let the
-                            # post-loop write_eof. stream_ok stays False so
-                            # the backend is not marked healthy.
-                            error_payload = {
-                                "error": {
-                                    "code": 502,
-                                    "message": _NATIVE_EMPTY_REPLY_MESSAGE,
-                                    "reason": "empty_response",
-                                }
-                            }
-                            error_sse = f"data: {json.dumps(error_payload)}\n\n"
-                            try:
-                                await sr.write(error_sse.encode())
-                            except (ConnectionResetError, BrokenPipeError, OSError):
-                                logger.debug(
-                                    "Client disconnected before empty-response exhaustion "
-                                    "error could be sent"
-                                )
+                            # No more backends — error already logged, stream continues to end.
+                            # KBR-250: break here so the exhausted in-stream error
+                            # does not fall through to the empty-response gate below
+                            # (the no-finish arm would otherwise write a second
+                            # terminal error after the stream ends). The messages
+                            # branch has always ended its in-stream-error exhaustion
+                            # this way. Gemini did not write a terminal error on this
+                            # path before KBR-250 either; the break preserves that.
+                            done = True
                             break
 
-                    # Write buffered finish events
-                    for event in finish_events:
-                        await sr.write(event.encode())
-                    self._log_usage(last_usage)
-                    stream_ok = True
-                    break  # Exit retry loop
+                        # Check for empty response. KBR-250 extends the gate with
+                        # the no-finish arm (`empty_no_finish`) so a stream whose
+                        # upstream produced no finish chunk (zero bytes, [DONE]-only,
+                        # or truncated before any chunk) enters the same ladder as
+                        # the finish-chunk-empty case. When the ladder exhausts and
+                        # the entry was the no-finish arm, write the D4 SSE error
+                        # event and let the post-loop write_eof without the
+                        # healthy-mark. The `reason: "empty_response"` field is the
+                        # D4 discriminator on the Gemini wire (TEST_SUITE.md §11
+                        # Q14, KBR-235).
+                        #
+                        # No post-emission arm here, unlike KBR-235 on `/v1/messages`:
+                        # `GeminiTranslator.response_was_empty` is whole-response-
+                        # scoped (accumulated text + tools), so a stream that wrote
+                        # content cannot have `response_was_empty` True and
+                        # `empty_no_finish` requires `not events_emitted` on the
+                        # current attempt. The post-emission arm is structurally
+                        # unreachable on this route — see TEST_SUITE.md §11 Q14
+                        # amendment.
+                        empty_no_finish = not finish_events and not events_emitted
+                        if (translator.response_was_empty and finish_events) or empty_no_finish:
+                            translator.reset()
+                            finish_events.clear()
+                            if self._backends and self._current_backend_idx >= 0:
+                                if self._any_healthy_backend() and attempt < max_attempts - 1:
+                                    self._select_backend()
+                                    self._normalize_model(cc_request)
+                                    self._active_provider.normalize_request(cc_request)
+                                    # KBR-254: cross-class failover — this branch cannot drive a
+                                    # custom-transport provider via session.post(...). Re-dispatch into
+                                    # the custom-transport branch with the failover-selected provider
+                                    # as its initial selection (no further _select_backend call); the
+                                    # arm above already reset the translator (F22), so its stale
+                                    # tool buffers do not leak into the re-entry.
+                                    if self._active_provider.use_custom_transport:
+                                        if _crossings >= _max_crossings:
+                                            logger.warning(
+                                                "Re-dispatch cap reached (%d crossings, cap %d); "
+                                                "not crossing plain → custom",
+                                                    _crossings, _max_crossings,
+                                                    )
+                                            _cross_cap_hit = True
+                                            break
+                                        _crossings += 1
+                                        # Arm above already reset the translator (F22).
+                                        logger.info(
+                                            "Re-dispatching plain → custom after transport-class "
+                                            "failover (attempt %d, %d crossings)",
+                                            attempt + 1, _crossings,
+                                            )
+                                        _cross_mode_to_custom = True
+                                        break
+                                    url = self._build_upstream_url(cc_request)
+                                    headers = self._build_upstream_headers(cc_request)
+                                    upstream_body = self._active_provider.translate_to_upstream(cc_request)
+                                    logger.info(
+                                        "Gemini stream empty response: attempt %d/%d, switching backend",
+                                        attempt + 1,
+                                        max_attempts,
+                                    )
+                                    continue
+                                logger.warning(
+                                    "All backends returned empty response, emitting fallback",
+                                )
+                            elif attempt < max_attempts - 1:
+                                delay = _BACKOFF_BASE * (2 ** (attempt % (_MAX_RETRIES + 1)))
+                                logger.warning(
+                                    "Gemini stream empty response: retrying in %.1fs (%d/%d)",
+                                    delay,
+                                    attempt + 1,
+                                    max_attempts,
+                                )
+                                await asyncio.sleep(delay)
+                                continue
+                            else:
+                                logger.warning(
+                                    "Gemini stream empty response after %d attempts, emitting fallback",
+                                    max_attempts,
+                                )
 
-        except asyncio.TimeoutError:
-            logger.error("Upstream POST timed out after %ds for Gemini stream", _STREAM_READ_TIMEOUT)
-            error_payload = {
-                "error": {
-                    "code": 504,
-                    "message": f"Upstream provider timed out ({_STREAM_READ_TIMEOUT}s)",
+                            if empty_no_finish:
+                                # D4 exhaustion: no prior emission, every attempt
+                                # empty. Write the D4 SSE error event and let the
+                                # post-loop write_eof. stream_ok stays False so
+                                # the backend is not marked healthy.
+                                error_payload = {
+                                    "error": {
+                                        "code": 502,
+                                        "message": _NATIVE_EMPTY_REPLY_MESSAGE,
+                                        "reason": "empty_response",
+                                    }
+                                }
+                                error_sse = f"data: {json.dumps(error_payload)}\n\n"
+                                try:
+                                    await sr.write(error_sse.encode())
+                                except (ConnectionResetError, BrokenPipeError, OSError):
+                                    logger.debug(
+                                        "Client disconnected before empty-response exhaustion "
+                                        "error could be sent"
+                                    )
+                                break
+
+                        # Write buffered finish events
+                        for event in finish_events:
+                            await sr.write(event.encode())
+                        self._log_usage(last_usage)
+                        stream_ok = True
+                        break  # Exit retry loop
+
+            except asyncio.TimeoutError:
+                logger.error("Upstream POST timed out after %ds for Gemini stream", _STREAM_READ_TIMEOUT)
+                error_payload = {
+                    "error": {
+                        "code": 504,
+                        "message": f"Upstream provider timed out ({_STREAM_READ_TIMEOUT}s)",
+                    }
                 }
-            }
-            error_sse = f"data: {json.dumps(error_payload)}\n\n"
-            try:
-                await sr.write(error_sse.encode())
+                error_sse = f"data: {json.dumps(error_payload)}\n\n"
+                try:
+                    await sr.write(error_sse.encode())
+                except (ConnectionResetError, BrokenPipeError, OSError):
+                    logger.debug("Client disconnected before timeout error could be sent")
             except (ConnectionResetError, BrokenPipeError, OSError):
-                logger.debug("Client disconnected before timeout error could be sent")
-        except (ConnectionResetError, BrokenPipeError, OSError):
-            logger.debug("Client disconnected during Gemini streaming")
-        except Exception as exc:
-            logger.exception("Exception in _stream_gemini: %s", exc)
-            error_sse = f"data: {json.dumps({'error': {'code': 500, 'message': str(exc)}})}\n\n"
-            try:
-                await sr.write(error_sse.encode())
-            except (ConnectionResetError, BrokenPipeError, OSError):
-                logger.debug("Client disconnected before error could be sent")
+                logger.debug("Client disconnected during Gemini streaming")
+            except Exception as exc:
+                logger.exception("Exception in _stream_gemini: %s", exc)
+                error_sse = f"data: {json.dumps({'error': {'code': 500, 'message': str(exc)}})}\n\n"
+                try:
+                    await sr.write(error_sse.encode())
+                except (ConnectionResetError, BrokenPipeError, OSError):
+                    logger.debug("Client disconnected before error could be sent")
 
+
+            # Dispatch-loop routing (KBR-254). Every plain-POST crossing site
+            # ran pre-emission, so a re-dispatch here starts the matching branch
+            # on a fresh attempt of the same request.
+            if _cross_mode_to_custom:
+                continue
+            if _cross_cap_hit:
+                logger.warning(
+                    "Re-dispatch cap reached (%d crossings, cap %d); surfacing "
+                    "cross-class exhaustion",
+                    _crossings,
+                    _max_crossings,
+
+                )
+                error_payload = {
+                    "error": {
+                        "code": 502,
+                        "message": (
+                            "Upstream backends exhausted (the bridge could not "
+                            "land on a usable backend on this request)"
+                        ),
+                        "reason": "cross_class_exhaustion",
+                    }
+                }
+                error_sse = f"data: {json.dumps(error_payload)}\n\n"
+                try:
+                    await sr.write(error_sse.encode())
+                except (ConnectionResetError, BrokenPipeError, OSError):
+                    logger.debug("Client disconnected before cap-hit error could be sent")
+                break
+            break
         try:
             await sr.write_eof()
         except (ConnectionResetError, BrokenPipeError, OSError):
@@ -6618,237 +6867,371 @@ class BridgeServer:
         upstream_status = None
         last_usage: dict | None = None
 
-        # Custom-transport providers return Responses API SSE but CC clients
-        # expect Chat Completions SSE.  Collect, parse, and re-emit.
-        if self._active_provider.use_custom_transport:
-            cc_request["_resolved_key"] = self._active_key
-            cc_request["_provider_config"] = self._active_provider_config
-            self._log_backend_selection()
+        # KBR-254: transport-class dispatch loop. Mirrors `_stream_messages` (KBR-249,
+        # §5.3 S8/S9 of SYSTEM_DESIGN.md). A streaming branch whose failover selects a
+        # provider of the other transport class re-dispatches here so the matching
+        # branch drives the response. The hop cap bounds pathological cooldown-expiry
+        # ping-pong; mirroring `_stream_messages`'s `(2 * n_backends) + 1` bound.
+        _crossings = 0
+        _max_crossings = (2 * (len(self._backends) if self._backends else 1)) + 1
+        while True:
+            _cross_mode_to_custom = False
+            _cross_cap_hit = False
 
-            n_backends = len(self._backends) if self._backends else 1
-            for attempt in range(n_backends):
-                raw_chunks: list[bytes] = []
+            # Custom-transport providers return Responses API SSE but CC clients
+            # expect Chat Completions SSE.  Collect, parse, and re-emit.
+            if self._active_provider.use_custom_transport:
+                cc_request["_resolved_key"] = self._active_key
+                cc_request["_provider_config"] = self._active_provider_config
+                self._log_backend_selection()
 
-                async def _collect(chunk: bytes, _raw_chunks: list[bytes] = raw_chunks) -> None:
-                    _raw_chunks.append(chunk)
+                n_backends = len(self._backends) if self._backends else 1
+                for attempt in range(n_backends):
+                    raw_chunks: list[bytes] = []
 
-                try:
-                    await self._active_provider.stream_request(cc_request, _collect)
-                except Exception as exc:
-                    logger.warning("Custom-transport stream failed: %s", exc)
-                    if self._backends and self._current_backend_idx >= 0:
-                        kind = self._provider_error_failure_kind(exc)
-                        self._mark_backend_unhealthy(
-                            self._current_backend_idx,
-                            failure_kind=kind,
-                            cooldown=self._retry_after_from_exc(exc),
-                        )
-                        if self._any_healthy_backend(require_streaming=True) and attempt < n_backends - 1:
-                            try:
-                                self._select_backend(require_streaming=True)
-                            except AllBackendsUnhealthyError as all_unhealthy:
-                                logger.warning(
-                                    "All streaming backends unhealthy (fast-fail), retry_after=%ds",
-                                    all_unhealthy.retry_after,
-                                )
-                                break
-                            self._normalize_model(cc_request)
-                            self._active_provider.normalize_request(cc_request)
-                            cc_request["_resolved_key"] = self._active_key
-                            cc_request["_provider_config"] = self._active_provider_config
-                            logger.info(
-                                "Custom-transport failover: attempt %d/%d (%s), switching backend",
-                                attempt + 1,
-                                n_backends,
-                                exc,
-                            )
-                            continue
-                        # No custom-transport backend healthy — try cross-mode failover to standard backend
-                        if self._any_healthy_backend() and attempt < n_backends - 1:
-                            try:
-                                self._select_backend()
-                            except AllBackendsUnhealthyError:
-                                logger.warning("Cross-mode failover: all backends unhealthy")
-                                break
-                            self._normalize_model(cc_request)
-                            self._active_provider.normalize_request(cc_request)
-                            cc_request.pop("_resolved_key", None)
-                            cc_request.pop("_provider_config", None)
-                            cc_request.pop("_original_body", None)
-                            logger.info(
-                                "Cross-mode failover: attempt %d/%d (%s), switching to standard backend",
-                                attempt + 1,
-                                n_backends,
-                                exc,
-                            )
-                            break
-                    error_status, error_type = self._map_provider_error(exc)
-                    upstream_status = error_status
-                    error_payload = {
-                        "error": {"message": str(exc), "type": error_type},
-                    }
+                    async def _collect(chunk: bytes, _raw_chunks: list[bytes] = raw_chunks) -> None:
+                        _raw_chunks.append(chunk)
+
                     try:
-                        await sr.write(f"data: {json.dumps(error_payload)}\n\n".encode())
-                        await sr.write(b"data: [DONE]\n\n")
-                    except (ConnectionResetError, BrokenPipeError, OSError):
-                        logger.debug("Client disconnected before error event")
-                    break
-                else:
-                    raw_bytes = b"".join(raw_chunks)
-                    if hasattr(self._active_provider, "parse_stream_to_cc_response"):
-                        cc_response = self._active_provider.parse_stream_to_cc_response(raw_bytes)
-                    else:
-                        from kitty.providers.openai_subscription import OpenAISubscriptionAdapter
-
-                        cc_response = OpenAISubscriptionAdapter._parse_sse_to_response(raw_bytes)
-
-                    # Re-emit as Chat Completions SSE stream
-                    response_id = cc_response.get("id", "chatcmpl-sub")
-                    created = cc_response.get("created", 0)
-                    model = cc_response.get("model", "")
-
-                    def _cc_chunk(
-                        delta: dict,
-                        fin: str | None = None,
-                        usage: dict | None = None,
-                        _response_id: str = response_id,
-                        _created: int = created,
-                        _model: str = model,
-                    ) -> bytes:
-                        payload: dict = {
-                            "id": _response_id,
-                            "object": "chat.completion.chunk",
-                            "created": _created,
-                            "model": _model,
-                            "choices": [{"index": 0, "delta": delta, "finish_reason": fin}],
-                        }
-                        if usage is not None:
-                            payload["usage"] = usage
-                        return f"data: {json.dumps(payload)}\n\n".encode()
-
-                    choice = (cc_response.get("choices") or [{}])[0]
-                    msg = choice.get("message", {})
-                    finish_reason = choice.get("finish_reason", "stop")
-
-                    # First chunk: role + content/tool_calls start
-                    first_delta: dict = {"role": "assistant", "content": None}
-                    if msg.get("content"):
-                        first_delta["content"] = ""
-                    if msg.get("tool_calls"):
-                        first_delta["tool_calls"] = [
-                            {
-                                "index": i,
-                                "id": tc.get("id", f"call_{i}"),
-                                "type": "function",
-                                "function": {"name": tc["function"]["name"], "arguments": ""},
-                            }
-                            for i, tc in enumerate(msg["tool_calls"])
-                        ]
-                    try:
-                        await sr.write(_cc_chunk(first_delta))
-
-                        # Content delta
-                        if msg.get("content"):
-                            await sr.write(_cc_chunk({"content": msg["content"]}))
-
-                        # Tool call argument deltas
-                        for i, tc in enumerate(msg.get("tool_calls", [])):
-                            args = tc.get("function", {}).get("arguments", "")
-                            if args:
-                                await sr.write(
-                                    _cc_chunk(
-                                        {"tool_calls": [{"index": i, "function": {"arguments": args}}]},
+                        await self._active_provider.stream_request(cc_request, _collect)
+                    except Exception as exc:
+                        logger.warning("Custom-transport stream failed: %s", exc)
+                        if self._backends and self._current_backend_idx >= 0:
+                            kind = self._provider_error_failure_kind(exc)
+                            self._mark_backend_unhealthy(
+                                self._current_backend_idx,
+                                failure_kind=kind,
+                                cooldown=self._retry_after_from_exc(exc),
+                            )
+                            if self._any_healthy_backend(require_streaming=True) and attempt < n_backends - 1:
+                                try:
+                                    self._select_backend(require_streaming=True)
+                                except AllBackendsUnhealthyError as all_unhealthy:
+                                    logger.warning(
+                                        "All streaming backends unhealthy (fast-fail), retry_after=%ds",
+                                        all_unhealthy.retry_after,
                                     )
+                                    break
+                                self._normalize_model(cc_request)
+                                self._active_provider.normalize_request(cc_request)
+                                cc_request["_resolved_key"] = self._active_key
+                                cc_request["_provider_config"] = self._active_provider_config
+                                logger.info(
+                                    "Custom-transport failover: attempt %d/%d (%s), switching backend",
+                                    attempt + 1,
+                                    n_backends,
+                                    exc,
                                 )
+                                continue
+                            # No custom-transport backend healthy — try cross-mode failover to standard backend
+                            if self._any_healthy_backend() and attempt < n_backends - 1:
+                                try:
+                                    self._select_backend()
+                                except AllBackendsUnhealthyError:
+                                    logger.warning("Cross-mode failover: all backends unhealthy")
+                                    break
+                                self._normalize_model(cc_request)
+                                self._active_provider.normalize_request(cc_request)
+                                cc_request.pop("_resolved_key", None)
+                                cc_request.pop("_provider_config", None)
+                                cc_request.pop("_original_body", None)
+                                logger.info(
+                                    "Cross-mode failover: attempt %d/%d (%s), switching to standard backend",
+                                    attempt + 1,
+                                    n_backends,
+                                    exc,
+                                )
+                                break
+                        error_status, error_type = self._map_provider_error(exc)
+                        upstream_status = error_status
+                        error_payload = {
+                            "error": {"message": str(exc), "type": error_type},
+                        }
+                        try:
+                            await sr.write(f"data: {json.dumps(error_payload)}\n\n".encode())
+                            await sr.write(b"data: [DONE]\n\n")
+                        except (ConnectionResetError, BrokenPipeError, OSError):
+                            logger.debug("Client disconnected before error event")
+                        break
+                    else:
+                        raw_bytes = b"".join(raw_chunks)
+                        if hasattr(self._active_provider, "parse_stream_to_cc_response"):
+                            cc_response = self._active_provider.parse_stream_to_cc_response(raw_bytes)
+                        else:
+                            from kitty.providers.openai_subscription import OpenAISubscriptionAdapter
 
-                        # Finish
-                        await sr.write(
-                            _cc_chunk({}, fin=finish_reason, usage=cc_response.get("usage")),
-                        )
-                        await sr.write(b"data: [DONE]\n\n")
-                    except (ConnectionResetError, BrokenPipeError, OSError):
-                        logger.debug("Client disconnected during custom-transport emit")
-                    self._log_usage(cc_response.get("usage"))
-                    break
+                            cc_response = OpenAISubscriptionAdapter._parse_sse_to_response(raw_bytes)
 
-            cc_request.pop("_resolved_key", None)
-            cc_request.pop("_provider_config", None)
-            # If cross-mode failover switched to a non-custom-transport provider,
-            # fall through to the standard streaming path below.
-            if not self._active_provider.use_custom_transport:
-                logger.info(
-                    "Cross-mode failover: entering standard streaming path with %s",
-                    type(self._active_provider).__name__,
-                )
-            else:
-                try:
-                    await sr.write_eof()
-                except (ConnectionResetError, BrokenPipeError, OSError):
-                    logger.debug("Client disconnected before stream EOF")
-                return sr
+                        # Re-emit as Chat Completions SSE stream
+                        response_id = cc_response.get("id", "chatcmpl-sub")
+                        created = cc_response.get("created", 0)
+                        model = cc_response.get("model", "")
 
-        try:
-            url = self._build_upstream_url(cc_request)
-            headers = self._build_upstream_headers(cc_request)
-            upstream_body = self._active_provider.translate_to_upstream(cc_request)
-            logger.debug("Upstream POST → %s", url)
+                        def _cc_chunk(
+                            delta: dict,
+                            fin: str | None = None,
+                            usage: dict | None = None,
+                            _response_id: str = response_id,
+                            _created: int = created,
+                            _model: str = model,
+                        ) -> bytes:
+                            payload: dict = {
+                                "id": _response_id,
+                                "object": "chat.completion.chunk",
+                                "created": _created,
+                                "model": _model,
+                                "choices": [{"index": 0, "delta": delta, "finish_reason": fin}],
+                            }
+                            if usage is not None:
+                                payload["usage"] = usage
+                            return f"data: {json.dumps(payload)}\n\n".encode()
 
-            stream_timeout = aiohttp.ClientTimeout(total=None, sock_connect=30, sock_read=_STREAM_READ_TIMEOUT)
+                        choice = (cc_response.get("choices") or [{}])[0]
+                        msg = choice.get("message", {})
+                        finish_reason = choice.get("finish_reason", "stop")
 
-            # Retry loop with backend failover for balancing mode
-            n_backends = len(self._backends) if self._backends else 1
-            _original_max_attempts = (_MAX_RETRIES + 1) * n_backends
-            max_attempts = _original_max_attempts + len(_EMPTY_FINAL_DELAYS)
-            transport_grace = TransportGrace()
-            # A thinking strip gets its attempt back (KBR-238): the loop runs
-            # wider by the strip budget and the ordinal is corrected below, so
-            # strips never pull the empty-response schedule forward.
-            strip_body: dict | None = None
-            strip_count = 0
-            strip_retries = 0
-            for raw_attempt in range(max_attempts + _MAX_THINKING_STRIPS):
-                attempt = raw_attempt - strip_retries
-                # The extra iterations exist only to give strips back. Without
-                # this the loop could run past the last real attempt — a
-                # `continue` that does not check `attempt` (the tool_use
-                # format fallback) would then index off the end of
-                # _EMPTY_FINAL_DELAYS. Ending here keeps the pre-strip
-                # invariant: at most `max_attempts` real attempts.
-                if attempt >= max_attempts:
-                    break
-                if attempt >= _original_max_attempts:
-                    delay = _EMPTY_FINAL_DELAYS[attempt - _original_max_attempts]
-                    logger.warning(
-                        "Empty upstream response: final retry in %.1fs (%d/%d)",
-                        delay,
-                        attempt + 1,
-                        max_attempts,
+                        # First chunk: role + content/tool_calls start
+                        first_delta: dict = {"role": "assistant", "content": None}
+                        if msg.get("content"):
+                            first_delta["content"] = ""
+                        if msg.get("tool_calls"):
+                            first_delta["tool_calls"] = [
+                                {
+                                    "index": i,
+                                    "id": tc.get("id", f"call_{i}"),
+                                    "type": "function",
+                                    "function": {"name": tc["function"]["name"], "arguments": ""},
+                                }
+                                for i, tc in enumerate(msg["tool_calls"])
+                            ]
+                        try:
+                            await sr.write(_cc_chunk(first_delta))
+
+                            # Content delta
+                            if msg.get("content"):
+                                await sr.write(_cc_chunk({"content": msg["content"]}))
+
+                            # Tool call argument deltas
+                            for i, tc in enumerate(msg.get("tool_calls", [])):
+                                args = tc.get("function", {}).get("arguments", "")
+                                if args:
+                                    await sr.write(
+                                        _cc_chunk(
+                                            {"tool_calls": [{"index": i, "function": {"arguments": args}}]},
+                                        )
+                                    )
+
+                            # Finish
+                            await sr.write(
+                                _cc_chunk({}, fin=finish_reason, usage=cc_response.get("usage")),
+                            )
+                            await sr.write(b"data: [DONE]\n\n")
+                        except (ConnectionResetError, BrokenPipeError, OSError):
+                            logger.debug("Client disconnected during custom-transport emit")
+                        self._log_usage(cc_response.get("usage"))
+                        break
+
+                cc_request.pop("_resolved_key", None)
+                cc_request.pop("_provider_config", None)
+                # If cross-mode failover switched to a non-custom-transport provider,
+                # fall through to the standard streaming path below.
+                if not self._active_provider.use_custom_transport:
+                    logger.info(
+                        "Cross-mode failover: entering standard streaming path with %s",
+                        type(self._active_provider).__name__,
                     )
-                    await asyncio.sleep(delay)
-                # Reset stream state for each retry attempt
-                line_buffer = bytearray()  # F23+F24: byte-based buffering
-                done = False
-                stream_error = False
-                has_content = False
-                chunk_count = 0
-                # A Messages-wire upstream speaks Anthropic SSE, which no Chat
-                # Completions client can read: each line is converted before the
-                # per-line logic (KBR-232).  Re-created per attempt so a failover
-                # onto a Chat Completions-wire backend re-evaluates the gate.
-                stream_converter = AnthropicCCStreamConverter() if self._serves_messages_wire(cc_request) else None
-                upstream = await self._open_upstream_stream(
-                    url, upstream_body, headers, stream_timeout, transport_grace
-                )
-                async with upstream:
-                    upstream_status = upstream.status
-                    logger.debug("Upstream response status: %d", upstream.status)
+                else:
+                    try:
+                        await sr.write_eof()
+                    except (ConnectionResetError, BrokenPipeError, OSError):
+                        logger.debug("Client disconnected before stream EOF")
+                    return sr
 
-                    if upstream.status not in (200, 201):
-                        error_body = await upstream.text()
+            try:
+                url = self._build_upstream_url(cc_request)
+                headers = self._build_upstream_headers(cc_request)
+                upstream_body = self._active_provider.translate_to_upstream(cc_request)
+                logger.debug("Upstream POST → %s", url)
 
-                        # Cloudflare challenge — never retryable, abort immediately
-                        if self._is_cloudflare_block(upstream.status, error_body):
-                            _log_cloudflare_block(upstream.status, error_body)
+                stream_timeout = aiohttp.ClientTimeout(total=None, sock_connect=30, sock_read=_STREAM_READ_TIMEOUT)
+
+                # Retry loop with backend failover for balancing mode
+                n_backends = len(self._backends) if self._backends else 1
+                _original_max_attempts = (_MAX_RETRIES + 1) * n_backends
+                max_attempts = _original_max_attempts + len(_EMPTY_FINAL_DELAYS)
+                transport_grace = TransportGrace()
+                # A thinking strip gets its attempt back (KBR-238): the loop runs
+                # wider by the strip budget and the ordinal is corrected below, so
+                # strips never pull the empty-response schedule forward.
+                strip_body: dict | None = None
+                strip_count = 0
+                strip_retries = 0
+                for raw_attempt in range(max_attempts + _MAX_THINKING_STRIPS):
+                    attempt = raw_attempt - strip_retries
+                    # The extra iterations exist only to give strips back. Without
+                    # this the loop could run past the last real attempt — a
+                    # `continue` that does not check `attempt` (the tool_use
+                    # format fallback) would then index off the end of
+                    # _EMPTY_FINAL_DELAYS. Ending here keeps the pre-strip
+                    # invariant: at most `max_attempts` real attempts.
+                    if attempt >= max_attempts:
+                        break
+                    if attempt >= _original_max_attempts:
+                        delay = _EMPTY_FINAL_DELAYS[attempt - _original_max_attempts]
+                        logger.warning(
+                            "Empty upstream response: final retry in %.1fs (%d/%d)",
+                            delay,
+                            attempt + 1,
+                            max_attempts,
+                        )
+                        await asyncio.sleep(delay)
+                    # Reset stream state for each retry attempt
+                    line_buffer = bytearray()  # F23+F24: byte-based buffering
+                    done = False
+                    stream_error = False
+                    has_content = False
+                    chunk_count = 0
+                    # A Messages-wire upstream speaks Anthropic SSE, which no Chat
+                    # Completions client can read: each line is converted before the
+                    # per-line logic (KBR-232).  Re-created per attempt so a failover
+                    # onto a Chat Completions-wire backend re-evaluates the gate.
+                    stream_converter = AnthropicCCStreamConverter() if self._serves_messages_wire(cc_request) else None
+                    upstream = await self._open_upstream_stream(
+                        url, upstream_body, headers, stream_timeout, transport_grace
+                    )
+                    async with upstream:
+                        upstream_status = upstream.status
+                        logger.debug("Upstream response status: %d", upstream.status)
+
+                        if upstream.status not in (200, 201):
+                            error_body = await upstream.text()
+
+                            # Cloudflare challenge — never retryable, abort immediately
+                            if self._is_cloudflare_block(upstream.status, error_body):
+                                _log_cloudflare_block(upstream.status, error_body)
+                                error_msg = self._translate_upstream_error(upstream.status, error_body)
+                                error_sse = (
+                                    f"data: {json.dumps({'error': {'message': error_msg, 'type': 'upstream_error'}})}"
+                                    "\n\n"
+                                )
+                                try:
+                                    await sr.write(error_sse.encode())
+                                except (ConnectionResetError, BrokenPipeError, OSError):
+                                    logger.debug("Client disconnected before Cloudflare error event")
+                                if self._backends and self._current_backend_idx >= 0:
+                                    self._mark_backend_unhealthy(self._current_backend_idx, failure_kind="cloudflare")
+                                break
+
+                            logger.error("Upstream error %d: %s", upstream.status, error_body)
+
+                            # Native-passthrough tool_use format mismatch — convert
+                            # to CC and retry the same backend.
+                            if (
+                                _is_tool_use_format_error(upstream.status, error_body)
+                                and cc_request.get("_native_messages_request")
+                                and _has_tool_use_blocks(cc_request)
+                            ):
+                                logger.warning(
+                                    "tool_use format mismatch (status %d) — converting to CC and retrying same backend",
+                                    upstream.status,
+                                )
+                                cc_request = _convert_native_to_cc_format(cc_request)
+                                cc_request["_native_messages_request"] = False
+                                self._normalize_model(cc_request)
+                                self._active_provider.normalize_request(cc_request)
+                                url = self._build_upstream_url(cc_request)
+                                headers = self._build_upstream_headers(cc_request)
+                                upstream_body = self._active_provider.translate_to_upstream(cc_request)
+                                continue
+
+                            # A signature the API will not verify is the bridge's history, not a sick
+                            # backend: strip the broken thinking and retry the same backend
+                            # (KBR-238; scope addition on KBR-232).  Strips are counted per
+                            # serialized body, so a failover's rebuilt body starts over.
+                            strips_done = strip_count if strip_body is upstream_body else 0
+                            if (
+                                attempt < max_attempts - 1
+                                and _is_thinking_signature_error(upstream.status, error_body)
+                                and _recover_rejected_thinking(upstream_body, error_body, strips_done)
+                            ):
+                                strip_body, strip_count = upstream_body, strips_done + 1
+                                strip_retries = min(strip_retries + 1, _MAX_THINKING_STRIPS)
+                                logger.warning(
+                                    "Backend rejected a thinking signature (status %d) — stripped thinking "
+                                    "and retrying the same backend (strip %d, attempt %d/%d)",
+                                    upstream.status,
+                                    strip_count,
+                                    attempt + 1,
+                                    max_attempts,
+                                )
+                                continue
+
+                            # In balancing mode: mark unhealthy and try next backend for ANY error —
+                            # except a signature rejection recovery could not fix: that history fails
+                            # on every member alike, so it surfaces without cooling a backend (M17).
+                            if (
+                                self._backends
+                                and self._current_backend_idx >= 0
+                                and not _is_thinking_signature_error(upstream.status, error_body)
+                            ):
+                                kind = (
+                                    "auth"
+                                    if upstream.status in _AUTH_FAILURE_STATUSES
+                                    else ("rate_limit" if upstream.status == 429 else "hard")
+                                )
+                                self._mark_backend_unhealthy(self._current_backend_idx, failure_kind=kind)
+                                if self._any_healthy_backend() and attempt < max_attempts - 1:
+                                    self._select_backend()
+                                    self._normalize_model(cc_request)
+                                    self._active_provider.normalize_request(cc_request)
+                                    # KBR-254: cross-class failover — this branch cannot drive a
+                                    # custom-transport provider via session.post(...). Re-dispatch into
+                                    # the custom-transport branch with the failover-selected provider
+                                    # as its initial selection (no further _select_backend call).
+                                    if self._active_provider.use_custom_transport:
+                                        if _crossings >= _max_crossings:
+                                            logger.warning(
+                                                "Re-dispatch cap reached (%d crossings, cap %d); "
+                                                "not crossing plain → custom",
+                                                    _crossings, _max_crossings,
+                                                    )
+                                            _cross_cap_hit = True
+                                            break
+                                        _crossings += 1
+                                        # Pass-through: no translator to reset. Per-attempt buffers
+                                        # (line_buffer/done/has_content/chunk_count/stream_converter)
+                                        # are re-initialised by the attempt-loop prologue, so a fresh
+                                        # raw_attempt=0 iteration is enough.
+                                        logger.info(
+                                            "Re-dispatching plain → custom after transport-class "
+                                            "failover (attempt %d, %d crossings)",
+                                            attempt + 1, _crossings,
+                                            )
+                                        _cross_mode_to_custom = True
+                                        break
+                                    url = self._build_upstream_url(cc_request)
+                                    headers = self._build_upstream_headers(cc_request)
+                                    upstream_body = self._active_provider.translate_to_upstream(cc_request)
+                                    logger.info(
+                                        "CC stream failover: attempt %d/%d (status %d), switching backend",
+                                        attempt + 1,
+                                        max_attempts,
+                                        upstream.status,
+                                    )
+                                    continue
+                            elif self._should_retry_stream(upstream.status, error_body) and attempt < max_attempts - 1:
+                                delay = _BACKOFF_BASE * (2 ** (attempt % (_MAX_RETRIES + 1)))
+                                logger.debug(
+                                    "Upstream %d, retrying in %.1fs (%d/%d)",
+                                    upstream.status,
+                                    delay,
+                                    attempt + 1,
+                                    max_attempts,
+                                )
+                                await asyncio.sleep(delay)
+                                continue
+
+                            # No healthy backends left or non-balancing mode — surface error to agent
                             error_msg = self._translate_upstream_error(upstream.status, error_body)
                             error_sse = (
                                 f"data: {json.dumps({'error': {'message': error_msg, 'type': 'upstream_error'}})}\n\n"
@@ -6856,135 +7239,102 @@ class BridgeServer:
                             try:
                                 await sr.write(error_sse.encode())
                             except (ConnectionResetError, BrokenPipeError, OSError):
-                                logger.debug("Client disconnected before Cloudflare error event")
-                            if self._backends and self._current_backend_idx >= 0:
-                                self._mark_backend_unhealthy(self._current_backend_idx, failure_kind="cloudflare")
+                                logger.debug("Client disconnected before upstream error could be sent")
                             break
 
-                        logger.error("Upstream error %d: %s", upstream.status, error_body)
-
-                        # Native-passthrough tool_use format mismatch — convert
-                        # to CC and retry the same backend.
-                        if (
-                            _is_tool_use_format_error(upstream.status, error_body)
-                            and cc_request.get("_native_messages_request")
-                            and _has_tool_use_blocks(cc_request)
-                        ):
-                            logger.warning(
-                                "tool_use format mismatch (status %d) — converting to CC and retrying same backend",
-                                upstream.status,
-                            )
-                            cc_request = _convert_native_to_cc_format(cc_request)
-                            cc_request["_native_messages_request"] = False
-                            self._normalize_model(cc_request)
-                            self._active_provider.normalize_request(cc_request)
-                            url = self._build_upstream_url(cc_request)
-                            headers = self._build_upstream_headers(cc_request)
-                            upstream_body = self._active_provider.translate_to_upstream(cc_request)
-                            continue
-
-                        # A signature the API will not verify is the bridge's history, not a sick
-                        # backend: strip the broken thinking and retry the same backend
-                        # (KBR-238; scope addition on KBR-232).  Strips are counted per
-                        # serialized body, so a failover's rebuilt body starts over.
-                        strips_done = strip_count if strip_body is upstream_body else 0
-                        if (
-                            attempt < max_attempts - 1
-                            and _is_thinking_signature_error(upstream.status, error_body)
-                            and _recover_rejected_thinking(upstream_body, error_body, strips_done)
-                        ):
-                            strip_body, strip_count = upstream_body, strips_done + 1
-                            strip_retries = min(strip_retries + 1, _MAX_THINKING_STRIPS)
-                            logger.warning(
-                                "Backend rejected a thinking signature (status %d) — stripped thinking "
-                                "and retrying the same backend (strip %d, attempt %d/%d)",
-                                upstream.status,
-                                strip_count,
-                                attempt + 1,
-                                max_attempts,
-                            )
-                            continue
-
-                        # In balancing mode: mark unhealthy and try next backend for ANY error —
-                        # except a signature rejection recovery could not fix: that history fails
-                        # on every member alike, so it surfaces without cooling a backend (M17).
-                        if (
-                            self._backends
-                            and self._current_backend_idx >= 0
-                            and not _is_thinking_signature_error(upstream.status, error_body)
-                        ):
-                            kind = (
-                                "auth"
-                                if upstream.status in _AUTH_FAILURE_STATUSES
-                                else ("rate_limit" if upstream.status == 429 else "hard")
-                            )
-                            self._mark_backend_unhealthy(self._current_backend_idx, failure_kind=kind)
-                            if self._any_healthy_backend() and attempt < max_attempts - 1:
-                                self._select_backend()
-                                self._normalize_model(cc_request)
-                                self._active_provider.normalize_request(cc_request)
-                                url = self._build_upstream_url(cc_request)
-                                headers = self._build_upstream_headers(cc_request)
-                                upstream_body = self._active_provider.translate_to_upstream(cc_request)
-                                logger.info(
-                                    "CC stream failover: attempt %d/%d (status %d), switching backend",
-                                    attempt + 1,
-                                    max_attempts,
-                                    upstream.status,
-                                )
-                                continue
-                        elif self._should_retry_stream(upstream.status, error_body) and attempt < max_attempts - 1:
-                            delay = _BACKOFF_BASE * (2 ** (attempt % (_MAX_RETRIES + 1)))
-                            logger.debug(
-                                "Upstream %d, retrying in %.1fs (%d/%d)",
-                                upstream.status,
-                                delay,
-                                attempt + 1,
-                                max_attempts,
-                            )
-                            await asyncio.sleep(delay)
-                            continue
-
-                        # No healthy backends left or non-balancing mode — surface error to agent
-                        error_msg = self._translate_upstream_error(upstream.status, error_body)
-                        error_sse = (
-                            f"data: {json.dumps({'error': {'message': error_msg, 'type': 'upstream_error'}})}\n\n"
-                        )
-                        try:
-                            await sr.write(error_sse.encode())
-                        except (ConnectionResetError, BrokenPipeError, OSError):
-                            logger.debug("Client disconnected before upstream error could be sent")
-                        break
-
-                    # Success path — line-buffered SSE pass-through stream
-                    async for chunk_bytes in upstream.content:
-                        try:
-                            if done:
-                                break
-                            chunk_count += 1
+                        # Success path — line-buffered SSE pass-through stream
+                        async for chunk_bytes in upstream.content:
                             try:
-                                complete_lines = _append_sse_chunk(line_buffer, chunk_bytes)
-                            except ValueError as exc:
-                                # F24: abort stream on unbounded line growth
-                                logger.error("SSE line exceeded maximum buffer size")
-                                _err = {"error": {"message": str(exc), "type": "upstream_error"}}
-                                error_sse = f"data: {json.dumps(_err)}\n\n"
+                                if done:
+                                    break
+                                chunk_count += 1
                                 try:
-                                    await sr.write(error_sse.encode())
-                                except (ConnectionResetError, BrokenPipeError, OSError):
-                                    logger.debug("Client disconnected before overflow error could be sent")
-                                stream_error = True
-                                done = True
+                                    complete_lines = _append_sse_chunk(line_buffer, chunk_bytes)
+                                except ValueError as exc:
+                                    # F24: abort stream on unbounded line growth
+                                    logger.error("SSE line exceeded maximum buffer size")
+                                    _err = {"error": {"message": str(exc), "type": "upstream_error"}}
+                                    error_sse = f"data: {json.dumps(_err)}\n\n"
+                                    try:
+                                        await sr.write(error_sse.encode())
+                                    except (ConnectionResetError, BrokenPipeError, OSError):
+                                        logger.debug("Client disconnected before overflow error could be sent")
+                                    stream_error = True
+                                    done = True
+                                    break
+                                for line in complete_lines:
+                                    if not line:
+                                        continue
+                                    if not line.startswith("data: "):
+                                        # Non-data SSE fields (event:, id:, retry:) not used by CC providers
+                                        continue
+                                    # KBR-232: on a Messages-wire upstream the line is an
+                                    # Anthropic event; the converter's output lines re-enter
+                                    # the same body below and are never re-fed to it.
+                                    upstream_lines = (
+                                        [
+                                            converted.decode("utf-8").removesuffix("\n\n")
+                                            for converted in stream_converter.feed(f"{line}\n\n".encode())
+                                        ]
+                                        if stream_converter is not None
+                                        else [line]
+                                    )
+                                    for line in upstream_lines:
+                                        data_str = line[6:]
+                                        if data_str.strip() == "[DONE]":
+                                            raw_line_bytes = f"{line}\n\n".encode()
+                                            for translated in self._active_provider.translate_upstream_stream_event(
+                                                raw_line_bytes
+                                            ):
+                                                has_content = True
+                                                await sr.write(translated)
+                                            done = True
+                                            break
+                                        try:
+                                            chunk = json.loads(data_str)
+                                        except json.JSONDecodeError:
+                                            # Non-JSON data line — pass through
+                                            raw_line_bytes = f"{line}\n\n".encode()
+                                            for translated in self._active_provider.translate_upstream_stream_event(
+                                                raw_line_bytes
+                                            ):
+                                                has_content = True
+                                                await sr.write(translated)
+                                            continue
+                                        # Detect in-stream errors
+                                        if self._is_upstream_stream_error(chunk):
+                                            logger.warning("Upstream sent error in stream chunk: %s", data_str[:500])
+                                            if self._backends and self._current_backend_idx >= 0:
+                                                cooldown = self._get_stream_error_cooldown(self._current_backend_idx)
+                                                self._mark_backend_unhealthy(
+                                self._current_backend_idx, cooldown=cooldown
+                            )
+                                            stream_error = True
+                                            done = True
+                                            break
+                                        # Extract usage for logging
+                                        if "usage" in chunk and chunk["usage"] is not None:
+                                            last_usage = chunk["usage"]
+                                        # Forward non-error chunk
+                                        raw_line_bytes = f"{line}\n\n".encode()
+                                        for translated in self._active_provider.translate_upstream_stream_event(
+                                            raw_line_bytes
+                                        ):
+                                            has_content = True
+                                            await sr.write(translated)
+                                    if done:
+                                        break
+                            except (ConnectionResetError, BrokenPipeError, OSError):
+                                logger.debug("Client disconnected during streaming")
                                 break
-                            for line in complete_lines:
-                                if not line:
-                                    continue
-                                if not line.startswith("data: "):
-                                    # Non-data SSE fields (event:, id:, retry:) not used by CC providers
-                                    continue
-                                # KBR-232: on a Messages-wire upstream the line is an
-                                # Anthropic event; the converter's output lines re-enter
-                                # the same body below and are never re-fed to it.
+
+                        logger.debug("Upstream stream ended. chunks=%d done=%s", chunk_count, done)
+
+                        # Flush remaining buffer (last chunk without trailing \n)
+                        if not done and line_buffer:
+                            line = line_buffer.decode("utf-8", errors="replace").strip()
+                            if line.startswith("data: "):
+                                # KBR-232: same conversion as the main loop above.
                                 upstream_lines = (
                                     [
                                         converted.decode("utf-8").removesuffix("\n\n")
@@ -7002,110 +7352,99 @@ class BridgeServer:
                                         ):
                                             has_content = True
                                             await sr.write(translated)
-                                        done = True
-                                        break
-                                    try:
-                                        chunk = json.loads(data_str)
-                                    except json.JSONDecodeError:
-                                        # Non-JSON data line — pass through
-                                        raw_line_bytes = f"{line}\n\n".encode()
-                                        for translated in self._active_provider.translate_upstream_stream_event(
-                                            raw_line_bytes
-                                        ):
-                                            has_content = True
-                                            await sr.write(translated)
-                                        continue
-                                    # Detect in-stream errors
-                                    if self._is_upstream_stream_error(chunk):
-                                        logger.warning("Upstream sent error in stream chunk: %s", data_str[:500])
-                                        if self._backends and self._current_backend_idx >= 0:
-                                            cooldown = self._get_stream_error_cooldown(self._current_backend_idx)
-                                            self._mark_backend_unhealthy(self._current_backend_idx, cooldown=cooldown)
-                                        stream_error = True
-                                        done = True
-                                        break
-                                    # Extract usage for logging
-                                    if "usage" in chunk and chunk["usage"] is not None:
-                                        last_usage = chunk["usage"]
-                                    # Forward non-error chunk
-                                    raw_line_bytes = f"{line}\n\n".encode()
-                                    for translated in self._active_provider.translate_upstream_stream_event(
-                                        raw_line_bytes
-                                    ):
-                                        has_content = True
-                                        await sr.write(translated)
-                                if done:
-                                    break
-                        except (ConnectionResetError, BrokenPipeError, OSError):
-                            logger.debug("Client disconnected during streaming")
-                            break
-
-                    logger.debug("Upstream stream ended. chunks=%d done=%s", chunk_count, done)
-
-                    # Flush remaining buffer (last chunk without trailing \n)
-                    if not done and line_buffer:
-                        line = line_buffer.decode("utf-8", errors="replace").strip()
-                        if line.startswith("data: "):
-                            # KBR-232: same conversion as the main loop above.
-                            upstream_lines = (
-                                [
-                                    converted.decode("utf-8").removesuffix("\n\n")
-                                    for converted in stream_converter.feed(f"{line}\n\n".encode())
-                                ]
-                                if stream_converter is not None
-                                else [line]
-                            )
-                            for line in upstream_lines:
-                                data_str = line[6:]
-                                if data_str.strip() == "[DONE]":
-                                    raw_line_bytes = f"{line}\n\n".encode()
-                                    for translated in self._active_provider.translate_upstream_stream_event(
-                                        raw_line_bytes
-                                    ):
-                                        has_content = True
-                                        await sr.write(translated)
-                                else:
-                                    try:
-                                        chunk = json.loads(data_str)
-                                        if not self._is_upstream_stream_error(chunk):
-                                            if "usage" in chunk and chunk["usage"] is not None:
-                                                last_usage = chunk["usage"]
+                                    else:
+                                        try:
+                                            chunk = json.loads(data_str)
+                                            if not self._is_upstream_stream_error(chunk):
+                                                if "usage" in chunk and chunk["usage"] is not None:
+                                                    last_usage = chunk["usage"]
+                                                raw_line_bytes = f"{line}\n\n".encode()
+                                                for translated in self._active_provider.translate_upstream_stream_event(
+                                                    raw_line_bytes
+                                                ):
+                                                    has_content = True
+                                                    await sr.write(translated)
+                                        except json.JSONDecodeError:
                                             raw_line_bytes = f"{line}\n\n".encode()
                                             for translated in self._active_provider.translate_upstream_stream_event(
                                                 raw_line_bytes
                                             ):
                                                 has_content = True
                                                 await sr.write(translated)
-                                    except json.JSONDecodeError:
-                                        raw_line_bytes = f"{line}\n\n".encode()
-                                        for translated in self._active_provider.translate_upstream_stream_event(
-                                            raw_line_bytes
-                                        ):
-                                            has_content = True
-                                            await sr.write(translated)
-                        line_buffer.clear()  # Buffer consumed
+                            line_buffer.clear()  # Buffer consumed
 
-                    # Handle in-stream error failover
-                    if stream_error:
-                        if has_content:
-                            # Partial content already sent — retrying would corrupt the stream
-                            logger.warning("CC stream error after content emitted; not retrying")
-                            error_json = json.dumps(
-                                {
+                        # Handle in-stream error failover
+                        if stream_error:
+                            if has_content:
+                                # Partial content already sent — retrying would corrupt the stream
+                                logger.warning("CC stream error after content emitted; not retrying")
+                                error_json = json.dumps(
+                                    {
+                                        "error": {
+                                            "message": "Upstream stream error during response",
+                                            "type": "upstream_error",
+                                        }
+                                    }
+                                )
+                                error_sse = f"data: {error_json}\n\n"
+                                try:
+                                    await sr.write(error_sse.encode())
+                                except (ConnectionResetError, BrokenPipeError, OSError):
+                                    logger.debug("Client disconnected before error could be sent")
+                                break
+                            if not self._backends or not self._any_healthy_backend():
+                                # All backends failed or non-balancing — emit clean error and stop
+                                error_payload = {
                                     "error": {
-                                        "message": "Upstream stream error during response",
+                                        "message": "All upstream providers returned errors",
                                         "type": "upstream_error",
                                     }
                                 }
-                            )
-                            error_sse = f"data: {error_json}\n\n"
-                            try:
-                                await sr.write(error_sse.encode())
-                            except (ConnectionResetError, BrokenPipeError, OSError):
-                                logger.debug("Client disconnected before error could be sent")
-                            break
-                        if not self._backends or not self._any_healthy_backend():
-                            # All backends failed or non-balancing — emit clean error and stop
+                                error_sse = f"data: {json.dumps(error_payload)}\n\n"
+                                try:
+                                    await sr.write(error_sse.encode())
+                                except (ConnectionResetError, BrokenPipeError, OSError):
+                                    logger.debug("Client disconnected before upstream error could be sent")
+                                break
+                            if attempt < max_attempts - 1:
+                                self._select_backend()
+                                self._normalize_model(cc_request)
+                                self._active_provider.normalize_request(cc_request)
+                                # KBR-254: cross-class failover — this branch cannot drive a
+                                # custom-transport provider via session.post(...). Re-dispatch into
+                                # the custom-transport branch with the failover-selected provider
+                                # as its initial selection (no further _select_backend call).
+                                if self._active_provider.use_custom_transport:
+                                    if _crossings >= _max_crossings:
+                                        logger.warning(
+                                            "Re-dispatch cap reached (%d crossings, cap %d); "
+                                            "not crossing plain → custom",
+                                                _crossings, _max_crossings,
+                                                )
+                                        _cross_cap_hit = True
+                                        break
+                                    _crossings += 1
+                                    # Pass-through: no translator to reset. Per-attempt buffers
+                                    # (line_buffer/done/has_content/chunk_count/stream_converter)
+                                    # are re-initialised by the attempt-loop prologue, so a fresh
+                                    # raw_attempt=0 iteration is enough.
+                                    logger.info(
+                                        "Re-dispatching plain → custom after transport-class "
+                                        "failover (attempt %d, %d crossings)",
+                                        attempt + 1, _crossings,
+                                        )
+                                    _cross_mode_to_custom = True
+                                    break
+                                url = self._build_upstream_url(cc_request)
+                                headers = self._build_upstream_headers(cc_request)
+                                upstream_body = self._active_provider.translate_to_upstream(cc_request)
+                                logger.info(
+                                    "CC stream in-stream error: attempt %d/%d, switching backend",
+                                    attempt + 1,
+                                    max_attempts,
+                                )
+                                continue
+                            # Exhausted all attempts — emit error and stop
                             error_payload = {
                                 "error": {
                                     "message": "All upstream providers returned errors",
@@ -7118,88 +7457,118 @@ class BridgeServer:
                             except (ConnectionResetError, BrokenPipeError, OSError):
                                 logger.debug("Client disconnected before upstream error could be sent")
                             break
-                        if attempt < max_attempts - 1:
-                            self._select_backend()
-                            self._normalize_model(cc_request)
-                            self._active_provider.normalize_request(cc_request)
-                            url = self._build_upstream_url(cc_request)
-                            headers = self._build_upstream_headers(cc_request)
-                            upstream_body = self._active_provider.translate_to_upstream(cc_request)
-                            logger.info(
-                                "CC stream in-stream error: attempt %d/%d, switching backend",
-                                attempt + 1,
-                                max_attempts,
-                            )
-                            continue
-                        # Exhausted all attempts — emit error and stop
-                        error_payload = {
-                            "error": {
-                                "message": "All upstream providers returned errors",
-                                "type": "upstream_error",
-                            }
-                        }
-                        error_sse = f"data: {json.dumps(error_payload)}\n\n"
-                        try:
-                            await sr.write(error_sse.encode())
-                        except (ConnectionResetError, BrokenPipeError, OSError):
-                            logger.debug("Client disconnected before upstream error could be sent")
-                        break
 
-                    # Check for empty response (pass-through: no content bytes written)
-                    if not has_content:
-                        if self._backends and self._current_backend_idx >= 0:
-                            if self._any_healthy_backend() and attempt < max_attempts - 1:
-                                self._select_backend()
-                                self._normalize_model(cc_request)
-                                self._active_provider.normalize_request(cc_request)
-                                url = self._build_upstream_url(cc_request)
-                                headers = self._build_upstream_headers(cc_request)
-                                upstream_body = self._active_provider.translate_to_upstream(cc_request)
-                                logger.info(
-                                    "CC stream empty response: attempt %d/%d, switching backend",
+                        # Check for empty response (pass-through: no content bytes written)
+                        if not has_content:
+                            if self._backends and self._current_backend_idx >= 0:
+                                if self._any_healthy_backend() and attempt < max_attempts - 1:
+                                    self._select_backend()
+                                    self._normalize_model(cc_request)
+                                    self._active_provider.normalize_request(cc_request)
+                                    # KBR-254: cross-class failover — this branch cannot drive a
+                                    # custom-transport provider via session.post(...). Re-dispatch into
+                                    # the custom-transport branch with the failover-selected provider
+                                    # as its initial selection (no further _select_backend call).
+                                    if self._active_provider.use_custom_transport:
+                                        if _crossings >= _max_crossings:
+                                            logger.warning(
+                                                "Re-dispatch cap reached (%d crossings, cap %d); "
+                                                "not crossing plain → custom",
+                                                    _crossings, _max_crossings,
+                                                    )
+                                            _cross_cap_hit = True
+                                            break
+                                        _crossings += 1
+                                        # Pass-through: no translator to reset. Per-attempt buffers
+                                        # (line_buffer/done/has_content/chunk_count/stream_converter)
+                                        # are re-initialised by the attempt-loop prologue, so a fresh
+                                        # raw_attempt=0 iteration is enough.
+                                        logger.info(
+                                            "Re-dispatching plain → custom after transport-class "
+                                            "failover (attempt %d, %d crossings)",
+                                            attempt + 1, _crossings,
+                                            )
+                                        _cross_mode_to_custom = True
+                                        break
+                                    url = self._build_upstream_url(cc_request)
+                                    headers = self._build_upstream_headers(cc_request)
+                                    upstream_body = self._active_provider.translate_to_upstream(cc_request)
+                                    logger.info(
+                                        "CC stream empty response: attempt %d/%d, switching backend",
+                                        attempt + 1,
+                                        max_attempts,
+                                    )
+                                    continue
+                            elif attempt < max_attempts - 1:
+                                delay = _BACKOFF_BASE * (2 ** (attempt % (_MAX_RETRIES + 1)))
+                                logger.warning(
+                                    "CC stream empty response: retrying in %.1fs (%d/%d)",
+                                    delay,
                                     attempt + 1,
                                     max_attempts,
                                 )
+                                await asyncio.sleep(delay)
                                 continue
-                        elif attempt < max_attempts - 1:
-                            delay = _BACKOFF_BASE * (2 ** (attempt % (_MAX_RETRIES + 1)))
-                            logger.warning(
-                                "CC stream empty response: retrying in %.1fs (%d/%d)",
-                                delay,
-                                attempt + 1,
-                                max_attempts,
-                            )
-                            await asyncio.sleep(delay)
-                            continue
-                    self._log_usage(last_usage)
-                    # Mark backend healthy on clean stream completion
-                    if self._backends and self._current_backend_idx >= 0:
-                        self._mark_backend_healthy(self._current_backend_idx)
-                    break  # Exit retry loop
+                        self._log_usage(last_usage)
+                        # Mark backend healthy on clean stream completion
+                        if self._backends and self._current_backend_idx >= 0:
+                            self._mark_backend_healthy(self._current_backend_idx)
+                        break  # Exit retry loop
 
-        except asyncio.TimeoutError:
-            logger.error("Upstream POST timed out after %ds for Chat Completions stream", _STREAM_READ_TIMEOUT)
-            error_payload = {
-                "error": {
-                    "message": f"Upstream provider timed out ({_STREAM_READ_TIMEOUT}s)",
-                    "type": "timeout_error",
+            except asyncio.TimeoutError:
+                logger.error("Upstream POST timed out after %ds for Chat Completions stream", _STREAM_READ_TIMEOUT)
+                error_payload = {
+                    "error": {
+                        "message": f"Upstream provider timed out ({_STREAM_READ_TIMEOUT}s)",
+                        "type": "timeout_error",
+                    }
                 }
-            }
-            error_sse = f"data: {json.dumps(error_payload)}\n\n"
-            try:
-                await sr.write(error_sse.encode())
+                error_sse = f"data: {json.dumps(error_payload)}\n\n"
+                try:
+                    await sr.write(error_sse.encode())
+                except (ConnectionResetError, BrokenPipeError, OSError):
+                    logger.debug("Client disconnected before timeout error could be sent")
             except (ConnectionResetError, BrokenPipeError, OSError):
-                logger.debug("Client disconnected before timeout error could be sent")
-        except (ConnectionResetError, BrokenPipeError, OSError):
-            logger.debug("Client disconnected during Chat Completions streaming")
-        except Exception as exc:
-            logger.exception("Exception in _stream_chat_completions: %s", exc)
-            error_sse = f"data: {json.dumps({'error': {'message': str(exc), 'type': 'internal_error'}})}\n\n"
-            try:
-                await sr.write(error_sse.encode())
-            except (ConnectionResetError, BrokenPipeError, OSError):
-                logger.debug("Client disconnected before error could be sent")
+                logger.debug("Client disconnected during Chat Completions streaming")
+            except Exception as exc:
+                logger.exception("Exception in _stream_chat_completions: %s", exc)
+                error_sse = f"data: {json.dumps({'error': {'message': str(exc), 'type': 'internal_error'}})}\n\n"
+                try:
+                    await sr.write(error_sse.encode())
+                except (ConnectionResetError, BrokenPipeError, OSError):
+                    logger.debug("Client disconnected before error could be sent")
 
+
+            # Dispatch-loop routing (KBR-254). Every plain-POST crossing site
+            # ran pre-emission, so a re-dispatch here starts the matching branch
+            # on a fresh attempt of the same request.
+            if _cross_mode_to_custom:
+                continue
+            if _cross_cap_hit:
+                logger.warning(
+                    "Re-dispatch cap reached (%d crossings, cap %d); surfacing "
+                    "cross-class exhaustion",
+                    _crossings,
+                    _max_crossings,
+
+                )
+                error_payload = {
+                    "error": {
+                        "message": (
+                            "Upstream backends exhausted (the bridge could not "
+                            "land on a usable backend on this request)"
+                        ),
+                        "type": "cross_class_exhaustion",
+                    }
+                }
+                error_sse = f"data: {json.dumps(error_payload)}\n\n"
+                try:
+                    await sr.write(error_sse.encode())
+                    await sr.write(b"data: [DONE]\n\n")
+                except (ConnectionResetError, BrokenPipeError, OSError):
+                    logger.debug("Client disconnected before cap-hit error could be sent")
+                break
+            break
         logger.info("Chat Completions stream completed (upstream_status=%s)", upstream_status)
         try:
             await sr.write_eof()

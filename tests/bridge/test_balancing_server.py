@@ -1046,6 +1046,316 @@ class TestBalancingAllCustomTransport:
         finally:
             await server.stop_async()
 
+    # KBR-254: the dispatch-loop fix shape must reach the three sibling
+    # streaming handlers (`_stream_responses`, `_stream_gemini`,
+    # `_stream_chat_completions`). Each positive test proves a plain-POST
+    # failover that lands on a custom-transport backend is re-dispatched into
+    # the custom branch (content oracle, not the KBR-249 vacuous one); each
+    # cap test proves the per-request hop cap surfaces the route's
+    # cross_class_exhaustion terminal event instead of looping.
+
+    async def _fake_hello_stream(self, req, write):
+        """Emit a Responses-API SSE carrying the text ``hello`` — the content oracle."""
+        await write(b'data: {"type":"response.created","response":{"id":"resp_test","status":"in_progress"}}\n\n')
+        await write(b'data: {"type":"response.output_text.delta","delta":"hello"}\n\n')
+        await write(b"data: [DONE]\n\n")
+
+    def _sibling_pool(self, stream_side_effect):
+        """Build a two-backend pool: plain NoStreamProvider first, custom BedrockAdapter second.
+
+        Args:
+            stream_side_effect: An async callable ``(req, write)`` installed as
+                the custom backend's ``stream_request``.
+
+        Returns:
+            ``(backends, server, stream_provider)`` where ``server`` is not yet
+            started — the caller starts and stops it.
+        """
+        import uuid
+
+        from kitty.profiles.schema import Profile
+
+        NoStreamProvider = self.NoStreamProvider
+        stream_provider = BedrockAdapter()
+        stream_provider.stream_request = AsyncMock(side_effect=stream_side_effect)
+        backends = [
+            (
+                NoStreamProvider(),
+                "nostream-key",
+                Profile(
+                    name="nostream",
+                    provider="openai",
+                    model="nostream-model",
+                    auth_ref=str(uuid.uuid4()),
+                ),
+            ),
+            (
+                stream_provider,
+                "stream-key",
+                Profile(
+                    name="stream",
+                    provider="bedrock",
+                    model="stream-model",
+                    auth_ref=str(uuid.uuid4()),
+                ),
+            ),
+        ]
+        server = BridgeServer(
+            adapter=None,
+            provider=backends[0][0],
+            resolved_key=backends[0][1],
+            model="nostream-model",
+            backends=backends,
+        )
+        return backends, server, stream_provider
+
+    @pytest.mark.asyncio
+    async def test_responses_stream_cross_class_dispatch(self):
+        """A plain-POST failover onto a custom-transport backend re-dispatches (KBR-254, /v1/responses)."""
+        backends, server, stream_provider = self._sibling_pool(self._fake_hello_stream)
+
+        # Pin the weighted draw: the plain backend is drawn first and the
+        # non-2xx failover selects the custom-transport one (see KBR-249's
+        # chain([0], repeat(1)) pattern).
+        draw = iter(chain([0], repeat(1)))
+
+        def _deterministic_draw(self=server, *, require_streaming: bool = False):
+            idx = next(draw)
+            provider, key, profile = self._backends[idx]
+            return provider, key, profile.model, profile.provider_config or {}, idx
+
+        server._get_next_backend = _deterministic_draw
+
+        port = await server.start_async()
+        url = f"http://127.0.0.1:{port}/v1/responses"
+        request_body = {
+            "model": "test-model",
+            "input": [{"type": "message", "role": "user", "content": "hi"}],
+            "stream": True,
+        }
+        try:
+            with aioresponses(passthrough=["http://127.0.0.1"]) as m:
+                m.post("https://api.nostream.example.com/v1/chat/completions", status=500, body="boom")
+                async with aiohttp.ClientSession() as session, session.post(url, json=request_body) as resp:
+                    assert resp.status == 200
+                    body = await resp.read()
+        finally:
+            await server.stop_async()
+
+        assert server._active_provider is stream_provider
+        # The dispatch correctness oracle: without re-dispatch the plain-POST
+        # branch drives the custom provider over HTTP and the mock never fires.
+        assert stream_provider.stream_request.called, (
+            "Expected the stream-capable backend's stream_request() to have been "
+            "called via cross-mode re-dispatch (KBR-254); got 0 calls."
+        )
+        # Content oracle (the KBR-249 vacuous-oracle trap): the mocked payload's
+        # text must reach the client, not just a 200 with the right shape.
+        assert b"hello" in body, f"Expected mocked 'hello' payload in body, got {body[:500]!r}"
+
+    @pytest.mark.asyncio
+    async def test_gemini_stream_cross_class_dispatch(self):
+        """A plain-POST failover onto a custom-transport backend re-dispatches (KBR-254, /v1/gemini)."""
+        backends, server, stream_provider = self._sibling_pool(self._fake_hello_stream)
+        draw = iter(chain([0], repeat(1)))
+
+        def _deterministic_draw(self=server, *, require_streaming: bool = False):
+            idx = next(draw)
+            provider, key, profile = self._backends[idx]
+            return provider, key, profile.model, profile.provider_config or {}, idx
+
+        server._get_next_backend = _deterministic_draw
+
+        port = await server.start_async()
+        url = f"http://127.0.0.1:{port}/v1beta/models/test-model:streamGenerateContent"
+        request_body = {"contents": [{"role": "user", "parts": [{"text": "hi"}]}]}
+        try:
+            with aioresponses(passthrough=["http://127.0.0.1"]) as m:
+                m.post("https://api.nostream.example.com/v1/chat/completions", status=500, body="boom")
+                async with aiohttp.ClientSession() as session, session.post(url, json=request_body) as resp:
+                    assert resp.status == 200
+                    body = await resp.read()
+        finally:
+            await server.stop_async()
+
+        assert server._active_provider is stream_provider
+        assert stream_provider.stream_request.called, (
+            "Expected the stream-capable backend's stream_request() to have been "
+            "called via cross-mode re-dispatch (KBR-254); got 0 calls."
+        )
+        assert b"hello" in body, f"Expected mocked 'hello' payload in body, got {body[:500]!r}"
+
+    @pytest.mark.asyncio
+    async def test_chat_completions_stream_cross_class_dispatch(self):
+        """A plain-POST failover onto a custom-transport backend re-dispatches (KBR-254, /v1/chat/completions)."""
+        backends, server, stream_provider = self._sibling_pool(self._fake_hello_stream)
+        draw = iter(chain([0], repeat(1)))
+
+        def _deterministic_draw(self=server, *, require_streaming: bool = False):
+            idx = next(draw)
+            provider, key, profile = self._backends[idx]
+            return provider, key, profile.model, profile.provider_config or {}, idx
+
+        server._get_next_backend = _deterministic_draw
+
+        port = await server.start_async()
+        url = f"http://127.0.0.1:{port}/v1/chat/completions"
+        request_body = {"model": "test-model", "messages": [{"role": "user", "content": "hi"}], "stream": True}
+        try:
+            with aioresponses(passthrough=["http://127.0.0.1"]) as m:
+                m.post("https://api.nostream.example.com/v1/chat/completions", status=500, body="boom")
+                async with aiohttp.ClientSession() as session, session.post(url, json=request_body) as resp:
+                    assert resp.status == 200
+                    body = await resp.read()
+        finally:
+            await server.stop_async()
+
+        assert server._active_provider is stream_provider
+        assert stream_provider.stream_request.called, (
+            "Expected the stream-capable backend's stream_request() to have been "
+            "called via cross-mode re-dispatch (KBR-254); got 0 calls."
+        )
+        assert b"hello" in body, f"Expected mocked 'hello' payload in body, got {body[:500]!r}"
+
+    async def _run_cap_hit(
+        self,
+        route_path: str,
+        request_body: dict,
+        discriminator: str,
+    ):
+        """Drive one request until the cross-class hop cap fires; return the body.
+
+        The pool alternates plain / custom with the custom backend's stream
+        poisoned and health-marking a no-op, so every failover crosses class
+        (the KBR-249 cap-test mechanism). The plain backend's upstream URL is
+        intercepted with a 500 so each plain-POST attempt fails through its
+        non-2xx failover quickly. Unlike `/v1/messages` — which defers
+        ``sr.prepare()`` and can answer a cap-hit with a bare JSON 502 — the
+        three sibling routes prepare their SSE response eagerly, so the cap
+        surfaces as the route's terminal in-stream event instead.
+
+        Args:
+            route_path: The inbound route, e.g. ``/v1/responses``.
+            request_body: The JSON body for the inbound request.
+            discriminator: The route's D4-family error field name
+                (``code`` / ``reason`` / ``type``) — asserted set to
+                ``"cross_class_exhaustion"`` in the body.
+
+        Returns:
+            ``(status, body_bytes)`` of the client's response.
+        """
+
+        async def _poison(req, write):
+            raise ConnectionResetError("poisoned")
+
+        backends, server, _stream_provider = self._sibling_pool(_poison)
+        _call_count = [0]
+
+        def _alternate(self=server, **kwargs):
+            n = _call_count[0]
+            _call_count[0] += 1
+            idx = 0 if n == 0 else (1 if n % 2 == 1 else 0)
+            provider, key, profile = self._backends[idx]
+            return provider, key, profile.model, {}, idx
+
+        server._get_next_backend = _alternate
+
+        def _any_healthy(*, require_streaming=False):
+            return not require_streaming
+
+        port = await server.start_async()
+        url = f"http://127.0.0.1:{port}{route_path}"
+        try:
+            with aioresponses(passthrough=["http://127.0.0.1"]) as m:
+                m.post(
+                    "https://api.nostream.example.com/v1/chat/completions",
+                    status=500,
+                    body="boom",
+                    repeat=True,
+                )
+                with (
+                    patch("kitty.bridge.server._EMPTY_FINAL_DELAYS", []),
+                    patch("kitty.bridge.server._TRANSPORT_GRACE_DELAYS", (0.0,)),
+                    patch.object(server, "_mark_backend_unhealthy", lambda *a, **k: None),
+                    patch.object(server, "_any_healthy_backend", _any_healthy),
+                ):
+                    async with aiohttp.ClientSession() as session, session.post(
+                        url, json=request_body
+                    ) as resp:
+                        status = resp.status
+                        body = await resp.read()
+        finally:
+            await server.stop_async()
+
+        text = body.decode("utf-8", errors="replace")
+        # Parse each SSE event and find the terminal cap-hit error. The route's
+        # D4 discriminator must name `cross_class_exhaustion` exactly — not
+        # merely appear as a value somewhere in the body (the AC-2 oracle).
+        # Responses puts `code`/`reason`/`message` at the top level of the
+        # error event; Gemini and Chat Completions nest them under "error".
+        terminal = None
+        for line in text.splitlines():
+            line = line.strip()
+            if not line.startswith("data: "):
+                continue
+            data_str = line[6:]
+            if data_str == "[DONE]":
+                continue
+            try:
+                payload = json.loads(data_str)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(payload, dict):
+                continue
+            error = payload.get("error") if isinstance(payload.get("error"), dict) else payload
+            if discriminator in error:
+                assert error[discriminator] == "cross_class_exhaustion", (
+                    f"cap-hit event should carry {discriminator}="
+                    f"cross_class_exhaustion, got {payload!r}"
+                )
+                terminal = payload
+        assert terminal is not None, (
+            f"cap-hit body should carry an event with {discriminator}="
+            f"cross_class_exhaustion, got {text[:500]!r}"
+        )
+        # The full standard wording, not just a fragment.
+        assert "could not land on a usable backend" in text, (
+            f"cap-hit message should carry the standard wording, got {text[:500]!r}"
+        )
+        return status, body
+
+    @pytest.mark.asyncio
+    async def test_responses_stream_re_dispatch_cap_surfaces_error_event(self):
+        """Hop-cap hit on /v1/responses surfaces the route's D4 error event (KBR-254)."""
+        status, _body = await self._run_cap_hit(
+            "/v1/responses",
+            {"model": "test-model", "input": [{"type": "message", "role": "user", "content": "hi"}], "stream": True},
+            discriminator="code",
+        )
+        # sr.prepare() is eager on this route, so the cap surfaces in-stream
+        # (200 + the error event) rather than as the Messages route's bare 502.
+        assert status == 200, f"cap-hit should surface as 200 SSE (committed by prepare), got {status}"
+
+    @pytest.mark.asyncio
+    async def test_gemini_stream_re_dispatch_cap_surfaces_error_event(self):
+        """Hop-cap hit on /v1beta/...streamGenerateContent surfaces the route's error event (KBR-254)."""
+        status, _body = await self._run_cap_hit(
+            "/v1beta/models/test-model:streamGenerateContent",
+            {"contents": [{"role": "user", "parts": [{"text": "hi"}]}]},
+            discriminator="reason",
+        )
+        assert status == 200
+
+    @pytest.mark.asyncio
+    async def test_chat_completions_stream_re_dispatch_cap_surfaces_error_event(self):
+        """Hop-cap hit on /v1/chat/completions surfaces the route's error event (KBR-254)."""
+        status, _body = await self._run_cap_hit(
+            "/v1/chat/completions",
+            {"model": "test-model", "messages": [{"role": "user", "content": "hi"}], "stream": True},
+            discriminator="type",
+        )
+        assert status == 200
+
 
 class TestCustomTransportCloudflareClassification:
     """Verify that ProviderError with is_cloudflare=True triggers

@@ -391,7 +391,7 @@ logic. A no means byte-identical to the pre-KBR-232 behaviour.
 | S5 | `thinking_delta` → `reasoning_content`; signatures dropped | The Chat Completions wire has no signature slot, so preservation is impossible; M17's strip-and-retry recovers the round-trip rejection instead (KBR-238). |
 | S6 | The three loops run wider by the strip budget, with an attempt correction | Same rationale KBR-238 recorded on `_stream_messages`: a strip gets its attempt back, so the empty-response schedule is not pulled forward. |
 | S7 | `_stream_responses` opens the lifecycle lazily, on the first non-finish write of each attempt | `translate_stream_start` and `translate_stream_chunk` draw from the same `_seq` counter, so translating the lifecycle after the first chunk had been translated would put `sequence_number` 3 and 4 on the wire ahead of the chunk's 0, 1, 2 — the translation therefore runs speculatively at attempt start, before any chunk, and the two strings are written on the first real event and invalidated at every `translator.reset()` inside the loop (KBR-242; gap G41). Writing eagerly, before the first chunk is translated, was rejected: an all-finish first chunk is how an empty response presents, and publishing the lifecycle before the empty verdict is known would put a half-open lifecycle on the wire exactly where the failover ladder is about to retire the attempt. A purely-empty attempt publishes nothing, so KBR-247's `events_emitted` model survives; the exhausted-ladder fallback stays an empty 200 (KBR-235's territory); the error paths never open the lifecycle. Tests: `tests/bridge/test_responses_stream_lifecycle.py`, and the KBR-240 walk's opening + exact-`sequence_number` assertions |
-| S8 | Cross-class re-dispatch (`_stream_messages`, KBR-249): when a plain-POST branch's failover selects a `use_custom_transport` provider, the function re-enters the custom-transport branch with the failover-selected provider as its own initial selection | The plain-POST branch cannot drive a `use_custom_transport` provider via `session.post(...)`; the bridge must speak the protocol that matches the selected backend's class. Without re-dispatch the failover silently delivers an empty `200` (the bug KBR-235 exposed). The custom-transport branch's symmetric `custom → plain` fall-through — `src/kitty/bridge/server.py:4185-4204` (the cross-mode select with the three pops) then `4265-4270` (the `continue` entering the plain block) — is unchanged in behaviour. The re-dispatch bound is `(2 * n_backends) + 1` per request so a pathological cooldown-expiry ping-pong surfaces an honest error instead of looping; the cap-hit error carries `"reason": "cross_class_exhaustion"` so a client that branches on `reason` can tell it apart from `empty_response` and `upstream_error` (D4, KBR-241). |
+| S8 | Cross-class re-dispatch (`_stream_messages` KBR-249; `_stream_responses`, `_stream_gemini`, `_stream_chat_completions` KBR-254): when a plain-POST branch's failover selects a `use_custom_transport` provider, the function re-enters the custom-transport branch with the failover-selected provider as its own initial selection | The plain-POST branch cannot drive a `use_custom_transport` provider via `session.post(...)`; the bridge must speak the protocol that matches the selected backend's class. Without re-dispatch the failover silently delivers an empty `200` (the bug KBR-235 exposed). The custom-transport branch's symmetric `custom → plain` fall-through — `src/kitty/bridge/server.py:4185-4204` (the cross-mode select with the three pops) then `4265-4270` (the `continue` entering the plain block) — is unchanged in behaviour. The re-dispatch bound is `(2 * n_backends) + 1` per request so a pathological cooldown-expiry ping-pong surfaces an honest error instead of looping; the cap-hit error carries `"reason": "cross_class_exhaustion"` (plus the route's own D4 discriminator — `code` on Responses, `reason` on Gemini, `type` on Chat Completions) so a client that branches on `reason` can tell it apart from `empty_response` and `upstream_error` (D4, KBR-241). The three sibling handlers prepare their SSE response eagerly (`sr.prepare()` before the dispatch loop), so unlike `/v1/messages` — which defers prepare and answers a cap-hit with a bare JSON `502` — a sibling cap-hit surfaces as the route's in-stream terminal event followed by the handler's existing post-loop. |
 | S9 | Cross-class re-dispatch reuses the failover-selected provider, never re-selects | Re-selecting would consume a new draw from the deterministic test stub and break the pinned two-draw invariant; semantically, the failover already chose — the branch re-enters with that choice intact. |
 
 ### 5.4 Known limits
@@ -421,6 +421,25 @@ logic. A no means byte-identical to the pre-KBR-232 behaviour.
   doc and the source diverge again, run `git grep -n "self._select_backend()"`
   and reject any matches that are inside the custom-transport branch's
   cross-mode fall-through — those don't have the defect.)
+- **KBR-254 applied the same fix shape on each sibling.** `_stream_responses`,
+  `_stream_gemini`, and `_stream_chat_completions` now sit inside `while True:`
+  with `_crossings`/`_max_crossings = (2 * n_backends) + 1` and a transport-
+  class crossing guard at every plain-POST `_select_backend()` site listed
+  above. Per-route cap-hit terminal SSE event (recorded in the PR description):
+
+  - `/v1/responses`: `error` event with `code: "cross_class_exhaustion"` plus
+    `reason: "cross_class_exhaustion"`, then the existing
+    `responses_format_error(...)` + `synthesize_completed_events` loop.
+  - `/v1beta/...:streamGenerateContent`: `data: {"error":{"code":502,"message":
+    "...","reason":"cross_class_exhaustion"}}\n\n` then the existing
+    `write_eof`. The asymmetry from the Messages route — which returns a bare
+    JSON `502` on cap-hit because `sr.prepare()` is deferred there — is
+    intentional: the three siblings prepare their SSE response eagerly, so
+    the cap-hit surfaces as an in-stream terminal event followed by the
+    handler's existing post-loop, and the status line on the wire is `200`.
+  - `/v1/chat/completions`: `data: {"error":{"message":"...","type":
+    "cross_class_exhaustion"}}\n\n` followed by `data: [DONE]\n\n`, then
+    `write_eof`.
 ## 6. Backend health, cooldowns, and the arrival recovery hold
 
 ### 6.1 The state machine as it stands
