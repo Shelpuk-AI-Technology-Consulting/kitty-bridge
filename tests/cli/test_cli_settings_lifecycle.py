@@ -748,14 +748,6 @@ def test_sigkill_orphans_the_session_file_and_cleanup_is_a_noop(sandbox: _Sandbo
 # ── AC-4: staged pre-fix-style kitty state — cleanup restores byte-exactly ───
 
 
-@pytest.mark.skipif(
-    sys.platform == "win32",
-    reason=(
-        "_load_backup reads with universal newlines and _atomic_write_text writes with "
-        "default newline=None, so a LF backup round-trips to CRLF on Windows — the "
-        "byte-exact assertion needs a newline-aware comparison there"
-    ),
-)
 def test_staged_kitty_state_is_restored_byte_exactly_from_backup(sandbox: _Sandbox) -> None:
     """A SIGKILLed pre-fix-style session is repaired exactly from the backup.
 
