@@ -1595,14 +1595,22 @@ class TestOpaqueKindVocabulary:
 
     @pytest.mark.parametrize(
         "wire",
-        ["guardContent", "cachePoint", "reasoningContent", "citationsContent", "toolAddition", "toolRemoval"],
+        # Converse has nine camelCase ``ContentBlock`` types.  T-A5 (KBR-37)
+        # added aliases for the six whose ``Opaque`` projection is the
+        # canonical form (``cachePoint``/``guardContent``/``citationsContent``
+        # /``toolAddition``/``toolRemoval``/``searchResult`` — the latter
+        # predated T-A5).  The three remaining (``reasoningContent``,
+        # ``toolUse``, ``toolResult``) project to first-class parts and never
+        # reach :func:`opaque_kind` — but if a reader did pass them in, they
+        # would still raise, and this test pins that.
+        ["reasoningContent", "toolUse", "toolResult"],
     )
     def test_a_camel_case_wire_type_raises_rather_than_being_converted(self, wire: str) -> None:
-        """Converse has nine of these. Raising is what puts T-A5's author here with a real corpus.
+        """A truly un-aliased camelCase raises rather than being silently converted.
 
-        Converting instead would mean shipping a camelCase splitter with no caller
-        and no corpus, whose unexercised edge cases become a second source of
-        drift rather than a cure for one.
+        Converting instead would mean shipping a camelCase splitter with no
+        caller and no corpus, whose unexercised edge cases become a second
+        source of drift rather than a cure for one.
         """
         with pytest.raises(ValueError, match=wire):
             c.opaque_kind(wire)
@@ -1640,9 +1648,14 @@ class TestOpaqueRejectsANonCanonicalKind:
         with pytest.raises(ValueError, match="document"):
             c.Opaque(kind)
 
-    @pytest.mark.parametrize("kind", ["guardContent", "myCustomBlock", "_x", "x_", "2x", "a-b", ""])
+    @pytest.mark.parametrize("kind", ["myCustomBlock", "_x", "x_", "2x", "a-b", ""])
     def test_a_kind_that_is_not_snake_case_is_rejected_even_with_no_alias_for_it(self, kind: str) -> None:
         """The second branch, and it needs a value **no alias covers** to exercise at all.
+
+        ``guardContent`` was previously the camelCase representative; T-A5
+        (KBR-37) added it to :data:`OPAQUE_ALIASES`, so it now lands on the
+        alias branch. ``myCustomBlock`` carries that responsibility — a
+        camelCase value that no alias covers, per the original purpose.
 
         An earlier version of this test used `searchResult`, which
         :data:`OPAQUE_ALIASES` reconciles — so it was proving the alias branch
