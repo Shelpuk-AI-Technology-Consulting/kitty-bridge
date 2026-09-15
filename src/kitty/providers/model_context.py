@@ -379,7 +379,11 @@ def get_model_context_tokens(
     ``(provider, model, effective, ignored)`` at ``INFO`` — see
     :func:`_log_shadowed_context_window` — so an operator whose hand-written
     setting is being outvoted by a file synced from the network can discover
-    that from the logs without enabling debug mode.
+    that from the logs at INFO level. ``INFO`` (not ``WARNING``) because the
+    precedence is deliberate — this is visibility, not an alarm — and
+    discoverability depends on the operator's logging config emitting at
+    INFO for the ``kitty.providers.model_context`` logger; handlers that
+    filter INFO out will need to surface this logger's events explicitly.
     """
     override = _lookup_override(model)
     if override is not None:

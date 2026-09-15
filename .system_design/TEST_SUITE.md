@@ -1795,11 +1795,15 @@ query/key spellings missed, and a miss is silent.
   when the two disagree, `get_model_context_tokens` emits an `INFO` line once per
   `(provider, model, effective, ignored)`, naming the model and both values, so
   an operator whose setting is being outvoted by a file they do not control can
-  discover that from the logs. The docstring's "omit that model from the
-  overrides file" advice remains true; the log makes the shadowing visible even
-  when the operator did not set the file themselves. The behaviour itself
-  (precedence + silent shadow) was unchanged; `INFO`, not `WARNING`, because the
-  precedence is deliberate. No register row moves.
+  discover that from the logs **at INFO level** — `INFO` (not `WARNING`) because
+  the precedence is deliberate and this is visibility, not an alarm.
+  Discoverability therefore depends on the operator's logging config emitting
+  at INFO for the `kitty.providers.model_context` logger; handlers that filter
+  INFO out will need to surface this logger's events explicitly. The docstring's
+  "omit that model from the overrides file" advice remains true; the log makes
+  the shadowing visible even when the operator did not set the file themselves.
+  The behaviour itself (precedence + silent shadow) was unchanged. No register
+  row moves.
 
 **Mutation testing.** Line coverage cannot tell a real assertion from `assert result is not
 None`. `mutmut` closes that gap.
