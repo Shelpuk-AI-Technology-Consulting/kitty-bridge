@@ -403,40 +403,44 @@ logic. A no means byte-identical to the pre-KBR-232 behaviour.
 - In-stream error failover on `/v1/chat/completions` needs a backend pool; pool-less the
   error surfaces to the client (which is still the fix: the per-event translator used to
   swallow the error and deliver a truncated success).
-- **The KBR-249 dispatch defect exists in three sibling handlers too.**
-  Each has a plain-POST branch whose failovers call `_select_backend()`
-  without a transport-class guard, just like `_stream_messages` did
-  before KBR-249. The fix shape is identical; KBR-249 scopes to
-  `/v1/messages` because that is where the test sits (PR #131's CI).
-  A sibling ticket per handler is owed. Representative plain-POST
-  failover sites on the current `main` head:
+- **KBR-254: cross-class dispatch fix on the three siblings.** The KBR-249 fix
+  on `_stream_messages` left the same defect in `_stream_responses`,
+  `_stream_gemini`, and `_stream_chat_completions` (recorded in §5.4 of
+  `SYSTEM_DESIGN.md` since KBR-249 as "the fix shape is identical, a sibling
+  ticket per handler is owed"). KBR-254 applies the fix: each sibling now
+  sits inside a `while True:` dispatch loop with `_crossings` /
+  `_max_crossings = (2 * n_backends) + 1` and a transport-class crossing
+  guard at every plain-POST `_select_backend()` failover site — three per
+  handler, mirroring the KBR-249 shape on `_stream_messages` (see §5.3 S8
+  and §5.4 for the per-route cap-hit wire shapes):
 
-  - `_stream_responses` (`src/kitty/bridge/server.py:3605, 3770, 3804`).
-    The cross-mode fall-through at `:3395` is the symmetric custom→plain
-    path, not the bug.
-  - `_stream_gemini` (`:5818, 5959, 5980`).
-  - `_stream_chat_completions` (`:6825, 7024, 7054`).
+  - `_stream_responses` — the three plain-POST failover sites that
+    KBR-249 recorded at pre-KBR-254 line numbers
+    `src/kitty/bridge/server.py:~3605, 3770, 3804`. Each now sits behind
+    a guard inside the dispatch loop. The cross-mode fall-through at
+    `:3395` is the symmetric custom→plain path, not a crossing site.
+  - `_stream_gemini` — three plain-POST failover sites pre-recorded at
+    `:~5818, 5959, 5980`.
+  - `_stream_chat_completions` — three plain-POST failover sites
+    pre-recorded at `:~6825, 7024, 7054`.
 
-  (Line numbers verified against this branch's HEAD; if the design
-  doc and the source diverge again, run `git grep -n "self._select_backend()"`
-  and reject any matches that are inside the custom-transport branch's
-  cross-mode fall-through — those don't have the defect.)
-- **KBR-254 applied the same fix shape on each sibling.** `_stream_responses`,
-  `_stream_gemini`, and `_stream_chat_completions` now sit inside `while True:`
-  with `_crossings`/`_max_crossings = (2 * n_backends) + 1` and a transport-
-  class crossing guard at every plain-POST `_select_backend()` site listed
-  above. Per-route cap-hit terminal SSE event (recorded in the PR description):
+  To re-locate the now-guarded sites against current source, run
+  `git grep -n "KBR-254: cross-class failover"`; matches inside the
+  custom-transport branch's cross-mode fall-through are not crossings.
+  Per-route cap-hit terminal SSE event shape (recorded in the PR
+  description for KBR-254):
 
-  - `/v1/responses`: `error` event with `code: "cross_class_exhaustion"` plus
-    `reason: "cross_class_exhaustion"`, then the existing
+  - `/v1/responses`: `error` event with `code: "cross_class_exhaustion"`
+    plus `reason: "cross_class_exhaustion"`, then the existing
     `responses_format_error(...)` + `synthesize_completed_events` loop.
-  - `/v1beta/...:streamGenerateContent`: `data: {"error":{"code":502,"message":
-    "...","reason":"cross_class_exhaustion"}}\n\n` then the existing
-    `write_eof`. The asymmetry from the Messages route — which returns a bare
-    JSON `502` on cap-hit because `sr.prepare()` is deferred there — is
-    intentional: the three siblings prepare their SSE response eagerly, so
-    the cap-hit surfaces as an in-stream terminal event followed by the
-    handler's existing post-loop, and the status line on the wire is `200`.
+  - `/v1beta/...:streamGenerateContent`: `data: {"error":{"code":502,
+    "message":"...","reason":"cross_class_exhaustion"}}\n\n` then the
+    existing `write_eof`. The asymmetry from the Messages route — which
+    returns a bare JSON `502` on cap-hit because `sr.prepare()` is
+    deferred there — is intentional: the three siblings prepare their SSE
+    response eagerly, so the cap-hit surfaces as an in-stream terminal
+    event followed by the handler's existing post-loop, and the status
+    line on the wire is `200`.
   - `/v1/chat/completions`: `data: {"error":{"message":"...","type":
     "cross_class_exhaustion"}}\n\n` followed by `data: [DONE]\n\n`, then
     `write_eof`.

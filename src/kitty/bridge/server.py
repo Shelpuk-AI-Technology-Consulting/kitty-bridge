@@ -3636,7 +3636,7 @@ class BridgeServer:
                                             logger.warning(
                                                 "Re-dispatch cap reached (%d crossings, cap %d); "
                                                 "not crossing plain → custom",
-                                                    _crossings, _max_crossings,
+                                                _crossings, _max_crossings,
                                                 )
                                             _cross_cap_hit = True
                                             break
@@ -3829,7 +3829,7 @@ class BridgeServer:
                                         logger.warning(
                                             "Re-dispatch cap reached (%d crossings, cap %d); "
                                             "not crossing plain → custom",
-                                                _crossings, _max_crossings,
+                                            _crossings, _max_crossings,
                                             )
                                         _cross_cap_hit = True
                                         break
@@ -3913,7 +3913,7 @@ class BridgeServer:
                                             logger.warning(
                                                 "Re-dispatch cap reached (%d crossings, cap %d); "
                                                 "not crossing plain → custom",
-                                                    _crossings, _max_crossings,
+                                                _crossings, _max_crossings,
                                                 )
                                             _cross_cap_hit = True
                                             break
@@ -4624,7 +4624,7 @@ class BridgeServer:
                                                     logger.warning(
                                                         "Re-dispatch cap reached (%d crossings, cap %d); "
                                                         "not crossing plain → custom for %s",
-                                                        _crossings, _max_crossings, message_id,
+                                                    _crossings, _max_crossings, message_id,
                                                         )
                                                     _cross_cap_hit = True
                                                     break
@@ -4752,7 +4752,7 @@ class BridgeServer:
                                                 logger.warning(
                                                     "Re-dispatch cap reached (%d crossings, cap %d); "
                                                     "not crossing plain → custom for %s",
-                                                    _crossings, _max_crossings, message_id,
+                                                _crossings, _max_crossings, message_id,
                                                     )
                                                 _cross_cap_hit = True
                                                 break
@@ -4924,7 +4924,7 @@ class BridgeServer:
                                                 logger.warning(
                                                     "Re-dispatch cap reached (%d crossings, cap %d); "
                                                     "not crossing plain → custom for %s",
-                                                    _crossings, _max_crossings, message_id,
+                                                _crossings, _max_crossings, message_id,
                                                     )
                                                 _cross_cap_hit = True
                                                 break
@@ -5154,7 +5154,7 @@ class BridgeServer:
                                             logger.warning(
                                                 "Re-dispatch cap reached (%d crossings, cap %d); "
                                                 "not crossing plain → custom for %s",
-                                                _crossings, _max_crossings, message_id,
+                                            _crossings, _max_crossings, message_id,
                                                 )
                                             _cross_cap_hit = True
                                             break
@@ -5275,7 +5275,7 @@ class BridgeServer:
                                                 logger.warning(
                                                     "Re-dispatch cap reached (%d crossings, cap %d); "
                                                     "not crossing plain → custom for %s",
-                                                    _crossings, _max_crossings, message_id,
+                                                _crossings, _max_crossings, message_id,
                                                     )
                                                 _cross_cap_hit = True
                                                 break
@@ -5324,7 +5324,7 @@ class BridgeServer:
                                                     logger.warning(
                                                         "Re-dispatch cap reached (%d crossings, cap %d); "
                                                         "not crossing plain → custom for %s",
-                                                        _crossings, _max_crossings, message_id,
+                                                    _crossings, _max_crossings, message_id,
                                                         )
                                                     _cross_cap_hit = True
                                                     break
@@ -5515,7 +5515,7 @@ class BridgeServer:
                                                 logger.warning(
                                                     "Re-dispatch cap reached (%d crossings, cap %d); "
                                                     "not crossing plain → custom for %s",
-                                                    _crossings, _max_crossings, message_id,
+                                                _crossings, _max_crossings, message_id,
                                                     )
                                                 _cross_cap_hit = True
                                                 break
@@ -5622,7 +5622,7 @@ class BridgeServer:
                     "cross-class exhaustion for %s",
                     _crossings,
                     _max_crossings,
-                    message_id,
+                message_id,
                     )
                 return _make_error_response(
                     {
@@ -6022,7 +6022,7 @@ class BridgeServer:
                                             logger.warning(
                                                 "Re-dispatch cap reached (%d crossings, cap %d); "
                                                 "not crossing plain → custom",
-                                                    _crossings, _max_crossings,
+                                                _crossings, _max_crossings,
                                                 )
                                             _cross_cap_hit = True
                                             break
@@ -6189,7 +6189,7 @@ class BridgeServer:
                                         logger.warning(
                                             "Re-dispatch cap reached (%d crossings, cap %d); "
                                             "not crossing plain → custom",
-                                                _crossings, _max_crossings,
+                                            _crossings, _max_crossings,
                                             )
                                         _cross_cap_hit = True
                                         break
@@ -6261,7 +6261,7 @@ class BridgeServer:
                                             logger.warning(
                                                 "Re-dispatch cap reached (%d crossings, cap %d); "
                                                 "not crossing plain → custom",
-                                                    _crossings, _max_crossings,
+                                                _crossings, _max_crossings,
                                                 )
                                             _cross_cap_hit = True
                                             break
@@ -7193,7 +7193,7 @@ class BridgeServer:
                                             logger.warning(
                                                 "Re-dispatch cap reached (%d crossings, cap %d); "
                                                 "not crossing plain → custom",
-                                                    _crossings, _max_crossings,
+                                                _crossings, _max_crossings,
                                                 )
                                             _cross_cap_hit = True
                                             break
@@ -7419,7 +7419,7 @@ class BridgeServer:
                                         logger.warning(
                                             "Re-dispatch cap reached (%d crossings, cap %d); "
                                             "not crossing plain → custom",
-                                                _crossings, _max_crossings,
+                                            _crossings, _max_crossings,
                                             )
                                         _cross_cap_hit = True
                                         break
@@ -7474,7 +7474,7 @@ class BridgeServer:
                                             logger.warning(
                                                 "Re-dispatch cap reached (%d crossings, cap %d); "
                                                 "not crossing plain → custom",
-                                                    _crossings, _max_crossings,
+                                                _crossings, _max_crossings,
                                                 )
                                             _cross_cap_hit = True
                                             break
