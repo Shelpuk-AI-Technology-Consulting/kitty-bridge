@@ -21,9 +21,13 @@ collects anything, and the first working version of this file had the
 decorators first. What is load-bearing is the property in (1): a step defined
 in a module pytest does not collect is a step pytest-bdd cannot find.
 
-The step bodies bind to the L3 harness surface shipped in ``tests/harness/`` and
-``tests/exemptions.py``. They do not re-implement bridge behaviour — that is the
-rule §6.4.1 names when it says "every scenario binds to an L3 harness rather than
+The step bodies bind to the L3 harness surface shipped in ``tests/harness/``
+— specifically :mod:`harness.bridge`. ``tests/exemptions.py`` is **not**
+imported here; the TR-1c exemption hook lands with T-J2 when its scenario
+exists (§8.3 keeps the registry empty until then), and this file will be
+extended in place rather than forked. The bodies bind to L3 symbols only;
+they do not re-implement bridge behaviour — that is the rule §6.4.1 names
+when it says "every scenario binds to an L3 harness rather than
 re-implementing one."
 """
 
