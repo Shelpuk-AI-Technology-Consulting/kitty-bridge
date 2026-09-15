@@ -177,6 +177,135 @@ class TestTranslateRequestFunctionCall:
         assert msg["tool_calls"][0]["function"]["name"] == "get_weather"
 
 
+class TestTranslateRequestToolCallIdPairing:
+    """Echo the inbound Gemini wire ``id``; synthesise only when absent.
+
+    KBR-195 — the production translator was discarding the inbound
+    ``functionCall.id`` and ``functionResponse.id`` and minting two
+    independent synthetic ids, so a call/result pair that arrived correctly
+    matched came out paired by nothing. The fix preserves the wire id when
+    present and falls back to synthesis only when it is absent.
+    """
+
+    def test_function_call_id_is_echoed_when_present(self):
+        """Inbound ``functionCall.id`` must reach the CC ``tool_calls[].id``."""
+        t = GeminiTranslator()
+        gemini_req = {
+            "contents": [
+                {"role": "user", "parts": [{"text": "Weather?"}]},
+                {
+                    "role": "model",
+                    "parts": [
+                        {
+                            "functionCall": {
+                                "id": "shared-123",
+                                "name": "get_weather",
+                                "args": {"location": "NYC"},
+                            }
+                        }
+                    ],
+                },
+            ],
+        }
+        cc = t.translate_request(gemini_req)
+        assistant = next(m for m in cc["messages"] if m["role"] == "assistant")
+        assert assistant["tool_calls"][0]["id"] == "shared-123"
+
+    def test_function_response_id_is_echoed_when_present(self):
+        """Inbound ``functionResponse.id`` must reach the CC ``tool_call_id``."""
+        t = GeminiTranslator()
+        gemini_req = {
+            "contents": [
+                {
+                    "role": "function",
+                    "parts": [
+                        {
+                            "functionResponse": {
+                                "id": "shared-123",
+                                "name": "get_weather",
+                                "response": {"temp": "72F"},
+                            }
+                        }
+                    ],
+                }
+            ],
+        }
+        cc = t.translate_request(gemini_req)
+        tool_msg = next(m for m in cc["messages"] if m["role"] == "tool")
+        assert tool_msg["tool_call_id"] == "shared-123"
+
+    def test_function_call_id_is_synthesised_when_absent(self):
+        """No wire id → fall back to ``call_<uuid>`` (current behaviour preserved)."""
+        t = GeminiTranslator()
+        gemini_req = {
+            "contents": [
+                {
+                    "role": "model",
+                    "parts": [{"functionCall": {"name": "get_weather", "args": {}}}],
+                }
+            ],
+        }
+        cc = t.translate_request(gemini_req)
+        assistant = next(m for m in cc["messages"] if m["role"] == "assistant")
+        assert assistant["tool_calls"][0]["id"].startswith("call_")
+
+    def test_function_response_id_is_synthesised_when_absent(self):
+        """No wire id on the response → fall back to ``call_<uuid>`` (current behaviour preserved)."""
+        t = GeminiTranslator()
+        gemini_req = {
+            "contents": [
+                {
+                    "role": "function",
+                    "parts": [{"functionResponse": {"name": "get_weather", "response": {}}}],
+                }
+            ],
+        }
+        cc = t.translate_request(gemini_req)
+        tool_msg = next(m for m in cc["messages"] if m["role"] == "tool")
+        assert tool_msg["tool_call_id"].startswith("call_")
+
+    def test_pairing_survives_when_wire_ids_match(self):
+        """The KBR-195 reproduction inverted: a matched wire pair stays matched upstream."""
+        t = GeminiTranslator()
+        gemini_req = {
+            "contents": [
+                {"role": "user", "parts": [{"text": "Weather?"}]},
+                {
+                    "role": "model",
+                    "parts": [
+                        {
+                            "functionCall": {
+                                "id": "shared-123",
+                                "name": "get_weather",
+                                "args": {"location": "NYC"},
+                            }
+                        }
+                    ],
+                },
+                {
+                    "role": "function",
+                    "parts": [
+                        {
+                            "functionResponse": {
+                                "id": "shared-123",
+                                "name": "get_weather",
+                                "response": {"temp": "72F"},
+                            }
+                        }
+                    ],
+                },
+            ],
+        }
+        cc = t.translate_request(gemini_req)
+        assistant = next(m for m in cc["messages"] if m["role"] == "assistant")
+        tool_msg = next(m for m in cc["messages"] if m["role"] == "tool")
+        call_id = assistant["tool_calls"][0]["id"]
+        result_id = tool_msg["tool_call_id"]
+        assert call_id == "shared-123"
+        assert result_id == "shared-123"
+        assert call_id == result_id
+
+
 class TestTranslateResponseText:
     """Chat Completions text response → Gemini candidates."""
 
