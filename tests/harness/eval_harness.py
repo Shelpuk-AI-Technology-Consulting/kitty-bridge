@@ -25,16 +25,19 @@ permitted to import the product; this is not it.
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, fields
 from enum import Enum
 from typing import Any, TypeAlias
 
 __all__ = [
+    "ArmExecutor",
+    "ArmSpec",
     "JSONValue",
     "ModelReply",
     "RawOutcome",
     "RunConfig",
+    "TaskSpec",
     "TimedOut",
     "TrialCategory",
     "UnclassifiedError",
@@ -42,6 +45,7 @@ __all__ = [
     "UpstreamRefusal",
     "Verdict",
     "classify",
+    "validate_arms",
 ]
 
 #: The shape ``sampling_overrides`` accepts: any JSON-serialisable scalar
@@ -316,3 +320,80 @@ def classify(outcome: RawOutcome, verdict: Verdict | None = None) -> TrialCatego
         f"{type(outcome).__name__}; update this function when adding a new "
         f"RawOutcome variant"
     )
+
+
+@dataclass(frozen=True)
+class TaskSpec:
+    """One eval task: a prompt, an id, and the check that judges a reply.
+
+    The task set itself is plan task **T-K2** — independently authored,
+    per §6.4.3 ("A model-generated test that the model's own code
+    passes establishes nothing"). This class is only the shape a task
+    has to satisfy so the harness can drive it; it ships no tasks.
+
+    Attributes:
+        id: Stable identifier the run record keys the trial rows by.
+        prompt: What the arm is asked.
+        acceptance_check: A callable judging one reply and returning a
+            :class:`Verdict`. Per-task by design: what counts as a
+            refusal is evidence about *this* task's context, and a
+            generic heuristic would blur exactly the distinction
+            §6.4.3 says is the diagnosis.
+    """
+
+    id: str
+    prompt: str
+    acceptance_check: Callable[[Any], Verdict]
+
+
+#: The seam the runner calls once per trial. ``sample_index`` lets an
+#: executor vary its behaviour across the N repetitions §6.4.3 requires.
+ArmExecutor: TypeAlias = Callable[[TaskSpec, int], RawOutcome]
+
+
+@dataclass(frozen=True)
+class ArmSpec:
+    """One arm of a paired run: a name for the record and its executor.
+
+    Attributes:
+        name: The arm's key in the run record's per-arm tallies. Must
+            be unique within a run (the two-arm rule refuses duplicates,
+            because two same-named arms would collapse into one tally
+            and silently halve the evidence).
+        executor: The :data:`ArmExecutor` that drives one trial.
+    """
+
+    name: str
+    executor: ArmExecutor
+
+
+def validate_arms(arms: Sequence[ArmSpec]) -> None:
+    """Refuse any arm list that is not exactly two arms with distinct names.
+
+    §6.4.3's measure is the *difference* between two arms — kitty and
+    the direct provider. A single arm has nothing to compare against;
+    a third arm changes what the comparison means; and two arms that
+    share a name collapse into one per-arm tally, silently halving the
+    evidence the record carries. The rule lives in its own function so
+    the runner can call it as its first action — before any trial
+    executes — and so a deliberate defect can be handed to it directly
+    (§1.4).
+
+    Args:
+        arms: The arm list a run proposes to use.
+
+    Raises:
+        ValueError: When ``arms`` does not hold exactly two entries, or
+            when the two entries share a name. The message states the
+            rule, not just the count.
+    """
+    if len(arms) != 2:
+        raise ValueError(
+            f"an eval run needs exactly two arms (kitty and direct); got {len(arms)}"
+        )
+
+    first, second = arms
+    if first.name == second.name:
+        raise ValueError(
+            f"the two arms must have distinct names; both are named {first.name!r}"
+        )

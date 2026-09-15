@@ -22,8 +22,11 @@ from __future__ import annotations
 import pytest
 
 from harness.eval_harness import (
+    ArmSpec,
     ModelReply,
+    RawOutcome,
     RunConfig,
+    TaskSpec,
     TimedOut,
     TrialCategory,
     UnclassifiedError,
@@ -31,6 +34,7 @@ from harness.eval_harness import (
     UpstreamRefusal,
     Verdict,
     classify,
+    validate_arms,
 )
 
 # ── RunConfig — pinning (REQ 1) ──────────────────────────────────────────────
@@ -230,6 +234,49 @@ def test_classify_unknown_outcome_variant_raises_type_error() -> None:
     """
     with pytest.raises(TypeError, match="unknown type"):
         classify("not a RawOutcome")  # type: ignore[arg-type]
+
+
+# ── Arms and the two-arm rule (REQ 3) ───────────────────────────────────────
+
+
+def _always_pass(task: TaskSpec, sample_index: int) -> RawOutcome:
+    """A trivial executor: every trial succeeds."""
+    return ModelReply(reply=f"ok for {task.id} #{sample_index}")
+
+
+def test_validate_arms_accepts_two_distinct_arms() -> None:
+    """REQ 3 — exactly two arms with distinct names is the legal shape."""
+    arms = [ArmSpec(name="kitty", executor=_always_pass), ArmSpec(name="direct", executor=_always_pass)]
+    validate_arms(arms)  # must not raise
+
+
+def test_validate_arms_rejects_a_single_arm() -> None:
+    """REQ 3 — one arm is refused; §6.4.3's measure is the difference between two."""
+    with pytest.raises(ValueError, match="exactly two"):
+        validate_arms([ArmSpec(name="kitty", executor=_always_pass)])
+
+
+def test_validate_arms_rejects_three_arms() -> None:
+    """REQ 3 — three arms are refused for the same reason one is."""
+    arms = [
+        ArmSpec(name="kitty", executor=_always_pass),
+        ArmSpec(name="direct", executor=_always_pass),
+        ArmSpec(name="third", executor=_always_pass),
+    ]
+    with pytest.raises(ValueError, match="exactly two"):
+        validate_arms(arms)
+
+
+def test_validate_arms_rejects_duplicate_arm_names() -> None:
+    """REQ 3 — two arms sharing a name are refused.
+
+    The run record's per-arm tallies are keyed by name; two arms with
+    the same name would collapse into one tally and silently halve the
+    evidence.
+    """
+    arms = [ArmSpec(name="kitty", executor=_always_pass), ArmSpec(name="kitty", executor=_always_pass)]
+    with pytest.raises(ValueError, match="distinct"):
+        validate_arms(arms)
 
 
 # ── Helpers ─────────────────────────────────────────────────────────────────
