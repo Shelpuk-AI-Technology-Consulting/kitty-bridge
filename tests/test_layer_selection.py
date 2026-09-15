@@ -457,6 +457,13 @@ class TestTheWholeSuiteIsCoherent:
             # module-level `pytestmark` cannot be overridden per test, and the
             # behavioural cases for the same helper are L1.
             "tests/test_cc_ingress_normalises_stop.py",
+            # KBR-76 (T-G1). A §6.2.3 docs-vs-code guard with four arms: the
+            # README's endpoint table, `X-Kitty-*` attribution-header table,
+            # `KITTY_*` env-var register and logging-flag table, each held
+            # against the code artefact that implements it. One exempt
+            # assertion (`t-g1-endpoint-table`, KBR-9) lands red until the
+            # README correction closes that defect.
+            "tests/test_readme_table_guards.py",
         }
 
         actual = {

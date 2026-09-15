@@ -95,6 +95,35 @@ _SHAPES: tuple[tuple[str, str], ...] = (
         c.part_path(2, 0, "cache_control"),
     ),
     (c.tool_path(c.WILDCARD, "cache_control"), c.tool_path("Bash", "cache_control")),
+    # KBR-195 — M18's anchor (functionCall id synth on the Gemini route).
+    (c.part_path(c.WILDCARD, c.WILDCARD, "id"), c.part_path(2, 0, "id")),
+    # KBR-195 — M19's anchor (functionResponse tool_use_id synth).
+    (
+        c.part_path(c.WILDCARD, c.WILDCARD, "tool_use_id"),
+        c.part_path(2, 0, "tool_use_id"),
+    ),
+    # KBR-195 — M21's anchor (Gemini NON_BLOCKING calling toggle on a tool decl).
+    (c.tool_path(c.WILDCARD, "behavior"), c.tool_path("get_weather", "behavior")),
+    # KBR-195 — M22's anchor (Gemini thoughtSignature on a functionCall).
+    (
+        c.part_path(c.WILDCARD, c.WILDCARD, "signature"),
+        c.part_path(2, 0, "signature"),
+    ),
+    # KBR-195 — M23's anchor (Gemini functionResponse scheduling).
+    (
+        c.part_path(c.WILDCARD, c.WILDCARD, "scheduling"),
+        c.part_path(2, 0, "scheduling"),
+    ),
+    # KBR-195 — M24's anchor (Gemini part videoMetadata).
+    (
+        c.part_path(c.WILDCARD, c.WILDCARD, "video_metadata"),
+        c.part_path(2, 0, "video_metadata"),
+    ),
+    # KBR-195 — M25's anchor (Gemini image displayName).
+    (
+        c.part_path(c.WILDCARD, c.WILDCARD, "display_name"),
+        c.part_path(2, 0, "display_name"),
+    ),
 )
 
 
@@ -102,8 +131,14 @@ class TestTheRowsThemselves:
     """§3.2 publishes 52 live rows; the data must be those rows and no others."""
 
     def test_the_register_holds_every_live_row(self) -> None:
-        """16 bridge-level rows less the withdrawn M13, plus 36 provider-level."""
-        assert len(r.REGISTER) == 52
+        """24 bridge-level rows less the withdrawn M13, plus 36 provider-level.
+
+        The +8 over the pre-KBR-195 count is the eight Gemini inbound rows
+        KBR-195 added (M18, M19, M20..M25). This literal is the +8
+        no-reflow damage test — a future change that drops a row or adds
+        one without updating the guard fails loudly.
+        """
+        assert len(r.REGISTER) == 60
 
     def test_the_register_is_a_tuple_and_not_a_list(self) -> None:
         """`mypy` does not run over `tests/`, so the annotation is not enforcement.
@@ -581,6 +616,7 @@ class TestTheTriggerArrangingBy:
             r.Trigger.NATIVE_TOOL_USE_FORMAT_ERROR: r.ArrangingBy.RESPONSE,
             r.Trigger.GEMINI_PROTOCOL: r.ArrangingBy.ROUTE,
             r.Trigger.GEMINI_NON_STREAMING: r.ArrangingBy.REQUEST,
+            r.Trigger.GEMINI_INBOUND_ID_ABSENT: r.ArrangingBy.REQUEST,
             r.Trigger.UPSTREAM_EMPTY_RESPONSE: r.ArrangingBy.RESPONSE,
             r.Trigger.ZAI_THINKING_ENABLED: r.ArrangingBy.REQUEST,
             r.Trigger.ZAI_THINKING_DISABLED: r.ArrangingBy.REQUEST,

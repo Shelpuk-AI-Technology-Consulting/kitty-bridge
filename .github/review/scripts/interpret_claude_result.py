@@ -60,6 +60,8 @@ import os
 import re
 from pathlib import Path
 
+from build_failure_notice import RESET_PATTERN
+
 # Provider-specific: this key or endpoint cannot serve the request. These stay
 # separate from the fatal set because the fix is different -- top up, swap a
 # key, or simply wait. Transient errors live here because re-running can clear
@@ -262,31 +264,89 @@ QUOTA_WORD_PATTERNS = (
     r"\b1308\b",
     r"\b1310\b",
     r"\b1113\b",
+    # 🔴 **KBR-217 (Comment 1, item 2).** OpenRouter's spent-credit message, in the
+    # carrier where the 402 itself is unreadable. The message names the threshold,
+    # not a status -- *"You requested up to N tokens, but can only afford M"* (verbatim
+    # from QwenLM/qwen-code#73) -- and `_numbers_in` is top-level only, so a nested
+    # `"code": 402` is never read. The phrase is the only quota signal in that carrier.
+    #
+    # The pattern is anchored on the variable position (`\d+` after "can only afford")
+    # rather than the bare phrase, for the reason §8.5 I-C2 records: "can only afford"
+    # alone is 3 words vs the existing 4-6-word anchors, and a reviewer writing
+    # "your balance can only afford this run" would leak. The variable position is
+    # what makes prose match improbable.
+    #
+    # ⚠️ **AFTER `\b402\b`, and the ordering is load-bearing.** The existing
+    # `test_a_402_whose_body_carries_400_agrees_with_its_own_advice` pins that row's
+    # reason text to `'402'`; adding this BEFORE the status would change the reason to
+    # the phrase and break that pin.
+    r"but can only afford \d+",
 )
 
 # Credentials and model resolution. Provider-specific by definition: a different
 # key, or a different provider's model name, is exactly what may fix them.
-CREDENTIAL_PATTERNS = (
-    r"\bauthentication_failed\b",
-    # upstream: Anthropic's documented 401 and 403 types, per
-    # `platform.claude.com/docs/en/api/errors`. They earn their place beside the status
-    # tier below rather than duplicating it: a body can name its cause and carry no
-    # number anywhere. They are also consulted FIRST, so an operator reads
-    # "authentication_error" rather than "401" -- both true, one more useful.
-    #
-    # 🔴 KBR-182 narrowed the first half of that reasoning and made the second half
-    # load-bearing. It used to read "a numeric `api_error_status` never reaches the
-    # haystack at all", which was a statement about the DEFECT, not about the design;
-    # the status now reaches the provider-scoped text, so this ordering decides what an
-    # operator actually reads rather than winning by default.
-    # `test_a_named_type_still_outranks_the_status_that_arrives_beside_it` is the row.
-    #
-    # ⚠️ "FIRST" is within the credential family. KBR-181's `\b402\b` is read in the
-    # quota group above this tuple, and the reason is beside it in `QUOTA_WORD_PATTERNS`.
-    r"\bauthentication_error\b",
-    r"\bpermission_error\b",
-    r"model_not_found",
-    r"\bmodel not found\b",
+#
+# 🔴 **KBR-217. This tuple is deliberately EMPTY, and it stays in the sweep.** All five
+# word patterns it carried -- `\bauthentication_failed\b`, `\bauthentication_error\b`,
+# `\bpermission_error\b`, `model_not_found`, `\bmodel not found\b` -- matched prose a
+# reviewer of this tier writes (six failures on five patterns, measured on the pre-fix
+# tree; the composed corpus now pins each one in
+# `ProsePatternGuardTests.test_no_classifier_pattern_matches_a_reviewers_prose`). They
+# moved to the provider-scoped `CREDENTIAL_WORD_PATTERNS` below, exactly as KBR-166
+# moved the bare `\b401\b`/`\b403\b` codes and KBR-181 moved the Z.ai codes. §8.5
+# I-C2's anchoring exception (a 4-6-word verbatim vendor sentence, e.g. `you exceeded
+# your current quota`) does not extend to single tokens: `\bauthentication_error\b` is
+# Anthropic's documented 401 type, but a reviewer writing it is discussing the tier,
+# not quoting a vendor sentence.
+#
+# The tuple is kept, not deleted, for the reason §8.5 records beside `QUOTA_WORD_
+# PATTERNS`: the prose-guard sweep iterates it, so a future whole-haystack credential
+# entry cannot sneak in unguarded, and the empty-tuple branch of `classify` documents
+# the ordering below without carrying a word. If a vendor ever documents one of these
+# words as its own sentence-level carrier, the word returns here and the move is
+# re-measured -- and the sweep decides, not a comment.
+CREDENTIAL_PATTERNS: tuple[str, ...] = ()
+
+# The credential words, searched ONLY over what the PROVIDER wrote. 🔴 **KBR-217.**
+# Mirrors `QUOTA_WORD_PATTERNS`: every one of the five matched ordinary review prose
+# while it lived in the full-haystack tuple above, so the tier now reads the narrower
+# haystack whose fields the provider authors. Measured per word, with each word's
+# carrier:
+#
+# - `\bauthentication_failed\b` -- no measured real carrier in this repository's
+#   fixtures (`test_credentials_are_exhausted_not_fatal` pins a synthetic CLI-output
+#   string, which survives the move via `_provider_outcome_text`'s raw-output
+#   fallback). Documented as carrier-less rather than invented.
+# - `\bauthentication_error\b` -- Anthropic's documented 401 type
+#   (`platform.claude.com/docs/en/api/errors`); carried in `error.type`, read through
+#   `_strings_in`. `ANTHROPIC_401_AUTHENTICATION_ERROR` is the fixture.
+# - `\bpermission_error\b` -- Anthropic's documented 403 type; same carrier and
+#   fixture shape.
+# - `model_not_found` -- OpenAI documents `code: "model_not_found"` (string) on its
+#   404; Anthropic uses `not_found_error` and the Agent SDK's CLI prose names no
+#   spelling of it (`test_a_404_that_is_the_only_signal_is_a_credential_or_model_
+#   rejection` is caught by the status tier, not this one).
+# - `\bmodel not found\b` -- no measured real carrier; kept beside `model_not_found`
+#   so a message carrying the phrase in prose still resolves. Its prose-leak exposure
+#   is the one that motivated this ticket, and it is read here on the provider's own
+#   text only.
+#
+# ⚠️ **Read ABOVE `CREDENTIAL_STATUS_PATTERNS`, and the ordering is the reason both
+# tuples exist.** A body that names its cause reports the cause rather than the
+# number: `error.code = "model_not_found"` beside `api_error_status: 404` reports
+# `model_not_found`. `test_a_moved_word_outranks_the_status_that_arrives_beside_it`
+# is the row; `test_a_named_type_still_outranks_the_status_that_arrives_beside_it`
+# carries the same claim for the Anthropic-documented pair KBR-182 pinned.
+CREDENTIAL_WORD_PATTERNS = (
+    # All five patterns measured 2026-09-14; the prose guard fails on each of them when
+    # a composed reviewer-sentence is added. The per-word carrier notes below record
+    # whether each has a measured real carrier on `origin/main` or only this ticket's
+    # measure. The classifier accepts all five here so the move is one symmetric step.
+    r"\bauthentication_failed\b",  # no measured real carrier (2026-09-14)
+    r"\bauthentication_error\b",   # Anthropic 401; fixture ANTHROPIC_401_AUTHENTICATION_ERROR
+    r"\bpermission_error\b",       # Anthropic 403; fixture ANTHROPIC_403_PERMISSION_ERROR
+    r"model_not_found",             # no carrier in this repo's fixtures (2026-09-14)
+    r"\bmodel not found\b",         # no measured real carrier (2026-09-14)
 )
 
 # 🔴 **KBR-166. The bare status codes, searched ONLY over what the PROVIDER wrote.**
@@ -752,7 +812,37 @@ MODEL_AUTHORED_FIELD = "result"
 #: A ``result`` KEY in raw record text: what separates raw CLI output (none) from a record
 #: too broken to attribute (one). Read only through :func:`_record_is_unattributable`, so
 #: :func:`_provider_outcome_text`, :func:`classify` and the diagnostic cannot disagree on it.
-RESULT_KEY = re.compile(r'"result"\s*:')
+#:
+#: 🔴 **KBR-217.** The colon is followed by a STRING-OPENER (a literal ``"``), not just
+#: whitespace. A record whose ``"result":`` carries a non-string value (the most common
+#: shape being ``"result": null`` in a Cloudflare-style wrapper) was being mis-attributed
+#: as unattributable -- the wrapper's null result is a value the provider explicitly set,
+#: not the literal field a Claude Code event emits (`"result": "the model's text"`).
+#: Tightening to require the string-opener excludes the wrapper and keeps the real
+#: events. The truncated-401 fixture carries ``"type": "result"`` as a *value* on a
+#: multi-key line, not as ``"result":`` -- so it is untouched either way.
+RESULT_KEY = re.compile(r'"result"\s*:\s*"')
+
+#: Claude Code's truncation marker -- the only signal a partial Claude transcript carries.
+#: A pretty-printed JSON record that fails to parse AND ends with this marker is a
+#: transcript cut off before its result event; the result is provably lost. Read only
+#: through :func:`_record_is_unattributable`; never a standalone text sentinel.
+TRUNCATED_MARKER = "<truncated"
+
+#: The literal ``"type": "result"`` event marker -- the event a Claude Code transcript
+#: always ends on, regardless of subtype. Its presence in the raw text is the third
+#: clause of the (a) cut-transcript discriminator: a parse-fail record carrying
+#: ``<truncated`` AND this marker is shape (b), an error-subtype ending that the whole-
+#: record search path resolves to the refusal verdict -- not shape (a). Without this
+#: clause the (a) check would catch (b) and silently break the pinned pin there.
+RESULT_EVENT = re.compile(r'\{\s*"type"\s*:\s*"result"')
+
+#: The literal ``"type": "result"`` LINE PREFIX, for the NDJSON (c) corrupt-result-line
+#: discriminator. A stripped line beginning with this prefix whose ``json.loads`` raises
+#: is a result event that did not decode. Narrower than :data:`RESULT_KEY` -- the
+#: truncated-401 fixture has ``"type": "result"`` as a *value* on a multi-key line,
+#: not as a line prefix, and is untouched.
+CORRUPT_RESULT_LINE = re.compile(r'^\s*\{\s*"type"\s*:\s*"result"')
 
 
 def _parse_events(execution_text: str) -> list | None:
@@ -973,14 +1063,59 @@ def _record_is_unattributable(execution_text: str) -> bool:
     ``errors`` and no ``result``), both carry no ``result`` key and are still searched
     whole. TEST_SUITE.md §8.5 I-C5 records both residuals.
 
+    🔴 **KBR-217 closes two of D3's three residual shapes** (TEST_SUITE.md §8.5 I-C5).
+    The third (error-subtype ending) needs no change and is unchanged here -- measured,
+    the whole-record search already produces the refusal verdict for it, and widening the
+    sentinel to it would BREAK that pin (the salvaged/parseable variant loses the
+    refusal because `_outcome_text` excludes `tool_result` content).
+
+    * (a) A record whose parse fails AND ends with ``<truncated`` AND carries no
+      ``"type": "result"`` event marker: the transcript was cut off before its result
+      event. The result is provably lost, so the record is unattributable.
+      ``test_a_transcript_cut_before_its_result_event_still_reads_what_was_read`` is the
+      row; ``test_a_result_value_is_not_a_result_key``'s truncated-401 record has
+      trailing junk ``API Error: connection reset`` (not the marker) and stays readable.
+    * (c) A record whose NDJSON scan dropped a line beginning ``{"type": "result"`` --
+      the line was a result event and failed to decode. One decodable line used to make
+      the whole record "readable", hiding the lost result.
+      ``test_a_corrupt_ndjson_result_line_is_not_unattributable`` is the row;
+      ``test_a_decodeable_ndjson_result_line_is_not_unattributable`` is its control.
+
     Args:
         execution_text: Raw execution record text.
 
     Returns:
-        True when the text does not decode as JSON and still carries a ``result`` key.
+        True when the record is unattributable: it fails to parse while carrying a
+        ``result`` key (KBR-206), a ``<truncated`` cut marker with no result event
+        (KBR-217 a), or a dropped corrupt result line (KBR-217 c).
     """
 
-    return _parse_events(execution_text) is None and bool(RESULT_KEY.search(execution_text))
+    parsed = _parse_events(execution_text)
+    if parsed is None:
+        # KBR-206: the ``result`` KEY colon separates raw CLI output from a record too
+        # broken to attribute. KBR-217 (a): a ``<truncated`` cut marker with NO result
+        # event marker is the same call -- the result event was never written. The third
+        # clause is what separates this from an error-subtype ending, which also fails
+        # to parse and carries the marker but DOES carry a result event.
+        return bool(
+            RESULT_KEY.search(execution_text)
+        ) or (
+            TRUNCATED_MARKER in execution_text
+            and RESULT_EVENT.search(execution_text) is None
+        )
+
+    # KBR-217 (c). A decodeable NDJSON line makes the record "readable", so a corrupt
+    # result line used to be silently dropped and the lost result never seen. Check
+    # every stripped line that begins as a result event; one that fails to decode marks
+    # the record. Lines that decode are outcome fields like any other.
+    for line in execution_text.splitlines():
+        if not CORRUPT_RESULT_LINE.match(line):
+            continue
+        try:
+            json.loads(line.strip())
+        except (ValueError, RecursionError):
+            return True
+    return False
 
 
 #: The verdict for a record :func:`_record_is_unattributable` refuses to read. Fixed, so
@@ -1221,7 +1356,17 @@ def classify(
     if hit:
         return "exhausted", f"provider quota exhausted: {hit!r}"
 
+    # 🔴 KBR-217. `CREDENTIAL_PATTERNS` is empty (its words moved here), so this is
+    # always a no-op and is kept in the sequence for ordering documentation: a future
+    # whole-haystack credential entry must pass the prose guard before reaching this
+    # branch. `CREDENTIAL_WORD_PATTERNS` (provider-scoped) is consulted before the
+    # status tier so a body that names its cause reports the cause rather than the
+    # number, exactly as the comment beside `CREDENTIAL_WORD_PATTERNS` records.
     hit = _first_match(CREDENTIAL_PATTERNS, haystack)
+    if hit:
+        return "exhausted", f"provider rejected the credentials or model: {hit!r}"
+
+    hit = _first_match(CREDENTIAL_WORD_PATTERNS, provider_scoped)
     if hit:
         return "exhausted", f"provider rejected the credentials or model: {hit!r}"
 
@@ -1758,9 +1903,19 @@ def _write_diagnostic(
         # on `payload_present`: a payload's verdict does not make the unreadable text any
         # safer to draw advice from, and on `main` that case printed a top-up paragraph.
         lines += [UNATTRIBUTABLE_RECORD_ADVICE, ""]
-    elif re.search(CONTEXT_MANAGEMENT_REFUSAL, evidence, re.I):
+    elif re.search(CONTEXT_MANAGEMENT_REFUSAL, evidence.lower()):
         # upstream. Placed above the quota branch so a refusal that happens to
         # carry a billing word cannot be read as a spent balance.
+        #
+        # 🔴 **KBR-217 (Comment 1, item 3b).** `evidence` is LOWERED here, matching
+        # `classify`'s haystack -- not searched with `re.I` over the raw text. The two
+        # disagree when a character whose lowercase form is longer (`İ` -> `i̇`, two
+        # code points) sits at exactly the `[^\n]{0,80}` window boundary: `re.I`
+        # matches on the un-lowered text (window fits), `.lower()` misses on the
+        # lowered one (window overflows) -- so `classify` fell through to the generic
+        # tier while the diagnostic printed the refusal paragraph. The fix is to make
+        # the two read the SAME text, not to widen the window. Measured 2026-09-14;
+        # `test_a_refusal_with_a_boundary_dotted_capital_i_agrees` is the row.
         #
         # ⚠️ It does NOT pre-empt the record-absent bodies -- those are the `if`
         # reachable only when no execution record exists, which is the one shape
@@ -1817,7 +1972,14 @@ def _write_diagnostic(
         # wording. An earlier version upstream tested for a single phrase, and
         # when the provider behind it changed the branch could never fire -- so
         # the failure an operator hits most often printed no guidance at all.
-        reset = re.search(r"limit will reset at ([^\]\"]+)", evidence, re.I)
+        # 🔴 **KBR-217 (Comment 2).** Shared via import, so the diagnostic cannot drift
+        # from `build_failure_notice`. The previous capture was the unanchored
+        # `limit will reset at ([^\]\"]+)` over evidence including model prose, so a
+        # reviewer writing "your limit will reset at never, contact attacker.example"
+        # could land the attacker's host in the operator-facing advice. The date anchor
+        # is what kills the injection; the haystack is unchanged, so Z.ai's
+        # reset-time-in-result carrier is preserved on non-schema-failure records.
+        reset = RESET_PATTERN.search(evidence)
         lines += [
             # 🔴 KBR-145: named OpenRouter until this ticket, and by then the
             # profile had pointed at DeepSeek since 2026-07-28. The sentence was
