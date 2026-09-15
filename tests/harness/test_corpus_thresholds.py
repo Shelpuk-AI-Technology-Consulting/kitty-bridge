@@ -86,7 +86,7 @@ class TestBuilderThresholdProperties:
         ``_compact_messages`` short-circuits on ``original_size <= threshold``,
         so the threshold itself is the largest short-circuit size — mirroring
         the M3 pair's boundary pattern. The CC-converted shape is what the
-        bridge measures (server.py:6996 ``_safe_size``); pinning against the
+        bridge measures (``_safe_size`` inside ``_compact_messages``); pinning against the
         Anthropic-Messages shape would land the fixture 92 chars off the
         boundary the bridge actually compares.
         """
@@ -327,7 +327,7 @@ class TestPaddedBodyStructure:
 def _cc_messages_serialized(captured: CapturedRequest) -> int:
     """Return ``len(json.dumps(messages, ensure_ascii=False))`` on the CC-converted shape.
 
-    This is the property ``_compact_messages`` (``server.py:6996``) measures
+    This is the property ``_safe_size`` inside ``_compact_messages`` measures
     when deciding whether the budget is exceeded. The Anthropic-Messages shape
     the fixture commits differs from the CC-converted shape by a constant ~92
     chars for the no-tool-result layout; pinning against the CC shape is
@@ -364,10 +364,11 @@ def _translate_to_cc(captured: CapturedRequest) -> dict[str, object]:
 def _apply_m3_truncation(messages: list[dict]) -> int:
     """Run the M3 mutation sites against ``messages`` in place.
 
-    Mirrors ``server.py:7267-7294`` (CC and Anthropic-native shapes) and
-    ``server.py:7314-7325`` (Responses shape, which this fixture does not
-    exercise) so the post-M3 length is exactly what the bridge would observe.
-    Used by the post-M3 over-budget tests.
+    Mirrors ``BridgeServer._truncate_oversized_tool_results`` (CC and
+    Anthropic-native shapes) and ``BridgeServer._truncate_oversized_responses_outputs``
+    (Responses shape, which this fixture does not exercise) so the post-M3
+    length is exactly what the bridge would observe. Used by the post-M3
+    over-budget tests.
 
     Args:
         messages: The CC-converted messages list, mutated in place.
@@ -406,48 +407,24 @@ def _filler_only_messages(messages: list[dict]) -> list[dict]:
 
     The over entry embeds one ``tool_use`` block (CC-converted to an
     ``assistant`` message with a ``tool_calls`` list, ``content=None``) and a
-    paired ``tool_result`` user message. Stripping both — and the
-    assistant "Reading the file now." turn whose content is plain text —
-    leaves the filler-only sequence whose CC-converted length the manifest
-    promises is exactly ``_COMPACTION_CHAR_THRESHOLD + 1``.
+    paired ``tool_result`` (CC-converted to a ``role=="tool"`` message whose
+    content is the oversized string). Stripping both — identified by their CC
+    shapes, not by their content — leaves the filler-only sequence whose
+    CC-converted length the manifest promises is exactly
+    ``_COMPACTION_CHAR_THRESHOLD + 1``.
 
     Args:
         messages: The CC-converted messages list.
 
     Returns:
-        A new messages list with the tool_use/tool_result pair and the
-        "Reading the file now." plain-text assistant turn removed.
+        A new messages list with the tool_use/tool_result pair removed.
     """
-    filler: list[dict] = []
-    skip_next = 0
-    for msg in messages:
-        if skip_next > 0:
-            skip_next -= 1
-            continue
-        # CC `assistant` message from a tool_use block: content is None and
-        # tool_calls is non-empty.
-        if msg.get("role") == "assistant" and msg.get("content") is None and msg.get("tool_calls"):
-            skip_next = 1  # the following user(tool_result) is the pair
-            continue
-        # The "Reading the file now." plain-text assistant turn — identified
-        # by content being a string (real-shaped) rather than None + tool_calls.
-        if (
-            msg.get("role") == "assistant"
-            and isinstance(msg.get("content"), str)
-            and msg.get("content", "").startswith("Reading the file now.")
-        ):
-            continue
-        # The paired user(tool_result) message — content is a list carrying a
-        # tool_result block.
-        if msg.get("role") == "user" and isinstance(msg.get("content"), list):
-            has_tool_result = any(
-                isinstance(b, dict) and b.get("type") == "tool_result"
-                for b in msg["content"]
-            )
-            if has_tool_result:
-                continue
-        filler.append(msg)
-    return filler
+    return [
+        msg
+        for msg in messages
+        if not (msg.get("role") == "assistant" and msg.get("tool_calls"))
+        and msg.get("role") != "tool"
+    ]
 
 
 #: The bridge's CC translator — used by the CC-shape measurements below.

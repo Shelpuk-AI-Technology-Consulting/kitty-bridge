@@ -285,21 +285,21 @@ T-C3 ships four synthetic entries pinned against two thresholds from `src/kitty/
 |---|---|---|
 | `tool_result_under_limit` | one `tool_result` string content of length exactly `_TOOL_RESULT_TRUNCATION_LIMIT` (= 50 000) — the largest non-triggering size (the bridge's three sites compare with strict `>`) | M3 complement; M4 has no oversized result either |
 | `tool_result_over_limit` | one `tool_result` string content of length `_TOOL_RESULT_TRUNCATION_LIMIT + 1` (= 50 001) — the smallest triggering size | M3 trigger case |
-| `compaction_budget_under` | filler alone, CC-converted, serialises to exactly `_COMPACTION_CHAR_THRESHOLD` (= 2 800 000) — the largest short-circuit size on the static fallback (`max_messages_chars=None`, `server.py:7012`) | M5 complement on the static fallback path and on profiles whose derived budget ≥ 2 800 000; M4 complement (no oversized tool result) |
+| `compaction_budget_under` | filler alone, CC-converted, serialises to exactly `_COMPACTION_CHAR_THRESHOLD` (= 2 800 000) — the largest short-circuit size on the static fallback (called with `max_messages_chars=None` in `_compact_messages`) | M5 complement on the static fallback path and on profiles whose derived budget ≥ 2 800 000; M4 complement (no oversized tool result) |
 | `compaction_budget_over` | filler alone, CC-converted, serialises to exactly `_COMPACTION_CHAR_THRESHOLD + 1` (= 2 800 001); an oversized tool_result rides on top, pushing the total to ~2 850 100 | M5 trigger on the static fallback path and on profiles whose derived budget is below this body; post-M3-truncation still over threshold so the pruning step fires; also M4 trigger (oversized tool result present) |
 
 #### Why the budget pairs pin the CC-converted shape against the static constant
 
 The bridge's runtime trigger is not the static constant — it is the **profile-derived**
 `messages_budget = max_chars - overhead - 10_000`, where `max_chars = min(tokens_to_chars(context_tokens), _MAX_REQUEST_CHARS)`
-(`src/kitty/bridge/server.py:7597`, `:7214-7238`). For a 200 K-token model the budget is roughly
+is computed by `_get_max_context_chars` and `messages_budget` by `_apply_compaction`. For a 200 K-token model the budget is roughly
 790 K; for a 1 M-token model roughly 3.99 M; for an unknown model the budget falls back to
 `_MAX_REQUEST_CHARS` (4 M). The static `_COMPACTION_CHAR_THRESHOLD` (2 800 000) is the constant
 the bridge uses when `_compact_messages` is called with `max_messages_chars=None`
-(`server.py:7012`).
+(the static fallback branch in `_compact_messages`).
 
 Crucially, the bridge measures `len(json.dumps(messages, ensure_ascii=False))` on the
-**CC-converted** messages (`server.py:6996`), not the Anthropic-Messages shape the fixture
+**CC-converted** messages (`_safe_size` inside `_compact_messages`), not the Anthropic-Messages shape the fixture
 commits. The two shapes differ by a constant ~92 chars for this layout, and on the
 `use_native_messages=True` passthrough path the Anthropic shape is preserved verbatim. The
 builder in `tests/harness/corpus_thresholds.py` therefore sizes filler against the CC-converted
@@ -310,7 +310,7 @@ That gives three directional facts the fixtures satisfy, and one thing they do n
 
 * **`compaction_budget_under` is M5-complement on the static fallback.** The fixture's
   CC-length is exactly 2 800 000, which `_compact_messages` short-circuits on
-  (`server.py:7014`). The fixture is also a complement on profiles whose derived budget is
+  (the `original_size <= compaction_threshold` comparison in `_compact_messages`). The fixture is also a complement on profiles whose derived budget is
   ≥ 2 800 000, and triggers M5 on profiles whose derived budget is smaller (e.g. the default
   200 K-token model gives ~790 K).
 * **`compaction_budget_over` is M5-trigger on the static fallback, and post-M3 too.** Pre-M3
