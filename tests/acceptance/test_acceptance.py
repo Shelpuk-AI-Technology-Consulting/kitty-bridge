@@ -119,6 +119,9 @@ def assert_recording_transport_saw_the_turn(
     loop, bridge = bridge_session
     loop.run_until_complete(
         assert_fixture_reached_its_recorder(
-            bridge, marker=turn["marker"], status=turn["status"]
+            bridge,
+            marker=turn["marker"],
+            status=turn["status"],
+            body=turn["body"],
         )
     )

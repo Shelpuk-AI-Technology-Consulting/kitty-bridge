@@ -348,7 +348,9 @@ class TestTheStartedFixtureTwinIsCaughtToo:
             )
 
             with pytest.raises(AssertionError) as excinfo:
-                await assert_fixture_reached_its_recorder(fixture, marker=f"kbr31-not-{sent}", status=200)
+                await assert_fixture_reached_its_recorder(
+                    fixture, marker=f"kbr31-not-{sent}", status=200, body="ok"
+                )
             assert "marker" in str(excinfo.value)
 
     async def test_a_status_that_was_never_served_is_caught(self) -> None:
@@ -361,7 +363,9 @@ class TestTheStartedFixtureTwinIsCaughtToo:
             )
 
             with pytest.raises(AssertionError) as excinfo:
-                await assert_fixture_reached_its_recorder(fixture, marker=sent, status=500)
+                await assert_fixture_reached_its_recorder(
+                    fixture, marker=sent, status=500, body="server exploded"
+                )
             assert "500" in str(excinfo.value)
 
     async def test_a_second_request_is_caught(self) -> None:
@@ -383,7 +387,9 @@ class TestTheStartedFixtureTwinIsCaughtToo:
             )
 
             with pytest.raises(AssertionError) as excinfo:
-                await assert_fixture_reached_its_recorder(fixture, marker=sent, status=200)
+                await assert_fixture_reached_its_recorder(
+                    fixture, marker=sent, status=200, body="ok"
+                )
             assert "2 capture" in str(excinfo.value)
 
     async def test_an_honest_call_passes(self) -> None:
@@ -395,4 +401,4 @@ class TestTheStartedFixtureTwinIsCaughtToo:
                 minimal_inbound_body(InboundProtocol.MESSAGES, sent),
             )
 
-            await assert_fixture_reached_its_recorder(fixture, marker=sent, status=200)
+            await assert_fixture_reached_its_recorder(fixture, marker=sent, status=200, body="ok")

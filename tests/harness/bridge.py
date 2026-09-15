@@ -953,7 +953,7 @@ async def assert_transport_reaches_its_recorder(
 
 
 async def assert_fixture_reached_its_recorder(
-    fixture: BridgeFixture, *, marker: str, status: int
+    fixture: BridgeFixture, *, marker: str, status: int, body: str
 ) -> None:
     """Assert a **started** fixture's recorder carries exactly one marked request.
 
@@ -984,6 +984,11 @@ async def assert_fixture_reached_its_recorder(
             captured body.
         status: The status the caller's own request returned, to be asserted
             ``200``.
+        body: The raw response text the caller's own request returned, for the
+            same diagnostic tail the original's third assertion includes — a
+            failed ``200`` check without the body is half the evidence, and
+            the two messages must share their vocabulary so a reader can
+            match one to its twin without a second decode pass.
 
     Raises:
         AssertionError: When the recorder did not carry *this* fixture's
@@ -1012,5 +1017,5 @@ async def assert_fixture_reached_its_recorder(
     )
 
     assert status == 200, (
-        f"transport {name!r} captured the request correctly but the bridge answered {status}"
+        f"transport {name!r} captured the request correctly but the bridge answered {status}: {body[:200]!r}"
     )
