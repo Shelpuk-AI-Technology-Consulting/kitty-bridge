@@ -27,12 +27,17 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass, fields
+from typing import TypeAlias
 
 __all__ = [
     "RunConfig",
+    "JSONValue",
 ]
 
-_JSONValue = "str | int | float | bool | None | list | dict"  # for docstrings
+#: The shape ``sampling_overrides`` accepts: any JSON-serialisable scalar
+#: or container. Named here so the field annotation and the constructor's
+#: serialisability check describe one type, not two.
+JSONValue: TypeAlias = "str | int | float | bool | None | list[JSONValue] | dict[str, JSONValue]"
 
 
 @dataclass(frozen=True)
@@ -74,7 +79,7 @@ class RunConfig:
     #: Wall-clock bound on a single trial, in seconds.
     deadline_seconds: float
     #: Provider-specific sampling knobs, pinned like the fixed fields.
-    sampling_overrides: Mapping[str, object]
+    sampling_overrides: Mapping[str, JSONValue]
 
     def __post_init__(self) -> None:
         """Refuse any unset required field and validate the boundaries.
@@ -109,13 +114,18 @@ class RunConfig:
         # contents have to reach the record intact — so a value that
         # cannot survive a JSON round-trip is refused here, at
         # construction, rather than silently dropped at write time.
+        # Snapshot to a plain dict so any Mapping whose contents are
+        # serialisable is accepted (a MappingProxyType or UserDict carries
+        # JSON-clean bytes but the stdlib's JSON encoder refuses the
+        # container itself, which would silently lose a perfectly valid
+        # pin set).
         if not isinstance(self.sampling_overrides, Mapping):
             raise TypeError(
                 f"RunConfig.sampling_overrides must be a Mapping; got "
                 f"{type(self.sampling_overrides).__name__}"
             )
         try:
-            json.dumps(self.sampling_overrides)
+            json.dumps(dict(self.sampling_overrides))
         except (TypeError, ValueError) as exc:
             raise ValueError(
                 f"RunConfig.sampling_overrides must be JSON-serialisable; "

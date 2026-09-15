@@ -89,11 +89,20 @@ def test_run_config_rejects_unset_required_field() -> None:
 
 
 def test_run_config_rejects_n_samples_below_one() -> None:
-    """REQ 1 boundary — a degenerate ``n_samples`` is refused at construction."""
+    """REQ 1 boundary — a degenerate ``n_samples`` is refused at construction.
+
+    The inclusive complement (``n_samples=1``) is the test that kills an
+    off-by-one ``<= 1`` mutant; without it the falsification case would
+    be vacuous at the boundary.
+    """
     with pytest.raises(ValueError) as exc_info:
         _fully_pinned(n_samples=0)
 
     assert "n_samples" in str(exc_info.value)
+
+    # The inclusive complement: 1 is legal, so the check must be ``< 1``,
+    # not ``<= 1``. Without this, an off-by-one mutant survives.
+    assert _fully_pinned(n_samples=1).n_samples == 1
 
 
 def test_run_config_rejects_non_mapping_sampling_overrides() -> None:
