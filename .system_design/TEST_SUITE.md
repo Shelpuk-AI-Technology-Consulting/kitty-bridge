@@ -1788,11 +1788,18 @@ query/key spellings missed, and a miss is silent.
   The budget is recomputed on every request, so an unconditional line would be one per turn — and
   the silence is precisely what let KBR-151 live undetected. `INFO` not `WARNING`: an unknown model
   is routine and correct for a profile naming a local or private model.
-- **Open, referred onward:** the overrides catalog outranks a profile's hand-written
-  `provider_config["context_window"]`, and since KBR-151 one key captures every prefixed spelling
-  of its model. Whether a *network-synced* catalog should outrank the one setting the operator
-  typed is a question about operator authority, not about prefixed names, and is filed as
-  [KBR-170](https://shelpuk.atlassian.net/browse/KBR-170) rather than decided inside a bug fix.
+- **Decided (KBR-170, folded into [KBR-71](https://shelpuk.atlassian.net/browse/KBR-71), 2026-09-15):**
+  the overrides catalog keeps its top rank — a remote-synced entry still beats
+  a profile's hand-written `provider_config["context_window"]`. What the owner
+  authorised is the **visibility** the docstring's escape hatch did not provide:
+  when the two disagree, `get_model_context_tokens` emits an `INFO` line once per
+  `(provider, model, effective, ignored)`, naming the model and both values, so
+  an operator whose setting is being outvoted by a file they do not control can
+  discover that from the logs. The docstring's "omit that model from the
+  overrides file" advice remains true; the log makes the shadowing visible even
+  when the operator did not set the file themselves. The behaviour itself
+  (precedence + silent shadow) was unchanged; `INFO`, not `WARNING`, because the
+  precedence is deliberate. No register row moves.
 
 **Mutation testing.** Line coverage cannot tell a real assertion from `assert result is not
 None`. `mutmut` closes that gap.
