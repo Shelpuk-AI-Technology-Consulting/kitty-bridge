@@ -302,9 +302,8 @@ def classify(outcome: RawOutcome, verdict: Verdict | None = None) -> TrialCatego
             ``HARNESS_FAULT`` itself.
 
     Note:
-        The mapping table lives in the design spec at
-        ``.requirements/20260915T113051Z_eval_harness_skeleton/REQUIREMENTS.md``
-        §2; this function is the implementation.
+        The mapping table is in ``.system_design/TEST_SUITE.md``
+        §6.4.3; this function is the implementation.
 
     Returns:
         The single :class:`TrialCategory` the trial lands in.

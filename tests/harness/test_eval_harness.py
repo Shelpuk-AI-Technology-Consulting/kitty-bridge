@@ -463,6 +463,18 @@ async def test_run_eval_classifies_a_trial_raising_oserror_as_harness_fault_and_
     assert direct_tally[TrialCategory.SUCCESS] == 3
     assert direct_tally[TrialCategory.HARNESS_FAULT] == 0
 
+    # The exception message must NOT reach the persisted ``detail`` —
+    # exception args can carry URLs with embedded credentials (aiohttp
+    # ``ClientConnectorError`` is the canonical example), and the
+    # ``detail`` string lands in the on-disk ``RunRecord`` artifact.
+    # Pin the class-name-only property so a regression to the
+    # ``f"{type(...).__name__}: {exc}"`` shape is caught.
+    harness_fault_trial = next(
+        trial for trial in record.trials if trial.category is TrialCategory.HARNESS_FAULT
+    )
+    assert harness_fault_trial.detail == "OSError"
+    assert "simulated bridge bind failure" not in harness_fault_trial.detail
+
 
 async def test_run_eval_lets_operator_interrupt_propagate() -> None:
     """F3' — ``except Exception`` (not ``BaseException``) is the F3 mechanism.
@@ -578,6 +590,15 @@ async def test_run_record_from_json_rejects_garbage() -> None:
     # set; the test pins that path, not a coincidental substring in the
     # bogus value itself.
     with pytest.raises(ValueError, match="is not a valid TrialCategory"):
+        RunRecord.from_json(json.dumps(parsed).encode("utf-8"))
+
+    parsed = json.loads(good)
+    parsed["trials"][0]["duration_seconds"] = -1.0
+    # The fifth garbage shape: ``TrialRecord.duration_seconds`` is
+    # documented as non-negative and ``from_json`` enforces it at the
+    # boundary. A regression to ``<= 0`` (off-by-one) or to dropping
+    # the check would otherwise pass the suite silently.
+    with pytest.raises(ValueError, match="negative"):
         RunRecord.from_json(json.dumps(parsed).encode("utf-8"))
 
 
