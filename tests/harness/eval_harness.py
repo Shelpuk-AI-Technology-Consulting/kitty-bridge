@@ -491,17 +491,26 @@ class RunRecord:
 
     @property
     def pass_rate_per_arm(self) -> dict[str, float]:
-        """Return successes ÷ scheduled for each arm, as a mapping.
+        """Return successes ÷ per-arm scheduled for each arm, as a mapping.
 
         Returns:
-            One float per arm in the run record's ``per_arm``. ``0.0``
+            One float per arm in the run record's ``per_arm``. The
+            runner's grid is rectangular (every arm runs every task
+            ``n_samples`` times), so per-arm scheduled equals the
+            total ``scheduled`` divided by the number of arms. ``0.0``
             when scheduled is non-zero and no trials succeeded; the
-            empty mapping ``{}`` when the record has no trials (a
-            degenerate run that the runner refuses to produce in
-            practice — ``scheduled >= 2`` is enforced by REQ 4).
+            empty mapping ``{}`` when the record has no arms.
+
+        The per-arm denominator (not the total) is what §6.4.3's
+        paired-delta measure consumes: the comparison is between
+        arms, so each arm's rate must be self-consistent before the
+        difference is meaningful.
         """
+        if not self.per_arm:
+            return {}
+        per_arm_scheduled = self.scheduled / len(self.per_arm)
         return {
-            arm: self.per_arm[arm].get(TrialCategory.SUCCESS, 0) / self.scheduled
+            arm: self.per_arm[arm].get(TrialCategory.SUCCESS, 0) / per_arm_scheduled
             for arm in self.per_arm
         }
 
