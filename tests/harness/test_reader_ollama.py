@@ -579,6 +579,175 @@ class TestToolCalls:
         assert req.residual == {"messages[0].tool_calls[0].function.arguments": "this is not a JSON object"}
         assert req.conversation.turns[0].parts[0].arguments == {}
 
+    def test_function_absent_raises(self) -> None:
+        """A tool_calls entry with no ``function`` raises — the position cannot be vacated."""
+        body = {
+            "model": "m",
+            "messages": [{"role": "assistant", "tool_calls": [{"name": "f"}]}],
+        }
+        with pytest.raises(c.UnreadableBodyError):
+            _project(body)
+
+    def test_function_null_raises(self) -> None:
+        """A tool_calls entry with ``function: null`` raises (§7.4.2 rule 7 row 4)."""
+        body = {
+            "model": "m",
+            "messages": [{"role": "assistant", "tool_calls": [{"function": None}]}],
+        }
+        with pytest.raises(c.UnreadableBodyError):
+            _project(body)
+
+    def test_function_scalar_raises(self) -> None:
+        """A tool_calls entry with a scalar ``function`` raises."""
+        body = {
+            "model": "m",
+            "messages": [{"role": "assistant", "tool_calls": [{"function": 7}]}],
+        }
+        with pytest.raises(c.UnreadableBodyError):
+            _project(body)
+
+    def test_position_not_vacated_by_null_function(self) -> None:
+        """Convergence pin: the two-call example projects both ToolUse parts —
+        a ``continue`` on ``function: null`` would shift later indices.
+        """
+        body = {
+            "model": "m",
+            "messages": [
+                {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {"function": {"name": "f1", "arguments": {}}},
+                        {"function": {"name": "f2", "arguments": {}}},
+                    ],
+                }
+            ],
+        }
+        req = _project(body)
+        names = [p.name for p in req.conversation.turns[0].parts]
+        assert names == ["f1", "f2"]
+
+    def test_entry_unknown_key_residualises(self) -> None:
+        """An unrecognised key on a tool_calls entry residualises at its path."""
+        body = {
+            "model": "m",
+            "messages": [
+                {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "type": "function",
+                            "function": {"name": "f", "arguments": {}},
+                        }
+                    ],
+                }
+            ],
+        }
+        req = _project(body)
+        # Ollama publishes no ``type`` on tool_calls entries — the CC
+        # spelling is an unrecognised wire key here and residualises.
+        assert req.residual == {"messages[0].tool_calls[0].type": "function"}
+
+    def test_non_mapping_entry_residualises(self) -> None:
+        """A scalar tool_calls entry residualises at its indexed path."""
+        body = {
+            "model": "m",
+            "messages": [{"role": "assistant", "tool_calls": ["not a dict"]}],
+        }
+        req = _project(body)
+        assert req.residual == {"messages[0].tool_calls[0]": "not a dict"}
+
+
+class TestToolDeclarations:
+    """``tools`` entries fail closed on every unmodelled field (review round 1)."""
+
+    def _tools_body(self, tool_entry: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "model": "m",
+            "messages": [{"role": "user", "content": "x"}],
+            "tools": [tool_entry],
+        }
+
+    def test_well_formed_tool_projects(self) -> None:
+        req = _project(
+            self._tools_body(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "get_weather",
+                        "description": "Get the weather",
+                        "parameters": {"type": "object", "properties": {}},
+                    },
+                }
+            )
+        )
+        assert req.residual == {}
+        assert req.conversation.tools[0].name == "get_weather"
+        assert req.conversation.tools[0].strict is None
+
+    def test_entry_unknown_key_residualises(self) -> None:
+        """An unknown field on the tool entry residualises at ``tools[0].<key>``."""
+        body = self._tools_body(
+            {
+                "type": "function",
+                "vendor_marker": 1,
+                "function": {"name": "f", "parameters": {}},
+            }
+        )
+        req = _project(body)
+        assert req.residual == {"tools[0].vendor_marker": 1}
+        assert req.conversation.tools[0].name == "f"
+
+    def test_function_unknown_key_residualises(self) -> None:
+        """An unknown field inside ``function`` residualises at ``tools[0].function.<key>``."""
+        body = self._tools_body(
+            {
+                "type": "function",
+                "function": {
+                    "name": "f",
+                    "parameters": {},
+                    "strict": True,
+                },
+            }
+        )
+        req = _project(body)
+        # Ollama publishes no ``strict`` — the Anthropic/CC spelling is
+        # an unrecognised wire key here and residualises at its path.
+        assert req.residual == {"tools[0].function.strict": True}
+        assert req.conversation.tools[0].name == "f"
+
+    def test_non_function_type_residualises_whole_entry(self) -> None:
+        """``type`` other than ``"function"`` residualises the whole entry at ``tools[0]``.
+
+        A non-function declaration is one the product cannot faithfully
+        forward; naming it (Chat Completions' answer,
+        ``reader_chat_completions.py:920-967``) is the honest answer.
+        """
+        body = self._tools_body(
+            {
+                "type": "web_search",
+                "function": {"name": "f", "parameters": {}},
+            }
+        )
+        req = _project(body)
+        assert req.residual == {"tools[0]": {"type": "web_search", "function": {"name": "f", "parameters": {}}}}
+        assert req.conversation.tools == ()
+
+    def test_function_absent_residualises_whole_entry(self) -> None:
+        """A tool entry with no ``function`` object residualises whole at ``tools[0]``."""
+        body = self._tools_body({"type": "function"})
+        req = _project(body)
+        assert req.residual == {"tools[0]": {"type": "function"}}
+        assert req.conversation.tools == ()
+
+    def test_function_null_residualises_whole_entry(self) -> None:
+        """``function: null`` on a tool entry residualises whole — tools are
+        name-addressed (§3.3.1a), so vacating the slot shifts no indexed path.
+        """
+        body = self._tools_body({"type": "function", "function": None})
+        req = _project(body)
+        assert req.residual == {"tools[0]": {"type": "function", "function": None}}
+        assert req.conversation.tools == ()
+
 
 class TestToolResults:
     """``role: "tool"`` messages yield ``ToolResult`` parts."""
@@ -963,12 +1132,16 @@ def _mutate_option(body: dict[str, Any], key: str, value: Any) -> dict[str, Any]
 
 
 @pytest.mark.parametrize(
-    ("label", "mutator"),
+    ("label", "mutator", "expected_key"),
     [
-        ("messages as string", lambda b: {**b, "messages": "not a list"}),
-        ("options as string", lambda b: {**b, "options": "not a dict"}),
-        ("options as list", lambda b: {**b, "options": [1, 2]}),
-        ("unknown options key", lambda b: _mutate_option(b, "vendor_marker", 1)),
+        ("messages as string", lambda b: {**b, "messages": "not a list"}, "messages"),
+        ("options as string", lambda b: {**b, "options": "not a dict"}, "options"),
+        ("options as list", lambda b: {**b, "options": [1, 2]}, "options"),
+        (
+            "unknown options key",
+            lambda b: _mutate_option(b, "vendor_marker", 1),
+            "options.vendor_marker",
+        ),
         (
             "unknown message key (user)",
             lambda b: {
@@ -979,6 +1152,7 @@ def _mutate_option(body: dict[str, Any], key: str, value: Any) -> dict[str, Any]
                     *b["messages"][2:],
                 ],
             },
+            "messages[1].vendor_marker",
         ),
         (
             "unknown system message key",
@@ -989,6 +1163,7 @@ def _mutate_option(body: dict[str, Any], key: str, value: Any) -> dict[str, Any]
                     *b["messages"][1:],
                 ],
             },
+            "messages[0].vendor_marker",
         ),
         (
             "tool_calls arguments as string",
@@ -1010,6 +1185,7 @@ def _mutate_option(body: dict[str, Any], key: str, value: Any) -> dict[str, Any]
                     *b["messages"][3:],
                 ],
             },
+            "messages[2].tool_calls[0].function.arguments",
         ),
         (
             "tool id on wire",
@@ -1029,18 +1205,26 @@ def _mutate_option(body: dict[str, Any], key: str, value: Any) -> dict[str, Any]
                     *b["messages"][3:],
                 ],
             },
+            "messages[2].tool_calls[0].id",
         ),
-        ("model as int", lambda b: {**b, "model": 7}),
-        ("stream as string", lambda b: {**b, "stream": "yes"}),
+        ("model as int", lambda b: {**b, "model": 7}, "model"),
+        ("stream as string", lambda b: {**b, "stream": "yes"}, "stream"),
     ],
 )
 class TestInjectionProbeResidualises:
-    """Mutations the reader accounts for by residualising, never by raising."""
+    """Mutations the reader accounts for by residualising, never by raising.
 
-    def test_mutation_residualises(self, label: str, mutator: Any) -> None:
+    Each mutation names the exact residual key it must produce — a
+    mutation that residualises at a different (or wider) path fails,
+    not just one that leaves the residual empty.
+    """
+
+    def test_mutation_residualises(self, label: str, mutator: Any, expected_key: str) -> None:
         mutated = mutator(_MAXIMAL_BODY)
         req = _project(mutated)
-        assert req.residual, f"{label}: shape must residualise, got empty residual"
+        assert expected_key in req.residual, (
+            f"{label}: expected residual key {expected_key!r}, got {sorted(req.residual)!r}"
+        )
 
 
 @pytest.mark.parametrize(

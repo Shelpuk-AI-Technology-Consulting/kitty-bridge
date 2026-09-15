@@ -774,20 +774,20 @@ def _read_tool_calls(
     parts: list[c.ToolUse] = []
     for index, entry in enumerate(value):
         if not isinstance(entry, Mapping):
-            residual[c.residual_key(f"{path}.tool_calls[{index}]", "")] = entry
+            residual[f"{path}.tool_calls[{index}]"] = entry
             continue
         function = entry.get("function")
         fn_path = f"{path}.tool_calls[{index}].function"
         if not isinstance(function, Mapping):
-            if function is None and "function" in entry:
-                # The key is present and the value is null — record it
-                # and emit no part (the position is not vacated, but a
-                # null ``function`` carries no instruction).
-                continue
+            # Absent, null, or a scalar: raise. §7.4.2 rule 7 row 4 —
+            # the schema declares an object, the position is
+            # index-addressed, and "the position cannot be vacated":
+            # a continue here would shift every later part's index and
+            # invent deltas on content nobody touched.
             raise c.UnreadableBodyError(f"{fn_path} must be an object, got {type(function).__name__}")
         name = _typed_leaf(function, "name", (str,), fn_path, residual) or ""
         raw_args = function.get("arguments")
-        arguments, args_residualised = _decode_arguments_object(raw_args, fn_path, residual)
+        arguments = _decode_arguments_object(raw_args, fn_path, residual)
 
         # Account for ``id`` if the wire ever sends one. Ollama
         # publishes no id; ``tool_name`` (the tool-result pairing key)
@@ -798,8 +798,13 @@ def _read_tool_calls(
             if raw_id is not None:
                 residual[c.residual_key(f"{path}.tool_calls[{index}]", "id")] = raw_id
 
+        # Fail closed: every entry key other than ``function`` (mapped)
+        # and ``id`` (handled above) residualises at its indexed path.
+        for key in entry:
+            if key not in ("function", "id"):
+                residual[c.residual_key(f"{path}.tool_calls[{index}]", key)] = entry[key]
+
         parts.append(c.ToolUse(name=name, id=None, arguments=arguments))
-        del args_residualised  # residual already extended in place
 
     return tuple(parts)
 
@@ -808,7 +813,7 @@ def _decode_arguments_object(
     raw: Any,
     path: str,
     residual: dict[str, Any],
-) -> tuple[Mapping[str, Any], bool]:
+) -> Mapping[str, Any]:
     """Decode the object-form ``arguments`` field with the same fail-closed policy.
 
     Mirrors :func:`harness.contract.decode_arguments` and Gemini's
@@ -817,7 +822,9 @@ def _decode_arguments_object(
     so a residual-key set diff across the six readers does not store
     two different renderings of one unreadable value
     (``contract.py:912-913``). Absent / ``null`` projects ``{}`` with
-    no residual — the absent branch.
+    no residual — the absent branch. The residual is a parameter, not
+    a return flag, for the reason ``decode_arguments``'s docstring
+    records: the fail-closed step cannot be skipped by the caller.
 
     Args:
         raw: The wire value of ``function.arguments``.
@@ -826,15 +833,16 @@ def _decode_arguments_object(
         residual: The residual mapping, extended in place.
 
     Returns:
-        A 2-tuple of ``(arguments, was_residualised)``.
+        The decoded arguments mapping (``{}`` unless the wire carried
+        a JSON object).
     """
     if raw is None:
-        return ({}, False)
+        return {}
     if isinstance(raw, Mapping):
-        return (raw, False)
+        return raw
     # Non-object: residualise the raw value whole.
     residual[c.residual_key(path, "arguments")] = raw
-    return ({}, True)
+    return {}
 
 
 def _merge_turns(
@@ -940,11 +948,19 @@ def _read_tools(
     is the only published variant today. ``strict`` is not on the
     wire — ``ToolDecl.strict`` stays ``None``.
 
-    A tool that names itself differently (``type: "X"`` where ``X`` is
-    not ``function``) follows rule 5: it lands at
-    ``envelope.extra[<key>]`` if it has no name to address (none of
-    the published variants today). Reserved for a future shape; today
-    a non-function tool raises per §7.4.2 rule 7.
+    A tool whose ``type`` is present and is not ``"function"`` is a
+    declaration the product cannot faithfully forward (the Chat
+    Completions reader's answer at ``reader_chat_completions.py:
+    920-967``): the whole entry residualises at ``tools[<i>]``. The
+    same fate meets an entry whose ``function`` is absent, ``null``
+    or not an object — no declaration can be built from it, and
+    register paths address tools by name, so vacating the position
+    shifts no indexed path (unlike ``tool_calls``, whose parts are
+    index-addressed and therefore raise instead).
+
+    Fail closed at every depth (§7.4.1): every key on the entry and
+    on ``function`` is either mapped or residualised at its indexed
+    path — the same discipline ``_read_message_parts`` applies.
 
     Args:
         value: The body-level ``tools`` field.
@@ -952,10 +968,6 @@ def _read_tools(
 
     Returns:
         The tool declarations, in wire order.
-
-    Raises:
-        UnreadableBodyError: When ``tools`` is not a list, when an
-            entry is not an object, or when ``function`` is missing.
     """
     if value is None:
         return ()
@@ -969,17 +981,35 @@ def _read_tools(
         if not isinstance(entry, Mapping):
             residual[c.residual_key("tools", str(index))] = entry
             continue
+        # A non-function tool is not this reader's to translate: the
+        # whole entry residualises, which fails the run and names the
+        # entry, rather than silently translating a declaration the
+        # wire says is something else.
+        tool_type = entry.get("type")
+        if tool_type is not None and tool_type != "function":
+            residual[path] = entry
+            continue
         function = entry.get("function")
         if not isinstance(function, Mapping):
-            if function is None and "function" in entry:
-                continue
-            raise c.UnreadableBodyError(f"{path}.function must be an object, got {type(function).__name__}")
+            # Absent, null, or a scalar: no declaration can be built.
+            # Residualise whole and vacate the slot — tools are
+            # name-addressed (§3.3.1a), so no indexed path shifts.
+            residual[path] = entry
+            continue
         name = _typed_leaf(function, "name", (str,), f"{path}.function", residual) or ""
         description = _typed_leaf(function, "description", (str,), f"{path}.function", residual)
         schema = function.get("parameters")
         if schema is not None and not isinstance(schema, Mapping):
             residual[c.residual_key(f"{path}.function", "parameters")] = schema
             schema = None
+        # Fail closed: every other key on the entry and on `function`
+        # residualises at its indexed path.
+        for key in entry:
+            if key not in ("type", "function"):
+                residual[c.residual_key(path, key)] = entry[key]
+        for key in function:
+            if key not in ("name", "description", "parameters"):
+                residual[c.residual_key(f"{path}.function", key)] = function[key]
         decls.append(
             c.ToolDecl(
                 name=name,
