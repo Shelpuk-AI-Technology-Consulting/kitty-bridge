@@ -60,10 +60,25 @@ def token_request_headers() -> dict[str, str]:
     its token with the client it uses for the API; two clients for one account
     is a shape no real installation produces.
 
+    ``originator: codex_cli_rs`` is sent for the same reason.  The genuine
+    Codex CLI carries it on every token POST
+    (``codex-rs/login/src/auth/default_client.rs``, posted by ``server.rs``);
+    omitting it was the one header that distinguished every kitty auth POST
+    from a real one.  A live probe against ``auth.openai.com`` on 2026-09-15
+    (four POST variants, no credentials) confirmed the auth host is
+    indifferent -- ``originator`` triggers no rejection on its error path --
+    so the legacy "do NOT set originator" warning in
+    :meth:`~kitty.providers.openai_subscription.OpenAISubscriptionAdapter._build_codex_headers`,
+    which was written for the **Codex backend** (strict tool validation),
+    does not apply here.
+
     Returns:
         Headers to merge into a token-endpoint POST.
     """
-    return {"User-Agent": build_codex_user_agent()}
+    return {
+        "User-Agent": build_codex_user_agent(),
+        "originator": "codex_cli_rs",
+    }
 
 
 class OAuthError(Exception):

@@ -38,6 +38,16 @@ guard whose own subject is another hand-written list rots exactly the same way,
 so :func:`token_post_sites` derives the list from the AST instead, and
 :class:`TestTheEnumerationCatchesANewSite` plants a fifth site to prove it
 notices.
+
+**T-G9 / KBR-78 extended this file** with the exact-set half: each of the four
+sites asserts its own registered header set — names, casing, and the
+``Authorization`` asymmetry (three sites authenticate in the body; site 4 by
+bearer) — plus ``originator: codex_cli_rs``, which landed here as the ticket's
+recorded decision: the genuine Codex CLI sends it on every token POST, and a
+live probe against ``auth.openai.com`` (2026-09-15, four POST variants, no
+credentials) confirmed the auth host is indifferent to it, clearing the only
+objection in the legacy warning (which scopes to the Codex *backend*).  The
+identity assertions above are unchanged; the exact set is asserted beside them.
 """
 
 from __future__ import annotations
@@ -155,8 +165,14 @@ class _CapturingTransport:
         )
 
 
-async def _refresh_leg_user_agents() -> list[str]:
-    """Drive sites 1 and 2 and return the user-agent each sent."""
+async def _refresh_leg_headers() -> list[dict[str, str]]:
+    """Drive sites 1 and 2 and return the full header set each sent.
+
+    T-G9: the exact-set contract reads the whole dict, not one value.
+
+    Returns:
+        The headers of ``_refresh`` then ``_exchange_api_key``, in send order.
+    """
     session = OAuthSession(
         client_id="cid",
         access_token="at",
@@ -169,11 +185,23 @@ async def _refresh_leg_user_agents() -> list[str]:
     )
     transport = _CapturingTransport()
     await session.get_valid_api_key(transport)
-    return [h.get("User-Agent", "") for h in transport.headers]
+    return list(transport.headers)
 
 
-async def _login_leg_user_agents() -> list[str]:
-    """Drive sites 3 and 4 and return the user-agent each sent."""
+async def _refresh_leg_user_agents() -> list[str]:
+    """Drive sites 1 and 2 and return the user-agent each sent."""
+    return [h.get("User-Agent", "") for h in await _refresh_leg_headers()]
+
+
+async def _login_leg_headers() -> list[dict[str, str]]:
+    """Drive sites 3 and 4 and return the full header set each sent.
+
+    T-G9: the exact-set contract reads the whole dict, not one value.
+
+    Returns:
+        The headers of ``_exchange_code_for_tokens`` then
+        ``_exchange_id_token_for_api_key``, in send order.
+    """
     captured: list[dict[str, str]] = []
 
     def capture(url, **kw):
@@ -190,7 +218,12 @@ async def _login_leg_user_agents() -> list[str]:
             await _exchange_code_for_tokens("code", "verifier", "cid", http)
             await _exchange_id_token_for_api_key("id", "acc", "cid", http)
 
-    return [h.get("User-Agent", "") for h in captured]
+    return captured
+
+
+async def _login_leg_user_agents() -> list[str]:
+    """Drive sites 3 and 4 and return the user-agent each sent."""
+    return [h.get("User-Agent", "") for h in await _login_leg_headers()]
 
 
 def _api_leg_headers() -> dict[str, str]:
@@ -372,3 +405,183 @@ class TestTheVersionHasOneSource:
         ]
 
         assert hits == ["codex_identity.py"], hits
+
+
+# ── The exact-set contract (T-G9 / KBR-78) ────────────────────────────────
+
+
+#: The exact header set each token POST site must carry. The four sites are
+#: deliberately **not** harmonised (KBR-78's ticket): three of them authenticate
+#: in the form body alone and carry no ``Authorization`` at all, while site 4's
+#: grant authenticates by bearer. ``token_request_headers()`` contributes
+#: ``User-Agent`` and ``originator`` to every site; the table says what *each*
+#: site adds — and, by exact-set equality, that it adds nothing else.
+SITE_EXPECTED_SETS: dict[str, frozenset[str]] = {
+    # Site 1 — OAuthSession._refresh (refresh_token grant, credentials in body).
+    "oauth_session._refresh": frozenset({"User-Agent", "originator"}),
+    # Site 2 — OAuthSession._exchange_api_key (token-exchange grant, credentials
+    # in body — despite the sibling grant below, this site authenticates by
+    # body, and its exact set must keep saying so).
+    "oauth_session._exchange_api_key": frozenset({"User-Agent", "originator"}),
+    # Site 3 — openai_oauth._exchange_code_for_tokens (authorization_code grant,
+    # credentials in body).
+    "openai_oauth._exchange_code_for_tokens": frozenset({"User-Agent", "originator"}),
+    # Site 4 — openai_oauth._exchange_id_token_for_api_key (token-exchange
+    # grant, authenticated by bearer).
+    "openai_oauth._exchange_id_token_for_api_key": frozenset(
+        {"User-Agent", "originator", "Authorization"}
+    ),
+}
+
+
+async def _every_token_post_headers() -> dict[str, dict[str, str]]:
+    """Capture all four token POSTs, keyed by site label.
+
+    Returns:
+        One header dict per :data:`SITE_EXPECTED_SETS` key.
+    """
+    refresh = await _refresh_leg_headers()
+    login = await _login_leg_headers()
+
+    return {
+        "oauth_session._refresh": refresh[0],
+        "oauth_session._exchange_api_key": refresh[1],
+        "openai_oauth._exchange_code_for_tokens": login[0],
+        "openai_oauth._exchange_id_token_for_api_key": login[1],
+    }
+
+
+def exact_set_violation(headers: Mapping[str, str], expected: frozenset[str]) -> str | None:
+    """Compare a site's header names against its registered set.
+
+    Pure over its arguments so the falsification cases can hand it a
+    deliberate defect, per ``tests/test_opencode_endpoint_table.py``'s
+    ``check_routing`` precedent.
+
+    Args:
+        headers: The header dict a token POST actually carried.
+        expected: The exact name set the site must carry.
+
+    Returns:
+        ``None`` when the names match exactly; otherwise a message naming the
+        site's set and the expected one. Compared by exact name, not by
+        case-folded name: casing is part of the assertion
+        (``TEST_SUITE.md`` §4.3 C1), and a re-spelled header is as visible to
+        a fingerprinting provider as a new one.
+    """
+    if set(headers) == set(expected):
+        return None
+
+    return (
+        f"carries {sorted(headers)}, expected exactly {sorted(expected)} "
+        f"(TEST_SUITE.md §4.3 C1 / KBR-78)"
+    )
+
+
+class TestEachTokenPostCarriesItsExactSet:
+    """T-G9: the exact set per token POST — names, casing, value shapes.
+
+    The KBR-161 sibling asserts identity (one ``User-Agent``, five legs). This
+    is the second half: each site's **whole** header set is exactly what the
+    register says — nothing missing, nothing extra, nothing re-cased — so a new
+    header on any single site turns red instead of riding along unnoticed.
+    """
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("site", sorted(SITE_EXPECTED_SETS))
+    async def test_site_carries_exactly_its_registered_set(self, site: str) -> None:
+        """The site's header names are exactly the registered set."""
+        headers = (await _every_token_post_headers())[site]
+
+        violation = exact_set_violation(headers, SITE_EXPECTED_SETS[site])
+
+        assert violation is None, f"{site} {violation}"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("site", sorted(SITE_EXPECTED_SETS))
+    async def test_site_carries_no_authorisation_unless_its_grant_needs_one(self, site: str) -> None:
+        """Three of the four sites authenticate in the body, not by header.
+
+        The absence is asserted explicitly on each site that must not carry an
+        ``Authorization`` — exact-set equality would hide a *reintroduced*
+        header behind a passing equality only if the expected set grew too,
+        and the point of T-G9 is that it must not grow silently.
+        """
+        headers = (await _every_token_post_headers())[site]
+
+        if site == "openai_oauth._exchange_id_token_for_api_key":
+            assert headers["Authorization"] == "Bearer acc", (
+                f"{site} must authenticate by bearer for its grant"
+            )
+        else:
+            assert "Authorization" not in headers, (
+                f"{site} must authenticate in the request body; an "
+                f"Authorization header here is an unregistered surface "
+                f"(KBR-78)"
+            )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("site", sorted(SITE_EXPECTED_SETS))
+    async def test_site_carries_the_originator_and_the_single_source_user_agent(
+        self, site: str
+    ) -> None:
+        """``originator`` and ``User-Agent`` come from the one shared builder."""
+        headers = (await _every_token_post_headers())[site]
+
+        assert headers["originator"] == "codex_cli_rs", (
+            f"{site} must carry originator: codex_cli_rs — the one header the "
+            f"real Codex CLI sends that kitty's auth leg must not omit "
+            f"(KBR-78; auth.openai.com probed 2026-09-15, indifferent)"
+        )
+        assert headers["User-Agent"] == codex_identity.build_codex_user_agent(), (
+            f"{site} must read its User-Agent from kitty.codex_identity"
+        )
+
+
+class TestTheExactSetCatchesThePreChangeShape:
+    """§1.4: the exact-set check fails on the shape before the KBR-78 change.
+
+    The planted builder reproduces the pre-fix ``token_request_headers`` —
+    ``User-Agent`` only — and the *check itself* must reject it on the
+    refresh leg, which reads the patched binding directly. Driving
+    :func:`exact_set_violation` with the planted shape proves the assertion
+    logic catches the defect, not merely that the patch was applied — the
+    latter is what an inline "the planted headers lack ``originator``" check
+    would prove, and is the failure mode ``inline assert has no negative
+    control`` records.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_token_post_without_the_originator_is_caught(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A ``User-Agent``-only builder fails the exact-set check."""
+        monkeypatch.setattr(
+            "kitty.auth.oauth_session.token_request_headers",
+            lambda: {"User-Agent": codex_identity.build_codex_user_agent()},
+        )
+
+        headers = await _refresh_leg_headers()
+        violation = exact_set_violation(headers[0], SITE_EXPECTED_SETS["oauth_session._refresh"])
+
+        assert violation is not None, (
+            "the exact-set check failed to flag the pre-change shape "
+            "(User-Agent only) — either the check is too weak or the patch "
+            "did not apply to the refresh leg"
+        )
+        assert "'originator'" in violation, (
+            "the violation message must name the missing field — readers "
+            "diagnose the failure from the message"
+        )
+
+    def test_a_freshly_built_pre_change_dict_violates_the_register(self) -> None:
+        """The check fires on a hand-built planted shape, no monkeypatch.
+
+        A pure-function test for the assertion itself, separate from the
+        ``monkeypatch``-driven leg. Same shape as ``check_routing`` in
+        ``tests/test_opencode_endpoint_table.py``.
+        """
+        planted = {"User-Agent": codex_identity.build_codex_user_agent()}
+        violation = exact_set_violation(planted, SITE_EXPECTED_SETS["oauth_session._refresh"])
+
+        assert violation is not None
+        assert "'originator'" in violation
+
