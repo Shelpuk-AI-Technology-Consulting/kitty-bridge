@@ -41,7 +41,7 @@ from collections.abc import AsyncGenerator
 
 import pytest
 
-from harness.conftest import _phase_outcomes, _PhaseOutcome
+from harness.conftest import _PHASE_TEST_NAMES, _phase_outcomes, _PhaseOutcome
 from harness.connect_proxy import (
     HARNESS_UPSTREAM_HOST,
     PROXY_PASSWORD,
@@ -327,20 +327,6 @@ class TestPhase3Falsification:
 
 
 # ── Verdict recording (R5) ───────────────────────────────────────────────
-
-
-#: The phase tests whose outcomes gate the slice verdict. Names match those
-#: in :data:`tests.harness.conftest._PHASE_TEST_NAMES`; the conftest is the
-#: source of truth (it owns the hook and the session-finaliser that records
-#: the verdict). Listed here only so :class:`TestSliceVerdict` can iterate
-#: it directly without importing a name the conftest considers module-local.
-_PHASE_TEST_NAMES = frozenset({
-    "test_with_egress_disabled_the_recorder_records_the_connection_and_the_proxy_sees_nothing",
-    "test_proxy_down_leaves_the_recorder_with_zero_connections",
-    "test_proxy_up_every_peer_port_joins_a_tunnel",
-    "test_failed_tunnel_contributes_no_upstream_connection",
-    "test_injected_bypass_makes_the_harness_report_it",
-})
 
 
 class TestSliceVerdict:
