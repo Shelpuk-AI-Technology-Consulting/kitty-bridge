@@ -11,7 +11,11 @@ What this module owns:
   its own ephemeral port and the proxy's ``resolve`` map carrying exactly that
   ``host:port`` → ``127.0.0.1:port`` binding. Sibling slices (T-E2..T-E5) read
   the same :class:`~harness.connect_proxy.ConnectProxy` and recording-upstream
-  the harness holds.
+  the harness holds. The recorder speaks TLS (the leaf cert already carries
+  ``HARNESS_UPSTREAM_HOST`` in its SAN) so aiohttp's ``ClientSession`` CONNECTs
+  through the proxy on the bridge's behalf; tests drive the bridge with the
+  ``aiohttp_trusts_test_ca`` fixture (T-W5) so the bridge's aiohttp client
+  trusts the harness CA.
 * **`monkeypatched_aiohttp_resolver`** — the **direct**-leg override for the
   bridge's own aiohttp sessions: ``socket.getaddrinfo`` mapped for the harness
   hostname, deferring every other name to the real resolver. It patches
@@ -35,7 +39,10 @@ What this module owns:
   :class:`BridgeAiohttpContainment` that demonstrates the seam by driving one
   request through the bridge's aiohttp serving path with egress off and the
   patched resolver in scope, asserting the recorder recorded the connection
-  and the proxy recorded zero CONNECTs. T-E3–T-E5 register their own without
+  and the proxy recorded zero CONNECTs. The bridge's outbound URL is
+  ``https://upstream.kitty-test.invalid:{port}`` (the recorder is TLS — see
+  :attr:`SealedNetwork.upstream_base_url`), so drives take the
+  ``aiohttp_trusts_test_ca`` fixture. T-E3–T-E5 register their own without
   editing this module.
 
 Delivered as an async context manager rather than pytest fixtures: the harness
@@ -54,7 +61,7 @@ import uuid
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, ClassVar, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, ClassVar, Protocol, runtime_checkable
 
 import aiohttp
 import pytest
@@ -69,6 +76,9 @@ from harness.connect_proxy import (
 from harness.contract import CapturedRequest, WireFormat
 from harness.recorder import ConnectionRecord, RecordingUpstream
 
+if TYPE_CHECKING:
+    from kitty.egress import EgressConfig
+
 __all__ = [
     "BridgeAiohttpContainment",
     "CapabilityReport",
@@ -82,6 +92,7 @@ __all__ = [
     "monkeypatched_aiohttp_resolver",
     "register_containment_transport",
     "registered_containment_transports",
+    "reset_for_test",
 ]
 
 #: Default wire format. The harness's recorder answers in this format and the
@@ -285,6 +296,23 @@ def instance() -> CapabilityReport:
     return _REPORT
 
 
+def reset_for_test() -> None:
+    """Replace the singleton with a fresh, every-``not_attempted`` report.
+
+    Test-scoped seam for the singleton :func:`instance` exposes: it lets the
+    ``test_singleton_exposes_every_transport_not_attempted`` contract T-E1
+    shipped survive the first verdict a sibling slice records into it
+    ([KBR-62](https://shelpuk.atlassian.net/browse/KBR-62)). A test that
+    imports this function outside a test scope would erase another slice's
+    verdict, so the name is chosen to read as test-only on the import side.
+
+    No production code calls this. The future T-E9 completeness gate reads
+    whatever the slices wrote; it has no use for a reset.
+    """
+    global _REPORT
+    _REPORT = CapabilityReport()
+
+
 # ── The monkeypatched resolver (§5.3 direct-leg seam) ──────────────────────
 
 
@@ -372,11 +400,13 @@ class SealedNetwork:
                 ``default_format`` so the recorder's reply matches the
                 inbound protocol. The default — Anthropic Messages — is the
                 one the fixture suite exercises end to end.
-            certs: The session's throwaway TLS certificates. The proxy is a
-                TLS server and must present one; the recorder binds plain HTTP
-                and the bridge's ``aiohttp_trusts_test_ca`` fixture is *not*
-                needed (the bridge reaches the recorder over plain HTTP, with
-                only the client↔proxy hop TLS-wrapped). The seam is taken in
+            certs: The session's throwaway TLS certificates. Both the proxy
+                (``proxy_cert``/``proxy_key``) and the recorder
+                (``target_cert``/``target_key``, already carrying
+                :data:`harness.connect_proxy.HARNESS_UPSTREAM_HOST` in its
+                SAN) present leaves signed by the same CA; a test takes the
+                ``aiohttp_trusts_test_ca`` fixture so the bridge's aiohttp
+                client trusts that CA on both hops. The seam is taken in
                 here rather than from a pytest fixture because the harness is
                 not a fixture itself — a test asks for ``SealedNetwork``
                 explicitly.
@@ -393,6 +423,16 @@ class SealedNetwork:
         to it; the order is therefore fixed and recorded here, not at the call
         site, so sibling slices do not see a half-started harness.
 
+        The recorder speaks **TLS**, using the leaf cert the harness already
+        generates with :data:`harness.connect_proxy.HARNESS_UPSTREAM_HOST` in
+        the SAN. Plain HTTP would make aiohttp's HTTP stack send the bridge's
+        request in absolute form (``POST http://upstream...``) through the
+        proxy — a CONNECT-only proxy rejects that with 405. With TLS at the
+        recorder, the bridge's outbound URL is ``https://...``, aiohttp
+        CONNECT-tunnels, and §5.2.1's source-port join holds. Callers must
+        take the ``aiohttp_trusts_test_ca`` fixture (T-W5) so the bridge's
+        aiohttp client trusts the harness CA.
+
         A failed proxy start releases the recorder — ``__aenter__`` propagates
         the exception and ``__aexit__`` is never called on the failed entry,
         so without this guard the recorder would hold its port for the rest of
@@ -406,9 +446,16 @@ class SealedNetwork:
                 is the same family as a connect-time failure of any other
                 network resource.
         """
-        # Recorder first: the proxy's resolver map needs its port.
+        # Recorder first: the proxy's resolver map needs its port. The leaf
+        # cert the harness generates for `TlsTarget` (`certs.target_cert` /
+        # `certs.target_key`) already has `HARNESS_UPSTREAM_HOST` in the SAN,
+        # so the same key material services both the probe tests' TLS target
+        # and the containment harness' TLS recorder without a second
+        # generation pass.
         recorder = RecordingUpstream(default_format=self._fmt)
-        await recorder.start()
+        await recorder.start(
+            ssl_context=server_ssl_context(self._certs.target_cert, self._certs.target_key)
+        )
         self._recorder = recorder
 
         try:
@@ -493,13 +540,16 @@ class SealedNetwork:
         """Return the URL the bridge's adapter points at.
 
         Returns:
-            ``http://HARNESS_UPSTREAM_HOST:{port}``. Plain HTTP at the
-            upstream is a §5.3-shaped decision: the proxy terminates the
-            TLS hop, and the upstream hop is the only place a recorder can
-            observe the bridge's outbound socket peer port without a TLS
-            handshake gate.
+            ``https://HARNESS_UPSTREAM_HOST:{port}``. The recorder is TLS
+            because aiohttp only CONNECT-tunnels for ``https://`` targets;
+            for ``http://`` it sends the request in absolute form through the
+            proxy, and the harness's CONNECT-only proxy rejects that with
+            405. With TLS at the recorder, the bridge's outbound URL is
+            ``https://...``, aiohttp CONNECTs through the proxy, and the
+            §5.2.1 join keys (proxy's tunnel source port = recorder's peer
+            port) hold.
         """
-        return f"http://{self.upstream_host}:{self.upstream_port}"
+        return f"https://{self.upstream_host}:{self.upstream_port}"
 
     @property
     def proxy_url(self) -> str:
@@ -545,7 +595,12 @@ class SealedNetwork:
 
 @dataclass(frozen=True)
 class Phase1Result:
-    """What a bridge-aiohttp phase 1 drive observes, in one struct.
+    """What a bridge-aiohttp drive observes, in one struct.
+
+    Shared by :meth:`BridgeAiohttpContainment.drive_phase_1` and
+    :meth:`BridgeAiohttpContainment.drive_with_egress`; which observations
+    *should* be populated differs per §5.2.2 phase and is the calling test's
+    to assert (T-E2's phase tests are that contract).
 
     Attributes:
         status: The HTTP status the test client received from the bridge.
@@ -558,8 +613,8 @@ class Phase1Result:
         captures: The recorder's request captures after one request.
         connections: The recorder's connection log, including the request
             that carried the capture and any earlier probe the bridge made.
-        attempts: The proxy's CONNECT attempts. Phase 1 (egress off) must
-            leave this empty.
+        attempts: The proxy's CONNECT attempts. Empty with egress off (phase
+            1); populated per phase with egress on (T-E2's phases 2/2b/3).
     """
 
     status: int
@@ -822,6 +877,109 @@ class BridgeAiohttpContainment(ContainmentTransport):
                 # connect — both shapes the test client's ``status`` field
                 # cannot represent. Carry the exception in ``text`` so a
                 # failing drive is diagnosable from its result alone.
+                status = -1
+                text = repr(exc)
+            finally:
+                await server.stop_async()
+
+            return Phase1Result(
+                status=status,
+                text=text,
+                captures=list(harness.recorder.requests),
+                connections=list(harness.recorder.connections),
+                attempts=list(harness.proxy.attempts),
+            )
+
+    async def drive_with_egress(
+        self,
+        harness: SealedNetwork,
+        *,
+        egress: EgressConfig,
+        monkeypatch: pytest.MonkeyPatch,
+        resolver_port: int | None = None,
+    ) -> Phase1Result:
+        """Drive one request through the bridge with egress configured (§5.2.2 phases 2/2b/3).
+
+        The same drive :meth:`drive_phase_1` performs, with the caller's
+        :class:`~kitty.egress.EgressConfig` handed to ``BridgeServer`` so
+        :meth:`BridgeServer._session_for` returns the proxied session for a
+        public destination. The harness hostname is not ``localhost``-family
+        and not an IP literal, so :func:`kitty.egress.should_bypass` returns
+        ``False`` for it and the proxy is used — the premise the three
+        containment phases assert on, and the premise the falsification
+        control breaks by patching ``should_bypass`` at the test site.
+
+        The resolver mapping stays in scope exactly as in phase 1. A product
+        defect that wrongly falls back to a direct route therefore still
+        resolves the harness hostname to the recorder, and the §5.2.1 join
+        detects the bypass instead of the test passing vacuously on a DNS
+        failure (§5.3 trap 2).
+
+        Args:
+            harness: The sealed network the request is driven against.
+            egress: The configuration to hand to ``BridgeServer``. Typical
+                value: ``EgressConfig(proxy_url=harness.proxy_url,
+                username=PROXY_USER, password=PROXY_PASSWORD)`` from
+                :mod:`harness.connect_proxy`.
+            monkeypatch: Pytest's monkeypatch fixture; the resolver patch
+                reverts on its teardown.
+            resolver_port: The port the direct-leg resolver maps the harness
+                hostname to. Default is ``harness.upstream_port`` — the
+                recorder's port — the same seam :meth:`drive_phase_1` uses.
+
+        Returns:
+            A :class:`Phase1Result` with the bridge's status, the recorder's
+            captures and connections after the request, and the proxy's
+            attempts. The result shape is shared with phase 1; which
+            observations *should* be populated differs per phase and is the
+            caller test's to assert (T-E2's phase tests are the contract).
+        """
+        # Local import keeps the module-import surface tidy: the bridge
+        # server depends on `kitty.providers.*`, which the rest of the test
+        # module surface (e.g., the report) does not need.
+        from kitty.bridge.server import BridgeServer
+        from kitty.providers.custom_anthropic import CustomAnthropicAdapter
+
+        target_port = harness.upstream_port if resolver_port is None else resolver_port
+
+        # Identical drive shape to `drive_phase_1`: the per-transport direct
+        # route in scope, then the harness's resolver mapping, then the
+        # bridge pointed at the recorder by its non-loopback name. The only
+        # difference is the `egress` argument on the constructor.
+        with (
+            self.direct_route(harness),
+            monkeypatched_aiohttp_resolver(monkeypatch, harness.upstream_host, target_port),
+        ):
+            adapter = CustomAnthropicAdapter()
+            server = BridgeServer(
+                None,  # type: ignore[arg-type]
+                adapter,
+                resolved_key="harness-key",
+                model=self._MODEL,
+                provider_config={"base_url": harness.upstream_base_url},
+                egress=egress,
+            )
+            status: int = -1
+            text: str = ""
+            try:
+                bridge_port = await server.start_async()
+
+                body = {
+                    "model": self._MODEL,
+                    "messages": [{"role": "user", "content": f"kbr62-{uuid.uuid4().hex}"}],
+                    "max_tokens": 16,
+                    "stream": False,
+                }
+
+                async with aiohttp.ClientSession() as client:
+                    response = await client.post(
+                        f"http://127.0.0.1:{bridge_port}/v1/messages",
+                        json=body,
+                        timeout=aiohttp.ClientTimeout(total=_DRIVE_TIMEOUT),
+                    )
+                    text = await response.text()
+                    status = response.status
+            except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:
                 status = -1
                 text = repr(exc)
             finally:

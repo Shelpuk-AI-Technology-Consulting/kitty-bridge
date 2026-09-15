@@ -54,6 +54,7 @@ from harness.containment import (
     monkeypatched_aiohttp_resolver,
     register_containment_transport,
     registered_containment_transports,
+    reset_for_test,
 )
 from harness.containment import (
     instance as report_instance,
@@ -152,6 +153,20 @@ class TestMonkeypatchedResolver:
 # ── R3: the capability report ──────────────────────────────────────────────
 
 
+@pytest.fixture(autouse=True)
+def _isolate_singleton() -> None:
+    """Reset the capability-report singleton before every test in this class.
+
+    The singleton is the wire T-E2..T-E5 record into and T-E9's completeness
+    gate reads; a sibling slice's verdict written earlier in the process would
+    leave the per-test "initial state" assertion false. ``reset_for_test``
+    replaces it with a fresh every-``not_attempted`` report before each test;
+    the per-test :func:`capability_report` fixture is unchanged, so unit tests
+    constructing a fresh :class:`CapabilityReport` directly are unaffected.
+    """
+    reset_for_test()
+
+
 class TestCapabilityReport:
     """The in-process report the completeness gate reads (§5.3, §5.4)."""
 
@@ -230,6 +245,31 @@ class TestCapabilityReport:
         message = str(excinfo.value)
         for name in ("curl_cffi", "provider_aiohttp", "botocore"):
             assert name in message, f"missing pending transport {name!r} in gate message"
+
+    def test_reset_for_test_replaces_the_singleton_with_every_not_attempted(self) -> None:
+        """``reset_for_test`` returns the singleton to its initial state.
+
+        The autouse fixture in this class already does this; the test is the
+        contract the fixture rests on. A sibling slice that records a verdict
+        into ``instance()`` and then sees another test's
+        ``test_singleton_exposes_every_transport_not_attempted`` go green is
+        what makes the singleton co-tenant-safe.
+        """
+        before = report_instance()
+        before.record("bridge_aiohttp", Outcome.PROVEN)
+        # Before resetting: at least one row is *not* ``not_attempted``.
+        assert before.outcome("bridge_aiohttp") is Outcome.PROVEN
+
+        reset_for_test()
+
+        # After resetting: a fresh object, every row ``not_attempted``.
+        assert report_instance() is not before
+        assert set(report_instance().not_attempted_names()) == {
+            "bridge_aiohttp",
+            "curl_cffi",
+            "provider_aiohttp",
+            "botocore",
+        }
 
 
 # ── R1: the sealed-network harness ─────────────────────────────────────────
@@ -320,8 +360,8 @@ class TestSealedNetwork:
         started: list[RecordingUpstream] = []
 
         class _CapturingRecorder(RecordingUpstream):
-            async def start(self) -> None:
-                await super().start()
+            async def start(self, *args: object, **kwargs: object) -> None:
+                await super().start(*args, **kwargs)  # type: ignore[arg-type]
                 started.append(self)
 
         monkeypatch.setattr(containment, "RecordingUpstream", _CapturingRecorder)
@@ -384,9 +424,15 @@ class TestBridgeAiohttpContainment:
     async def test_drive_phase_1_one_request_reaches_the_recorder_directly(
         self,
         sealed_network: SealedNetwork,
+        aiohttp_trusts_test_ca: None,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """The bridge, egress off, resolver patched, posts once and lands on the harness."""
+        """The bridge, egress off, resolver patched, posts once and lands on the harness.
+
+        The recorder is TLS (see :attr:`SealedNetwork.upstream_base_url`), so
+        the bridge's outbound aiohttp client must trust the harness CA — the
+        fixture's job, on this hop and on the proxied phases' hop alike.
+        """
         result = await BridgeAiohttpContainment().drive_phase_1(sealed_network, monkeypatch=monkeypatch)
 
         assert isinstance(result, Phase1Result)
@@ -410,6 +456,7 @@ class TestBridgeAiohttpContainment:
     async def test_drive_phase_1_with_a_broken_resolver_records_zero_connections(
         self,
         sealed_network: SealedNetwork,
+        aiohttp_trusts_test_ca: None,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Falsification (plan §1.4): a wrong-port resolver must make the green path fail.
@@ -424,7 +471,11 @@ class TestBridgeAiohttpContainment:
         drive's ``status`` comes back as ``-1`` and
         ``text`` carries the ``TimeoutError`` repr. The recorder receives
         nothing in any of those shapes, which is what the green assertion
-        ``captures == 1`` catches.
+        ``captures == 1`` catches. The fixture is taken so the bridge's TLS
+        verify step is in scope on the green path's notional branch — the
+        broken-resolver branch never reaches TLS verify, but the
+        consistency between this test and the green-path one is what the
+        reader expects.
 
         **Cost: ~30 s.** The 10-second client timeout plus ``stop_async()``
         waiting out the bridge's in-flight retries is the price of driving
