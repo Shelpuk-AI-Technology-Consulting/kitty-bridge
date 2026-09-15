@@ -291,6 +291,31 @@ class TestSettingsBackup:
         claude_mod.delete_settings_backup()
         assert claude_mod.load_settings_backup() is None
 
+    def test_load_settings_backup_preserves_crlf_backup_bytes(self, _backup_in_tmp: Path) -> None:
+        """`load_settings_backup` returns a backup's CRLF bytes verbatim (KBR-260).
+
+        The pre-fix reader used ``Path.read_text`` (universal newlines),
+        which silently strips ``\\r\\n`` on every platform — breaking the
+        byte-identity contract for any CRLF backup the user already has on
+        disk. The backup is staged here via ``write_bytes`` rather than
+        through ``save_settings_backup`` because the round-trip
+        (save→load) would cancel the read and write defects and expose
+        nothing.
+
+        Args:
+            _backup_in_tmp: The autouse fixture that points
+                ``_DEFAULT_BACKUP_PATH`` at a per-test temp file.
+        """
+        original_bytes = b'{\n  "model": "opus",\r\n  "env": {"API_TIMEOUT_MS": "3000000"}\r\n}\n'
+        _backup_in_tmp.write_bytes(original_bytes)
+
+        result = claude_mod.load_settings_backup()
+
+        assert result is not None
+        assert result.encode("utf-8") == original_bytes, (
+            f"load_settings_backup returned bytes {result.encode('utf-8')!r}; expected {original_bytes!r}"
+        )
+
 
 class TestCleanupOwnership:
     """Ownership-checked restore — the legacy shared-file path.
