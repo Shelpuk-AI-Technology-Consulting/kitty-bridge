@@ -12,8 +12,14 @@ The unit-level counterparts (``tests/test_claude_settings_multi_session.py``)
 prove the same invariants on the adapter in-process; this file proves them at
 the process boundary, where two bridge servers, two child processes and two
 ``launch_async`` lifecycles actually coexist. The lifecycle counterpart
-(``tests/cli/test_cli_settings_lifecycle.py``, T-I1) proves one session at a
-time; concurrency is the row it does not cover.
+(``tests/cli/test_cli_settings_lifecycle.py``, KBR-93, merged in PR #162)
+proves one session at a time; concurrency is the row it does not cover.
+
+This file is self-contained — no import from the sibling L3 file — so the
+two harnesses evolve independently. That trades ~250 lines of duplicated
+sandbox / driver / barrier code for two independently mergeable files; a
+future change to one copy must be hand-mirrored to the other until a
+consolidation task lifts the shared harness into ``tests/harness/``.
 
 Layer: L3 (subsystem — real processes, real filesystem). No CI job selects
 ``l3`` yet; ``tests/layers.py::PENDING_ACTIVATION_LAYERS`` parks the layer on
@@ -42,6 +48,7 @@ isolation would let the concurrent tests pass vacuously.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import signal
@@ -427,6 +434,7 @@ if __name__ == "__main__":
 '''
 
 
+
 def _spawn_launch_child(sandbox: _Sandbox, name: str) -> subprocess.Popen[str]:
     """Spawn one launch child under the sandboxed environment.
 
@@ -601,6 +609,38 @@ def _signal_and_reap(proc: subprocess.Popen[str], sandbox: _Sandbox, name: str) 
     return _wait_for_exit(proc, sandbox, name)
 
 
+def _terminate_children(procs: list[subprocess.Popen[str]], sandbox: _Sandbox) -> None:
+    """End any still-running launch children; never mask a test failure.
+
+    A mid-flight assertion failure would otherwise leak two live launch
+    children — each holding a bridge server and a sleeping stub ``claude``
+    (``exec sleep 300``) — into the rest of the suite. Every scenario calls
+    this from a ``finally``. SIGTERM first (launch_async forwards it to the
+    stub, so the whole process tree exits through the product's own path);
+    escalate to kill for a child that ignores it. Failures here are
+    suppressed so the original assertion error survives teardown.
+
+    Args:
+        procs: The launch children to end.
+        sandbox: Their sandbox (unused by the teardown itself; kept for
+            signature symmetry with the reap helpers).
+    """
+    for proc in procs:
+        if proc.poll() is None:
+            with contextlib.suppress(Exception):
+                proc.send_signal(signal.SIGTERM)
+    for proc in procs:
+        if proc.poll() is not None:
+            continue
+        try:
+            proc.wait(timeout=_CHILD_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired:
+            with contextlib.suppress(Exception):
+                proc.kill()
+            with contextlib.suppress(Exception):
+                proc.wait()
+
+
 def _session_port(session_path: Path) -> int:
     """Extract the bridge port from a session file's base URL.
 
@@ -642,9 +682,6 @@ def sandbox(tmp_path: Path) -> _Sandbox:
 # ── AC-1: each concurrent session gets its own --settings temp file ─────────
 
 
-# ── AC-1: each concurrent session gets its own --settings temp file ─────────
-
-
 @pytest.mark.skipif(
     sys.platform == "win32",
     reason="os.kill(pid, SIGTERM) is TerminateProcess on Windows — indistinguishable from SIGKILL",
@@ -663,23 +700,28 @@ def test_concurrent_sessions_each_get_their_own_settings_file(sandbox: _Sandbox)
     """
     proc_a = _spawn_launch_child(sandbox, "a")
     proc_b = _spawn_launch_child(sandbox, "b")
+    try:
+        session_a = _wait_for_session_record(sandbox, "a", proc_a)
+        session_b = _wait_for_session_record(sandbox, "b", proc_b)
+        _wait_for_stub(sandbox, [proc_a, proc_b])
 
-    session_a = _wait_for_session_record(sandbox, "a", proc_a)
-    session_b = _wait_for_session_record(sandbox, "b", proc_b)
-    _wait_for_stub(sandbox, [proc_a, proc_b])
+        # Both children are alive past their barriers: the files on disk are
+        # a snapshot of two sessions mid-flight, not one session's
+        # before/after.
+        assert proc_a.poll() is None, "child a exited before the assertion"
+        assert proc_b.poll() is None, "child b exited before the assertion"
 
-    # Both children are alive past their barriers: the files on disk are a
-    # snapshot of two sessions mid-flight, not one session's before/after.
-    assert proc_a.poll() is None, "child a exited before the assertion"
-    assert proc_b.poll() is None, "child b exited before the assertion"
+        assert session_a != session_b, "both sessions resolved to the same settings file"
+        assert session_a.exists(), "session a's settings file vanished while it runs"
+        assert session_b.exists(), "session b's settings file vanished while it runs"
 
-    assert session_a != session_b, "both sessions resolved to the same settings file"
-    assert session_a.exists(), "session a's settings file vanished while it runs"
-    assert session_b.exists(), "session b's settings file vanished while it runs"
-
-    port_a = _session_port(session_a)
-    port_b = _session_port(session_b)
-    assert port_a != port_b, "both sessions route to the same bridge port"
+        port_a = _session_port(session_a)
+        port_b = _session_port(session_b)
+        assert port_a != port_b, "both sessions route to the same bridge port"
+    finally:
+        # Leak containment: a mid-flight assertion failure must not leave two
+        # live launch children (bridge servers + sleeping stubs) running.
+        _terminate_children([proc_a, proc_b], sandbox)
 
     _signal_and_reap(proc_a, sandbox, "a")
     _signal_and_reap(proc_b, sandbox, "b")
@@ -707,18 +749,22 @@ def test_concurrent_sessions_do_not_touch_the_global_settings(sandbox: _Sandbox)
 
     proc_a = _spawn_launch_child(sandbox, "a")
     proc_b = _spawn_launch_child(sandbox, "b")
+    try:
+        # The two calls are the readiness barrier; the recorded paths
+        # matter only to AC-1/AC-3, so they are not bound here.
+        _wait_for_session_record(sandbox, "a", proc_a)
+        _wait_for_session_record(sandbox, "b", proc_b)
+        _wait_for_stub(sandbox, [proc_a, proc_b])
 
-    # The two calls are the readiness barrier; the recorded paths matter
-    # only to AC-1/AC-3, so they are not bound here.
-    _wait_for_session_record(sandbox, "a", proc_a)
-    _wait_for_session_record(sandbox, "b", proc_b)
-    _wait_for_stub(sandbox, [proc_a, proc_b])
-
-    # Mid-flight: both sessions fully prepared, neither has exited — the
-    # point where the pre-#22 design had already rewritten the global twice.
-    assert sandbox.global_settings.read_bytes() == _PRISTINE_GLOBAL, (
-        "the user-global settings file was modified while both sessions run"
-    )
+        # Mid-flight: both sessions fully prepared, neither has exited —
+        # the point where the pre-#22 design had already rewritten the
+        # global twice.
+        assert sandbox.global_settings.read_bytes() == _PRISTINE_GLOBAL, (
+            "the user-global settings file was modified while both sessions run"
+        )
+    finally:
+        # Leak containment: see AC-1's ``finally`` above.
+        _terminate_children([proc_a, proc_b], sandbox)
 
     _signal_and_reap(proc_a, sandbox, "a")
     _signal_and_reap(proc_b, sandbox, "b")
@@ -751,30 +797,38 @@ def test_second_session_start_does_not_disturb_the_first(sandbox: _Sandbox) -> N
         sandbox: The redirected sandbox.
     """
     proc_a = _spawn_launch_child(sandbox, "a")
-    session_a = _wait_for_session_record(sandbox, "a", proc_a)
-    port_a = _session_port(session_a)
+    proc_b: subprocess.Popen[str] | None = None
+    try:
+        session_a = _wait_for_session_record(sandbox, "a", proc_a)
+        port_a = _session_port(session_a)
 
-    # B starts while A is already mid-flight — the exact ordering issue #22
-    # broke under, not a simultaneous start.
-    proc_b = _spawn_launch_child(sandbox, "b")
-    session_b = _wait_for_session_record(sandbox, "b", proc_b)
-    _wait_for_stub(sandbox, [proc_a, proc_b])
-    port_b = _session_port(session_b)
+        # B starts while A is already mid-flight — the exact ordering issue
+        # #22 broke under, not a simultaneous start.
+        proc_b = _spawn_launch_child(sandbox, "b")
+        session_b = _wait_for_session_record(sandbox, "b", proc_b)
+        _wait_for_stub(sandbox, [proc_a, proc_b])
+        port_b = _session_port(session_b)
 
-    assert proc_a.poll() is None, "session a died when session b started"
-    assert port_a != port_b, "the two sessions resolved to one bridge port"
+        assert proc_a.poll() is None, "session a died when session b started"
+        assert port_a != port_b, "the two sessions resolved to one bridge port"
 
-    # A's file is A's: same path, same routing, while B runs.
-    assert session_a.exists(), "session b's start removed session a's settings file"
-    assert _session_port(session_a) == port_a, (
-        "session b's start rerouted session a's settings file (issue #22 regression)"
-    )
+        # A's file is A's: same path, same routing, while B runs.
+        assert session_a.exists(), "session b's start removed session a's settings file"
+        assert _session_port(session_a) == port_a, (
+            "session b's start rerouted session a's settings file (issue #22 regression)"
+        )
+    finally:
+        # Leak containment: proc_b may not exist yet if an earlier line
+        # raised; ``_terminate_children`` skips processes that already
+        # exited, and the SIGTERM path is the same one the happy flow uses,
+        # so teardown and success end the sessions identically.
+        to_end = [proc_a] + ([proc_b] if proc_b is not None else [])
+        _terminate_children(to_end, sandbox)
 
-    _signal_and_reap(proc_a, sandbox, "a")
-    _signal_and_reap(proc_b, sandbox, "b")
-
+    # Both children were ended via SIGTERM (the Ctrl-C path): the mapped
+    # exit code is not the assertion, the file-cleanup outcome is.
     assert not session_a.exists(), "session a's settings file survived cleanup"
-    assert not session_b.exists(), "session b's settings file survived cleanup"
+    assert session_b is not None and not session_b.exists(), "session b's settings file survived cleanup"
     assert sandbox.global_settings.read_bytes() == _PRISTINE_GLOBAL, (
         "the user-global settings file was modified by the session lifecycles"
     )
