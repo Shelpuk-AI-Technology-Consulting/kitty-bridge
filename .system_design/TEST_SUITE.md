@@ -597,15 +597,26 @@ Completions dialect carries Anthropic's own `cache_control` on content parts. So
 meet a breakpoint. Whether it fills this slot from either spelling (the OpenAI one is a
 value-mapping decision) or residualises it is gap **G37**; until then such a body residualises.
 
-**Why a slot rather than §3.3.1's other outcome.** §3.3.1 offers "map it, or declare it ignored
-with a reason", and a reader-side declared-ignored mechanism would also have stopped the run
-failing. It was rejected deliberately: kitty's translated path **strips every block-level breakpoint** (one nested carrier escapes — see M16), so
-under a declared-ignored rule the oracle would be blind, by construction, to a mutation that
-re-bills the user's cached prefix at **at least** ten times its cached rate — a cache read is
-0.1x base input on most models and 0.025x on Claude Fable 5.1 and Mythos 5.1, where the multiple
-is forty. Register row **M16** claims
-the strip instead, which keeps the cost visible and attributable. The declared-ignored mechanism
-therefore still does not exist; §7.4.1 records that, and no field currently needs it.
+**Why a slot for `cache_control` rather than §3.3.1's other outcome.** §3.3.1 offers "map it, or
+declare it ignored with a reason", and a reader-side declared-ignored mechanism would also have
+stopped the run failing. It was rejected **for this field** deliberately: kitty's translated path
+**strips every block-level breakpoint** (one nested carrier escapes — see M16), so under a
+declared-ignored rule the oracle would be blind, by construction, to a mutation that re-bills the
+user's cached prefix at **at least** ten times its cached rate — a cache read is 0.1x base input on
+most models and 0.025x on Claude Fable 5.1 and Mythos 5.1, where the multiple is forty. Register
+row **M16** claims the strip instead, which keeps the cost visible and attributable.
+
+**The other outcome exists now, and its first users arrived with KBR-205.** Five Anthropic block
+fields — `text.citations`, `image.transformations`, `tool_use.caller`, `tool_use.toolset_name` and
+`tool_result.toolset_name` — needed the third outcome rather than a slot, because **none of them
+carries a consequence a strip would hide**: they are optional, vendor-defined *descriptive* fields,
+not control knobs, and a reader that drops one changes nothing the agent asked for. Slots for five
+vendor spellings would have pushed one vendor's names into a form whose entire purpose is wire
+independence (§3.3.1 declines that for P16's reason). The mechanism — path-keyed by
+`(block wire type, field wire key)`, reason-required per entry, defined once for all six readers in
+`tests/harness/contract.py` — is recorded in §7.4.1, which also names the two Anthropic tool
+fields that are deliberately **mapped** rather than ignored because a mutation on them is a real
+fidelity finding (KBR-214).
 
 **`consumed` is why a dropped key is detectable.** A reader that *drops* an unknown key produces
 an **empty** residual, so "the residual must be empty" would pass it — and T-W2's own falsification
@@ -690,7 +701,7 @@ only the second consumer; §3.2.2 says why.
 | `conversation.system[<i>]` | One system text part |
 | `conversation.system_role` | The role a Gemini `systemInstruction` `Content` published — the first path form at conversation scope, added by KBR-194. `None` is the absent value, so a translated route that drops the role is a positive delta at this path. M20 on the Gemini inbound route claims it |
 | `conversation.turns[<i>].role` · `.parts[<j>]` | A turn, or one part of it |
-| `conversation.tools[<name>].description` · `.schema` · `.strict` · `.behavior` | A tool declaration, **by name**. `behavior` is Gemini's NON_BLOCKING calling toggle (KBR-194) |
+| `conversation.tools[<name>].description` · `.schema` · `.strict` · `.behavior` · `.type` | A tool declaration, **by name**. `behavior` is Gemini's NON_BLOCKING calling toggle (KBR-194); `type` is the tool's discriminator — `"custom"` on a client tool, an Anthropic-defined dated spelling (e.g. `web_search_20250305`) on a server tool (KBR-205, closing G35). `ToolDecl.type` is `str | None`, so an absent type is its own absence rather than a coerced `""` |
 | `conversation.sampling[<key>]` | One sampling parameter |
 | `conversation.turns[<i>].parts[<j>].cache_control` · `conversation.tools[<name>].cache_control` · `conversation.system[<i>].cache_control` | One cache breakpoint — **M16**. ⚠️ **A coarser row can claim these first**: a pattern is a prefix, so P5b's bare `conversation.system` and M5/M6/M7's bare `conversation.turns` subsume the breakpoint paths beneath them whenever their own triggers are met — and P5b's `MULTIPLE_SYSTEM_BLOCKS` is met by most Claude Code bodies. M16 is therefore the row that fires only where no collection-level row does; on the system blocks that means the single-block case, since P5b changes the collection's length and no `system[i]` path survives it. The field addresses the same three carriers the grammar gives it a slot on; `system_path` and `part_path` take an optional field name for it, as `tool_path` already did for P15's `.strict` |
 | `conversation.turns[<i>].parts[<j>].signature` | A vendor thinking signature — Anthropic's on a thought part, Gemini's `thoughtSignature` on either a thought part or a `functionCall` part (KBR-194 gave the latter its `ToolUse.signature` slot). **M8**'s carrier repair produces a delta at this path |
@@ -909,6 +920,19 @@ agree on a canonical form. They are six separate tasks, so the agreement is part
   `envelope.extra["tool_choice"]`, with the **value** normalised to `auto` · `any` · `none` ·
   `tool:<name>`. This is the one deliberate exception to keying `extra` by the wire key, because
   four spellings name one concept.
+- **The parallel-tool-use knob is its own address, not part of `tool_choice`** (KBR-205, closing
+  G36). Anthropic nests an inverted flag on every `tool_choice` shape —
+  `tool_choice.<shape>.disable_parallel_tool_use`, default `false` — and Chat Completions carries
+  a top-level `parallel_tool_calls` boolean, default `true`, on its own wire. Same concept, two
+  spellings, opposite polarity; the value must therefore be normalised too, so both wires meet at
+  **`envelope.extra["parallel_tool_calls"]`, the Chat Completions spelling and polarity** —
+  `true` when parallel calls are allowed, `false` when they are not. The reader writes the entry
+  only when the wire carries a **non-default** value, mirroring the product's forwarding rule
+  (KBR-214 forwards only `disable_parallel_tool_use: true` as `parallel_tool_calls: false`); an
+  absent entry and an explicit default are one request on both wires, so writing both would
+  invent a second field some providers reject and every comparison would carry. The Anthropic
+  reader maps `disable_parallel_tool_use: true` onto `parallel_tool_calls = False`; the Chat
+  Completions reader (T-A2) meets the same address and reads `parallel_tool_calls` directly.
 - **On the response direction**, `stop_reason` is `end_turn` · `max_tokens` · `stop_sequence` ·
   `tool_use` · `error` · `other`, where `other` keeps the wire's own string in
   **`Reply.stop_reason_raw`** — Gemini adds `SAFETY` and `RECITATION`, and a closed set with no
@@ -2956,3 +2980,2822 @@ call (KBR-190) — `BotocoreTransport.stop` has nothing here to release, and the
 specifically.
 
 [KBR-42]: https://shelpuk.atlassian.net/browse/KBR-42
+
+### 7.3 Recording CONNECT proxy
+
+**Delivered by T-W5 ([KBR-28]) in `tests/harness/connect_proxy.py`**, extracted from
+`tests/test_egress_https_proxy.py` rather than written a second time — two proxy implementations
+is how two harnesses come to disagree about what "tunnelled" means. That module keeps its five
+tests, unchanged down to the collected node ids, and drives all three transport stacks through the
+extracted fixture; it is the regression evidence for the extraction.
+
+What it provides:
+
+- **The fixtures**, registered as a pytest plugin from `tests/conftest.py`, so a test asks for
+  `connect_proxy` or `tls_target` by name and imports nothing.
+- **`ConnectAttempt.source_port`** — the local port of the proxy's outbound socket for each tunnel
+  it opens, and `None` where no tunnel was opened (rejected auth, or an unreachable upstream).
+  This is §5.2.1's join key; target and auth status alone cannot identify a connection at both
+  ends.
+- **`unattributable_peer_ports(peer_ports, attempts)`** — §5.2.1's assertion, stated once so each
+  transport slice inherits it rather than re-deriving it. It refuses an unset peer port rather
+  than guessing: a recorder that never populated `CapturedRequest.peer_port` would otherwise make
+  containment unfalsifiable in whichever direction the default happened to fall. *This is an
+  addition to T-W5's two named deliverables, made because §1.4 requires this delivery to ship a
+  falsification case and a falsification case needs a checkable assertion.* It does not discharge
+  **T-E2's** phase-3 obligation, which injects a bypass into the product rather than into the test.
+- **`ConnectProxy.stop()` and `TlsTarget.stop()`** — mid-test stoppability for §5.2.2 phase 2.
+  Both abort live connections rather than closing them (a TLS `close()` waits out
+  `ssl_shutdown_timeout`, 30s by default) and both retry until the listener has actually finished
+  closing. Python 3.12.1 changed `asyncio.Server.wait_closed()` to block until every connection is
+  dropped while 3.10 and 3.11 return immediately, so a teardown that merely closes the listener
+  hangs on half the support matrix and passes on the other half.
+- **The proxied-leg resolver** — `HARNESS_UPSTREAM_HOST` (`upstream.kitty-test.invalid`, §5.3) in
+  the target certificate's SAN, and an empty-by-default `ConnectProxy.resolve` map consulted
+  before the outbound connection. The harness owns the resolver because the harness is the proxy;
+  a client tunnelling to a `.invalid` name never resolves it itself, so this is the only place the
+  name can be mapped. **Shipped here, not in T-E1**, because T-E1 would otherwise have to edit a
+  module five tickets consume — the coordination problem Milestone 0 exists to remove.
+
+Still **T-E1's** (KBR-61): the per-transport **direct**-route override §5.2.2 phase 1 needs, and
+which transport gets which route. T-W5 ships the seam, not the policy.
+
+**A missing `openssl` fails, it does not skip.** `certs` is shared infrastructure, and §8's rule
+is that a skip in a gating job is a failure: a suite that quietly stops proving containment
+because a tool is absent is indistinguishable from one that proves it.
+
+[KBR-28]: https://shelpuk.atlassian.net/browse/KBR-28
+
+### 7.4 Wire projections and the transparency oracle
+
+**The projections (§3.3.1)** are the load-bearing piece: one hand-written reader per wire format —
+Anthropic Messages, Chat Completions, OpenAI Responses, Gemini, Bedrock Converse, Ollama
+`/api/chat` — each mapping a serialized body to the common `Conversation` form and **importing
+nothing from `src/kitty/bridge`**. They are test code that the whole of I1 rests on, so they get
+their own L1 tests, written against each format's published examples rather than against kitty's
+output.
+
+**The oracle** is a pytest fixture wrapping the recorders, exposing one assertion over **complete
+requests**, not bodies:
+
+```
+CapturedRequest(method, scheme, host, path, query, headers, body,
+                arrival?, peer_port?)      -- the last two are T-W4's to populate (§5.2.1)
+CapturedReply(status, headers, body)
+
+Projection      -- wire_format: WireFormat ; read_request(CapturedRequest) -> Request
+ReplyProjection -- wire_format: WireFormat ; read_reply(CapturedReply)    -> Reply
+
+verify_total(projected)                     -- the totality rule; Request or Reply
+
+assert_no_unclaimed_mutation(inbound:  CapturedRequest, inbound_format,
+                             captured: CapturedRequest, captured_format,
+                             register, triggers_met,
+                             expected_route)   # derived from the profile, independently
+```
+
+`WireFormat` is a **closed** enumeration of the six formats above. §7.4 already notes that a
+boolean declaration cannot select among six projections; a bare string has the opposite failure,
+where six reader authors spell one format three ways and the format-keyed lookup silently misses.
+
+**Two protocols, not one with two methods.** §3.3.1 makes response translation "a different claim
+[that] gets a different test", and the plan splits the work as six request readers (T-A1–T-A6)
+against one reply task (T-A7) with its own comparison (T-D10).
+
+**`arrival` and `peer_port` sit on `CapturedRequest` but belong to T-W4.** They serve containment's
+tunnel join (§5.2.1), and no fidelity assertion reads them. They live on the shared type rather than
+on a T-W4 subclass so that T-W4, T-B1–T-B3 and T-E2 consume one type instead of two.
+
+**Projection values are not hashable** — `__hash__` is set to `None` on every one, deliberately, so
+the limitation is total rather than data-dependent. §3.3.3's counterpart matching must therefore be
+an **order-aware multiset** match, not a set difference: a set-based implementation would pass on
+text-only fixtures and raise on the first corpus entry carrying a `ToolUse`. Capture types *are*
+hashable; only projections are not.
+
+**A body that cannot be read raises `UnreadableBodyError`**, named in the contract so that T-C6's
+malformed corpus entry is distinguishable from an I1 breach without catching bare `Exception`.
+
+**Bodies alone cannot prove correct routing** (§3.3.5). Both formats are supplied by the harness
+from the observed wire shape (§3.3.4), never read from the adapter's own declaration. That
+declaration was unreliable (F5, KBR-7, since fixed) — but the decision does not rest on that: an
+oracle must not ask the code under test what it did, and a **boolean** declaration cannot
+select among the six projections listed above in any case. A new corpus entry, adapter, model
+route or transport costs one parametrisation, not a new test.
+
+#### 7.4.1 What every reader does with a field the grammar cannot carry
+
+Six request readers and one reply task — seven authors — are written against §3.3.1's grammar,
+and the grammar is deliberately narrower than the six wire formats. §3.3.1 fixes the *shapes*;
+§3.3.1b fixes the *normalisation*. This section fixes the remaining ten decisions, each of which was reached
+writing **T-A1** and each of which six later authors would otherwise answer differently. A
+disagreement here is not a style difference: paths are index-based, so two readers that disagree
+about a part boundary report a delta on every subsequent part.
+
+**Where a projection lives.** `tests/harness/reader_<format>.py`, one module per `WireFormat`
+member — **six**, not seven — with `test_reader_<format>.py` beside it. Flat, next to
+`contract.py`, which is what §3.3.1 already says of every harness module: "each in its own module
+beside it". An earlier draft of this section put them in a `projections/` package; two readers
+were written against the two conventions within a day of each other, which is the coordination
+failure this section exists to prevent, so the design's own existing wording wins.
+
+`WireFormat` has six members and Epic A has seven tasks because T-A7 is the *reply* direction
+across formats, not a seventh format: each format's `ReplyProjection` lands in that format's
+existing module, beside its `Projection`. One module per format, both directions, because the two
+share that format's vocabulary and nothing else does.
+
+**Which of these rules are request-side only.** The turn merge and the tool-result-string rule
+address `Conversation`, which `Reply` does not have. Everything else below binds both directions.
+
+**Fail closed at every depth.** §3.3.1's "unknown fields fail closed" is not a top-level rule. A
+key the mapping does not consume residualises under its path, whatever its depth. `verify_total`
+cannot see past the top level (§3.3.1 records that boundary and why closing it would make the
+contract a second reader), so this is the rule that closes it, and it is each reader's own L1
+tests that hold it.
+
+**Residual *keys* are the body's own path, indexed, and never the delta spelling.** Two rules,
+and the second is the one that surprises:
+
+1. A wholly-unclassified **top-level** key is keyed by its bare name — `x-kitty-trace`, never
+   `residual[x-kitty-trace]`. `verify_total` computes `set(consumed) | set(residual)` against
+   `set(source)`, so the wrapped form misses `source` and raises `DroppedFieldsError`, naming the
+   wrong defect. `residual_path()` renders a *delta path* for the oracle to report; it never
+   builds this mapping. The mapping itself is built by `contract.residual_key()` — one call
+   covers both rules and is the only spelling the seven readers use (KBR-193), so a
+   disagreement is structurally impossible at the call site.
+2. A nested key is keyed by its path from the body root with **array positions as indices** —
+   `tools[0].type`, `messages[2].content[0].x_vendor_marker`, `system[0].x_vendor_marker`. It does
+   **not** inherit §3.3.1a's by-name tool addressing. That convention exists because "translators
+   reorder and filter declarations", which is a property of a *comparison*; a residual key is
+   never matched against a register pattern, so the reason does not apply and one rule is better
+   than two. T-D8 diffs residual key sets across all six readers and index-here/name-there is
+   exactly the drift this section exists to stop.
+
+**`Opaque` consumes its block, and carries a payload digest.** A block type the grammar does not
+model projects as `Opaque(kind=…, digest=…)` where:
+
+- `kind` is **named through `contract.opaque_kind()`** — not restated by each reader. For most
+  types that is the wire `type` itself; where two vendors spell one concept differently the table
+  reconciles them, and where a type is not snake_case at all it raises rather than converting (see
+  below). Anthropic's spellings (`document`, `search_result`,
+  `redacted_thinking`, `server_tool_use`) are already canonical; a format-unique type keeps its own
+  spelling, which is the deliberate exception to "never the wire's spelling".
+
+  **The alias table arrived with T-A3, not T-A5.** This section deferred it to "the first reader
+  that needs one"; that was wrong, and the cost was paid before it was noticed. T-A1 and T-A3
+  landed first and named one concept two ways — Anthropic's `document` and Responses' `file` for
+  an attached file — which is the permanent unclaimed delta the deferral was meant to avoid.
+  `document` is canonical because Anthropic Messages **and** Bedrock Converse both spell it that
+  way on the wire, so exactly one reader moved. The table is `contract.OPAQUE_ALIASES` and it is
+  **enforced**: `Opaque` rejects any key of it, so a reader cannot quietly project a rival name.
+  The lesson generalises — a shared vocabulary deferred to the reader that first needs it is
+  deferred to the *second* reader, because the first has already answered it alone.
+
+  **A non-snake_case wire type with no alias raises.** `opaque_kind` does not convert it: a
+  camelCase splitter with no caller and no corpus is a second source of drift, not a cure for one,
+  so the conversion belongs to the author who first meets a real one. That is **T-A5, nine times**
+  — Converse's `ContentBlock` union is `text` `image` `document` `video` `audio` `toolUse`
+  `toolResult` `guardContent` `cachePoint` `reasoningContent` `citationsContent` `searchResult`
+  `toolAddition` `toolRemoval` (confirmed against the `bedrock-runtime` 2023-09-30 service model),
+  of which nine are camelCase. A **reader** meeting such a type translates the `ValueError` into
+  `UnreadableBodyError`: the body is not projectable, but the reader is not at fault, and
+  `contract` defines a reader-raised `ValueError` as a reader bug. A new *snake_case* vendor type
+  needs no decision and still projects, so a vendor release is not a harness outage.
+- `digest` has **two recipes**, and which applies is a property of the content, not of the format:
+
+  * `contract.opaque_digest(block)` for a block the grammar cannot model — exactly
+    `hashlib.sha256(json.dumps(rest, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")).hexdigest()`,
+    where `rest` is the block without `type` and without `cache_control`.
+  * `contract.text_digest(text)` for content whose identity is a run of text — a refusal is the
+    case. One recipe was considered and rejected on a checked fact: Chat Completions carries a
+    refusal as a **bare string** on the message (`ChatCompletionResponseMessage.refusal` is
+    `anyOf[string, null]`), so there is no block for T-A2 to hash and a single rule would force it
+    to invent a wrapper — and the wrapper's shape would be a new thing six readers could disagree
+    about, which is this rule's own defect one level down.
+
+  Both are pinned in `contract.py` rather than restated here (KBR-174), because prose did not hold
+  the first one: in T-A1 all three wrong spellings survived mutation testing until a test pinned a
+  digest to an external literal.
+- the block's every other key is **consumed** — nothing beneath it residualises — while
+  `cache_control` maps to `Opaque.cache_control` exactly as it does on a modelled block (KBR-167;
+  it residualised until the grammar gained the slot).
+
+Each clause is load-bearing. A bare `Opaque("document")` makes two different documents project
+identically, so a swapped or truncated document produces no delta at all — and §3.3.1 put
+`digest` on `Opaque` precisely to keep unmodelled content "detectable". Residualising every
+payload key instead would fail the run on every `document` block, which is not a defect signal but
+the grammar's known limit. **Canonical JSON rather than the raw wire slice**, because a translator
+that reorders keys must not change the digest; that is the whole reason the recipe is not
+`sha256(raw_block_bytes)`. **`ensure_ascii` is pinned** because its default is `True` while the
+surrounding prose says UTF-8: an author who "helpfully" passes `False` gets a different digest for
+the same block, and it would surface only on non-ASCII content. **`cache_control` is excluded from
+the digest** so that one field behaves the same way everywhere — inside the digest it would produce
+a delta with no named cause, on a path where the same field on a modelled block produces a
+diagnosis. That exclusion is unchanged now the field has a slot, and it is what lets **M16** claim
+a stripped breakpoint on an unmodelled block by path: were it inside the digest, the strip would
+show as an opaque digest change no row could name.
+
+> **The cost, recorded so it is not discovered later.** The digest is over *that format's* JSON, so
+> one document carried from Messages to Converse digests differently and shows a cross-format
+> delta no mutation caused. Modelling six vendors' block zoos is what §3.3.1 declined to do, so
+> the alternative is not on offer. **T-D9's cross-format matrix is where this will first bite**,
+> and the fix, when it is needed, is a per-kind payload rule here — not six readers each
+> inventing one.
+
+**A wrongly-typed leaf residualises — it is neither coerced nor raised on — and the rule is
+general.** It binds *every* optional leaf, not the ones a bug happened to be found in: the
+contract validates only `Turn.role`, `Conversation.sampling`, `extra["tool_choice"]` and —
+KBR-191 — that an `extra` key names no nested value, so an
+unguarded leaf declared `str | None` carries a dict silently with an empty residual. A reader
+should apply it through one helper, so the next field added inherits it. `str(7)` and
+`dict(["ab", "cd"])` invent a value the agent never sent, and a silently nulled tool description is
+indistinguishable from the deletion §3.3.1's own falsification set injects. Raising is the other
+wrong answer: it blinds the oracle to everything else in a request it could otherwise diff, and
+`verify_total` cannot see a nested coercion because `consumed` is top-level only. So the field
+residualises at its own path, the projection carries the grammar's absent value in its place, and
+the run fails with the field named. **The one exception is the leaf the contract itself validates
+— the key-shape rule — and the two read in opposite directions deliberately.** A wrongly-typed
+leaf is vendor input arriving through a reader's own parse, so residualising keeps the rest of
+the request diffable. A dotted `extra` key is not vendor input at all: `Envelope` is constructed
+by harness readers, so the violation is a reader bug before it is ever a fidelity finding, and
+`contract` already defines a reader-raised `ValueError` as a reader bug. Residualising it would
+land the unclaimed address on `residual[...]`, where no register row can ever reach it.
+
+Structural failures are the exception and still raise `UnreadableBodyError` — a role outside
+`user`/`assistant`, a content block with no type — because there is no partial projection to
+salvage: the turn cannot be built at all.
+
+**A tool-result string is always `Text`, never `Json`.** `Json` is for a format that carries a
+structured value natively — Converse's `toolResult.content.json`, Gemini's
+`functionResponse.response`. A Messages or Chat Completions tool result whose content is the
+*string* `'{"price": 259.75}'` is text that happens to parse. Without this fixed once, one reader
+parses and another does not, and every JSON-shaped tool result shows an unclaimed delta on the
+Messages ↔ Chat Completions comparison the oracle rests on.
+
+**The Chat Completions reader's rule is its role set, and the merge rule's clause 3 is vacuous
+on it.** Chat Completions delivers tool results in their own ``role: tool`` messages, so a run is
+delimited by the wire and clause 1 builds the merged ``ToolResult`` turn from contiguous
+``tool`` messages; an immediately following ``role: user`` message is a separate wire entry clause 2
+absorbs into the same turn; clause 3 has nothing to reorder. T-A1's Anthropic Messages reader
+applies the same four clauses per message (results and text inside one message, the run has no
+natural boundary there); T-A2's Chat Completions reader applies them per *role*, with clause 3
+deliberately a no-op — the two readers agree on the projection because the rule is the rule, not
+because they happen to converge. KBR-25's scope addition pins this in `test_reader_chat_completions.
+TestConvergence`: the CC and Messages encodings of one worked tool exchange project to identical
+``Conversation`` values, indices included.
+
+**§3.3.1b's merge rule is an ordered pipeline, and the last step is never a re-sort.** Its four
+clauses run in order: a maximal run of consecutive tool results forms one turn; an immediately
+following non-tool user message merges into it; `ToolResult` parts come first **within the turn
+those first two clauses build**; then consecutive same-role turns merge. Read as four independent
+rules — "merge everything, then hoist every result in every user turn" — it produces a different
+conversation, and a wrong one:
+
+> `tool_result → user(text) → tool_result` must project as `[ToolResult, Text, ToolResult]`. A
+> re-sort after the merge gives `[ToolResult, ToolResult, Text]`, hoisting a result ahead of text
+> the agent sent **before** it — moving history the bridge did not move. Because paths are
+> index-based, that invented delta lands on every part of the turn and on every turn after it.
+> **Two readers were written against the two readings within a day of each other**, which is why
+> the ordering is now stated here rather than inferred from the bullet's sentence order.
+
+**Where each clause does its work depends on the format, and clause 3 is the one that moves.**
+Chat Completions and Responses deliver results contiguously in their own messages or input items,
+so a run is delimited by the wire itself and clause 3 is satisfied *vacuously* — every member of
+the run is already a result. Anthropic Messages carries text and results inside **one message**, so
+the run has no natural boundary and clause 1 cannot do the work by splitting; clause 3 does it
+instead, **per message and for a `user` message only**.
+
+That scoping is the whole distinction. Per message, `tool_result → user(text) → tool_result`
+keeps three groups and concatenates to `[ToolResult, Text, ToolResult]`. Applied to the *merged*
+turn it gives `[ToolResult, ToolResult, Text]` — the defect above. And omitting it entirely is
+also wrong: a single Anthropic message of `[text, tool_result]` would project `[Text, ToolResult]`
+where the Chat Completions and Responses readers both produce `[ToolResult, Text]` for the same
+content, which is a delta no mutation caused.
+
+> **What the merge hides**, stated because §3.3.1 requires a projection's blind spots to be on the
+> record: a mutation whose only effect is to split or join two consecutive same-role turns
+> produces no delta, which weakens §3.3.2 assertion 2 for M5, M6 and M7, whose complement case
+> must show the mutation *absent*. Accepted, because without the merge the Messages and Chat
+> Completions readers disagree about turn boundaries on the standard
+> `assistant(tool_calls) → tool → tool` exchange, and that disagreement reports a false delta on
+> every subsequent turn.
+
+**A key outside the published schema is recognised only on stated evidence, and there are two
+kinds.** The default is the published schema: §3.3.1's independent-oracle rule means a reader is
+written against the format's own documentation, not against what kitty happens to emit. Two narrow
+exceptions, and they are not interchangeable:
+
+1. **The client demonstrably sends it.** Then it is a recognised control field and maps to
+   `envelope.extra[<wire key>]`, with a comment naming the evidence. Residualising it would fail
+   the run on every real request, which is a harness defect and not a finding.
+
+   The worked example is Anthropic Messages' top-level **`effort`**. Claude Code sends it and
+   `MessagesTranslator` reads it straight off the inbound body
+   (`src/kitty/bridge/messages/translator.py`: `if "effort" in messages_request`), so it is the
+   *agent's* field, not kitty's. Anthropic's API reference does not list it — the feature page
+   spells the concept `output_config.effort` — which is why the rule is about evidence rather than
+   about the reference table.
+
+2. **Only kitty emits it, and a register row names it.** Then it maps the same way, because
+   residualising it would fail the run *before* register matching happens and the row could never
+   be claimed — the under-claiming direction §3.3.1a calls unrecoverable.
+
+   **No key currently exercises this branch**, and that is worth saying: an earlier draft of this
+   section presented it as the general case using `effort` as its example, which is wrong twice
+   — `effort` is client-sent, and generalising from it would have told six authors to ask "does a
+   register row name this?" about fields no row names, such as `output_config`
+   (carried on the translated route since KBR-224, still unrowed — see P5d), and to residualise
+   them. (`context_management` stood beside it until **P23** claimed it — which is the point:
+   membership of that set is a fact about the register on the day you read it.)
+
+A key kitty emits that **no** register row names is an *unregistered* mutation. That is the defect
+the oracle exists to find, and it must residualise.
+
+**The third outcome §3.3.1 promises exists now.** §3.3.1 says adding a field to a wire format
+"forces a deliberate decision: map it, or declare it ignored with a reason". The contract
+implements all three; the third is the **`IGNORED_BLOCK_FIELDS` registry** in
+`tests/harness/contract.py` — a single, shared mapping from `(block wire type, field wire key)` to
+the reason the reader consumes the field without modelling its value. Built once, importable by
+every reader, because seven authors would otherwise answer this question seven ways.
+
+**Why it shipped with KBR-205, and not before.** `cache_control` could have used it — and was
+deliberately rejected from it (§3.3.1), because kitty's translated path **strips every block-level
+breakpoint** and a declared-ignored rule would have made that cost invisible to the oracle. The
+five Anthropic fields that arrived with KBR-205 carry no comparable consequence: they are optional,
+descriptive, vendor-defined fields the agent neither reads nor writes — `text.citations`,
+`image.transformations`, `tool_use.caller`, `tool_use.toolset_name` and
+`tool_result.toolset_name`. None of them costs the user anything to lose, so a strip would not be
+hiding a cost; it would only be hiding a *description* the reader was never going to model
+anyway. The mechanism is the right answer when the field is one the grammar will not model **and**
+losing it does not change behaviour the agent asked for.
+
+**Five rules the mechanism follows, all of them written for the next field the grammar cannot
+carry.**
+
+1. **Path-keyed, exact wire spellings only.** Each entry names the block's wire `type` (the
+   discriminator Anthropic publishes, like `"text"` or `"tool_use"`) and the field's wire key.
+   No wildcards, no prefixes, no fuzzy match — a re-spelled sibling (`CitationS`, `Citation`) is a
+   different entry the registry does not know, residualises, and fails the run, which is exactly
+   the unregistered-mutation case §3.3.1 says a dropped field would have hidden.
+2. **A reason is required per entry**, enforced by `ignored_field_problems` the way
+   `row_shape_problems` enforces `not_projectable_reason` — a `None`, `""` or whitespace-only
+   reason is rejected. The reason is the audit trail: a future reader can answer "why does this
+   field disappear?" without having to read the ticket.
+3. **The reader consumes the field, never the residual.** A key in `IGNORED_BLOCK_FIELDS` is added
+   to the reader's mapped-keys set, the way `cache_control` is on every modelled block; the value
+   is dropped (no slot, no `Envelope.extra`, nothing downstream reads it). `verify_total` sees the
+   field as accounted for, which is the property that lets it not fail the run.
+4. **The mechanism is shared, not per-reader.** `contract.IGNORED_BLOCK_FIELDS` is the single
+   source; every reader imports the same registry and asks it the same way. A reader that wanted
+   to ignore a field its five siblings did not would have to propose a new entry — the audit trail
+   the registry carries is also a coordination guard.
+5. **A falsification case ships in the suite.** §1.4's harness rule: a mechanism never shown to
+   fail is indistinguishable from one that cannot. The test suite pins (i) `verify_total` passes
+   on a body carrying each declared-ignored field; (ii) a re-spelled sibling still residualises
+   and fails the run; (iii) `ignored_field_problems` rejects a registry entry without a reason.
+
+**Two Anthropic tool fields that are *not* declared-ignored** (KBR-214's design review of KBR-205):
+
+- `tool_choice.disable_parallel_tool_use` — Anthropic's nested, inverted flag is mapped onto
+  `envelope.extra["parallel_tool_calls"]` (one address, one polarity, fixed in §3.3.1b so the Chat
+  Completions reader meets the same rule). Mapping it makes a real mutation detectable: a
+  product that strips the flag would now show a fidelity finding on a request that asked for
+  non-parallel tool calls. Declaring it ignored would have made that loss invisible.
+- `tools[i].type` — the discriminator on a tool declaration carries information the oracle must
+  see: KBR-214 D10 uses it to decide whether a forced call is to a client-declared or
+  Anthropic-defined tool, and G35's register row (KBR-184) needs to read it to anchor its
+  conditional on Anthropic-defined types (`web_search_20250305` and friends). Declaring it
+  ignored would have made that decision invisible to the oracle.
+
+Both are mapped rather than ignored for the same reason: a mutation on them changes what the
+agent asked for, or what the product decides about the request — exactly the property a declared-
+ignored mechanism is designed not to see.
+
+#### 7.4.2 What T-A4 settled — seven more rules, and which readers each one binds
+
+§7.4.1 fixed ten decisions writing T-A1. Writing **T-A4** (Gemini, [KBR-36]) reached seven more, each
+of which the remaining authors would otherwise answer differently, and each recorded here for the
+same reason: paths are index-based and `envelope.extra` is keyed, so two readers that disagree
+report a delta on content nobody changed.
+
+**Two of the seven are Google-specific and five are not**, which matters because only the five are a
+standing obligation on the rest of Epic A. **Rule 7 is different in kind from the other six**: it is
+not a new question this format raised but one the three shipped readers have already answered three
+different ways, which makes it the only rule here that is also a correction.
+
+| Rule | Binds |
+|---|---|
+| 1 — the route as a reader input | Gemini alone; no other format puts routing in the inbound URL (§3.3.5) |
+| 2 — a nested control field flattens to its leaf published key | **T-A5**, whose `inferenceConfig` and `toolConfig` nest the same way |
+| 3 — ProtoJSON's two spellings, and case-insensitive enum values | Google formats; a **Vertex** reader, if one is ever added, inherits it |
+| 4 — `envelope.extra` keyed by the *published* spelling | every reader of a format with more than one legal spelling, so today rule 3's set |
+| 5 — a capability toggle the wire does not name is control, not a `ToolDecl` | **T-A5** and **T-A6** |
+| 6 — digest the payload, not the carrier, where the field name discriminates | any format whose content union is discriminated by field name rather than by a `type` member |
+| 7 — a union member's own value is wrong: raise, residualise, or drop? | **every** reader; three answers are already shipped |
+
+**1. The route is a reader input, and only for what the body cannot show.** Gemini alone puts the
+model and the operation in the URL (§3.3.5), so its reader derives `envelope.model` from the path
+segment and `envelope.stream` from the operation suffix — `:streamGenerateContent` versus
+`:generateContent`, and **never** from `?alt=sse`, which selects SSE framing over JSON-array framing
+for a method that streams either way. The **query string is not read at all**: `verify_total`
+compares `consumed | residual` against the *body*, so a query key in either account would be
+reported as a claim on a key the body does not have. Asserting the route is T-D2's.
+
+A path that is not a published generate route raises `UnreadableBodyError`. That widens a type §7.4
+describes as "a body that cannot be read" to cover a *route* problem, which is defensible only on
+the inbound direction, where the path is the client's — and it is stated here because T-D1 uses that
+one exception type to tell a malformed corpus entry from an I1 breach.
+
+**2. A nested control field is addressed by its leaf published key.** Gemini puts sampling under
+`generationConfig` and the tool choice under `toolConfig.functionCallingConfig`; Converse nests
+`inferenceConfig` and `toolConfig` the same way, so T-A5 inherits this. `extra_path()` **raises** on
+a dotted key, which leaves exactly two dotless candidates, and the container loses:
+`envelope.extra[generationConfig]` cannot collide and survives a schema revision, but §3.3.1a
+compares an `extra` value **whole**, so it would collapse fourteen independently registrable fields
+into one address and make any row anchored there claim all of them — the coarse-anchor failure
+§3.3.1a warns about by name. The leaf key wins on the narrowest-anchor rule.
+
+The cost is a flat namespace assembled from several nested objects, so **each reader that flattens
+owes a test that its `extra` key sets are pairwise disjoint.** The namespace is not naturally
+disjoint — Gemini publishes `mediaResolution` on both `GenerationConfig` and `Part`, and the only
+reason there is no clash is that the `Part` one residualises. A collision would be introduced by a
+*schema revision*, not by a request, and the loser would overwrite the winner with no residual and
+no delta.
+
+**3. Google's JSON has two legal spellings of every field, and both must read.** Gemini's wire
+format is ProtoJSON, whose parsers "accept both the lowerCamelCase name … and the original proto
+field name" (`protobuf.dev/programming-guides/json/`). This is not theoretical: Google's own
+published examples mix them freely — `system_instruction`, `function_declarations`, `tool_config`,
+`file_data` and `response_mime_type` in snake_case, beside `generationConfig`, `stopSequences`,
+`maxOutputTokens` and `topP` in camelCase. A reader that knew only the schema's spelling would
+residualise the other and **fail the run on Google's own published example**, which §7.4.1 already
+calls "a harness defect and not a finding". Enum *values* are matched case-insensitively for the
+same reason: the published `FunctionCallingConfig.mode` enumeration is upper case and Google's
+`function_calling.sh` sends `"mode": "auto"`.
+
+Where one object carries both spellings of one field, the **published** spelling is read and the
+other residualises. Not "the first wins": §7.4.1 designs key order out of the projection elsewhere —
+"canonical JSON rather than the raw wire slice, because a translator that reorders keys must not
+change the digest" — and resolving by position would put it back, projecting one semantic body two
+ways depending on which alias a serialiser emitted first.
+
+**4. `envelope.extra` is keyed by the *published* wire key.** §3.3.1b says "keyed by the wire key",
+which named one thing until rule 3; it now names two. A register row can name only one, and T-D9's
+matrix needs one, so the published lowerCamelCase name is the address and the snake_case original
+resolves onto it. This is the one place where `extra` and the residual diverge deliberately:
+`consumed` and residual keys stay in the **wire** spelling, because `verify_total` compares them
+against the body's own keys.
+
+**5. A server-side capability toggle in the tools array is control, not a tool declaration.**
+Gemini's `Tool` message carries eight of them beside `functionDeclarations` — `googleSearch`,
+`codeExecution`, `urlContext`, `fileSearch`, `computerUse`, `googleMaps`, `googleSearchRetrieval`,
+`mcpServers` — each an unnamed toggle object such as `{"googleSearch": {}}`. They map to
+`envelope.extra[<key>]`.
+
+**This departs from T-A3**, which makes a non-`function` Responses tool a `ToolDecl` whose name is
+the tool type, and the departure is the point: a Responses built-in tool *has* a name to be
+addressed by, and §3.3.1a's tool paths are by name. Gemini's has none, so a `ToolDecl` would have to
+invent one — putting a vendor spelling into a form whose purpose is wire independence — while
+residualising would fail the run on every request that enables Google Search. The distinguishing
+question is therefore **"does the wire name this tool?"**, not "is it built in".
+
+**6. Digest the payload, not the carrier, where the field name is the discriminator.** §7.4.1's
+recipe says `rest` is "the block without `type` and without `cache_control`", which assumes a block
+discriminated by a `type` member. A Gemini `Part` is a union discriminated by **field name** and
+defines no `cache_control`, so the digest is taken over the *payload object* — `part["executableCode"]`
+— and neither exclusion has anything to remove. Sibling members on the same part residualise, which
+is exactly the role `cache_control` plays on a `type`-discriminated block. The recipe itself is
+unchanged, `ensure_ascii` included.
+
+**7. When a union member's own value is wrong: raise, residualise, or drop — and never drop.** Three
+readers have shipped and all three answer differently, which is the coordination failure §7.4.1
+exists to prevent, so it is settled here rather than left to T-A5 and T-A6 to pick a precedent from.
+The distinction is **what the bad value is a value *of***:
+
+| The wrong value is… | Outcome | Because |
+|---|---|---|
+| the value that **is** the part — `Part.text`, a `Thinking`'s text, `Opaque.kind` | **raise** `UnreadableBodyError` | the grammar has no absent value to fall back to, and `Text("")` fabricates an empty part — which is *meaningful* here, since P5e and P8 both inject one |
+| a **required field** of a part — a tool `name`, `fileData.fileUri` | **residualise**, project the part: a tool `name` projects `ToolUse(name="")`; `fileData.fileUri` projects with the canonical-JSON digest of the blob as identity | §3.3.1b settles it in those words: "an absent `name` *does* residualise … a call nobody can name cannot be paired or addressed". `Image.__post_init__` now enforces XOR (KBR-192), so a missing `fileUri` cannot project `Image(ref=None)`; the part keeps its position with the `opaque_digest` recipe as identity, and the residual records the missing or wrongly-typed value. |
+| a **payload** the reader cannot canonicalise — base64 that does not decode | **residualise the leaf**, project the part with the raw-bytes digest | `Image.__post_init__` enforces XOR (KBR-192), so a bare `None` digest is illegal. The reader digests the wire's own raw bytes (`image_digest(raw.encode("utf-8"))`), giving the part a distinguishing identity; §7.4.1: "raising is the other wrong answer: it blinds the oracle to everything else in a request it could otherwise diff". |
+| the **member itself**, where the schema declares an object and the wire sent a scalar — `{"functionCall": 7}` | **raise** | there is no value to put in the position, and the position cannot be vacated |
+
+**The line between the last two rows is where the member sits, not how bad the value is.** A
+container under the **envelope** — `generationConfig`, `toolConfig` — residualises whole when it is
+not an object, because every envelope field has an absent value and the rest of the request still
+projects. A container that **is a part or a turn** raises, because a part must occupy its index and
+the grammar offers nothing to put there: residualising it would leave the position empty, which is
+the drop this rule forbids. State the question as *"can the projection still fill this position?"*
+and every case above falls out of it.
+
+**No branch ever returns *no part*.** That is the load-bearing half, and it is where two of the three
+shipped readers are wrong: `reader_responses.py` returns `None` for both a wrongly-typed `input_text`
+and an undecodable data URL, which drops the part and shifts every later part's index — §7.4.1's own
+warning that "that invented delta lands on every part of the turn and on every turn after it". A
+reader that cannot read a part must still *occupy its position*.
+
+> **Reconciliation owed — paid 2026-09-14 (KBR-251).** The undecodable-base64 shape this rule names
+> is now conformed across all three shipped readers. `reader_anthropic_messages._read_image`
+> residualises the `…source.data` leaf and projects the part under
+> `image_digest(raw.encode("utf-8"))` — the second of `image_digest`'s recipes (KBR-192) — with
+> the media type and breakpoint carried as before. `reader_responses._read_image` never returns
+> *no part*: both data-URL branches residualise the `…image_url` leaf (digest of the payload
+> string where the base64 grammar parsed, digest of the payload after the first comma where it
+> did not — with the media segment parsed from the URL prefix and carried separately, keeping
+> `image_digest`'s "media type excluded" rule), and the no-`image_url`-no-`file_id` branch
+> carries the `opaque_digest(part)` identity Gemini's missing-`fileUri` shape already used, the
+> residual naming the absent or wrongly-typed key (a present-but-wrongly-typed `image_url`
+> residualises even when a usable `file_id` carries the part). `reader_gemini.py` remains the
+> reference implementation.
+>
+> **What still diverges, and is owed elsewhere.** Anthropic's missing/wrongly-typed
+> `source.data` (`KeyError` / `TypeError` from `b64decode`) still escapes the reader; the
+> sibling sweep over `input_file` parts (OpenAI's `detail`, future siblings) is not in scope
+> for this ticket; the `_DATA_URL` regex `^data:([^;,]+);base64,(.*)$` rejects
+> `data:;base64,…` (empty media segment) and a case-variant `;BASE64,` marker, routing both to
+> the non-base64 branch — pre-existing defects in the regex, separate ticket. The broader sweep
+> this note once implied — the
+> Responses dispatcher's other `return None` paths for wrongly-typed text and refusal parts —
+> stays tracked under KBR-196, consolidated here.
+
+> **What this reader leaves on the record — and when it was paid.** Six fields the format
+> publishes, real clients send, and the grammar could not carry residualised and so **failed the
+> first oracle run** — the same shape as the `cache_control` deadline above, tracked as its own
+> defect ([KBR-194](https://github.com/Shelpuk-AI-Technology-Consulting/kitty-bridge)). **KBR-194
+> met the deadline by growing the six slots**: `ToolUse.signature` (the sharp one — Gemini 3
+> *requires* clients to echo a functionCall's `thoughtSignature` back verbatim, and unlike
+> `cache_control` the grammar nearly had the slot, `Thinking.signature`), `Conversation.system_role`
+> for the role Google's SDKs set on `systemInstruction`, `ToolDecl.behavior` and
+> `ToolResult.scheduling` for the two halves of NON_BLOCKING calling, and `Text.video_metadata` /
+> `Image.video_metadata` / `Image.display_name` for the part modifiers. §3.3.1a grew
+> `conversation.system_role` — the first path form at conversation scope — so a register row can
+> anchor there. The Gemini reader's L1 inventory asserts all six flow into their slots.
+>
+> A second consequence, on the oracle rather than the reader: `GeminiTranslator` **discards** the
+> inbound tool-call id and synthesises one per call (`_make_tool_call_id`). Now that the §3.3.1 correction above
+> projects the wire id, every tool turn from a client that populates one shows a delta with no
+> register row to claim it. That is a correct oracle finding, not a reader defect, and it needs a
+> row or a ticket before T-D9 runs.
+
+### 7.5 The bridge fixture
+
+`tests/harness/bridge.py` — plan task **T-W8** ([KBR-31]). The counterpart of §7.2 on the
+inbound side: §7.2 says what a recording upstream must observe, this says how a **real
+`BridgeServer`** is put in front of one. Around fifteen tasks across Epics D, E, G, I, J and K
+need it, and `tests/conftest.py` offers only `unused_tcp_port` today. Measured in-repo: of the
+**62** test modules under `tests/bridge/`, **38** start a real `BridgeServer` and most build
+their own stub adapter, fake upstream and `post()` helper; 25 of those *also* intercept the
+upstream with `aioresponses` rather than a real socket, and 24 start no server at all.
+
+**This was the one `tests/harness/` module that imports the product, and since T-B1 it is one of
+two** — an Epic B transport must build the adapter it binds, which is what `bind()` is for
+(§7.2.2). `contract.py` and
+`recorder.py` each carry a structural guard forbidding any `kitty` import, because §3.3.1's
+independent-oracle rule says a reader that asked kitty how to parse a body would inherit
+kitty's bugs. That rule governs what *judges* a request. This module *starts* the thing under
+test, so it must import `kitty.bridge.server`; the guards are per-module and nothing here
+weakens them. Its own structural guard is a different claim — that it registers no Epic B
+transport (below).
+
+**What it delivers.**
+
+| Piece | What it is |
+|---|---|
+| `UpstreamTransport` | The **extension interface**: `name`, `format`, `start`, `stop`, `bind`, `captures`, `connections`, `assert_teardown_clean`. **Open question for T-B1:** `format` is typed `WireFormat`, which §3.3.1 closes at six — and the `openai_subscription` **OAuth token leg** §7.2 assigns it is none of them. T-B1 decides whether that leg is a separate transport, a recorder outside this interface, or a seventh format; named here so the decision is deliberate |
+| The registry | `register_transport` / `transport(name, fmt, *, responder)` / `registered_transports` |
+| `AiohttpTransport` | The **only** transport registered here, over §7.2's `RecordingUpstream` |
+| `redirected(adapter, origin, provider_config)` | Re-hosts any **default-transport** adapter onto a recorder, keeping path and query |
+| `profile_for` / `backend_for` | Valid `Profile` objects and `(adapter, key, profile)` backend triples already pointed at a transport |
+| `pin_backend_order` | The determinism seam for balancing mode |
+| `InboundProtocol`, `inbound_path`, `minimal_inbound_body` | The agent-facing side: route and smallest body per inbound protocol |
+| `BridgeFixture` | An async context manager: a real `BridgeServer`, single-backend or balancing, against a started transport |
+| `assert_transport_reaches_its_recorder(transport, *, protocol=None)` | The **integration conformance check**, run over every registered transport by a meta-test. Takes a transport **instance**, not a registry name — so the falsification defects need never be registered, and an author whose format has no matching inbound route names one |
+| `marker()`, `protocol_for()` | The per-request marker, and the inbound route matching an upstream format |
+| `MisdeclaredFormatError`, `TransportTimeout` | What a teardown check and a timed-out request raise |
+
+**Naming.** One list of captured requests, spelled `captures` on a transport and `requests` on
+`RecordingUpstream` (§7.2's own name, unchanged). `CapturedRequest` is the element type.
+`assert_teardown_clean` is deliberately *not* called `check`: `recorder_conformance.py` already
+owns `check_*` for "the contract every recorder is judged against" (§7.2.1), and an Epic B author
+told to "implement `check()`" would reasonably read it as that suite.
+
+#### 7.5.1 Two axes, not one: inbound protocol and upstream format
+
+They are independent, and translating between them is what the bridge *is*. `WireFormat`
+(six values) describes what a **recorder** serves; `InboundProtocol` (four —
+`chat_completions`, `messages`, `responses`, `gemini`) describes the **bridge route an agent
+posts to**. `BEDROCK_CONVERSE` and `OLLAMA_CHAT` have no inbound route at all, and the oracle
+(§3.3) exists precisely because the two sides differ. A single parameter for both would work
+only for the pass-through pairs T-W8 happens to ship and would mislead every reader after that,
+so the fixture keeps two vocabularies.
+
+#### 7.5.2 `bind()` is the seam, and redirection **re-hosts** rather than replaces
+
+A transport returns the `(ProviderAdapter, provider_config)` pair that points a bridge at *its
+own* recorder. The obvious alternative — the fixture reading `recorder.base_url` and building the
+config itself — works for the one transport T-W8 ships and for none of the other three: botocore
+takes an **endpoint override**, curl_cffi terminates TLS with the harness certificate, and the
+`openai_subscription` OAuth leg is a different session entirely (§7.2). Defining the interface
+here is what lets T-B1–T-B3 register a transport without editing a module fifteen tickets consume.
+
+**`provider_config["base_url"]` is the product's own channel, and it reaches five adapters.**
+Read from every file under `src/kitty/providers/`: `ProviderAdapter.build_base_url` ignores
+`provider_config` and returns `default_base_url`. Four adapters override it to read that key —
+`custom_anthropic`, `custom_openai`, `ollama`, `minimax` — and **`ollama_cloud` honours the same
+key by a different route**, resolving it inside its own custom transport rather than through
+`build_base_url`, which an enumeration of `build_base_url` overrides misses. `vertex` and
+`minimax_token` override it to read *different* keys, and the remaining ~14 never override it.
+So the channel cannot redirect the "20 default-transport adapters" §7.2 names, which is the first
+thing T-D1's "per adapter × model × transport" hits.
+
+**`redirected(adapter, origin, provider_config)` closes the gap by overriding `build_base_url`** —
+the single method the bridge calls for the destination (`server.py`, `_build_upstream_url`).
+Overriding `default_base_url` instead, the convention `tests/bridge/` established by hand, is
+**not** equivalent: the six adapters that override `build_base_url` ignore it.
+
+**It substitutes scheme and authority only, and keeps path, query and fragment.** Replacing the
+whole base URL is the obvious implementation and it is wrong, for a reason §3.3.5 already states
+from the other side: T-D2 must rewrite the **authority and scheme** of its expected route before
+comparing, and "path and query need no such treatment". Some adapters put routing *in the base
+URL's path* — `vertex` returns
+`https://{location}-aiplatform.googleapis.com/{version}/projects/{project_id}/locations/{location}`,
+and §3.3.5 records that for Vertex "the account being billed is a URL component" (P21). A
+whole-URL replacement deletes that path, while T-D2's independently-derived expectation still
+carries it, so P21 would report a routing mismatch against a request that went exactly where the
+harness sent it — indistinguishable from a real misroute.
+
+The trap is that the obvious check passes: **Azure survives a whole-URL replacement**, because
+`get_upstream_path(model)` carries its deployment id and `?api-version=`, not the base URL. Azure
+is §3.3.5's lead example, so a seam validated against it looks correct and silently breaks the
+row two below. Re-hosting makes the binding side and the comparison side the same rule, which is
+a stronger guarantee than either stated alone.
+
+**The redirect runs the adapter's real `build_base_url` once, at redirect time.** Two consequences
+worth knowing. It preserves whatever the adapter computes from `provider_config`, which is the
+point. And `build_base_url` is also a **validator** — `validation.py` calls it for pre-flight, and
+Vertex raises `ProviderError("Vertex AI requires 'project_id' …")` from inside it — so a redirected
+adapter raises that at redirect time and no longer raises it per request. A test meaning to
+exercise pre-flight validation must call the adapter, not the redirected copy.
+
+**The default transport never uses `redirected()`.** It binds `custom_anthropic` or
+`custom_openai` precisely because those two honour the product's own channel, so the default path
+exercises that channel and the helper is exercised separately — it exists for the ~14 adapters
+that honour no key.
+
+**This applies to default-transport adapters.** The three custom-transport adapters never call
+`build_base_url` at all: `ollama_cloud` resolves the key inside its own request path,
+`openai_subscription` uses a module constant, and `bedrock` takes a botocore endpoint override.
+Redirecting those is T-B1–T-B3's business, through `bind()` — which is exactly why `bind()`, and
+not a base-URL helper, is the interface.
+
+**`provider_config` arrives by two routes.** In balancing mode `_get_next_backend` passes
+`profile.provider_config`; in single-backend mode the same branch returns the constructor kwarg.
+`Profile.base_url` is **neither**: the resolver never reads it, and it is typed `HttpsUrl`, which
+a loopback recorder serving `http://` cannot satisfy. The fixture also encapsulates the
+constructor's `adapter=None` positional and its `# type: ignore[arg-type]`, which 38 modules
+currently repeat.
+
+**No pytest fixture, and not in `pytest_plugins`.** T-W5's proxy is published that way because
+a test asks for `connect_proxy` by name and cannot construct one. This module is different on
+both counts: a test must choose a wire format and a bridge shape anyway, so
+`BridgeFixture(transport("aiohttp", fmt))` says more than a fixture name would — and importing it
+pulls in `server.py`, measured at **0.72 s**, which a global plugin charges to every pytest
+invocation including those that never start a bridge.
+
+**No `host=` on the factory.** An earlier draft added one "so T-E1 can rebind to §5.3's
+non-loopback name". It cannot be justified: §7.3 gives T-E1 non-loopback addressing by
+**resolution** — `HARNESS_UPSTREAM_HOST` in the target's SAN and the proxy's `resolve` map, "the
+only place the name can be mapped" — not by a bind address, and a CI runner may have no
+non-loopback address to bind. It is dropped by the same standard that admits `responder` and
+`connections`: a seam is paid for by a named consumer, and T-E1 can add one when it has a need
+a resolver cannot serve.
+
+#### 7.5.3 Balancing is part of the core, and undisciplined balancing is vacuous
+
+`BridgeServer` has two shapes, and `_select_backend`, failover, reserve-tier selection and
+`_backend_context` isolation are unreachable through the single-backend constructor — four Epic I
+tickets would each have to build the second shape themselves.
+
+Selection is **weighted-random** (`random.choices(tier, weights=…)`), so a balancing test without
+a seam may never try the backend it is about to assert on. That is not hypothetical:
+`tests/bridge/test_opencode_responses_refusal.py` records that its two-backend test "would pass
+with the refusal handler deleted, **which is how this was found**". `pin_backend_order` ships the
+round-robin seam once, rather than four Epic I tickets re-deriving the same monkeypatch. It takes
+a `monkeypatch` and is therefore callable only from a test; the conformance check below is
+single-backend and never needs it. It patches `random.choices` on the **stdlib module object**
+reached through `kitty.bridge.server.random`, so for the duration every caller in the process gets
+round-robin, not only the bridge; `monkeypatch` reverting it is what contains that.
+
+**All members share the fixture's one transport, and therefore one recorder.** Distinct models per
+member are what make the selection observable. A test needing members on *separate* recorders
+builds its own `backends` list from `backend_for`; per-backend upstream *behaviour* — T-I8's
+blip-then-success, T-I11's mid-stream failover — is scripted through a stateful `responder` under
+`pin_backend_order`, not through separate transports. Stated here so four Epic I tickets inherit
+the shape rather than each rediscovering its limit.
+
+#### 7.5.4 Why the fixture carries its own conformance check
+
+A bridge fixture's characteristic failure is **silent**, and it is §1.4's own shape. Measured
+against `origin/main`, single-backend, non-streaming, one inbound request:
+
+| Wiring | Inbound result | Elapsed | Captures |
+|---|---|---|---|
+| Pointed at its recorder | 200 | 0.01 s | 1 |
+| Pointed at a closed port | 500 | **30 s** | 0 |
+| Pointed at a **different live** upstream | **200** | fast | **0** |
+| Recorder answers **400** | 400 | 0.00 s | 1 |
+| Recorder answers **500** | 500 | 7 s | 4 (retried) |
+
+Row 3 is the dangerous one. Nothing about the request fails, and every assertion the suite builds
+on the fixture — "no unclaimed delta" (§3.3), "zero unattributable connections" (§5.2.1), every
+cross-attempt and lifecycle claim in §6.3.1 — is then quantified over an **empty** capture list
+and passes vacuously. So T-W8 ships the check that makes the wiring a checkable claim rather than
+a promise.
+
+`assert_transport_reaches_its_recorder` drives one request and asserts four things. Each is
+paired with a defect the **other three pass** — the only argument that establishes
+non-redundancy — and each defect is a **real transport instance**, driven through the real check
+and running in the suite. They are deliberately **not** registered: the check takes an instance,
+so a shared registry never holds four things that are wrong on purpose — which would otherwise
+force the completeness meta-test below to carry a skip-list, the one mechanism it exists to
+forbid:
+
+| # | Assertion | The defect only it catches |
+|---|---|---|
+| 1 | Exactly one capture | **The decoy**: `bind()` points the bridge at a different live recorder. Status 200, teardown clean, and this transport's capture list is empty |
+| 2 | The marker is in the capture's body | **The blind capture**: a recorder that counts the request and stores no body — §1.4's "projection that could not see the model name" |
+| 3 | The inbound status is 200 | **The refusal**: upstream answers 400. Measured at one capture, marker present, teardown clean, downstream 400 — the request arrived correctly and the client was still failed |
+| 4 | `assert_teardown_clean()`, run by the **fixture's** `__aexit__` | **The mis-declared format**: a transport declaring one format while binding an adapter that posts to the other. The recorder dispatches by path **suffix**, so it replies in the format the *path* named, the adapter parses it, `unmatched` stays empty — one correct capture, marker present, 200, and the declared `format` was never under test |
+
+Row 4 is why the fourth defect is a transport and not a unit test on
+`assert_teardown_clean()`. A unit test proves that function raises; it does not prove anything
+**calls** it — and plan §1.4's own list of past harness failures includes "a guard proving a
+function was *called* when the enforcement was the branch after it". Row 1 and row 4 are as far
+apart as row 1 and row 2: one fails with an **empty** capture list, the other with a **complete
+and correct** one.
+
+**Row 4 is asserted once, by the fixture, and deliberately not repeated inside the conformance
+check.** An earlier draft did both. Running the falsification procedure on it — delete each
+assertion, confirm exactly its own case goes red — showed the repeat was an assertion **no defect
+could falsify**: `__aexit__` raises first either way, so removing it changed nothing. An
+assertion nothing can kill is the thing §1.4 objects to, so it went. The teardown call is
+falsified instead by `_MisdeclaredTransport`, and a separate case asserts the fixture makes that
+call on the clean path.
+
+**An upstream 500 is deliberately not one of the defects.** Measured at four captures and seven
+seconds, it also trips assertion 1, so it would not be orthogonal. A 400 is the clean one.
+
+**The marker is in the body, and that is the opposite of `recorder_conformance.py`'s rule on
+purpose.** T-W4's conformance markers travel in a **header** because the defects *it* injects
+destroy every other location, and a body marker would make correlation fail with "no capture
+found" instead of failing the named check. T-W8's marker must prove the **user's content**
+survived translation to the upstream, which a header cannot show. Both rules are right for their
+own subject; neither is a general lesson, and an author must not "fix" one to match the other.
+The marker is regenerated per call, so a capture left by an earlier fixture cannot satisfy it.
+
+**The registry earns its indirection by being iterable — and the iteration must be complete.** A
+name-keyed lookup would otherwise be equivalent to importing the class, since a name resolves only
+after something imported the module that registered it. What it buys is a **meta-test that runs
+the check over every registered transport**, so an Epic B author gets the conformance check by
+registering rather than by remembering. But "iterate whatever is registered" is not enough:
+under a selective run or a per-file invocation the registering module may never be imported in
+that process, and the meta-test would pass over a set of one while reporting success for a
+category it never ran — the failure `--require-category` exists to prevent. So the meta-test iterates an explicit
+`CONFORMANCE_CASES` table — one row per Epic B ticket, carrying the registering module, the
+registry name, **the upstream format to construct with, and the inbound route that exercises
+it** — imports every row's module, and asserts the registered set **equals** the expected one.
+
+The last two fields are not decoration. The bridge *translates*, so the inbound route cannot be
+derived from the upstream format: `BEDROCK_CONVERSE` (T-B3) and `OLLAMA_CHAT` (half of T-B1) have
+no inbound route at all. And a single hardcoded format — the first draft — raises `ValueError` at
+construction for **all three** Epic B transports, since none of them serves Anthropic Messages.
+"Inherits the check by registering" was false for every author it was written for until the row
+carried both. T-W8's structural guard is separate and pins what
+*this module* registers, against a module-local constant and an AST scan, never against global
+registry state.
+
+**`responder` is a hook, and scripted replies are stateful closures.** Every consumer named for it
+needs the reply to change between attempts — §6.3.1's four injection points, T-I8's
+blip-then-success, and the `empty_replies` / `error_replies` counters `tests/bridge/` already
+uses. `Responder`'s signature permits a closure over mutable state, and that is the intended
+answer; no setter is added to a Protocol fifteen tickets consume.
+
+**Timeouts bound the wait and must not destroy the diagnostic.** aiohttp's client default is
+`total=300` seconds (confirmed on the pinned 3.13.5), so a hung binding costs five minutes per
+test. `post()` defaults to **10 seconds** and converts a client timeout into an assertion naming
+the transport, the elapsed time, the captures so far and the 30 s / 80 s reference values — a bare
+`TimeoutError` keeps none of that. A test that means to observe the empty-response ladder
+(§7.2.1) raises the timeout deliberately.
+
+**Teardown releases the ports and never substitutes an exception.** Client sessions close before
+`BridgeServer.stop_async`, which cleans up the runner but does not abort live connections — the
+`wait_closed` split §7.3 handles for the proxy, and the reason the support matrix is
+3.10–3.13. `assert_teardown_clean()` runs only on the clean path: raised from `__aexit__` over a
+failing body it would replace the assertion the test was making, and the falsification cases
+assert on message content. The conformance check does **not** call it as well: `__aexit__` runs
+before the check returns either way, so a repeat inside the block would be an assertion no defect
+could falsify — which is how the repeat was found and removed.
+
+**`assert_teardown_clean()` is stated for every transport, not just this one.** Its obligation is
+"every request I received was answered in the format I declare"; how a transport knows that is its
+own business, since none of the other three can consult `RecordingUpstream`'s suffix table. The
+aiohttp transport uses T-W4's `format_for_path` — the **pure** lookup, split out of
+`_format_for` for this, because `_format_for` appends to `unmatched` and an assertion must not
+mutate the evidence it judges.
+
+**What T-W8 does not settle.** The one-upstream-request assertion here is scoped to the binding
+the conformance check drives, because a check tolerating a retry ladder could not tell a working
+binding from a broken one. **T-W9** still owns it as a product claim for one request driven end
+to end, together with capture **type-compatibility with T-W2's declared contract**, the
+`has_content` cell of §7.2.1's table, and the wall-clock bound on the empty ladder; T-W9 depends
+on T-W1/T-W2/T-W4/T-W8 and no corpus task, so corpus-wide quantification is **T-D1's**, not its.
+§5.3's non-loopback addressing stays with T-E1/T-E2 — loopback is correct for this fixture and is
+not a containment decision. **T-K4** is not served by this fixture: §7.2.1's unbounded capture
+retention is acceptable for one request per test and not for a sustained load run, which needs
+its own bound.
+
+**Existing tests are not migrated.** The 38 modules that build their own bridge stay as they are;
+this fixture is for new work. Rewriting them is neither in T-W8 nor scheduled elsewhere, and
+saying so here stops a future reader reading it as an unpaid debt.
+
+[KBR-31]: https://shelpuk.atlassian.net/browse/KBR-31
+
+### 7.6 The proven vertical slice
+
+`tests/harness/test_vertical_slice.py` — plan task **T-W9** ([KBR-32]). §7.2 says what a
+recording upstream must observe, §7.5 how the product is put in front of one, and §3.3.1 what a
+projection reads. This is the first place all three are driven **together**: one request from a
+real `BridgeServer`, into the recorder, and out into T-W2's declared types. Small, and it is the
+moment the contracts become known to *compose* rather than merely to exist — six streams build
+on that afterwards.
+
+**Four claims, and the falsification that keeps each honest.**
+
+| Claim | Assertion | The defect it catches |
+|---|---|---|
+| One inbound request, one upstream request | Exactly one capture; inbound status 200 | A fired retry ladder. Scoped against §7.5.4's identical-looking assertion: T-W8's is about **one binding**, this is the product claim for a **driven request** |
+| The capture is complete | Each of T-W2's seven fields at its declared type and wire value; `arrival` and `peer_port` populated | A capture that silently stops carrying §5.2.1's join key, which nothing else would notice until T-E2 |
+| The capture is **readable** | A minimal reader satisfies `Projection`, and `verify_total` passes over what it produces | A capture that type-checks and that no projection can consume — the composition failure this task exists to rule out |
+| The query survives | The capture's `query` equals what the bridge sent, percent-encoding and duplicate names intact | A recorder that drops the query string, driven **end to end** |
+
+**The default binding carries no query, so the falsification had to be made non-vacuous.**
+Measured: `AiohttpTransport.bind()` returns `{"base_url": recorder.base_url}`, and the capture's
+`query` is then `""` — against which a query-dropping recorder passes perfectly. The slice
+therefore drives a binding whose `base_url` carries one, merged onto the adapter's endpoint path
+by `ProviderAdapter.compose_upstream_url` (the KBR-143 rule). That is the **product's own
+channel**, not a patch arranged for the test: a query the harness injected some other way would
+prove the recorder reads `raw_query_string` and nothing about whether the bridge preserves a
+query at all.
+
+**Both properties of the query literal are load-bearing, and an earlier draft had neither.** It is
+`kbr32=slice%20value&dup=1&dup=2`: the `%20` would become `+` under a `parse_qsl`/`urlencode`
+round trip, and `dup` appears **twice** so a recorder that collapses duplicates is
+distinguishable from one that preserves them. A first draft wrote `dup` once, which made the
+duplicate half of the claim untestable — §1.4's shape again, caught in review.
+
+**Byte-for-byte survival is specific to these two adapters.** `compose_upstream_url` *merges*
+when both sides carry a query and drops base parameters whose name the endpoint also uses;
+`custom_anthropic` and `custom_openai` contribute no endpoint query, so the base query survives
+verbatim. The same assertion against Azure would be false, which is why it is stated here rather
+than generalised.
+
+**The transports this module defines are never registered.** They are constructed directly and
+driven, following §7.5.4's rule that a shared registry must not hold things that are wrong on
+purpose. It is also load-bearing for the gate: `test_bridge.py`'s meta-test asserts
+`set(registered_transports()) == EXPECTED_TRANSPORTS`, and registration happens at **import
+time** on module-global state — so a stray `register_transport` here would leave this module
+green on its own and the full suite red. That is an order-dependent failure and a direct hit on
+plan §1.3(5), "it lands on `main` alone".
+
+**The `peer_port` assertion asserts the join, not the type.** §5.2.1 joins captures to tunnels on
+that key, and an `isinstance(..., int)` check passes for a port matching no connection — which is
+precisely the column T-E2 would then be joining against nothing. The slice asserts the capture's
+port is among the ports of the connections the upstream actually accepted.
+
+**§7.2.1's `has_content` claim is discharged here**, because it is the only place it can be. It is
+a local flag inside `BridgeServer._stream_chat_completions`, not a callable, so no unit test
+reaches it; T-W4's streams satisfy its precondition by construction. Driving one `stream: true`
+request end to end and asserting a single capture is the evidence that the flag was set and the
+empty-response retry never fired. Named by symbol, not by line: the plan's `server.py:5145`
+anchor is already stale, and §7.2.1 states this in prose rather than in a table.
+
+**That case asserts the capture count and nothing else, deliberately.** A downstream status
+assertion there would be unfalsifiable: `_stream_chat_completions` commits the 200 with
+`sr.prepare()` before it opens the upstream at all, so every outcome on that route is a 200 —
+measured, a bridge with `has_content` forced false does not answer non-200, it fails to complete.
+An assertion nothing can kill is what §7.5.4 removed from T-W8 and what §1.4 forbids, so it is
+not shipped. The non-streaming case **does** assert the status, where §7.5.4's measured row 3 (an
+upstream 400, one correct capture, a failed client) is reachable and T-W8's `_RefusingTransport`
+is the defect that proves the assertion bites.
+
+It is a claim about one **pair** of axes and not about either alone (§7.5.1): inbound
+`chat_completions` over upstream `CHAT_COMPLETIONS`, streaming.
+
+**A wall-clock bound, and why it is an assertion rather than a timeout.** `_EMPTY_RETRY_DELAYS`
++ `_EMPTY_FINAL_DELAYS` is 80 seconds of real `asyncio.sleep`, and a regression that reintroduces
+the ladder must make the suite **red**, not merely slow — the defect commit `691e974` fixed that
+once already. Three mechanisms were rejected before the one that ships:
+
+- `pytest-timeout` is **not** in the dev extras.
+- `asyncio.timeout` is **3.11+**, and the matrix is 3.10–3.13.
+- `BridgeFixture.post`'s own client timeout **does not bound the slice**. Measured: a `post()`
+  given 2 seconds against a still-sleeping ladder exited its block after **62 seconds**, because
+  `BridgeFixture.stop` waits for in-flight upstream handlers rather than aborting them — §7.5's
+  own documented property, and the reason §7.3 took the opposite decision for the proxy.
+
+What ships is `time.monotonic()` around each driven request, asserted against a **4.0 s** budget:
+200× the measured healthy time (0.01–0.02 s).
+
+**What that budget catches is not "a ladder".** An earlier draft justified it as "strictly below
+`_EMPTY_RETRY_DELAYS[0]`, so any ladder that sleeps trips it", and that is wrong twice over. Any
+ladder that fires leaves an **extra capture**, so the one-capture assertion sees it first and sees
+it deterministically, with no dependence on a runner's speed. And there are **two ladders, not
+one**: `_request_with_retry_single` — the *non-streaming* helper — is the only site that
+**sleeps** `_EMPTY_RETRY_DELAYS`, while every streaming path sleeps
+`_BACKOFF_BASE * 2 ** (attempt % 4)`, i.e. 1, 2, 4, 8 s, reaching `_EMPTY_FINAL_DELAYS` only on
+its last two attempts. (Say *sleeps*, not *reads*: one other site reads the list's **length**, to
+report an attempt total. An earlier draft of this paragraph said "read at exactly one site",
+which is simply false about the source tree — and a docstring citing another module's internals
+as an invariant is a failure mode this repo has already been bitten by. It is also why T-W9's
+monkeypatch changes those values and leaves the lengths alone.) A streaming
+ladder can therefore fire **twice inside a 4-second budget**. That fact is recorded here because
+it is non-obvious and the next author will otherwise repeat the mistake.
+
+The honest division of labour, and the reason all three are kept:
+
+| Mechanism | The band only it covers |
+|---|---|
+| The one-capture assertion | **Any** retry, at any sleep length, deterministically |
+| The 4.0 s budget | **Slow with a single capture** — a connect grace, a wedged handler, a non-ladder regression |
+| `post()`'s `DEFAULT_TIMEOUT` (10 s) | Everything above ten seconds, with a message naming the transport and both ladder costs |
+
+The budget's failure message reports the capture count **first** and says so in words, because the
+gate is ~18.5 minutes on runners this repo has already seen OOM-killed under parallel load: a
+contended runner and a fired ladder must be distinguishable without a rerun. CI is the authority
+for the number, across every leg — 3.10–3.13 on Linux plus the pinned Windows and macOS legs
+§8.4 added after this module was written — and a platform- or version-dependent failure means
+raising it, never skipping.
+
+**The coarse clock reached this module twice, and only one of them was foreseen.** The second was
+found by the Windows leg itself: `test_the_budget_is_enforced_on_every_driven_request` drove a
+request with an "impossible" budget of literal `0.0`, on the reasoning that zero is over-budget
+for any real request. On Windows `elapsed` measured **exactly** `0.0`, so `0.0 <= 0.0` held and
+the case failed with "DID NOT RAISE" while all five other legs were green. The impossible budget
+is **negative** now, which no measurement can satisfy at any resolution.
+
+Worth separating from the rule two paragraphs above, because the remedy was **not** that rule.
+"A platform-dependent failure means raising the budget, never skipping" governs the **4.0 s**
+budget, whose margin is a judgement about runner speed. This was a different defect: an assertion
+written so that it *could not fire* on a coarse clock. The fix was to make it
+resolution-independent, not to widen a margin — and no §8.3 row was added, because the platform
+dependence was removed rather than amnestied.
+
+**The slice needs no Windows exemption row, and must not acquire one.** §8.3's registry is all
+arrival *ordering*: Windows' clock cannot separate two adjacent requests, so every "arrival
+increases" assertion is false there (KBR-188). This module asserts only that `arrival` is
+**populated and typed**, which a coarse clock satisfies — ordering is T-W4's claim, not the
+slice's. Tightening it into an ordering check here would add debt to §8.3 for a claim that is
+already made, and made better, one layer down.
+
+**The fired ladder is shown, and it is shown on the non-streaming path.** Plan §1.4 requires the
+one-capture assertion to be caught detecting a real ladder rather than passing by construction,
+so the module ships an upstream reply the bridge judges *empty*, with the ladder's delays
+flattened to zero by `monkeypatch`: measured at **five captures in 0.008 s**, deterministic and
+free. It is deliberately **not** done on the streaming path: with `has_content` mutated to never
+become true, the driven request was measured **never completing at all**, so a streaming version
+of this defect would hang the gate rather than fail it. Flattening the delays rather than waiting
+them out is what keeps a falsification case affordable in a gate that already runs ~18.5 minutes
+per Python version.
+
+**The reader is local and minimal, and it is deliberately not T-A1's — which has now landed.**
+T-W9's declared dependencies are T-W1, T-W2, T-W4 and T-W8 and **no reader task** (§7.5.4), and
+that is worth keeping now that `reader_anthropic_messages.py` exists: a slice that went red
+because a reader had a bug would mis-attribute the failure, and the claim here is only that the
+recorder's output is readable **at all** by something shaped like a `Projection`. It is
+correspondingly **not** a `reader_<format>.py` module — §7.4.1 closes that set at six, one per
+`WireFormat` member, and this is evidence rather than a seventh projection. How a format *ought*
+to be projected stays T-A1–T-A6's question.
+
+**`consumed` is built from literal key names, and that is load-bearing.** `verify_total` computes
+`set(source) - (consumed | residual)`, so a reader deriving `consumed = frozenset(source)` passes
+unconditionally — the same shape §1.4 forbids. The deliberate consequence is that a product change
+adding a new top-level key to the upstream body turns the slice **red**, which is the signal worth
+having: an unregistered addition is exactly what §3.2's register exists to catch.
+
+**The falsification cases live in this module rather than a sibling.** T-W4 and T-W8 each split
+theirs out because each ships four or more deliberate defects. T-W9 ships two, and a separate
+60-line module would cost a reader a file hop to reach the defect that falsifies the assertion
+three lines above it. Recorded so the divergence reads as a decision and not as an oversight.
+
+**What the falsification sweep killed, and what it could not.** §1.4 asks for the procedure;
+what is worth recording is its result. Each of the recorder's capture fields was mutated in turn
+and the module re-run:
+
+- **Every** mutation is caught: wrong method, scheme, host, headers, body, arrival, a wrong or
+  absent peer port, and a dropped, percent-decoded or duplicate-collapsing query. Most red
+  exactly one case; a corrupted body reds three, and each query mutation reds two, because the
+  field-completeness case asserts the query alongside the six other fields and the dedicated
+  query case asserts it alone. That overlap is deliberate — one case is "the capture is
+  complete", the other is "routing survives" — but it means the sweep shows *caught*, not
+  *uniquely attributed*. An earlier draft of this paragraph claimed the stronger property, which
+  the sweep's own output contradicts.
+- Mutating `host` to aiohttp's `request.host` kills nothing, and that is an **equivalent
+  mutant** rather than a hole: aiohttp returns the Host header whenever one is present and the
+  bridge always sends one. Simulating the real §7.2.1 defect — the `socket.getfqdn()` fallback —
+  reds exactly one case, which is what makes the `host` row honest.
+- **`path` read percent-decoded killed nothing.** The adapter's own path is `/v1/messages`, which
+  contains nothing encoded, so `request.path` and `rel_url.raw_path` are identical on this route
+  and §7.2.1's trap was untestable here. The fix was to carry `%20` in the base URL's path
+  component too, exactly as the query already did; the mutation then fails the field case. This
+  is the second time in this task that a claim turned out to be vacuous because the *driven
+  request* did not carry the thing the claim was about — the first being the query itself — and
+  it is the argument for running the sweep rather than reasoning about it.
+- **One assertion survived on purpose.** The non-streaming case's `status == 200` is falsified by
+  nothing in this module. It is not redundant — §7.5.4's measured row 3 is an upstream 400, which
+  yields one correct capture and a failed client — and T-W8's `_RefusingTransport` is the defect
+  that proves it bites. Re-shipping that defect here would duplicate T-W8 rather than add
+  evidence, so the assertion is kept with the argument written beside it rather than deleted or
+  left unexplained.
+- **One assertion is weaker than it looks.** `scheme` is built from a recorder *constant*, not
+  from anything on the wire, so asserting `"http"` pins the recorder's own declaration. T-B2's
+  TLS transport is where the field starts carrying information.
+
+**What this task does not settle.** Corpus-wide quantification is **T-D1**'s ([KBR-51]); the
+other five wire formats and the three custom transports are **T-B1–T-B3**'s; non-loopback
+addressing stays with **T-E1**/**T-E2** (§5.3). Bounding fixture *teardown* against a fired
+ladder is real — the 62 seconds above — but aborting in-flight handlers is a change to §7.5's
+module and a decision §7.3 already took for the proxy; it is left to **T-K6** and **T-B4** rather
+than taken here as a side effect.
+
+[KBR-32]: https://shelpuk.atlassian.net/browse/KBR-32
+[KBR-51]: https://shelpuk.atlassian.net/browse/KBR-51
+
+---
+
+## 8. CI cadence
+
+One executable selection matrix. Every test carries exactly one layer marker
+(`l1`, `l2`, `l3`, `acceptance`, `agent_smoke`, `agent_live`, `eval`, `load`), so a job is
+defined by its marker expression and no test can fall between two jobs or into both.
+
+| Job | Selection | Trigger | Gates a PR? | Gates a release? |
+|---|---|---|---|---|
+| **Fast** | `ruff`, `lint-imports`, `mypy src/kitty`, then `pytest -m "l1 or l2" -q` on Python 3.10–3.13 on Linux, and on one pinned version on Windows and macOS (§8.4) | push, PR | **Yes** | **Yes** |
+| **Subsystem** | `pytest -m l3 -q` | PR | **Yes** | **Yes** |
+| **Acceptance** | `pytest -m "acceptance or agent_smoke" -q` | PR | **Yes** | **Yes** |
+| **Deep** | mutation testing (§6.1), schemathesis at high `--max-examples`, extended property runs | nightly | No | No |
+| **Agent live** | `pytest -m agent_live -q`, credentials from CI secrets | nightly | No | No |
+| **Eval** | answer-quality runner (§6.4.3) | nightly | No | **No** — alerts only |
+| **Load** | load runner (§6.4.4) | pre-release | No | **Yes** |
+
+**The release gate is the union of the four "gates a release" rows, and nothing else.** An
+earlier draft said Release runs "everything above plus load" and then, a paragraph later, that a
+release must not wait on an LLM eval. Both cannot hold. Evals and the live-agent job are
+**alerting**, not gating: they are nondeterministic and depend on a third party's availability,
+and a release that can be blocked by someone else's rate limiter is not a release process.
+
+**`ratchet` exempts one named assertion, not a scenario.** A scenario-wide exemption is a
+blanket amnesty: a broken fixture, a failure in a `Given` step, or an unrelated regression inside
+that scenario all become invisible, indistinguishable from the known defect. That is a worse
+outcome than the red gate it was meant to avoid.
+
+The exemption is therefore narrow and accountable:
+
+- It attaches to **one assertion**, named, with its expected failure condition and its issue key
+  (TR-1c's header-subset assertion → G3's policy half, Q1 — **re-keyed from KBR-8 on 2026-09-11**
+  when KBR-8 shipped without closing parity; see §6.4.1. TR-4's no-vendor-content assertion → KBR-5
+  was the only other entry and was **withdrawn on 2026-09-07** when KBR-5 shipped, which leaves the
+  registry one row long **in the state this document describes** — the length it is supposed to
+  trend towards, and not a count of what is in the file today; see §8.3).
+- **Setup and every other assertion in the scenario gate normally.** If TR-4 cannot reach the
+  bridge, the job fails — that is not the known defect.
+- **An unexpected pass fails the job.** When the assertion starts passing, the defect is fixed
+  and the exemption must come off; `xfail(strict=True)` semantics, so nobody has to remember.
+- All exemptions live in one registry with their issue keys, so the list is short, visible and
+  obviously temporary rather than scattered through the suite.
+
+A gate that is red for a known reason on the day it is introduced does not survive contact with a
+release. A gate that is green because it stopped looking is worse.
+
+**Skips are failures in a gating job.** If `agent_smoke` cannot find its pinned binary, or `l3`
+cannot start its proxy, the job fails. A gating job that goes green because it ran nothing is the
+most expensive kind of false confidence.
+
+**One exception, stated so the rule is honest.** A **platform or interpreter** skip is permitted:
+`tests/test_launcher_discovery.py` skips POSIX cases on Windows, and the matrix is what covers
+them. A **resource-availability** skip is not. The suite had one — `tests/bridge/test_bridge_state.py`
+called `pytest.skip("openssl not available")` inside a gating job, the exact shape this rule
+forbids — filed as KBR-132 rather than quietly grandfathered, and **closed on 2026-09-11**.
+
+**How it is upheld there now.** `tests/bridge/tls_certs.py` owns the certificate generation the
+bridge TLS tests need, and every non-success exit from it goes through `pytest.fail`: a missing
+binary, a non-zero exit, a timeout. `tests/bridge/test_tls_certs.py` is the check on that, and its
+falsification case — restore the skip, the test must go **red** — is what makes it a detector
+rather than a decoration. That case is written out in the module rather than left to a
+`pytest.raises`, because `Failed` and `Skipped` are *sibling* classes: `pytest.raises(Failed)` does
+not catch a `Skipped`, so the obvious spelling would have reported the reintroduced defect as a
+*skipped* test, passing the gate. A detector that fails by skipping is the defect wearing the
+uniform of its own guard.
+
+**A consequence, stated because it is now load-bearing:** `openssl` is an **environment
+prerequisite of the Fast job**, not something a test may probe for. Forbidding the
+resource-availability skip and requiring the runner to provide the resource are the same statement.
+`ubuntu-latest` ships it; a change of runner image, a container job, or a non-Ubuntu matrix entry
+has to keep it, and the fix for a red gate is to install `openssl`, never to reinstate the skip.
+
+**Why that is not handled by deselection, which is this document's other answer for a missing
+resource.** §8.1's `RESOURCE_DEPENDENT_LAYERS` excludes a whole **layer** whose resource a
+developer's machine may not have — a pinned agent binary, live credentials, a load rig — so a bare
+`pytest` reports those as *deselected*, not skipped. That mechanism is layer-granular by
+construction, and `openssl` is needed by *some tests inside* `l1` rather than by a layer — stated
+as that property rather than as a count of modules, which is the kind of number that goes stale
+silently. A resource used by part of a gating layer has only two possible treatments: skip it,
+which §8 forbids, or require it.
+The two rules are consistent, and the seam between them is worth naming because the obvious
+reading of §8.1 suggests a third option that does not exist.
+
+**The rule itself is still only prose.** Nothing checks that a *future* test does not do what
+`test_bridge_state.py` did. The property holds today — no test in a gating layer calls
+`pytest.skip`, and every `skipif` left there tests `sys.platform`, `os.name`, `sys.version_info` or
+`hasattr(signal, ...)` — but that is an observation about the present, not a mechanism, and it is
+the kind of observation that stops being true without anyone noticing. Filed as
+[KBR-138](https://shelpuk.atlassian.net/browse/KBR-138), by the same reasoning that filed KBR-132:
+the rule is only worth stating if the gap between it and its enforcement has an owner.
+
+### 8.1 The selection mechanism
+
+Delivered by T-W1, ahead of the jobs that use it, because parallel authors need the divided test
+command from day one.
+
+- **`tests/layers.py`** owns the vocabulary and every decision over it as a **pure function**:
+  the path default, the exactly-one predicate, the required-category predicate, and which layers
+  a marker expression positively selects. Pure so that each can be handed a deliberate defect —
+  plan §1.4 makes that mandatory, and a decision entangled with a pytest hook cannot be given one.
+- **`tests/conftest.py`** wires them with a single `wrapper=True`
+  `pytest_collection_modifyitems`. Defaults are applied **before** pytest's `-m` deselection —
+  otherwise `-m l1` deselects a suite whose files carry no markers — and the category check runs
+  **after** it, or it counts tests the job will not run. A wrapper gets that ordering from the
+  hook protocol rather than from plugin registration order.
+- **`--require-category=NAME`**, repeatable, fails the run when a named layer collected nothing.
+  This is the fix for the `or` problem above, and every job must pass one per layer its
+  expression selects. A test enforces that pairing across every workflow.
+- **`--layer-report=PATH`** dumps the collected items and their layers as JSON, which is how the
+  whole-suite checks reason about labelling without re-deriving it.
+
+**The default is by path, and the vocabulary is by marker.** Thousands of tests predate the scheme
+and are not edited one at a time: `tests/integration/**` defaults to `agent_live`, everything else
+to `l1`, and a file names its own layer only where that is wrong. An unrecognised path falls back
+to `l1` — a new corner of the tree joining the fast gate uninvited is visible and cheap, whereas
+one joining a nightly job is invisible until something ships broken.
+
+**`--runslow` is gone.** It attached `pytest.mark.skip` to the 32 live-agent tests, so the gating
+job collected them, skipped them, and reported green — the failure this section names, running in
+production. They are `agent_live` now, and a bare `pytest` excludes them through an `addopts`
+marker expression instead. The difference is not cosmetic: the run now reports *32 deselected*, a
+statement about what was **selected**, where it used to report *32 skipped*, a statement about
+tests that were supposed to run and did not.
+
+**Two hand-maintained copies of one list is a defect in waiting**, so the `addopts` expression is
+asserted equal to one derived from `RESOURCE_DEPENDENT_LAYERS` — the layers needing a resource CI
+has and a developer's machine may not. `agent_smoke` is on that list before it has a single test,
+because §6.4.2 launches a real pinned binary and the task that makes the category live should not
+have to rediscover the rule.
+
+**`--strict-markers` is passed on the command line, never through `addopts`.** pytest 9.0 silently
+ignores it there; 9.1 honours it (upstream issue 14442). With `pytest>=8.0` and no upper bound, a
+config-file placement would mean the gate behaves differently for two contributors looking at the
+same tree, which is worse than not having it.
+
+### 8.2 Activation is incremental, and the gap is on the record
+
+The matrix above describes the finished state. Today only the Fast job exists, so `l3`,
+`acceptance`, `agent_smoke`, `eval` and `load` are selected by **no job at all**.
+`agent_live` has one job, and it is **not** the nightly: `.github/workflows/tmux-disconnect.yml`
+runs exactly one file, `tests/integration/test_tmux_disconnect.py`, on pull requests that touch
+the `--tmux` wrap (`SYSTEM_DESIGN.md` §3.4). That job removed `agent_live` from
+`PENDING_ACTIVATION_LAYERS`, so the registry no longer records that
+`tests/integration/test_agent_e2e.py` still runs nowhere: **T-K11, the Agent-live nightly, is
+still owed** (product owner, 2026-09-13).
+What each of those jobs would need from the runner is §8.6; for `agent_smoke` and `agent_live`
+the answer is that CI has had it all along, so what they are still waiting on is the tests, not
+the resources. **`eval` is not in that sentence:** its runner needs are met too, but T-K12 waits
+on T-K3, which waits on Q4 and Q13 — both still open. A resource being available does not close a
+decision.
+
+That is a real hole and it is the one this mechanism could most easily hide: before the split,
+`pytest -q` ran everything, so a subsystem test written tomorrow ran in CI. After it, that test
+runs nowhere — silently, because a job nobody has written cannot go red.
+
+`PENDING_ACTIVATION_LAYERS` is the answer: a registry mapping each not-yet-run layer to the plan
+task that activates it. It is checked in **both** directions, which is what stops it becoming a
+standing amnesty:
+
+- a layer holding tests that no job selects and that is **not** in the registry fails the suite;
+- a layer in the registry that a job **does** now select also fails, so an entry cannot outlive
+  its reason.
+
+A consequence worth stating: **a test may not be moved to `l3` before the Subsystem job exists.**
+Roughly six modules under `tests/` bind real sockets or spawn processes and are `l1` by default
+today — `test_egress_https_proxy.py` foremost among them, and since T-W5 the shared fixture it was
+extracted into plus `tests/harness/test_connect_proxy.py`, which must move **with** it: an
+extraction and its own regression evidence landing in two different jobs would leave one proving
+the other in a run that no longer includes it. Reclassifying them is correct and is T-K6's
+business, together with the job that runs them; doing it earlier would remove them from every
+gate. T-H1 must take that reclassification into account before it measures a mutation
+baseline, because it selects on `l1`.
+
+**Ten modules are bulleted below — in eight bullets, since the T-W4 and T-W8 rows name two
+modules each — and `tests/cli/test_stream_encoding.py` (KBR-10) is described after them, eleven in
+all, named here so T-K6 inherits a list rather than a search** — the count
+is what T-K6 and T-H1 plan against. (The bullet count and the KBR-10 paragraph were already
+drifting apart before T-W8 added two; spelling out both is what stops the next addition
+guessing which set it joins. T-W9 joins the **bulleted** set, not the paragraph above it, which
+still names `tests/test_egress_https_proxy.py` and `tests/harness/test_connect_proxy.py`
+separately.)
+
+- **KBR-132:** `tests/bridge/test_tls_certs.py` spawns a real `openssl` in one of its five cases.
+  KBR-132 deliberately did **not** move it — the rule above applies to a test fixing a skip defect
+  exactly as it applies to any other.
+- **T-W4 (KBR-27):** `tests/harness/test_recorder.py` and
+  `tests/harness/test_recorder_falsification.py` both bind real sockets.
+  `tests/harness/test_recorder_conformance.py` is genuinely `l1` — its checks are pure functions
+  over data and it opens nothing. The two socket-binding modules together run in **~1 second**,
+  measured, which is the number the fast-gate budget should carry until T-K6 moves them.
+- **T-W8 (KBR-31):** `tests/harness/test_bridge.py` and
+  `tests/harness/test_bridge_falsification.py` each start a real `BridgeServer` **and** a
+  recorder, most cases one of each. Together they run in **~1.6 seconds**, measured (1.1 s and
+  0.5 s), which is the number the fast-gate budget should carry until T-K6 moves them. Worth
+  knowing while planning that move: the timeout case cost **30 seconds** until its responder was
+  released explicitly, because `stop_async` waits for in-flight upstream handlers rather than
+  aborting them — the same property §7.3 handles deliberately for the proxy.
+- **T-W9 (KBR-32):** `tests/harness/test_vertical_slice.py` starts a real `BridgeServer` and a
+  recorder in nine of its ten cases. The module runs in **~0.5 seconds**, measured (0.42–0.54 s
+  over three runs), which is the number the fast-gate budget should carry until T-K6 moves it.
+  Its falsification cases are deliberately cheap: the empty-response ladder is flattened with
+  `monkeypatch` rather than waited out, because an 80-second falsification case is the defect
+  commit `691e974` fixed once already. Worth knowing while planning the move: when one of its
+  cases goes red on a fired ladder, the *bound* catches the regression but does not bound the
+  cost of catching it — teardown still waits out the in-flight handlers, measured at 62 seconds.
+  T-B1 below measures the same property at 72 s through the adapter; they are the same 62-second
+  teardown plus that path's own ladder, not two different findings.
+- **T-B1 (KBR-40):** `tests/harness/test_provider_aiohttp.py` binds a recorder in most of its
+  cases and a real `BridgeServer` in several, and drives the OpenAI login OAuth leg over loopback
+  in four more. It runs in **~0.6 seconds**, measured, which is the number the fast-gate budget
+  should carry until T-K6 moves it. It is one module rather than two because its falsification
+  cases are defects in the transport it ships, not a separate harness; where T-W8 put four defect
+  transports in their own file, a fifth file per Epic B ticket would be three more for T-K6 to
+  move. Worth knowing while planning that move: a **wrong-shaped reply** costs 72 seconds here —
+  10 s of retry ladder plus the teardown that waits it out — which is why §7.2.2's reply-shape
+  falsification is driven through the adapter rather than through the bridge.
+- **KBR-144:** `tests/bridge/test_responses_string_input.py` starts a real `BridgeServer` on an
+  ephemeral port in four of its classes, following the existing convention of
+  `tests/bridge/test_crash_resilience.py` rather than inventing a second one. The whole module
+  runs in **~0.6 seconds**, measured, of which the socket-binding cases are ~0.1.
+- **KBR-176:** `tests/bridge/test_bridge_management.py` spawns real child interpreters in four
+  cases of `TestStartBridgeWithALoudChild`, and already bound loopback sockets in
+  `TestBridgeReachable` before that, unlisted. It has no choice for the children: the defect is a
+  child blocked inside `write()` on a pipe nobody reads, which only a real pipe and a real writer
+  can show — a stand-in stream never blocks — and one case runs a whole second interpreter as the
+  CLI, because how an interpreter exits around a thread still blocked on that pipe is platform
+  behaviour. The four spawning cases take **~0.6 seconds** together and the whole module
+  **~3 seconds**, measured. The child is a `python -c` script, never `kitty.bridge_runner`, which
+  would refresh the model-context catalog over the network.
+- **KBR-220:** `tests/cli/test_bridge_state_location.py` runs the real `kitty bridge start`,
+  `status`, `restart` and `stop`, and a real `kitty.bridge_runner` started as a service would start
+  it. It has no choice: the defect lived *between* two processes, each of which resolved its path
+  correctly by its own logic. It is the **one** module allowed to spawn `kitty.bridge_runner`, and it
+  keeps KBR-176's reason for the rule. The model-context catalog cache is seeded fresh in an isolated
+  cache directory, so no fetch runs inside `start`'s 5-second window and no user cache is written.
+  Its isolation is worth copying: `WIN_PD_OVERRIDE_LOCAL_APPDATA` (platformdirs ≥ 4.8), because
+  plain `LOCALAPPDATA` does not redirect Windows. A child reports where kitty will look, and the
+  fixture refuses before writing anything unless that is the temporary directory. Its three cases
+  take **~6.5 seconds** on Linux, measured. They passed unskipped on the Windows and macOS legs of
+  the first PR run (2026-09-13, run 34766656090), but the gate prints no per-test durations, so those
+  legs have a result and no figure yet. One cost to know about: a bridge that misses the 5 s window fails the case
+  with *"did not report ready"* rather than slowing it, so a slow runner shows up as a red leg,
+  never as a quiet delay.
+
+**One cross-cutting cost, added by KBR-188's fix.** Every conformance probe now begins by waiting
+for the clock to report a new instant (§8.3). Measured at **80 calls** across the harness suite:
+immeasurable on Linux and macOS, where the clock resolves in nanoseconds and the first look
+returns, and a worst case of **~1.2 s** on the Windows leg, whose step is ~15.6 ms. It scales with
+the number of raw-socket probes, so a future recorder adds to it in proportion to the probes it
+drives, not to its test count.
+
+KBR-10 added the largest one: `tests/cli/test_stream_encoding.py` spawns **38 child interpreters**
+per run, on each of the gate's six legs (four Linux interpreters, plus the Windows and macOS legs
+§8.4 added). It has no choice — the behaviour it proves is that kitty survives a
+hostile *interpreter start-up encoding*, and `PYTHONIOENCODING` is read before any in-process test
+exists, so a real child is the only oracle. Each spawn is short (the whole file runs in ~13s,
+measured on Linux), but
+T-H1 should note that mutation testing over `l1` will re-pay that cost per mutant, and may want to
+deselect this file from the mutation baseline rather than from the gate.
+
+**KBR-204 added three of the 38**, for the same Windows family by another route: an interactive
+command whose stdin reports as a terminal while its stdout is a pipe. The children get a
+pseudo-terminal as stdin on POSIX and `NUL` on Windows, so all six legs build the real asymmetry.
+One cost to know about: a child that gets past **both** guards — the prompts' and the menus' —
+with that stdin **blocks** waiting for keys nothing will type, so a regression there shows up as
+the runner's 60-second `TimeoutExpired`, not as a fast assertion.
+
+**The load gate has to be wired, not merely declared.** The table above marks Load as gating a
+release, but `publish.yml` currently depends only on the reusable `tests.yml`. Putting the load
+run in "its own workflow" would leave publication free to proceed while load fails — or while it
+never ran at all for that commit, which is the more likely failure. A row in a table is not a
+dependency.
+
+The arrangement, made explicit:
+
+- `tests.yml` — reusable. Gains the Subsystem and Acceptance jobs. Called by `ci.yml` (push, PR)
+  and by `publish.yml`.
+- `load.yml` — **reusable**, and `publish.yml` calls it too, `needs:`-gated on the tag commit, so
+  publication cannot complete without a successful load run **for that exact commit**. A
+  scheduled nightly caller of the same reusable workflow gives early warning; it does not
+  substitute for the release call, because a nightly result belongs to a different commit.
+- Nightly Deep, Agent-live and Eval workflows stand alone and gate nothing.
+
+That keeps the property the existing setup gets right — a release runs exactly the checks a PR
+ran, from one definition — while extending it to the one gate that runs only at release time.
+
+**A note on the existing runtime.** The suite already takes ~18.5 minutes per Python version, ×4
+versions. The new L3 work adds real sockets to that gate. If the fast gate stops being fast,
+people route around it, so the marker split above is also the mechanism for keeping the per-PR
+path bounded — and the mutation-cadence measurement (Q11) has to be taken against that budget,
+not against an empty one.
+
+### 8.3 The exemption mechanism
+
+Delivered by T-W7 (KBR-30), ahead of the guards that need it: T-G1, T-G4, T-G5, T-G9 and T-J2
+each cover a class of check broader than the one defect they happen to expose, so each is
+expected to land red on one assertion (plan §16). T-J1 is the blocked *dependency* rather than a
+guard — it is the pytest-bdd wiring T-J2's scenarios are written against.
+
+**`tests/exemptions.py`** holds the registry and the decisions over it, in the shape §8.1 uses
+for the selection rules: every decision is a **pure function** — `outcome_for`,
+`lookup_exemption`, `registry_violations`, `unexpected_pass_message` — so each can be handed a
+deliberate defect, per plan §1.4. There is no pytest hook, no plugin and no new CI flag; a test
+that uses an exemption is an ordinary test carrying its ordinary layer marker.
+
+```python
+# tests/exemptions.py — the one registry
+EXEMPTIONS: Mapping[str, Exemption] = {
+    "tr-1c-header-subset": Exemption(
+        assertion="the header set is a subset of what Claude Code sends natively",
+        condition="the bridge sends a User-Agent the agent does not",
+        issue="KBR-8",
+    ),
+}
+```
+
+```python
+# the guard. Imported as `exemptions`, not `tests.exemptions`: `tests/` has no
+# `__init__.py`, so pytest's `prepend` import mode puts it on `sys.path` —
+# `tests/layers.py` carries the same caveat in its module docstring.
+from exemptions import ratchet
+
+with ratchet("tr-1c-header-subset"):
+    assert bridge_headers <= native_headers
+```
+
+**Two words spelled the same.** `ratchet(...)` here is the **exemption**: binary, gating, and it
+fails when its assertion starts passing. A *"ratcheted baseline"* in §4.3 C1b, §6.3.1 and §6.4.4,
+and in plan tasks T-I9 and T-I12, is a **different and non-gating** mechanism: record a number,
+report it, tighten it monotonically. The collision predates this section — §8 above already calls
+the exemption `@ratchet` — and the name is kept because §8 is the section the guards are written
+against. T-I9 and T-I12 must not import this symbol; their plan rows say so.
+
+**Ids are lowercase kebab-case**, and that much is checked, because five tasks add rows
+independently. Prefixing an id with the guard or scenario it belongs to is a convention, not a
+check — see the stated limits below. **One row per assertion, not per defect:** two guards over
+KBR-8 take two rows, since each must be withdrawn on the day its own cell starts passing.
+
+**Parametrised guards.** The blocked consumers are per-adapter (T-G9) and per adapter × model ×
+transport (T-G4), and the defect is usually one cell of that matrix. Exempt the cell, not the
+parametrisation:
+
+```python
+exemption = (
+    ratchet("t-g9-openai-subscription-user-agent")
+    if adapter == "openai_subscription"
+    else nullcontext()
+)
+with exemption:
+    assert headers(adapter) <= native_headers(adapter)
+```
+
+The other adapters gate normally; the exempt one still fails the job the day it starts passing.
+The row's `condition` column names the cell in prose, because nothing else does. **In a
+parametrised guard a cell is an assertion:** three exempt cells take three rows, so each can be
+withdrawn on the day its own cell starts passing, and the count in the registry stays a count of
+outstanding defects.
+
+Six decisions in that mechanism depart from the obvious option, and are recorded because the
+obvious option is what a future reader will otherwise assume was intended:
+
+- **A context manager, not a decorator.** The paragraph above writes `@ratchet`, and a decorator
+  is what pytest's own `xfail` would give. But a decorator can only wrap a **whole test**, which
+  is exactly the scenario-wide amnesty this section rejects: it would hide a broken fixture and
+  every healthy assertion beside the exempt one. Assertion scope needs a block. The name is kept.
+- **Only `AssertionError` is amnestied; every other exception propagates.** An exemption says
+  "this claim is known to be false", not "this region of the test may do anything". A `KeyError`
+  inside the block is a broken fixture and fails the job. `pytest.fail()`, `pytest.xfail()`,
+  `pytest.skip()` and **a missed `pytest.raises()`** are not `AssertionError`s and are therefore
+  **not** amnestied — the safe direction, since an exemption that could turn a test into a skip is
+  the failure §8 names two paragraphs above, but a surprise for the author of an L2 guard that
+  reports its verdict with `pytest.fail` and a diff, which is the shape
+  `tests/test_github_actions.py` uses today. **A guard that needs an exemption states its verdict
+  as an `assert`**: catch with `try`/`except` and assert on what you caught, rather than leaning on
+  `pytest.raises` or `pytest.fail`.
+- **An unexpected pass raises a non-`AssertionError` exception.** `UnexpectedExemptionPass`
+  descends from `Exception`, deliberately not from `AssertionError`, so that a nested or adjacent
+  `ratchet` block can never swallow it. A strictness signal that another exemption can amnesty is
+  not strictness.
+- **The registry seam is private.** `ratchet` takes an underscored `_registry` keyword so that
+  this mechanism's own tests can have rows while the production registry is empty. **A guard must
+  never pass it.** A public `registry=` would be a documented back door into the one-registry
+  invariant: a local amnesty nobody can count by reading one file.
+- **No orphan-row scan.** A row whose assertion has since been deleted is stale documentation,
+  but it grants amnesty to nothing and so cannot hide a failure; the mechanism against an
+  exemption outliving its defect is the unexpected-pass rule. A text scan of `tests/**` for unused
+  ids would buy tidiness at the price of a false positive on any id named in a comment.
+  Considered and declined, not overlooked.
+- **No terminal reporting of fired exemptions.** Visibility is the registry file, which is what
+  §8 asks for — "one registry … short, visible". A per-run summary would be a `conftest.py` hook,
+  and the value of this mechanism is precisely that it changes no job's collection or selection.
+  The residual risk is real and accepted: a CI log gives no sign that an exemption fired.
+
+**Two limits the mechanism cannot enforce, stated so they are not mistaken for guarantees.**
+
+- **The block must hold exactly one assertion** and the statements that build its subject.
+  Nothing detects a second: once the first assertion fails, the second is never evaluated, and a
+  failure it would have reported is invisible — a miniature of the blanket amnesty §8 rejects.
+  The enforcement is review, and the rule is in `.github/review/rules/python-tests.md`.
+- **The `condition` column is documentation, not an assertion.** Any `AssertionError` from the
+  block is amnestied, including one raised by an unrelated regression that happens to break the
+  same assertion. The mitigation is the single-statement scope above, not the column.
+- **The id prefix is a convention.** `registry_violations` checks the casing, not that an id
+  names its guard or scenario, and it cannot check that a parametrised guard took one row per
+  exempt cell. An allow-list of permitted prefixes would need editing for every new guard, which
+  buys tidiness at the price of friction on the path this mechanism exists to keep open.
+
+**The unexpected-pass rule only fires in a job that runs the test.** A row attached to a test on
+a layer in `PENDING_ACTIVATION_LAYERS` (§8.2) — `l3` and `acceptance` today, which is where T-G4,
+T-G5 and T-J2 land — is unchecked until that job is activated, so there the exemption *can*
+outlive its defect. The task that activates the job owns re-checking the rows on its layer, in
+the same way §8.2 makes each pending layer someone's named handoff.
+
+**KBR-164 gave the registry its first rows**, and they were not the row this section
+anticipated. TR-1c's header-subset assertion (KBR-8) still belongs to an
+acceptance scenario that does not exist yet (§6.4.1, delivered by T-J2 downstream of T-J1), and a
+registry row for an assertion no test contains documents a fiction — so it is still unwritten.
+What arrived first instead were the **Windows cells** of assertions that the platform legs
+(§8.4) found to be false on Windows and true everywhere else: several over KBR-188 and one over
+KBR-189.
+
+**The KBR-188 rows are gone again, and why they could not have worked is the lesson.** KBR-188
+was one defect — Windows' `time.monotonic` advances in ~15.6 ms steps, so two probes sent back to
+back are stamped at the same instant and `check_arrival_increases` is false. Its four rows
+exempted the assertions that observed it. But **whether a given pair collides is a race**, not a
+platform property: a pair that straddles a step boundary is stamped at two instants and the
+assertion *passes*. An exemption fails on an unexpected pass — deliberately, so debt cannot
+outlive its defect — so the leg went red in **both** directions on alternate runs. Measured on
+2026-09-12: one run failed `check_arrival_increases`, the next failed the exemption for passing.
+
+The rule that follows, and it generalises past this defect: **an exemption is only sound over an
+assertion that is deterministically false on the exempt platform.** Over a racing one it converts
+a flaky assertion into a job that is red either way. A nondeterministic platform difference has to
+be removed, not exempted.
+
+Removed here by `recorder_conformance._advance_clock()`, which stands a probe apart from whatever
+arrived before it by waiting — on a **condition**, that the clock has reported a new instant,
+never on a fixed sleep. It lives in the shared driver, so §7.2's four recorders inherit it rather
+than each carrying a row, and it costs nothing measurable where the clock is fine: 80 calls across
+the harness suite, a worst case of ~1.2 s on Windows and immeasurable on Linux and macOS. Its own
+bound is a **poll count, not a deadline**, because a deadline is computed from a clock and the case
+it exists for is a clock that has stopped — the frozen-clock defect `check_arrival_increases` is
+there to catch, and the first draft of the function hung the suite on it. The case that pins that
+bound counts polls for the same reason: an earlier version asserted elapsed *wall time* and went
+red on the macOS leg, where `time.sleep(0.001)` takes about eleven milliseconds. Sleep accuracy is
+the platform's business; the count is the only part the driver promises.
+
+**The wait goes before the probe, not after it, and the first fix got that wrong.** Waiting after
+the reply separates a probe from the driver's own previous probe and from nothing else — so a
+probe following a request the driver did **not** send still shares that request's instant. §6.3's
+slow-body pair is exactly that shape: it hand-rolls its first request on a raw socket so that
+arrival order and completion order differ, and the driven probe behind it collided anyway. The
+Windows leg stayed red. Waiting at the *start* of `send_raw` is the general form — every probe is
+separated from everything before it, however the earlier request was produced.
+
+**A clock quantised from real time could not have caught that**, which is the sharper lesson. It
+reproduces the platform but keeps the race: whether a given pair collides still depends on how
+fast the runner is, so a case built on it passes against the defect most of the time. Measured:
+the slow-body pair collided in four runs out of eight at a 50 ms quantum. `test_recorder.py`
+therefore pins the *placement* against a clock that moves **only when something sleeps on it** —
+no real time passes and every run agrees. That clock is sound only away from the event loop, which
+reads `time.monotonic` for its own timers, so the end-to-end cases keep the quantised clock and
+the placement case, which never opens a loop, uses the stepped one.
+
+KBR-189's row was over a different defect — a mid-stream abort that lost the body on Windows —
+and it was sound where KBR-188's were not, because that loss was deterministic there. It is gone
+too, withdrawn together with its fix: KBR-189 changed `Reply.abort()` (§7.2), and the Windows leg
+of the PR that removed the row is the evidence the assertion now holds there. **The registry is
+empty again.**
+
+All of those rows were the parametrised-cell shape above rather than whole-test exemptions, and the reason
+is the rule this section opens with — the reason the next platform row should take that shape too.
+A `skipif` would have been the obvious move and is the wrong one: §8 permits a platform skip for
+behaviour that **does not exist** on a platform, and these assertions were not inapplicable on
+Windows — they were **false** there, which is a defect with a ticket. Exempting the cell kept the
+assertion gating on the four Linux legs and on macOS, kept the count of outstanding Windows defects
+readable in one file, and failed the job the day Windows started passing. Skipping would have
+bought a green leg by not looking.
+
+That makes the registry-shape check itself vulnerable to §8's own "green because it stopped
+looking": a validator run over zero rows passes perfectly. So `registry_violations` is proved
+against a **fabricated malformed registry** rather than against the production one, and the
+production registry is asserted clean as a separate, weaker claim.
+
+### 8.4 The platform matrix
+
+Delivered by [KBR-164](https://shelpuk.atlassian.net/browse/KBR-164). Until it landed, every
+job in the repository ran on Linux, so **every Windows-only and macOS-only defect in the product
+was reachable only by a user reporting it** — which is how all three platform bugs on epic
+KBR-123 (KBR-1, KBR-4, KBR-10) were in fact found.
+
+The Fast gate therefore runs on three platforms:
+
+| Leg | Runner label | Python | Selection |
+|---|---|---|---|
+| Linux | `ubuntu-latest` | 3.10, 3.11, 3.12, 3.13 | the whole Fast gate |
+| Windows | `windows-latest` | 3.12 | **identical** |
+| macOS | `macos-latest` | 3.12 | **identical** |
+
+**One job with an `os` matrix dimension, not a second job.** A separate platform job would
+duplicate the five-step list, and the day the two copies differ the platform leg stops being
+evidence about the gate and becomes evidence about a *similar* gate. This is the same argument
+`tests.yml`'s header already makes for the release path — *"there is no second, weaker
+definition to drift out of sync"* — applied across platforms instead of across events. It also
+means the legs gate a pull request through `ci-required`'s existing `needs: [test, …]` with **no
+change to `ci.yml`**, and gate a release through `publish.yml`, for free.
+
+**The same tests, not a platform-dependent subset.** The ticket floated scoping the leg "to the
+tests whose behaviour is actually platform-dependent". Rejected: that set is precisely what
+nobody knows — a latent POSIX assumption is invisible until the test runs somewhere else — and
+naming it would need a second marker axis, which collides with §8.1's exactly-one-layer-marker
+rule. The whole `l1 or l2` expression runs on every leg.
+
+**GitHub-hosted, and this is not a new decision.** `.github/review/rules/ci.md` § "Runner and
+caps" already fixed it for every job in the repository: a self-hosted runner group carries an
+*"Allow public repositories"* setting that is **off by default**, and this repository is public,
+so a `[self-hosted, …]` label reaches no group at all and the job **queues for ever — no error,
+no annotation, no timeout**. The platform legs inherit that unchanged.
+
+**The cost objection in the ticket does not apply here, and the reason is worth recording
+because it is the whole reason this was cheap.** KBR-164 was written expecting a large bill
+("`windows-latest` minutes bill at 2×"). That multiplier is a **private**-repository rule.
+`kitty-bridge` is public, and GitHub's runner reference states the case in one sentence: *"Use of
+the standard GitHub-hosted runners is free and unlimited on public repositories."* `windows-latest`
+and `macos-latest` are both in that table. **Confirmed 2026-09-12.** If this repository is ever
+made private, this subsection is the one to revisit first — the legs keep working and start
+billing at 2× and 10× respectively.
+
+**One Python version per platform, and it is 3.12.** The suite is mostly platform-independent, so
+a four-version Windows matrix would quadruple wall-clock and quadruple the first-run triage
+surface to re-prove interpreter-version facts the Linux legs already prove. 3.12 rather than the
+newest because `ci.yml`'s two review-system jobs already pin 3.12, so the repository names one
+version in one place; and because a Windows-only defect is likelier to reach a user on a
+mainstream version than on the newest. Interpreter-version questions stay the Linux matrix's job.
+
+**`include:` entries, not an `os` × `python-version` product with `exclude:`.** The product form
+needs six `exclude:` entries to remove six of twelve combinations, and `_matrix_values` in
+`.github/review/tests/test_review_scripts.py` deliberately does **not** honour `exclude:` — it
+over-approximates on purpose, which is the safe direction for a ceiling check but the wrong one
+for a matrix that would then be mostly holes. ⚠️ The `include:` form carries its own subtlety and
+it is where this construct is misread: an include object whose keys would **overwrite** a base
+matrix value is not merged into the existing combinations — it becomes a **new** combination.
+That is what produces the two platform legs, and a comment in `tests.yml` says so beside them.
+
+**One integer `timeout-minutes` for the whole matrix job.** `DeclaredJobCapIsEnforceableTests`
+parses the cap with `(\d+)`, so a `${{ matrix.… }}` expression there reads as **absent** and the
+guard reports "declares no job-level `timeout-minutes:`" about a line that is plainly present. A
+matrix job is held to the **lowest** platform ceiling among the labels its matrix can produce;
+all three labels here are ordinary GitHub-hosted 4-CPU runners at **360 minutes**, so the cap is
+bounded by measurement rather than by the platform.
+
+**`openssl` is an environment prerequisite on all three images, and §8 already said so.** The
+paragraph above on the resource-availability rule states the duty in advance of this change: *"a
+non-Ubuntu matrix entry has to keep it, and the fix for a red gate is to install `openssl`, never
+to reinstate the skip."* `tests/bridge/tls_certs.py` calls `pytest.fail` — not `skip` — when the
+binary is absent, so a missing `openssl` is a red gating leg with no sanctioned recovery.
+Discharged, and recorded rather than assumed: **confirmed 2026-09-12** against the
+`actions/runner-images` image manifests — Windows Server 2025 ships **OpenSSL 3.6.4**, macOS 15
+arm64 ships **OpenSSL 1.1.1w**, Ubuntu 24.04 ships **3.0.13**. A future image bump inherits that
+duty. ⚠️ If the Windows TLS tests go red, check `-subj "/CN=localhost"` first: a leading-slash
+argument is mangled by MSYS2 path conversion if the resolved `openssl.exe` is the Git-for-Windows
+build rather than the native one.
+
+**`fail-fast: false` is load-bearing now, and was merely tidy before.** With six legs it is the
+only reason a Windows failure does not cancel the four Linux legs mid-run. Cancelling them would
+destroy the evidence needed to tell "Windows is broken" from "this change is broken" — which is
+the first question asked of every red platform leg. It predates this subsection; its importance
+does not.
+
+**A red platform leg blocks a release, deliberately.** `publish.yml` calls this same reusable
+workflow, so macOS and Windows have just joined the release gate — which is not free, and the
+cost is named rather than discovered later. `rules/ci.md` already notes that the release path
+carries blast radius beyond itself; after this change a red or flaky platform leg stops a PyPI
+release of a product whose platform behaviour was, until now, never exercised at all. That is the
+correct trade — shipping a release known to be broken on Windows is the worse outcome — and the
+break-glass is the same admin path `review/README.md` documents.
+
+**The measurement, because the number beside it used to be fiction.** The comment that stood
+beside `timeout-minutes: 30` claimed *"the suite runs in a couple of minutes"* — stale by an
+order of magnitude, leaving the backstop only ~50% headroom on a leg nobody had timed. Measured
+on the first six-leg run (2026-09-12, run 34689734864):
+
+| Leg | Wall clock | Outcome |
+|---|---|---|
+| Linux × 4 | 19.5 – 19.7 min | passed |
+| **macOS** | **20.6 min** | **passed, whole suite, first run** |
+| Windows | 2.3 min | **not a measurement** — aborted early on KBR-180 |
+
+The cap is **60**, which clears the slowest *completed* leg (macOS, 20.6) by ~3×. ⚠️ Windows is
+**not yet timed**: its first run aborted 227 tests in, so the figure above measures a failure, not
+the suite. Whoever next reads a green Windows leg should set this number from it. The cost of 60,
+stated rather than hidden: a **hung Linux leg is noticed 30 minutes later than it was**. On a free
+runner that is cheap, and a cap too low is worse — it kills a healthy leg and reads as a product
+failure. **A platform leg killed at the cap is a cap problem until proven otherwise**, never
+triaged as a hang; the platform ceiling is 360, so there is room to raise it.
+
+**What the legs found on their first run, recorded because it is the argument for the whole
+subsection.** macOS passed the entire suite immediately. Windows did not, and the failure was not
+a latent POSIX assumption in a test — it was a **user-facing product defect**
+([KBR-180](https://shelpuk.atlassian.net/browse/KBR-180)): `probe_pid` in `bridge/manage.py`
+probes liveness with `os.kill(pid, 0)`, and `signal.CTRL_C_EVENT` **is** `0` on Windows, so that
+call broadcasts a Ctrl+C to every process sharing the console instead of probing. It is reached by
+`kitty bridge status`, `stop`, `start` and `restart`, so each of those interrupted the user's own
+shell. Its docstring asserted the opposite — *"on Windows as well as POSIX — it does not terminate
+the target"* — and the `except OSError` branch beneath it explained a Windows code path that call
+never reaches. Both were written by reasoning about Windows rather than running there. **That is
+the failure mode a platform leg exists to end**, and it was caught within two minutes of the leg
+first existing.
+
+**Skips are named, not counted in silence.** §8's rule — a gating job that goes green because it
+ran nothing is the most expensive false confidence — is what a new platform leg is most likely to
+breach, because a **platform** skip is the one kind §8 permits. So the gate's pytest invocation
+carries **`-rsfE`**: every skipped test is listed in the log *with its reason*, on all six legs.
+The flag is on the one shared invocation rather than on the platform legs alone, because a second
+invocation in the file is exactly the second definition this subsection's first decision rejects.
+
+🔴 **`fE` is not decoration, and the obvious spelling is a trap this section fell into before it
+was corrected.** `-r` **stores** reportchars; it does not append to them. A bare `-rs` therefore
+*replaces* pytest's default `fE` and **deletes the `FAILED …` summary** from the end of the run —
+measured on pytest 9.1.1 with this exact command. On a suite of this size that summary is how a
+red leg is read, and the first red platform leg is precisely when it is needed. The skip letter
+must be **added** to the defaults, never substituted for them. An earlier draft of this paragraph
+claimed the visibility "costs one flag"; it costs one flag *only* when the defaults are restated
+alongside it. `tests/test_github_actions.py::…::test_the_gate_keeps_its_failure_summary_while_reporting_skips`
+is the check, because a claim about a flag that nothing verifies is how the first spelling
+survived review.
+
+⚠️ **A platform skip is not a licence to skip a platform's defects.** §8 permits a skip for
+behaviour that *does not exist* on a platform — no `SIGKILL`, no POSIX path semantics — and the
+distinction matters most here, where a leg is new and red. A test that fails because a tool is
+missing or behaves differently is a **resource-availability** skip in platform clothing: the
+shape §8 forbids and KBR-132 closed. The fix for that is to provision the runner or make the test
+platform-agnostic, never `skipif`. And a test that fails because the **product is broken on that
+platform** is neither: it is a defect, it gets a ticket, and the leg stays red until the defect is
+fixed. `tests/bridge/tls_certs.py` is the template for stating the difference in code.
+
+**A consequence that is a product win, not a side effect.** Two things in the repository have
+never executed even once:
+
+- `tests/test_launcher_discovery.py`'s two `skipif(sys.platform != "win32")` cases — written for
+  a leg that did not exist, skipped in every run that has ever happened;
+- **every `if sys.platform == "win32"` branch in `src/kitty`, as far as `mypy` is concerned.**
+  mypy resolves `sys.platform` against the platform it runs on, so the Windows bodies were
+  invisible to the only type check we run — and §8's table credits mypy with four user-visible
+  defects the suite could not find, one of them explicitly *"on a non-Linux OS"*.
+
+Running `mypy src/kitty` on the Windows leg is therefore not redundant with the Linux legs; it is
+a **new detector over code no check has ever read**. That is also why the platform legs run the
+whole step list rather than pytest alone.
+
+### 8.5 The review classifier's tier order
+
+The gate is not the only thing that decides whether a pull request is reviewed.
+`.github/review/scripts/interpret_claude_result.py` reads the wreckage of a failed review
+attempt and answers a question no test in `tests/` asks: **who fixes this** — top up a
+balance, or edit a workflow. It also decides whether the one automatic retry is spent. Its
+entire rationale has lived in module comments, which is why three tickets (KBR-145, KBR-172,
+KBR-166) each re-derived the same reasoning from scratch. The invariants are recorded here so
+the next change to it has something to contradict.
+
+**I-C1 — Tier order is a cost ordering, not a specificity ordering.** Tier 1 is consulted
+first — since KBR-206, the context-management refusal and then `FATAL_PATTERNS`, and ahead of it
+the unattributable-record check (I-C5, D3) — then quota, then credentials, then the generic-code
+tier, then transients.
+"Generic loses to everything more specific" reads well and is wrong: `EXHAUSTED_PATTERNS`
+carries the bare words `timeout` and `capacity`, which a model can write in its own prose, so
+yielding to them would let a billed rejection be retried at full price. The order is justified
+by what each misclassification costs, and each entry's position is measured rather than
+argued.
+
+**I-C2 — A pattern weak enough to appear in ordinary prose is scoped by AUTHORSHIP, never by
+a tighter regex — with one measured exception, below.** KBR-172 and KBR-166 each measured anchoring — on vendor vocabulary, on the
+CLI's line shape, on proximity to a spending verb — and every version lost a real provider
+body while still leaking model prose. The separable question is not what the text says but who
+wrote it, and the execution record already answers it: `_provider_outcome_text` is the
+narrower haystack, and the weak patterns read only that.
+
+KBR-181 moved four more there — the Z.ai business codes `1308`, `1310`, `1113` and the phrase
+`limit will reset` — and **anchored a fifth instead, which is the exception.** The exception is
+a **verbatim prefix of a vendor's own error sentence, long enough that prose matching it is a
+quotation of that vendor**: `you exceeded your current quota`. It stays in the full haystack
+because OpenAI's spent quota arrives in production as CLI text in `result`, where no
+provider-scoped pattern can see it, so the bare `exceeded your current` was that body's only
+quota signal. Measured across the status matrix, moving or deleting the phrase kept every
+status and retry but lost the quota reason and top-up advice on 10 of 11 statuses (the 11th is
+402, which now names the quota itself); the anchor lost nothing. Its residual is that a
+quotation still leaks, and that Gemini sends the same sentence for a per-minute rate limit, so a
+free-tier throttle is advised to top up — status and retry still right. The rule is about the
+tiers that can **promote** a record to `exhausted`. KBR-206 added a second exception on the same
+terms — `your credit balance is too low`, the shared prefix of Anthropic's two spent-balance sentences
+(*"…to access the Anthropic API"* and *"…to access the Claude API"*, both in public reports); the longer
+prefix would lose one of them. It is needed for the same reason: the CLI's error line in `result` is
+the carrier no provider-scoped pattern reads. `FATAL_PATTERNS` no longer carries a weak entry — see
+I-C5. `CREDENTIAL_PATTERNS`'
+`model not found` / `authentication_failed` words are the same exposure and are KBR-217's.
+
+The four moved patterns kept every English body: Z.ai's own error table puts a stronger vendor
+phrase beside every code and every `limit will reset`. They moved rather than being deleted
+because a code survives translation and a phrase does not.
+
+**I-C3 — A numeric outcome field is admitted to the provider-scoped haystack only.** KBR-182.
+`api_error_status` is a JSON number and was discarded before any pattern saw it, so the field
+whose purpose is to report the provider's status was dead weight while looking live. It is now
+read — but it must never reach the haystack `_outcome_text` returns. When KBR-182 set this rule that
+haystack was read first by tier 1, which carried `\b400\b`, and the victim was Anthropic's spent
+balance, which is an HTTP 400. KBR-206 moved `\b400\b` to `FATAL_UNLESS_PROVIDER_NAMED_PATTERNS`,
+below the quota group, and the rule still holds for a different harm: that tier is consulted
+**before** `EXHAUSTED_PATTERNS` and `STRUCTURED_OUTPUT_PATTERNS`, so a status in the full haystack
+would turn a transient server error or a structured-output give-up beside a 400 into `fatal` with
+the re-run refused. `StatusMatrixTests.test_no_status_turns_a_record_into_a_workflow_fault` and
+`test_a_bare_400_is_not_promoted_to_a_workflow_fault` are the rows. The bound is at the field's own
+value: a number nested inside a provider's error object is a parameter, not a status.
+
+⚠️ **One consequence, accepted by name.** A 400 that names no cause reaches different verdicts by
+carrier: in the CLI's text (`API Error: 400`, bare or in `result`) the generic tier reads it and the
+record is `fatal`; as `api_error_status` alone it is not read there, and the record falls through to
+`exhausted` "no recognisable error" with a retry. Production usually writes both, so the text decides.
+
+⚠️ Two qualifications, because the rule is easy to state more absolutely than it holds. It
+governs **parseable** records: when `_parse_events` fails, `classify` searches the raw text
+whole and always has, status text included — except that since KBR-206 (D3, I-C5) such a
+record carrying a `result` key is decided before every tier. And `_provider_outcome_text` has a **second
+consumer** — `_write_diagnostic`'s quota branch — so a numeric pattern added to
+`QUOTA_WORD_PATTERNS` would fire the top-up paragraph off a bare status, including under a
+`fatal` verdict. That is the door KBR-207 has to walk through carefully.
+
+KBR-181 walked through it (KBR-207 folded into that ticket). `\b402\b` and the three Z.ai codes
+joined `QUOTA_WORD_PATTERNS` — one provider-scoped tuple, so no consumer can read the words and
+miss the codes — and `\b40[134]\b` replaced `\b40[13]\b`. **The 402 is read in the quota
+group, above `CREDENTIAL_PATTERNS`, because of I-C4 rather than specificity.** A 402 beside a
+named `authentication_error` is incoherent and either verdict is arguable, but the diagnostic
+keys on evidence, so a 402 placed below the credential names would print a credential verdict
+over a top-up paragraph. In the quota group the two agree.
+
+Measured over the full cross product for the two disagreement kinds this change can create —
+`fatal` over a top-up paragraph, and a credential verdict over one — exactly one new cell
+appears, and it is **reachable**: a 402 whose body carries the number 400. OpenRouter's own
+spent-credit message is *"You requested up to N tokens, but can only afford M"*, and at M=400
+tier 1's `\b400\b` calls it a workflow fault while the diagnostic, reading the 402, advises a
+top-up. That is KBR-206's family — tier 1 reading text that is not a workflow fault — and the
+advice is the correct half, so it is pinned rather than hidden: gating the diagnostic on the
+verdict would suppress correct advice there and in KBR-206's own row. A pre-existing
+disagreement of a third kind — a quota verdict under the context-management paragraph — is not
+touched by this change. **KBR-206 closed the 400-carried instance of the first kind, including
+this 402 cell, and the whole of the third**; four cells of the first kind remain, and the second kind
+was never measured in its sweep (I-C5).
+
+**Residuals, stated so they read as decisions.** A non-English Z.ai body in `result` keeps
+`exhausted` and its retry but loses the quota reason and advice. A provider that writes `0.402`
+or `1308` in its own message is read as quota, as KBR-166 records for `quota`. The truncated-record
+fallback `_provider_outcome_text` already documents — no `result` key, so model-authored
+`message`/`content` is handed back — reaches 402 and 404 exactly as it reached 401 and 403.
+
+**A decode failure degrades; it does not crash.** KBR-181 also widened the four `json.loads`
+sites to `ValueError` and `RecursionError`: an integer over the interpreter's digit limit and a
+deeply nested document raised through the script, so the run that already failed wrote no
+status and no diagnostic. The cost is recorded: such a record takes the unparseable path, where
+`classify` searches the text whole — a crash traded for an unscoped verdict — unless it carries a
+`result` key, which since KBR-206 makes it unattributable (I-C5, D3).
+
+**I-C4 — The verdict, the `retryable` flag and the diagnostic's advice must agree.** They are
+computed by three different functions from three different inputs — pattern order, cost, and
+the evidence text — so they can disagree without any one of them being obviously wrong.
+KBR-145 was filed because they did: an operator was told to top up a balance and, one
+paragraph up, that the workflow was broken. Any change to the tier order re-checks all three.
+
+**I-C5 — Tier 1 names a workflow fault; it never carries a bare status or a generic code.** KBR-206.
+Tier 1 is consulted before any provider-named cause, so whatever it matches decides the verdict
+*and* refuses the retry. `\b400\b` sat there, and a 400 says the request was rejected, not **by what**:
+Anthropic bills a spent balance as a 400 (*"Your credit balance is too low…"*), and the CLI writes the
+status into its error line, so tier 1 called an empty account a broken workflow while the diagnostic,
+reading evidence, advised a top-up. KBR-145 moved `invalid[_ ]request` down for the identical reason;
+KBR-206 moves `\b400\b` beside it, into `FATAL_UNLESS_PROVIDER_NAMED_PATTERNS`, and adds Anthropic's
+sentence prefix to `QUOTA_PATTERNS` (I-C2) so the `result` carrier is read.
+
+*Why not simply demote it.* The context-management refusal is also a 400, and the wording this
+repository has carried since upstream adds *"No quota was consumed"* — a sentence KBR-206 found in no
+public report. The verbatim OpenRouter body (cc-switch#1929) carries no quota word, but its
+`"code":400` is nested and never read, so in the error-object carrier nothing except its wording can
+call it fatal. So the two 400s are separated by their **bodies**, not by tier order: `classify` reads
+`CONTEXT_MANAGEMENT_REFUSAL` — the constant `_write_diagnostic`'s refusal branch already reads — first.
+It is read **ahead of the schema patterns** because the diagnostic has a refusal branch and no schema
+branch, so a record carrying both is told one thing. Its reason is a **fixed string**, not the match:
+this pattern now decides the verdict, and echoing up to 80 characters of provider- or model-written
+text into a `reason=` line of `$GITHUB_OUTPUT` is a surface the other reasons never had. ⚠️ "One
+pattern" is not "one matcher": `classify` searches lowercased text and the diagnostic uses `re.I`, and
+the two can differ on a character whose lowercase is longer (`İ`) inside the phrase's 80-character
+window. The coverage of `CONTEXT_MANAGEMENT_REFUSAL` is what decides the verdict: a future refusal
+wording matching neither alternative falls to the tiers below.
+
+*The leak the move uncovered (D3).* An unparseable record is searched whole, tool results included.
+A `400` anywhere in it used to reach tier 1 first; with the status demoted, every full-haystack tier
+read what the reviewer read — `src/kitty/bridge/server.py` names `authentication_error`, the harness
+quotes the refusal's dated slug, and prose says `timeout` — and each granted a paid retry or gave advice
+drawn from it. The leak already existed for text without a `400`. **Scoping tiers one at a time was
+built first and failed review:** it removed the quota and credential votes, and the record fell to
+`EXHAUSTED_PATTERNS` or the fallthrough and was retried anyway, while a real spent balance in that
+shape lost its top-up advice. So `_record_is_unattributable` — not JSON per `_parse_events`, and
+carrying a `result` key — decides such a record before every tier: `fatal`, a fixed reason, no
+automatic retry, and a diagnostic paragraph that gives no advice drawn from unattributable text.
+
+*Measured*, `origin/main` @ `b902076` against the change: the 400-carrying module-level fixtures in
+`test_review_scripts.py`, the inline KBR-206 rows, `QUOTA_FIXTURES`, both schema rejections, four
+public-report bodies (the *"Claude API"* wording, claude-code#4283's malformed-request 400, a bare
+`HTTP 400 Bad Request`, OpenRouter's verbatim refusal) and the status-matrix bodies, × three carriers
+(bare CLI line, `result`, `error`) × every matrix status — 595 cells, 181 changed (reason-only changes
+included). Verdict/advice disagreements of the two kinds the sweep checks (top-up advice against a
+non-quota verdict; refusal advice against a non-`fatal` one) fell from **72 to 4**; the four are
+pre-existing (a schema rejection beside a `402` status) and are the named I-C4 exclusion. No quota
+fixture and no schema rejection changed verdict. The figure is a measurement, not a pinned test;
+`FourHundredCarrierTests` pins the verdicts it rests on, and fails when a new 400-carrying
+**module-level** fixture joins the file without a row.
+
+*Owner decisions (2026-09-13)*, recorded because each flips behaviour that was pinned or relied on:
+
+* **D1 — a 400 whose only cause evidence is a billing word is a spent balance.** Anthropic's real body
+  has exactly that shape (`Plans & Billing`), so no rule separates it from a synthetic *"the billing
+  account is not permitted to use this model"* except tier order, which this invariant forbids. The
+  cost is at most one re-run of a request that was rejected before the model ran.
+* **D2 — a record naming only the context-management slug is `fatal`.** Its advice already said
+  "re-running unchanged will not help"; the verdict now agrees. The cost is that a reviewer quoting the
+  dated slug in a non-schema-failure `result` loses its retry.
+* **D3 — a transcript too broken to attribute is `fatal`, not retried, full stop.** Closed in this
+  ticket rather than filed, because the move widened it. Chosen over deferring it to a ticket after
+  the narrower version was measured failing. The cost, accepted by name: a spent balance or a
+  transient outage in that shape is a workflow-level `fatal` and not retried — the PR notice, the job
+  summary and the `::error::` line say the workflow needs fixing, and only the embedded diagnostic
+  says the record was unreadable — and a spent balance whose top-up advice worked on `main` in that
+  shape now gets none.
+
+*Residuals.* **D3 is a text sentinel, and it does not reach three broken shapes.** (1) A transcript
+cut off before its result event carries no `result` key, is indistinguishable from raw CLI output,
+and is still searched whole — on `main` a `400` beside a quota phrase there was `fatal`, and it is now
+a paid retry with top-up advice (`test_a_transcript_cut_before_its_result_event_still_reads_what_was_read`).
+(2) A transcript whose result event is an error subtype — the Agent SDK's `SDKResultError` carries
+`errors` and no `result` — is the same case; with the dated refusal slug in a tool result it moved
+from `exhausted` to `fatal` with no retry (`test_an_error_subtype_transcript_is_not_unattributable`).
+Widening the sentinel to `"type": "result"` would refuse the truncated-401 record
+`test_a_result_value_is_not_a_result_key` keeps readable, so it is not done here. (3) `_parse_events`
+treats a record as readable if any line decodes, so an NDJSON record whose result line is corrupt is
+not unattributable and its lost result is never seen (`test_a_corrupt_ndjson_result_line_is_not_unattributable`).
+Conversely a raw provider body passed through unescaped that carries its own `"result":` key — e.g.
+Cloudflare's `{"result":null,"success":false,...}` wrapper — IS called unattributable; kitty's
+translated error escapes it, so the usual route is unaffected. OpenRouter's *"can only afford 400"* message stays `fatal` with no advice unless a 402 is
+in `api_error_status` or in the CLI's text outside `result`: a nested `"code":402` is never read, and
+`API Error: 402 …` inside `result` is read only by the anchored tiers, which carry no phrase of that
+message. A 401/402/403/404 status beside a malformed-request 400 body resolves to what the status
+names — credentials, or quota with the top-up paragraph — with `retryable` **true**, the incoherent-pair
+resolution `STATUS_MATRIX_MOVED` records for the generic code; that body comes from a run 27 turns
+deep, so the retry is priced, and `FourHundredCarrierTests` pins it.
+
+*Closed by KBR-217 (2026-09-14).* D3's three broken shapes are closed (KBR-217,
+`fix/kbr-217-credential-prose-retry`): shape (1) — `<truncated` marker with no
+result-event marker — and shape (3) — a dropped corrupt NDJSON result line — are now
+decided before every tier as unattributable-fatal. Shape (2) needs no change: the
+salvage the ticket sketched would BREAK the pinned refusal verdict (the parseable
+variant loses the refusal because `_outcome_text` excludes `tool_result` content), so
+the whole-record search path remains. The truncated-401 control
+`test_a_result_value_is_not_a_result_key` stays unchanged. The Cloudflare wrapper
+sentinel is tightened to require a string-opener (`r'"result"\s*:\s*"'`), excluding
+`"result":null`. OpenRouter's *"but can only afford"* phrase is now read by the
+provider-scoped `QUOTA_WORD_PATTERNS`; the `API Error: 402 … in result` carrier stays
+`fatal`-with-no-advice and is the named residual (Z.ai's reset-time-in-result carrier
+is the same boundary, closed by the reset-time capture via `RESET_PATTERN`).
+
+**How it is proven.** `.github/review/tests/test_review_scripts.py`, run directly by `ci.yml`
+rather than through `pytest`, so it is outside §8.1's marker matrix and carries no layer
+marker. That is deliberate: the suite must stay runnable with a bare interpreter and no
+installed dependencies, because a broken review workflow has to be diagnosable before an
+environment is provisioned. Its content is L1 in kind. Behaviour-changing edits to the tier
+order carry a before/after table over the full cross product of statuses and body fixtures —
+incoherent pairs included, since a gateway's status need not match a passed-through upstream
+body — and `StatusMatrixTests` is the pattern to copy.
+
+### 8.6 What the CI environment already supplies
+
+Recorded because this document spent its first draft reasoning about these resources as things
+CI might one day be given. It has had all of them since the automated reviewer landed.
+`.github/workflows/claude-code-review.yml` runs a real Claude Code through a released Kitty
+Bridge on every same-repository pull request, which means the runner is already provisioned
+with a complete kitty installation — and that is the single most consequential fact about what
+this suite can afford to test.
+
+| Capability | Artifact | Binding |
+|---|---|---|
+| Claude Code CLI, version-pinned | `.github/workflows/claude-code-review.yml` | `bash -s -- 2.1.238` |
+| Kitty profiles — a balancing pool by default | `.github/workflows/claude-code-review.yml` | `vars.KITTY_PROFILES_JSON` |
+| Kitty credentials | `.github/workflows/claude-code-review.yml` | `secrets.KITTY_CREDENTIALS_JSON` |
+| Kitty egress gateway | `.github/workflows/claude-code-review.yml` | `secrets.KITTY_EGRESS_JSON` |
+| Kitty bridge debug log | `.github/review/scripts/configure_kitty.py` | `kitty-bridge-debug.log` |
+| Kitty launch stderr — a disjoint window | `.github/review/scripts/configure_kitty.py` | `kitty-bridge-stderr.log` |
+
+`configure_kitty.py` materialises the three kitty documents at the paths kitty itself reads,
+and generates the launcher that puts `kitty` in front of `claude`.
+
+**A second consumer binds the same three settings:** `.github/workflows/tmux-disconnect.yml`
+runs the pull request's own kitty against them for the live `--tmux` test (`SYSTEM_DESIGN.md`
+§3.4), with the same Claude Code pin. The rows above keep naming the review workflow because a
+duplicate row per consumer could be deleted with every arm green. Every job binding a `KITTY_*`
+capability, in any workflow, must refuse a fork's pull request; `kitty_job_fork_discrepancies`
+holds that.
+
+**The profile is a balancing pool, and that changes what an assertion may say.** The workflow
+derives the consequence three times over: *"the profile is a four-member balancing pool"*, so
+*"no single name here could be true of the run"*. A `agent_live` or `eval` assertion may
+therefore not name a model — it may assert membership, or a property every member has, and
+nothing else. This is the half of the capability that is easiest to plan around wrongly.
+
+**Both logs exist, and neither may leave the runner.** They cover disjoint windows:
+`--debug-file` records everything after the bridge is up, and the stderr redirect catches the
+launch failures kitty prints nowhere else — an egress refusal, a credential that will not
+resolve — which reach `claude-code-action` as an empty execution record. Between them they are
+the only evidence a failed run leaves. Two properties a test job must inherit rather than
+rediscover:
+
+- 🔴 **The debug log carries kitty's inbound request bodies — the bridge token and the entire
+  prompt. It must never be uploaded as an artifact.** The obvious way to use a debug log in a
+  smoke or e2e job is `actions/upload-artifact`, and that is the one thing it may not do. The
+  review workflow keeps the log on the runner and uploads a filtered timeline instead.
+- The logs are **per-runner, not per-run** — *on a persistent runner*. The workflow purges stale
+  copies before launching, so at most one failed run's evidence is ever on a machine. The review
+  job runs on `ubuntu-latest`, which is destroyed after the job, so the purge is a no-op there and
+  is kept for the half of the invariant that survives a move back to a self-hosted fleet. A job
+  that expects to find its own log by name, unqualified, is reading someone else's the moment the
+  runner persists.
+
+**Two limits, stated because a job planned without them will be wrong.**
+
+**The CLI pin is a manual pairing, not a mechanism.** `anthropics/claude-code-action` is
+referenced at a floating `@v1` tag and the literal above is kept equal to the version that
+action pins internally, by hand, as one change when the action bumps. Nothing fails when they
+diverge. `tests/test_ci_capability_inventory.py` holds this table to the workflow, which catches
+the table going stale but cannot catch the action moving underneath both. Two more facts that
+will surprise whoever writes the startup smoke: the wrapper passes `--no-validate`, because in
+CI the run itself is the validation; and `~/.local/bin/claude` is deliberately **not** on `PATH`
+— kitty's own fallback chain is the rung that finds it, so a job that assumes a plain `PATH`
+lookup will not find a CLI that is present.
+
+**A fork pull request does not get the secrets, and the profile variable is unmeasured.** Stated
+split because only one half is established. GitHub documents that *"with the exception of
+`GITHUB_TOKEN`, secrets are not passed to the runner when a workflow is triggered from a forked
+repository"*, which covers the credential and egress stores. It documents **nothing** about
+configuration variables, so whether `vars.KITTY_PROFILES_JSON` reaches a fork run is **unknown
+here and was not measured**; no gating decision may assume either answer. Independently of both,
+this workflow's job does not start on a fork at all, guarded by
+`github.event.pull_request.head.repo.full_name == github.repository` — and the documented wrong
+way to "fix" a skipped fork run is `pull_request_target`, which runs the fork's pull request in
+the base branch's context *with* secrets. A new workflow inherits none of that guard and has to
+write its own.
+
+That asymmetry divides the L4 jobs, and the division is why the §8 cadence table reads as it
+does:
+
+| Job | Needs | Consequence |
+|---|---|---|
+| `agent_smoke` (hermetic, §6.4.2) | the pinned CLI only — no credentials, no variables, no network, no provider | The installer is a public download, so the fork question does not arise. A per-PR gate stays viable. |
+| `agent_live`, `eval` | the kitty credential store, and a provider that bills | Withheld from a fork run by GitHub's own rule. Nightly on `schedule`, where the fork case does not arise — which is where §8 already puts them, now for a stated reason rather than by cadence preference. |
+
+**The pinned CLI is an environment prerequisite of the Acceptance job, not something a test may
+probe for** — §8's `openssl` reasoning applies unchanged, and this is the shape that makes a
+per-PR `agent_smoke` gate compatible with "skips are failures in a gating job". The CLI arrives
+by a live download from a third party on every run, so the *install step* owns the retry ladder
+and the job must fail when it cannot install. That is **prescriptive for a future `agent_smoke`
+job, not a description of the review workflow**, whose install step carries `continue-on-error:
+true` on purpose: there an install failure composes into the review path and is classified, which
+is the right answer for a job whose output is a review and the wrong one for a gate. One non-obvious reason that ladder is shaped as it is,
+worth carrying into any job that copies it: without `set -o pipefail` inside the `bash -c`, a
+curl 429 or 403 feeds `bash -s` empty stdin, which exits 0 — the retry loop then breaks on the
+first attempt with **no CLI installed** and the transient download error reaches the classifier
+as a fatal.
+
+**What this unlocks that was not previously plannable.** The balancing pool means the nightly
+`agent_live` job can exercise member selection and failover against real providers, which §4.3
+C3's cross-attempt row otherwise proves only against recorded upstreams. The egress secret means
+the same job can assert I3 containment end to end, through a real gateway, rather than only
+through the local CONNECT proxy of §5.2. Neither is specified here; both are named so that T-K11
+and T-I14 inherit them.
+
+**Five directions, because fewer would not have caught this.**
+`tests/test_ci_capability_inventory.py` checks forward, so the document cannot promise a
+capability CI does not have; reverse, so a capability cannot be added to CI and left out of the
+design; the version pin, both ways, because that pairing is maintained by hand; the logs the
+generated launcher writes, because the two log rows bind neither a secret nor a version and a
+review round found that both could be deleted from the table with every other arm green; and the
+fork guard itself, whose removal changes no binding and would leave the paragraph above false.
+Every row is covered by at least one *reverse* direction — that is the property, not the count.
+A forward-only check would have gone green through the entire period this section describes —
+the table would simply have been absent, which is what it was.
+
+**One case is read rather than scanned, and the reason generalises.** The launcher's two log rows
+are checked against the text `configure_kitty.py` *generates*, not against its source: the module
+discusses `--debug-file` and both log names at length in its own docstring and comments, so a
+substring scan over the file is satisfied by the prose after the launcher stops emitting either
+flag — measured, in the same review round. It is the trap the fork arm was already built to avoid
+by reading the parsed `on:` block instead of a file whose comments argue about
+`pull_request_target`. When a matcher reads text the change under test does not control, scope it
+by what the artifact *declares*.
+
+---
+
+## 9. Gap register
+
+### 9.1 What the current suite already does well
+
+2,880 test functions across 139 Python files under `tests/`; ~50,700 lines of test to ~22,700
+lines of source. Broad L1 coverage of translators, providers, profiles, credentials and the TUI.
+Three assets stand out and are built on rather than replaced:
+
+- `tests/test_egress_https_proxy.py` — real TLS handshakes through a local recording CONNECT
+  proxy, across all three transport stacks. The strongest existing proof of anything in this
+  document. Since T-W5 the proxy, the target and the certificates are shared from
+  `tests/harness/connect_proxy.py`; the tests stayed here.
+- `tests/test_egress_coverage.py` — AST/regex structural guard over `src/` that also asserts its
+  own scan finds known positives, so it cannot rot into a no-op.
+- `tests/test_github_actions.py` — treats the workflow definitions as testable artifacts.
+
+Four Python versions in CI, with `mypy` and `import-linter` as gates rather than reports.
+
+### 9.2 What is missing
+
+**Status convention.** A closed gap keeps its row — the reasoning is still worth reading — with
+**CLOSED** in the *Gap* column, *Today* in the past tense, and Priority `—`, so a scan by priority
+does not surface work that is done. `TEST_SUITE_IMPLEMENTATION_PLAN.md` §16 mirrors it.
+
+| ID | Gap | Today | Target | Priority |
+|---|---|---|---|---|
+| ~~**G14**~~ | ~~**F3 — the vendor name goes upstream in the body (M13)** — KBR-5~~ | **CLOSED 2026-09-07** | Post-condition raises; handlers render a downstream 400; defect-scoped source-literal guard (`tests/bridge/test_vendor_token_guard.py`) stands in until T-G5 | — |
+| **G15** | **F4 — `_effort` / `_thinking_adaptive` reach the wire** — KBR-6 | Live I1+I2 breach on every CC-wire provider | Add both to `_INTERNAL_KEYS`; internal-key completeness guard (§6.2.3); regression test at `BridgeServer._upstream_body_for`. Residual: `openai_subscription` alone builds its body independently of that boundary (allowlisted, hence never leaked); `bedrock` and `ollama_cloud` call `translate_to_upstream` inside their transports, so the assertion reaches their wire. Carried by T-G2 over T-D4–T-D9's captures | **0** |
+| **G16** | **F5 — `OpenCodeGoAdapter` misdeclared its wire shape** — KBR-7 · **CLOSED** | Was a latent defect in the M8 path and a trap for the oracle | Done: the declaration is per-model, both repair sites branch on it, and the **hook-level** honesty guard landed with the fix. The **wire-level** guard remains T-G4 / KBR-80 | — |
+| **G24** | **No staleness alarm on the provider endpoint snapshot** | KBR-126 checked in `tests/data/opencode_go_endpoints.json` as the routing oracle. Nothing detects that the provider has since changed its table: §8's determinism rules exclude both mechanisms that could — a networked check and a clock. Refreshing it is a human act | Accepted trade-off, recorded rather than fixed: a networked alarm makes CI depend on a third party's uptime and turns green into a statement about today's weather. Revisit only if the provider publishes a machine-readable endpoint table — today's `/v1/models` carries ids only, no endpoints, and still lists retired aliases | **3** |
+| **G26** | **P13's CC-origin twin — the Codex body builder drops 16 non-sampling control fields, unregistered** — KBR-184 | Found while closing KBR-171, which closed the identical defect on the Responses-origin path with P23. `_cc_to_responses` carries `model`, `messages`→`input`, `stream`, `store`, `tools`, `tool_choice`, `parallel_tool_calls` and an injected `reasoning`; against `CreateChatCompletionRequest`'s 37 published fields that leaves **16** which are neither carried nor sampling — `metadata`, `user`, `service_tier` and the agent's own `reasoning_effort` among them. *(Seventeen until KBR-214, which began carrying `parallel_tool_calls` once the Messages ingress started producing it; the Codex allowlist accepts it and the Responses-origin builder already forwarded it.)* P13 is anchored at the bare `conversation.sampling` and reaches none of them, so T-D5 reports a false I1 breach on the CC-origin route exactly as it would have on the Responses-origin one | Row **P24**, enumerating one `envelope.extra[<wire key>]` per dropped control field, with the derivation guard P23 carries. **Blocked on T-A2 (KBR-34)**: the enumeration is the Chat Completions reader's control-field table minus what the builder carries, and that table does not exist yet — authoring it now is the guesswork §3.2.4 refuses for `scope`. **Before T-D5** | **1** |
+| ~~**G27**~~ | ~~**An allowlisted Codex control field is dropped when its value is falsy, unregistered** — KBR-185~~ · **CLOSED 2026-09-14** | Was: found by the design review of KBR-171 and confirmed by running the builder. `_ALLOWED_RESPONSES_PARAMS` is read only by `_prepare_responses_body`'s DEBUG log; the shipped body is an explicit `if` chain and six of its branches test **truthiness** (only `parallel_tool_calls` tests presence), so `include: []` and `reasoning: {}` are permitted by the allowlist and dropped anyway. The reader projects by presence, so each is an unclaimed `envelope.extra[...]` delta. P23 excludes both by construction (they are inside the allowlist), P14 reaches no `extra` path, and P22 (KBR-149) is conditional on `REASONING_EFFORT_PRESENT`, which this case does not meet | Done: row **P25** — trigger `ALLOWLISTED_FIELD_IS_FALSY`, conditional, anchored at `envelope.extra[include]` and `envelope.extra[reasoning]`, on `_prepare_responses_body`. Owner decision 2026-09-14 (KBR-185): register the drop, do not change the adapter — `include: []` and `reasoning: {}` carry no instruction, the allowlist permits them, the truthiness branches drop them, and the defect was that the drop was undocumented. `tool_choice` is truthiness-gated on the same chain and is an `envelope.extra` key, but its falsy form is not a legal `CreateResponse` value, so that branch is unreachable today — recorded in P25's Notes so no future reader re-derives it. P22's interaction: the two triggers are predicates on different request fields and can co-occur (falsy `reasoning` beside a non-`none` effort); in that state the `elif` injects and P22's injection claims the address, so the rows' claims on `envelope.extra[reasoning]` do not overlap. The corpus trigger case and the §3.3.2 assertion-2 complement arrive with the T-C entries, as for P22 | — |
+| **G28** | **`top_k` is dropped on every non-Anthropic-family route, unregistered** — KBR-178 | Found by the design review of KBR-178. Chat Completions declares no `top_k` (`CreateChatCompletionRequest` has zero occurrences), so KBR-178 carries the agent's value on the internal key `_top_k` and only `AnthropicAdapter` and its four delegates restore it — **five** registry entries, `opencode_go` only on its Messages-routed models. The other **eighteen** routes therefore drop it **by design and permanently** — including `ollama_cloud`, which is the one adapter that accepts `options.top_k` and is now guaranteed never to receive it, and `bedrock`, whose Converse `InferenceConfiguration` has no `topK` member at all. `reader_anthropic_messages.py:84` projects the field and `Conversation` enforces it as one of the closed fifteen `SAMPLING_KEYS`, and no register row claims `conversation.sampling[top_k]` outside `openai_subscription` (P13/P14 reach it there via the bare `CONVERSATION_SAMPLING` anchor). So the moment T-D5 drives a corpus entry carrying a `top_k`, the oracle reports a **false** I1 breach on a deliberate drop — the under-claiming direction §3.3.1a calls unrecoverable, and structurally the same defect as G26 and G27 | Either widen the restore to every destination that accepts the field, or add a bridge-level row anchored at `conversation.sampling[top_k]`. **Unconditional** in P13's sense — it fires wherever the field is present, so it owes no §3.3.2 assertion-2 complement, which is what separates it from G29. **Deferred deliberately, not overlooked:** KBR-178 chose the internal-key route on the product owner's decision. The row itself waits on T-D5 for its trigger case, as G26 and G27 do. Recording the residue here is what stops the trade-off being mistaken for an accident. **Before T-D5** | **1** |
+| **G29** | **An empty inbound `stop_sequences` is omitted rather than forwarded, unregistered** — KBR-178 | Found by the design review of KBR-178 and confirmed by running the reader. D6 omits an empty `stop_sequences` instead of forwarding it, because `StopConfiguration` in `openai/openai-openapi` declares **`minItems: 1`** — so `stop: []` is a schema-invalid Chat Completions body, and forwarding it would put one on the wire of the **sixteen** adapters that deliver a top-level `stop`. **The omission is correct and must not be "fixed" by forwarding `[]`.** But it is still an unclaimed delta: `reader_anthropic_messages.py:193-195` projects sampling **by presence with no emptiness guard** and `contract.py:1063` validates sampling **keys only**, so an inbound `stop_sequences: []` projects as `conversation.sampling[stop] = []` while the upstream projection has none. Measured: `_project({... 'stop_sequences': []})` yields `{'max_tokens': 8, 'stop': []}`. Claimed only by P13/P14's bare `CONVERSATION_SAMPLING` on `openai_subscription`; unclaimed on the other twenty-two routes, so §3.3.2 assertion 1 reports a **false** I1 breach on a deliberate, correct omission | A row of its own, and **conditional** — unlike G28 this depends on the *value*, not the route, so per G27's precedent it also owes §3.3.2 assertion 2 a **complement**: a corpus entry with a non-empty `stop_sequences` in which the omission is provably absent. Trigger `EMPTY_STOP_SEQUENCES`. Deferred with G28 and G30, for the reason G26/G27 are: the trigger case and the assertion-2 complement both need the T-D5 corpus. **Before T-D5** | **1** |
+| **G30** | **The Chat Completions string-form `stop` is rewritten into a list, unregistered** — KBR-178 | Found by the code review of KBR-178. `StopConfiguration` declares `stop` as `oneOf` a string or an array, so `"END"` and `["END"]` are the same request; every wire kitty writes downstream takes only the array form. `server._normalize_cc_stop`, called from `_handle_chat_completions` before the body forks, wraps a non-empty string. That is a real rewrite of the agent's bytes at the §3.2.3 boundary, and **no register row claims it** — the same class as G22/G23/G26-G29 | Row **M17**, modelled exactly on **M15**, which is this same decision already taken for the Responses `input` field: `site=("server._normalize_cc_stop",)`, trigger always, `paths=(NOT_PROJECTABLE,)`, **unconditional** — an array-form body meets the row as a no-op, so there is no complement state for §3.3.2 assertion 2 — and `NOT_PROJECTABLE` for P16's reason: both forms project to one `Conversation`, and a projection that told them apart would be reading a vendor's spelling into a wire-independent form. **This binds the future Chat Completions reader (T-A2 / KBR-34) to read `stop: "END"` and `stop: ["END"]` into the identical `Request`; if it ever does not, this row needs a projectable anchor instead.** Without that clause the escape is void, which is the failure M15's own text warns about. Deferred for the reason G26 and G27 are: a register row needs its trigger case and, when conditional, its §3.3.2 assertion-2 complement, and the corpus that supplies both arrives with T-D5. *(An earlier draft gave the reason as "`register.py` is held by a concurrent session"; KBR-167 merged as PR #87 mid-task, so that reason is void — and it was a scheduling reason masquerading as a design one, which the design review said at the time.)* **Before T-D5** | **1** |
+| **G31** | **An agent's `metadata` is dropped off the Anthropic family, unregistered** — KBR-214 | KBR-214 carries the Anthropic `metadata` (Claude Code sends `metadata.user_id` on every request) on the internal key `_metadata`, which only `AnthropicAdapter` and its four delegates restore — the same five registry entries as G28, measured. So **seventeen** routes drop it by design and permanently, plus `openai_subscription`, whose drop G26 (KBR-184) already lists. `reader_anthropic_messages.py` projects it to `envelope.extra[metadata]` and no row claims that address, so T-D5 reports a **false** I1 breach — G28's shape. **Deliberate, on the product owner's decision (2026-09-13):** Chat Completions' own `metadata` is a 16-pair string map for stored completions, and its abuse field is `safety_identifier`; a bare mapping would put a new field on every request to sixteen third-party providers, and a strict one would reject every turn. ⚠️ Because §3.3.1b keys `extra` by wire key, the future Chat Completions reader (T-A2 / KBR-34) will land CC's `metadata` at **the same address** with a different meaning — a row or a comparison there must not treat a user-id object and a tag map as one field | A bridge-level row anchored at `envelope.extra[metadata]`, **unconditional** in P13's sense (route, not value), so no §3.3.2 assertion-2 complement. Deferred with G28–G30 for their reason: the row waits on T-D5 for its trigger case. **Before T-D5** | **1** |
+| **G32** | **Tool-selection fields are dropped where the destination wire has no field for them, unregistered** — KBR-214 | Ollama `/api/chat` defines neither a tool choice nor a parallel-tool-use knob (`ollama/ollama` `docs/api.md`), so `OllamaCloudAdapter` writes neither; Bedrock Converse's `ToolConfiguration` has no parallel knob (botocore `bedrock-runtime` 2023-09-30), so `BedrockAdapter` does not write one. Each is an unclaimed `envelope.extra[tool_choice]` or parallel-knob delta on its route. Not a defect in the adapters — nothing on those wires can carry the field | Rows per route, **unconditional** (route). The parallel-knob half cannot be anchored until **G36** gives the knob an address. **Before T-D5** | **2** |
+| **G33** | **Bedrock writes `toolChoice: {"auto": {}}` whenever the Chat Completions body forces nothing, unregistered** — KBR-214 | `BedrockAdapter.translate_to_upstream` has always written `auto` whenever tools are present; KBR-214 maps only `required` and the named form onto `any` and `tool`. Converse's `ToolChoice` union has no `none`, and dropping `toolConfig` to honour it is unavailable once the transcript holds `toolUse`/`toolResult` blocks (*"The toolConfig field must be defined when using toolUse and toolResult content blocks"*) — conditional on history, which KBR-214 rejected as a new conditional mutation. Pre-existing; **recorded now** because the Converse reader (T-A5) maps `toolConfig.toolChoice` onto `envelope.extra[tool_choice]` (§3.3.1b) and P11 is `NOT_PROJECTABLE`, so nearly every Bedrock request with tools shows it | A row anchored at `envelope.extra[tool_choice]`, **conditional** on the value: trigger "tools present and the Chat Completions body carries no `required` or named choice" — which covers an absent choice, `none`, and the choices **G35** omits upstream of this adapter; its §3.3.2 assertion-2 complement is a `required` choice or a named choice to an ordinary tool, which the adapter must carry as `any` or `tool`. G33 and G35 share the address and overlap on `bedrock`, where a G35 omission is *rewritten to `auto`* rather than merely dropped; both rows are conditional, so the two rows cannot disagree about whether the address owes a complement. **Before T-D5** | **2** |
+| **G34** | **`disable_parallel_tool_use: false` is omitted rather than forwarded, unregistered** — KBR-214 | KBR-214 maps the flag only when `true`, onto `parallel_tool_calls: false`, on the product owner's decision: `false` is Anthropic's documented default and `true` is `ParallelToolCalls`' default, so the two spellings are one request on both wires, and writing it would add a second field some providers reject. The Anthropic reader can nonetheless tell them apart, so an explicit `false` is a delta — **the omission is correct and must not be "fixed" by forwarding it**, G29's exact shape | A row of its own, **conditional** on the value, owing a complement in which the flag is `true` and carried. The address **exists as of KBR-205** (`envelope.extra[parallel_tool_calls]`, §3.3.1b); the row itself is still T-D5's to author. **Before T-D5** | **2** |
+| **G35** | **A legal inbound `tool_choice` is omitted in two cases, unregistered** — KBR-214 | KBR-214 carries the agent's choice except where carrying it would **create** a failure the agent did not cause: (1) a choice over no tools — legal on Anthropic, and *"'tool_choice' is only allowed when 'tools' are specified"* on OpenAI; (2) a forced call to an **Anthropic-defined** tool, meaning a declaration whose `type` is neither absent, `null` nor `"custom"` — Claude Code's WebSearch forces `web_search`, declared `type: "web_search_20250305"`, which the translator flattens into a schema-less function nothing on the route can execute (anthropics/claude-code#56984; omitted on the product owner's decision, 2026-09-13). A forced call to an **undeclared** tool is *not* omitted: it is the agent's mistake and the provider's error names it. Each case projects as `envelope.extra[tool_choice]` inbound and nothing upstream — or `auto` on `bedrock`, which is **G33**. `{"type": "any"}` over only Anthropic-defined tools is carried: nothing shows an agent sending it, and guarding it would mean reasoning about the whole tool list rather than one name | A row anchored at `envelope.extra[tool_choice]`, **conditional** on the value, with a complement per case: a choice beside tools, and forcing an untyped tool. **The Anthropic reader carries a tool's `type` as of KBR-205** (`ToolDecl.type`, §3.3.1a) — the blocker this row named is gone, and case (2)'s trigger is now authorable from a corpus entry. Case (2) is also where a future capability — running server tools on a translated route — would remove the row rather than widen it. **Before T-D5** | **1** |
+| ~~**G36**~~ | ~~**The parallel-tool-use knob has no canonical address, so the oracle fails the run on it** — KBR-214~~ · **harness, not product** · **CLOSED 2026-09-14** | Was: found by the design review of KBR-214. `reader_anthropic_messages._read_tool_choice` sent `disable_parallel_tool_use` to the residual (pinned by its own test), and a non-empty residual fails the run before register matching — so every Messages body carrying the flag failed, whatever the product did. Fixing the reader alone was not enough: §3.3.1b unified `tool_choice` across four wire keys *"because four spellings name one concept"* and said nothing about the knob, so Anthropic's nested, inverted flag and Chat Completions' top-level `parallel_tool_calls` would have landed at two addresses with two polarities, and every route that carried the flag **correctly** would have shown a false delta. Excluded from §3.2.5's count, which is about mutations the product performs | Done: **§3.3.1b** gives the knob one address and one polarity — `envelope.extra["parallel_tool_calls"]`, the Chat Completions spelling and polarity (`true` parallel allowed, `false` parallel not allowed) — and the reader writes the entry only when the wire carries a non-default value, mirroring KBR-214's forwarding rule. The Anthropic reader maps `disable_parallel_tool_use: true` onto `parallel_tool_calls = False`; the Chat Completions reader (T-A2) reads `parallel_tool_calls` directly. `test_disable_parallel_tool_use_is_not_part_of_the_canonical_value` is inverted to assert the new mapping at the same path it used to pin as residual | — |
+| ~~**G37**~~ | ~~**The Anthropic adapter family drops a Chat Completions request's cache breakpoints everywhere except user and tool content, unregistered** — KBR-199~~ · **CLOSED 2026-09-14** | Was: found while implementing KBR-199. `_handle_chat_completions` handed the body to `translate_to_upstream` without translating it, and a `cache_control` was then **dropped** at the top level, on a system content part and on a tool declaration (a system content part is one of OpenRouter's defined content parts; the top level and the tool declaration are the other two sites its Chat Completions dialect defines), and on a message object and a tool call (two sites no published dialect defines), and **kept** on a user content part and on tool-message content (moved inside the `tool_result`). Measured identical on `anthropic`, `minimax_token`, `zai_coding` and `custom_anthropic` (the last two are native only for Messages bodies). OpenAI's own spelling, `prompt_cache_breakpoint`, was not ignored: the same family forwarded it verbatim on user and tool content, onto an Anthropic wire whose schema does not define it, and dropped it elsewhere. No register row claimed any of it, and the oracle could not see it yet: no Chat Completions reader filled the `cache_control` slot (§3.3.1), so such a body residualised and failed the run first | Done: **§3.3.1b** (KBR-205 closing G36) gives the parallel knob one address and one polarity; **T-A2 (KBR-34)** (closing G37) fills the `cache_control` slot from **both** spellings, verbatim — ``cache_control`` and ``prompt_cache_breakpoint`` both project onto ``Part.cache_control`` (and ``ToolDecl.cache_control``) as the wire carries them, the value shape travels because the slot is ``Mapping[str, Any] | None``, and §3.3.1's "carried whole, not reduced" rule applies to a spelling with no TTL the same way it applies to one with. The reader's `_CACHE_KEYS` constant pins both spellings in one place; `test_reader_chat_completions.TestCacheBreakpoints` asserts both verbatim, the OpenAI `mode: "explicit"` shape on the Anthropic `cache_control` slot, and the residual-on-wrong-type case. The `cache_control` spelling is OpenRouter's CC dialect (Anthropic's own field); `prompt_cache_breakpoint` is OpenAI's GPT-5.6+ spelling with a request-wide TTL (`prompt_cache_options.ttl`, `30m` only). The dropped sites the row was owed — top level, message object, tool call — remain dropped in the adapter, and the register rows that name them are still owed to M16's twin | **2** |
+| **G38** | **A top-level `cache_control` is dropped on every translated route, and M16 disclaims it** — KBR-199 | Found by the design review of KBR-199. Anthropic's automatic-caching form projects to `envelope.extra[cache_control]` (§3.3.1). `MessagesTranslator.translate_request` never copies it, so on every route that is not native passthrough the upstream projection has no such key. M16's paths name the system, part and tool carriers only and its text calls the top-level form "not this row's"; M2 is `NOT_PROJECTABLE`; no row anchors on that `extra` key. So a body using automatic caching yields an unclaimed delta on every translated route — §3.3.1a's under-claiming direction, a false I1 breach. The loss itself costs the user the same as M16's | Add `envelope.extra[cache_control]` to M16's paths (same site, same trigger) or give it its own row — either way one change with `register.py`. **Before T-D1 (KBR-51) drives a body with a top-level `cache_control`** | **1** |
+| ~~**G39**~~ | ~~**The translated Messages stream opens every parallel `tool_use` at block index 0** — KBR-226~~ · **CLOSED 2026-09-14** | Was: the tool-call branch of `MessagesTranslator.translate_stream_chunk` recorded `block_index: self._content_block_index` and emitted `content_block_start` at it but never advanced the counter, while the text and thinking branches advance theirs when they close. Two parallel tool calls therefore opened at index 0, both calls' argument deltas landed under index 0, and the finish path closed index 0 twice — every event valid on its own, the sequence not a sentence in the §6.2.2 grammar. Found by KBR-183's design review, confirmed by running the translator | Done: the counter advances when a tool block opens — the same address the text and thinking branches already use — so each call gets a distinct increasing index and a following text block opens the next free one; the finish path, `finalize_interrupted_stream` and `close_open_blocks` close by the recorded `meta["block_index"]`, so one stop per index follows without further change. **Decided stream shape:** blocks opened by parallel calls may overlap and close out of order — clients key blocks by index, and closing a tool block early would risk a delta after its stop — but each index opens once, closes once after its start, and carries no delta outside its window; the overlap itself is not new (pre-fix text-after-tools overlapped at the *colliding* index). **Scope-out:** a repeated id-chunk for an already-open Chat Completions tool-call index re-enters the open branch and stays malformed, as before this fix. **Advancing on open cannot flip the empty-stream fallbacks:** a tool-open always creates its `ToolCallBuffer`, so `had_any_content` already holds via the buffers term. Sibling check (the ticket's DoD item 3): Gemini is clean — positional `parts[]`, no index in its grammar; Responses has the same class through a different mechanism (no shared counter; text pinned to `output_index: 0`), filed as **KBR-240**. Regression tests: `tests/bridge/test_messages_translator.py::TestParallelToolCallBlockIndices`, `tests/bridge/test_parallel_tool_use_stream.py`. Red at base, evidence in the PR | — |
+| ~~**G40**~~ | ~~**The translated Responses stream has no output-item counter, so text and the first function call claim one `output_index` slot** — KBR-240~~ · **CLOSED 2026-09-14** | Was: `ResponsesTranslator` pinned the reasoning and text items to `output_index: 0` at every event site and took a function call item's `output_index` raw from the Chat Completions `tool_calls[].index` — also `0` for the first call — so a stream carrying text and then a tool call, the common Codex shape, announced two items at slot 0 and both `output_item.done` events closed slot 0; reasoning vs text collided the same way. Every event valid on its own, the sequence not a sentence in the §6.2.2 grammar. Found by KBR-226's sibling check (its DoD item 3), confirmed by running the translator | Done: one shared output-item counter — each newly opened item (reasoning, text message, function call) allocates the next `output_index`, and every event referencing the item carries its recorded index on the chunk path, `_build_finish_events` and `synthesize_completed_events` alike; the CC `tool_calls[].index` remains a routing key only. The ticket's DoD audit of the close paths (its "audit the finish path and finalize/reset" item) then found `synthesize_completed_events` — the EOF-without-finish path timeouts and dropped connections reach — closing neither the reasoning item nor a text item whose text stripped to nothing: both close there now, at their recorded index, and **every opened item appears in `response.completed`'s `output`, so array position equals `output_index` throughout** (a text item whose content was all thinking tags closes with empty text and stays in the array — its done event already did). `response.function_call_arguments.delta/done` now carry the owning call's `output_index` — the vendor grammar defines the field as required (OpenAI SDK generated types, verified 2026-09-14); kitty omitted it. **Decided stream shape:** G39's — items may overlap and close out of order, but each index opens once, closes once after its start, and carries no delta outside its window. **Scope-out:** the non-streaming `translate_response` needs no allocation — the Responses body's `output` array is positional and carries no per-item index field; a repeated id-chunk for an already-open Chat Completions index re-enters the open branch and stays malformed, G39's scope-out shared. **Cannot flip the empty-stream fallbacks:** allocation happens where the buffers are created, and `response_was_empty` reads accumulated text, reasoning and the buffers — not indices (the synthesize path's own `was_empty` reads text and buffers only; unchanged either way). The design review caught the first draft under-testing the text *part/delta/done* event indices at non-zero slots — a mutant pinning those sites to 0 survived the first suite; the mixed-stream test now pins every text-addressed event to slot 1 and kills it. Regression tests: `tests/bridge/test_responses_translator.py::TestOutputItemIndices` (10 tests), `tests/bridge/test_responses_output_index_stream.py`. Red at base, evidence in the PR | — |
+| ~~**G41**~~ | ~~**The translated Responses stream never opens with `response.created` — the server buffers the lifecycle start and never writes it** — KBR-242~~ · **CLOSED 2026-09-14** | Was: `BridgeServer._stream_responses` built `translate_stream_start`'s two events and never wrote them — the only references were the assignment and a `logger.debug` loop — so every translated `/v1/responses` stream began at `response.output_item.added`, mid-sentence. The buffering comment stated an intent (protect the client from a half-open lifecycle across an empty-response failover) the write side never implemented. Found by KBR-240's server-level walk, which had to weaken its "complete sentence" assertion to match the wire | Done: the owner picked the failover-clean shape. The lifecycle is translated **speculatively at the start of each attempt** — before any `translate_stream_chunk`, because both draw from the same `_seq` counter and a write-time call would put `sequence_number` 3 and 4 on the wire ahead of the chunk's 0, 1, 2 — and **written lazily** on the first real non-finish event, with the strings invalidated at every `translator.reset()` inside the loop (the in-stream-error failover and the empty-response ladder). A purely-empty attempt publishes nothing, so no half-open lifecycle crosses the failover and KBR-247's `events_emitted` model is preserved; the exhausted-ladder fallback stays an empty 200 (probed: zero bytes); the error paths — cloudflare, upstream 5xx, timeout, in-stream terminal — never open the lifecycle. Regression tests: `tests/bridge/test_responses_output_index_stream.py` (the walk now asserts the opening and exact `0..len-1` sequence numbers) and `tests/bridge/test_responses_stream_lifecycle.py` (empty-failover opening-once + the R4 negative controls). Decided shape recorded as **S7** in `.system_design/SYSTEM_DESIGN.md` §5.3 | — |
+| **G42** | **User images and documents on the routes that still drop them, unregistered** — KBR-222 | KBR-222 carries an agent's `image` blocks as CC `image_url` parts and `document` blocks on the `_documents` internal key. `AnthropicAdapter` and its delegates restore both (the tool run and its trailing user message re-join into one user message there, the shape Anthropic's docs prescribe); the OpenAI-family verbatim forwarders ship `image_url` parts natively. The remaining routes keep a deliberate drop no row claims: `ollama_cloud`'s `_flatten_content` and `bedrock`'s user-branch flatten keep only the text (`bedrock`'s flatten exists because forwarding the parts list would newly fail boto3 validation on every Messages-route image turn — KBR-223 owns real Converse handling), and `openai_subscription`'s `_cc_to_responses` flattens a parts list to its text, an image-only list yielding no input item at all. M5's pruning forfeit is recorded in that row. `reader_anthropic_messages` and `reader_responses` already project images on their wires, so the moment the corpus carries one (KBR-45's), the oracle reports a **real** I1 breach on each route in this list — a true positive that is still unclaimed | One row per route's flatten/drop, or claim them in M2's prose per destination as KBR-223 and KBR-45 land. **Before T-D5 drives a corpus entry carrying an image or document** | **1** |
+| ~~**G23**~~ | ~~**`openai_subscription` injects `reasoning` from `_reasoning_effort`, unregistered** — KBR-149~~ · **CLOSED 2026-09-14** | Was: four sites in `providers/openai_subscription.py` set `reasoning: {"effort": …}` from kitty's internal key. The gap walk had counted three and missed `_cc_to_responses`, the CC-origin builder P13 names, which injects from the same key and predates the ticket. Structurally identical to P3 and P4, and **P4 cannot cover it**: §3.2.3 records that `translate_to_upstream` never runs on this adapter's request path. Unlike G22 this is a **request-body** row feeding §3.3.2 assertion 1, so the moment T-D5 drives a corpus entry carrying a reasoning effort the oracle reports a *false* I1 breach on a deliberate mutation — the under-claiming direction §3.3.1a calls unrecoverable | Done: row **P22** — trigger `REASONING_EFFORT_PRESENT`, conditional, anchored at `envelope.extra[reasoning]`, naming all four sites. At effort `"none"` the trigger is met-but-inert (the P5c precedent), so the §3.3.2 assertion-2 complement needs a corpus entry carrying an effort, not a `"none"` one; the Responses-origin half waits on T-A3 projecting the effort signal, which the CC-origin half's reader already has. The corpus trigger case and complement arrive with the T-C entries, as for P3 and P4 | — |
+| **G22** | **Register header coverage was partial and inconsistent** — KBR-148 · **CLOSED** | Was: rows for four adapters (P9a ×3, P9b, P9c) while six more deviated from the base header set with none. **Closed 2026-09-14** as five rows, P9d–P9h. The closing survey corrected the gap's own lumping: `ZaiAnthropicAdapter` keeps `Authorization: Bearer` — its deviation is `anthropic-version` plus the lowercase `content-type` re-spell (P9f), not the `x-api-key` scheme change (P9e) this survey first attributed to it — because a row's paths must be true of every site it names. `opencode_go` reaches P9e's set only on its Messages models, by delegation rather than inheritance; `OllamaCloudAdapter` keeps Bearer and takes no row | Done: **P9d** (conditional `ChatGPT-Account-Id`; its assertion-2 complement is a claimless-`id_token` corpus entry, L1-pinned at `tests/providers/test_openai_subscription.py`, the fixture owed to T-D5), **P9e** (the Anthropic-family auth scheme), **P9f** (`zai_coding`), **P9g** (Azure's non-Entra `api-key`), **P9h** (Ollama's dropped `Authorization`). §4.3 C1's per-adapter expectation is now *reviewable against the register* instead of written from scratch — which is what stops C1 reproducing the ad-hockery F1 names; the exact-set assertion itself remains T-G9 | — |
+| **G21** | **A declared trigger is never verified** — KBR-140 | §7.4 hands the oracle `triggers_met` as an argument and §3.3.2 asserts only that a row is **absent** when its trigger is not met. Nothing asserts a trigger declared met actually fired, so a corpus entry that over-declares makes assertion 1 claim every delta — the oracle reports green on a bridge that is rewriting messages. The same author writes the entry and its trigger index (T-W6), so the mechanism has no second reader | Roughly fifteen triggers are decidable from the inbound request; give those an optional predicate and have T-D8 require the declaration to agree with it. M6, M8, M9 and M12 depend on an upstream response and stay declaration-only — the stated residual risk. Blocked on T-A1/T-A2, since a predicate needs a projected request to read | **1** |
+| ~~**G20**~~ | ~~**OpenCode Go's routing table does not match the provider** — KBR-126~~ | **CLOSED 2026-09-11.** Was: eight models served on `/v1/messages` against two routed there, four `/v1/responses` models with no route, and a `validation_model` that had left the catalogue — ten of twenty-eight models broken, presenting to the user as a false auth failure because the provider answers an unsupported model with `401` | Done: table refreshed against the provider's published list (re-verified live 2026-09-11); `/v1/responses` models route truthfully and are refused at serialization with `UnsupportedModelError` naming KBR-137, which owns the route itself; `validation_model` replaced and the whole class guarded registry-wide; snapshot oracle checked in. The balancing pool is explicitly protected from the refusal, mirroring the `CompactionFailedError` precedent | — |
+| **G19** | Routing was outside the register and outside the oracle | The destination is built from the profile (M14, P20, P21); a body-only check cannot see a misrouted Azure deployment | §3.3.5 — whole-request oracle with an independently derived route | **1** |
+| **G17** | Undecided behaviour for an irreducible final turn | Compaction emits an over-budget request, or (since KBR-5) the bridge refuses it downstream; neither was designed | Answer Q10, then align M3-M7, the 6.1 properties and TR-3 together | **2** |
+| **G18** | P13-P19 - seven transport-level mutations, unregistered in the first draft | Necessary (the Codex backend and boto3 require them) but invisible above DEBUG, and unreachable by a guard placed at `translate_to_upstream` | Rows P13-P19; boundary corrected in 3.2.3; Q5 decides user visibility | **3** |
+| **G21** | §8's skip rule is stated in prose and nothing checks it — KBR-138 | Found while closing KBR-132. The known breach is fixed, and every skip left in a *gating* layer is a platform or interpreter one — but that is an observation, not a mechanism, and the next resource-availability skip written into `l1`, `l2`, `l3` or `acceptance` re-creates the same silent-green defect | A check over the collected suite that fails on a resource-availability skip in a gating layer, with a planted skip as its falsification case (§1.4). It must be **layer-aware**: `tests/integration/test_agent_e2e.py` holds three legitimate resource skips (missing credentials, profile, agent binary) that are legal only because they sit in `agent_live`, so a flat grep would report them and be turned off. Two further questions: static sweep or runtime hook, and whether a permitted skip is recognised by condition shape or declared by marker | **3** |
+| **G1** | I1 is unstated and untested | No definition of "unchanged"; mutation sites discoverable only by reading 6,463 lines | Register (§3.2) + oracle (§3.3) | **1** |
+| **G2** | No-bypass unproven **for the bridge's serving path**; no negative assertion; start-path guard is file-granular | `test_egress_https_proxy.py` proves the transports and drives `egress_cmd._probe` | Sealed-network harness (§5.2) per transport (§5.5) + AST start-path guard | **1** |
+| **G3** | I2 partially breached (F1) — KBR-8 · **fix landed, gap open** | Identity is still ad hoc per adapter. The subscription adapter no longer reports two different versions in one request: **KBR-8 fixed that on 2026-09-11**, and `tests/test_upstream_identity_consistency.py` guards both halves of §4.3 C1's F1 assertions across every registered adapter | Remaining: the exact-set header contract (T-G9 / **KBR-78**) and the parity baseline (T-C7, T-I12), then a policy — Q1 | **2** |
+| **G4** | L1 strength unmeasured | Line coverage only | `mutmut` ≥ 85% **per target group** on the §6.1 scope | **2** |
+| **G8** | No corpus of real agent traffic | Synthetic fixtures encode our assumptions | Golden corpus (§7.1) | **2** |
+| **G10** | Custom-transport containment untested | **Partly closed (KBR-161).** Ambient `NO_PROXY` on `curl_cffi` is now measured, closed with `CURLOPT_NOPROXY`, and pinned; the OAuth refresh leg is covered by the same builder and contract. **Still open:** containment is proven at transport level, never through the bridge; `botocore`'s behaviour under an ambient `NO_PROXY` is **unmeasured** (its §6.2.4 row expects precedence, which is the assumption measurement falsified for `curl_cffi` — KBR-173); the aiohttp login leg is unproven end to end | §5.5 + §6.2.4 | **2** |
+| **G5** | No contract layer | No published schema; SSE grammar unchecked | OpenAPI + `schemathesis` + grammar state machine | **3** |
+| **G6** | Docs drift undetected (F2) — KBR-9 | README endpoint table already wrong; the **guard** half landed with KBR-76 under the exemption path (`t-g1-endpoint-table`, issue KBR-9) — the README correction itself remains in KBR-9 | README ⇄ code guards (Landed, with KBR-9 as the live defect) | **3** |
+| **G7** | No property-based tests | All example-based | `hypothesis` on the §6.1 list | **3** |
+| **G9** | C5 unmeasured | `force_close=True` gives a per-request connection pattern unlike the agent's | Connection-count baseline | **3** |
+| **G11** | Dependency behaviour unpinned; `curl_cffi` unbounded, **botocore undeclared** and the interpreter declared to the minor only | One of five §6.2.4 contracts has landed — the stdlib `ipaddress` one (KBR-146). The four transport contracts and the `botocore` declaration remain, so containment still rests on an undeclared transitive dependency | Dependency contract tests (§6.2.4) + declare botocore | **3** |
+| **G25** | **§6.2.4 contracts are only ever evaluated on the newest patch of each minor** — KBR-146 | `tests.yml` names bare minor versions and `actions/setup-python` resolves each to the newest patch. Every dependency contract therefore proves forward drift only; a value that differs on an older patch a user runs — the shape KBR-146 had — is invisible to the gate. Today that half rests on one L1 test that forces the property both ways, which works because the surrounding behaviour was measured stable, and does not generalise to a contract whose neighbours have not been | One job pinned to the oldest supported patch (`setup-python` accepts an exact version, so it is one job, not four). Deferred as a CI-spend decision, not a technical one | **3** |
+| ~~**G26**~~ | ~~**Post-emission failover is reachable for the timeout class** — KBR-183~~ · **CLOSED 2026-09-13** *(this ID is also used by KBR-184's row above — a numbering collision, not the same gap)* | Was: §11 Q14(a) was honoured for the **transport** class only. `_is_transport_error` returns `False` for `asyncio.TimeoutError` by design and the failover arm after it carried **no** emission test, so a mid-stream `sock_read` timeout after emission selected another backend (or, without balancing, retried the same one up to six times) and wrote a second attempt onto the already-prepared response | Done: the arm reads `sr`; a post-emission failure closes the blocks the client saw open (from the translator, or from the unsent finish buffer) and ends in one error, charging the backend. The same guard landed on the Responses and Gemini custom-transport failovers (`_bytes_written`) and in `openai_subscription`'s stream-reset retry, and a pre-emission failover now resets the translator. Regression tests: `tests/bridge/test_post_emission_no_failover.py`, `TestCloseOpenBlocks`, `test_does_not_retry_a_reset_after_bytes_were_written`. T-I7 still owns the L3 form. Residual: the transport drop's `message_stop` ending (§6.3.1) | — |
+| **G12** | Product layer effectively absent | 2 E2E tests, never run in CI | Nightly job, extended to 5 Claude Code cases | **4** |
+| **G13** | No answer-quality signal | Compaction and the Fireworks cap can degrade output invisibly | Paired delta eval | **4** |
+
+**Order of work.** G14 and G15 are priority 0: they are live breaches of the product's stated
+promise, both are small code fixes, and each has a cheap guard that stops it recurring. Then G1
+and G2 — the two invariants with the least coverage, sharing §7.2's recording upstream as their
+foundation. (G16 was originally scheduled alongside them; it is closed, and per §3.3.4 the
+oracle's scoping never depended on it.) G8 unblocks G1's
+corpus; G10 rides along with G2 once the harness is parametrised. G3's measurement lands with G1;
+G3's *fix* is its own ticket. G4 and G7 reinforce an existing layer and can run in parallel. G5,
+G6, G9, G11 are cheap and independent. G12 and G13 are last: most expensive to run, least caught
+per hour. **§8.6 does not move G12**, and the reason is worth stating so the next reader does not
+re-derive it: the inventory removes the *provisioning* half of G12's cost — credentials, profiles
+and a gateway are already on the runner — but the cost that put G12 last is token spend and
+nondeterminism, and neither is changed by a resource being available.
+
+---
+
+## 10. Design rationale
+
+Recorded per the repo's system-design discipline: the reasoning, especially where the choice was
+not the obvious one.
+
+**Pin what the code reads, not what it tolerates (§6.2.4).** A dependency contract that asserts a
+version-dependent value enforces the author's interpreter rather than the product's requirement —
+and, for KBR-146, would have enforced the defect. Where the dependency offers a stable neighbour the
+answer is to read that instead; where it does not, the row records whether a floor or a runtime
+check was chosen.
+
+**A permitted-mutation register instead of golden files (§3.1).** Golden files fail on every
+change, get regenerated reflexively, and prove nothing about unrecorded inputs. The register
+inverts it: the permitted set is small, explicit and reviewed, and everything else fails for all
+inputs. The cost is maintenance — hence the L2 guards.
+
+**Per-adapter register rows instead of one "providers may normalise" row (§3.2.2).** A trigger of
+"the provider overrides it" is unfalsifiable, and a register with an unfalsifiable row does not
+constrain the 23 adapters where most of the reshaping happens. Splitting it costs twenty lines of
+table and buys a testable claim — and writing those rows out is what surfaced P5c, P7 and P10.
+
+**The register guard is a shape-diff harness, not a source scan (§6.2.3).** Almost every provider
+mutation happens by building and returning a new dict, so a scan for writes to `cc_request` sees
+none of them. Feeding a fixed request through each adapter and diffing the output against that
+adapter's rows is falsifiable and catches added-and-returned mutations. A source scan would have
+missed F4.
+
+**The oracle is scoped by observed wire shape, not by the adapter's own property (§3.3.4).** On a
+CC-wire provider every field differs and every delta is claimed by the translation row, so a
+direct diff passes without proving anything. And the natural selector must not be trusted: it is a
+claim by the code under test, and it is a boolean where §7.4 needs six projections. It was also in
+fact wrong (`OpenCodeGoAdapter` declared a Messages wire while emitting Chat Completions for most
+models — F5, since fixed), but the first two reasons stand without it. Selecting on the observed
+shape keeps assertion 1 falsifiable regardless.
+
+**Structural diff, except key order on the passthrough path (§3.3, §4.3 C2).** Byte-comparing
+JSON fails on serialisation noise and trains people to ignore red. But key *order* is exactly what
+a provider fingerprints, so where kitty claims to be forwarding rather than translating, order is
+part of the contract. The asymmetry is deliberate — and it stops at the body: header order is
+aiohttp's, not the agent's, so pinning it would pin a dependency's internals.
+
+**A hostname outside the `localhost` family, never an IP literal, for the fake upstream (§5.3).**
+`should_bypass` bypasses loopback, private and `localhost`-suffixed destinations, so the obvious
+`127.0.0.1` harness proves the opposite of what it claims — silently. The premise is pinned by an
+L1 property test, stated *with* the `localhost` exclusions so it does not fail on day one and get
+weakened.
+
+**Extend the existing CONNECT proxy rather than build one (§7.3).** `test_egress_https_proxy.py`
+already had a recording proxy exercised across all three transport stacks. A second would
+duplicate the hard part and risk the two drifting on exactly the behaviour they both exist to pin.
+T-W5 carried this out: the proxy moved to `tests/harness/connect_proxy.py` and that module's five
+tests kept passing against it, unchanged down to their collected node ids.
+
+**Two L1 properties are stated with their exceptions (§6.1).** "Output ≤ budget" and "the last
+turn survives" are both false as absolutes — the compactor breaks out while still over budget
+when it cannot shrink further, and the last turn can be dropped outright (after which KBR-5
+refuses the request downstream). Stating the honest version keeps
+the properties enforceable; stating the clean version guarantees they get weakened by whoever is
+on the rota.
+
+**Mutation testing on a subset (§6.1).** Whole-codebase mutation testing on 22,700 lines produces
+a survivor list nobody reads and a nightly job nobody waits for. The subset rule — modules whose
+silent misbehaviour breaches an invariant — keeps the output actionable.
+
+**A paired delta for answer quality, not an absolute threshold (§6.4.3).** Absolute thresholds
+on LLM output are flaky, and a flaky gate at L4 trains people to re-run rather than investigate.
+Pairing holds *task difficulty* constant, which removes the largest nuisance term. It does **not**
+cancel the model's independent sampling on each call — which is why §6.4.3 specifies repetition,
+a confidence interval and a pre-registered margin rather than a single delta. The eval is a
+measurement, not a comparison of two numbers.
+
+**Real-agent E2E stays out of the default run (§6.4.2).** It needs four CLIs, live credentials and
+live network. A default suite that cannot run on a developer's laptop stops being run, and then
+stops being trusted. Nightly with CI secrets is the right home.
+
+**C1b and C5 start as reported baselines, not gates (§4.3).** Both differences are large today. A
+gate that fails on day one gets disabled on day one. A ratcheted baseline makes the number visible
+and stops it growing while the fix is done properly.
+
+**TLS fingerprint parity is accepted residual risk, not omitted (§4.5).** Closing it means routing
+every provider through `curl_cffi`, a large change to the serving path for a threat no provider is
+currently known to apply here. Recording it means a future incident is a known gap, not a surprise.
+
+**The oracle compares independent projections, never a translator round-trip (§3.3.1).** The
+production translators are not inverses — one maps request to request, the other response to
+response — so the round-trip an earlier draft specified could not have run at all. And even a
+genuine inverse would only demonstrate self-consistency: a translator that drops a field in both
+directions round-trips perfectly. Hand-written projections, importing nothing from the bridge,
+are the only form of this check that can fail for the right reason.
+
+**The vendor-token check is scoped to bridge-introduced content (§3.3.3, §4.3 C2).** A flat scan
+of the serialized body for `kitty` puts I1 and I2 in direct conflict: a user asking Claude Code
+to explain kitty-bridge would fail the I2 check, and satisfying it by stripping their words would
+breach I1. Scoping by the projection diff dissolves the conflict — the user's sentence has an
+inbound counterpart, M13's message did not.
+
+KBR-5's own guard could not wait for the oracle, so it takes the other way out of the same
+conflict: it scans **source literals** against an allowlist rather than serialized traffic. Agent
+content is never inspected, so the conflict cannot arise — at the cost of catching only strings
+that are literals in the bridge's own source, which is why it is a stand-in and not the answer.
+
+**The register is enforced at the serialization boundary, not at `translate_to_upstream`
+(§3.2.3).** On the subscription provider those hooks return a Chat Completions shape and
+`_cc_to_responses` drops fourteen parameters afterwards, inside the custom transport. A guard
+placed at the hook would have called that adapter clean — which is how P13 went unregistered in
+the first draft.
+
+**Containment gets a positive control and a falsification control (§5.2.2).** The `.invalid`
+hostname that solves the loopback-bypass trap creates a second one: an unresolvable destination
+makes "zero upstream connections" true for a broken implementation too. Proving direct
+reachability first, and then proving the harness can detect a deliberately injected bypass, is
+what turns a green result into evidence.
+
+**Connections are joined to tunnels, not counted against requests (§5.2.1).** Connection reuse
+puts many requests on one tunnel and a failed CONNECT puts none on any, so equal counts would
+reject correct behaviour — and would quietly encode today's `force_close=True` into a test, which
+Q7 may change.
+
+**Two compaction claims and three Gherkin scenarios were corrected against the code (§6.1,
+§6.4.1).** "Output ≤ budget except for an oversized system block", "a short turn is unchanged"
+and "the latest turn survives in full" were all false. Where the correction exposed an undesigned
+behaviour rather than a wording slip it became Q10, instead of being written up as intended
+behaviour. A design document that ratifies whatever the code happens to do is not a specification.
+
+**Mutation scope now contains the code its own rationale is about (§6.1).** The subset was
+justified by "a mutation surviving in the compactor", and then excluded `server.py`, where the
+compactor lives. Function-level wildcards bring it in without dragging in the retry state
+machine, and per-component thresholds stop a weak invariant-critical component hiding behind a
+strong one in an aggregate.
+
+**Evals are specified as a measurement, not a comparison (§6.4.3).** Pairing removes task
+variance; it does not remove the model's independent sampling variance, so a single paired run
+and a single delta cannot support a decision. Repetition, a pinned configuration, a confidence
+interval and a pre-registered margin are the minimum that makes a nightly signal actionable —
+and independently authored acceptance tests, because a model-generated test passing the model's
+own code shares the model's misunderstandings.
+
+**Load has numbers or it is not a gate (§6.4.4).** "Behave as intended" is the "as appropriate"
+this document forbids elsewhere. The ceilings come from a recorded baseline run and are then
+ratcheted; streaming and buffered paths are measured separately, because the blanket claim that
+memory does not grow is false on the paths that buffer a whole response.
+
+---
+
+## 11. Open questions for the product owner
+
+Answers belong in this document. They are not invented here. Q10 and Q13 are prerequisites for
+the implementation work they name — each blocks a test whose acceptance oracle depends on it. An
+answered question keeps its place in the list and carries its answer in the heading.
+
+Q12 was in that set until 2026-09-12 (KBR-216). Its entry below records the answer, and what the
+answer does not settle.
+
+**Q-image-digest-ref — ANSWERED by the product owner, 2026-09-14 (KBR-192).** Yes — `Image.__post_init__` enforces a strict XOR between `digest` and `ref`. Construction with both `None` raises (the blindness KBR-179 names for `Opaque`); construction with both set raises (a phantom delta two readers could populate the pair differently for one image and report on content neither altered). The legitimate reader paths that today produced neither — Gemini's undecodable inlineData base64, Gemini's missing or wrongly-typed `fileData.fileUri`, and Anthropic's missing or wrongly-typed `url` / `file_id` — now give the part identity: the raw-encoded-bytes digest for the first case (the second of `image_digest`'s recipes), and the `opaque_digest` canonical-JSON digest of the malformed blob for the others. The residual still records the bad/missing value, so the run fails visibly at the right path. Dependent passages re-derived: §3.3.1 line 599-602 (the `Image.digest` recipe paragraph, now mentions the raw-bytes second recipe); §7.4 rule 7 row 2 (line 3167) and row 3 (line 3168) (the absent-value table now describes the canonical-JSON and raw-bytes outcomes respectively). Out of scope: the reconciliation ticket for the two earlier reader divergences (§7.4 "Reconciliation owed" line 3183-3186) — KBR-192 unblocks it by giving both branches a compatible answer to the "what identity does an unreadable image carry?" question.
+
+**Q1 — How faithful should the agent's identity be (F1, G3, KBR-8)?** Three options, materially
+different: (a) forward a curated allowlist of the agent's real headers, uniformly, so every
+provider sees a genuine coding agent; (b) send a neutral, stable identity that is neither kitty
+nor Claude Code; (c) leave it ad hoc and treat I2 as "no kitty fingerprint" rather than "looks
+like the agent." Option (a) is the literal reading of KBR-2 but carries provider-compatibility
+risk (some providers reject unknown `anthropic-beta` values) and would replace three working
+hard-coded strings with a general mechanism. Whichever is chosen, the current state is not a
+policy — it is four independent workarounds, one of which reports two different client versions
+in the same request. This decides both the I2 target and the C1b gate.
+
+**Q2 — Is pre-flight credential validation an acceptable I2 exception?** It is an upstream
+request the agent never made, and `--no-validate` already exists to suppress it. Declared
+exception, or suppressed by default when egress is configured?
+
+**Q3 — Should `should_bypass` resolve hostnames (§5.3)?** Not resolving saves a DNS round trip
+per request but means a LAN-hostname-configured local model server gets tunnelled to a proxy that
+cannot reach it. `localhost` is already handled by name. Keep the trade-off, or resolve-and-cache?
+
+**Q4 — What regression margin for answer quality (§6.4.3)?** A pre-registered number, chosen
+before the data. This is one input to the eval design, not a substitute for it — Q13 and the
+repetition and interval choices in §6.4.3 have to be settled alongside it.
+
+**Q5 — Should silently dropped or overridden request parameters be visible to the user (P5c, P7, P13–P19)?**
+Fireworks caps `max_tokens` down, Anthropic raises it up, the Codex backend drops fourteen
+parameters including `max_tokens` and `temperature` outright and strips `strict` from every tool
+declaration, and both custom transports overwrite `stream`. Every one is necessary — the
+upstream rejects the request otherwise — and every one means a setting the agent sent silently
+does nothing. Today each logs at DEBUG. A one-line warning at launch would make it visible at
+the cost of noise.
+
+**Q6 — Which of the five body-changing retry paths are acceptable (§4.3 C3)?** M6, M8, M9, M17 and
+failover re-normalisation each send a different payload on a later attempt, and a provider that
+hashes bodies sees all five. The alternative in each case is to fail the turn, which is worse for
+the user. Declare all five as exceptions, or close some?
+
+**Q7 — Should `force_close=True` stay (C5, §4.5)?** It prevents port exhaustion but produces a
+connection pattern unlike the agent's own. Keep, or trade for keep-alive parity? §5.2.1 is
+deliberately written not to depend on the answer.
+
+**Q8 — What is the repo's policy on tracking `.system_design/`?** `.gitignore` ignored both
+`.system_design/` and `.requirements/`. KBR-2 asks for this document at a tracked path *and* for
+a PR, which cannot both hold while the directory is ignored; this change therefore un-ignores
+`.system_design/` and leaves `.requirements/` ignored as per-task working material. If that is
+wrong, say so — and note the repo has no `SYSTEM_DESIGN.md` at all, so the request path, provider
+registry and failover state machine are undocumented. A separate ticket seems right.
+
+**Q9 — ANSWERED by the product owner, 2026-09-07.** Return the error **downstream only**, never as
+a synthetic upstream turn — the third option below — and the downstream message **names the
+product**, since it never leaves the user's machine and naming the component tells them which part
+of their stack is speaking. Implemented in KBR-5: the post-condition raises `CompactionFailedError`
+and each handler renders a protocol-native 400. The message text was also rewritten, because the
+original blamed the system prompt and prescribed `/clear`, and F3 establishes that neither is
+right. *Original question:* what should the unrecoverable-compaction message say (F3, G14,
+KBR-5)? It must stay
+legible to the user and stop naming the product upstream. Options: a vendor-neutral string;
+routing the error to the agent as an HTTP error instead of a synthetic assistant turn; or keeping
+the text but returning it downstream only. The third is probably right — the message is for the
+user, and it currently reaches the one audience it was never meant for.
+
+**Q10 — What should happen when the final turn alone exceeds the budget (§6.1, TR-3)?** Today
+compaction gives up and emits an over-budget request, which the provider rejects, or — since
+KBR-5 — the bridge refuses it downstream with a 400. Neither was designed; both are what the loop happens to do when it can
+shrink no further. Options: truncate the final turn's content, fail fast with a clear local
+error, or keep current behaviour and document it deliberately. **Whatever is chosen, register
+rows M3–M7, the §6.1 compaction properties and TR-3 move together — M13 has since been
+withdrawn by KBR-5, which narrows this question rather than answering it.** The design records
+current behaviour as observed, explicitly not as approved, until this is answered.
+
+**Q11 — Does changed-code mutation testing fit the per-PR gate (§6.1)?** Answerable by
+measurement, not opinion: time `mutmut run` restricted to the functions a representative PR
+touches, against the budget the fast gate can absorb given it already runs ~18.5 minutes per
+Python version. Adopt per-PR if it fits, nightly-only otherwise. The current nightly-only choice
+is provisional pending that number.
+
+**Q12 — ANSWERED by the product owner, 2026-09-12 (KBR-216).** CI has had a version-pinned
+Claude Code since the automated reviewer landed, together with kitty profiles, credentials and an
+egress gateway. `.github/workflows/claude-code-review.yml` installs the CLI from the official
+installer script at an exact version, at run time. §8.6 is the inventory and the reasoning; the
+answer to each half of the original question is: the official distribution, pinned by an exact
+version argument, and **redistribution does not arise** because nothing is baked into an image.
+So the settings-precedence claim *does* have a per-PR proof available, and T-I5, T-I6 and T-K10
+are unblocked.
+
+**What this does not settle.** Three things, named so a task does not inherit them as surprises.
+The pin is a **hand-maintained pairing** with a floating `@v1` action tag — `§8.6` holds the
+document to the workflow, but nothing holds the workflow to the action, so a job asserting a
+*specific* CLI version rests on a human having noticed. A **fork pull request receives no
+secrets**, which costs the hermetic smoke nothing and rules out a credential-dependent per-PR
+gate entirely. And the product owner's answer establishes that the resource **exists**, not that
+the smoke job's three-sentinel design (§6.4.2) is the right shape — that remains T-I6's to prove.
+
+*Original question:* how is a pinned Claude Code binary supplied to CI (§6.4.2)? The per-PR agent
+smoke needs a real Claude Code, not an arbitrary child process, because the claim under test is
+Claude Code's own settings precedence. Which distribution, pinned how, and is redistribution
+inside a CI image acceptable? If it is not, the settings-precedence claim has no per-PR proof,
+and that limitation should be stated rather than papered over.
+
+**Q13 — What is the baseline for the compaction arm of the evals (§6.4.3)?** For an over-context
+input the direct-provider arm returns a 400, so there is no answer to compare against.
+Candidates: kitty against a larger-context model, or kitty with compaction relaxed. The choice
+determines what a regression in that arm actually means.
+
+**Q14 — ANSWERED by the product owner, 2026-09-12.** Two parts, and the second is what makes the
+first affordable.
+
+**(a) Post-emission, the bridge closes the turn and surfaces the error.** Once a byte has reached
+the client there is no retry and no failover. The bridge closes any half-open content block,
+emits one terminal error, and lets the agent retry the whole turn. The first candidate below —
+abandon the partial block and re-open under a new id — is **rejected**.
+
+**(b) An empty stream is kept out of that situation rather than recovered from inside it.** On
+the native passthrough the bridge performs a **preamble hold**: it withholds the stream's *leading*
+events until the first content event arrives, mirroring the buffer the translated path already
+keeps (*"Buffer finish events to detect empty responses before writing"*). A contentless reply is
+therefore still pre-emission when it is detected and keeps the ordinary retry ladder. This is the
+KBR-155 remedy; KBR-163 records it, KBR-155 implements it.
+
+**Amended by KBR-227 (2026-09-13): "the native passthrough" now means the Messages-wire passthrough.** **Confirmed by the product owner, 2026-09-13:** (b) and the KBR-155 decisions D1–D7 below cover the translated Messages-wire routes too — one behaviour for every upstream that speaks Anthropic Messages, accepting that their users watch the spinner rather than live thinking until content arrives.
+`_stream_messages` forwards the upstream stream unchanged whenever `BridgeServer._serves_messages_wire`
+holds — a native adapter, **or** a translated one whose upstream speaks Messages for the routed model
+(`anthropic`, `minimax_token` by default, `opencode_go`'s Messages models). Those translated routes used
+to push Anthropic SSE through the Chat Completions chunk translator, which discarded every event and sent
+Claude Code an empty reply. So everything (b) says about the passthrough, and the preamble hold KBR-155
+adds, applies to them too; every site that decides "Messages wire" must call that one method. What the
+change traded, recorded here because each is a behaviour the translated branch had or lacked:
+
+- **A pre-content `error` event is forwarded and the backend marked healthy**, as on native passthrough.
+  The translated branch failed over on it, and on these routes that worked — while every successful
+  stream arrived empty. Restoring failover is **KBR-233**; the preamble hold is its natural home.
+  *(Resolved 2026-09-14: KBR-233 was closed NOT-fixed pending a fresh owner decision, and KBR-241
+  supplied it — the hold now records a pre-content error event and the ladder runs, on every
+  Messages-wire route; see D2's amendment.)*
+- **Post-emission timeout failover (G26 / KBR-183) becomes reachable** on these routes, because bytes now
+  reach the client.
+- **A forwarded stream is counted as one completion** (`_log_usage(None)`), for native routes too, which
+  counted none. Tokens stay 0 on every Messages-wire route: `_log_usage` reads Chat Completions usage keys.
+  Under `--logging` this writes a zero-token usage-log line per turn. When the preamble hold lands, the
+  count belongs **inside** its release test: a discarded empty attempt is not a completion.
+- **Claude Code now receives signed thinking blocks**, and the request side still strips signatures, so
+  with thinking on a signature-validating upstream rejects turn 2 and a balancing pool classifies that 400
+  as `hard`. Not a regression — turn 1 used to be empty — and **KBR-228**'s to fix.
+- **Non-streaming** `/v1/messages` on the same routes still translates: thinking dropped, stop reason
+  mapped, M12 reachable. Aligning it is KBR-228's.
+- An accidental Chat Completions stream from a Messages-wire upstream is no longer translated on
+  `/v1/messages`. The other inbound protocols share the original defect and still translate: **KBR-232**.
+
+**Completed by KBR-232 (2026-09-14):** the three non-Messages stream handlers now convert a
+Messages-wire upstream's Anthropic SSE into Chat Completions chunks through the stateful
+`AnthropicCCStreamConverter` (`kitty.providers.anthropic`) before their per-chunk logic, gated
+per attempt on `_serves_messages_wire` — tool calls stream under a per-block `tool_calls`
+index, thinking crosses as `reasoning_content`, the finish chunk carries accumulated Chat
+Completions usage, and the Responses and Gemini empty-response ladders became reachable
+(their finish events exist only since this conversion). M17's strip-and-retry covers these
+three streams too. What is still true: a converted `/v1/chat/completions` stream's role chunk
+sets `has_content`, so a content-less completion is a well-formed skeleton rather than an
+empty-retry there — as before this ticket.
+
+Four things the implementer needs that the question itself did not settle, decided here so KBR-155
+is writable:
+
+- **What releases the hold.** The first `content_block_delta` of a non-thinking block. A
+  thinking-only reply and a `message_delta` carrying `stop_reason: max_tokens` with no content are
+  **not** content: the first is a reply the user cannot read, the second is a truncation no retry
+  can improve — so the first releases nothing, and the second exhausts the ladder rather than
+  restarting it.
+- **The held bytes are replayed verbatim, never re-serialised.** §4.3 C2 keeps a byte-level
+  key-order assertion that applies wherever kitty claims to be forwarding rather than translating.
+  A hold that re-emitted parsed events would break that claim while looking identical downstream.
+- **Ladder exhaustion.** When every attempt comes back empty the client receives a **terminal
+  error** — not fallback text, and not the empty stream. Nothing has been emitted, so this is the
+  ordinary pre-emission error path. Deliberately *not* the translated path's substituted fallback
+  text: that is register row **M12**, whose Site column names the two translators, and the native
+  path drives neither. Fallback text here would open a second place where the bridge puts words in
+  the model's mouth and would require M12's row to be widened in the same change; an error opens
+  none.
+- **The accepted cost, stated rather than discovered.** Under the hold a stalled native stream
+  produces *no* downstream bytes until `_STREAM_READ_TIMEOUT`, where today the client sees
+  `message_start` within a round trip; and because `sr` stays `None`, that failure then surfaces as
+  a pre-emission JSON error response rather than a `200` carrying an SSE `error` event. Both change
+  the downstream contract, and §6.2.2's grammar suite must cover the second.
+
+**Amended by the product owner, 2026-09-13, while implementing KBR-155.** Reading the four
+points above against the Anthropic stream format, and a design review of the implementation,
+found cases they did not reach and one they understated. Each is decided here, with its reason:
+
+- **D1 — the release rule also counts a block that arrives whole.** Besides the first
+  `content_block_delta` of a non-thinking block, the hold releases on a `content_block_start`
+  whose block already carries content: any type other than `text`, `thinking` and
+  `redacted_thinking` (`tool_use`, `server_tool_use`, `web_search_tool_result`, and any type not
+  yet known), and a `text` block whose `text` is non-empty. *Why:* Anthropic's own result blocks
+  have no delta at all — the official SDK's accumulator (`lib/streaming/_messages.py`) seeds its
+  snapshot straight from `content_block_start` — and `bridge/tool_audit.py` records that shims
+  handing back a pre-parsed tool call do the same. The delta-only rule would judge those replies
+  empty, retry them, and then fail them.
+- **D2 — an upstream `error` event before content is passed through.** It releases the hold and
+  is forwarded verbatim, exactly as before the hold existed. *Why:* the provider's own error type
+  (`overloaded_error` and the like) is what Claude Code is written against; treating it as an
+  empty reply would replace it with the bridge's wording and add a retry policy nobody decided.
+  The event is recognised by its SSE `event:` name as well as its `data.type`, because the
+  official SDK (`_streaming.py`) raises on `sse.event == "error"` whatever the data holds, and
+  fills a missing `data.type` from the event name. **Also as before:** a released error-only
+  stream counts as a completed attempt, so its backend is marked healthy — the translated path
+  quarantines on an in-stream error, and closing that difference is not this decision's.
+
+  **Amended by the product owner, 2026-09-14 (KBR-241; supersedes KBR-233's "closed, NOT
+  fixed"): a pre-content error event is no longer delivered — it is judged, and the attempt
+  takes the ordinary pre-emission ladder.** KBR-233 had asked for exactly this and was closed on
+  the recorded condition that revisiting it "needs a fresh owner decision amending D2 in §11
+  first"; KBR-241, filed an hour after that closure after the owner's own session was stopped
+  by this error a second time, is that decision — confirmed in conversation as recover
+  **pre-emission only**, with Q14(a) untouched. What the amendment keeps of D2: the recognition
+  rule (name or `data.type`, decided at the name line, as the SDK decides) and the exhaustion
+  rationale — when the ladder runs out, the client receives the **provider's payload
+  re-embedded** (`502`, with only `reason: "upstream_error"` added inside its `error` object),
+  because the provider's error type is what the client is written against; this deliberately
+  departs from Q9/D4's "names the product" precedent, so the body is not mistaken for a defect
+  or "fixed" into kitty's own wording later. When the error was seen but its payload is too
+  malformed to deliver (no `error` object, unparseable data), the marker still says
+  `upstream_error` and the wording is kitty's own (Q9) — an errored ladder never reports
+  `empty_response`, which would be false reporting against D4's own rationale for the marker.
+  What it changes: the hold records the error
+  (`error_seen`, `error_event`, `error_event_complete` — a chunk boundary may fall between the
+  name line and its data line, and reading stops only when the event's lines have all arrived)
+  and is deaf to everything after it (a later `message_delta` stop reason records nothing, so
+  the judge's answer cannot depend on how the stream was chunked); the handler stops reading at
+  the completed error event and runs the empty ladder. Two differences are **kept, not closed**:
+  the health model stays the empty ladder's — no quarantine, unlike the CC-wire path's in-stream
+  cooldown — and the two wires now also exhaust differently, the CC-wire generic body carrying
+  neither the provider payload nor a reason marker. The `sr is not None` arm ends an
+  already-open stream with the provider's payload raw, or kitty's upstream-error wording when
+  the payload is unusable. Three accepted residues: error-then-content
+  reaches the client only when both arrive in one chunk (the SDK raises on the event, so that
+  content was wasted anyway); the D5 cap still fails open past an unjudged error, delivering as
+  before this amendment; and a stream that stalls *inside* the error event (name line seen, no
+  blank line) still ends at the read timeout, since judging it early would truncate the event.
+- **D3 — a truncation before content fails at once with a `400`.** A reply whose stop reason is
+  `max_tokens` or `model_context_window_exceeded` and that carried no content gets
+  `invalid_request_error` with `reason: "<stop_reason>_before_content"`, and the ladder ends on
+  that attempt. *Why:* the point above already says no retry can improve a `max_tokens`
+  truncation, and the SDK's `StopReason` names the context-window stop as the same kind of
+  ending; a `400` also stops the agent retrying it, where a `5xx` would invite exactly that.
+  Every other stop reason before content is an empty reply.
+- **D4 — the exhaustion error.** `502`, `api_error`, `reason: "empty_response"`, and a message
+  that names the product, per Q9's precedent. The `reason` marker follows `compaction_failed`:
+  without it the body is indistinguishable from any other `502`.
+- **D5 — the hold is capped at 10 MiB and fails open.** Past the cap it releases and the stream
+  continues as a plain passthrough. *Why:* the adapters on this path serve reasoning models, so the
+  "preamble" is not a few events but the whole thinking phase — the downstream cost in the fourth
+  point above includes it, and the user watches Claude Code's spinner rather than live thinking.
+  An uncapped hold would make that memory unbounded, against every other bound the bridge keeps
+  (F24's line cap, the auditor's). The price of the cap is stated rather than discovered: a
+  thinking-only reply longer than 10 MiB cannot be retried. Worst-case memory per concurrent
+  native request is therefore about 10 MiB for the hold, plus the auditor's own 10 MiB line bound,
+  plus a set of at most 256 thinking-block indices (kilobytes). The cap is checked per upstream
+  chunk — aiohttp's `StreamReader.__aiter__` is `AsyncStreamIterator(self.readline)`, one line at a
+  time, and `readuntil` raises `LineTooLong` past the reader's high-water mark — so it can be
+  overshot by at most that one line, and releasing copies the buffer once. The index set fails
+  open past its bound, mirroring the auditor's bound on open `tool_use` blocks.
+- **D6 — an empty text chunk is not content.** A `text_delta` whose `text` is `""` releases
+  nothing. *Why:* the literal rule would release a reply that opens a text block, streams `""`
+  and stops — a blank turn, the defect this ticket exists to fix — while D1 already declines to
+  count a text block that *starts* empty.
+- **D7 — a stall while held takes the ordinary pre-emission ladder; the cost above is corrected,
+  not the policy.** The fourth point above says a stalled stream sends nothing "until
+  `_STREAM_READ_TIMEOUT`" and then errors. That understates it: `asyncio.TimeoutError` is
+  retryable and not a transport error, so each timeout while held is retried — failed over, with
+  the backend quarantined, on a balancing profile — up to the whole attempt budget. On one
+  backend the worst case is six 120-second reads plus the backoff and final delays, about
+  thirteen minutes with no downstream byte. *Why keep it:* it is exactly the policy the bridge
+  already applies to a provider that never answers at all, which is what Q14 meant by "the
+  ordinary pre-emission path"; a separate stall rule would make the two cases differ for no
+  product reason.
+- **Implementation consequences recorded with the decision.** (i) A client that disconnects
+  while held is no longer revealed by a failed write, and aiohttp does not cancel the handler, so
+  the native branch checks the client connection on each held chunk and before each upstream
+  attempt, and stops — leaving backend health alone, as issue #38 requires. Without that check a user who
+  presses Esc during a long thinking phase would keep it billing upstream. (ii) Headers go out at
+  release, so a discarded empty attempt never names its backend: the attribution headers name
+  the backend whose bytes are the first the client receives — which is what the README already
+  promises ("the backend that produced the first byte of the response"). (iii) Each discarded attempt is logged at WARNING with
+  its held byte count and stop reason, and a bounded head of the held bytes at DEBUG — a `200`
+  carrying a non-SSE body is otherwise undiagnosable, because nothing of it was written.
+  (iv) The `sr is not None` arm that ends an already-open stream with one SSE `error` event
+  instead of a JSON `502` is defence in depth, twice over. It was written for the pre-KBR-183
+  route — a timeout *after* release starting another attempt — which KBR-183 closed; KBR-236
+  (2026-09-14) closed the other route into it, the translated branch's empty-response retry
+  failing over onto a Messages-wire backend (§6.3.1's recovery paragraph records the site).
+  Kept rather than deleted because a future route that reached it must not fall through to the
+  pre-emission ladder — that would put a second attempt on the open stream, the exact hazard
+  the arm exists to stop — and its message now reports an empty response arriving after
+  content, not "the retry came back empty": no such retry can exist.
+
+**Extended to the translated Chat Completions route by KBR-235 (owner decision, 2026-09-14).**
+The translated branch of `_stream_messages` judged an empty reply only when a chunk carrying
+`finish_reason` had arrived, so a `200` whose stream was zero bytes, `[DONE]`-only, or otherwise
+content-free with no finish chunk reached Claude Code as an empty turn — no retry, no failover,
+and the backend marked healthy. Those streams now take the same ladder as any empty reply, and
+**(b)'s preamble hold needs no translated counterpart**: the branch already withholds the finish
+events, and the no-finish shapes write nothing, so an empty attempt is still pre-emission when
+the gate judges it. The gate's no-finish arm also stands down once the request has written
+anything (`sr is not None`): `events_emitted` counts one attempt, while `sr` counts the request,
+so a request that has already written is post-emission — Q14(a)'s situation, and KBR-236's to
+fix, not the D4 path's. The exhaustion outcome was this ticket's one owner decision, and the product
+owner chose **D4, not M12**: a no-finish empty stream that exhausts the ladder ends in the same
+`502` `api_error` `reason: "empty_response"` as the native route — a `200` carrying substituted
+text is the one thing the route must never produce, and exhausting into an error opens no second
+exhaustion vocabulary. Two boundaries recorded with the decision: the contentless-with-
+`finish_reason` case keeps its M12 fallback exhaustion, so the route's exhaustion is deliberately
+split until the owner unifies it; and the translated route has **no streaming D3** — a
+`max_tokens` finish-chunk empty stream is still retried and fallback-ized, the route's
+pre-existing finish-chunk behaviour this change deliberately did not touch. The non-streaming
+judgement `_is_empty_cc_response` and the four ladders it gates were aligned with D1/D3 for
+Messages-shaped replies in the same change (§7.2.1 above): D1 by block type, mirroring
+`PreambleHold._block_start_releases`; D3 ends the ladder at once and the Messages handler returns
+the `400` with the same body the native branch builds. The branch's tail-flush write path now
+sets `events_emitted`, so content arriving in a final unterminated line counts as a write for
+both the emptiness gate and FI-8.3's truncation guard. The post-emission retry a content delta
+after the finish chunk can still trigger is KBR-236's, untouched here.
+
+**Extended to `/v1/responses` and `/v1/gemini` by KBR-250 (owner decision, 2026-09-14,
+per-route confirmation pending).** The no-finish empty-stream hole that KBR-235 closed on
+`/v1/messages` had the same shape on `_stream_responses` (Codex CLI) and `_stream_gemini`
+(Gemini CLI): the gate at `server.py` ~3766 / ~5677 still read
+`translator.response_was_empty and finish_events`, so an upstream that answered `200` with
+zero bytes or `[DONE]`-only passed both conditions' guard and reached the agent as an
+empty turn with the backend marked healthy. The fix is the same on both routes: a no-finish
+arm `empty_no_finish = not finish_events and not events_emitted` extends the gate to
+`or empty_no_finish`, and the D4 exhaustion path writes an SSE error event into the open
+`sr`, lets the post-loop synthesize `response.completed` with `status="incomplete"`
+(responses) or `write_eof()` without the healthy-mark (gemini), and returns `sr` with
+`200 text/event-stream`. The route-specific D4 discriminators carry the same semantic
+KBR-235 chose for the messages branch: `responses_format_error({"code": "empty_response",
+"message": ...}, seq=N)` producing a top-level `{type: "error", code: "empty_response",
+...}` on the Responses wire; `{"error": {"code": 502, "message": ..., "reason":
+"empty_response"}}` serialized as `data: {json}\n\n` on the Gemini wire. The owner is
+asked in the PR to confirm this in-stream shape as the exhaustion form for Codex and
+Gemini CLI.
+
+**The post-emission arm and per-request `request_emitted` flag are deliberately NOT
+mirrored on these two routes.** `ResponsesTranslator` and `GeminiTranslator` set
+`response_was_empty` against the **whole response's accumulated content** (text + tools +
+reasoning), not the finish chunk's content alone — the messages branch's
+`MessagesTranslator` is chunk-scoped, so its post-emission arm fires there but is
+structurally unreachable on responses and gemini. A stream that wrote content then received
+a finish chunk with no content has accumulated content → `response_was_empty` is False →
+the gate does not fire → no post-emission arm is reachable. The `empty_no_finish` arm
+requires `not events_emitted` on the current attempt, which also cannot be true when
+content has been written. The two routes therefore carry no `request_emitted` flag and no
+post-emission guard; minimum code, no defensive scaffolding for an impossible scenario. The
+shape is locked in by `TestResponsesInStreamErrorExhaustion::test_content_then_empty_finish_never_fires_the_empty_gate`
+and the gemini mirror in `tests/bridge/test_empty_response_retry.py` — a regression that
+makes the gate fire on a content-carrying stream fails them both. If a future translator
+change makes the emptiness check chunk-scoped on these routes too, the post-emission arm is
+the obvious next step — the same shape KBR-235 added on messages.
+
+**JSON 502 alternative.** The branches `sr.prepare(request)` at the top of each handler,
+before any upstream POST, so aiohttp cannot later replace the prepared `StreamResponse`
+with a JSON `Response`. Lazy-preparing both branches (mirroring `_ensure_prepared()` on
+messages) would carry attribution-header timing and `§11 Q14(ii)` "backend that produced
+the first byte" consequences that need their own design pass — out of scope for KBR-250.
+The in-stream SSE error event is the chosen shape; the JSON 502 alternative is recorded
+here as the route the owner can take if a future decision prefers protocol-identical
+behaviour to the messages branch.
+
+**Why, and not the obvious alternative.** Three reasons, in decreasing order of how much they
+would cost to be wrong about.
+
+1. **It is what the provider being imitated does.** Verified against the official Anthropic Python
+   SDK, `src/anthropic/_streaming.py` (the `sse.event == "error"` branch, sync and async): a
+   mid-stream failure arrives as an SSE `error` event and is raised to the caller. No resumption,
+   no re-opened block, no second attempt — the HTTP status was already `200` and the stream simply
+   ends in an error. The claim this rests on is §1's ordinary-correctness promise that *protocol
+   translation is faithful*, together with §6.2.2's SSE grammar — **not I2**, which the correction
+   below shows is upstream-side and says nothing about what the client is handed. The client is
+   Claude Code, and Claude Code is written against Anthropic's stream shape.
+2. **It ratifies a policy already in force.** `bridge/server.py`'s streaming handler already makes
+   exactly this choice for a mid-stream transport drop — *"Bytes already reached the client, so a
+   restart on any backend would duplicate them. Close the message off instead"* — for exactly this
+   reason, and calls it the same choice FI-8.3 makes for a clean truncation. Answering the other
+   way would mean **changing working code to introduce a duplication hazard**.
+
+   **It was the transport class only — gap G26, closed by KBR-183 on 2026-09-13.**
+   `_is_transport_error` returns `False` for `asyncio.TimeoutError` deliberately, and the failover
+   arm that followed carried no emission test, so a mid-stream `sock_read` timeout **after** bytes
+   had reached the client marked the backend unhealthy, selected another and wrote a second attempt
+   onto the already-prepared response — measured at 2 upstream requests with two backends and 6
+   with one. KBR-183 guards that arm and three sites of the same class it found on the way: the
+   Responses and Gemini custom-transport failovers, and `openai_subscription`'s in-provider retry
+   of a stream reset. The transport drop's own *ending* still differs from (a) — `message_stop`
+   rather than an error — and is recorded in §6.3.1 rather than ratified.
+3. **The alternative is not soundly implementable.** Re-opening on a second backend lets the client
+   receive the same sentence twice, or tool-call arguments spliced from two attempts. §6.3.1 states
+   the consequence and it is not hypothetical: every SSE event stays syntactically valid while the
+   conversation is corrupt, and Claude Code will act on a duplicated tool call. De-duplicating
+   across attempts needs to know what the second backend was about to say.
+
+**One correction to the framing this question was filed under.** KBR-163 argued that buffering the
+passthrough "changes downstream latency and the observable timing that invariant **I2**
+constrains". It does not: every I2 channel in §4.2 — C1 headers, C2 body, C3 cross-attempt content
+and cadence, C4 transport fingerprint, C5 connection lifecycle — is **upstream-side**. What the
+downstream client is handed, and when, is invisible to the provider. The only coupling is TCP
+backpressure, and holding a bounded preamble makes the bridge read upstream *sooner*, not later,
+which is what any promptly-reading client does. The real cost of (b) is downstream
+time-to-first-token, which is a user-experience question and bounded by the preamble, not an I2
+breach. That is why (b) is affordable and full buffering — unbounded, and growing with stream
+length — still is not.
+
+**What this does not decide.** The wording of the terminal error the client receives follows Q9's
+precedent (downstream only, names the product); KBR-155 settled it as D4 above. The *zero-chunk*
+case needs no separate rule, but the sentence first recorded here — that the ordinary
+pre-emission ladder already applied to it — was not what the code did: the native branch set
+`stream_ok` unconditionally, so a zero-byte stream skipped the ladder, fell to the handler's
+"should not happen" `502` and marked the backend healthy. Under the hold it is simply an empty
+reply and takes the ladder like any other.
+
+*Original question:* what is a correct stream recovery after bytes have reached the client
+(§6.3.1)? Failover
+before the first downstream byte is unambiguous. After text has been emitted, or mid tool-call
+arguments, there is no obvious right answer: abandon the partial block and re-open under a new
+id, fail the turn and let the agent retry, or something else. Until this is decided the L3 row
+can assert only the negatives — no duplicated text, no reused tool-call id across attempts, no
+spliced arguments — which catches corruption but cannot confirm correct behaviour. This is the
+one place in the design where a test is specified without a full acceptance oracle, and it is
+recorded here rather than papered over.
+
+**Q15 — ANSWERED by the product owner, 2026-09-14 (KBR-205).** §3.3.1's reader-side
+declared-ignored mechanism is built, and the first five users are Anthropic block fields; the
+two Anthropic tool-control fields named by KBR-214 are **mapped** rather than ignored. Recorded
+in §3.3.1, §3.3.1b, §7.4.1, G35 and G36 in §9.2; the answer to each half:
+
+1. **A field the grammar cannot carry is declared-ignored, not slotted, when a strip would not
+   hide a cost.** §3.3.1 offers "map it, or declare it ignored with a reason". A slot is the right
+   answer when a strip would have hidden a mutation the user pays for — `cache_control` is the
+   worked example, because a stripped breakpoint re-bills the agent's cached prefix at **at
+   least** ten times the cached rate. The five Anthropic fields — `text.citations`,
+   `image.transformations`, `tool_use.caller`, `tool_use.toolset_name` and
+   `tool_result.toolset_name` — are optional, descriptive, vendor-defined fields the agent
+   neither reads nor writes; a strip would have hidden no cost, only a description the reader was
+   never going to model anyway. Slots for five vendor spellings would also have put one vendor's
+   names into a form whose entire purpose is wire independence, which §3.3.1 declines for P16's
+   reason. The mechanism — path-keyed by `(block wire type, field wire key)`, reason-required per
+   entry, defined once for all six readers in `tests/harness/contract.py` — is the right home for
+   this class of field, and the audit trail every entry carries is also the coordination guard
+   the seven-reader shape needs.
+2. **`tool_choice.disable_parallel_tool_use` and `tools[i].type` are mapped, not ignored.**
+   KBR-214's design review of KBR-205 named these as defects of the same shape (they were the
+   cause the ticket expanded), and the same reasoning applies in reverse: a mutation on either
+   changes what the agent asked for, or what the product decides about the request. Mapping them
+   keeps that mutation detectable — declaring either ignored would have hidden the very
+   fidelity finding the oracle exists to catch. The parallel knob gets one address and one
+   polarity at `envelope.extra["parallel_tool_calls"]` (§3.3.1b), the Chat Completions spelling
+   so the T-A2 reader meets the same rule; `tools[i].type` becomes `ToolDecl.type`
+   (§3.3.1a), the discriminator the G35 register row needs to author.
+
+**Scope note for KBR-34.** T-A2 is the first to **read** the canonical
+`envelope.extra["parallel_tool_calls"]` directly — the Anthropic reader
+writes it (from Anthropic's inverted `disable_parallel_tool_use` flag); the
+Chat Completions reader carries it (the wire key is the canonical spelling,
+routed through `PARALLEL_TOOL_CALLS_KEY` so the two spellings cannot drift).
+A wrongly-typed value at the canonical address residualises at its own path,
+the same shape §7.4.1's wrongly-typed-leaf rule gives every other optional
+leaf — and is asserted in `test_reader_chat_completions.TestEnvelope`.
+T-A3 (Responses) and T-A4 (Gemini) carry the same address when their
+readers exist; the closed canonical spelling is the anchor.
+
+**What this does not settle.** Two things, named so a future task does not inherit them as
+surprises.
+
+- **Per-reader entries the registry does not yet carry.** Five readers do not exist yet (T-A2
+  through T-A6). The mechanism is shared, but the entries those readers will need — Converse's
+  `cachePoint` discriminator, Gemini's ProtoJSON-only fields, Chat Completions' `prompt_cache_*`
+  family, Responses' `reasoning`/`include` controls, Ollama's tool-shape extras — are author
+  decisions the relevant tickets will make, with the registry as the agreed place to put them.
+  A field that is *not* in the registry and is not on a modelled block residualises today, so
+  nothing fails silently in the meantime.
+- **The falsification case for the unregistered-mutation guard.** §1.4 requires a mechanism to
+  ship with a falsification case proving it can fail. `test_reader_anthropic_messages.py` now
+  asserts (i) a body carrying each declared-ignored field projects without residual, (ii) a
+  re-spelled sibling still residualises and fails `verify_total`, and (iii) the
+  `ignored_field_problems` reporter rejects a registry entry without a reason. A future reader
+  that wants to declare-ignore a field that one of its siblings does not carries the same
+  falsification cost.
+
+*Original question:* when the projection grammar cannot carry a wire field, declare it ignored
+or give it a slot (§3.3.1, §7.4.1)? The decision turns on whether a strip would hide a cost —
+`cache_control` cost re-bills the cached prefix, so it got a slot; five Anthropic block-extras
+carry no comparable cost, so they got the third outcome; two Anthropic tool-control fields
+carry information a mutation could corrupt, so they got a mapping onto a shared canonical
+address.
+
+**Q16 — ANSWERED by the product owner's delegation to T-A2, 2026-09-14 (KBR-34).** The Chat
+Completions reader fills `Part.cache_control` from **both** spellings — `cache_control`
+(OpenRouter's CC dialect, Anthropic's own field) and `prompt_cache_breakpoint`
+(OpenAI's GPT-5.6+ spelling, `{"mode": "explicit"}`, no per-part TTL) — **verbatim**. The
+value shape travels because the slot is `Mapping[str, Any] | None`: the two spellings are
+distinguishable on the slot by their own keys, and a future vendor addition to either shape
+(a `ttl` on `prompt_cache_breakpoint`, an extra mode value) arrives as a projection delta
+rather than as a silently-flattened loss.
+
+**Why not normalise the two into one shape.** §3.3.1's "carried whole, not reduced" rule
+applies to a spelling with no TTL the same way it applies to one with: a flattened form would
+make a vendor's future TTL invisible (a 1-hour write costs 2x base input against 1.25x for
+the default five-minute one, so a silently-downgraded TTL is a cost the user bears —
+§3.3.1's `cache_control` rationale verbatim, applied to the slot's own carrier); a
+normalised form would put a vendor spelling into a wire-independent value, which the
+whole-slot rule exists to prevent.
+
+**Why the same slot, and not a second one.** §3.3.1's slot is the canonical address for
+"the cache breakpoint this block carries"; the wire's spelling is a property of the
+dialect, not of the concept. Two slots would put the dialect into the wire-independent
+form (§3.3.1's P16 objection), and the two spellings cannot co-occur on one block (the
+schema forbids it; if one ever appears, the first non-null spelling in
+`_CACHE_KEYS` order — `cache_control` first — fills the slot and the other
+residualises at its own path; a silent drop is the shape M16 and G37 exist
+to prevent, asserted in `test_reader_chat_completions.TestCacheBreakpoints.
+test_when_both_cache_spellings_are_present_first_fills_the_slot_and_second_residualises`).
+
+**Converse does not inherit this.** Bedrock Converse's `cachePoint` is a *separate block*
+in the content list, not a field on one (§3.3.1 records the shape); a T-A5 reader that
+meets it projects the `cachePoint` block itself as `Opaque(kind="cache_point")` and does
+not fill the `cache_control` slot. §11 Q16 is the answer T-A2 shipped; T-A5's is its own
+decision and belongs in a §11 entry of its own.
+
+*Original question:* does the Chat Completions reader fill the `cache_control` slot from
+`cache_control`, from `prompt_cache_breakpoint`, or leave such bodies residualising
+(§3.3.1, KBR-199's comment)? T-A2 filled it from both, verbatim, and residualised a
+wrongly-typed value at its own path — the answer §3.3.1's own slot rationale points to,
+and the one that makes G37's closure a data point rather than a wording change.
+
