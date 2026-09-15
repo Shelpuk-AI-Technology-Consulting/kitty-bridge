@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import socket
 from collections.abc import Generator
 from pathlib import Path
@@ -24,6 +25,32 @@ from layers import (
 # A test asks for `connect_proxy` or `tls_target` by name; nothing imports
 # `harness.connect_proxy` to get them.
 pytest_plugins = ("harness.connect_proxy",)
+
+# Hypothesis profile for the L1 property-test stream (KBR-70 / T-F1). When
+# `CI` is set we register and load a profile that derandomises every run
+# (so a failure replays deterministically), removes the 200 ms per-example
+# deadline (the slow Windows / macOS Fast-gate legs would flake otherwise),
+# and disables the example database (so a developer's local failure does not
+# replay on a runner). The registration lives here -- *not* in a test module
+# or the substrate library -- because `settings.load_profile` mutates
+# hypothesis's global state, and a property-test module inheriting the
+# profile only by being collected in the same session as the module that
+# registered it couples downstream T-F2 / T-F3 / T-F6 test modules to
+# collection order. A session-level registration runs before any module
+# collection, so every property test gets the same treatment deterministically.
+# The local developer keeps hypothesis's default randomized profile plus the
+# on-disk example database when `CI` is unset.
+if os.environ.get("CI"):
+    from hypothesis import HealthCheck, settings
+
+    settings.register_profile(
+        "kitty-bridge-ci",
+        derandomize=True,
+        deadline=None,
+        suppress_health_check=[HealthCheck.too_slow],
+        database=None,
+    )
+    settings.load_profile("kitty-bridge-ci")
 
 # The collected items and their layers, as `(node id, [layer names])`, published
 # for `tests/test_layer_markers.py`. A stash key rather than a module global so
@@ -275,7 +302,7 @@ def unused_tcp_port() -> int:
     """Find a free TCP port for bridge tests."""
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
+        return s.getsockname()[1]  # type: ignore[no-any-return]
 
 
 @pytest.fixture()

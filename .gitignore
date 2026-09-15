@@ -2,6 +2,7 @@
 /.import_linter_cache/
 /.requirements/
 /.serena/
+/.hypothesis/
 /.venv/
 /debug/
 /.codex
