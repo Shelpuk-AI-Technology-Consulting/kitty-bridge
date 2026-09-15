@@ -1142,7 +1142,7 @@ list of headers we happened to think of. That posture is what surfaced F3 and F4
 
 | Channel | What it exposes today | Verdict |
 |---|---|---|
-| **C1 — Request headers** | `build_upstream_headers()` constructs the set from scratch; no inbound agent header is forwarded. Four adapters supply a coding-agent `User-Agent` (P9a, P9c). The deviations from the base header set are registered: `x-api-key` + `anthropic-version` (+ the lowercase `content-type` re-spell, unaddressable — casing) on the Anthropic family (P9e: `anthropic`, `custom_anthropic`, `minimax_token`, and `opencode_go` on its Messages models); `anthropic-version` + the casing re-spell beside Bearer auth on `zai_coding` (P9f); `api-key` on Azure's non-Entra credential (P9g) and on Mimo (P9b); no `Authorization` at all on `ollama` (P9h); the conditional `ChatGPT-Account-Id` on `openai_subscription` (P9d). Every other adapter sends the baseline set. | **Gap.** The per-adapter expectation is reviewable against the register; the exact-set assertion itself is T-G9. F1's policy gap remains. |
+| **C1 — Request headers** | `build_upstream_headers()` constructs the set from scratch; no inbound agent header is forwarded. Four adapters supply a coding-agent `User-Agent` (P9a, P9c). The deviations from the base header set are registered: `x-api-key` + `anthropic-version` (+ the lowercase `content-type` re-spell, unaddressable — casing) on the Anthropic family (P9e: `anthropic`, `custom_anthropic`, `minimax_token`, and `opencode_go` on its Messages models); `anthropic-version` + the casing re-spell beside Bearer auth on `zai_coding` (P9f); `api-key` on Azure's non-Entra credential (P9g) and on Mimo (P9b); no `Authorization` at all on `ollama` (P9h); the conditional `ChatGPT-Account-Id` on `openai_subscription` (P9d). Every other adapter sends the baseline set. | **Closed (KBR-78, 2026-09-15).** Every wire route's exact header set — names, casing, value shape — is asserted over the same `wire_routes()` enumeration, and the AST-derived branch-arm meta-test proves the swept routes execute every `If` arm of every header builder. `bedrock`'s contract is observed on the botocore-prepared request (its hook never ships). The OAuth token POSTs (KBR-161's other half) assert their exact set per site; `originator: codex_cli_rs` lands on all four (probed against `auth.openai.com` 2026-09-15, indifferent). F1's policy gap remains — the identity each adapter *should* claim is Q1. |
 | **C2 — Request body** | The register's mutations (§3.2), JSON key ordering produced by kitty's serialisation, ~~the literal string `[Kitty Bridge: …]` (M13)~~ **— fixed, KBR-5** — and **`_effort` / `_thinking_adaptive`, which are kitty-internal and reach the wire**. With M13 gone the only bridge-introduced literal left in the body is `[Tool output truncated — original size: N chars]` (M3/M4): still a viable fingerprint, it simply does not name the product. | **Still breached by F4.** F3 closed. |
 | **C3 — Cross-attempt content and cadence** | Retries (`_MAX_RETRIES = 3`), failover, transport-blip re-connects, the empty-response ladder — and **five** paths that send a *different body* on a later attempt (M6, M8, M9, M17, and failover re-normalisation). | §4.3 C3. Five declared exceptions. |
 | **C4 — Transport fingerprint** | TLS/ALPN/HTTP-2 signature of aiohttp, unlike the agent's own client. `curl_cffi` is already used for the OpenAI subscription provider precisely because that provider fingerprints TLS. | **Accepted residual risk.** §4.5 — including the narrower, *provider-specific* residual KBR-161 leaves on the OpenAI login leg, which the general argument does **not** cover. |
@@ -1259,6 +1259,10 @@ guard; see its entry below and §6.2.3. The rest remain open.
   `_build_codex_headers`, since it overrides no hook and would otherwise be invisible. It stands
   in until T-G9 / KBR-78 lands the exact-set contract, exactly as
   `tests/bridge/test_vendor_token_guard.py` stands in until T-G5.
+  **T-G9 landed (2026-09-15, KBR-78)**: the same file now extends to the exact
+  header set per wire route — names, casing, value shape, with an
+  AST-derived branch-arm meta-test that proves the swept routes execute
+  every `If` arm of every header builder.
   **What KBR-8 did not close:** identity is still ad hoc per adapter — three hard-coded
   `claude-code/1.0` strings, one synthesised Codex identity, and aiohttp's default everywhere else.
   That is the policy half of G3, and it waits on Q1.
@@ -1351,12 +1355,19 @@ change to the serving path for a threat no provider is currently known to apply 
 Recorded so a future incident is a known gap rather than a surprise. The README's existing
 guidance ("use a CONNECT proxy, not a TLS-terminating one") already depends on this reasoning.
 
-**C4a — the OpenAI login leg, specifically (KBR-161).** The general C4 argument above does
+**C4a — the OpenAI login leg, specifically (KBR-161, KBR-78).** The general C4 argument above does
 **not** apply to this provider: `curl_cffi` is already a dependency, already constructed, and
 already in use in this very adapter, so the cost that justifies accepting C4 elsewhere is absent.
-KBR-161 therefore moved the **recurring** OAuth traffic — `_refresh` and `_exchange_api_key`, which
+KBR-161 moved the **recurring** OAuth traffic — `_refresh` and `_exchange_api_key`, which
 `get_valid_api_key` drives on every Codex request — onto an impersonating `curl_cffi` session, and
-all four token POSTs now carry the Codex `User-Agent` from `kitty.codex_identity`.
+all four token POSTs now carry the Codex `User-Agent` from `kitty.codex_identity`. **KBR-78 (2026-09-15)**
+closed the residual header gap on the auth leg: every one of the four token POSTs now also carries
+`originator: codex_cli_rs` — the one header the genuine Codex CLI sends and the legacy bridge
+omitted. The decision rests on a live probe against `auth.openai.com` (four POST variants, no
+credentials) which confirmed the auth host is indifferent to `originator` on its error path. The
+strict-tool-validation warning in `OpenAISubscriptionAdapter._build_codex_headers`, which scoped
+the omission, applies to the Codex **backend** (`api.openai.com/v1/responses`); KBR-78 scopes
+that warning to the API leg.
 
 The **interactive login** leg (`_exchange_code_for_tokens`, `_exchange_id_token_for_api_key`) stays
 on aiohttp. It is reached from `cli/auth_cmd.py`, which has no adapter and no curl session; giving
@@ -1368,7 +1379,8 @@ non-Codex TLS handshake anywhere in its history (`codex-rs/login/src/auth/defaul
 one client and `server.rs` posts `/oauth/token` through it), so a kitty account carries exactly one,
 at signup, permanently associated with it. Weaker in frequency than the pre-KBR-161 pattern, not
 weaker in kind — accepted on sign-in-regression cost alone. `tests/test_oauth_leg_identity.py`
-guards the identity half and says explicitly that it asserts nothing about the fingerprint.
+guards the identity half and asserts the exact-set per site; it says explicitly that it asserts
+nothing about the fingerprint.
 
 **Ambient `NO_PROXY` on the curl transport — closed, not accepted (KBR-161).** Moving the refresh
 leg onto `curl_cffi` would have imported an egress exposure the aiohttp leg did not have: aiohttp
@@ -5129,7 +5141,7 @@ does not surface work that is done. `TEST_SUITE_IMPLEMENTATION_PLAN.md` §16 mir
 | **G21** | §8's skip rule is stated in prose and nothing checks it — KBR-138 | Found while closing KBR-132. The known breach is fixed, and every skip left in a *gating* layer is a platform or interpreter one — but that is an observation, not a mechanism, and the next resource-availability skip written into `l1`, `l2`, `l3` or `acceptance` re-creates the same silent-green defect | A check over the collected suite that fails on a resource-availability skip in a gating layer, with a planted skip as its falsification case (§1.4). It must be **layer-aware**: `tests/integration/test_agent_e2e.py` holds three legitimate resource skips (missing credentials, profile, agent binary) that are legal only because they sit in `agent_live`, so a flat grep would report them and be turned off. Two further questions: static sweep or runtime hook, and whether a permitted skip is recognised by condition shape or declared by marker | **3** |
 | **G1** | I1 is unstated and untested | No definition of "unchanged"; mutation sites discoverable only by reading 6,463 lines | Register (§3.2) + oracle (§3.3) | **1** |
 | **G2** | No-bypass unproven **for the bridge's serving path**; no negative assertion; start-path guard is file-granular | `test_egress_https_proxy.py` proves the transports and drives `egress_cmd._probe` | Sealed-network harness (§5.2) per transport (§5.5) + AST start-path guard | **1** |
-| **G3** | I2 partially breached (F1) — KBR-8 · **fix landed, gap open** | Identity is still ad hoc per adapter. The subscription adapter no longer reports two different versions in one request: **KBR-8 fixed that on 2026-09-11**, and `tests/test_upstream_identity_consistency.py` guards both halves of §4.3 C1's F1 assertions across every registered adapter | Remaining: the exact-set header contract (T-G9 / **KBR-78**) and the parity baseline (T-C7, T-I12), then a policy — Q1 | **2** |
+| **G3** | I2 partially breached (F1) — KBR-8 · **fix landed, gap open** | Identity is still ad hoc per adapter. The subscription adapter no longer reports two different versions in one request: **KBR-8 fixed that on 2026-09-11**, and `tests/test_upstream_identity_consistency.py` guards both halves of §4.3 C1's F1 assertions across every registered adapter | Remaining: the parity baseline (T-C7, T-I12), then a policy — Q1. **KBR-78 (2026-09-15) closed the exact-set half** — the per-route contract, the AST branch-arm meta-test, the bedrock botocore observation, and the OAuth token POSTs' exact sets (incl. `originator`). | **1** |
 | **G4** | L1 strength unmeasured | Line coverage only | `mutmut` ≥ 85% **per target group** on the §6.1 scope | **2** |
 | **G8** | No corpus of real agent traffic | Synthetic fixtures encode our assumptions | Golden corpus (§7.1) | **2** |
 | **G10** | Custom-transport containment untested | **Partly closed (KBR-161).** Ambient `NO_PROXY` on `curl_cffi` is now measured, closed with `CURLOPT_NOPROXY`, and pinned; the OAuth refresh leg is covered by the same builder and contract. **Still open:** containment is proven at transport level, never through the bridge; `botocore`'s behaviour under an ambient `NO_PROXY` is **unmeasured** (its §6.2.4 row expects precedence, which is the assumption measurement falsified for `curl_cffi` — KBR-173); the aiohttp login leg is unproven end to end | §5.5 + §6.2.4 | **2** |
