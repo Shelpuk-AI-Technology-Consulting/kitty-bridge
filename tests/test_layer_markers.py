@@ -133,6 +133,14 @@ class TestDefaultLayerForPath:
         [
             ("tests/integration/test_agent_e2e.py", "agent_live"),
             ("tests/integration/nested/test_deep.py", "agent_live"),
+            # T-J1: the Gherkin acceptance layer is a path default like any
+            # other, so a `tests/acceptance/` file joins the layer no job runs
+            # yet and is visible to T-K9 rather than joining the Fast gate
+            # uninvited.
+            ("tests/acceptance/test_acceptance.py", "acceptance"),
+            # The negative case: the prefix must not over-match a sibling
+            # directory whose name merely shares characters with it.
+            ("tests/acceptance_old/test_x.py", "l1"),
             ("tests/bridge/test_server.py", "l1"),
             ("tests/test_egress.py", "l1"),
             ("tests/tui/test_setup_wizard.py", "l1"),

@@ -49,6 +49,7 @@ kitty = "kitty.cli.main:main"
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
+    "pytest-bdd>=8.1",
     "aioresponses>=0.7",
     "ruff>=0.4",
     "mypy>=1.10",
