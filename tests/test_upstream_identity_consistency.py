@@ -102,7 +102,7 @@ import inspect
 import json
 import re
 import sys
-from collections.abc import Iterator, Mapping
+from collections.abc import Awaitable, Callable, Iterator, Mapping
 from pathlib import Path
 from typing import NamedTuple
 
@@ -1266,9 +1266,11 @@ def _arm_lines_in_block(stmts: list[ast.stmt], out: set[int]) -> None:
       and opencode_go's model routes enumerable.
 
     Conditional *expressions* are enumerated too: every ``IfExp`` (ternary)
-    contributes the lines of both its branches, and ``match`` statements
-    contribute each case's first statement.  Nested ``If``s recurse into
-    their bodies and orelses.
+    contributes the lines of both its branches.  ``match`` statements are
+    **not** walked today — they appear in ``translate_to_upstream`` bodies
+    (not in the header builders), and adding them would require
+    ``ast.MatchCase`` support that the current builders do not exercise.
+    Nested ``If``s recurse into their bodies and orelses.
     """
     for i, stmt in enumerate(stmts):
         if not isinstance(stmt, ast.If):
@@ -1595,7 +1597,13 @@ class _BytesBody:
         return self._data
 
     def stream(self, chunk_size: int = 1024) -> Iterator[bytes]:
-        """Yield the body in ``chunk_size`` chunks, generator-style."""
+        """Yield the body once.
+
+        The ``chunk_size`` parameter is accepted for shape compatibility
+        with botocore's stream protocol but is deliberately ignored: the
+        body handed to this shim is a single small ValidationException
+        payload, not a stream worth chunking.
+        """
         yield self._data
 
 
@@ -1614,37 +1622,20 @@ def _drive_bedrock_wire(monkeypatch: pytest.MonkeyPatch, *, streaming: bool) -> 
     Returns:
         The exact header dict botocore prepared.
     """
-    import asyncio
-
     capture = _BedrockShortCircuit()
     adapter = capture.install(monkeypatch, streaming=streaming)
-    cc_request = {
-        "model": "anthropic.claude-3-sonnet",
-        "messages": [{"role": "user", "content": "hi"}],
-        "max_tokens": 8,
-        "_resolved_key": "AKIAFAKE:fake",
-        "_provider_config": {"region": "us-east-1"},
-    }
 
-    loop = asyncio.new_event_loop()
-    try:
-        if streaming:
+    if streaming:
 
-            async def run():
-                await adapter.stream_request(cc_request, write=_echo)
+        async def _run():
+            await adapter.stream_request(_BEDROCK_CC_REQUEST, write=_echo)
 
-            # 400 → ProviderError; we only wanted the request.
-            with contextlib.suppress(Exception):
-                loop.run_until_complete(run())
-        else:
+    else:
 
-            async def run():
-                return await adapter.make_request(cc_request)
+        async def _run():
+            return await adapter.make_request(_BEDROCK_CC_REQUEST)
 
-            with contextlib.suppress(Exception):
-                loop.run_until_complete(run())
-    finally:
-        loop.close()
+    _run_on_fresh_loop(_run)
 
     assert capture.headers is not None, (
         "before-send never fired — botocore event registration did not take"
@@ -1655,6 +1646,36 @@ def _drive_bedrock_wire(monkeypatch: pytest.MonkeyPatch, *, streaming: bool) -> 
 async def _echo(_chunk: bytes) -> None:
     """A no-op write callback for ``stream_request``."""
     return None
+
+
+#: A minimal request the bedrock adapter will translate, used by both the
+#: wire-contract sweep and the branding-mutation falsification.  The body
+#: shape is irrelevant — the 400 short-circuit short-circuits before any
+#: model response is computed.
+_BEDROCK_CC_REQUEST: dict = {
+    "model": "anthropic.claude-3-sonnet",
+    "messages": [{"role": "user", "content": "hi"}],
+    "max_tokens": 8,
+    "_resolved_key": "AKIAFAKE:fake",
+    "_provider_config": {"region": "us-east-1"},
+}
+
+
+def _run_on_fresh_loop(coro_factory: Callable[[], Awaitable[None]]) -> None:
+    """Run an async coroutine on a fresh event loop, suppressing exceptions.
+
+    Used by bedrock wire drivers.  The botocore 400 short-circuit raises
+    :class:`ProviderError` through the adapter; we only care about the
+    captured headers, so the exception is consumed.
+    """
+    import asyncio
+
+    loop = asyncio.new_event_loop()
+    try:
+        with contextlib.suppress(Exception):
+            loop.run_until_complete(coro_factory())
+    finally:
+        loop.close()
 
 
 #: Botocore's measured header name set for a Converse call (botocore 1.43.93,
@@ -1799,25 +1820,10 @@ class TestBedrockWireContract:
 
         monkeypatch.setattr(adapter, "_get_boto3_client", patched)
 
-        cc_request = {
-            "model": "anthropic.claude-3-sonnet",
-            "messages": [{"role": "user", "content": "hi"}],
-            "max_tokens": 8,
-            "_resolved_key": "AKIAFAKE:fake",
-            "_provider_config": {"region": "us-east-1"},
-        }
-        import asyncio
+        async def _run():
+            return await adapter.make_request(_BEDROCK_CC_REQUEST)
 
-        loop = asyncio.new_event_loop()
-        try:
-
-            async def run():
-                return await adapter.make_request(cc_request)
-
-            with contextlib.suppress(Exception):
-                loop.run_until_complete(run())
-        finally:
-            loop.close()
+        _run_on_fresh_loop(_run)
 
         assert capture.headers is not None, (
             "before-send never fired — the capture wiring did not take"
