@@ -405,6 +405,17 @@ _MESSAGES_FALSIFICATION_CASES: list[tuple[str, dict, str]] = [
         "messages[0] has no 'content'",
     ),
     (
+        "message with content: None (user)",
+        {
+            "model": "claude-sonnet-5",
+            "max_tokens": 10,
+            "messages": [
+                {"role": "user", "content": None},
+            ],
+        },
+        "messages[0] content must not be None",
+    ),
+    (
         "tool_result not in the immediately next turn",
         {
             "model": "claude-sonnet-5",
@@ -630,6 +641,48 @@ _CC_FALSIFICATION_CASES: list[tuple[str, dict, str]] = [
             ],
         },
         "messages[1] assistant has no 'content' and no tool_calls",
+    ),
+    (
+        "user with content: None",
+        {
+            "model": "gpt-4o",
+            "messages": [
+                {"role": "user", "content": None},
+            ],
+        },
+        "messages[0] content must not be None",
+    ),
+    (
+        "tool with content: None",
+        {
+            "model": "gpt-4o",
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "tool_a",
+                        "description": "x",
+                        "parameters": {"type": "object"},
+                    },
+                }
+            ],
+            "messages": [
+                {"role": "user", "content": "hi"},
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {"name": "tool_a", "arguments": "{}"},
+                        }
+                    ],
+                },
+                {"role": "tool", "tool_call_id": "call_1", "content": None},
+            ],
+        },
+        "messages[2] content must not be None",
     ),
     (
         "tool message not in the immediately next messages",

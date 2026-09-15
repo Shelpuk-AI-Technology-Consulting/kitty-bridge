@@ -644,7 +644,10 @@ def messages_problems(body: object) -> list[str]:
     # 'content'. A message dict missing either passes the alternation and
     # pairing checks silently (its role contributes None, its content is
     # skipped), so the vacuous-pass shape §1.4 warns about hides here unless
-    # flagged explicitly.
+    # flagged explicitly. The same holds for ``content: None``: the key is
+    # present so the missing-content check is satisfied, but the wire rejects
+    # a null content on every role (Anthropic requires string or list) — a
+    # T-F3 mutation setting the value to None must show up.
     for index, message in enumerate(messages):
         if not isinstance(message, dict):
             continue
@@ -652,6 +655,8 @@ def messages_problems(body: object) -> list[str]:
             problems.append(f"messages[{index}] has no 'role'")
         if "content" not in message:
             problems.append(f"messages[{index}] has no 'content'")
+        elif message.get("content") is None:
+            problems.append(f"messages[{index}] content must not be None")
 
     # Per-turn tool_use / tool_result id sets, in message order — the input
     # to both the set-level orphan/unanswered check and the positional
@@ -1119,7 +1124,9 @@ def cc_problems(body: object) -> list[str]:
     # 'content', CC is the same as Messages except assistant: an assistant
     # turn may carry ``content: None`` only when ``tool_calls`` is present and
     # non-empty (the wire permits it; a tool-only assistant with missing
-    # content is malformed).
+    # content is malformed). The ``content: None`` check is symmetric: the
+    # key is present so the missing-content check is satisfied, but the
+    # value is null and the wire rejects it.
     for index, message in enumerate(messages):
         if not isinstance(message, dict):
             continue
@@ -1129,12 +1136,18 @@ def cc_problems(body: object) -> list[str]:
         if role == "user" or role == "tool":
             if "content" not in message:
                 problems.append(f"messages[{index}] has no 'content'")
+            elif message.get("content") is None:
+                problems.append(f"messages[{index}] content must not be None")
         elif role == "assistant":
             raw_calls = message.get("tool_calls")
             has_calls = isinstance(raw_calls, list) and len(raw_calls) > 0
             if "content" not in message and not has_calls:
                 problems.append(
                     f"messages[{index}] assistant has no 'content' and no tool_calls"
+                )
+            elif message.get("content") is None and not has_calls:
+                problems.append(
+                    f"messages[{index}] assistant content must not be None without tool_calls"
                 )
 
     # Tool-call / tool-message id sets per message index, in order — input to
