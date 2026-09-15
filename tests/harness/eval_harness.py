@@ -27,17 +27,129 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass, fields
-from typing import TypeAlias
+from enum import Enum
+from typing import Any, TypeAlias
 
 __all__ = [
-    "RunConfig",
     "JSONValue",
+    "ModelReply",
+    "RawOutcome",
+    "RunConfig",
+    "TimedOut",
+    "TrialCategory",
+    "UnclassifiedError",
+    "UpstreamFailure",
+    "UpstreamRefusal",
+    "Verdict",
+    "classify",
 ]
 
 #: The shape ``sampling_overrides`` accepts: any JSON-serialisable scalar
 #: or container. Named here so the field annotation and the constructor's
 #: serialisability check describe one type, not two.
 JSONValue: TypeAlias = "str | int | float | bool | None | list[JSONValue] | dict[str, JSONValue]"
+
+
+class Verdict(Enum):
+    """What an acceptance check returns for a single ``ModelReply``.
+
+    Three values, deliberately closed: ``PASS`` (the answer is right),
+    ``FAIL`` (the answer is wrong), ``REFUSED`` (the model declined or
+    produced no usable answer). ``REFUSED`` is its own value rather
+    than a special ``FAIL`` because §6.4.3 names it separately — a
+    refusal is **evidence about the arm**, not just a wrong answer.
+    """
+
+    PASS = "pass"
+    FAIL = "fail"
+    REFUSED = "refused"
+
+
+class TrialCategory(Enum):
+    """The §6.4.3 failure taxonomy, plus ``SUCCESS`` and ``FAILED_ACCEPTANCE``.
+
+    Every trial in a run lands in exactly one of these. ``SUCCESS`` and
+    ``FAILED_ACCEPTANCE`` are the two paths a ``ModelReply`` can take
+    after the acceptance check has spoken; the other five are the §6.4.3
+    operational categories (refusal, upstream error, rate limit,
+    timeout, harness fault). ``FAILED_ACCEPTANCE`` is added so the
+    taxonomy is exhaustive over non-successes — a trial that is neither
+    success nor one of the five operational categories still has a home.
+    """
+
+    SUCCESS = "success"
+    FAILED_ACCEPTANCE = "failed_acceptance"
+    REFUSAL = "refusal"
+    UPSTREAM_ERROR = "upstream_error"
+    RATE_LIMIT = "rate_limit"
+    TIMEOUT = "timeout"
+    HARNESS_FAULT = "harness_fault"
+
+
+@dataclass(frozen=True)
+class ModelReply:
+    """The executor returned a model reply that needs an acceptance verdict.
+
+    Attributes:
+        reply: The model's reply, in whatever shape the executor's
+            upstream returned. The acceptance check interprets it; the
+            harness itself does not parse it.
+    """
+
+    reply: Any
+
+
+@dataclass(frozen=True)
+class UpstreamRefusal:
+    """An upstream error the executor judged to be a behavioural refusal.
+
+    The skeleton owns the seam — a dedicated outcome variant the
+    executor can return when it recognises an upstream reply as a
+    refusal-shaped error (e.g. a 400 with a content-moderation body).
+    It does **not** own the heuristic for recognising one; provider
+    body shapes belong to the executor author.
+    """
+
+    status: int
+    body: Any
+
+
+@dataclass(frozen=True)
+class UpstreamFailure:
+    """A non-refusal upstream error: a status code with a body.
+
+    Status 429 lands in ``RATE_LIMIT``; everything else lands in
+    ``UPSTREAM_ERROR``. A 400 with a content-moderation body should
+    be wrapped as ``UpstreamRefusal`` by the executor instead, so a
+    plain ``UpstreamFailure(400, ...)`` classifies to
+    ``UPSTREAM_ERROR``.
+    """
+
+    status: int
+    body: Any
+
+
+@dataclass(frozen=True)
+class TimedOut:
+    """The executor hit the trial's wall-clock bound."""
+
+
+@dataclass(frozen=True)
+class UnclassifiedError:
+    """An exception the executor caught but did not recognise.
+
+    The runner wraps any exception escaping an executor call into this
+    shape, so the per-trial loop never re-raises into the outer
+    runner. Classifying here is the harness's one rule about harness
+    faults: we caught it, we record it, the run continues.
+    """
+
+    exc: BaseException
+
+
+#: The tagged union the executor returns. Distinct dataclasses — the
+#: runner dispatches on ``isinstance`` rather than on a discriminator.
+RawOutcome = ModelReply | UpstreamRefusal | UpstreamFailure | TimedOut | UnclassifiedError
 
 
 @dataclass(frozen=True)
@@ -132,3 +244,70 @@ class RunConfig:
                 f"its recorded digest is the durable evidence of what was "
                 f"pinned. {exc}"
             ) from exc
+
+
+def classify(outcome: RawOutcome, verdict: Verdict | None = None) -> TrialCategory:
+    """Map a single trial's outcome (and its verdict) to a trial category.
+
+    §6.4.3 names the taxonomy: every non-success is classified and
+    reported separately, and the categories are the diagnosis. The
+    mapping table is in :mod:`harness.eval_harness` §2 of the
+    requirements doc; this function is the implementation.
+
+    Args:
+        outcome: The tagged-union value the executor returned, or the
+            runner's wrapped form of an exception.
+        verdict: The acceptance check's judgement on the reply, used
+            only when ``outcome`` is a :class:`ModelReply`. Other
+            outcomes ignore it. ``None`` for a ``ModelReply`` is a
+            programming error — the runner must always pass the verdict
+            it computed, or skip ``classify`` and treat the trial as
+            ``HARNESS_FAULT`` itself.
+
+    Returns:
+        The single :class:`TrialCategory` the trial lands in.
+
+    Raises:
+        ValueError: When ``outcome`` is a ``ModelReply`` and ``verdict``
+            is ``None`` (the runner forgot to compute the verdict).
+        TypeError: When ``outcome`` is not one of the five variants
+            of :data:`RawOutcome`. A defensive guard so a future
+            variant added without updating this function is reported,
+            not silently dropped to ``HARNESS_FAULT`` (which would
+            hide the omission).
+    """
+    if isinstance(outcome, ModelReply):
+        if verdict is Verdict.PASS:
+            return TrialCategory.SUCCESS
+        if verdict is Verdict.FAIL:
+            return TrialCategory.FAILED_ACCEPTANCE
+        if verdict is Verdict.REFUSED:
+            return TrialCategory.REFUSAL
+        # No verdict was supplied for a ModelReply. A runner that calls
+        # classify here has forgotten its own contract; raise rather
+        # than classify to a default, which would let the omission pass
+        # silently into the record.
+        raise ValueError(
+            "classify() requires a Verdict for a ModelReply; the runner "
+            "must compute the acceptance check before classifying"
+        )
+
+    # Non-ModelReply outcomes ignore the verdict argument; each maps to
+    # a single category by its own shape. No further branching is
+    # needed for the §6.4.3 categories: a content-moderation 400 is
+    # the executor's UpstreamRefusal, not a UpstreamFailure, and a 429
+    # is the only rate-limit status the taxonomy names.
+    if isinstance(outcome, UpstreamRefusal):
+        return TrialCategory.REFUSAL
+    if isinstance(outcome, UpstreamFailure):
+        return TrialCategory.RATE_LIMIT if outcome.status == 429 else TrialCategory.UPSTREAM_ERROR
+    if isinstance(outcome, TimedOut):
+        return TrialCategory.TIMEOUT
+    if isinstance(outcome, UnclassifiedError):
+        return TrialCategory.HARNESS_FAULT
+
+    raise TypeError(
+        f"classify() received an outcome of unknown type "
+        f"{type(outcome).__name__}; update this function when adding a new "
+        f"RawOutcome variant"
+    )

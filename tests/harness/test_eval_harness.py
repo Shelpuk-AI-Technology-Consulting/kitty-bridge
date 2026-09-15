@@ -21,7 +21,17 @@ from __future__ import annotations
 
 import pytest
 
-from harness.eval_harness import RunConfig
+from harness.eval_harness import (
+    ModelReply,
+    RunConfig,
+    TimedOut,
+    TrialCategory,
+    UnclassifiedError,
+    UpstreamFailure,
+    UpstreamRefusal,
+    Verdict,
+    classify,
+)
 
 # ── RunConfig — pinning (REQ 1) ──────────────────────────────────────────────
 
@@ -125,6 +135,66 @@ def test_run_config_rejects_non_serialisable_sampling_overrides_value() -> None:
 
     with pytest.raises(ValueError):
         _fully_pinned(sampling_overrides={"set_val": {1, 2, 3}})  # type: ignore[dict-item]
+
+
+# ── TrialCategory — classify() (REQ 5) ──────────────────────────────────────
+
+
+def test_classify_verdict_pass_yields_success() -> None:
+    """REQ 5 — a model reply the acceptance check accepts is SUCCESS."""
+    assert classify(ModelReply(reply="OK"), Verdict.PASS) is TrialCategory.SUCCESS
+
+
+def test_classify_verdict_fail_yields_failed_acceptance() -> None:
+    """REQ 5 — an answer that fails the acceptance test is FAILED_ACCEPTANCE.
+
+    "Failed acceptance" is the eval's quality signal: the arm answered
+    but the answer was wrong. It is deliberately its own category so
+    T-K3 can report it alongside the §6.4.3 operational ones.
+    """
+    assert classify(ModelReply(reply="nope"), Verdict.FAIL) is TrialCategory.FAILED_ACCEPTANCE
+
+
+def test_classify_verdict_refused_yields_refusal() -> None:
+    """REQ 5 — a model reply the acceptance check marks REFUSED is REFUSAL."""
+    assert classify(ModelReply(reply="I cannot help"), Verdict.REFUSED) is TrialCategory.REFUSAL
+
+
+def test_classify_upstream_refusal_yields_refusal() -> None:
+    """REQ 5 — an executor pre-classified upstream refusal is REFUSAL.
+
+    The skeleton owns the seam (``UpstreamRefusal`` is a dedicated
+    ``RawOutcome`` variant) but **not** the heuristic for spotting one;
+    provider-specific body shapes belong to the executor author.
+    """
+    assert classify(UpstreamRefusal(status=400, body={"error": "content_moderation"})) is TrialCategory.REFUSAL
+
+
+def test_classify_upstream_failure_429_yields_rate_limit() -> None:
+    """REQ 5 — a 429 upstream reply is RATE_LIMIT (§6.4.3's named category)."""
+    assert classify(UpstreamFailure(status=429, body={"error": "rate_limited"})) is TrialCategory.RATE_LIMIT
+
+
+def test_classify_upstream_failure_5xx_yields_upstream_error() -> None:
+    """REQ 5 — any other non-2xx upstream reply is UPSTREAM_ERROR."""
+    assert classify(UpstreamFailure(status=500, body={"error": "boom"})) is TrialCategory.UPSTREAM_ERROR
+    assert classify(UpstreamFailure(status=503, body={"error": "unavailable"})) is TrialCategory.UPSTREAM_ERROR
+
+
+def test_classify_timeout_yields_timeout() -> None:
+    """REQ 5 — an executor-caught timeout is TIMEOUT."""
+    assert classify(TimedOut()) is TrialCategory.TIMEOUT
+
+
+def test_classify_unexpected_exception_yields_harness_fault() -> None:
+    """REQ 5 — an exception the executor did not recognise is HARNESS_FAULT.
+
+    HARNESS_FAULT is the one category that diagnoses *us*, not the
+    upstream or the model. The runner catches executor-side exceptions
+    and converts them; ``classify`` then turns the wrapped form into
+    the category without re-raising.
+    """
+    assert classify(UnclassifiedError(exc=OSError("bridge bind failed"))) is TrialCategory.HARNESS_FAULT
 
 
 # ── Helpers ─────────────────────────────────────────────────────────────────
