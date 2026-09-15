@@ -97,7 +97,6 @@ from __future__ import annotations
 
 import ast
 import base64
-import contextlib
 import inspect
 import json
 import re
@@ -111,7 +110,7 @@ import pytest
 from kitty.codex_identity import CODEX_CLI_VERSION as _CODEX_CLI_VERSION
 from kitty.codex_identity import build_codex_user_agent as _build_codex_user_agent
 from kitty.providers.anthropic import _ANTHROPIC_VERSION
-from kitty.providers.base import ProviderAdapter
+from kitty.providers.base import ProviderAdapter, ProviderError
 from kitty.providers.bedrock import BedrockAdapter
 from kitty.providers.openai import OpenAIAdapter
 from kitty.providers.openai_subscription import OpenAISubscriptionAdapter
@@ -1661,19 +1660,29 @@ _BEDROCK_CC_REQUEST: dict = {
 }
 
 
-def _run_on_fresh_loop(coro_factory: Callable[[], Awaitable[None]]) -> None:
-    """Run an async coroutine on a fresh event loop, suppressing exceptions.
+def _run_on_fresh_loop(coro_factory: Callable[[], Awaitable[object]]) -> None:
+    """Run an async coroutine on a fresh event loop.
 
-    Used by bedrock wire drivers.  The botocore 400 short-circuit raises
-    :class:`ProviderError` through the adapter; we only care about the
-    captured headers, so the exception is consumed.
+    The bedrock 400 short-circuit raises :class:`ProviderError` through the
+    adapter (both ``make_request`` and ``stream_request`` wrap botocore
+    errors that way) — the one outcome this helper consumes, since only the
+    captured headers matter.  Any **other** exception propagates: the first
+    draft of this helper used ``contextlib.suppress(Exception)``, which
+    routed a real wiring failure (a signature change in botocore's stream
+    protocol, say) into the caller's ``"before-send never fired"`` assert
+    and misdiagnosed the cause.
+
+    Args:
+        coro_factory: A zero-argument callable returning the coroutine to
+            drive.  Its result is discarded.
     """
     import asyncio
 
     loop = asyncio.new_event_loop()
     try:
-        with contextlib.suppress(Exception):
-            loop.run_until_complete(coro_factory())
+        loop.run_until_complete(coro_factory())
+    except ProviderError:
+        pass
     finally:
         loop.close()
 
