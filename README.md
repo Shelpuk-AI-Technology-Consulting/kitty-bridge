@@ -628,11 +628,12 @@ kitty --debug-file /tmp/debug.log --logging my-profile codex
 
 ### Cleanup
 
-kitty restores agent config files after the agent exits. Three layers of cleanup:
+kitty restores agent config files after the agent exits. Three automatic cleanup layers, plus manual recovery:
 
 1. **Normal exit** — `finally` block
-2. **Crash / `SIGTERM`** — `atexit` handler
-3. **`SIGKILL` / kernel OOM** — run `kitty cleanup` manually
+2. **Crash** — `atexit` handler
+3. **`SIGTERM`** — forwarded to the agent; the same `finally` block runs when the agent dies from it
+4. **`SIGKILL` / kernel OOM** — manual recovery via `kitty cleanup`
 
 If your agent shows connection errors after a crash, run `kitty cleanup` to restore its configuration files.
 
