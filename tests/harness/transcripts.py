@@ -588,7 +588,10 @@ def messages_problems(body: object) -> list[str]:
             problems.append(f"missing required field {required!r}")
 
     messages = body.get("messages")
-    if not isinstance(messages, list) or not messages:
+    if not isinstance(messages, list):
+        problems.append("'messages' must be a list")
+        return problems
+    if not messages:
         problems.append("'messages' must be a non-empty list")
         return problems
 
@@ -637,8 +640,24 @@ def messages_problems(body: object) -> list[str]:
         for tool in tools_list
         if isinstance(tool, dict)
     }
-    tool_uses: list[tuple[int, str]] = []
-    tool_results: list[tuple[int, str]] = []
+    # Per-message required fields: every message must carry a 'role' and a
+    # 'content'. A message dict missing either passes the alternation and
+    # pairing checks silently (its role contributes None, its content is
+    # skipped), so the vacuous-pass shape §1.4 warns about hides here unless
+    # flagged explicitly.
+    for index, message in enumerate(messages):
+        if not isinstance(message, dict):
+            continue
+        if not isinstance(message.get("role"), str) or not message.get("role"):
+            problems.append(f"messages[{index}] has no 'role'")
+        if "content" not in message:
+            problems.append(f"messages[{index}] has no 'content'")
+
+    # Per-turn tool_use / tool_result id sets, in message order — the input
+    # to both the set-level orphan/unanswered check and the positional
+    # next-turn check below.
+    tool_use_ids_by_message: dict[int, set[str]] = {}
+    tool_result_ids_by_message: dict[int, set[str]] = {}
     for index, message in enumerate(messages):
         if not isinstance(message, dict):
             problems.append(f"messages[{index}] is not a dict")
@@ -652,7 +671,7 @@ def messages_problems(body: object) -> list[str]:
                 continue
             block_type = block.get("type")
             if block_type == "tool_use":
-                tool_uses.append((index, block.get("id") or ""))
+                tool_use_ids_by_message.setdefault(index, set()).add(block.get("id") or "")
                 tool_name = block.get("name")
                 if tool_name not in declared_tool_names:
                     problems.append(
@@ -661,16 +680,62 @@ def messages_problems(body: object) -> list[str]:
                 if not block.get("id"):
                     problems.append(f"messages[{index}] tool_use has no 'id'")
             elif block_type == "tool_result":
-                tool_results.append((index, block.get("tool_use_id") or ""))
+                tool_result_ids_by_message.setdefault(index, set()).add(
+                    block.get("tool_use_id") or ""
+                )
                 if not block.get("tool_use_id"):
                     problems.append(f"messages[{index}] tool_result has no 'tool_use_id'")
 
-    use_ids = {tid for _, tid in tool_uses}
-    result_ids = {tid for _, tid in tool_results}
+    use_ids = {tid for ids in tool_use_ids_by_message.values() for tid in ids}
+    result_ids = {tid for ids in tool_result_ids_by_message.values() for tid in ids}
     for tid in result_ids - use_ids:
         problems.append(f"tool_result {tid!r} has no matching tool_use")
     for tid in use_ids - result_ids:
         problems.append(f"tool_use {tid!r} has no matching tool_result")
+
+    # Positional pairing — fixture rule, mirroring ``cache_breakpoints.py``:
+    # every tool call must be answered in the very next turn. A matching
+    # tool_result anywhere *later* is still a violation ("answered too late"):
+    # it is exactly the shape a wiring bug produces when the answer arrives
+    # several turns downstream, and the wire misattributes it.
+
+    def _result_positions(tid: str) -> list[int]:
+        """Return every turn index whose tool_result set contains ``tid``."""
+        return sorted(
+            index
+            for index, ids in tool_result_ids_by_message.items()
+            if tid in ids
+        )
+
+    for index, uses in tool_use_ids_by_message.items():
+        following = tool_result_ids_by_message.get(index + 1, set())
+        for tid in uses:
+            if tid in following:
+                continue
+            later = [pos for pos in _result_positions(tid) if pos > index + 1]
+            if later:
+                problems.append(
+                    f"tool_use {tid!r} answered too late at messages[{later[0]}]"
+                )
+
+    def _use_positions(tid: str) -> list[int]:
+        """Return every turn index whose tool_use set contains ``tid``."""
+        return sorted(
+            index
+            for index, ids in tool_use_ids_by_message.items()
+            if tid in ids
+        )
+
+    for index, results in tool_result_ids_by_message.items():
+        preceding = tool_use_ids_by_message.get(index - 1, set())
+        for tid in results:
+            if tid in preceding:
+                continue
+            earlier = [pos for pos in _use_positions(tid) if pos < index - 1]
+            if earlier:
+                problems.append(
+                    f"tool_result {tid!r} answered too late at messages[{index}]"
+                )
 
     return problems
 
@@ -999,7 +1064,10 @@ def cc_problems(body: object) -> list[str]:
             problems.append(f"missing required field {required!r}")
 
     messages = body.get("messages")
-    if not isinstance(messages, list) or not messages:
+    if not isinstance(messages, list):
+        problems.append("'messages' must be a list")
+        return problems
+    if not messages:
         problems.append("'messages' must be a non-empty list")
         return problems
 
@@ -1047,8 +1115,33 @@ def cc_problems(body: object) -> list[str]:
         if isinstance(tool, dict) and isinstance(tool.get("function"), dict)
     }
 
-    tool_call_ids: list[str] = []
-    tool_message_ids: list[str] = []
+    # Per-message required fields. Every message must carry a 'role'. On
+    # 'content', CC is the same as Messages except assistant: an assistant
+    # turn may carry ``content: None`` only when ``tool_calls`` is present and
+    # non-empty (the wire permits it; a tool-only assistant with missing
+    # content is malformed).
+    for index, message in enumerate(messages):
+        if not isinstance(message, dict):
+            continue
+        if not isinstance(message.get("role"), str) or not message.get("role"):
+            problems.append(f"messages[{index}] has no 'role'")
+        role = message.get("role")
+        if role == "user" or role == "tool":
+            if "content" not in message:
+                problems.append(f"messages[{index}] has no 'content'")
+        elif role == "assistant":
+            raw_calls = message.get("tool_calls")
+            has_calls = isinstance(raw_calls, list) and len(raw_calls) > 0
+            if "content" not in message and not has_calls:
+                problems.append(
+                    f"messages[{index}] assistant has no 'content' and no tool_calls"
+                )
+
+    # Tool-call / tool-message id sets per message index, in order — input to
+    # both the set-level orphan/unanswered check and the positional next-turn
+    # check below.
+    tool_call_ids_by_message: dict[int, set[str]] = {}
+    tool_message_ids_by_message: dict[int, set[str]] = {}
 
     for index, message in enumerate(messages):
         if not isinstance(message, dict):
@@ -1080,7 +1173,7 @@ def cc_problems(body: object) -> list[str]:
                 if not call_id:
                     problems.append(f"messages[{index}] tool_call has no 'id'")
                 else:
-                    tool_call_ids.append(call_id)
+                    tool_call_ids_by_message.setdefault(index, set()).add(call_id)
                 function = call.get("function")
                 if not isinstance(function, dict):
                     problems.append(
@@ -1097,13 +1190,57 @@ def cc_problems(body: object) -> list[str]:
             if not call_id:
                 problems.append(f"messages[{index}] tool message has no 'tool_call_id'")
             else:
-                tool_message_ids.append(call_id)
+                tool_message_ids_by_message.setdefault(index, set()).add(call_id)
 
-    orphan_results = set(tool_message_ids) - set(tool_call_ids)
-    for tid in orphan_results:
+    tool_call_ids_ever = {
+        tid for ids in tool_call_ids_by_message.values() for tid in ids
+    }
+    tool_message_ids_ever = {
+        tid for ids in tool_message_ids_by_message.values() for tid in ids
+    }
+    for tid in tool_message_ids_ever - tool_call_ids_ever:
         problems.append(f"tool message {tid!r} has no matching tool_call")
-    unanswered = set(tool_call_ids) - set(tool_message_ids)
-    for tid in unanswered:
+    for tid in tool_call_ids_ever - tool_message_ids_ever:
         problems.append(f"tool_call {tid!r} has no matching tool message")
+
+    # Positional pairing — the wire requires a tool message immediately after
+    # the assistant turn that emitted its tool_calls, and CC's grammar forbids
+    # anything between them. A matching tool message several turns later is a
+    # wiring defect and must be flagged, mirroring the same rule the Messages
+    # reporter applies (and which the sibling fixture enforces as well).
+    def _message_positions(tid: str, by_message: dict[int, set[str]]) -> list[int]:
+        return sorted(index for index, ids in by_message.items() if tid in ids)
+
+    for index, call_set in tool_call_ids_by_message.items():
+        # Walk forward collecting the immediately-following tool messages. The
+        # collected ids must equal the assistant's call set.
+        collected: set[str] = set()
+        walk = index + 1
+        while walk in tool_message_ids_by_message:
+            collected |= tool_message_ids_by_message[walk]
+            walk += 1
+        for tid in call_set - collected:
+            later = [
+                pos for pos in _message_positions(tid, tool_message_ids_by_message)
+                if pos > index + 1
+            ]
+            if later:
+                problems.append(
+                    f"tool_call {tid!r} answered too late at messages[{later[0]}]"
+                )
+
+    for index, m_ids in tool_message_ids_by_message.items():
+        preceding_calls = tool_call_ids_by_message.get(index - 1, set())
+        for tid in m_ids:
+            if tid in preceding_calls:
+                continue
+            earlier = [
+                pos for pos in _message_positions(tid, tool_call_ids_by_message)
+                if pos < index - 1
+            ]
+            if earlier:
+                problems.append(
+                    f"tool_result {tid!r} answered too late at messages[{index}]"
+                )
 
     return problems

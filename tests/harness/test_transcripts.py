@@ -22,25 +22,14 @@ import re
 from pathlib import Path
 
 import pytest
-from hypothesis import HealthCheck, given, settings
+from hypothesis import given, settings
 
 from harness import transcripts as t
 
-# CI profile: when CI is set, derandomise, lift the 200 ms per-example
-# deadline, and disable the example database so a developer's failure does
-# not replay on the runner. The module registers the profile too; loading
-# again here is idempotent and makes the dependency explicit at the test
-# boundary. Both no-op when CI is unset — developers keep the default
-# randomized profile and the on-disk example database locally.
-if os.environ.get("CI"):
-    settings.register_profile(
-        "kitty-bridge-ci-tests",
-        derandomize=True,
-        deadline=None,
-        suppress_health_check=[HealthCheck.too_slow],
-        database=None,
-    )
-    settings.load_profile("kitty-bridge-ci-tests")
+# Hypothesis CI profile is registered in ``tests/conftest.py`` at session
+# start, so this module needs no local registration — and downstream
+# property-test modules (T-F2, T-F3, T-F6) inherit the same profile
+# deterministically rather than by collection order.
 
 
 # ── AC-2: the documented import surface ────────────────────────────────────
@@ -337,6 +326,109 @@ _MESSAGES_FALSIFICATION_CASES: list[tuple[str, dict, str]] = [
         },
         "tool_use 'call_unanswered' has no matching tool_result",
     ),
+    (
+        "tool_use with no id",
+        {
+            "model": "claude-sonnet-5",
+            "max_tokens": 10,
+            "tools": [{"name": "tool_a", "description": "x", "input_schema": {"type": "object"}}],
+            "messages": [
+                {"role": "user", "content": "hi"},
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "tool_use", "name": "tool_a", "input": {}}
+                    ],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "tool_result", "tool_use_id": "any", "content": "ok"}
+                    ],
+                },
+            ],
+        },
+        "messages[1] tool_use has no 'id'",
+    ),
+    (
+        "tool_result with no tool_use_id",
+        {
+            "model": "claude-sonnet-5",
+            "max_tokens": 10,
+            "messages": [
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "content": "ok"},
+                {"role": "user", "content": [{"type": "tool_result", "content": "ok"}]},
+            ],
+        },
+        "messages[2] tool_result has no 'tool_use_id'",
+    ),
+    (
+        "messages is not a list",
+        {
+            "model": "claude-sonnet-5",
+            "max_tokens": 10,
+            "messages": {"role": "user", "content": "hi"},
+        },
+        "'messages' must be a list",
+    ),
+    (
+        "messages is empty",
+        {
+            "model": "claude-sonnet-5",
+            "max_tokens": 10,
+            "messages": [],
+        },
+        "'messages' must be a non-empty list",
+    ),
+    (
+        "message with no role",
+        {
+            "model": "claude-sonnet-5",
+            "max_tokens": 10,
+            "messages": [
+                {"role": "user", "content": "hi"},
+                {"content": "no role"},
+            ],
+        },
+        "messages[1] has no 'role'",
+    ),
+    (
+        "message with no content",
+        {
+            "model": "claude-sonnet-5",
+            "max_tokens": 10,
+            "messages": [
+                {"role": "user"},
+            ],
+        },
+        "messages[0] has no 'content'",
+    ),
+    (
+        "tool_result not in the immediately next turn",
+        {
+            "model": "claude-sonnet-5",
+            "max_tokens": 10,
+            "tools": [{"name": "tool_a", "description": "x", "input_schema": {"type": "object"}}],
+            "messages": [
+                {"role": "user", "content": "go"},
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "tool_use", "id": "call_late", "name": "tool_a", "input": {}}
+                    ],
+                },
+                {"role": "user", "content": "unrelated turn"},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "tool_result", "tool_use_id": "call_late", "content": "ok"}
+                    ],
+                },
+            ],
+        },
+        "tool_use 'call_late' answered too late at messages[3]",
+    ),
 ]
 
 
@@ -467,6 +559,110 @@ _CC_FALSIFICATION_CASES: list[tuple[str, dict, str]] = [
             ],
         },
         "tool_call 'call_unanswered' has no matching tool message",
+    ),
+    (
+        "tool_call with no id",
+        {
+            "model": "gpt-4o",
+            "messages": [
+                {"role": "user", "content": "hi"},
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "type": "function",
+                            "function": {"name": "tool_a", "arguments": "{}"},
+                        }
+                    ],
+                },
+                {"role": "tool", "tool_call_id": "anything", "content": "ok"},
+            ],
+        },
+        "messages[1] tool_call has no 'id'",
+    ),
+    (
+        "tool message with no tool_call_id",
+        {
+            "model": "gpt-4o",
+            "messages": [
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "content": "ok"},
+                {"role": "tool", "content": "no id"},
+            ],
+        },
+        "messages[2] tool message has no 'tool_call_id'",
+    ),
+    (
+        "messages is not a list",
+        {
+            "model": "gpt-4o",
+            "messages": {"role": "user", "content": "hi"},
+        },
+        "'messages' must be a list",
+    ),
+    (
+        "messages is empty",
+        {
+            "model": "gpt-4o",
+            "messages": [],
+        },
+        "'messages' must be a non-empty list",
+    ),
+    (
+        "message with no role",
+        {
+            "model": "gpt-4o",
+            "messages": [
+                {"role": "user", "content": "hi"},
+                {"content": "no role"},
+            ],
+        },
+        "messages[1] has no 'role'",
+    ),
+    (
+        "assistant without content and no tool_calls",
+        {
+            "model": "gpt-4o",
+            "messages": [
+                {"role": "user", "content": "hi"},
+                {"role": "assistant"},
+            ],
+        },
+        "messages[1] assistant has no 'content' and no tool_calls",
+    ),
+    (
+        "tool message not in the immediately next messages",
+        {
+            "model": "gpt-4o",
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "tool_a",
+                        "description": "x",
+                        "parameters": {"type": "object"},
+                    },
+                }
+            ],
+            "messages": [
+                {"role": "user", "content": "hi"},
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "call_late",
+                            "type": "function",
+                            "function": {"name": "tool_a", "arguments": "{}"},
+                        }
+                    ],
+                },
+                {"role": "user", "content": "unrelated"},
+                {"role": "tool", "tool_call_id": "call_late", "content": "ok"},
+            ],
+        },
+        "tool_call 'call_late' answered too late at messages[3]",
     ),
 ]
 
