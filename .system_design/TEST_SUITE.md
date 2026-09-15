@@ -3078,6 +3078,47 @@ because a tool is absent is indistinguishable from one that proves it.
 
 [KBR-28]: https://shelpuk.atlassian.net/browse/KBR-28
 
+### 7.3.1 T-E2 delivery ([KBR-62](https://shelpuk.atlassian.net/browse/KBR-62)) — the aiohttp slice, complete and falsified
+
+T-E2 closes phases 2, 2b and 3 of §5.2.2 for the bridge's own aiohttp serving path, and
+records the slice's verdict. What it added to the shared T-E1 harness core, and what it had
+to add to make the phases provable:
+
+- **`RecordingUpstream.start(ssl_context=None)`** — accept an optional server-side TLS context.
+  The KBR-61 design assumed the bridge's aiohttp client CONNECT-tunnels for a plain-HTTP
+  upstream, which is not how aiohttp behaves: for ``http://`` targets it sends the request in
+  absolute form (``POST http://upstream...``), which the harness's CONNECT-only proxy answers
+  with 405. With TLS at the recorder, the bridge's outbound URL is ``https://...``, aiohttp
+  CONNECTs through the proxy, and §5.2.1's source-port join holds. The harness's
+  ``SealedNetwork.start()`` passes ``server_ssl_context(certs.target_cert, certs.target_key)``
+  — the throwaway leaf cert ``TlsTarget`` already uses, with ``HARNESS_UPSTREAM_HOST`` in its
+  SAN, so the same key material serves both servers without a second generation pass.
+- **`SealedNetwork.upstream_base_url`** — now ``https://...`` (not ``http://...``). T-E1's
+  comment "plain HTTP at the upstream" is no longer true and the test that named it
+  (``TestBridgeAiohttpContainment``) takes the ``aiohttp_trusts_test_ca`` fixture so the
+  bridge's aiohttp client trusts the harness CA on both hops.
+- **`BridgeAiohttpContainment.drive_with_egress(harness, *, egress, monkeypatch)`** — the
+  phases-2/2b/3 entry point: same shape as ``drive_phase_1`` but passes ``egress=`` through
+  to ``BridgeServer`` so ``_session_for`` routes public destinations through the proxy.
+- **`CapabilityReport.reset_for_test()`** — test-scoped seam returning the singleton to its
+  every-``not_attempted`` state. The autouse fixture on ``TestCapabilityReport`` (and on this
+  module) calls it before each test so the KBR-61 "initial state" contract survives the
+  verdict T-E2 records at the end of the slice, regardless of test ordering.
+
+Phase 2 (proxy down ⇒ zero connections), phase 2b (every peer port joins a tunnel source
+port, 407 contributes nothing) and phase 3 (an injected ``should_bypass`` bypass makes the
+harness fail) live in ``tests/harness/test_aiohttp_containment_slice.py``. Phase 3's
+monkeypatch lands on ``kitty.bridge.server`` (where ``_session_for`` resolves its own module
+binding) — a patch on ``kitty.egress`` is silently ignored, which is the exact fail-by-silence
+the falsification exists to prevent. The phases skip below Python 3.11 where aiohttp cannot
+do TLS-in-TLS over stdlib asyncio, matching ``test_egress_https_proxy.py``; phase 1
+(direct-leg TLS to the recorder, no proxy) runs on every supported Python.
+
+The slice records ``Outcome.PROVEN`` for ``bridge_aiohttp`` into ``harness.containment.instance()``
+at teardown. T-E1's contract test — "singleton exposes every transport ``not_attempted``" — was
+updated to use ``reset_for_test`` via autouse, so T-E1's assertion holds regardless of
+whether T-E2's verdict has been written in the same process.
+
 ### 7.4 Wire projections and the transparency oracle
 
 **The projections (§3.3.1)** are the load-bearing piece: one hand-written reader per wire format —
