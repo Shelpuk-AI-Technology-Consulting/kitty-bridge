@@ -18,7 +18,11 @@ time; concurrency is the row it does not cover.
 Layer: L3 (subsystem — real processes, real filesystem). No CI job selects
 ``l3`` yet; ``tests/layers.py::PENDING_ACTIVATION_LAYERS`` parks the layer on
 plan task T-K6, and the Fast gate's ``-m "l1 or l2"`` never runs these. A
-developer's bare ``pytest`` does.
+developer's bare ``pytest`` does. The three scenario tests are POSIX-only:
+ending a session is signalled with SIGTERM, which ``subprocess.Popen``
+delivers as TerminateProcess on Windows — indistinguishable from SIGKILL, so
+the cleanup assertions cannot pass there (the falsification control is
+pure-Python and runs everywhere).
 
 Hermeticity: the child environment redirects every path the product resolves
 — ``HOME`` (settings.json, the crash backup), the platformdirs trees, and the
@@ -498,8 +502,13 @@ def _wait_for_session_record(sandbox: _Sandbox, name: str, proc: subprocess.Pope
     record_path = sandbox.root / f"session-path-{name}.txt"
     deadline = time.monotonic() + _READY_TIMEOUT_SECONDS
     while time.monotonic() < deadline:
-        if record_path.exists():
-            return Path(record_path.read_text(encoding="utf-8").strip())
+        # Non-empty read — Path.write_text opens the file before the write
+        # closes it; an empty read in that microsecond window would parse as
+        # ``Path(".")`` and produce a confusing "both sessions resolved to
+        # the same settings file" failure. Require content.
+        text = record_path.read_text(encoding="utf-8").strip() if record_path.exists() else ""
+        if text:
+            return Path(text)
         if proc.poll() is not None:
             break
         time.sleep(_POLL_INTERVAL_SECONDS)
@@ -633,6 +642,13 @@ def sandbox(tmp_path: Path) -> _Sandbox:
 # ── AC-1: each concurrent session gets its own --settings temp file ─────────
 
 
+# ── AC-1: each concurrent session gets its own --settings temp file ─────────
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="os.kill(pid, SIGTERM) is TerminateProcess on Windows — indistinguishable from SIGKILL",
+)
 def test_concurrent_sessions_each_get_their_own_settings_file(sandbox: _Sandbox) -> None:
     """Two simultaneous sessions produce two distinct per-session files.
 
@@ -673,6 +689,10 @@ def test_concurrent_sessions_each_get_their_own_settings_file(sandbox: _Sandbox)
 # ── AC-2: neither session touches ~/.claude/settings.json ────────────────────
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="os.kill(pid, SIGTERM) is TerminateProcess on Windows — indistinguishable from SIGKILL",
+)
 def test_concurrent_sessions_do_not_touch_the_global_settings(sandbox: _Sandbox) -> None:
     """The user-global file is byte-identical before, during and after.
 
@@ -688,8 +708,10 @@ def test_concurrent_sessions_do_not_touch_the_global_settings(sandbox: _Sandbox)
     proc_a = _spawn_launch_child(sandbox, "a")
     proc_b = _spawn_launch_child(sandbox, "b")
 
-    session_a = _wait_for_session_record(sandbox, "a", proc_a)
-    session_b = _wait_for_session_record(sandbox, "b", proc_b)
+    # The two calls are the readiness barrier; the recorded paths matter
+    # only to AC-1/AC-3, so they are not bound here.
+    _wait_for_session_record(sandbox, "a", proc_a)
+    _wait_for_session_record(sandbox, "b", proc_b)
     _wait_for_stub(sandbox, [proc_a, proc_b])
 
     # Mid-flight: both sessions fully prepared, neither has exited — the
@@ -701,9 +723,6 @@ def test_concurrent_sessions_do_not_touch_the_global_settings(sandbox: _Sandbox)
     _signal_and_reap(proc_a, sandbox, "a")
     _signal_and_reap(proc_b, sandbox, "b")
 
-    # After both: cleanup removed the session files and still touched nothing.
-    assert not session_a.exists(), "session a's settings file survived cleanup"
-    assert not session_b.exists(), "session b's settings file survived cleanup"
     assert sandbox.global_settings.read_bytes() == _PRISTINE_GLOBAL, (
         "the user-global settings file was modified by the session lifecycles"
     )
@@ -713,6 +732,10 @@ def test_concurrent_sessions_do_not_touch_the_global_settings(sandbox: _Sandbox)
 # ── AC-3: the second session's start does not disturb the first (issue #22) ──
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="os.kill(pid, SIGTERM) is TerminateProcess on Windows — indistinguishable from SIGKILL",
+)
 def test_second_session_start_does_not_disturb_the_first(sandbox: _Sandbox) -> None:
     """Session A's routing survives session B's start, end to end.
 
@@ -793,13 +816,10 @@ def test_shared_settings_path_clobber_is_visible_to_the_probe(tmp_path: Path) ->
     _legacy_write(10001)
     _legacy_write(10002)
 
-    # The probe the concurrent tests use — read the file, parse the routing —
-    # must report the clobber: the second writer's port is what the file
-    # carries; the first writer's routing is gone.
-    parsed_url = json.loads(shared.read_text(encoding="utf-8"))["env"]["ANTHROPIC_BASE_URL"]
-    assert parsed_url == "http://127.0.0.1:10002", (
-        "the shared-file write did not clobber — the probe's premise is broken"
-    )
-    assert parsed_url != "http://127.0.0.1:10001", (
-        "the probe cannot distinguish a clobber from isolation"
-    )
+    # The probe the concurrent tests use — ``_session_port`` — is the same
+    # read-and-compare oracle the AC-1/AC-3 assertions perform. Calling it
+    # here ties the control to that oracle: a future bug in ``_session_port``
+    # (e.g. reading a stale mtime sibling) would not survive the control.
+    port = _session_port(shared)
+    assert port == 10002, "the shared-file write did not clobber — the probe's premise is broken"
+    assert port != 10001, "the probe cannot distinguish a clobber from isolation"
