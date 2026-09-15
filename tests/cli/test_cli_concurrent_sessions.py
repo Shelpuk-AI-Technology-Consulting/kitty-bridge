@@ -150,6 +150,11 @@ def _sandbox_env(tmp_root: Path, home: Path, bin_dir: Path) -> dict[str, str]:
     # different code tree without anyone noticing. Stripping it pins the
     # child to the venv's editable install.
     env.pop("PYTHONPATH", None)
+    # KITTY_SESSION_SUMMARY controls where the bridge writes session summaries;
+    # the scenarios never fly a request, so this would be inert — pop it
+    # for symmetry and to keep the sandbox independent of the developer's
+    # shell.
+    env.pop("KITTY_SESSION_SUMMARY", None)
     env["PATH"] = os.pathsep.join([str(bin_dir), env.get("PATH", "")])
     return env
 
