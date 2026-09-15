@@ -40,9 +40,18 @@ _atexit_registered = False
 def _atexit_cleanup() -> None:
     """Undo the agent config prepare_launch set up (delete or restore).
 
-    Registered via atexit so cleanup runs even on unhandled exceptions,
-    sys.exit(), or SIGTERM (which triggers normal Python shutdown).
-    SIGKILL cannot be caught — use `kitty cleanup` for that.
+    Registered via atexit so cleanup runs even when the normal ``finally``
+    block is never entered: interpreter shutdown after a return, an unhandled
+    exception, or ``sys.exit()``. SIGTERM is **not** one of those paths —
+    ``launch_async`` installs ``signal.signal(SIGTERM, _forward_signal)``
+    while the child runs, so SIGTERM is forwarded to the child and kitty
+    keeps running; the ``finally`` block at ``launch_async`` is the path
+    that runs when the child dies from the forwarded signal. SIGKILL cannot
+    be caught — use ``kitty cleanup`` for that. A SIGTERM landing in the
+    pre-handler window between the ``_register_atexit_cleanup`` call and
+    the ``signal.signal(SIGTERM, _forward_signal)`` install (both inside
+    ``launch_async``) kills kitty with no cleanup at all; that is a
+    known, accepted window, and ``kitty cleanup`` is the recovery.
     """
     for adapter, original, settings_path in _atexit_cleanup_state:
         try:
