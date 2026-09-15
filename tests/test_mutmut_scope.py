@@ -26,10 +26,10 @@ hand. The two halves of the ``l1 or l2`` job.
 from __future__ import annotations
 
 import fnmatch
+import sys
 from pathlib import Path
 
 import pytest
-import tomllib
 from mutmut_scope import (
     CLS,
     DEFERRED_GROUPS,
@@ -42,6 +42,13 @@ from mutmut_scope import (
 )
 
 pytestmark = pytest.mark.l2
+
+# tomllib landed in 3.11; the 3.10 leg of the test matrix needs
+# ``tomli`` (declared as a conditional dev extra in pyproject.toml).
+if sys.version_info >= (3, 11):
+    import tomllib
+else:
+    import tomli as tomllib  # type: ignore[no-redef]
 
 # Known-positive anchor: a real mangled mutant key for a target already
 # in the registry, from a mutmut run that did generate it. The whole-module
