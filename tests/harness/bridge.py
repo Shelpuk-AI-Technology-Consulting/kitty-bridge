@@ -68,6 +68,7 @@ __all__ = [
     "TransportTimeout",
     "UpstreamTransport",
     "AiohttpTransport",
+    "assert_fixture_reached_its_recorder",
     "assert_transport_reaches_its_recorder",
     "backend_for",
     "inbound_path",

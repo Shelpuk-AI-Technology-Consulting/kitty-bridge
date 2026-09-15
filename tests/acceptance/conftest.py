@@ -18,14 +18,15 @@ the round-2 review surfaced.
 
 The conftest imports the L3 harness surface directly — the only behaviour the
 acceptance layer owns is *how steps find L3*, never *how L3 behaves*. The
-clean-path teardown helper itself lives in :mod:`teardown` so the conftest's
-own falsification can call it with a deliberate defect.
-
-The fixture accepts an optional ``request.param`` override: the smoke scenario
-calls it without parametrising, and the conftest's own §1.4 falsification
-parametrises it with a transport whose teardown-clean call fails, so the
-acceptance layer inherits the same falsification culture the rest of the
-harness follows.
+clean-path teardown lives in :func:`tests.acceptance.teardown.teardown_clean_path`
+so the §1.4 falsification can wrap its call in ``pytest.raises``; fixture
+teardown errors surface as test errors, not as exceptions a test can wrap, so
+direct ``pytest.raises`` on the fixture would be impossible. The residual gap
+is stated on the record: a future regression that *deletes the conftest's
+``else`` call to the helper entirely* (rather than edits the helper itself)
+would not be caught here — the helper is falsified directly, end-to-end. If
+end-to-end conftest coverage becomes important, pytester's nested-run pattern
+is the route.
 """
 
 from __future__ import annotations
@@ -34,14 +35,12 @@ import asyncio
 from collections.abc import Iterator
 
 import pytest
-from harness.bridge import BridgeFixture, UpstreamTransport, WireFormat, transport
+from harness.bridge import BridgeFixture, WireFormat, transport
 from teardown import teardown_clean_path
 
 
 @pytest.fixture
-def bridge_session(
-    request: pytest.FixtureRequest,
-) -> Iterator[tuple[asyncio.AbstractEventLoop, BridgeFixture]]:
+def bridge_session() -> Iterator[tuple[asyncio.AbstractEventLoop, BridgeFixture]]:
     """Yield ``(loop, started BridgeFixture)`` for one acceptance scenario.
 
     Yields:
@@ -52,15 +51,6 @@ def bridge_session(
         clean path, and the loop is closed last. The outer ``finally`` closes
         the loop on every exit, including ``BridgeFixture.start()`` raising.
 
-    Args:
-        request: The pytest fixture request. When the test parametrises
-            ``bridge_session`` with ``indirect=True``, ``request.param`` is the
-            transport to start instead of the default. The smoke scenario does
-            not parametrise and gets the default; the conftest's own
-            §1.4 falsification parametrises with a transport whose
-            :meth:`assert_teardown_clean` fails, so the clean-path assertion is
-            exercised.
-
     Notes:
         Function-scoped on purpose: pytest-bdd generates one test function per
         scenario, and a started ``BridgeFixture`` owns a real port the next
@@ -68,12 +58,7 @@ def bridge_session(
     """
     loop = asyncio.new_event_loop()
     try:
-        transport_instance: UpstreamTransport = (
-            request.param
-            if hasattr(request, "param")
-            else transport("aiohttp", WireFormat.ANTHROPIC_MESSAGES)
-        )
-        bridge = BridgeFixture(transport_instance)
+        bridge = BridgeFixture(transport("aiohttp", WireFormat.ANTHROPIC_MESSAGES))
         loop.run_until_complete(bridge.start())
         try:
             yield loop, bridge
@@ -87,7 +72,7 @@ def bridge_session(
             # Clean path. The shared ``teardown_clean_path`` is the single
             # implementation; the falsification test calls the same helper
             # with a deliberately broken transport.
-            teardown_clean_path(bridge, transport_instance, loop)
+            teardown_clean_path(bridge, loop)
     finally:
         # Closes the loop on every documented exit path:
         # - ``BridgeFixture.start()`` raising (reachable per bridge.py:707-732)

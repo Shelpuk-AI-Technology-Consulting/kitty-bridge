@@ -15,6 +15,12 @@ The defect here mirrors the L3 harness's own ``_MisdeclaredTransport``
 — :func:`teardown.teardown_clean_path` — is the *same* helper the conftest
 calls; this test does not re-implement the teardown shape, it points the
 shared implementation at a transport that must make it raise.
+
+Coverage boundary, stated rather than hidden: this falsifies the helper
+itself. A regression that *deletes the conftest's ``else`` call* to the
+helper (rather than edits the helper) is not caught here — that call site
+is one line and is what code review is for. The conftest's module docstring
+records the same boundary.
 """
 
 from __future__ import annotations
@@ -36,18 +42,21 @@ class _MisdeclaredTransport(AiohttpTransport):
 
     Subclasses ``AiohttpTransport`` so it satisfies the
     :class:`~harness.bridge.UpstreamTransport` protocol
-    :class:`bridgeFixture` expects. Mirrors the spirit of the L3 harness's
+    :class:`BridgeFixture` expects. Mirrors the spirit of the L3 harness's
     ``_MisdeclaredTransport`` (``test_bridge_falsification.py``) — same
-    exception, same message shape — without importing that module's private
-    helper.
+    exception — without importing that module's private helper. The message
+    names the transport and states that this is the deliberate defect, not a
+    claim about a captured body: the scenario below never drives a request,
+    so there is no body to mis-declare.
     """
 
     name = "acceptance-misdeclared"
 
     def assert_teardown_clean(self) -> None:
-        """Raise the same exception the L3 fixture's mis-declared case raises."""
+        """Raise unconditionally: this transport *is* the §1.4 defect."""
         raise MisdeclaredFormatError(
-            f"transport {self.name!r} declared anthropic_messages but body was gemini"
+            f"transport {self.name!r} is the deliberate mis-declared-format defect: "
+            "its teardown-clean assertion always raises"
         )
 
 
@@ -74,8 +83,8 @@ class TestTheConftestTeardownIsHonoured:
             loop.run_until_complete(bridge.start())
 
             with pytest.raises(MisdeclaredFormatError) as excinfo:
-                teardown_clean_path(bridge, transport_instance, loop)
+                teardown_clean_path(bridge, loop)
 
-            assert "anthropic_messages" in str(excinfo.value)
+            assert "deliberate mis-declared-format defect" in str(excinfo.value)
         finally:
             loop.close()
