@@ -172,6 +172,84 @@ def _make_413_then_streaming_success_responder() -> Any:
     return _responder
 
 
+#: The streaming Chat Completions reply the recorder gives for a recovered
+#: turn — CC SSE chunk grammar (``chat.completion.chunk`` objects, ``[DONE]``
+#: sentinel), the shape the CC-wire streaming route forwards.
+_CC_STREAMING_SUCCESS_EVENTS: tuple[bytes, ...] = (
+    b'data: {"id":"chatcmpl-recovered","object":"chat.completion.chunk","created":1,'
+    b'"model":"stub","choices":[{"index":0,"delta":{"role":"assistant","content":"ok"},'
+    b'"finish_reason":null}]}\n\n'
+    b"data: [DONE]\n\n",
+)
+
+
+def _make_413_then_cc_streaming_success_responder() -> Any:
+    """Return a responder that 413s once, then streams a CC SSE 200.
+
+    Mirrors :func:`_make_413_then_streaming_success_responder` with the CC
+    wire's chunk grammar instead of Anthropic Messages events — the shape the
+    ``/v1/chat/completions`` streaming route parses.
+
+    Returns:
+        A :class:`~harness.recorder.Responder` closure.
+    """
+    state = {"calls": 0}
+
+    async def _responder(_captured: CapturedRequest, reply: Reply) -> None:
+        """Answer 413 on the first request, a CC SSE 200 on later requests.
+
+        Args:
+            _captured: The capture, unused — state is in the closure.
+            reply: The unprepared response.
+        """
+        is_first = state["calls"] == 0
+        state["calls"] += 1
+
+        if is_first:
+            reply.content_length = len(_CONTEXT_TOO_LARGE_BODY)
+            await reply.begin(413, {"content-type": "application/json"})
+            await reply.write(_CONTEXT_TOO_LARGE_BODY)
+            await reply.write_eof()
+            return
+
+        await reply.begin(200, {"content-type": "text/event-stream"})
+        for event in _CC_STREAMING_SUCCESS_EVENTS:
+            await reply.write(event)
+        await reply.write_eof()
+
+    return _responder
+
+
+def _oversized_cc_body() -> dict[str, Any]:
+    """Build an oversized CC conversation for the Chat Completions route.
+
+    Same shape as the committed Messages twin (many ~5k-char alternating
+    turns, ~605k serialized chars) so pre-flight compaction short-circuits
+    under the test's 800k budget while the body still clears the 600k
+    oversized gate. Built programmatically rather than committed as a second
+    corpus entry: the corpus carries the inbound Anthropic-Messages capture;
+    this body exercises the CC-wire ingress, a different projection of the
+    same M6 trigger, and committing it would double the owner-review surface
+    for no additional trigger coverage.
+
+    Returns:
+        The request body.
+    """
+    return {
+        "model": "claude-sonnet-4-20250514",
+        "max_tokens": 4096,
+        "stream": True,
+        "messages": [
+            message
+            for _ in range(60)
+            for message in (
+                {"role": "user", "content": "u" * 5_000},
+                {"role": "assistant", "content": "a" * 5_000},
+            )
+        ],
+    }
+
+
 def _load_entry(entry_id: str) -> k.CorpusEntry:
     """Load one committed entry by id.
 
@@ -475,4 +553,67 @@ class TestTheM6EntryExercisesTheRecoveryPathOnABalancingProfile:
         assert "event: message_start" in response_text, (
             "the client still receives the SSE success stream from the "
             "failover backend"
+        )
+
+    async def test_the_cc_streaming_413_with_an_oversized_body_engages_tighter_recompaction(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The KBR-256 recovery fires on the Chat Completions streaming route.
+
+        Mirrors the Messages streaming case — same M6 predicate, same compact-
+        and-retry-same-backend semantics — but drives the ``/v1/chat/
+        completions`` ingress with a programmatically-built oversized CC body
+        and a CC SSE success reply. The CC route is the OpenAI-compatible
+        ingress; it is the second of the four streaming routes the recovery
+        was added to, and the second covered by the aiohttp harness here.
+        Responses and Gemini are deferred on recorder work (curl_cffi /
+        botocore respectively).
+        """
+        pin_backend_order(monkeypatch)
+        monkeypatch.setattr(BridgeServer, "_get_max_context_chars", lambda self: 800_000)
+
+        responder = _make_413_then_cc_streaming_success_responder()
+
+        async with BridgeFixture(
+            transport("aiohttp", WireFormat.CHAT_COMPLETIONS, responder=responder),
+            backend_models=["m0", "m1"],
+        ) as fixture:
+            recorder = fixture.transport.recorder  # type: ignore[attr-defined]
+            inbound_body = _oversized_cc_body()
+            assert inbound_body.get("stream") is True, (
+                "the test body must carry stream: true; without it the bridge "
+                "would not engage the streaming Chat Completions route"
+            )
+
+            with caplog.at_level(logging.INFO, logger="kitty.bridge.server"):
+                status, response_text = await fixture.post("/v1/chat/completions", inbound_body)
+            first_backend_healthy = fixture.server._backend_health[0]["healthy"]  # type: ignore[attr-defined]
+
+        assert status == 200, "the CC streaming recovery reply must reach the client"
+        assert len(recorder.requests) == 2, (
+            "the CC streaming M6 path must retry the same backend once with a "
+            "tighter-compacted body"
+        )
+        first_model = json.loads(recorder.requests[0].body)["model"]
+        second_model = json.loads(recorder.requests[1].body)["model"]
+        assert first_model == second_model, (
+            f"the recovery retried a different backend (m0 -> {second_model}); "
+            "the CC streaming M6 path must retry the same backend, not failover"
+        )
+        first_body = recorder.requests[0].body
+        second_body = recorder.requests[1].body
+        assert len(second_body) < len(first_body), (
+            "the second upstream request body must be smaller than the first"
+        )
+        assert first_backend_healthy is True, (
+            "the CC streaming recovery path must not mark the backend unhealthy"
+        )
+        log_blob = "\n".join(record.getMessage() for record in caplog.records)
+        assert "compacting tighter" in log_blob.lower(), (
+            "the CC streaming recovery log line must fire; an absent log "
+            "means the recovery never ran on the CC ladder"
+        )
+        assert "chatcmpl-recovered" in response_text, (
+            "the client must receive a CC SSE success stream "
+            "(chat.completion.chunk object) from the recovered attempt"
         )
