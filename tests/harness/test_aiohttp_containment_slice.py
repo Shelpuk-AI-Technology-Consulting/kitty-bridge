@@ -374,8 +374,17 @@ class TestSliceVerdict:
 
 
 class TestDriveWithEgress:
-    """``BridgeAiohttpContainment.drive_with_egress`` — the phase-2/2b/3 entry point."""
+    """``BridgeAiohttpContainment.drive_with_egress`` — the phase-2/2b/3 entry point.
 
+    The drive test below is skipped on Python <3.11 (TLS-in-TLS, bpo-44011):
+    the green-path exercise sends the bridge's aiohttp session through the
+    harness CONNECT proxy over TLS, and aiohttp's TLS-in-TLS over stdlib
+    asyncio does not work below 3.11. The static hostname/resolve-map check
+    in this class does not drive the bridge, so it still runs on every
+    supported Python.
+    """
+
+    @pytest.mark.skipif(_AIOHTTP_NEEDS_311, reason=_AIOHTTP_SKIP_REASON)
     async def test_drive_with_egress_one_request_reaches_the_recorder_through_the_proxy(
         self,
         sealed_network: SealedNetwork,
@@ -389,6 +398,11 @@ class TestDriveWithEgress:
         the proxy records one authenticated CONNECT with a non-``None`` source
         port, and the recorder's connection log shows the upstream connection
         on the matching source port — the §5.2.1 join key, exercised once.
+
+        Skipped on Python <3.11 (TLS-in-TLS, bpo-44011): the drive opens a
+        TLS session to the harness CONNECT proxy and then wraps the recorder's
+        TLS hop inside it, and aiohttp's stdlib-asyncio TLS-in-TLS only landed
+        in 3.11.
         """
         egress = _egress_for(sealed_network)
         result = await _drive(sealed_network).drive_with_egress(
