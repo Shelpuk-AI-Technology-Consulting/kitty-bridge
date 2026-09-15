@@ -606,10 +606,11 @@ class RunRecord:
             raise ValueError(
                 f"RunRecord.from_json: 'trials' must be a list; got {type(trials_raw).__name__}"
             )
-        # Each trial row is rebuilt with strict shape checks; the
-        # category string must resolve to a known TrialCategory, not
-        # silently default. ``TrialCategory(value)`` raises ValueError
-        # for an unknown string, which we let propagate.
+        # Each trial row is rebuilt with structural checks — key
+        # presence and dict-ness. Value-type validation (e.g. ``arm``
+        # being a string, ``sample_index`` being an int) belongs to
+        # T-K3, the schema's second consumer. The harness's own inverse
+        # only proves round-trip-ability for the shape it wrote.
         trials: list[TrialRecord] = []
         for index, row in enumerate(trials_raw):
             if not isinstance(row, dict):
@@ -617,12 +618,21 @@ class RunRecord:
                     f"RunRecord.from_json: trial {index} is not an object; got {type(row).__name__}"
                 )
             try:
+                category = TrialCategory(row["category"])
+            except ValueError as exc:
+                # The propagated message names the bad value and the
+                # valid set, which is what an operator reading a CI log
+                # needs — but prefix it so the source is unambiguous.
+                raise ValueError(
+                    f"RunRecord.from_json: trial {index} names an unknown category: {exc}"
+                ) from exc
+            try:
                 trials.append(
                     TrialRecord(
                         arm=row["arm"],
                         task_id=row["task_id"],
                         sample_index=row["sample_index"],
-                        category=TrialCategory(row["category"]),
+                        category=category,
                         duration_seconds=row["duration_seconds"],
                         detail=row["detail"],
                     )
@@ -640,10 +650,14 @@ class RunRecord:
         # Per-arm rebuild: convert string keys back to TrialCategory.
         # ``TrialCategory(key)`` raises ValueError on an unknown key,
         # which we let propagate so a corrupted file is loud.
-        per_arm: TallyByArm = {
-            arm: {TrialCategory(category): count for category, count in tally.items()}
-            for arm, tally in per_arm_raw.items()
-        }
+        per_arm: TallyByArm = {}
+        for arm, tally in per_arm_raw.items():
+            if not isinstance(tally, dict):
+                raise ValueError(
+                    f"RunRecord.from_json: per_arm[{arm!r}] must be an object; "
+                    f"got {type(tally).__name__}"
+                )
+            per_arm[arm] = {TrialCategory(category): count for category, count in tally.items()}
 
         return cls(
             config=config,

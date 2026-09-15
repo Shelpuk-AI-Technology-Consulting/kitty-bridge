@@ -471,17 +471,25 @@ async def test_run_eval_lets_operator_interrupt_propagate() -> None:
 
 
 async def _mixed_category_record() -> RunRecord:
-    """Build a record whose trials hit several categories, for round-trip tests."""
+    """Build a record whose trials hit several categories, for round-trip tests.
+
+    Sample 0 produces a ``ModelReply`` the acceptance check accepts
+    (SUCCESS). Sample 1 produces an ``UpstreamFailure(429)`` (RATE_LIMIT).
+    Sample 2 produces an ``UpstreamRefusal`` (REFUSAL). The acceptance
+    check accepts every ModelReply so a future change that drops
+    sample-0's verdict trips the round-trip equality on the trial rows.
+    """
+
     async def _mixed(_task: TaskSpec, sample_index: int) -> RawOutcome:
         if sample_index == 0:
-            return ModelReply(reply="fine")
+            return ModelReply(reply="ok")
         if sample_index == 1:
             return UpstreamFailure(status=429, body={"error": "rate_limited"})
         return UpstreamRefusal(status=400, body={"error": "content_moderation"})
 
-    refusing = TaskSpec(id="t1", prompt="anything", acceptance_check=lambda _r: Verdict.REFUSED)
+    task = TaskSpec(id="t1", prompt="anything", acceptance_check=lambda _r: Verdict.PASS)
     pinned = _fully_pinned(n_samples=3, sampling_overrides={"b_key": 2, "a_key": 1})
-    return await run_eval(pinned, [refusing], _two_arms(_mixed))
+    return await run_eval(pinned, [task], _two_arms(_mixed))
 
 
 async def test_run_record_json_round_trip() -> None:
@@ -548,7 +556,10 @@ async def test_run_record_from_json_rejects_garbage() -> None:
 
     parsed = json.loads(good)
     parsed["trials"][0]["category"] = "not_a_real_category"
-    with pytest.raises(ValueError, match="category"):
+    # The propagated ``TrialCategory(...)`` message names the valid
+    # set; the test pins that path, not a coincidental substring in the
+    # bogus value itself.
+    with pytest.raises(ValueError, match="is not a valid TrialCategory"):
         RunRecord.from_json(json.dumps(parsed).encode("utf-8"))
 
 
