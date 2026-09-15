@@ -1,19 +1,25 @@
 """Bind pytest-bdd's scenarios and define the acceptance step vocabulary (T-J1, KBR-107).
 
-Two things live here, in this order, and the order is load-bearing:
+Two things live here, and one property of this file is load-bearing:
 
 1. **The step definitions.** pytest-bdd's ``@given``/``@when``/``@then``
    decorators inject a pytest fixture into the *calling module's namespace*
    (``pytest-bdd``'s ``step()`` uses ``get_caller_module_locals``), and a
    scenario resolves a step by looking that fixture up through pytest's fixture
-   manager. So the steps must live in a module **pytest collects** — this one —
-   not in a side module pytest never imports, where the injected fixtures are
-   invisible.
+   manager. So the steps must live in a module **pytest collects** — this one,
+   named ``test_*.py`` — not in a side module pytest never imports, where the
+   injected fixtures are invisible.
 
 2. **The ``scenarios()`` binding.** Every ``.feature`` under ``features/`` is
    bound recursively to a generated pytest test function. T-J2 and T-J3 add
    their ``.feature`` files and step definitions alongside this one's smoke; no
    further wiring is needed.
+
+The relative order of the ``scenarios()`` call and the step decorators below it
+is **not** load-bearing — both run during this module's import, before pytest
+collects anything, and the first working version of this file had the
+decorators first. What is load-bearing is the property in (1): a step defined
+in a module pytest does not collect is a step pytest-bdd cannot find.
 
 The step bodies bind to the L3 harness surface shipped in ``tests/harness/`` and
 ``tests/exemptions.py``. They do not re-implement bridge behaviour — that is the
@@ -24,7 +30,7 @@ re-implementing one."
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from harness.bridge import (
     BridgeFixture,
@@ -35,11 +41,9 @@ from harness.bridge import (
 )
 from pytest_bdd import given, scenarios, then, when
 
-if TYPE_CHECKING:
-    pass
-
-# Register the step definitions below, then bind the feature files. Reversing
-# the order reports the first step as "not found" at collection time.
+# Bind every ``.feature`` under this directory recursively. Runs during module
+# import, before pytest collects; the step decorators below run in the same
+# pass (see the module docstring on what is and is not load-bearing here).
 scenarios("features")
 
 

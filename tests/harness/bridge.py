@@ -968,8 +968,13 @@ async def assert_fixture_reached_its_recorder(
     re-implementing one") instead of inlining a weaker copy of these checks.
 
     The teardown assertion is again the caller's, by construction: the fixture
-    was started outside, so its ``stop()`` — which asserts teardown cleanliness
-    — runs in the scenario fixture, not here.
+    was started outside, so its ``stop()`` — and the teardown-clean assertion,
+    which only ``__aexit__`` runs on the clean path — belongs to whoever owns
+    the fixture lifecycle. A caller that wants all four of the original's
+    assertions must mirror that: stop, then the transport's
+    :meth:`~AiohttpTransport.assert_teardown_clean` (or
+    :meth:`RecordingUpstream.assert_teardown_clean`), on the clean path only.
+    The acceptance layer's ``bridge_session`` fixture does exactly that.
 
     Args:
         fixture: A **started** fixture that has served at least the one request

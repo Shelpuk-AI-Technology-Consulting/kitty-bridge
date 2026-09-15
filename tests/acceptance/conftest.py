@@ -9,8 +9,10 @@ sync steps without a per-step event loop (which would orphan the session), the
 scenario and yields the ``(loop, bridge)`` tuple to every step.
 
 Steps consume the tuple and call ``loop.run_until_complete(coro)`` for each L3
-op — most steps use ``bridge.post``. On teardown the fixture stops the bridge
-and closes the loop.
+op — most steps use ``bridge.post``. On teardown the fixture stops the bridge,
+mirrors ``BridgeFixture.__aexit__``'s clean-path teardown-clean assertion, and
+closes the loop in that order; flipping them leaks the recorder port or
+strands the aiohttp reader.
 
 The conftest imports the L3 harness surface directly — the only behaviour the
 acceptance layer owns is *how steps find L3*, never *how L3 behaves*.
@@ -31,9 +33,10 @@ def bridge_session() -> Iterator[tuple[asyncio.AbstractEventLoop, BridgeFixture]
 
     Yields:
         A tuple of the asyncio loop and the :class:`BridgeFixture` the steps
-        drive. The bridge is started on ``loop`` before the yield and stopped
-        before the loop closes, in that order — flipping them leaks the
-        recorder port or strands the aiohttp reader.
+        drive. The bridge is started on ``loop`` before the yield; on
+        teardown — mirroring :meth:`BridgeFixture.__aexit__` exactly — the
+        bridge is stopped, the transport's teardown is asserted only on the
+        clean path, and the loop is closed last.
 
     Notes:
         Function-scoped on purpose: pytest-bdd generates one test function per
@@ -41,10 +44,23 @@ def bridge_session() -> Iterator[tuple[asyncio.AbstractEventLoop, BridgeFixture]
         scenario must not inherit.
     """
     loop = asyncio.new_event_loop()
-    bridge = BridgeFixture(transport("aiohttp", WireFormat.ANTHROPIC_MESSAGES))
+    transport_instance = transport("aiohttp", WireFormat.ANTHROPIC_MESSAGES)
+    bridge = BridgeFixture(transport_instance)
     loop.run_until_complete(bridge.start())
     try:
         yield loop, bridge
-    finally:
+    except BaseException:
+        # The test body raised. ``__aexit__`` would skip the teardown-clean
+        # assertion in this case, so the inner ``finally`` mirrors it by not
+        # calling it either — surface the test's own exception, not ours.
         loop.run_until_complete(bridge.stop())
+        loop.close()
+        raise
+    else:
+        # Clean path. Mirror ``__aexit__``: stop, then assert teardown clean,
+        # then close. Asserting before close lets the assertion shadow a
+        # teardown-clean failure only on the path where there is no other
+        # exception to surface — same as the L3 reference.
+        loop.run_until_complete(bridge.stop())
+        transport_instance.assert_teardown_clean()
         loop.close()

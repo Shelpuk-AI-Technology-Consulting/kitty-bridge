@@ -41,6 +41,8 @@ it would also make the registry-completeness meta-test assert over them.
 from __future__ import annotations
 
 import json
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
 
 import pytest
@@ -320,40 +322,47 @@ class TestTheStartedFixtureTwinIsCaughtToo:
     """
 
     @staticmethod
-    async def _honest_run() -> tuple[BridgeFixture, str]:
-        """Start a fixture, drive one marked request, return the fixture and marker.
+    @asynccontextmanager
+    async def _started() -> AsyncIterator[BridgeFixture]:
+        """Start a fixture and yield it; stop it however the body exits.
 
-        Returns:
-            The started fixture (the caller stops it) and the marker that was
-            sent, so each case below can vary exactly one input.
+        The whole body runs inside this context, so a raise from the drive or
+        the assertion still stops the fixture — a per-test ``try``/``finally``
+        wrapped only the assertion and would have leaked a started fixture on
+        a raise from the drive itself.
         """
-        sent = marker()
         fixture = BridgeFixture(transport("aiohttp", FORMAT))
         await fixture.start()
-        await fixture.post(
-            inbound_path(InboundProtocol.MESSAGES), minimal_inbound_body(InboundProtocol.MESSAGES, sent)
-        )
-        return fixture, sent
+        try:
+            yield fixture
+        finally:
+            await fixture.stop()
 
     async def test_a_marker_that_was_never_sent_is_caught(self) -> None:
         """The marker argument is checked against the capture, not trusted."""
-        fixture, sent = await self._honest_run()
-        try:
+        sent = marker()
+        async with self._started() as fixture:
+            await fixture.post(
+                inbound_path(InboundProtocol.MESSAGES),
+                minimal_inbound_body(InboundProtocol.MESSAGES, sent),
+            )
+
             with pytest.raises(AssertionError) as excinfo:
                 await assert_fixture_reached_its_recorder(fixture, marker=f"kbr31-not-{sent}", status=200)
             assert "marker" in str(excinfo.value)
-        finally:
-            await fixture.stop()
 
     async def test_a_status_that_was_never_served_is_caught(self) -> None:
         """The status argument is checked against 200, not trusted."""
-        fixture, sent = await self._honest_run()
-        try:
+        sent = marker()
+        async with self._started() as fixture:
+            await fixture.post(
+                inbound_path(InboundProtocol.MESSAGES),
+                minimal_inbound_body(InboundProtocol.MESSAGES, sent),
+            )
+
             with pytest.raises(AssertionError) as excinfo:
                 await assert_fixture_reached_its_recorder(fixture, marker=sent, status=500)
             assert "500" in str(excinfo.value)
-        finally:
-            await fixture.stop()
 
     async def test_a_second_request_is_caught(self) -> None:
         """Two requests through one fixture break the exactly-one assertion.
@@ -362,8 +371,12 @@ class TestTheStartedFixtureTwinIsCaughtToo:
         inside a retry loop must not be able to hand the checker a capture list
         it has not quantified over.
         """
-        fixture, sent = await self._honest_run()
-        try:
+        sent = marker()
+        async with self._started() as fixture:
+            await fixture.post(
+                inbound_path(InboundProtocol.MESSAGES),
+                minimal_inbound_body(InboundProtocol.MESSAGES, sent),
+            )
             await fixture.post(
                 inbound_path(InboundProtocol.MESSAGES),
                 minimal_inbound_body(InboundProtocol.MESSAGES, marker()),
@@ -372,13 +385,14 @@ class TestTheStartedFixtureTwinIsCaughtToo:
             with pytest.raises(AssertionError) as excinfo:
                 await assert_fixture_reached_its_recorder(fixture, marker=sent, status=200)
             assert "2 capture" in str(excinfo.value)
-        finally:
-            await fixture.stop()
 
     async def test_an_honest_call_passes(self) -> None:
         """The good case is green — the checker accepts what it should."""
-        fixture, sent = await self._honest_run()
-        try:
+        sent = marker()
+        async with self._started() as fixture:
+            await fixture.post(
+                inbound_path(InboundProtocol.MESSAGES),
+                minimal_inbound_body(InboundProtocol.MESSAGES, sent),
+            )
+
             await assert_fixture_reached_its_recorder(fixture, marker=sent, status=200)
-        finally:
-            await fixture.stop()
