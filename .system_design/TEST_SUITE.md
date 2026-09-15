@@ -3020,6 +3020,36 @@ What it provides:
 Still **T-E1's** (KBR-61): the per-transport **direct**-route override §5.2.2 phase 1 needs, and
 which transport gets which route. T-W5 ships the seam, not the policy.
 
+**Delivered by T-E1 ([KBR-61])** in `tests/harness/containment.py`, the same pattern — seam and
+policy in separate modules — continued one layer up. What it provides:
+
+- **`SealedNetwork`** — proxy + recording upstream stood up together, the upstream addressed by
+  :data:`HARNESS_UPSTREAM_HOST` at its own ephemeral port and the proxy's ``resolve`` map carrying
+  exactly that ``host:port`` → ``127.0.0.1:port`` binding. T-E2–T-E5 read the same
+  :class:`~harness.connect_proxy.ConnectProxy` and recording-upstream objects the harness holds,
+  so sibling slices do not need a second pair.
+- **`monkeypatched_aiohttp_resolver`** — the **direct**-leg override for the bridge's own aiohttp
+  sessions: ``socket.getaddrinfo`` mapped for the harness hostname, deferring every other name to
+  the real resolver. It is ``getaddrinfo``, not an aiohttp ``Resolver`` instance, because
+  ``_build_client_session`` builds its own ``TCPConnector`` with no injection point (§5.3). The
+  default (no-``aiodns``) build selects ``ThreadedResolver`` as ``DefaultResolver``, which reaches
+  ``getaddrinfo`` in a worker thread; if ``aiodns`` is ever added, ``AsyncResolver`` is chosen
+  instead and this patch has no effect — pyproject pins no ``aiodns`` extra, so the seam holds
+  today. ``/etc/hosts`` stays out — no administrator rights on CI runners.
+- **The per-transport capability report** — `CapabilityReport`, an in-process singleton over the
+  four §5.5 transports, every entry initialised ``not_attempted``; ``proven``, ``unsupported``
+  (with a reason) and ``failed`` are recorded by T-E2–T-E5, and T-E9's completeness gate reads
+  what they wrote. T-E1 records nothing — shipping the report and shipping verdicts are separate
+  deliveries, per plan §8's rule that a transport task is done when it records an outcome.
+- **The containment transport extension interface** — a ``ContainmentTransport`` protocol plus
+  registry, with the bridge-aiohttp route registered as the default. Its ``direct_route``
+  member is the per-transport override seam T-E3–T-E5 satisfy; nothing in this module changes
+  for them.
+
+The containment tests live at the **l1 path default** for the reason `test_bridge.py` records:
+§8.2 forbids moving a test to a layer no job selects, and the Subsystem job is T-K6's. §8.2
+lists `tests/harness/test_containment.py` as its T-E1 bullet, so T-K6 inherits the relocation.
+
 **A missing `openssl` fails, it does not skip.** `certs` is shared infrastructure, and §8's rule
 is that a skip in a gating job is a failure: a suite that quietly stops proving containment
 because a tool is absent is indistinguishable from one that proves it.
@@ -4202,8 +4232,8 @@ business, together with the job that runs them; doing it earlier would remove th
 gate. T-H1 must take that reclassification into account before it measures a mutation
 baseline, because it selects on `l1`.
 
-**Ten modules are bulleted below — in eight bullets, since the T-W4 and T-W8 rows name two
-modules each — and `tests/cli/test_stream_encoding.py` (KBR-10) is described after them, eleven in
+**Eleven modules are bulleted below — in nine bullets, since the T-W4 and T-W8 rows name two
+modules each — and `tests/cli/test_stream_encoding.py` (KBR-10) is described after them, twelve in
 all, named here so T-K6 inherits a list rather than a search** — the count
 is what T-K6 and T-H1 plan against. (The bullet count and the KBR-10 paragraph were already
 drifting apart before T-W8 added two; spelling out both is what stops the next addition
@@ -4245,6 +4275,18 @@ separately.)
   move. Worth knowing while planning that move: a **wrong-shaped reply** costs 72 seconds here —
   10 s of retry ladder plus the teardown that waits it out — which is why §7.2.2's reply-shape
   falsification is driven through the adapter rather than through the bridge.
+- **T-E1 (KBR-61):** `tests/harness/test_containment.py` drives a real `BridgeServer` against the
+  sealed-network harness (`ConnectProxy` + recording upstream) in two cases — one green, one
+  falsification. The other 22 cases run in **~1.0–1.8 s**, measured across five runs, of which
+  the slowest is one `sealed_network` setup (recorder + proxy + TLS certs); the range comes from
+  `openssl`-generated throwaway certs, whose cost varies with runner load. The falsification case
+  (`test_drive_phase_1_with_a_broken_resolver_records_zero_connections`) takes **~30 s** because
+  `_make_upstream_request`'s `_wait_out_transport_blip` (`server.py:8579`) sleeps through
+  `_TRANSPORT_GRACE_DELAYS = (2.0, 4.0, 8.0, 16.0)` (`server.py:1030`) summing to
+  `_TRANSPORT_GRACE_PERIOD = 30.0` (`server.py:1029`) when the resolver is closed, and
+  `stop_async` drains the in-flight handlers. The cost is on the *failure* path; the green path
+  completes in ~0.01 s. Reclassifying the module to `l3` is T-K6's call — the runtime figure is
+  what the Subsystem job's budget must carry.
 - **KBR-144:** `tests/bridge/test_responses_string_input.py` starts a real `BridgeServer` on an
   ephemeral port in four of its classes, following the existing convention of
   `tests/bridge/test_crash_resilience.py` rather than inventing a second one. The whole module
