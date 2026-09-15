@@ -105,6 +105,8 @@ CONFORMANCE_CASES: tuple[tuple[str, str, WireFormat, InboundProtocol, Any], ...]
     ("harness.bridge", "aiohttp", WireFormat.ANTHROPIC_MESSAGES, InboundProtocol.MESSAGES, None),
     ("harness.provider_aiohttp", "provider_aiohttp", WireFormat.OLLAMA_CHAT, InboundProtocol.CHAT_COMPLETIONS, None),
     ("harness.curl_cffi", "curl_cffi", WireFormat.OPENAI_RESPONSES, InboundProtocol.RESPONSES, _curl_cffi_setup),
+    ("harness.botocore", "botocore", WireFormat.BEDROCK_CONVERSE, InboundProtocol.CHAT_COMPLETIONS, None),
+
 )
 
 #: What the modules above are expected to have registered between them. Derived

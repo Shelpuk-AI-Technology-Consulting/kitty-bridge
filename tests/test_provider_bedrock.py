@@ -991,3 +991,129 @@ class TestItCachesNoTransport:
         adapter._get_boto3_client("AKIAEXAMPLE:secret-key", {"region": "us-east-1"})
 
         assert set(vars(adapter)) == before
+
+
+class TestTheEndpointUrlSeam:
+    """KBR-42 — ``provider_config["endpoint_url"]`` is the test-harness seam.
+
+    T-B3's transport points the botocore client at the local recorder by
+    setting this key.  Production profiles do not carry it (so the kwarg
+    is opt-in), and a regression that dropped the new key from
+    ``_get_boto3_client`` while keeping the rest of the method intact would
+    still be caught by the harness integration — but only at the **flow**
+    level, not the **kwarg** level.  These tests pin the kwarg at the layer
+    where the production change lives, so a future refactor cannot silently
+    regress it.
+    """
+
+    def test_endpoint_url_is_passed_to_the_boto3_client_when_set(self) -> None:
+        adapter = BedrockAdapter()
+        sentinel = MagicMock()
+        captured_kwargs: dict = {}
+
+        def _capture(*args: object, **kwargs: object) -> MagicMock:
+            captured_kwargs.update(kwargs)
+            return sentinel
+
+        with patch("boto3.Session") as session_cls:
+            session_cls.return_value.client.side_effect = _capture
+            adapter._get_boto3_client(
+                "AKIAEXAMPLE:secret",
+                {"endpoint_url": "http://recorder:9", "region": "us-east-1"},
+            )
+
+        assert captured_kwargs.get("endpoint_url") == "http://recorder:9", (
+            "the test-harness seam was not forwarded to the boto3 client; "
+            "the botocore endpoint-override recorder (T-B3) cannot point at the loopback"
+        )
+
+    def test_endpoint_url_is_omitted_when_provider_config_lacks_it(self) -> None:
+        """Profiles without the key must behave as before KBR-42.
+
+        Production profiles do not carry ``endpoint_url``; passing it
+        through to ``session.client(..., endpoint_url=None)`` raises on some
+        botocore versions and is silently ignored on others, so the seam
+        must consume the key only when truthy.
+        """
+        adapter = BedrockAdapter()
+        captured_kwargs: dict = {}
+
+        def _capture(*args: object, **kwargs: object) -> MagicMock:
+            captured_kwargs.update(kwargs)
+            return MagicMock()
+
+        with patch("boto3.Session") as session_cls:
+            session_cls.return_value.client.side_effect = _capture
+            adapter._get_boto3_client("AKIAEXAMPLE:secret", {"region": "us-east-1"})
+
+        assert "endpoint_url" not in captured_kwargs, (
+            "endpoint_url must not be passed when the profile does not set it; "
+            "production profiles do not, and some botocore versions raise on None"
+        )
+
+    def test_endpoint_url_reaches_the_sso_branch_when_set(self) -> None:
+        """The SSO half of the ``if/else`` shares the same ``client_kwargs``.
+
+        The two tests above drive the credentials branch
+        (``parse_aws_credentials`` → ``boto3.Session(aws_access_key_id=…,
+        …)``); this one drives the SSO branch
+        (``boto3.Session(profile_name=…, region_name=…)``), which shares
+        the same ``client_kwargs`` the seam mutates. ``endpoint_url``
+        sits **above** the ``if/else`` today, so both branches see it —
+        a refactor that moved the lines into one branch only would pass
+        the credentials tests while silently breaking SSO profiles,
+        which is why the SSO case is pinned too.
+        """
+        adapter = BedrockAdapter()
+        captured_kwargs: dict = {}
+        captured_session_kwargs: dict = {}
+
+        def _capture(*args: object, **kwargs: object) -> MagicMock:
+            captured_kwargs.update(kwargs)
+            return MagicMock()
+
+        session_mock = MagicMock()
+        session_mock.client.side_effect = _capture
+
+        def _session_capture(*args: object, **kwargs: object) -> MagicMock:
+            captured_session_kwargs.update(kwargs)
+            return session_mock
+
+        with patch("boto3.Session") as session_cls:
+            session_cls.side_effect = _session_capture
+            adapter._get_boto3_client(
+                "sso",
+                {"endpoint_url": "http://recorder:9", "region": "us-east-1", "profile_name": "harness-profile"},
+            )
+
+        assert captured_session_kwargs.get("profile_name") == "harness-profile", (
+            "the SSO branch was not taken; if the if/else moved to "
+            "is_sso_mode=False for resolved_key='sso', the credentials branch's "
+            "parse_aws_credentials would raise ProviderError on the colonless key "
+            "before this assertion ran, surfacing the regression even louder than this assert"
+        )
+        assert captured_kwargs.get("endpoint_url") == "http://recorder:9", (
+            "the test-harness seam did not reach the SSO branch's boto3 client; "
+            "the seam sits inside one arm of the if/else and the other arm lost it"
+        )
+
+    def test_the_harness_key_is_not_an_sso_marker(self) -> None:
+        """The harness key routes through the credentials branch.
+
+        ``HarnessBedrockAdapter``'s override of ``parse_aws_credentials``
+        resolves the harness key to the fake pair — but only when the key
+        is **not** an SSO marker. ``is_sso_mode`` intercepts ``""`` and
+        ``"sso"`` *before* ``parse_aws_credentials`` runs, so a harness
+        key that matched either would silently fall into the SSO branch
+        and use whatever ambient AWS credentials the test machine has.
+        Pinning the harness key's non-membership here makes that
+        brittleness a checkable claim rather than a docstring promise.
+        """
+        from kitty.providers.bedrock import BedrockAdapter
+
+        adapter = BedrockAdapter()
+        assert not adapter.is_sso_mode("harness-key"), (
+            "the harness key matched an SSO marker; HarnessBedrockAdapter's "
+            "parse_aws_credentials override would be silently bypassed and "
+            "the test would use whatever ambient AWS credentials the machine has"
+        )
