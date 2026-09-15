@@ -19,9 +19,12 @@ every file added to this repository writes LF; this file does too.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import pytest
 
 from harness.eval_harness import (
+    ArmExecutor,
     ArmSpec,
     ModelReply,
     RawOutcome,
@@ -34,6 +37,7 @@ from harness.eval_harness import (
     UpstreamRefusal,
     Verdict,
     classify,
+    run_eval,
     validate_arms,
 )
 
@@ -239,8 +243,8 @@ def test_classify_unknown_outcome_variant_raises_type_error() -> None:
 # ── Arms and the two-arm rule (REQ 3) ───────────────────────────────────────
 
 
-def _always_pass(task: TaskSpec, sample_index: int) -> RawOutcome:
-    """A trivial executor: every trial succeeds."""
+async def _always_pass(task: TaskSpec, sample_index: int) -> RawOutcome:
+    """A trivial async executor: every trial succeeds."""
     return ModelReply(reply=f"ok for {task.id} #{sample_index}")
 
 
@@ -280,10 +284,163 @@ def test_validate_arms_rejects_duplicate_arm_names() -> None:
     """
     arms = [
         ArmSpec(name="kitty", executor=_always_pass),
-        ArmSpec(name="kitty", executor=lambda task, sample_index: ModelReply(reply=f"alt {task.id}")),
+        ArmSpec(name="kitty", executor=_always_replying("alt")),
     ]
     with pytest.raises(ValueError, match="distinct"):
         validate_arms(arms)
+
+
+# ── run_eval — the runner (REQ 4, 6, 7) ─────────────────────────────────────
+
+
+async def test_run_eval_executes_the_full_grid() -> None:
+    """REQ 4 — n_samples × len(tasks) × 2 trials executed and recorded."""
+    config = _fully_pinned(n_samples=2)
+    tasks = [_accepting_task("t1")]
+    arms = _two_arms()
+
+    record = await run_eval(config, tasks, arms)
+
+    assert record.scheduled == 4  # 2 samples × 1 task × 2 arms
+    assert len(record.trials) == 4
+    # The grid is iterated arm → task → sample, so the trial ordering is
+    # (kitty, t1, 0), (kitty, t1, 1), (direct, t1, 0), (direct, t1, 1).
+    assert [trial.sample_index for trial in record.trials] == [0, 1, 0, 1]
+    assert all(trial.category is TrialCategory.SUCCESS for trial in record.trials)
+
+
+async def test_run_eval_rejects_empty_tasks() -> None:
+    """REQ 4 boundary — a run with no tasks is refused before any trial executes.
+
+    Per ``validate_arms``'s precedent, the rule fires first; an executor
+    that raises on call would surface that here.
+    """
+    sentinel = False
+
+    async def _raising(_task: TaskSpec, _sample_index: int) -> RawOutcome:
+        nonlocal sentinel
+        sentinel = True
+        return ModelReply(reply="never reached")
+
+    arms = _two_arms(_raising)
+
+    with pytest.raises(ValueError, match="at least one task"):
+        await run_eval(_fully_pinned(), [], arms)
+
+    assert sentinel is False, "executor was called despite an empty task list"
+
+
+async def test_run_eval_records_a_non_negative_duration_per_trial() -> None:
+    """REQ 4 — every trial's ``duration_seconds`` is non-negative.
+
+    A negative duration would mean the clock went backwards mid-trial,
+    which is impossible for ``time.monotonic`` and a sign a fake clock
+    is broken.
+    """
+    record = await run_eval(_fully_pinned(n_samples=2), [_accepting_task()], _two_arms())
+
+    assert all(trial.duration_seconds >= 0.0 for trial in record.trials)
+
+
+async def test_run_eval_durations_come_from_the_injected_clock() -> None:
+    """REQ 4 — ``clock`` controls the recorded ``duration_seconds``.
+
+    A stepped fake clock produces verbatim durations in the record,
+    proving the clock is read and not approximated by ``time.monotonic``.
+    """
+    # n=2, 1 task, 2 arms → 4 trials, 8 clock calls (start, end each).
+    # Pair the steps so each trial's duration is end - start of that pair.
+    clock = _stepping_clock([0.0, 1.5, 2.0, 3.5, 4.0, 5.5, 6.0, 7.5])
+    record = await run_eval(
+        _fully_pinned(n_samples=2),
+        [_accepting_task()],
+        _two_arms(),
+        clock=clock,
+    )
+
+    # Expected per-trial durations: 1.5, 1.5, 1.5, 1.5
+    assert [trial.duration_seconds for trial in record.trials] == [1.5, 1.5, 1.5, 1.5]
+
+
+async def test_run_eval_validation_fires_before_any_trial_executes() -> None:
+    """REQ 3 + REQ 4 composition — the two-arm rule fires first.
+
+    An invalid arm list with an executor that would record every call
+    proves the validation refuses before the per-trial loop is reached.
+    """
+    sentinel = 0
+
+    async def _counting(_task: TaskSpec, _sample_index: int) -> RawOutcome:
+        nonlocal sentinel
+        sentinel += 1
+        return ModelReply(reply="called")
+
+    bad_arms = [ArmSpec(name="kitty", executor=_counting)]  # only one arm
+
+    with pytest.raises(ValueError, match="exactly two"):
+        await run_eval(_fully_pinned(), [_accepting_task()], bad_arms)
+
+    assert sentinel == 0, "validation passed but the executor was never called"
+
+
+async def test_a_refusal_only_arm_leaves_pass_rate_at_zero_with_scheduled_intact() -> None:
+    """F2 (REQ 6) — the denominator survives a refusal storm.
+
+    §6.4.3: *"A bridge arm that refuses 90 of 100 tasks and answers the
+    other 10 correctly scores 10%, which is the truth; excluding
+    refusals would score it 100%."* The skeleton's runner holds the
+    scheduled denominator regardless of how many trials return refusals.
+    """
+    config = _fully_pinned(n_samples=3)
+    # A task whose acceptance check refuses every reply.
+    refusing_task = TaskSpec(
+        id="refuses",
+        prompt="anything",
+        acceptance_check=lambda _reply: Verdict.REFUSED,
+    )
+    record = await run_eval(config, [refusing_task], _two_arms())
+
+    # Scheduled: 3 samples × 1 task × 2 arms = 6. Held intact.
+    assert record.scheduled == 6
+    assert len(record.trials) == 6
+    # Every trial refused; no successes; pass rate 0.0 on both arms.
+    assert all(trial.category is TrialCategory.REFUSAL for trial in record.trials)
+    assert record.pass_rate_per_arm == {"kitty": 0.0, "direct": 0.0}
+
+
+async def test_run_eval_classifies_a_trial_raising_oserror_as_harness_fault_and_continues() -> None:
+    """F3 (REQ 7) — an executor exception is classified and the run continues.
+
+    The defect it catches: a runner that crashes the whole run on one
+    bad trial (surface as a job-level failure rather than a data point)
+    or that swallows the exception into a silent skip (let a single
+    broken executor look like an empty arm). Per REQ 7, the per-trial
+    loop catches the exception, classifies it HARNESS_FAULT, and
+    continues — scheduled intact, no unhandled exception escaping.
+    """
+    call_count = 0
+
+    async def _flaky(_task: TaskSpec, sample_index: int) -> RawOutcome:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            raise OSError("simulated bridge bind failure")
+        return ModelReply(reply=f"survivor #{sample_index}")
+
+    record = await run_eval(_fully_pinned(n_samples=3), [_accepting_task()], _two_arms(_flaky))
+
+    # The runner completes; no exception escapes.
+    assert record.scheduled == 6  # 3 samples × 1 task × 2 arms
+    assert len(record.trials) == 6
+
+    # Per-arm × per-category tally: the first trial of the kitty arm
+    # raised (HARNESS_FAULT); the rest succeeded.
+    kitty_tally = record.per_arm["kitty"]
+    direct_tally = record.per_arm["direct"]
+    assert kitty_tally[TrialCategory.HARNESS_FAULT] == 1
+    assert kitty_tally[TrialCategory.SUCCESS] == 2
+    assert direct_tally[TrialCategory.SUCCESS] == 3
+    assert direct_tally[TrialCategory.HARNESS_FAULT] == 0
 
 
 # ── Helpers ─────────────────────────────────────────────────────────────────
@@ -305,3 +462,36 @@ def _fully_pinned(**overrides: object) -> RunConfig:
     }
     defaults.update(overrides)
     return RunConfig(**defaults)  # type: ignore[arg-type]
+
+
+def _accepting_task(task_id: str = "t1") -> TaskSpec:
+    """A task whose acceptance check accepts any reply."""
+    return TaskSpec(id=task_id, prompt="say something", acceptance_check=lambda _reply: Verdict.PASS)
+
+
+def _two_arms(executor: object = _always_pass) -> list[ArmSpec]:
+    """Two legal arms sharing the given executor."""
+    return [ArmSpec(name="kitty", executor=executor), ArmSpec(name="direct", executor=executor)]  # type: ignore[arg-type]
+
+
+def _always_replying(word: str) -> ArmExecutor:
+    """Build an async executor whose every reply carries ``word``."""
+    async def _reply(task: TaskSpec, sample_index: int) -> RawOutcome:
+        return ModelReply(reply=f"{word} for {task.id} #{sample_index}")
+    return _reply
+
+
+def _stepping_clock(steps: list[float]) -> Callable[[], float]:
+    """A fake clock handing out the given values in order.
+
+    Two calls per trial (start, end), so a run of N trials consumes
+    2N values. Raising when exhausted is the point: a runner that
+    calls the clock a different number of times than the contract
+    says should fail loudly, not wrap around.
+    """
+    yielded = iter(steps)
+
+    def _next() -> float:
+        return next(yielded)
+
+    return _next

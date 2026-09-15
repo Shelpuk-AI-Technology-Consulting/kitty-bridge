@@ -25,7 +25,8 @@ permitted to import the product; this is not it.
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Mapping, Sequence
+import time
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, fields
 from enum import Enum
 from typing import Any, TypeAlias
@@ -37,14 +38,17 @@ __all__ = [
     "ModelReply",
     "RawOutcome",
     "RunConfig",
+    "RunRecord",
     "TaskSpec",
     "TimedOut",
     "TrialCategory",
+    "TrialRecord",
     "UnclassifiedError",
     "UpstreamFailure",
     "UpstreamRefusal",
     "Verdict",
     "classify",
+    "run_eval",
     "validate_arms",
 ]
 
@@ -249,6 +253,29 @@ class RunConfig:
                 f"pinned. {exc}"
             ) from exc
 
+    def digest(self) -> dict[str, JSONValue]:
+        """Return the pinned settings as a JSON-compatible record.
+
+        Returns:
+            One key per field, in declaration order, with the
+            ``sampling_overrides`` mapping re-keyed in sorted order so
+            two dicts built with different insertion orders produce the
+            same digest. This is the dict ``RunRecord.config`` carries;
+            serialising it is what makes a run reproducible months
+            later.
+        """
+        return {
+            field.name: (
+                # Sorted keys: the digest is the durable evidence of what
+                # was pinned, and two runs that pinned the same overrides
+                # in different insertion orders are the same run.
+                dict(sorted(self.sampling_overrides.items()))
+                if field.name == "sampling_overrides"
+                else getattr(self, field.name)
+            )
+            for field in fields(self)
+        }
+
 
 def classify(outcome: RawOutcome, verdict: Verdict | None = None) -> TrialCategory:
     """Map a single trial's outcome (and its verdict) to a trial category.
@@ -346,9 +373,13 @@ class TaskSpec:
     acceptance_check: Callable[[Any], Verdict]
 
 
-#: The seam the runner calls once per trial. ``sample_index`` lets an
-#: executor vary its behaviour across the N repetitions §6.4.3 requires.
-ArmExecutor: TypeAlias = Callable[[TaskSpec, int], RawOutcome]
+#: The seam the runner calls once per trial. Async because the
+#: vertical slice's executor awaits ``BridgeFixture.post``; making
+#: the seam async from the start avoids an executor that wraps an
+#: async call in ``asyncio.run`` and breaks the slice's own loop.
+#: ``sample_index`` lets an executor vary its behaviour across the
+#: N repetitions §6.4.3 requires.
+ArmExecutor: TypeAlias = Callable[[TaskSpec, int], Awaitable[RawOutcome]]
 
 
 @dataclass(frozen=True)
@@ -397,3 +428,221 @@ def validate_arms(arms: Sequence[ArmSpec]) -> None:
         raise ValueError(
             f"the two arms must have distinct names; both are named {first.name!r}"
         )
+
+
+@dataclass(frozen=True)
+class TrialRecord:
+    """One trial's outcome, as recorded in the run record.
+
+    Attributes:
+        arm: The arm this trial was run on (``"kitty"`` or ``"direct"``
+            in the skeleton's two-arm shape).
+        task_id: The :attr:`TaskSpec.id` the trial drove.
+        sample_index: Which of the N samples this trial was. Zero-based,
+            because ``range(n_samples)`` is what generated it.
+        category: The :class:`TrialCategory` this trial landed in.
+        duration_seconds: Wall-clock time spent in the trial, measured
+            by the runner's injected ``clock``. Non-negative.
+        detail: A short, JSON-safe diagnostic string. The category
+            carries the diagnosis; ``detail`` is for a maintainer who
+            wants to see *why* a refusal was a refusal, or what the
+            upstream's body said. The skeleton keeps it small.
+    """
+
+    arm: str
+    task_id: str
+    sample_index: int
+    category: TrialCategory
+    duration_seconds: float
+    detail: str
+
+
+#: The per-arm × per-category tally: arm name → category → count,
+#: keyed by the enum at runtime. The on-disk / JSON form (step 7's
+#: ``to_json``) maps the enum to its ``value`` string.
+TallyByArm = dict[str, dict[TrialCategory, int]]
+
+
+@dataclass(frozen=True)
+class RunRecord:
+    """The artifact one run produces: the config digest, every trial, the tally.
+
+    Attributes:
+        config: The :meth:`RunConfig.digest` of the run's settings. The
+            durable evidence of what was pinned (§6.4.3).
+        scheduled: The number of trials the runner *intended* to run
+            (``n_samples × len(tasks) × 2``). §6.4.3 calls the
+            success-rate "Successes ÷ scheduled trials" specifically
+            so refusals cannot be silently dropped from the denominator.
+        trials: One :class:`TrialRecord` per intended trial, in the
+            order the runner visited them (arm → task → sample_index).
+            ``len(trials) == scheduled`` is a contract — the falsification
+            case F2 catches a runner that drops non-successes.
+        per_arm: The per-arm × per-category tally. ``per_arm[arm_name][TrialCategory.SUCCESS]``
+            is the count for that cell; categories the arm never hit
+            stay at their initial zero rather than being dropped, so a
+            missing cell means "never populated", not "always zero".
+    """
+
+    config: dict[str, JSONValue]
+    scheduled: int
+    trials: tuple[TrialRecord, ...]
+    per_arm: TallyByArm
+
+    @property
+    def pass_rate_per_arm(self) -> dict[str, float]:
+        """Return successes ÷ scheduled for each arm, as a mapping.
+
+        Returns:
+            One float per arm in the run record's ``per_arm``. ``0.0``
+            when scheduled is non-zero and no trials succeeded; the
+            empty mapping ``{}`` when the record has no trials (a
+            degenerate run that the runner refuses to produce in
+            practice — ``scheduled >= 2`` is enforced by REQ 4).
+        """
+        return {
+            arm: self.per_arm[arm].get(TrialCategory.SUCCESS, 0) / self.scheduled
+            for arm in self.per_arm
+        }
+
+
+async def run_eval(
+    config: RunConfig,
+    tasks: Sequence[TaskSpec],
+    arms: Sequence[ArmSpec],
+    *,
+    clock: Callable[[], float] = time.monotonic,
+) -> RunRecord:
+    """Drive the full grid, classify every trial, and emit the run record.
+
+    The runner is **pure except for the injected ``clock`` keyword
+    argument** (two calls per trial to populate ``duration_seconds``)
+    and the executor calls it makes. It does not write to disk; the
+    caller serialises the returned :class:`RunRecord` via its own
+    methods (planned in step 7).
+
+    Order of operations:
+
+    1. :func:`validate_arms` — REQ 3's rule fires before anything else.
+    2. Empty-task check — REQ 4's boundary.
+    3. The grid loop: ``for arm in arms: for task in tasks: for
+       sample in range(n_samples):``.
+    4. Each trial: ``started = clock(); try { outcome = await
+       arm.executor(...); verdict = task.acceptance_check(outcome.reply)
+       if isinstance(outcome, ModelReply) else None; category =
+       classify(outcome, verdict) } except Exception as exc { outcome =
+       UnclassifiedError(exc); category = classify(outcome) }; duration
+       = clock() - started``.
+
+    The exception handler is the entire mechanism for F3 (REQ 7): an
+    executor-side exception is wrapped, classified as
+    :attr:`TrialCategory.HARNESS_FAULT`, and the run continues.
+
+    Args:
+        config: A pinned :class:`RunConfig`. ``n_samples`` and every
+            required field are enforced at construction.
+        tasks: The task set to drive. At least one task is required.
+        arms: Exactly two :class:`ArmSpec` entries with distinct names.
+            Validated by :func:`validate_arms` as the first action.
+        clock: A zero-arg callable returning a non-decreasing float.
+            Default ``time.monotonic``. Two calls per trial; the
+            difference is the trial's ``duration_seconds``.
+
+    Returns:
+        A :class:`RunRecord` whose ``scheduled`` equals
+        ``n_samples × len(tasks) × 2``, whose ``trials`` carries one
+        row per intended trial, and whose ``per_arm`` is the per-arm
+        × per-category tally.
+
+    Raises:
+        ValueError: From :func:`validate_arms` (bad arms list) or from
+            the empty-task check.
+    """
+    # The two-arm rule fires first — a runner that runs trials against
+    # an invalid arms list has built evidence it cannot key. The rule
+    # is its own function so this is one call, not a copy of the logic.
+    validate_arms(arms)
+
+    # The empty-task boundary is here, not in RunConfig (where it has
+    # no home) — a run with zero tasks has nothing to measure and no
+    # denominator to hold; the runner is the place that knows what a
+    # run *is*.
+    if len(tasks) < 1:
+        raise ValueError("an eval run needs at least one task; got 0")
+
+    scheduled = config.n_samples * len(tasks) * len(arms)
+    trials: list[TrialRecord] = []
+    per_arm: dict[str, dict[TrialCategory, int]] = {
+        arm.name: {category: 0 for category in TrialCategory} for arm in arms
+    }
+
+    # The grid. Per-trial try/except is the F3 mechanism: an executor
+    # that raises or an acceptance check that raises is caught,
+    # wrapped as UnclassifiedError, and classified HARNESS_FAULT. The
+    # run continues regardless. Exception, not BaseException: an
+    # operator interrupt (KeyboardInterrupt / SystemExit) propagates
+    # so the operator's Ctrl-C still works during a long nightly.
+    for arm in arms:
+        for task in tasks:
+            for sample_index in range(config.n_samples):
+                started = clock()
+                try:
+                    outcome: RawOutcome = await arm.executor(task, sample_index)
+                    verdict: Verdict | None = (
+                        task.acceptance_check(outcome.reply)
+                        if isinstance(outcome, ModelReply)
+                        else None
+                    )
+                    category = classify(outcome, verdict)
+                except Exception as exc:
+                    outcome = UnclassifiedError(exc=exc)
+                    verdict = None
+                    category = classify(outcome)
+                duration = clock() - started
+
+                detail = _detail_of(outcome, verdict)
+                trials.append(
+                    TrialRecord(
+                        arm=arm.name,
+                        task_id=task.id,
+                        sample_index=sample_index,
+                        category=category,
+                        duration_seconds=duration,
+                        detail=detail,
+                    )
+                )
+                per_arm[arm.name][category] += 1
+
+    return RunRecord(
+        config=config.digest(),
+        scheduled=scheduled,
+        trials=tuple(trials),
+        per_arm=per_arm,
+    )
+
+
+def _detail_of(outcome: RawOutcome, verdict: Verdict | None) -> str:
+    """Build the per-trial ``detail`` string.
+
+    The category carries the diagnosis; ``detail`` is for a maintainer
+    who wants to see *why* a refusal was a refusal, or what the
+    upstream's body said. Kept short and JSON-safe — the on-disk
+    record is the durable artifact.
+    """
+    if isinstance(outcome, ModelReply):
+        return f"verdict={verdict.value if verdict is not None else 'none'}"
+    if isinstance(outcome, UpstreamRefusal):
+        return f"upstream_refusal status={outcome.status}"
+    if isinstance(outcome, UpstreamFailure):
+        return f"upstream_failure status={outcome.status}"
+    if isinstance(outcome, TimedOut):
+        return "timed_out"
+    if isinstance(outcome, UnclassifiedError):
+        return f"{type(outcome.exc).__name__}: {outcome.exc}"
+    # Defensive: classify() raises on an unknown variant, so reaching
+    # here means a new variant slipped past it. Mirror the same error.
+    raise TypeError(
+        f"_detail_of() received an outcome of unknown type "
+        f"{type(outcome).__name__}; update this function when adding a new "
+        f"RawOutcome variant"
+    )
