@@ -20,6 +20,7 @@ every file added to this repository writes LF; this file does too.
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import Callable
 
 import pytest
@@ -30,6 +31,7 @@ from harness.eval_harness import (
     ModelReply,
     RawOutcome,
     RunConfig,
+    RunRecord,
     TaskSpec,
     TimedOut,
     TrialCategory,
@@ -463,6 +465,91 @@ async def test_run_eval_lets_operator_interrupt_propagate() -> None:
 
     with pytest.raises(asyncio.CancelledError):
         await run_eval(_fully_pinned(n_samples=1), [_accepting_task()], arms)
+
+
+# ── RunRecord — JSON round-trip (REQ 2, 8) ──────────────────────────────────
+
+
+async def _mixed_category_record() -> RunRecord:
+    """Build a record whose trials hit several categories, for round-trip tests."""
+    async def _mixed(_task: TaskSpec, sample_index: int) -> RawOutcome:
+        if sample_index == 0:
+            return ModelReply(reply="fine")
+        if sample_index == 1:
+            return UpstreamFailure(status=429, body={"error": "rate_limited"})
+        return UpstreamRefusal(status=400, body={"error": "content_moderation"})
+
+    refusing = TaskSpec(id="t1", prompt="anything", acceptance_check=lambda _r: Verdict.REFUSED)
+    pinned = _fully_pinned(n_samples=3, sampling_overrides={"b_key": 2, "a_key": 1})
+    return await run_eval(pinned, [refusing], _two_arms(_mixed))
+
+
+async def test_run_record_json_round_trip() -> None:
+    """REQ 8 — ``from_json(record.to_json())`` equals ``record``.
+
+    Exercises every trial category the mixed executor produces, so the
+    enum values, floats, ints and strings all survive the round-trip.
+    """
+    record = await _mixed_category_record()
+
+    rebuilt = RunRecord.from_json(record.to_json())
+
+    assert rebuilt == record
+
+
+async def test_recorded_config_round_trips_through_json() -> None:
+    """REQ 2 — the config digest carries every pinned setting after a JSON round-trip.
+
+    The digest is the only durable evidence of what was pinned, so a
+    round-trip that dropped a field would silently unpin the run.
+    """
+    record = await _mixed_category_record()
+    rebuilt = RunRecord.from_json(record.to_json())
+
+    assert rebuilt.config == record.config
+    # Spot-check each field that defines the run.
+    assert rebuilt.config["model_id"] == "claude-opus-4-1"
+    assert rebuilt.config["n_samples"] == 3
+    assert rebuilt.config["sampling_overrides"] == {"a_key": 1, "b_key": 2}
+
+
+def test_sampling_overrides_keys_are_sorted_in_recorded_digest() -> None:
+    """REQ 2 — overrides keys are re-keyed sorted so the digest is order-independent."""
+    config = _fully_pinned(sampling_overrides={"zulu": 26, "alpha": 1, "mike": 13})
+
+    digest = config.digest()
+    overrides = digest["sampling_overrides"]
+    assert isinstance(overrides, dict)  # type narrow: the union includes scalars
+
+    assert list(overrides.keys()) == ["alpha", "mike", "zulu"]
+
+
+async def test_run_record_from_json_rejects_garbage() -> None:
+    """REQ 8 — garbage input raises ValueError, never a partial record.
+
+    Four shapes of garbage: not JSON at all, JSON that is not an
+    object, an object missing required keys, and a trial row naming a
+    category the taxonomy does not carry. Each must be a loud typed
+    error, not a silently-partial ``RunRecord``.
+    """
+    record = await _mixed_category_record()
+    good = record.to_json()
+
+    with pytest.raises(ValueError, match="not valid JSON"):
+        RunRecord.from_json(b"this is not json at all {")
+
+    with pytest.raises(ValueError, match="not a JSON object"):
+        RunRecord.from_json(b"[1, 2, 3]")
+
+    parsed = json.loads(good)
+    del parsed["scheduled"]
+    with pytest.raises(ValueError, match="missing"):
+        RunRecord.from_json(json.dumps(parsed).encode("utf-8"))
+
+    parsed = json.loads(good)
+    parsed["trials"][0]["category"] = "not_a_real_category"
+    with pytest.raises(ValueError, match="category"):
+        RunRecord.from_json(json.dumps(parsed).encode("utf-8"))
 
 
 # ── Helpers ─────────────────────────────────────────────────────────────────

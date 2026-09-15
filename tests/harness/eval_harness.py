@@ -505,6 +505,153 @@ class RunRecord:
             for arm in self.per_arm
         }
 
+    def to_json(self) -> bytes:
+        """Serialise the record to JSON bytes for persistence.
+
+        The on-disk form is the durable evidence of a run; T-K3's
+        decision rule and T-K12's nightly will both read it. Indented
+        (``indent=2``) so a maintainer can grep the file directly; the
+        per-run size is bounded by the task set's size, and a
+        readability-vs-bytes trade-off that costs bytes here buys
+        legibility at every incident review.
+
+        Returns:
+            UTF-8-encoded JSON bytes. ``indent=2`` keeps the file
+            diff-able and human-readable without an extra formatter.
+        """
+        return json.dumps(
+            {
+                "config": self.config,
+                "scheduled": self.scheduled,
+                "trials": [
+                    {
+                        "arm": trial.arm,
+                        "task_id": trial.task_id,
+                        "sample_index": trial.sample_index,
+                        # Category travels as its enum value (the
+                        # string), not as the enum's repr, so the
+                        # on-disk format is independent of Python's
+                        # enum printer.
+                        "category": trial.category.value,
+                        "duration_seconds": trial.duration_seconds,
+                        "detail": trial.detail,
+                    }
+                    for trial in self.trials
+                ],
+                # Per-arm tally: enum key -> string key. The on-disk
+                # form is JSON-safe; from_json rebuilds the enum keys.
+                "per_arm": {
+                    arm: {category.value: count for category, count in tally.items()}
+                    for arm, tally in self.per_arm.items()
+                },
+            },
+            indent=2,
+        ).encode("utf-8")
+
+    @classmethod
+    def from_json(cls, data: bytes) -> RunRecord:
+        """Rebuild a :class:`RunRecord` from bytes :meth:`to_json` produced.
+
+        Garbage input raises :class:`ValueError` — never silently
+        returns a partial record. A future second consumer (T-K3) will
+        validate the schema from outside this module; the harness's
+        own inverse only proves round-trip-ability for the on-disk
+        shape it wrote.
+
+        Args:
+            data: UTF-8 JSON bytes in the shape :meth:`to_json` emits.
+
+        Returns:
+            A :class:`RunRecord` whose ``__eq__`` matches the source.
+
+        Raises:
+            ValueError: When ``data`` is not valid JSON, when the
+                top-level value is not a JSON object, when required
+                keys are missing, or when a trial row names a category
+                the taxonomy does not carry. The message names the
+                specific failure so an operator reading a CI log
+                knows what to fix.
+        """
+        try:
+            raw = json.loads(data)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValueError(f"RunRecord.from_json: not valid JSON: {exc}") from exc
+        if not isinstance(raw, dict):
+            raise ValueError(
+                f"RunRecord.from_json: top-level value is not a JSON object; "
+                f"got {type(raw).__name__}"
+            )
+
+        required = {"config", "scheduled", "trials", "per_arm"}
+        missing = required - set(raw)
+        if missing:
+            raise ValueError(
+                f"RunRecord.from_json: missing required keys: {sorted(missing)}"
+            )
+
+        config = raw["config"]
+        if not isinstance(config, dict):
+            raise ValueError(
+                f"RunRecord.from_json: 'config' must be an object; got {type(config).__name__}"
+            )
+
+        scheduled = raw["scheduled"]
+        if not isinstance(scheduled, int) or isinstance(scheduled, bool):
+            raise ValueError(
+                f"RunRecord.from_json: 'scheduled' must be an int; got {type(scheduled).__name__}"
+            )
+
+        trials_raw = raw["trials"]
+        if not isinstance(trials_raw, list):
+            raise ValueError(
+                f"RunRecord.from_json: 'trials' must be a list; got {type(trials_raw).__name__}"
+            )
+        # Each trial row is rebuilt with strict shape checks; the
+        # category string must resolve to a known TrialCategory, not
+        # silently default. ``TrialCategory(value)`` raises ValueError
+        # for an unknown string, which we let propagate.
+        trials: list[TrialRecord] = []
+        for index, row in enumerate(trials_raw):
+            if not isinstance(row, dict):
+                raise ValueError(
+                    f"RunRecord.from_json: trial {index} is not an object; got {type(row).__name__}"
+                )
+            try:
+                trials.append(
+                    TrialRecord(
+                        arm=row["arm"],
+                        task_id=row["task_id"],
+                        sample_index=row["sample_index"],
+                        category=TrialCategory(row["category"]),
+                        duration_seconds=row["duration_seconds"],
+                        detail=row["detail"],
+                    )
+                )
+            except KeyError as exc:
+                raise ValueError(
+                    f"RunRecord.from_json: trial {index} is missing key {exc.args[0]!r}"
+                ) from exc
+
+        per_arm_raw = raw["per_arm"]
+        if not isinstance(per_arm_raw, dict):
+            raise ValueError(
+                f"RunRecord.from_json: 'per_arm' must be an object; got {type(per_arm_raw).__name__}"
+            )
+        # Per-arm rebuild: convert string keys back to TrialCategory.
+        # ``TrialCategory(key)`` raises ValueError on an unknown key,
+        # which we let propagate so a corrupted file is loud.
+        per_arm: TallyByArm = {
+            arm: {TrialCategory(category): count for category, count in tally.items()}
+            for arm, tally in per_arm_raw.items()
+        }
+
+        return cls(
+            config=config,
+            scheduled=scheduled,
+            trials=tuple(trials),
+            per_arm=per_arm,
+        )
+
 
 async def run_eval(
     config: RunConfig,
