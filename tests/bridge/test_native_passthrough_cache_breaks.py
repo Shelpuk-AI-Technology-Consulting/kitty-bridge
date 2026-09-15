@@ -86,6 +86,7 @@ import contextlib
 import copy
 import json
 from collections.abc import Callable, Iterable
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -130,10 +131,16 @@ class _FakeLauncher(LauncherAdapter):
     ) -> dict:
         return {}
 
-    def prepare_launch(self, spawn_config: dict) -> None:
+    def prepare_launch(
+        self, env_overrides: dict[str, str], settings_path: Path | None = None
+    ) -> str | None:
+        """No-op stub matching :meth:`LauncherAdapter.prepare_launch`."""
         return None
 
-    def cleanup_launch(self, spawn_config: dict) -> None:
+    def cleanup_launch(
+        self, original: str | None, settings_path: Path | None = None
+    ) -> None:
+        """No-op stub matching :meth:`LauncherAdapter.cleanup_launch`."""
         return None
 
 
