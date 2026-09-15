@@ -1224,6 +1224,7 @@ class TestBalancingAllCustomTransport:
         discriminator: str,
         *,
         absent_discriminators: tuple[str, ...] = (),
+        required_discriminators: tuple[str, ...] = (),
     ):
         """Drive one request until the cross-class hop cap fires; return the body.
 
@@ -1331,6 +1332,17 @@ class TestBalancingAllCustomTransport:
                 f"cap-hit event must NOT carry {absent}="
                 f"cross_class_exhaustion, got {text[:500]!r}"
             )
+        # Fields a route must carry alongside the route's D4 discriminator.
+        # Responses carries `reason` (the parent KBR-241 marker) in addition
+        # to its D4 `code`; the §5.3 S8 design names this explicitly. A
+        # regression that drops `reason` from the Responses payload would
+        # leave clients branching on the KBR-241 family unable to tell the
+        # cap-hit apart from an upstream_error.
+        for required in required_discriminators:
+            assert f'"{required}": "cross_class_exhaustion"' in text, (
+                f"cap-hit event must carry {required}="
+                f"cross_class_exhaustion, got {text[:500]!r}"
+            )
         # The full standard wording, not just a fragment.
         assert "could not land on a usable backend" in text, (
             f"cap-hit message should carry the standard wording, got {text[:500]!r}"
@@ -1339,11 +1351,19 @@ class TestBalancingAllCustomTransport:
 
     @pytest.mark.asyncio
     async def test_responses_stream_re_dispatch_cap_surfaces_error_event(self):
-        """Hop-cap hit on /v1/responses surfaces the route's D4 error event (KBR-254)."""
+        """Hop-cap hit on /v1/responses surfaces the route's D4 error event (KBR-254).
+
+        Responses carries BOTH its D4 discriminator (`code`) and the parent
+        KBR-241 marker (`reason`) on every cap-hit, per §5.3 S8. The
+        `required_discriminators=("reason",)` below pins the second one so
+        a regression that drops `reason` from the Responses payload fails
+        this test.
+        """
         status, _body = await self._run_cap_hit(
             "/v1/responses",
             {"model": "test-model", "input": [{"type": "message", "role": "user", "content": "hi"}], "stream": True},
             discriminator="code",
+            required_discriminators=("reason",),
         )
         # sr.prepare() is eager on this route, so the cap surfaces in-stream
         # (200 + the error event) rather than as the Messages route's bare 502.
