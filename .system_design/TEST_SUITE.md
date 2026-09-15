@@ -1801,6 +1801,17 @@ None`. `mutmut` closes that gap.
   Rejecting per-PR mutation testing without that measurement is an assumption, not a decision.
   Tracked as Q11.
 
+**Where the score lives.** Per-component scores (and the mutmut config that
+produces them) are recorded in `.system_design/MUTATION_BASELINE.md`, with
+the machine-readable scope in `tests/mutmut_scope.py`. The baseline is
+**provisional** until [KBR-115](https://shelpuk.atlassian.net/browse/KBR-115)
+(T-K6) reclassifies the six socket/process modules out of `l1`; the current
+numbers are **optimistic**, since kills currently credited through
+substantively-L3 tests vanish on re-measure. One group
+(`compaction_and_pairing`) is **deferred** in this baseline — mutmut
+generates per-file, `server.py` is too large to mutate wholly, and
+selective `# pragma: no mutate` markers belong to a follow-up ticket.
+
 ### 6.2 L2 — Contract
 
 **Scope.** Any two artifacts that must agree but are deployed, edited or upgraded separately.

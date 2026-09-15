@@ -57,6 +57,7 @@ dev = [
     "build>=1.0",
     "hatchling>=1.0",
     "twine>=4.0",
+    "mutmut>=3.0,<4",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -252,3 +253,69 @@ forbidden_modules = [
     "kitty.credentials",
     "kitty.providers",
 ]
+
+# Mutation testing -- T-H1 (KBR-88).
+#
+# `source_paths` is the whole importable package: mutmut removes the original
+# `src/` from `sys.path` and runs tests against `mutants/`, so anything not in
+# `source_paths` (or in `also_copy`) is unimportable. TEST_SUITE.md section 6.1
+# narrows the scope to specific functions; that narrowing cannot live here --
+# mutmut treats wildcard entries as filesystem paths and silently drops them
+# (its `walk_all_files` only follows directories and files, not globs). The
+# function-level narrowing lives in `tests/mutmut_scope.py` (the registry) and
+# in the positional patterns the recorded invocation in
+# `.system_design/MUTATION_BASELINE.md` passes to `mutmut run`.
+#
+# `only_mutate` is file-level and bounds mutant generation to the files that
+# carry any section 6.1 target -- CLI, TUI, auth and `kitty.io_encoding` are
+# out of scope and never generate mutants.
+#
+# `src/kitty/bridge/server.py` is deliberately NOT here. Its section 6.1
+# targets are seven BridgeServer methods, but mutmut generates for the whole
+# file: server.py's mutated copy reaches 354 MB / 5.7M lines and the
+# generating worker did not finish in 25 minutes. Mutating just the seven
+# methods needs `# pragma: no mutate block` markers on everything else in
+# the file -- a source change that belongs to its own ticket, not to
+# baseline config. The compaction_and_pairing group is therefore absent
+# from the recorded baseline (see .system_design/MUTATION_BASELINE.md).
+#
+# `pytest_add_cli_args_test_selection` is array form -- mutmut's TOML reader
+# requires it (its config schema validates the array shape explicitly).
+#
+# The `--ignore` below is mutmut-only, not a gate change. The internal-keys
+# guard fails against mutmut's mutated source: mutmut-generated string
+# mutations in MessagesTranslator._translate_assistant_message write
+# `_THINKING_BLOCKS` in upper case, and the test's `startswith("_")` scan
+# sees the uppercase key as leaked before the strip test runs. Every
+# parametrized case of test_no_internal_key_reaches_upstream fails for the
+# same reason -- one `--deselect` only shifts the failure to the next case.
+# Deselecting the whole file removes ~111 tests from mutmut's selection
+# only; the L1 gate still runs them. Investigating the trampoline
+# interaction further is its own ticket, not T-H1 scope.
+#
+# `also_copy` carries files outside `source_paths`/`tests/` that the L1
+# selection reads from the repo root. README.md is the one such file today:
+# `tests/bridge/test_compaction_failure_response.py` (an L1 test) reads it.
+# This file must stay ASCII (see the ruff note above): section 6.1 is written
+# out rather than using the section sign.
+[tool.mutmut]
+source_paths = ["src/kitty"]
+pytest_add_cli_args_test_selection = [
+    "-m",
+    "l1",
+    "--ignore",
+    "tests/test_internal_keys_not_sent_upstream.py",
+]
+only_mutate = [
+    "src/kitty/bridge/messages/*",
+    "src/kitty/bridge/responses/*",
+    "src/kitty/bridge/gemini/*",
+    "src/kitty/bridge/engine.py",
+    "src/kitty/bridge/tool_audit.py",
+    "src/kitty/providers/*",
+    "src/kitty/egress.py",
+    "src/kitty/egress_guard.py",
+    "src/kitty/profiles/*",
+    "src/kitty/validation.py",
+]
+also_copy = ["README.md"]
