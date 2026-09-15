@@ -215,11 +215,46 @@ def test_unknown_exit_code_buckets_as_suspicious_and_is_reported(
 
 # ── main() guard branches ──────────────────────────────────────────────
 #
-# Each test pins one of ``main``'s three loud-failure exit codes (1) and
-# the no-input exit code (2). The composition layer (how bucket_mutants
-# results turn into the loud-failure contract) was uncovered by the five
-# bucket/routing tests above; a regression that drops a guard would not
-# be caught there.
+# Each test pins one of ``main``'s three loud-failure exit codes (1)
+# and the no-input exit code (2). The composition layer (how
+# bucket_mutants results turn into the loud-failure contract) was
+# uncovered by the five bucket/routing tests above; a regression that
+# drops a guard would not be caught there.
+#
+# The three loud-failure branches:
+#   1. total == 0 (this section's first test) — a non-deferred group
+#      matches no mutants, the registry's patterns are mis-scoped.
+#   2. no_tests > 0 — the L1 selection never touches the trampoline.
+#   3. not_checked > 0 — an interrupted run left unexamined mutants.
+# All three exit 1; main()'s no-input exit code is 2.
+
+
+def test_main_exits_one_when_a_group_matches_zero_mutants(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """A non-deferred group with zero matching mutants fails loud.
+
+    Pins the mis-scope guard (round-6 review: the third loud-failure
+    branch had no test). Seed only mutants that match NO group's
+    patterns — a module outside the registry — so every non-deferred
+    group lands at ``total == 0`` and ``main`` must reject the run:
+    the recorded baseline's per-group rows would otherwise read as
+    measured when nothing was scoped at all.
+    """
+    monkeypatch.setattr(agg, "_MUTANTS_ROOT", tmp_path)
+    _meta(
+        tmp_path,
+        exit_codes={
+            "kitty.unknown_module.x__foo__mutmut_1": 1,
+        },
+    )
+    rc = agg.main()
+    captured = capsys.readouterr()
+    assert rc == 1, f"main should exit 1 when a group matches nothing, got {rc}"
+    assert "zero mutants matched its patterns" in captured.err
+    # The offending group is named: translators_and_engine is the first
+    # non-deferred group in declaration order.
+    assert "translators_and_engine" in captured.err
 
 
 def test_main_exits_one_when_a_group_has_no_tests(
