@@ -1,0 +1,42 @@
+{
+  "id": "no_output_config",
+  "description": "P5f complement — an Anthropic Messages request body without output_config. CC 2.1.238 emits output_config in every observed request body; a captured complement is impossible on this client. Constructed against the documented schema (verified 2026-09-14) with the absence provable by direct body inspection. Also discharges the complement for adaptive_thinking_keys_present (no thinking block), multiple_system_blocks (single system block), non_streaming_max_tokens_over_4096 (stream=false and max_tokens=1024 < 4096), max_tokens_absent (max_tokens present), orphan_tool_result and tool_result_over_limit (no tool_result), and responses_origin_path (Messages wire).",
+  "origin": "synthetic",
+  "origin_note": "Synthetic (not captured). No body without `output_config` can be captured from Claude Code 2.1.238 — it emits the field in every observed request. Constructed against the documented Anthropic Messages schema (the only field whose absence is the point is the one missing).",
+  "captured_from": "",
+  "captured_at": "",
+  "method": "POST",
+  "scheme": "https",
+  "host": "api.anthropic.com",
+  "path": "/v1/messages",
+  "query": "",
+  "headers": [
+    [
+      "host",
+      "api.anthropic.com"
+    ],
+    [
+      "content-type",
+      "application/json"
+    ],
+    [
+      "x-api-key",
+      "<redacted:credential_header>"
+    ]
+  ],
+  "body_file": "no_output_config.body",
+  "body_sha256": "22d1054948e15dc1877eb1a084cffaf0e68ae7313b6a4e92b31220457a3da390",
+  "wire_format": "anthropic_messages",
+  "known_non_secrets": [],
+  "triggers_met": [],
+  "triggers_absent": [
+    "adaptive_thinking_keys_present",
+    "max_tokens_absent",
+    "multiple_system_blocks",
+    "non_streaming_max_tokens_over_4096",
+    "orphan_tool_result",
+    "output_config_present",
+    "responses_origin_path",
+    "tool_result_over_limit"
+  ]
+}

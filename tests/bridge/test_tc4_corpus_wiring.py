@@ -173,17 +173,22 @@ class TestTheEntriesAreCommittedAndDeclared:
     corpus format's demands on a synthetic entry belong.
     """
 
-    def test_the_corpus_holds_exactly_the_four_entries_this_module_knows(self) -> None:
-        """AC-1: the committed corpus is the four entries this task accounts for.
+    def test_every_tc4_entry_this_module_knows_is_committed(self) -> None:
+        """AC-1: every TC4 entry this task accounts for is committed.
 
-        A silent fifth entry would be fixture data no test loads, no lint
-        scans by id, and no task owns — the exact shape ``format_example``'s
-        origin_note warns about.
+        The "no orphan entry anywhere in the corpus" guarantee is
+        cross-task — it lives in
+        :mod:`tests.harness.test_corpus_lint::TestTheCommittedCorpusHasNoOrphanEntries`
+        where the allowlist can know about every documented task. This
+        test asserts only its own half: TC4's three entries plus
+        ``format_example`` are all present in the corpus.
         """
-        entries = k.load_corpus(CORPUS)
+        ids = {entry.id for entry in k.load_corpus(CORPUS)}
 
-        ids = sorted(entry.id for entry in entries)
-        assert ids == sorted([*TC4_ENTRY_IDS, "format_example"])
+        assert ids.issuperset({*TC4_ENTRY_IDS, "format_example"}), (
+            f"TC4 entries missing from the corpus: "
+            f"{set(TC4_ENTRY_IDS) - ids}; format_example present: {'format_example' in ids}"
+        )
 
 
 # ── Behaviour-level claims (the anti-F25 half) ───────────────────────────────

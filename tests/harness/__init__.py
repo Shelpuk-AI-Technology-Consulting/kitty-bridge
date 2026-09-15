@@ -9,6 +9,10 @@ than each stream's own tests:
   projection reads, every recorder produces, and the oracle compares.
 - T-W4's recording upstreams, T-W5's CONNECT proxy fixture, T-W6's corpus
   loader and T-W8's bridge fixture land here alongside it.
+- :mod:`harness.containment` — the sealed-network harness (T-E1): the
+  proxy-and-recording-upstream pair, the monkeypatched aiohttp resolver that
+  gives the bridge's direct leg a non-loopback name, the per-transport
+  capability report, and the containment transport extension interface.
 
 **Why a package and not loose modules.**  ``tests/`` has no ``__init__.py``, so
 pytest inserts ``tests/`` onto ``sys.path`` and these modules import as

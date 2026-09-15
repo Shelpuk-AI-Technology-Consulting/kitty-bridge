@@ -68,7 +68,7 @@ must fail the load, not silently mean "declares nothing".
 | `description` | One line: what this entry exercises |
 | `origin` | `captured` or `synthetic` |
 | `origin_note` | Required when `synthetic`: why this could not be captured |
-| `captured_from` | Required when `captured`: the Claude Code version, e.g. `claude-code/1.2.3` |
+| `captured_from` | Required when `captured`: the Claude Code version, **exactly** `claude-code/&lt;semver&gt;` — e.g. `claude-code/2.1.238`. The lint (`tests/harness/test_corpus_lint.py::TestTheCommittedCorpusIsFresh`) parses this to a `(major, minor, patch)` triple and compares it against the version pinned in `.github/workflows/claude-code-review.yml` (and the matching line in `.github/workflows/tmux-disconnect.yml`); a mismatch, a malformed form, or a drift in either workflow fails the gate |
 | `captured_at` | Required when `captured`: the ISO date of capture |
 | `method`, `scheme`, `host`, `path`, `query` | The request line, query raw and unreordered |
 | `headers` | Ordered `[name, value]` pairs — original casing and duplicates preserved, because §4.3 C1 asserts on the exact header set |
@@ -133,6 +133,14 @@ second reader, and the set it refuses is *derived* from the register's classific
 ## Capture procedure
 
 ### Inbound requests (T-C1–T-C6)
+
+A reference driver lives at `scripts/capture_corpus_t_c1.py`: it drives the four T-C1 shapes
+(plain turn, tools declared, tool_use / tool_result pair, effort configured) against
+per-session `RecordingUpstream` instances with a scratch `HOME`/`CLAUDE_CONFIG_DIR` (so the
+user's live config is untouched) and prints, per session, what the captured body carries —
+including the `output_config` co-occurrence the register row P5f claims against. It writes
+no entries; the operator reads every body end-to-end and calls `write_entry` per the steps
+below.
 
 Point Claude Code at the recorder **directly, not through the bridge**. What the corpus needs is
 what Claude Code sends; a request that has been through the bridge has already been mutated, and
