@@ -21,10 +21,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from collections.abc import Callable
+from pathlib import Path
 
 import pytest
 
+import harness.eval_harness as eval_harness
 from harness.eval_harness import (
     ArmExecutor,
     ArmSpec,
@@ -561,6 +564,41 @@ async def test_run_record_from_json_rejects_garbage() -> None:
     # bogus value itself.
     with pytest.raises(ValueError, match="is not a valid TrialCategory"):
         RunRecord.from_json(json.dumps(parsed).encode("utf-8"))
+
+
+# ── Harness independence (REQ 9) ─────────────────────────────────────────────
+
+#: Matches ``from kitty...``, ``import kitty...``, ``from src.kitty...``,
+#: ``import_module("kitty...")``, ``__import__("kitty...")``. Same
+#: pattern as the failures-library guard (``tests/harness/test_failures.py``);
+#: keeping them as two separate test functions means a future maintainer
+#: who adds a kitty import to either module still trips its own guard,
+#: and deleting one does not silently weaken the other.
+_KITTY_IMPORT = re.compile(
+    r"^\s*(?:from|import)\s+(?:src\.)?kitty\b"
+    r"|import_module\(\s*[\"'](?:src\.)?kitty"
+    r"|__import__\(\s*[\"'](?:src\.)?kitty"
+)
+
+
+def test_the_eval_harness_imports_nothing_from_kitty() -> None:
+    """REQ 9 — the eval harness module's source contains no kitty import.
+
+    A library that did would prove self-consistency, not fidelity
+    (§3.3.1). The check reads the module's source and greps for the
+    same pattern as the failures-library guard; both static, both
+    independent, both layer-1 tests in this file's path-default.
+    """
+    source = eval_harness.__file__
+    assert source is not None, "eval_harness module has no source path"
+
+    body = Path(source).read_text(encoding="utf-8")
+    # A non-trivial body length — an empty file would pass vacuously,
+    # the same trap the failures guard avoids.
+    assert len(body) > 1000, "read no meaningful source; the guard would pass vacuously"
+
+    offending = [line.strip() for line in body.splitlines() if _KITTY_IMPORT.search(line)]
+    assert offending == [], f"eval_harness.py must not import kitty: {offending}"
 
 
 # ── Helpers ─────────────────────────────────────────────────────────────────
