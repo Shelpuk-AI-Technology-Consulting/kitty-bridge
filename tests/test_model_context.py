@@ -950,3 +950,147 @@ class TestDefaultFallbackIsObservable:
 
         message = caplog.records[0].getMessage()
         assert "azure/unknown-deployment" in message
+
+
+class TestShadowedContextWindowIsObservable:
+    """KBR-170, folded into KBR-71: a shadowed ``context_window`` is discoverable.
+
+    The overrides catalog outranks ``provider_config["context_window"]`` — the
+    owner kept that precedence (decision 2026-09-15) — but today the shadowing
+    is silent, and the docstring's escape hatch names a file the operator does
+    not control when the remote-synced revision replaces the packaged catalog.
+    An ``INFO`` line naming the model and both values makes the shadowing
+    discoverable; ``INFO`` not ``WARNING`` because the precedence is deliberate,
+    so this is visibility, not an alarm.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _clear_shadow_log_cache(self):
+        import kitty.providers.model_context as mc
+
+        mc._log_shadowed_context_window.cache_clear()
+        yield
+        mc._log_shadowed_context_window.cache_clear()
+
+    def test_shadowing_is_logged_once_naming_model_and_both_values(self, caplog):
+        """Override wins on the wire, and the operator sees both numbers."""
+        import kitty.providers.model_context as mc
+
+        _set_overrides({"gpt-4o": 777_777})
+
+        with caplog.at_level(logging.INFO, logger="kitty.providers.model_context"):
+            result = mc.get_model_context_tokens(
+                provider="azure",
+                model="gpt-4o",
+                provider_config={"context_window": 128_000},
+            )
+
+        assert result == 777_777
+        records = [r for r in caplog.records if r.levelname == "INFO"]
+        assert len(records) == 1
+        message = records[0].getMessage()
+        assert "gpt-4o" in message
+        assert str(777_777) in message.replace(",", "")
+        assert str(128_000) in message.replace(",", "")
+
+    def test_agreeing_values_log_nothing(self, caplog):
+        """When both sources give the same number, nothing is being shadowed."""
+        import kitty.providers.model_context as mc
+
+        _set_overrides({"gpt-4o": 128_000})
+
+        with caplog.at_level(logging.INFO, logger="kitty.providers.model_context"):
+            mc.get_model_context_tokens(
+                provider="azure",
+                model="gpt-4o",
+                provider_config={"context_window": 128_000},
+            )
+
+        assert [r for r in caplog.records if r.levelname == "INFO"] == []
+
+    def test_no_profile_value_logs_nothing(self, caplog):
+        """Nothing to announce when the profile never set a context_window."""
+        import kitty.providers.model_context as mc
+
+        _set_overrides({"gpt-4o": 777_777})
+
+        with caplog.at_level(logging.INFO, logger="kitty.providers.model_context"):
+            mc.get_model_context_tokens(provider="azure", model="gpt-4o")
+
+        assert [r for r in caplog.records if r.levelname == "INFO"] == []
+
+    def test_no_override_match_logs_nothing(self, caplog):
+        """Without a catalog hit the profile's value is used, not shadowed."""
+        import kitty.providers.model_context as mc
+
+        _set_overrides({})
+
+        with caplog.at_level(logging.INFO, logger="kitty.providers.model_context"):
+            mc.get_model_context_tokens(
+                provider="azure",
+                model="gpt-4o",
+                provider_config={"context_window": 128_000},
+            )
+
+        assert [r for r in caplog.records if r.levelname == "INFO"] == []
+
+    def test_uncoercible_profile_value_logs_nothing(self, caplog):
+        """A ``context_window`` that fails coercion was never a shadowed value.
+
+        An invalid setting is a different defect — the existing WARNING covers
+        it — and announcing a shadowing that never happened would be noise.
+        """
+        import kitty.providers.model_context as mc
+
+        _set_overrides({"gpt-4o": 777_777})
+
+        with caplog.at_level(logging.INFO, logger="kitty.providers.model_context"):
+            mc.get_model_context_tokens(
+                provider="azure",
+                model="gpt-4o",
+                provider_config={"context_window": "not-a-number"},
+            )
+
+        assert [r for r in caplog.records if r.levelname == "INFO"] == []
+
+    def test_repeating_the_same_lookup_logs_nothing_further(self, caplog):
+        """The budget is recomputed every turn; the line may not be."""
+        import kitty.providers.model_context as mc
+
+        _set_overrides({"gpt-4o": 777_777})
+
+        with caplog.at_level(logging.INFO, logger="kitty.providers.model_context"):
+            for _ in range(2):
+                mc.get_model_context_tokens(
+                    provider="azure",
+                    model="gpt-4o",
+                    provider_config={"context_window": 128_000},
+                )
+
+        assert len([r for r in caplog.records if r.levelname == "INFO"]) == 1
+
+    def test_a_changed_catalog_value_logs_again(self, caplog):
+        """The dedup key carries both values, so a new shadowing re-announces.
+
+        The synced catalog can change between requests without a release; when
+        the effective number changes, the operator must see that, and a cache
+        keyed on the model alone would stay silent.
+        """
+        import kitty.providers.model_context as mc
+
+        _set_overrides({"gpt-4o": 777_777})
+        with caplog.at_level(logging.INFO, logger="kitty.providers.model_context"):
+            mc.get_model_context_tokens(
+                provider="azure",
+                model="gpt-4o",
+                provider_config={"context_window": 128_000},
+            )
+
+            _set_overrides({"gpt-4o": 555_555})
+            mc.get_model_context_tokens(
+                provider="azure",
+                model="gpt-4o",
+                provider_config={"context_window": 128_000},
+            )
+
+        assert len([r for r in caplog.records if r.levelname == "INFO"]) == 2
