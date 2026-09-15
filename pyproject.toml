@@ -276,8 +276,9 @@ forbidden_modules = [
 # intentionally narrowed to per-file globs (the round-1 review caught that
 # it matched `__init__.py`, `registry.py` and `model_context_sync.py`,
 # none of which are named by section 6.1). `tests/test_mutmut_scope.py`'s
-# `_only_mutate_matches_registry_files` guard keeps this list in sync with
-# the registry: any registry target whose file is not in this list fails
+# `test_every_registry_file_is_covered_by_only_mutate` guard keeps this
+# list in sync with the registry: any registry target whose file is not
+# in this list fails
 # the gate.
 #
 # `src/kitty/bridge/server.py` is deliberately NOT here. Its section 6.1

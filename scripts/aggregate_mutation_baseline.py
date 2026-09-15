@@ -5,13 +5,16 @@ writes under ``mutants/`` and buckets each mutant by the patterns in
 ``tests/mutmut_scope``. Prints a per-group table.
 
 The formula is mutmut's own badge formula
-(``mutmut/__main__.py::badge``):
+(``mutmut/__main__.py::badge``), but ``tested`` here is the stronger
+``total − skipped − not_checked`` — an interrupted run leaves
+``not_checked`` mutants whose verdict is unknown, and they drop out of
+the denominator alongside ``skipped``:
 
-    score = (killed + timeout) / (total - skipped)
+    tested = total - skipped - not_checked
+    score  = (killed + timeout) / tested
 
 Timeouts count as kills (a slow mutation is a behaviour change), and
-``skipped`` drops out of the denominator (mutmut never tested those
-mutants, so including them dilutes the score with noise). ``no_tests``
+``skipped`` and ``not_checked`` drop out of the denominator. ``no_tests``
 and ``suspicious`` stay in the denominator — a group whose mutants all
 land in ``no_tests`` has a mis-scoped pattern, not a 0% score; the script
 asserts ``no_tests == 0`` per group and fails loud if a group's
@@ -21,8 +24,9 @@ Usage::
 
     .venv/bin/python scripts/aggregate_mutation_baseline.py
 
-Reads from ``mutants/`` (cwd) and ``tests/mutmut_scope.py``. Prints a
-markdown table; copy that into ``.system_design/MUTATION_BASELINE.md``.
+Reads from the repo's ``mutants/`` directory and ``tests/mutmut_scope.py``
+(paths derived from ``__file__`` — runs from any cwd). Prints a markdown
+table; copy that into ``.system_design/MUTATION_BASELINE.md``.
 """
 
 from __future__ import annotations
@@ -297,6 +301,25 @@ def render_markdown_table(stats: dict[str, Stat]) -> str:
 
 
 def main() -> int:
+    """Aggregate mutmut results into a per-group table; fail loud on bad data.
+
+    Returns:
+        0 on success -- the table was printed and every scoped group
+        passed its three sanity checks (has ≥ 1 mutant, has no
+        ``no_tests``, has no ``not_checked`` from an interrupted run).
+
+        1 if any of the three sanity checks fail. The check messages
+        go to stderr; the table still prints to stdout so the
+        operator can see what the run did produce even when it
+        rejects the data. Re-running ``mutmut run`` resumes from the
+        cached results and clears the ``not_checked`` failures on its
+        own.
+
+        2 if no ``.meta`` files exist under ``mutants/`` (mutmut was
+        never run, or ``--ignore`` removed every source file from
+        generation). Distinct from 1 because the operator's first
+        action is different — re-run mutmut, not fix the scope.
+    """
     meta_files = collect_meta_files()
     if not meta_files:
         print(

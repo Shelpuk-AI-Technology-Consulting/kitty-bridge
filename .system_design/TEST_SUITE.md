@@ -1795,9 +1795,12 @@ None`. `mutmut` closes that gap.
 - **Tool:** `mutmut` (3.x; requires `fork`, so it runs on Linux CI — on Windows it needs WSL).
   Configured in `pyproject.toml` under `[tool.mutmut]`, where `source_paths` and
   `pytest_add_cli_args_test_selection` take **arrays**.
-- **Test selection:** `pytest_add_cli_args_test_selection = ["-m", "l1"]`. Mutation testing
-  measures the L1 suite; letting it run L3 subsystem tests would make each mutant minutes long
-  and attribute kills to the wrong layer.
+- **Test selection:** `pytest_add_cli_args_test_selection = ["-m", "l1", "--ignore",
+  "tests/test_internal_keys_not_sent_upstream.py"]`. Mutation testing measures the L1
+  suite; letting it run L3 subsystem tests would make each mutant minutes long and attribute
+  kills to the wrong layer. The one `--ignore` is mutmut-only — the L1 gate still runs the
+  file — because mutmut's clean-run context trips it (see `.system_design/MUTATION_BASELINE.md`
+  for the rationale); the gate's own selection is unchanged.
 - **Scope — narrow, but it must include the code the rationale is about.** An earlier draft
   justified the subset by "a mutation surviving in the compactor means the suite would not notice
   kitty eating a tool result", then excluded `server.py`, where the compactor lives. Corrected
@@ -1808,6 +1811,7 @@ None`. `mutmut` closes that gap.
   | `kitty.bridge.messages.*`, `kitty.bridge.responses.*`, `kitty.bridge.gemini.*`, `kitty.bridge.engine` | Translation — I1 |
   | `kitty.bridge.server._compact_messages*`, `_compact_with_tighter_budget*`, `_validate_tool_call_pairing*`, `_truncate_oversized_tool_results*`, `_apply_compaction*`, `_normalize_model*`, `_get_max_context_chars*` | Compaction and pairing — the I1 core, and the thing the rationale was always about |
   | `kitty.providers.*` `translate_to_upstream` / `normalize_request` / `build_upstream_headers` | The register's provider half — I1 and I2 |
+  | `kitty.providers.base.ProviderAdapter._strip_endpoint_suffix` (KBR-134) | The four URL-shape mutations unguarded stripping missed during review; the guard's whole safety property is a one-line composition-and-recompare that a unit test would have to re-check for every shape |
   | `kitty.providers.model_context.*` | Where the compaction budget is actually resolved since KBR-151. The `_get_max_context_chars*` row above now covers a dispatcher: it reads `_active_model` and hands both catalogs to `_resolve_catalog`. A mutation in the matcher — dropping the tail retry, collapsing ambiguity into a miss — changes every budget in the product and would not be caught by any target listed above |
   | `kitty.providers.openai_subscription._cc_to_responses*`, `_prepare_responses_body*`, `_convert_content_types*`, `_build_user_agent*` | P13–P17 and the F1 user-agent. These are where the subscription path's real body is built; omitting them lets the score stay healthy while nothing detects a regression in the mutations this design only just registered |
   | `kitty.egress`, `kitty.egress_guard` | I3, including the startup guard |

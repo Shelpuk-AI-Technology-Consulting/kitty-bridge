@@ -41,18 +41,28 @@ registry, not in `pyproject.toml`.
 | Date | 2026-09-15 |
 | Host | Linux dev workstation, 8 CPU, idle |
 | Selection | `pytest -m l1` minus `tests/test_internal_keys_not_sent_upstream.py` (see the deselect rationale below) |
-| Score formula | mutmut badge formula: `(killed + timeout) / (total - skipped)` — timeouts count as kills, `no_tests` / `suspicious` dilute, `skipped` drops out |
+| Score formula | mutmut badge formula as this aggregator computes it: `(killed + timeout) / tested`, where `tested = total − skipped − not_checked`. Timeouts count as kills; `no_tests` and `suspicious` dilute the score; `skipped` and `not_checked` drop out of the denominator (unexamined mutants are neither kills nor evidence of a gap) |
 
-| Group | Total | Tested | Killed | Survived | Timeout | No tests | Suspicious | Score |
-|---|---|---|---|---|---|---|---|---|
-| translators_and_engine | 4040 | 3084 | 2103 | 971 | 10 | 0 | 0 | 68.5% |
-| compaction_and_pairing | -- | -- | -- | -- | -- | -- | -- | _deferred_ |
-| provider_hooks | 1045 | 1026 | 860 | 166 | 0 | 0 | 0 | 83.8% |
-| model_context | 183 | 73 | 43 | 30 | 0 | 0 | 0 | 58.9% |
-| openai_subscription | 474 | 474 | 236 | 238 | 0 | 0 | 0 | 49.8% |
-| egress | 125 | 124 | 94 | 30 | 0 | 0 | 0 | 75.8% |
-| supporting | 773 | 686 | 445 | 241 | 0 | 0 | 0 | 64.9% |
-| **TOTAL (measured)** | 5467 | 5467 | 3781 | 1676 | 10 | 0 | 0 | **69.3%** |
+| Group | Total | Tested | Killed | Survived | Timeout | No tests | Suspicious | Not checked | Score |
+|---|---|---|---|---|---|---|---|---|---|
+| translators_and_engine | 4040 | 3084 | 2103 | 971 | 10 | 0 | 0 | 956 | 68.5% |
+| compaction_and_pairing | -- | -- | -- | -- | -- | -- | -- | -- | _deferred_ |
+| provider_hooks | 1045 | 1026 | 860 | 166 | 0 | 0 | 0 | 19 | 83.8% |
+| model_context | 183 | 73 | 43 | 30 | 0 | 0 | 0 | 110 | 58.9% |
+| openai_subscription | 474 | 474 | 236 | 238 | 0 | 0 | 0 | 0 | 49.8% |
+| egress | 125 | 124 | 94 | 30 | 0 | 0 | 0 | 1 | 75.8% |
+| supporting | 773 | 686 | 445 | 241 | 0 | 0 | 0 | 87 | 64.9% |
+| **TOTAL** | **6640** | **5467** | **3781** | **1676** | **10** | **0** | **0** | **1173** | **69.3%** |
+
+Column meanings, so the numbers recompute from the formula:
+
+* **Total** — every mutant the registry's patterns match in the
+  generated `.meta` files (the §6.1 scope at commit `b680edd`).
+* **Tested** — Total minus `not_checked`: mutants that actually ran.
+* **Not checked** — mutants still pending when the recording run was
+  stopped (`exit_code = None` in the `.meta` files). mutmut caches
+  results, so re-running `mutmut run` with the same patterns resumes
+  from here; see the paragraph below the table.
 
 **In progress at recording time.** `translators_and_engine` (76% tested),
 `provider_hooks` (98%), `model_context` (40%), `egress` (99%), and

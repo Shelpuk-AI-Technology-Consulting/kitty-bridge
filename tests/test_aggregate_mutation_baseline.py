@@ -8,7 +8,7 @@ mutmut with a static fallback), so the thing most likely to drift
 is the JSON shape it consumes (``exit_code_by_key``) and the bucket
 routing.
 
-Three tests pin both:
+Five tests pin the contract, plus a sixth for the unknown-exit-code path:
 
 * the JSON shape — what the script reads from each ``.meta`` file,
   what key names it tolerates, and what it does with malformed input;
@@ -211,3 +211,137 @@ def test_unknown_exit_code_buckets_as_suspicious_and_is_reported(
     captured = capsys.readouterr()
     assert repr(unknown_code) in captured.err
     assert "warning" in captured.err.lower()
+
+
+# ── main() guard branches ──────────────────────────────────────────────
+#
+# Each test pins one of ``main``'s three loud-failure exit codes (1) and
+# the no-input exit code (2). The composition layer (how bucket_mutants
+# results turn into the loud-failure contract) was uncovered by the five
+# bucket/routing tests above; a regression that drops a guard would not
+# be caught there.
+
+
+def test_main_exits_one_when_a_group_has_no_tests(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """A group whose mutants all land in ``no_tests`` fails loud.
+
+    Pins the L1-completeness guard: if mutmut's trampoline never
+    fires for any mutant in a target group, the L1 suite is missing
+    coverage of those methods. ``main`` prints the table and exits 1
+    with a stderr line naming the group.
+    """
+    monkeypatch.setattr(agg, "_MUTANTS_ROOT", tmp_path)
+    # A synthetic mutant key for `kitty.validation` (supporting group)
+    # with exit code 33 — no_tests per the static fallback.
+    _meta(
+        tmp_path,
+        exit_codes={
+            "kitty.validation.x__foo__mutmut_1": 33,
+        },
+    )
+    rc = agg.main()
+    captured = capsys.readouterr()
+    assert rc == 1, f"main should exit 1 when a group has no_tests, got {rc}"
+    assert "supporting" in captured.err
+    assert "no_tests" in captured.err
+    # The table still prints so the operator sees what was produced.
+    assert "| supporting |" in captured.out
+
+
+def test_main_exits_one_when_a_group_has_unchecked_mutants(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """An interrupted run leaves ``not_checked`` mutants; ``main`` fails loud.
+
+    Pins the run-completeness guard: every non-deferred group should
+    be fully tested when the recording stops. A single ``None``
+    exit code in the ``.meta`` JSON is enough to trigger the
+    failure for the whole group.
+    """
+    monkeypatch.setattr(agg, "_MUTANTS_ROOT", tmp_path)
+    _meta(
+        tmp_path,
+        exit_codes={
+            "kitty.validation.x__foo__mutmut_1": None,  # not_checked
+        },
+    )
+    rc = agg.main()
+    captured = capsys.readouterr()
+    assert rc == 1, f"main should exit 1 on not_checked, got {rc}"
+    assert "not_checked" in captured.err
+    assert "supporting" in captured.err
+
+
+def test_main_exits_two_when_no_meta_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """No ``.meta`` files under mutants/ → exit 2 (distinct from guard failures).
+
+    The operator's first action is different — re-run mutmut, not fix
+    the scope — so the exit code is distinct from the guard-failure 1.
+    """
+    monkeypatch.setattr(agg, "_MUTANTS_ROOT", tmp_path)
+    rc = agg.main()
+    captured = capsys.readouterr()
+    assert rc == 2, f"main should exit 2 with no .meta files, got {rc}"
+    assert "mutmut run" in captured.err
+
+
+def test_main_exits_zero_when_a_group_is_fully_tested(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """Every mutant in scope has a known exit code and no no_tests →
+    exit 0, table prints, no stderr noise.
+
+    One killed mutant per non-deferred target group, so every group
+    clears its three guards.
+    """
+    monkeypatch.setattr(agg, "_MUTANTS_ROOT", tmp_path)
+    _meta(
+        tmp_path,
+        exit_codes={
+            # supporting: whole-module kitty.validation
+            "kitty.validation.x__killed__mutmut_1": 1,
+            # openai_subscription: specific top-level fn
+            "kitty.providers.openai_subscription.x__convert_content_types__mutmut_1": 1,
+            # model_context: whole-module
+            "kitty.providers.model_context.x__resolve_catalog__mutmut_1": 1,
+            # egress: whole-module
+            "kitty.egress.x__should_bypass__mutmut_1": 1,
+            # translators_and_engine: whole-module kitty.bridge.engine
+            "kitty.bridge.engine.x__map_finish_reason__mutmut_1": 1,
+            # provider_hooks: cross-module (any class carrying the hook)
+            "kitty.providers.anthropic.xǁAnthropicAdapterǁtranslate_to_upstream__mutmut_1": 1,
+        },
+    )
+    rc = agg.main()
+    captured = capsys.readouterr()
+    assert rc == 0, f"main should exit 0 on a clean run, got {rc}"
+    assert captured.err == "", f"unexpected stderr on clean run: {captured.err!r}"
+    for group in agg.TARGET_GROUPS:
+        if group in agg.DEFERRED_GROUPS:
+            continue
+        assert f"| {group} |" in captured.out
+
+
+def test_render_markdown_table_renders_but_does_not_fail_on_unmatched(
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """``__unmatched__`` mutants appear in the table but do not fail the run.
+
+    Pins the explicit asymmetry in the design: ``__unmatched__`` is a
+    signal of mis-scope (a hand-added glob for a file outside the
+    registry, or vice versa), but it is not a guard-failure condition
+    — the run completed cleanly. The aggregator emits the row so a
+    reader sees the count, and the per-group guards catch the
+    actual mis-scope (zero-total group).
+    """
+    # Stat.total is a computed property: supply field values, not the
+    # computed total. 5 unexamined mutants = not_checked=5.
+    stats = {group: agg.Stat() for group in agg.TARGET_GROUPS}
+    stats["__total__"] = agg.Stat(killed=1, survived=1)
+    stats["__unmatched__"] = agg.Stat(not_checked=5)  # 5 unexamined mutants
+    table_lines = agg.render_markdown_table(stats)
+    assert "__unmatched__" in table_lines
