@@ -1243,6 +1243,15 @@ class TestBalancingAllCustomTransport:
             discriminator: The route's D4-family error field name
                 (``code`` / ``reason`` / ``type``) — asserted set to
                 ``"cross_class_exhaustion"`` in the body.
+            absent_discriminators: Field names that must NOT appear with
+                ``"cross_class_exhaustion"`` in the body. Used to pin the
+                per-route asymmetry §5.3 S8 promises (e.g. Chat
+                Completions carries ``type`` alone, never ``reason``).
+            required_discriminators: Field names that MUST appear with
+                ``"cross_class_exhaustion"`` in the body, alongside the
+                route's D4 discriminator. Used to pin the additional
+                fields §5.3 S8 names — Responses carries ``reason`` (the
+                parent KBR-241 marker) in addition to its D4 ``code``.
 
         Returns:
             ``(status, body_bytes)`` of the client's response.
