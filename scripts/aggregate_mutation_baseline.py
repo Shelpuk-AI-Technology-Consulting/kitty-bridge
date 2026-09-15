@@ -234,9 +234,19 @@ def bucket_mutants(
 
             target = out[matched_group or "__unmatched__"]
             setattr(target, field, getattr(target, field) + 1)
-            setattr(
-                out["__total__"], field, getattr(out["__total__"], field) + 1
-            )
+            if matched_group is not None:
+                # TOTAL covers the in-scope groups only — the same
+                # arithmetic the recorded MUTATION_BASELINE.md table
+                # uses, so its TOTAL row is the sum of the group rows
+                # above it. Unmatched mutants are visible on their own
+                # row and excluded from the total (round-5 review:
+                # mixing them in made the recorded table
+                # unreproducible from the script).
+                setattr(
+                    out["__total__"],
+                    field,
+                    getattr(out["__total__"], field) + 1,
+                )
 
     return out, unknown_exit_codes
 
@@ -265,15 +275,21 @@ def _warn_unknown_exit_codes(unknown: dict[int | None, int]) -> None:
 
 
 def render_markdown_table(stats: dict[str, Stat]) -> str:
-    """Format the per-group table for ``MUTATION_BASELINE.md``."""
+    """Format the per-group table for ``MUTATION_BASELINE.md``.
+
+    The output is the recorded artifact's body: pasting it into the
+    baseline document reproduces that document's table, column for
+    column. Adding a column here means re-recording the baseline doc
+    in the same change — the two are one contract (round-5 review).
+    """
     lines = [
-        "| Group | Total | Tested | Killed | Survived | Timeout | No tests | Suspicious | Score |",
-        "|---|---|---|---|---|---|---|---|---|",
+        "| Group | Total | Tested | Killed | Survived | Timeout | No tests | Suspicious | Not checked | Score |",
+        "|---|---|---|---|---|---|---|---|---|---|",
     ]
     for group_name in TARGET_GROUPS:
         if group_name in DEFERRED_GROUPS:
             lines.append(
-                f"| {group_name} | -- | -- | -- | -- | -- | -- | -- | "
+                f"| {group_name} | -- | -- | -- | -- | -- | -- | -- | -- | "
                 f"_deferred_ |"
             )
             continue
@@ -282,20 +298,20 @@ def render_markdown_table(stats: dict[str, Stat]) -> str:
         lines.append(
             f"| {group_name} | {s.total} | {s.tested} | {s.killed} "
             f"| {s.survived} | {s.timeout} | {s.no_tests} | "
-            f"{s.suspicious} | {score} |"
+            f"{s.suspicious} | {s.not_checked} | {score} |"
         )
     s = stats["__total__"]
     lines.append(
-        f"| **TOTAL (measured)** | {s.total} | {s.tested} | {s.killed} "
-        f"| {s.survived} | {s.timeout} | {s.no_tests} | "
-        f"{s.suspicious} | **{s.score * 100:.1f}%** |"
+        f"| **TOTAL** | **{s.total}** | **{s.tested}** | **{s.killed}** "
+        f"| **{s.survived}** | **{s.timeout}** | **{s.no_tests}** | "
+        f"**{s.suspicious}** | **{s.not_checked}** | **{s.score * 100:.1f}%** |"
     )
     s = stats["__unmatched__"]
     if s.total:
         lines.append(
             f"| __unmatched__ | {s.total} | {s.tested} | {s.killed} "
             f"| {s.survived} | {s.timeout} | {s.no_tests} | "
-            f"{s.suspicious} | {s.score * 100:.1f}% |"
+            f"{s.suspicious} | {s.not_checked} | {s.score * 100:.1f}% |"
         )
     return "\n".join(lines)
 
