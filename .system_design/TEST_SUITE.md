@@ -2194,8 +2194,8 @@ that produced nothing.
 |---|---|
 | Two concurrent `kitty claude` sessions | Each gets its own `--settings` temp file; neither touches `~/.claude/settings.json`; the second's start does not disturb the first (issue #22) |
 | Normal exit | Session settings file removed; user's global settings byte-identical to before |
-| `SIGTERM` | `atexit` path restores; same assertion |
-| `SIGKILL`, then `kitty cleanup` | Recovery from the backup file; the `_kitty_values_present` heuristic fires only on kitty-written state |
+| `SIGTERM` (forwarded to the child; kitty's `finally` restores) | Same byte-identical assertion. A SIGTERM landing in the pre-handler window (between atexit registration at `launcher.py:249` and handler installation at `launcher.py:308`) kills kitty with no cleanup — a known accepted window, recovered by `kitty cleanup` |
+| `SIGKILL`, then `kitty cleanup` | Cleanup runs `run_cleanup` against the redirected home. The `_kitty_values_present` heuristic (`launchers/claude.py:124-148`) fires on **either** a loopback `ANTHROPIC_BASE_URL` or `ANTHROPIC_AUTH_TOKEN == "kitty-bridge-token"`; a negative control uses a **non-loopback** URL with no token |
 | `prepare_launch` cannot write the file | Launch **fails**. It must not proceed — a session without the settings file would silently run on the user's own Anthropic credentials, which is both a fidelity and a billing failure |
 | Background bridge owned by another user | Not stopped, not restarted, no second bridge started beside it |
 
