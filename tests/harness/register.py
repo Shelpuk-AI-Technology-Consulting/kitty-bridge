@@ -1321,6 +1321,138 @@ _PROVIDER_ROWS: tuple[MutationRow, ...] = (
         conditional=False,
         design_ref="§3.2.2 · §3.2.3",
     ),
+    # KBR-258 — the Anthropic adapter family drops a Chat Completions request's
+    # cache breakpoints at five sites on the translated route, measured identical
+    # on `anthropic`, `minimax_token`, `zai_coding` and `custom_anthropic`. These
+    # five rows are P26..P30 — the CC-origin half of G37's "still owed" set.
+    # `minimax_token` and `custom_anthropic` short-circuit on
+    # `_native_messages_request` and otherwise delegate to
+    # `super().translate_to_upstream`; `zai_anthropic.ZaiAnthropicAdapter` is no
+    # exception (`zai_anthropic.py:85-91`). The drops KBR-199 measured happen on
+    # the translated (non-native) branch only.
+    #
+    # `conditional=False` is forced by three independent guards: KBR-186 makes
+    # `NON_NATIVE_UPSTREAM_WIRE` (ArrangingBy.ROUTE) non-corpus-variable; M16's
+    # comment records the same reasoning for the Messages twin; and
+    # `test_register.py::test_rows_sharing_a_trigger_agree_on_whether_it_is_conditional`
+    # is the structural guard — any `conditional=True` here would conflict with
+    # M2/M16/M20-M25 already `conditional=False` on this trigger. The native
+    # passthrough carrying the breakpoint is the observational complement,
+    # proven as product behaviour in epic KBR-197, not a corpus entry. The
+    # ticket's loose "each row owes a complement corpus entry" prose is
+    # reconciled in KBR-258's Jira comment.
+    MutationRow(
+        id="P26",
+        # The `translate_to_upstream` body is read whole for keys the
+        # Anthropic wire defines; the root-level `cache_control` is never read,
+        # so on the translated route this `envelope.extra[cache_control]` is
+        # dropped by omission. M16's note on §3.3.1's "carried whole, not
+        # reduced" rule does not apply — the reader does not currently
+        # consume the key into this address; the row claims the address the
+        # moment the reader grows the slot (the G38 precedent on the Messages
+        # twin). Today such a body residualises, which is the honest named
+        # failure: the field is present, nobody claims it.
+        site=("kitty/providers/anthropic.py:AnthropicAdapter.translate_to_upstream",),
+        trigger=Trigger.NON_NATIVE_UPSTREAM_WIRE,
+        # Keyed literal — no wildcard, so the `_SHAPES` test excludes it by
+        # construction. The path stays narrow so an over-claim cannot swallow
+        # a sibling row's `envelope.extra[<other>]` delta (the §3.3.1a
+        # prohibition on the bare `envelope.extra` anchor).
+        paths=(c.extra_path("cache_control"),),
+        conditional=False,
+        design_ref="§3.2.2 · §3.3.1 · §3.3.1a · §9.2 G37",
+    ),
+    MutationRow(
+        id="P27",
+        # The system-extraction loop joins system blocks into one string; a
+        # `cache_control` on a system content part does not survive the join
+        # (P5b's twin on this route — the join is the cause; the cache drop is
+        # the side-effect we register). The CC reader projects a system
+        # content-part breakpoint onto `conversation.system[*].cache_control`
+        # today, so this row is **claimable now**, not anticipatory.
+        # `forwards_thinking_signature` does not change this: the carriage
+        # `_anthropic_system` is a Messages-ingress concern, set by
+        # `MessagesTranslator`, stripped on the CC route by P1 — the join
+        # stands.
+        site=("kitty/providers/anthropic.py:AnthropicAdapter.translate_to_upstream",),
+        trigger=Trigger.NON_NATIVE_UPSTREAM_WIRE,
+        paths=(c.system_path(c.WILDCARD, "cache_control"),),
+        conditional=False,
+        design_ref="§3.2.2 · §3.3.1 · §3.3.1a · §9.2 G37",
+    ),
+    MutationRow(
+        id="P28",
+        # The outer message loop reads each `{"role": …, "content": …}` for
+        # role and content only; a `cache_control` on the message dict itself
+        # is dropped by omission. This site covers the *user-message* and
+        # *tool-message* object case; the assistant-message object case
+        # (which rebuilds inside `_translate_assistant_msg`) rides P29's
+        # site — the oracle matches paths, not sites, so the address is
+        # claimed either way.
+        #
+        # The kept half of G37's measurement — a breakpoint on a user content
+        # part and on tool-message content (moved inside the `tool_result`) —
+        # is NOT this row's and carries no row in this set: the adapter family
+        # preserves both on the CC route, the same boundary M16 draws on the
+        # Messages twin.
+        #
+        # Anticipatory today: the CC reader residualises a message-dict-level
+        # `cache_control` (`_read_one_message`'s `_residualise` sets name no
+        # cache key), so such a body fails the run on residual first — the
+        # honest named failure. The row lands now, before the reader grows
+        # the slot, on the G38 precedent.
+        #
+        # Anchor contingency: the §3.3.1a path vocabulary names
+        # `conversation.turns[*].parts[*].cache_control` (the field-level
+        # address), and this row's narrowest path assumes the reader will
+        # project the message-object `cache_control` onto a Part rather than
+        # onto Turn itself (`conversation.turns[*].cache_control`, not in the
+        # vocabulary today). If a future reader lands the slot on Turn, the
+        # row's anchor must move to match — the comment records it.
+        site=("kitty/providers/anthropic.py:AnthropicAdapter.translate_to_upstream",),
+        trigger=Trigger.NON_NATIVE_UPSTREAM_WIRE,
+        paths=(c.part_path(c.WILDCARD, c.WILDCARD, "cache_control"),),
+        conditional=False,
+        design_ref="§3.2.2 · §3.3.1 · §3.3.1a · §9.2 G37",
+    ),
+    MutationRow(
+        id="P29",
+        # `_translate_assistant_msg` rebuilds every `tool_calls` block into
+        # an Anthropic `tool_use` block (`{"type": "tool_use", "id": …,
+        # "name": …, "input": …}`); a `cache_control` on the tool_call dict
+        # is dropped by omission. This site also owns the assistant-message
+        # object case for the same reason — the assistant message is rebuilt
+        # here, not in the outer loop.
+        #
+        # Anchored at the same path as P28 because both project to a Part
+        # (the tool_use is a Part); distinguishable by site, the axis
+        # `test_no_two_rows_are_indistinguishable` explicitly allows (P3/P4
+        # precedent). Same anchor contingency as P28; anticipatory today for
+        # the same reason — the CC reader residualises a tool_call-level
+        # `cache_control` (`_read_tool_calls`'s `_residualise` set names no
+        # cache key), so such a body fails the run on residual first, the
+        # G38 precedent.
+        site=("kitty/providers/anthropic.py:AnthropicAdapter._translate_assistant_msg",),
+        trigger=Trigger.NON_NATIVE_UPSTREAM_WIRE,
+        paths=(c.part_path(c.WILDCARD, c.WILDCARD, "cache_control"),),
+        conditional=False,
+        design_ref="§3.2.2 · §3.3.1 · §3.3.1a · §9.2 G37",
+    ),
+    MutationRow(
+        id="P30",
+        # `_translate_tools` rebuilds every tool declaration as
+        # `{name, description, input_schema}`; a `cache_control` on the
+        # CC tool's `function` member is dropped by omission. The CC reader
+        # projects a tool-decl breakpoint onto
+        # `conversation.tools[<name>].cache_control` today, so this row is
+        # **claimable now** — like P27, not anticipatory. The Messages-route
+        # twin of this drop is M16's tool-decl path.
+        site=("kitty/providers/anthropic.py:AnthropicAdapter._translate_tools",),
+        trigger=Trigger.NON_NATIVE_UPSTREAM_WIRE,
+        paths=(c.tool_path(c.WILDCARD, "cache_control"),),
+        conditional=False,
+        design_ref="§3.2.2 · §3.3.1 · §3.3.1a · §9.2 G37",
+    ),
 )
 
 #: The register. Ordered as §3.2 publishes it — bridge rows, then provider rows —

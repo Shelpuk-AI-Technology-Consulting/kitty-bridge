@@ -76,10 +76,17 @@ def _detect_stale_env(env: dict) -> list[str]:
 
 
 def _load_backup(backup_path: Path) -> str | None:
-    """Load a settings backup if one exists."""
+    """Load a settings backup if one exists.
+
+    ``newline=""`` disables universal newlines (``\r\n`` -> ``\n`` on
+    every platform); without it, a CRLF backup on disk is silently read as
+    LF, breaking the byte-identity contract that ``kitty cleanup``'s
+    restore asserts against the user's original.
+    """
     if not backup_path.exists():
         return None
-    return backup_path.read_text(encoding="utf-8")
+    with backup_path.open("r", encoding="utf-8", newline="") as f:
+        return f.read()
 
 
 def _restore_from_backup(settings_path: Path, backup_path: Path) -> bool:

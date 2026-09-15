@@ -128,18 +128,20 @@ _SHAPES: tuple[tuple[str, str], ...] = (
 
 
 class TestTheRowsThemselves:
-    """§3.2 publishes 61 live rows; the data must be those rows and no others."""
+    """§3.2 publishes 66 live rows; the data must be those rows and no others."""
 
     def test_the_register_holds_every_live_row(self) -> None:
-        """24 bridge-level rows less the withdrawn M13, plus 37 provider-level.
+        """24 bridge-level rows less the withdrawn M13, plus 42 provider-level.
 
         The +8 over the pre-KBR-195 count is the eight Gemini inbound rows
         KBR-195 added (M18..M25). The +1 over the pre-KBR-44 count is P5f
-        (KBR-44). Both literals are the +9 no-reflow damage test — a
-        future change that drops a row or adds one without updating the
-        guard fails loudly.
+        (KBR-44). The +5 over the pre-KBR-258 count is P26..P30, the five
+        Chat Completions cache-breakpoint drops the Anthropic adapter family
+        performs on the translated route. Both literals are the no-reflow
+        damage test — a future change that drops a row or adds one without
+        updating the guard fails loudly.
         """
-        assert len(r.REGISTER) == 61
+        assert len(r.REGISTER) == 66
 
     def test_the_register_is_a_tuple_and_not_a_list(self) -> None:
         """`mypy` does not run over `tests/`, so the annotation is not enforcement.

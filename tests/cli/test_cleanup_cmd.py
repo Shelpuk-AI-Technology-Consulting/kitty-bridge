@@ -3,10 +3,15 @@
 from __future__ import annotations
 
 import json
+import os
+import sys
 from pathlib import Path
 from unittest.mock import patch
 
-from kitty.cli.cleanup_cmd import _detect_stale_env, _display_value, run_cleanup
+import pytest
+
+from kitty.cli.cleanup_cmd import _detect_stale_env, _display_value, _load_backup, run_cleanup
+from kitty.launchers.claude import _atomic_write_text
 
 
 def test_detect_stale_env_with_localhost_url():
@@ -267,6 +272,89 @@ class TestBackupRestore:
         # Backup should be deleted after restore
         assert not backup_path.exists()
 
+    def test_cleanup_restores_byte_exactly_from_crlf_backup(self, tmp_path: Path) -> None:
+        """A CRLF backup is restored byte-exactly to the user-global settings file.
+
+        Catches the universal-newlines read defect on POSIX today: the backup
+        is staged with raw CRLF bytes (``Path.write_bytes``), the restore is
+        driven through ``run_cleanup`` (not the free functions), and the
+        result is asserted against the staged bytes verbatim. On Windows the
+        two defects cancel for pure-CRLF content (read strips CR, write adds
+        CR), so the Windows-visible byte-identity for the write defect is
+        supplied by ``test_cleanup_restores_byte_exactly_from_lf_backup_on_windows``.
+
+        Args:
+            tmp_path: Per-test temp directory.
+        """
+        settings_path = tmp_path / "settings.json"
+        backup_path = tmp_path / "claude-settings-backup.json"
+
+        backup_bytes = b'{\n  "model": "sonnet",\r\n  "env": {"API_TIMEOUT_MS": "999"}\r\n}\n'
+        backup_path.write_bytes(backup_bytes)
+
+        # Settings carry live kitty values so the restore path fires.
+        settings_path.write_text(
+            json.dumps(
+                {
+                    "env": {
+                        "ANTHROPIC_AUTH_TOKEN": "kitty-bridge-token",
+                        "ANTHROPIC_BASE_URL": "http://127.0.0.1:45678",
+                    },
+                },
+            ),
+            encoding="utf-8",
+        )
+
+        with patch("kitty.cli.cleanup_cmd._get_backup_path", return_value=backup_path):
+            exit_code = run_cleanup(settings_path=settings_path)
+
+        assert exit_code == 0, "run_cleanup failed during exact restore"
+        assert settings_path.read_bytes() == backup_bytes, (
+            f"restored settings are {settings_path.read_bytes()!r}; expected {backup_bytes!r}"
+        )
+        assert not backup_path.exists(), "kitty cleanup left the backup behind"
+
+    @pytest.mark.skipif(
+        sys.platform != "win32",
+        reason="write-side CRLF translation only corrupts on Windows; CI covers it on the Windows leg",
+    )
+    def test_cleanup_restores_byte_exactly_from_lf_backup_on_windows(self, tmp_path: Path) -> None:
+        """On Windows, an LF backup restores to LF bytes (the ticket's exact scenario).
+
+        Claude Code writes LF, so the realistic scenario for any user is an
+        LF backup being restored on Windows. Pre-fix this fails because
+        ``_atomic_write_text`` translates ``\\n`` to ``\\r\\n`` on write.
+
+        Args:
+            tmp_path: Per-test temp directory.
+        """
+        settings_path = tmp_path / "settings.json"
+        backup_path = tmp_path / "claude-settings-backup.json"
+
+        backup_bytes = b'{\n  "model": "sonnet",\n  "env": {"API_TIMEOUT_MS": "999"}\n}\n'
+        backup_path.write_bytes(backup_bytes)
+
+        settings_path.write_text(
+            json.dumps(
+                {
+                    "env": {
+                        "ANTHROPIC_AUTH_TOKEN": "kitty-bridge-token",
+                        "ANTHROPIC_BASE_URL": "http://127.0.0.1:45678",
+                    },
+                },
+            ),
+            encoding="utf-8",
+        )
+
+        with patch("kitty.cli.cleanup_cmd._get_backup_path", return_value=backup_path):
+            exit_code = run_cleanup(settings_path=settings_path)
+
+        assert exit_code == 0, "run_cleanup failed during exact restore"
+        assert settings_path.read_bytes() == backup_bytes, (
+            f"restored settings are {settings_path.read_bytes()!r}; expected {backup_bytes!r}"
+        )
+        assert not backup_path.exists()
+
     def test_cleanup_heuristic_fallback_no_backup(self, tmp_path: Path):
         """Without backup, heuristic should still remove all Kitty keys."""
         settings_path = tmp_path / "settings.json"
@@ -369,3 +457,93 @@ class TestUndecodableSettings:
         assert exit_code == 0
         assert json.loads(settings_path.read_text(encoding="utf-8")) == {"model": "opus"}
         assert not backup_path.exists()
+
+
+# ── KBR-260 — byte-exact CRLF backup restore ─────────────────────────────────
+
+
+class TestBackupReaders:
+    """`_load_backup` must return the backup's bytes verbatim (KBR-260).
+
+    The pre-fix reader used ``Path.read_text`` (universal newlines), which
+    strips ``\\r\\n`` on every platform — silently breaking the byte-identity
+    contract for any CRLF backup the user already has on disk.
+    """
+
+    def test_load_backup_preserves_crlf_backup_bytes(self, tmp_path: Path) -> None:
+        """A CRLF backup's bytes are returned verbatim, no CR-strip.
+
+        Args:
+            tmp_path: Per-test temp directory.
+        """
+        backup_path = tmp_path / "backup.json"
+        original_bytes = b'{\n  "model": "opus",\r\n  "env": {"API_TIMEOUT_MS": "3000000"}\r\n}\n'
+        backup_path.write_bytes(original_bytes)
+
+        result = _load_backup(backup_path)
+
+        assert result is not None
+        assert result.encode("utf-8") == original_bytes, (
+            f"_load_backup returned bytes {result.encode('utf-8')!r}; expected {original_bytes!r}"
+        )
+
+
+class TestAtomicWriteText:
+    """`_atomic_write_text` must preserve the destination's bytes (KBR-260).
+
+    The pre-fix writer left the open's ``newline`` at the default ``None``,
+    which makes CPython translate ``\\n`` to ``os.linesep`` on write. On
+    Windows that is ``\\r\\n`` — silently corrupting any LF content into
+    CRLF.
+    """
+
+    def test_opens_with_no_newline_translation(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """`_atomic_write_text` opens the destination with ``newline=""``.
+
+        The write-side defect is invisible behaviourally on POSIX because
+        ``os.linesep == "\\n"`` there (CPython's ``TextIOWrapper`` is a no-op
+        even when ``os.linesep`` is monkeypatched at runtime — empirically
+        confirmed). The only POSIX-runnable regression guard is the open
+        call's kwargs; behavioural coverage lives in the Windows-only test
+        below.
+
+        Args:
+            tmp_path: Per-test temp directory.
+            monkeypatch: Pytest's monkeypatch fixture (auto-restores).
+        """
+        captured: list[dict[str, object]] = []
+        real_fdopen = os.fdopen
+
+        def recording_fdopen(fd, mode, **kwargs):
+            captured.append(kwargs)
+            return real_fdopen(fd, mode, **kwargs)
+
+        monkeypatch.setattr(os, "fdopen", recording_fdopen)
+
+        target = tmp_path / "settings.json"
+        _atomic_write_text(target, '{"a": 1}\n')
+
+        assert len(captured) == 1, f"expected exactly one os.fdopen call, got {len(captured)}"
+        assert captured[0].get("newline") == "", f"_atomic_write_text opened without newline=''; kwargs={captured[0]!r}"
+
+    @pytest.mark.skipif(
+        sys.platform != "win32",
+        reason="write-side CRLF translation only fires on Windows; CI covers it on the Windows leg",
+    )
+    def test_writes_byte_exactly_on_windows(self, tmp_path: Path) -> None:
+        """On Windows, `_atomic_write_text` preserves LF and CRLF content bytes.
+
+        CI-verified on the Fast gate's Windows leg.
+
+        Args:
+            tmp_path: Per-test temp directory.
+        """
+        for content in (
+            '{"a": 1}\n{"b": 2}\n',
+            '{"a": 1}\r\n{"b": 2}\r\n',
+        ):
+            target = tmp_path / "settings.json"
+            _atomic_write_text(target, content)
+            assert target.read_bytes() == content.encode("utf-8"), (
+                f"_atomic_write_text wrote {target.read_bytes()!r}; expected {content.encode('utf-8')!r}"
+            )
