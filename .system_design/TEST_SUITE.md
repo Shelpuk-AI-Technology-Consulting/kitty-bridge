@@ -2540,7 +2540,7 @@ header the corpus does not preserve as captured — it is recomputed, because th
 manifest internally inconsistent with its own body. Nothing downstream reads the original value:
 §4.3 C1 asserts on the headers the bridge *builds*, and C1b compares names.
 
-**Two lines of defence keep the committed bytes LF.** The byte-exactness claim above holds only if
+**Three lines of defence keep the committed bytes LF.** The byte-exactness claim above holds only if
 every contributor's checkout sees the bytes the writer produced, and the rest of the suite cannot
 tell the difference if it does not: `core.autocrlf=true` on Windows silently rewrites LF to CRLF
 inside a `.body` on checkout and would commit the result back, changing both the bytes §3.3.2
