@@ -109,13 +109,11 @@ reference after that point is the outcome to avoid.
 
 ## What is NOT in this baseline
 
-- The socket/process modules TEST_SUITE.md §8.2 enumerates (twelve,
-  named there so T-K6 inherits a list rather than a search) — they
+- The socket/process modules TEST_SUITE.md §8.2 enumerates — they
   run under `-m l1` today and dilute the numbers; see the provisional
-  caveat. Earlier copies of this paragraph carried a shorter six-file
-  list from the KBR-88 Jira comment of 2026-09-08, which has since
-  drifted from §8.2's authoritative enumeration; citing §8.2 instead
-  of re-listing stops the next drift.
+  caveat. §8.2 is the authoritative enumeration, and a future reader
+  reconciling the baseline's drift against the doc should look there,
+  not in this file.
 - `tests/cli/test_stream_encoding.py` (38 child interpreters per run) — its
   cost is paid once at stats collection, not per mutant: `only_mutate`
   excludes `kitty.io_encoding` from generation, so no mutant carries those

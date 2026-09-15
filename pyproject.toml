@@ -269,7 +269,13 @@ forbidden_modules = [
 #
 # `only_mutate` is file-level and bounds mutant generation to the files that
 # carry any section 6.1 target -- CLI, TUI, auth and `kitty.io_encoding` are
-# out of scope and never generate mutants.
+# out of scope and never generate mutants. The `providers/*` glob was
+# intentionally narrowed to per-file globs (the round-1 review caught that
+# it matched `__init__.py`, `registry.py` and `model_context_sync.py`,
+# none of which are named by section 6.1). `tests/test_mutmut_scope.py`'s
+# `_only_mutate_matches_registry_files` guard keeps this list in sync with
+# the registry: any registry target whose file is not in this list fails
+# the gate.
 #
 # `src/kitty/bridge/server.py` is deliberately NOT here. Its section 6.1
 # targets are seven BridgeServer methods, but mutmut generates for the whole
@@ -313,7 +319,35 @@ only_mutate = [
     "src/kitty/bridge/gemini/*",
     "src/kitty/bridge/engine.py",
     "src/kitty/bridge/tool_audit.py",
-    "src/kitty/providers/*",
+    # Every adapter file carrying one of the three provider hooks
+    # (translate_to_upstream / normalize_request / build_upstream_headers)
+    # -- per-file rather than `providers/*` so the three un-scoped
+    # modules (`__init__.py`, `registry.py`, `model_context_sync.py`)
+    # generate no mutants. `tests/test_mutmut_scope.py` asserts the file
+    # set equals the union of the files carrying a registry target, so
+    # a new adapter lands in this list when its registry row lands.
+    "src/kitty/providers/anthropic.py",
+    "src/kitty/providers/azure.py",
+    "src/kitty/providers/base.py",
+    "src/kitty/providers/bedrock.py",
+    "src/kitty/providers/byteplus.py",
+    "src/kitty/providers/custom_anthropic.py",
+    "src/kitty/providers/custom_openai.py",
+    "src/kitty/providers/fireworks.py",
+    "src/kitty/providers/kimi.py",
+    "src/kitty/providers/mimo.py",
+    "src/kitty/providers/minimax.py",
+    "src/kitty/providers/minimax_token.py",
+    "src/kitty/providers/model_context.py",
+    "src/kitty/providers/ollama_cloud.py",
+    "src/kitty/providers/ollama.py",
+    "src/kitty/providers/openai.py",
+    "src/kitty/providers/openai_subscription.py",
+    "src/kitty/providers/opencode.py",
+    "src/kitty/providers/openrouter.py",
+    "src/kitty/providers/vertex.py",
+    "src/kitty/providers/zai_anthropic.py",
+    "src/kitty/providers/zai.py",
     "src/kitty/egress.py",
     "src/kitty/egress_guard.py",
     "src/kitty/profiles/*",

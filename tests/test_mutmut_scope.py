@@ -26,10 +26,13 @@ hand. The two halves of the ``l1 or l2`` job.
 from __future__ import annotations
 
 import fnmatch
+from pathlib import Path
 
 import pytest
+import tomllib
 from mutmut_scope import (
     CLS,
+    DEFERRED_GROUPS,
     TARGET_GROUPS,
     Target,
     all_targets,
@@ -180,6 +183,86 @@ def test_each_target_group_has_at_least_one_pattern() -> None:
     with that group's patterns would filter every mutant out."""
     for group in TARGET_GROUPS:
         assert patterns_for(group), f"target group {group!r} produces no patterns"
+
+
+def _only_mutate_globs() -> list[str]:
+    """Return ``[tool.mutmut] only_mutate`` from ``pyproject.toml``.
+
+    The config is the file-level half of the scope; the registry in this
+    package is the symbol-level half. Reading the config here (rather
+    than duplicating its list) means the guard below fails the moment
+    either half drifts from the other.
+
+    Returns:
+        The list of fnmatch globs exactly as written in the config.
+    """
+    pyproject = Path(__file__).resolve().parent.parent / "pyproject.toml"
+    with pyproject.open("rb") as f:
+        config = tomllib.load(f)
+    return list(config["tool"]["mutmut"]["only_mutate"])
+
+
+def test_every_registry_file_is_covered_by_only_mutate() -> None:
+    """Each registry-named module's file is matched by some ``only_mutate`` glob.
+
+    mutmut generates mutants per *file*; a registry row whose file is
+    not in ``only_mutate`` silently produces zero mutants, which reads
+    in the recorded baseline as an empty group rather than an error.
+    This is the forward direction of the config ⇄ registry agreement.
+    Groups in :data:`DEFERRED_GROUPS` are exempt — their exclusion from
+    ``only_mutate`` is deliberate (see ``pyproject.toml``'s comment for
+    ``server.py``), and the exemption is what this test enforces in the
+    other direction: when a deferred group's blocker is fixed, removing
+    it from ``DEFERRED_GROUPS`` re-enables this check for it.
+    """
+    globs = _only_mutate_globs()
+    for group, target in all_targets():
+        if group in DEFERRED_GROUPS:
+            continue  # deliberate exclusion — see pyproject.toml
+        if target.module == "*":
+            continue  # cross-module: covered via the adapter file set below
+        rel = (
+            target.module.split(".", 1)[1]
+            if target.module.startswith("kitty.")
+            else target.module
+        )
+        path = f"src/kitty/{rel.replace('.', '/')}"
+        candidates = [f"{path}.py"]
+        # Whole-package scopes (``kitty.profiles``) are directories; any
+        # file inside them satisfies the glob.
+        pkg_dir = Path(__file__).resolve().parent.parent / path
+        if pkg_dir.is_dir():
+            candidates.append(f"{path}/*")
+        assert any(
+            fnmatch.fnmatch(candidate, g) for candidate in candidates for g in globs
+        ), (
+            f"registry row {target!r} (group {group!r}) names {path}, but no "
+            f"`only_mutate` glob in pyproject.toml matches it — mutmut "
+            f"would generate zero mutants for this target"
+        )
+
+
+def test_only_mutate_excludes_the_three_unscoped_provider_modules() -> None:
+    """``registry.py``, ``model_context_sync.py`` and providers/__init__ generate no mutants.
+
+    Section 6.1 names none of them. The round-1 review caught the
+    broader ``providers/*`` glob matching all three; the per-file glob
+    list replaced it. This test pins the narrowing so a future
+    "simplification" back to a directory glob fails here rather than
+    silently widening the scope again.
+    """
+    globs = _only_mutate_globs()
+    for unscoped in (
+        "src/kitty/providers/__init__.py",
+        "src/kitty/providers/registry.py",
+        "src/kitty/providers/model_context_sync.py",
+    ):
+        assert not any(
+            fnmatch.fnmatch(unscoped, g) for g in globs
+        ), (
+            f"{unscoped} is matched by an `only_mutate` glob but section 6.1 "
+            f"does not name it — the glob list has been widened back"
+        )
 
 
 # ── Falsification cases ─────────────────────────────────────────────────

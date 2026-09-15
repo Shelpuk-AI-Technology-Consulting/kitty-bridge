@@ -469,6 +469,12 @@ class TestTheWholeSuiteIsCoherent:
             # section 6.1's mutation-target table) must agree with the live
             # source. Two artifacts edited by hand, held against each other.
             "tests/test_mutmut_scope.py",
+            # KBR-88 (T-H1). A §6.2.3 contract against mutmut's per-file
+            # `.meta` JSON shape and the aggregator's bucket routing --
+            # the script is mutmut-coupled (its exit-code mapping comes
+            # from the installed mutmut), and the bucket routing is the
+            # other side of the registry agreement the scope guard tests.
+            "tests/test_aggregate_mutation_baseline.py",
         }
 
         actual = {

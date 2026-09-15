@@ -4235,9 +4235,11 @@ standing amnesty:
   its reason.
 
 A consequence worth stating: **a test may not be moved to `l3` before the Subsystem job exists.**
-Roughly six modules under `tests/` bind real sockets or spawn processes and are `l1` by default
-today — `test_egress_https_proxy.py` foremost among them, and since T-W5 the shared fixture it was
-extracted into plus `tests/harness/test_connect_proxy.py`, which must move **with** it: an
+Twelve modules under `tests/` bind real sockets or spawn processes and are `l1` by default
+today — `test_egress_https_proxy.py` foremost among them (an earlier draft said "roughly six";
+the count has grown as Epic B, E and the KBR-132/144/176/220 fixes each landed a socket-binding
+module, and the bullet list below is now the authoritative enumeration). Since T-W5 that file's
+shared fixture plus `tests/harness/test_connect_proxy.py` must move **with** it: an
 extraction and its own regression evidence landing in two different jobs would leave one proving
 the other in a run that no longer includes it. Reclassifying them is correct and is T-K6's
 business, together with the job that runs them; doing it earlier would remove them from every

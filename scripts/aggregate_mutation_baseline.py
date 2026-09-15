@@ -189,10 +189,19 @@ def bucket_mutants(
     out: dict[str, Stat] = {g: Stat() for g in group_patterns}
     out["__unmatched__"] = Stat()
     out["__total__"] = Stat()
+    unknown_exit_codes: dict[int | None, int] = {}
 
     for meta_path in meta_files:
         data = json.loads(meta_path.read_text())
         for mutant_key, exit_code in data.get("exit_code_by_key", {}).items():
+            if exit_code not in STATUS_BY_EXIT_CODE:
+                # Unknown exit code — a future mutmut 3.x release that
+                # re-numbers an exit code lands here. Bucket as
+                # suspicious so the count stays visible, and record the
+                # code so ``main`` can warn rather than fail silently.
+                unknown_exit_codes[exit_code] = (
+                    unknown_exit_codes.get(exit_code, 0) + 1
+                )
             raw_status = STATUS_BY_EXIT_CODE.get(exit_code, "suspicious")
             field = _STATUS_TO_FIELD.get(raw_status)
             if field is None:
@@ -221,7 +230,30 @@ def bucket_mutants(
                 out["__total__"], field, getattr(out["__total__"], field) + 1
             )
 
-    return out
+    return out, unknown_exit_codes
+
+
+def _warn_unknown_exit_codes(unknown: dict[int | None, int]) -> None:
+    """Emit a single stderr summary of unknown exit codes.
+
+    A future mutmut 3.x release that re-numbers an exit code lands in
+    ``unknown``. The script continues (the count still gets bucketed as
+    ``suspicious``), but the caller should know. One line per code; the
+    script exits 0 — this is a heads-up, not a hard failure.
+    """
+    if not unknown:
+        return
+    parts = ", ".join(
+        f"{code!r}: {count} mutant(s)"
+        for code, count in sorted(unknown.items(), key=lambda kv: (kv[0] is None, kv[0] or 0))
+    )
+    print(
+        f"warning: {len(unknown)} mutmut exit code(s) not in the "
+        f"STATUS_BY_EXIT_CODE table ({parts}); bucketed as suspicious. "
+        f"This usually means a mutmut version change — the table needs "
+        f"to be updated.",
+        file=sys.stderr,
+    )
 
 
 def render_markdown_table(stats: dict[str, Stat]) -> str:
@@ -271,7 +303,8 @@ def main() -> int:
         return 2
 
     group_patterns = {g: patterns_for(g) for g in TARGET_GROUPS}
-    stats = bucket_mutants(meta_files, group_patterns)
+    stats, unknown_exit_codes = bucket_mutants(meta_files, group_patterns)
+    _warn_unknown_exit_codes(unknown_exit_codes)
 
     # Sanity checks: every scoped group must have ≥ 1 mutant and zero
     # `no_tests`. A zero-total group means the registry or its pattern
