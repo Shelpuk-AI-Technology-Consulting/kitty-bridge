@@ -239,6 +239,17 @@ class TestCommittedArtifactsRegenerate:
         (``description``, ``origin_note``), headers, and trigger declarations
         are all written by ``write_entry`` too, so a drift in any of them
         breaks the committed artifact just as a body drift does.
+
+        The manifest comparison is via ``_manifest_for`` + ``json.dumps``,
+        not via ``write_entry`` itself: the latter uses ``Path.write_text``
+        with default newline translation, which produces LF on Linux and
+        CRLF on Windows regardless of ``.gitattributes``. The committed
+        files are LF (the ``-text`` rule in ``.gitattributes`` keeps git
+        from rewriting them on Windows checkout); a Windows run that
+        compared via ``write_entry`` would always mismatch on the manifest's
+        trailing newline. Asserting on ``_manifest_for`` keeps the test
+        platform-invariant and tests what matters: the committed manifest
+        is exactly what the builder produces.
         """
         for entry_id in ENTRY_IDS:
             captured, met, absent = _BUILD_BY_ID[entry_id]()
@@ -256,16 +267,18 @@ class TestCommittedArtifactsRegenerate:
                 triggers_met=met,
                 triggers_absent=absent,
             )
-            k.write_entry(tmp_path, entry)
-            regenerated_manifest = (tmp_path / f"{entry_id}.json").read_bytes()
-            regenerated_body = (tmp_path / f"{entry_id}.body").read_bytes()
+            builder_manifest = k._manifest_for(entry, captured)
+            builder_bytes = (
+                json.dumps(builder_manifest, indent=2, ensure_ascii=False) + "\n"
+            ).encode("utf-8")
             committed_manifest = (_COMMITTED_CORPUS / f"{entry_id}.json").read_bytes()
-            committed_body = (_COMMITTED_CORPUS / f"{entry_id}.body").read_bytes()
-            assert regenerated_manifest == committed_manifest, (
+            assert builder_bytes == committed_manifest, (
                 f"{entry_id}.json would regenerate differently; rerun "
                 "scripts/regenerate_corpus_thresholds.py"
             )
-            assert regenerated_body == committed_body, (
+            assert ct.build_body_bytes(entry_id) == (
+                _COMMITTED_CORPUS / f"{entry_id}.body"
+            ).read_bytes(), (
                 f"{entry_id}.body would regenerate differently; rerun "
                 "scripts/regenerate_corpus_thresholds.py"
             )
