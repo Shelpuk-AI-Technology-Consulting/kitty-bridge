@@ -133,7 +133,26 @@ class Exemption:
 #: statement runs, so a mid-stream abort sent headers and no body. It now uses
 #: `transport.close()`, which flushes first; the Windows leg of the PR that
 #: removed the row is the evidence. The registry is empty again.
-EXEMPTIONS: Mapping[str, Exemption] = MappingProxyType({})
+EXEMPTIONS: Mapping[str, Exemption] = MappingProxyType(
+    {
+        "t-g1-endpoint-table": Exemption(
+            assertion=(
+                "The README's bridge-mode endpoint table lists exactly the "
+                "routes `BridgeServer._register_routes` registers in bridge mode (adapter=None)"
+            ),
+            condition=(
+                "While KBR-9 is open: the README endpoint table documents "
+                "`POST /v1/gemini/generateContent` (no such route exists) and omits the two real "
+                "Gemini routes — `POST /v1beta/models/{model:.*}:generateContent` and "
+                "`POST /v1beta/models/{model:.*}:streamGenerateContent` — plus "
+                "`GET /v1/models`. On the day KBR-9's README correction lands, the guard's "
+                "`check_endpoint_agreement` returns an empty list, this assertion passes, and "
+                "the row must be deleted."
+            ),
+            issue="KBR-9",
+        ),
+    }
+)
 
 
 class UnknownExemption(Exception):

@@ -173,7 +173,7 @@ class TestTheEntriesAreCommittedAndDeclared:
     corpus format's demands on a synthetic entry belong.
     """
 
-    def test_the_corpus_holds_exactly_the_four_entries_this_module_knows(self) -> None:
+    def test_every_tc4_entry_this_module_knows_is_committed(self) -> None:
         """AC-1: every TC4 entry this task accounts for is committed.
 
         The "no orphan entry anywhere in the corpus" guarantee is

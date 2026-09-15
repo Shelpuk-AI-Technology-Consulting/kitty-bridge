@@ -202,6 +202,11 @@ class Trigger(Enum):
     NATIVE_TOOL_USE_FORMAT_ERROR = ("native_tool_use_format_error", ArrangingBy.RESPONSE)
     GEMINI_PROTOCOL = ("gemini_protocol", ArrangingBy.ROUTE)
     GEMINI_NON_STREAMING = ("gemini_non_streaming", ArrangingBy.REQUEST)
+    # The inbound Gemini functionCall/functionResponse carries no ``id``
+    # (KBR-195). REQUEST — a property of the inbound body, decidable per
+    # corpus entry — so §3.3.2 assertion 2 owes a complement, delivered with
+    # T-D5 (Gemini corpus entries).
+    GEMINI_INBOUND_ID_ABSENT = ("gemini_inbound_id_absent", ArrangingBy.REQUEST)
 
     # Bridge-level, response path.
     UPSTREAM_EMPTY_RESPONSE = ("upstream_empty_response", ArrangingBy.RESPONSE)
@@ -683,6 +688,114 @@ _BRIDGE_ROWS: tuple[MutationRow, ...] = (
         paths=(c.part_path(c.WILDCARD, c.WILDCARD),),
         conditional=True,
         design_ref="§3.2.1 · §3.3.1a · §4.3 C3",
+    ),
+    MutationRow(
+        id="M18",
+        site=("kitty/bridge/gemini/translator.py:GeminiTranslator._translate_content",),
+        trigger=Trigger.GEMINI_INBOUND_ID_ABSENT,
+        # KBR-195, functionCall half. When the inbound Gemini functionCall
+        # carries no ``id``, the translator synthesises a fresh
+        # ``call_<uuid>`` — the Chat Completions wire requires one, and the
+        # delta is real: the upstream projection carries a synthetic id
+        # where the Gemini reader projected absence. Conditional, because
+        # the complement (a corpus entry whose functionCall carries an id)
+        # is plainly writeable and arrives with T-D5.
+        #
+        # Kept distinguishable from M19 by ``paths`` (``id`` vs
+        # ``tool_use_id``) — the axis
+        # ``test_no_two_rows_are_indistinguishable`` keys on — not by the
+        # site, which both rows share.
+        paths=(c.part_path(c.WILDCARD, c.WILDCARD, "id"),),
+        conditional=True,
+        design_ref="§3.2.1",
+    ),
+    MutationRow(
+        id="M19",
+        site=("kitty/bridge/gemini/translator.py:GeminiTranslator._translate_content",),
+        trigger=Trigger.GEMINI_INBOUND_ID_ABSENT,
+        # KBR-195, functionResponse half — M18's tool-result twin. The
+        # synthesised id lands on the tool message's ``tool_call_id``, not
+        # on the call's ``id``, so the row anchors at the other field.
+        # Kept distinguishable from M18 by ``paths`` — the axis
+        # ``test_no_two_rows_are_indistinguishable`` keys on — not by the
+        # site.
+        paths=(c.part_path(c.WILDCARD, c.WILDCARD, "tool_use_id"),),
+        conditional=True,
+        design_ref="§3.2.1",
+    ),
+    MutationRow(
+        id="M20",
+        site=("kitty/bridge/gemini/translator.py:GeminiTranslator.translate_request",),
+        trigger=Trigger.NON_NATIVE_UPSTREAM_WIRE,
+        # KBR-194 gave the Gemini reader a slot for the role a
+        # ``systemInstruction`` Content published; Chat Completions has no
+        # equivalent, so the translation drops it and the reader's positive
+        # value meets the upstream's absence at this path. §3.3.1a's
+        # path-table cell used to name M2 as the claiming row; it names
+        # this row since KBR-195 — M2 takes the escape and is never
+        # path-matched.
+        paths=("conversation.system_role",),
+        conditional=False,
+        design_ref="§3.2.1 · §3.3.1a",
+    ),
+    MutationRow(
+        id="M21",
+        site=("kitty/bridge/gemini/translator.py:GeminiTranslator.translate_request",),
+        trigger=Trigger.NON_NATIVE_UPSTREAM_WIRE,
+        # Gemini's NON_BLOCKING calling toggle on a function declaration
+        # (KBR-194) has no Chat Completions equivalent, so
+        # ``_translate_tools`` drops it. Anchored at the field, not the
+        # whole tool — a coarser anchor would claim a deleted tool
+        # description, one of §3.3.1's own falsification cases (§3.3.1a).
+        paths=(c.tool_path(c.WILDCARD, "behavior"),),
+        conditional=False,
+        design_ref="§3.2.1 · §3.3.1a",
+    ),
+    MutationRow(
+        id="M22",
+        site=("kitty/bridge/gemini/translator.py:GeminiTranslator.translate_request",),
+        trigger=Trigger.NON_NATIVE_UPSTREAM_WIRE,
+        # Gemini's ``thoughtSignature`` on a ``functionCall`` part
+        # (KBR-194) has no Chat Completions equivalent, so the translation
+        # drops it. M8 also produces a delta at this path, but with a
+        # RESPONSE trigger (a thinking round-trip rejection) — the two are
+        # distinguishable by trigger, site and the narrower field anchor
+        # here, and on a plain Gemini→CC request M8's trigger is not met.
+        paths=(c.part_path(c.WILDCARD, c.WILDCARD, "signature"),),
+        conditional=False,
+        design_ref="§3.2.1 · §3.3.1a",
+    ),
+    MutationRow(
+        id="M23",
+        site=("kitty/bridge/gemini/translator.py:GeminiTranslator.translate_request",),
+        trigger=Trigger.NON_NATIVE_UPSTREAM_WIRE,
+        # Gemini's ``functionResponse.scheduling`` — the NON_BLOCKING
+        # response-side toggle (KBR-194) — has no Chat Completions
+        # equivalent, so the translation drops it.
+        paths=(c.part_path(c.WILDCARD, c.WILDCARD, "scheduling"),),
+        conditional=False,
+        design_ref="§3.2.1 · §3.3.1a",
+    ),
+    MutationRow(
+        id="M24",
+        site=("kitty/bridge/gemini/translator.py:GeminiTranslator.translate_request",),
+        trigger=Trigger.NON_NATIVE_UPSTREAM_WIRE,
+        # Gemini part-level ``videoMetadata`` (KBR-194) has no Chat
+        # Completions equivalent, so the translation drops it.
+        paths=(c.part_path(c.WILDCARD, c.WILDCARD, "video_metadata"),),
+        conditional=False,
+        design_ref="§3.2.1 · §3.3.1a",
+    ),
+    MutationRow(
+        id="M25",
+        site=("kitty/bridge/gemini/translator.py:GeminiTranslator.translate_request",),
+        trigger=Trigger.NON_NATIVE_UPSTREAM_WIRE,
+        # The blob/file ``displayName`` named to the model on an image part
+        # (KBR-194) has no Chat Completions equivalent, so the translation
+        # drops it.
+        paths=(c.part_path(c.WILDCARD, c.WILDCARD, "display_name"),),
+        conditional=False,
+        design_ref="§3.2.1 · §3.3.1a",
     ),
 )
 

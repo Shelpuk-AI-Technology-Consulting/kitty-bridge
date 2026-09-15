@@ -178,9 +178,14 @@ def _cc_env(session_home: Path, port: int, *, effort: str | None) -> dict[str, s
     env["ANTHROPIC_AUTH_TOKEN"] = "kitty-bridge-token"
     env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] = "1"
     env["NO_COLOR"] = "1"
-    # The effort dial: CC emits `output_config` only when an effort is set,
-    # and an inherited CLAUDE_EFFORT would configure it for every session —
-    # so it is unset here and re-set explicitly for the effort session.
+    # The effort dial: CLAUDE_EFFORT, if inherited from the operator's
+    # shell, would configure every session identically and blind the
+    # plain vs effort comparison the captures support. Pop it here and
+    # re-set explicitly for the effort session. CC 2.1.238 itself emits
+    # `output_config` in every body regardless — verified 2026-09-14, the
+    # plain_turn body carries `output_config: {"effort": "high"}` even
+    # with this unset and with --bare — so the comment must not say
+    # otherwise. See memory `confirmed_integrations_cc_always_emits_output_config`.
     env.pop("CLAUDE_EFFORT", None)
     if effort is not None:
         env["CLAUDE_EFFORT"] = effort

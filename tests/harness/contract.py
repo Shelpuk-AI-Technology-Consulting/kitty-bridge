@@ -1085,6 +1085,15 @@ class ToolDecl:
             rather than as a boolean because a one-hour write and a five-minute
             one are different prices, so a flattened form would hide a silently
             downgraded lifetime. **M16** claims its removal.
+        type: The tool's discriminator, as the wire spells it — ``"custom"`` on
+            an ordinary client tool, a dated vendor spelling such as
+            ``web_search_20250305`` on a server tool (Anthropic Messages), or
+            ``None`` where the format defines none. Carried rather than
+            residualised because a mutation on it changes what a forced call is
+            asking for (KBR-214 D10) and because G35's register row anchors its
+            conditional on it (KBR-205). Addressed at
+            ``conversation.tools[<name>].type``, by name, like every other
+            tool leaf.
     """
 
     name: str
@@ -1092,6 +1101,7 @@ class ToolDecl:
     schema: Mapping[str, Any] | None = None
     strict: bool | None = None
     behavior: str | None = None
+    type: str | None = None
     cache_control: Mapping[str, Any] | None = None
 
     __hash__ = None  # type: ignore[assignment]
@@ -1522,6 +1532,20 @@ TOOL_CHOICE_VALUES = frozenset({"auto", "any", "none"})
 #: name one concept and Gemini's is `toolConfig`.
 TOOL_CHOICE_KEY = "tool_choice"
 
+#: The canonical address for the parallel-tool-use knob, fixed in §3.3.1b
+#: (KBR-205, closing G36). Anthropic's nested, inverted flag
+#: (`tool_choice.<shape>.disable_parallel_tool_use`) and Chat Completions'
+#: top-level `parallel_tool_calls` (a boolean for "should the model emit
+#: multiple tool calls?") name one concept with two spellings and opposite
+#: polarity; both wires meet at this address in the Chat Completions
+#: spelling and polarity. The reader writes the entry only when the wire
+#: carries a non-default value — KBR-214 forwards only
+#: `disable_parallel_tool_use: true` as `parallel_tool_calls: false`, and
+#: the reader mirrors that. An absent value and an explicit default (`true`
+#: on Anthropic, the implicit CC default) are one request on both wires;
+#: writing both would invent a second field some providers reject.
+PARALLEL_TOOL_CALLS_KEY = "parallel_tool_calls"
+
 #: The value a register row carries when the projection deliberately does not
 #: model its effect. It **requires a reason**. P16 uses it (the content-type tag
 #: is redundant with the turn's role), as do the whole-body protocol
@@ -1532,6 +1556,316 @@ NOT_PROJECTABLE = "not projectable"
 #: The wildcard segment. §3.3.1 writes register fields with an empty index —
 #: "P15 is ``conversation.tools[].strict``" — meaning every tool.
 WILDCARD = "*"
+
+#: §3.3.1's reader-side declared-ignored mechanism (KBR-205). Keys are the
+#: exact wire spellings of ``(block type, field name)`` — no wildcards, no
+#: prefixes, no fuzzy match, so a re-spelled sibling still residualises and
+#: fails the run (the unregistered-mutation guard). Values are the
+#: ``(expected type, reason)`` pair:
+#:
+#: - The **expected type** is the vendor's published type for the field's
+#:   value. A reader consumes a field only when its wire value is an instance
+#:   of that type — §7.4.1's wrongly-typed-leaf rule, applied at the
+#:   registry layer so the same discipline five readers cannot quietly drift
+#:   on. A wrong-typed value residualises at its own path with the field
+#:   named, and the run fails closed.
+#: - The **reason** is required and non-empty (enforced by
+#:   :func:`ignored_field_problems`), and cites the vendor evidence — §3.3.1's
+#:   independent-oracle rule. It is the audit trail a future reader consults
+#:   to answer "why does this field disappear?" without re-reading the
+#:   ticket.
+#:
+#: **Built once, imported by every reader.** Seven authors answering this
+#: separately is the coordination failure §7.4.1 exists to prevent; a reader
+#: that wants to declare a field ignored but its siblings do not proposes a
+#: new entry here, and carries the falsification case (§1.4) with it.
+#: :func:`is_ignored` and :func:`ignored_fields_for` are the only ways to
+#: consult the registry; readers must go through them so the spelling cannot
+#: drift between T-A1 and T-A6.
+#:
+#: **What belongs here, what does not.** A field whose mutation changes what
+#: the agent asked for — `tool_choice.disable_parallel_tool_use`,
+#: `tools[i].type` — is **mapped** onto a shared canonical address, not
+#: ignored, so the mutation remains visible to the oracle. A field whose
+#: strip would hide a cost the user bears — `cache_control`'s cache
+#: breakpoint — gets a **slot** in the grammar and a register row, not an
+#: ignore. This registry is for the third class: descriptive, vendor-defined
+#: fields the agent neither reads nor writes, whose loss changes no
+#: instruction the request carried. The trade-off, recorded so a future
+#: reader can decide whether to widen the mechanism: **value changes inside
+#: an ignored field are invisible to the oracle**, the same shape §7.4.1's
+#: merge rule names in its "what the merge hides" caveat. The ticket owner's
+#: reasoning was that vendor-runtime-set or vendor-metadata fields are not
+#: fidelity signals the agent depends on; a future case where that ceases to
+#: hold belongs in §11, not in this registry.
+IGNORED_BLOCK_FIELDS: Mapping[tuple[str, str], tuple[type, str]] = MappingProxyType(
+    {
+        # Anthropic Messages — SDK types retrieved 2026-09-14
+        # (`anthropic-sdk-python` `src/anthropic/types/`). Each reason cites
+        # the source file so a reviewer can audit without re-fetching.
+        (
+            "text",
+            "citations",
+        ): (
+            list,
+            "Anthropic TextBlockParam.citations: Optional[Iterable[TextCitationParam]] "
+            "(anthropic-sdk-python src/anthropic/types/text_block_param.py) — citation list "
+            "Anthropic emits on a response text block; replayed into a request when an agent "
+            "feeds a prior response back as input. Vendor-shaped metadata, not a control the "
+            "agent sets; carrying it on a Part would put a vendor spelling into the wire-"
+            "independent form, and dropping it loses no instruction the request carried.",
+        ),
+        (
+            "image",
+            "transformations",
+        ): (
+            dict,
+            "Anthropic ImageBlockParam.transformations: Optional[ImageTransformationsParam] "
+            "(anthropic-sdk-python src/anthropic/types/image_block_param.py) — server-side "
+            "preprocessing config ('downsize' vs 'error' on an oversized image). Server-side; "
+            "the model observes the result, not the field. Stripped on translation; preserved "
+            "on the native passthrough. The ticket author's reasoning: not a fidelity signal "
+            "the agent depends on.",
+        ),
+        (
+            "tool_use",
+            "caller",
+        ): (
+            dict,
+            "Anthropic ToolUseBlockParam.caller: Caller union "
+            "(anthropic-sdk-python src/anthropic/types/tool_use_block_param.py) — the "
+            "invocation context (direct, server-side, programmatic). Vendor-recorded metadata; "
+            "Anthropic's runtime sets it on a tool_use emitted in an earlier assistant turn, "
+            "and Claude Code replays it as part of the conversation history. The bridge does "
+            "not own this field and does not transform it; treating it as consumed preserves "
+            "totality on real Claude Code bodies.",
+        ),
+        (
+            "tool_use",
+            "toolset_name",
+        ): (
+            str,
+            "Anthropic ToolUseBlockParam.toolset_name: Optional[str] "
+            "(anthropic-sdk-python src/anthropic/types/tool_use_block_param.py) — names the "
+            "toolset family a toolset-member tool_use belongs to ('computer', 'browser'). "
+            "Paired with the toolset declaration itself; an unmodelled block today.",
+        ),
+        (
+            "tool_result",
+            "toolset_name",
+        ): (
+            str,
+            "Anthropic ToolResultBlockParam.toolset_name: Optional[str] "
+            "(anthropic-sdk-python src/anthropic/types/tool_result_block_param.py) — the "
+            "member result echoes the paired tool_use's toolset_name. A dispatch key for "
+            "the agent's own handler, not a fidelity signal the bridge shapes.",
+        ),
+    }
+)
+
+
+def ignored_field_problems(
+    registry: Mapping[tuple[str, str], tuple[type, str]],
+) -> tuple[str, ...]:
+    """Report every way one entry of the declared-ignored registry is malformed.
+
+    Pure, and separate from the loop that applies it, so a deliberately bad
+    entry can be handed to it — §1.4 requires the falsification case to run in
+    the suite, and a rule enforced only inside a ``for`` over the shipped
+    registry cannot be given one. The same posture :func:`row_shape_problems`
+    takes on register rows.
+
+    Args:
+        registry: A candidate registry of ``(block wire type, field wire key)``
+            to ``(expected type, reason)``. The block key is the wire
+            discriminator (Anthropic ``"text"``, ``"image"``, ``"tool_use"``,
+            ``"tool_result"``); the field key is the wire spelling of the
+            field on that block. Both keys must be non-empty strings; the
+            expected type must be a real type; the reason must be a non-empty
+            string after stripping whitespace.
+
+    Returns:
+        One message per problem, empty when the registry is well formed.
+    """
+    problems: list[str] = []
+    seen: set[tuple[str, str]] = set()
+    for (block_kind, field_name), entry in registry.items():
+        # Tuple key check — guards against an entry built with a non-string
+        # block or field. A non-string key would silently mismatch nothing
+        # when a reader's helper consults the registry, which is exactly the
+        # silent escape §3.3.1's declared-ignored mechanism is meant to
+        # forbid.
+        key_problem = False
+        if not isinstance(block_kind, str) or not block_kind:
+            problems.append(
+                f"registry entry {block_kind!r}:{field_name!r}: block key must be a non-empty string"
+            )
+            key_problem = True
+        if not isinstance(field_name, str) or not field_name:
+            problems.append(
+                f"registry entry {block_kind!r}:{field_name!r}: field key must be a non-empty string"
+            )
+            key_problem = True
+        if not key_problem and (block_kind, field_name) in seen:
+            problems.append(
+                f"registry entry ({block_kind!r}, {field_name!r}): duplicate entry; "
+                "the audit trail is one entry per wire spelling"
+            )
+        seen.add((block_kind, field_name))
+
+        # The value is the (expected type, reason) pair. A non-tuple, a
+        # non-type, or a None reason are all rejected at this layer so a
+        # future reader cannot quietly build a malformed registry and have
+        # it pass.
+        if not isinstance(entry, tuple) or len(entry) != 2:
+            problems.append(
+                f"registry entry ({block_kind!r}, {field_name!r}): value must be "
+                f"(expected_type, reason); got {entry!r}"
+            )
+            continue
+
+        expected_type, reason = entry
+        if not isinstance(expected_type, type):
+            problems.append(
+                f"registry entry ({block_kind!r}, {field_name!r}): expected type must "
+                f"be a type, got {expected_type!r}"
+            )
+
+        # The reason is the audit trail. None, empty or whitespace-only is
+        # rejected — the same posture :func:`row_shape_problems` takes on
+        # `not_projectable_reason` (§3.3.1a: "an empty cell would leave
+        # those rows silently unfalsifiable").
+        if reason is None:
+            problems.append(
+                f"registry entry ({block_kind!r}, {field_name!r}): reason is required "
+                "(§3.3.1a); an entry without one would be silently unfalsifiable"
+            )
+        elif not isinstance(reason, str):
+            problems.append(
+                f"registry entry ({block_kind!r}, {field_name!r}): reason must be a string, "
+                f"got {type(reason).__name__}"
+            )
+        elif not reason.strip():
+            problems.append(
+                f"registry entry ({block_kind!r}, {field_name!r}): reason must be non-empty (§3.3.1a)"
+            )
+
+    return tuple(problems)
+
+
+def is_ignored(block_kind: str, field_name: str) -> bool:
+    """Return whether a block field is in the declared-ignored registry.
+
+    The single spelling readers consult: :func:`consumed_ignored_fields`
+    uses it for the per-block lookup, and a future reader that wants to know
+    whether *its* format has a declared-ignored field for a given block
+    kind asks here rather than indexing :data:`IGNORED_BLOCK_FIELDS`
+    directly. The two-step spelling — registry → helper → reader — is what
+    keeps seven authors from quietly disagreeing on the rule.
+
+    Args:
+        block_kind: The wire discriminator of the block carrying the field.
+        field_name: The wire spelling of the field on that block.
+
+    Returns:
+        ``True`` when an exact-match entry exists for the pair, ``False``
+        otherwise. Re-spelled siblings are deliberately absent — a typo'd
+        ``"CitationS"`` is not the same entry as ``"citations"``, and the
+        guard it fails to satisfy (§3.3.1) is exactly the one that protects
+        against unregistered mutations.
+    """
+    return (block_kind, field_name) in IGNORED_BLOCK_FIELDS
+
+
+def ignored_fields_for(block_kind: str) -> Mapping[str, tuple[type, str]]:
+    """Return the declared-ignored fields for one block wire type.
+
+    Reads :data:`IGNORED_BLOCK_FIELDS` and filters by the given block kind.
+    Used by readers to extend their per-block mapped-keys set with the
+    declared-ignored fields for that kind, then call
+    :func:`consumed_ignored_fields` to consume them in one place.
+
+    Args:
+        block_kind: The wire discriminator of the block (Anthropic
+            ``"text"``, ``"image"``, ``"tool_use"``, ``"tool_result"``).
+
+    Returns:
+        A frozen mapping from field wire name to its
+        ``(expected_type, reason)``. Empty when the block kind has no
+        declared-ignored entries today — the right answer for a reader
+        whose format has no field the registry knows about.
+    """
+    entries: dict[str, tuple[type, str]] = {}
+    for (kind, field_name), entry in IGNORED_BLOCK_FIELDS.items():
+        if kind == block_kind:
+            entries[field_name] = entry
+    return _freeze_mapping(entries)
+
+
+def consumed_ignored_fields(
+    block: Mapping[str, Any],
+    block_kind: str,
+    path: str,
+    residual: dict[str, Any],
+) -> set[str]:
+    """Consume the block's declared-ignored fields whose values are correctly typed.
+
+    Consults :data:`IGNORED_BLOCK_FIELDS` for the block's wire kind via
+    :func:`ignored_fields_for`. A field whose wire value is an instance of
+    the registry's expected type is consumed — the reader's
+    :func:`~tests.harness.reader_anthropic_messages._residualise` pass will
+    exclude it, and ``verify_total`` will see it as accounted for. The
+    value is dropped on the floor: declared-ignored fields do not get a
+    slot on any :class:`Part`, and the projection does not carry them.
+
+    A field whose value carries the **wrong** type residualises at its own
+    path, §7.4.1's wrongly-typed-leaf rule: the registry declares the
+    *field* ignorable, not the *value* well-formed. A reader that mistyped
+    a sibling (``citations: 7`` instead of an iterable) still fails the
+    run, with the field named.
+
+    A field whose value is absent (``None`` or missing) is silently
+    consumed, the same posture :func:`_read_cache_control` takes on
+    ``cache_control: null``. The bridge does not invent an absence the body
+    did not declare.
+
+    Args:
+        block: The block being read.
+        block_kind: The block's wire discriminator (Anthropic ``"text"``,
+            ``"image"``, ``"tool_use"``, ``"tool_result"``).
+        path: The block's path from the body root, used to build residual
+            keys for wrong-typed values.
+        residual: The residual mapping, extended in place when a value
+            carries the wrong type.
+
+    Returns:
+        The set of field names consumed — the caller's
+        :func:`_residualise` pass excludes these from the mapped-keys set so
+        they do not residualise as if unknown.
+    """
+    consumed: set[str] = set()
+    for field_name, (expected_type, _reason) in ignored_fields_for(block_kind).items():
+        if field_name not in block:
+            continue
+        value = block[field_name]
+        if value is None:
+            # Absent by the cache_control precedent. The block carried the
+            # key but with `null`; treat as no-op.
+            consumed.add(field_name)
+            continue
+        if isinstance(value, expected_type):
+            consumed.add(field_name)
+        else:
+            residual[f"{path}.{field_name}"] = value
+    return consumed
+
+
+# Falsification of the unrecoverable half of §3.3.1a, raised at module import
+# the same way `row_shape_problems` is invoked against `REGISTER`. A bad
+# shipped entry must fail the gate, not slip through review.
+assert not ignored_field_problems(IGNORED_BLOCK_FIELDS), (
+    "IGNORED_BLOCK_FIELDS has malformed entries — see ignored_field_problems"
+)
 
 
 def _index(value: int | str) -> str:
