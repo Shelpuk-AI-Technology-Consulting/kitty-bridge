@@ -2535,6 +2535,24 @@ header the corpus does not preserve as captured — it is recomputed, because th
 manifest internally inconsistent with its own body. Nothing downstream reads the original value:
 §4.3 C1 asserts on the headers the bridge *builds*, and C1b compares names.
 
+**Two lines of defence keep the committed bytes LF.** The byte-exactness claim above holds only if
+every contributor's checkout sees the bytes the writer produced, and the rest of the suite cannot
+tell the difference if it does not: `core.autocrlf=true` on Windows silently rewrites LF to CRLF
+inside a `.body` on checkout and would commit the result back, changing both the bytes §3.3.2
+asserts on and the lengths M3 and M5 decide by (T-W6 / **KBR-29**). `.gitattributes` is the first
+line — `tests/corpus/*.body -text` and `tests/corpus/*.json -text` stop git translating either
+path — and is pinned by `TestTheCorpusIsProtectedFromLineEndingTranslation::test_gitattributes_still_covers_the_corpus`
+in `tests/harness/test_corpus_lint.py`. The manifest digest in `harness.corpus.load_entry` is the
+second, in case the patterns are ever renamed, the directory moves, or the file is removed.
+**KBR-261** closed a third hole the digest could not see: `write_entry` used
+`Path.write_text(...)` with default newline translation, which emits LF on Linux and CRLF on
+Windows regardless of `.gitattributes`, so a Windows regen run produced a CRLF manifest and CI
+reported the resulting LF-vs-committed byte diff as pure line-ending drift. The writer now passes
+`newline="\n"` so its bytes are LF on every platform;
+`TestTheRoundTrip::test_the_manifest_bytes_are_lf_only` (`tests/harness/test_corpus.py`) pins
+the writer end, and `TestTheCorpusIsProtectedFromLineEndingTranslation::test_no_committed_manifest_carries_crlf`
+pins the committed tree.
+
 **Captures carrying `content-encoding` or `transfer-encoding` are refused at write time.** The
 corpus stores entity bodies, not wire octets. A compressed body is one the scrubber reads as noise
 and reports clean — a false clean that no plaintext falsification case can ever detect, and the

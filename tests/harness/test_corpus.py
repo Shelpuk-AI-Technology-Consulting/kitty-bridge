@@ -1234,6 +1234,22 @@ class TestTheRoundTrip:
 
         assert "claude-opus" not in path.read_text(encoding="utf-8")
 
+    def test_the_manifest_bytes_are_lf_only(self, tmp_path: Path) -> None:
+        """`write_entry` must emit LF on every platform (KBR-261).
+
+        `Path.write_text` with default newline translation rewrites every
+        ``\\n`` to ``\\r\\n`` on Windows regardless of ``.gitattributes``,
+        which commits a CRLF manifest the rest of the suite (which reads
+        through ``load_corpus``) silently accepts — text-mode translation
+        erases the drift on read. The L2 lint catches a CRLF *after* it is
+        committed; this test catches the writer before. Read with
+        ``read_bytes()`` so the assertion is what Python wrote, not what
+        Python's universal-newlines translator would prefer to see.
+        """
+        path = k.write_entry(tmp_path, entry(request=capture(CLEAN_BODY)))
+
+        assert b"\r\n" not in path.read_bytes()
+
     def test_writing_scrubs(self, tmp_path: Path) -> None:
         """The one step a tired operator skips must not be the one that matters."""
         k.write_entry(tmp_path, entry(request=capture(DIRTY_BODY)))

@@ -241,15 +241,14 @@ class TestCommittedArtifactsRegenerate:
         breaks the committed artifact just as a body drift does.
 
         The manifest comparison is via ``_manifest_for`` + ``json.dumps``,
-        not via ``write_entry`` itself: the latter uses ``Path.write_text``
-        with default newline translation, which produces LF on Linux and
-        CRLF on Windows regardless of ``.gitattributes``. The committed
-        files are LF (the ``-text`` rule in ``.gitattributes`` keeps git
-        from rewriting them on Windows checkout); a Windows run that
-        compared via ``write_entry`` would always mismatch on the manifest's
-        trailing newline. Asserting on ``_manifest_for`` keeps the test
-        platform-invariant and tests what matters: the committed manifest
-        is exactly what the builder produces.
+        not via ``write_entry`` itself, so the comparison is independent of
+        the writer's I/O: it asserts the manifest *content* the builder
+        produces (KBR-261 later fixed ``write_entry``'s ``newline`` handling
+        so the writer's bytes are also LF on every platform, but this test
+        still asserts on the builder's own JSON, not on the side effects of
+        writing it). The committed files are LF, as ``.gitattributes``'s
+        ``-text`` rule pins them on checkout; the L2 guard
+        ``test_no_committed_manifest_carries_crlf`` pins the write end.
         """
         for entry_id in ENTRY_IDS:
             captured, met, absent = _BUILD_BY_ID[entry_id]()
