@@ -1,6 +1,6 @@
 """The botocore recording upstream.
 
-`.system_design/TEST_SUITE.md` §3.2.3, §7.2, §7.2.3 · plan task **T-B3** (KBR-42).
+`.system_design/TEST_SUITE.md` §3.2.3, §7.2, §7.2.4 · plan task **T-B3** (KBR-42).
 
 §7.2 gives each of the bridge's five client configurations its own recorder.
 The primary one (T-W4, :mod:`harness.recorder`) observes the sessions

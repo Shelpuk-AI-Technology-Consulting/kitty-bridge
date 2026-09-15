@@ -1,6 +1,6 @@
 """The botocore transport, and how the bridge fixture reaches it.
 
-`.system_design/TEST_SUITE.md` §7.5, §7.2.3 · plan task **T-B3** (KBR-42).
+`.system_design/TEST_SUITE.md` §7.5, §7.2.4 · plan task **T-B3** (KBR-42).
 
 :mod:`harness.botocore_recorder` is the server; this module is how the product
 is pointed at it. Unlike the three default-transport shapes, ``bedrock``
