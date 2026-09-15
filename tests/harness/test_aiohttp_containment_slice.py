@@ -329,8 +329,15 @@ class TestPhase3Falsification:
 # ── Verdict recording (R5) ───────────────────────────────────────────────
 
 
+@pytest.mark.skipif(_AIOHTTP_NEEDS_311, reason=_AIOHTTP_SKIP_REASON)
 class TestSliceVerdict:
     """The verdict gate's precondition: every phase actually ran and passed.
+
+    Skipped on Python <3.11 alongside phases 2/2b/3 (TLS-in-TLS, bpo-44011):
+    the assertion's premise — every phase actually ran — is false on those
+    interpreters, and a red verdict test would make CI red for a slice
+    that has been honestly *not* proven on that Python rather than
+    honestly proven.
 
     The recording itself lives in the session finaliser in
     :mod:`tests.harness.conftest`, which runs **after** every test in this

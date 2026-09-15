@@ -155,7 +155,14 @@ class TestMonkeypatchedResolver:
 
 @pytest.fixture(autouse=True)
 def _isolate_singleton() -> None:
-    """Reset the capability-report singleton before every test in this class.
+    """Reset the capability-report singleton before every test in this module.
+
+    The autouse fixture is declared at module scope (unindented between
+    :class:`TestMonkeypatchedResolver` and :class:`TestCapabilityReport`),
+    so its ``autouse=True`` applies to **every** test in the file, not just
+    the class below it; a class-scoped autouse would be impossible to write
+    in pytest, and the wording here is what the reader needs to know when
+    they look for the seam.
 
     The singleton is the wire T-E2..T-E5 record into and T-E9's completeness
     gate reads; a sibling slice's verdict written earlier in the process would
