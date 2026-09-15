@@ -90,10 +90,10 @@ seventh row measures.
 
 [The KBR-88 comment of 2026-09-08](https://shelpuk.atlassian.net/browse/KBR-88)
 records the concern, and §6.1 §"Test selection" states the rule: mutation
-testing measures the **L1** suite. As of this baseline, six modules that
-bind real sockets or spawn processes sit at the `l1` path default —
-deliberately, because only `l1` and `l2` are gated today and reclassifying
-them before the Subsystem job exists (T-K6,
+testing measures the **L1** suite. The socket/process modules §8.2
+enumerates sit at the `l1` path default — deliberately, because only
+`l1` and `l2` are gated today and reclassifying them before the
+Subsystem job exists (T-K6,
 [KBR-115](https://shelpuk.atlassian.net/browse/KBR-115)) would remove them
 from every gate. They are substantively L3 tests running under the L1
 marker.

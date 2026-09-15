@@ -36,14 +36,13 @@ pytestmark = pytest.mark.l2
 
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(_REPO_ROOT / "scripts"))
 
-# Import the aggregator by file path rather than package name: the
-# `scripts/` directory is not on the default import path and adding
-# it for one file is wider than the test needs. The module must be in
-# ``sys.modules`` before ``exec_module`` — Python 3.13's ``@dataclass``
-# resolves the module's namespace through ``sys.modules`` while
-# decorating ``Stat``.
+# Load the aggregator by file path rather than package name: `scripts/`
+# is not a package and is deliberately NOT added to `sys.path` — one
+# file, not a whole directory of script entry points. The module must
+# be registered in ``sys.modules`` before ``exec_module`` — Python
+# 3.13's ``@dataclass`` resolves the class's namespace through
+# ``sys.modules`` while decorating ``Stat``.
 _spec = importlib.util.spec_from_file_location(
     "aggregate_mutation_baseline",
     _REPO_ROOT / "scripts" / "aggregate_mutation_baseline.py",

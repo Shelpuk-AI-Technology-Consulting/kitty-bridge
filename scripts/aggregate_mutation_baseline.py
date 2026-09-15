@@ -167,7 +167,7 @@ _STATUS_TO_FIELD = {
 def bucket_mutants(
     meta_files: Iterable[Path],
     group_patterns: dict[str, list[str]],
-) -> dict[str, Stat]:
+) -> tuple[dict[str, Stat], dict[int | None, int]]:
     """Read each meta file and tally each mutant into its target group.
 
     A mutant is bucketed into the first group whose patterns fnmatch it
@@ -183,8 +183,12 @@ def bucket_mutants(
             ``patterns_for``.
 
     Returns:
-        ``{group_name: Stat}``, plus ``__unmatched__`` and ``__total__``
-        keys for visibility into what did not match any group.
+        ``({group_name: Stat}, unknown_exit_codes)`` — the per-group
+        buckets (plus ``__unmatched__`` and ``__total__`` keys for
+        visibility into what did not match any group), and a map of
+        exit codes the table did not recognise to the number of
+        mutants that carried each one. ``main()`` prints a one-line
+        warning when the second element is non-empty.
     """
     out: dict[str, Stat] = {g: Stat() for g in group_patterns}
     out["__unmatched__"] = Stat()

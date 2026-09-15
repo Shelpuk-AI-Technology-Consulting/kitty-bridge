@@ -26,6 +26,7 @@ hand. The two halves of the ``l1 or l2`` job.
 from __future__ import annotations
 
 import fnmatch
+import re
 import sys
 from pathlib import Path
 
@@ -249,27 +250,140 @@ def test_every_registry_file_is_covered_by_only_mutate() -> None:
         )
 
 
-def test_only_mutate_excludes_the_three_unscoped_provider_modules() -> None:
-    """``registry.py``, ``model_context_sync.py`` and providers/__init__ generate no mutants.
+def test_only_mutate_excludes_every_unscoped_provider_file() -> None:
+    """Every ``src/kitty/providers/*.py`` file the registry does not name
+    matches no ``only_mutate`` glob.
 
-    Section 6.1 names none of them. The round-1 review caught the
-    broader ``providers/*`` glob matching all three; the per-file glob
-    list replaced it. This test pins the narrowing so a future
-    "simplification" back to a directory glob fails here rather than
-    silently widening the scope again.
+    Derives the in-scope set from the registry + source rather than
+    hardcoding it. A provider file is IN scope when either:
+
+    * a registry row names its module directly (e.g. ``base.py`` via
+      KBR-134's ``_strip_endpoint_suffix``, ``model_context.py`` via
+      the whole-module KBR-151 row, ``openai_subscription.py`` via its
+      four P13–P17 rows), or
+    * the file carries any of the three §6.1 hooks
+      (``translate_to_upstream`` / ``normalize_request`` /
+      ``build_upstream_headers``), matched by the cross-module rows.
+
+    Everything else in ``providers/`` — ``__init__.py``,
+    ``registry.py``, ``model_context_sync.py``, ``google_aistudio.py``,
+    ``novita.py`` today — is correctly excluded, and a future
+    hand-add of its path to ``only_mutate`` would silently widen the
+    scope unless this test catches it. The forward direction (every
+    registry file is covered) lives in
+    ``test_every_registry_file_is_covered_by_only_mutate``; the two
+    together pin the scope agreement.
+    """
+    providers_dir = (
+        Path(__file__).resolve().parent.parent / "src" / "kitty" / "providers"
+    )
+    # Modules the registry names under providers/ (excluding the
+    # cross-module wildcard rows, which are handled via the hook scan).
+    # Stored with slashes (path form) since that's what we compare
+    # against below.
+    registry_named = {
+        target.module.split(".", 1)[1].replace(".", "/")
+        for _group, target in all_targets()
+        if target.module.startswith("kitty.providers.")
+    }
+    hook_re = re.compile(
+        r"^    def (translate_to_upstream|normalize_request|build_upstream_headers)\(",
+        re.MULTILINE,
+    )
+    unscoped: list[str] = []
+    for path in sorted(providers_dir.glob("*.py")):
+        module_rel = f"providers/{path.stem}"  # e.g. "providers/model_context"
+        if module_rel in registry_named or any(
+            module_rel.startswith(r + "/") for r in registry_named
+        ):
+            continue  # registry names this module directly
+        if hook_re.search(path.read_text()):
+            continue  # carries a cross-module hook
+        rel = f"src/kitty/providers/{path.name}"
+        unscoped.append(rel)
+    assert unscoped, (
+        "no unscoped providers/*.py files found — either every provider "
+        "is now registry-named (verify §6.1 is current) or the test's "
+        "registry-naming logic has drifted"
+    )
+    globs = _only_mutate_globs()
+    for rel in unscoped:
+        assert not any(
+            fnmatch.fnmatch(rel, g) for g in globs
+        ), (
+            f"{rel} is not named by any registry row and carries none of "
+            f"the three §6.1 hooks but is matched by an `only_mutate` "
+            f"glob — the glob list has been widened to include "
+            f"unscoped providers"
+        )
+
+
+def test_every_only_mutate_entry_has_a_registry_row() -> None:
+    """No ``only_mutate`` glob covers a file that no registry row names.
+
+    Closes the reverse direction of the scope agreement — the
+    forward test (``test_every_registry_file_is_covered_by_only_mutate``)
+    requires every registry file to be glob-covered; this one
+    requires every glob-covered file to have a registry row. Without
+    it, a hand-add of a stray glob would pass the forward test (no
+    registry file would lose coverage) while silently widening the
+    scope to a file §6.1 does not name.
     """
     globs = _only_mutate_globs()
-    for unscoped in (
-        "src/kitty/providers/__init__.py",
-        "src/kitty/providers/registry.py",
-        "src/kitty/providers/model_context_sync.py",
-    ):
-        assert not any(
-            fnmatch.fnmatch(unscoped, g) for g in globs
-        ), (
-            f"{unscoped} is matched by an `only_mutate` glob but section 6.1 "
-            f"does not name it — the glob list has been widened back"
+    repo_root = Path(__file__).resolve().parent.parent
+    registry_files = set()
+    cross_module_hooks: set[str] = set()
+    for _group, target in all_targets():
+        if target.module == "*":
+            # Cross-module rows (``Target("*", "*", hook)``) make every
+            # provider module that carries the hook implicitly in scope
+            # — collect the hook names here so the reverse test below
+            # accounts for them too.
+            if target.function_or_method:
+                cross_module_hooks.add(target.function_or_method)
+            continue
+        rel = (
+            target.module.split(".", 1)[1]
+            if target.module.startswith("kitty.")
+            else target.module
         )
+        path = repo_root / "src" / "kitty" / rel.replace(".", "/")
+        for candidate in (path.with_suffix(".py"), path):  # file or dir
+            if candidate.exists():
+                # Store repo-relative so the comparison below matches
+                # the walked paths' spelling.
+                registry_files.add(str(candidate.relative_to(repo_root)))
+                break
+
+    # Add hook-carrying provider files to the in-scope set, since
+    # cross-module rows make them implicitly in scope.
+    if cross_module_hooks:
+        hook_re = re.compile(
+            r"^    def ("
+            + "|".join(re.escape(h) for h in sorted(cross_module_hooks))
+            + r")\(",
+            re.MULTILINE,
+        )
+        providers_dir = repo_root / "src" / "kitty" / "providers"
+        if providers_dir.is_dir():
+            for path in providers_dir.glob("*.py"):
+                if hook_re.search(path.read_text()):
+                    registry_files.add(str(path.relative_to(repo_root)))
+
+    # Walk the repo and assert every matched .py file has a registry
+    # entry. Walk, rather than enumerate, because glob coverage can
+    # span whole directories (`kitty.profiles/*`).
+    for path in sorted(repo_root.glob("src/kitty/**/*.py")):
+        rel = str(path.relative_to(repo_root))
+        if any(fnmatch.fnmatch(rel, g) for g in globs):
+            assert rel in registry_files or any(
+                rel.startswith(f + "/") for f in registry_files
+            ), (
+                f"{rel} is matched by an `only_mutate` glob but no "
+                f"registry row names it — either the registry is "
+                f"missing an entry, or the glob list has grown wider "
+                f"than the registry's scope"
+            )
 
 
 # ── Falsification cases ─────────────────────────────────────────────────
