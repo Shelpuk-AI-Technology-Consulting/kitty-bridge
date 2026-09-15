@@ -3034,8 +3034,12 @@ policy in separate modules — continued one layer up. What it provides:
   the real resolver. It is ``getaddrinfo``, not an aiohttp ``Resolver`` instance, because
   ``_build_client_session`` builds its own ``TCPConnector`` with no injection point (§5.3). The
   default (no-``aiodns``) build selects ``ThreadedResolver`` as ``DefaultResolver``, which reaches
-  ``getaddrinfo`` in a worker thread; if ``aiodns`` is ever added, ``AsyncResolver`` is chosen
-  instead and this patch has no effect — pyproject pins no ``aiodns`` extra, so the seam holds
+  ``getaddrinfo`` in a worker thread; if ``aiodns`` ≥ 3.2 (the version whose ``DNSResolver``
+  exposes ``getaddrinfo``) ever becomes importable, ``AsyncResolver`` is chosen instead and this
+  patch has no effect. **KBR-259** pins that premise in code —
+  `test_containment.py::TestMonkeypatchedResolver::test_default_resolver_is_threaded` fails
+  loudly, naming ``AsyncResolver`` and ``aiodns``, the day the flip happens — so the seam no
+  longer rests on this prose alone. pyproject pins no ``aiodns`` extra, so the seam holds
   today. ``/etc/hosts`` stays out — no administrator rights on CI runners.
 - **The per-transport capability report** — `CapabilityReport`, an in-process singleton over the
   four §5.5 transports, every entry initialised ``not_attempted``; ``proven``, ``unsupported``
