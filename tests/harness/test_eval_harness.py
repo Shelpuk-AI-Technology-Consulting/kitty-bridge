@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import re
 from collections.abc import Callable
 from pathlib import Path
 
@@ -46,6 +45,7 @@ from harness.eval_harness import (
     run_eval,
     validate_arms,
 )
+from harness.test_contract import _KITTY_IMPORT
 
 # ── RunConfig — pinning (REQ 1) ──────────────────────────────────────────────
 
@@ -568,26 +568,17 @@ async def test_run_record_from_json_rejects_garbage() -> None:
 
 # ── Harness independence (REQ 9) ─────────────────────────────────────────────
 
-#: Matches ``from kitty...``, ``import kitty...``, ``from src.kitty...``,
-#: ``import_module("kitty...")``, ``__import__("kitty...")``. Same
-#: pattern as the failures-library guard (``tests/harness/test_failures.py``);
-#: keeping them as two separate test functions means a future maintainer
-#: who adds a kitty import to either module still trips its own guard,
-#: and deleting one does not silently weaken the other.
-_KITTY_IMPORT = re.compile(
-    r"^\s*(?:from|import)\s+(?:src\.)?kitty\b"
-    r"|import_module\(\s*[\"'](?:src\.)?kitty"
-    r"|__import__\(\s*[\"'](?:src\.)?kitty"
-)
-
 
 def test_the_eval_harness_imports_nothing_from_kitty() -> None:
     """REQ 9 — the eval harness module's source contains no kitty import.
 
     A library that did would prove self-consistency, not fidelity
-    (§3.3.1). The check reads the module's source and greps for the
-    same pattern as the failures-library guard; both static, both
-    independent, both layer-1 tests in this file's path-default.
+    (§3.3.1). The regex is imported from the canonical definition in
+    :mod:`harness.test_contract`, not redefined — the failures-library
+    guard (``tests/harness/test_failures.py``) imports the same
+    constant, so a future form added there extends both guards
+    together, and the canonical's own positive/negative control tests
+    pin the pattern against silent drift.
     """
     source = eval_harness.__file__
     assert source is not None, "eval_harness module has no source path"

@@ -28,10 +28,10 @@ import aiohttp
 import pytest
 
 from harness.bridge import (
-    BridgeFixture,
-    InboundProtocol,
     MODEL,
     AiohttpTransport,
+    BridgeFixture,
+    InboundProtocol,
     inbound_path,
     minimal_inbound_body,
 )
@@ -75,16 +75,18 @@ async def test_eval_harness_drives_one_task_through_both_arms_end_to_end() -> No
             return ModelReply(reply=text)
 
         async def direct_arm(task: TaskSpec, sample_index: int) -> ModelReply:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
+            async with (
+                aiohttp.ClientSession() as session,
+                session.post(
                     upstream_url,
                     json={
                         "model": MODEL,
                         "messages": [{"role": "user", "content": task.prompt}],
                         "max_tokens": 16,
                     },
-                ) as response:
-                    text = await response.text()
+                ) as response,
+            ):
+                text = await response.text()
             assert response.status == 200, f"direct arm: upstream returned {response.status}: {text[:200]}"
             return ModelReply(reply=text)
 
@@ -117,6 +119,27 @@ async def test_eval_harness_drives_one_task_through_both_arms_end_to_end() -> No
         # Both arms reached the same scripted upstream; both classify SUCCESS.
         assert all(trial.category is TrialCategory.SUCCESS for trial in record.trials)
         assert record.pass_rate_per_arm == {"kitty": 1.0, "direct": 1.0}
+
+        # Bridge-traversal composition: the kitty arm's capture carries
+        # the auth header the bridge injects; the direct arm's carries
+        # neither that nor ``anthropic-version``. This is the observable
+        # that says "the kitty arm traversed the bridge", not just
+        # "both arms happened to end up at the recorder" — the bridge
+        # is the only thing on the kitty arm's path that can add it.
+        # Arrival order matches the runner's grid order (kitty first).
+        assert len(transport.captures) == 2
+        kitty_capture, direct_capture = transport.captures
+        header_names = lambda capture: {name.lower() for name, _ in capture.headers}  # noqa: E731
+        assert "x-api-key" in header_names(kitty_capture), (
+            "the kitty arm's capture carries no bridge-injected auth header; "
+            "the bridge was not traversed"
+        )
+        assert "x-api-key" not in header_names(direct_capture), (
+            "the direct arm's capture carries a bridge-injected auth header; "
+            "the arms are not distinct"
+        )
+        assert "anthropic-version" in header_names(kitty_capture)
+        assert "anthropic-version" not in header_names(direct_capture)
 
         # The config digest carries every pinned setting.
         assert record.config["model_id"] == MODEL
