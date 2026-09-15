@@ -1783,10 +1783,16 @@ class TestBedrockWireContract:
                 # late" — is exactly what the contract must catch.
                 request.headers["User-Agent"] = b"planted_kitty/1.0"
 
-            # Botocore's ``register_first`` *prepends* to the head each call —
-            # registration order therefore matches execution order at the
-            # head.  The branding handler must run before the capture so the
-            # capture sees the planted UA, not botocore's.
+            # Botocore's ``HierarchicalEmitter`` orders handlers by *section*:
+            # ``register_first`` puts a handler in the ``_FIRST`` section,
+            # ``register`` in ``_MIDDLE``.  All ``_FIRST`` handlers run before
+            # any ``_MIDDLE`` handler, and within a section handlers run in
+            # *registration order* (the section uses append-on-add, not
+            # prepend).  Both handlers below are in ``_FIRST``, so the
+            # branding one — registered first — runs first, and the capture
+            # one sees the planted UA, not botocore's.  This is the opposite
+            # of the comment the first draft of this test carried, which
+            # conflated section priority with per-position ordering.
             client.meta.events.register_first("before-send.bedrock-runtime.Converse", branding_handler)
             client.meta.events.register_first("before-send.bedrock-runtime.Converse", capture._on_request)
             return client
