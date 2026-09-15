@@ -48,8 +48,9 @@ def _atexit_cleanup() -> None:
     keeps running; the ``finally`` block at ``launch_async`` is the path
     that runs when the child dies from the forwarded signal. SIGKILL cannot
     be caught — use ``kitty cleanup`` for that. A SIGTERM landing in the
-    pre-handler window between atexit registration (line 249) and handler
-    installation (line 308) kills kitty with no cleanup at all; that is a
+    pre-handler window between the ``_register_atexit_cleanup`` call and
+    the ``signal.signal(SIGTERM, _forward_signal)`` install (both inside
+    ``launch_async``) kills kitty with no cleanup at all; that is a
     known, accepted window, and ``kitty cleanup`` is the recovery.
     """
     for adapter, original, settings_path in _atexit_cleanup_state:

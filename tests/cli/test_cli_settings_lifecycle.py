@@ -78,14 +78,19 @@ _PRIMED_CACHE_BODY = b"{}"
 # the sandboxed PATH), records the session-file path for the parent's
 # readiness barrier, and exits with launch_async's mapped code. In the
 # ``probe_atexit`` mode it injects a failure at the seam between atexit
-# registration (launcher.py:249) and the try block (launcher.py:289) — the
-# call site of ``build_child_env`` (launcher.py:261) — so the registered
-# atexit handler is the only cleanup that can run.
+# registration (the ``_register_atexit_cleanup`` call in ``launch_async``)
+# and the try block — the call site of ``build_child_env`` — so the
+# registered atexit handler is the only cleanup that can run. The driver
+# also configures a sandbox log file via logging.basicConfig so that the
+# atexit path's ``atexit cleanup: restored`` INFO line is observable by the
+# parent (the bridge's crash excepthook swallows the traceback itself —
+# stderr stays empty — so the logger is the only oracle).
 _CHILD_DRIVER_SOURCE = '''
 """Child driver for the L3 settings-lifecycle scenarios (sandbox-only)."""
 
 import asyncio
 import json
+import logging
 import sys
 import uuid
 from pathlib import Path
@@ -147,6 +152,20 @@ def main():
     spec = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
     record_path = Path(spec["record_session_path"])
     probe_atexit = bool(spec.get("probe_atexit", False))
+    atexit_log_path = Path(spec["atexit_log"])
+
+    # Route the kitty loggers to a sandbox file BEFORE any kitty import can
+    # log. The bridge's crash excepthook writes its critical record through
+    # the ``kitty.bridge`` logger (root handler), and the atexit path's
+    # cleanup logs ``atexit cleanup: restored`` through
+    # ``kitty.cli.launcher`` — both propagate to the root handler this
+    # installs. force=True is required: kitty's imports may configure
+    # handlers first, and without it basicConfig is a silent no-op.
+    logging.basicConfig(
+        filename=str(atexit_log_path),
+        level=logging.INFO,
+        force=True,
+    )
 
     from kitty.credentials.file_backend import FileBackend
     from kitty.credentials.store import CredentialStore
@@ -170,9 +189,9 @@ def main():
     provider = _StubProvider()
 
     if probe_atexit:
-        # Inject at the seam between atexit registration (launcher.py:249)
-        # and the try block (launcher.py:289). build_child_env is the call
-        # site at launcher.py:261.
+        # Inject at the seam between the ``_register_atexit_cleanup`` call
+        # in ``launch_async`` and its try block. The build_child_env call
+        # is the seam: it runs after registration and before the try.
         import kitty.cli.launcher as launcher_mod
 
         def _raise(_cfg):
@@ -327,12 +346,25 @@ class _Sandbox:
         self.crash_backup = self.home / ".config" / "kitty" / "claude-settings-backup.json"
         self.cache_dir, self.config_dir = _platformdirs_paths_under(redirect)
         self.cache_file = self.cache_dir / "model_context_overrides.json"
+        # The child driver routes every log record — including the atexit
+        # path's lone ``atexit cleanup: restored`` INFO line — into this file
+        # via logging.basicConfig(filename=...). AC-5 reads it as the
+        # discriminator that proves the atexit handler ran, not the finally.
+        self.atexit_log = self.root / "atexit.log"
 
         # The sandbox must be disjoint from the developer's real world: if
         # any of these equalities ever hold, the tests below would assert on
-        # (and mutate) live user state.
+        # (and mutate) live user state. The config tree matters as much as
+        # home and cache: ProfileStore and FileBackend default to
+        # user_config_dir("kitty"), so a broken XDG_CONFIG_HOME redirect
+        # would otherwise silently write profiles.json and a credential into
+        # the developer's real config dir.
         assert self.home != Path.home(), "sandbox home must not be the real home"
         assert self.cache_dir != Path(user_cache_dir_probe()), "sandbox cache must not be the real cache"
+        assert self.config_dir != Path(user_config_dir_probe()), (
+            "sandbox config dir must not be the real config dir "
+            "(ProfileStore and FileBackend would otherwise seed the developer's real profile store)"
+        )
 
         self.stub_sentinel = self.root / "stub-ran.txt"
         self.session_record = self.root / "session-path.txt"
@@ -403,7 +435,20 @@ class _Sandbox:
         """
         if sys.platform == "win32":
             stub_path = self.bin_dir / "claude.cmd"
-            script = f'@echo off\r\ntype nul > "{self.stub_sentinel}"\r\nexit /b 0\r\n'
+            # ping with a count is the most portable blocking primitive on
+            # Windows; both sleep and signal scenarios use it. SIGKILL /
+            # SIGTERM via proc.kill() land as TerminateProcess, which kills
+            # either flavour identically on Windows.
+            sleep_line = (
+                'ping -n 999 127.0.0.1 >nul\r\n'
+                if mode == "sleep"
+                else "exit /b 0\r\n"
+            )
+            script = (
+                "@echo off\r\n"
+                f'type nul > "{self.stub_sentinel}"\r\n'
+                f"{sleep_line}"
+            )
             stub_path.write_text(script, encoding="utf-8", newline="")
             return
 
@@ -488,6 +533,20 @@ def user_cache_dir_probe() -> str:
     return user_cache_dir("kitty")
 
 
+def user_config_dir_probe() -> str:
+    """Return the real (unredirected) platformdirs config dir for kitty.
+
+    Sibling of :func:`user_cache_dir_probe`; covers ProfileStore and
+    FileBackend which resolve under ``user_config_dir(\"kitty\")``.
+
+    Returns:
+        The real user config directory for the ``kitty`` app.
+    """
+    from platformdirs import user_config_dir
+
+    return user_config_dir("kitty")
+
+
 def _write_child_driver(sandbox: _Sandbox, *, probe_atexit: bool) -> Path:
     """Write the child driver script and its task spec into the sandbox.
 
@@ -503,6 +562,7 @@ def _write_child_driver(sandbox: _Sandbox, *, probe_atexit: bool) -> Path:
     spec_path = sandbox.root / "child_spec.json"
     spec = {
         "record_session_path": str(sandbox.session_record),
+        "atexit_log": str(sandbox.atexit_log),
         "probe_atexit": probe_atexit,
     }
     spec_path.write_text(json.dumps(spec), encoding="utf-8")
@@ -730,11 +790,14 @@ def test_staged_kitty_state_is_restored_byte_exactly_from_backup(sandbox: _Sandb
 def test_atexit_path_cleans_up_when_the_try_block_is_never_entered(sandbox: _Sandbox) -> None:
     """A failure between atexit registration and the try block still cleans up.
 
-    ``launch_async`` registers the atexit handler at line 249 and enters its
-    ``try`` at line 289; the ``build_child_env`` call at line 261 sits in
-    between. The probe makes that call raise, so the interpreter unwinds
-    through an unhandled exception and the registered atexit handler is the
-    only cleanup that can run.
+    ``launch_async`` calls ``_register_atexit_cleanup`` and then enters its
+    ``try`` block; the ``build_child_env`` call sits in between. The probe
+    makes that call raise, so the interpreter unwinds through an unhandled
+    exception and the registered atexit handler is the only cleanup that
+    can run. The atexit discriminator reads the ``atexit cleanup: restored``
+    INFO line the handler emits — observable because the child driver
+    routes the kitty loggers to a sandbox file before any library import
+    can swallow them.
 
     Args:
         sandbox: The redirected sandbox.
@@ -744,11 +807,23 @@ def test_atexit_path_cleans_up_when_the_try_block_is_never_entered(sandbox: _San
     exit_code = _wait_for_exit(proc, sandbox)
 
     assert exit_code != 0, "the probe must fail the launch for atexit to be the only cleanup path"
-    # Discriminator: if a refactor moved the build_child_env call inside
-    # the try block, the except branch would print "Failed to launch '...'"
-    # to stderr and the atexit path would never run. The empty log of the
-    # genuine atexit path trivially satisfies "not in"; the except-branch
-    # mutant's stderr trip kills the test.
+    # Primary discriminator: the atexit handler is the *only* code path that
+    # emits ``atexit cleanup: restored``. If a refactor moved build_child_env
+    # inside the try block, the except branch would run cleanup_launch
+    # directly and _clear_atexit_cleanup would empty the state before atexit
+    # fired — the marker would not appear, the assertion would fail, and
+    # the test would stop vacuously green.
+    atexit_log_text = ""
+    if sandbox.atexit_log.exists():
+        atexit_log_text = sandbox.atexit_log.read_text(encoding="utf-8", errors="replace")
+    assert "atexit cleanup: restored" in atexit_log_text, (
+        f"the atexit path did not run — cleanup_launch was reached only via "
+        f"the finally branch. atexit's log was:\n{atexit_log_text}"
+    )
+    # Secondary discriminator: the except branch prints "Failed to launch
+    # '...'" to stderr when it catches an exception during spawn. The
+    # genuine atexit path's traceback goes through the logger (caught
+    # above) and not stderr, so stderr stays clean of this string.
     assert "Failed to launch" not in sandbox.child_log.read_text(
         encoding="utf-8", errors="replace"
     ), "the atexit path did not run — the build_child_env probe likely fired inside the try block"
