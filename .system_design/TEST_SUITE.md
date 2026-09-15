@@ -4056,8 +4056,9 @@ separately.)
   falsification is driven through the adapter rather than through the bridge.
 - **T-E1 (KBR-61):** `tests/harness/test_containment.py` drives a real `BridgeServer` against the
   sealed-network harness (`ConnectProxy` + recording upstream) in two cases — one green, one
-  falsification. The 21 unit cases run in **~1.4–2.1 s**, measured, of which the slowest is one
-  `sealed_network` setup at ~1.0–1.75 s (recorder + proxy + TLS certs). The falsification case
+  falsification. The other 22 cases run in **~1.0–1.8 s**, measured across five runs, of which
+  the slowest is one `sealed_network` setup (recorder + proxy + TLS certs); the range comes from
+  `openssl`-generated throwaway certs, whose cost varies with runner load. The falsification case
   (`test_drive_phase_1_with_a_broken_resolver_records_zero_connections`) takes **~30 s** because
   the bridge's outbound connect-retry ladder (`_EMPTY_RETRY_DELAYS = [5.0, 15.0]`,
   `server.py:924`) plus `stop_async` drain cost is the price of driving a real bridge against a
