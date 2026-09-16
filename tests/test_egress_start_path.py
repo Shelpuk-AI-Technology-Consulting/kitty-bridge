@@ -49,7 +49,7 @@ def start_path(monkeypatch: pytest.MonkeyPatch) -> dict:
     """Patch every collaborator ``bridge_runner.main`` reads so one test can drive it.
 
     The collaborators are: ``ProfileStore`` (line 102), ``CredentialStore`` (line 103),
-    ``BridgeServer`` (line 185), and ``asyncio.run`` (line 217) — the last replaced by a
+    ``BridgeServer`` (line 185), and ``asyncio.run`` (line 220) — the last replaced by a
     no-op so the test never tries to actually start the server. The fixture also pins
     process-wide egress and ``sys.argv`` so argparse reads a clean argv.
 
