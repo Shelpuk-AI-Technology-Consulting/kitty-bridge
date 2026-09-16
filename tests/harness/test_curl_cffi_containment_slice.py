@@ -126,6 +126,16 @@ _SKIP_REASON = (
     "Python <3.11: proxied §5.2.2 phases skip (KBR-63 scope decision; see module docstring)"
 )
 
+#: Canonical deny coverage — the host/port set every deny map (client-side
+#: and proxy-side) must cover. Hardcoded so the wiring assertion is
+#: independent of the constants under test (``_REAL_UPSTREAM_HOSTS`` on the
+#: client, ``_REAL_UPSTREAM_DENY_RESOLVE`` in :mod:`harness.containment`).
+#: Module-level so method bodies see them by bare name; class attributes
+#: would force ``self.`` to disambiguate. Used by
+#: :class:`TestDirectRouteBlocksRealEgress`'s phase-1 wiring assertion.
+_CANONICAL_DENY_HOSTS: tuple[str, ...] = ("chatgpt.com", "auth.openai.com")
+_CANONICAL_DENY_PORTS: tuple[int, ...] = (80, 443)
+
 # ── Fixtures ───────────────────────────────────────────────────────────────
 
 
@@ -596,6 +606,15 @@ class TestDirectRouteBlocksRealEgress:
     ``SealedNetwork``'s map (``_REAL_UPSTREAM_DENY_RESOLVE`` in
     :mod:`harness.containment`). Together: no plausible regression
     anywhere in the swap life-cycle can produce a real handshake.
+
+    The canonical deny coverage is hardcoded in this module as
+    module-level constants ``_CANONICAL_DENY_HOSTS`` / ``_CANONICAL_DENY_PORTS`` —
+    *not* derived from ``_REAL_UPSTREAM_HOSTS`` or ``_REAL_UPSTREAM_DENY_RESOLVE`` —
+    so the wiring assertion is not tautological: it cross-checks the
+    two deny sources against an independent source of truth. Coordinated
+    emptying of both deny maps is the regression the test exists to
+    catch; shortening only one is the catch on either half of the
+    cross-check.
     """
 
     async def test_phase1_direct_leg_with_forced_seam_miss_does_not_reach_real_upstream(
@@ -647,27 +666,35 @@ class TestDirectRouteBlocksRealEgress:
             f"recorder saw {len(result.captures)} capture(s): a real request reached the upstream"
         )
 
-        # Wiring assertion — see the docstring. Counts and loopback/blackhole
-        # suffixes only: no hostname literals (CodeQL's
-        # py/incomplete-url-substring-sanitization tracks those through any
-        # comparison with a URL-derived value).
-        entries = transport._last_resolver_entries
-        loopback = [e for e in entries if e.endswith(":127.0.0.1")]
-        blackholed = [e for e in entries if e.endswith(":127.0.0.2")]
-        expected_denies = 2 * len(CurlCffiContainment._REAL_UPSTREAM_HOSTS)
-        assert len(loopback) == 1, (
-            f"expected exactly 1 harness resolve entry, got {loopback!r}: the "
-            "harness-hostname mapping is missing from direct_route"
+        # Wiring assertion — see the docstring. The canonical deny coverage
+        # below is hardcoded in the test (not derived from the constant
+        # under test — the round-10 review caught this as tautological
+        # because the test's only job is to police that constant), and
+        # BOTH the client-side (``direct_route`` snapshot) and the
+        # proxy-side (``harness.containment._REAL_UPSTREAM_DENY_RESOLVE``)
+        # deny maps must equal it. Coordinated emptying fails BOTH
+        # cross-checks; emptying one side fails the half that empties.
+        from harness import containment as _hc
+
+        observed_client_pairs: set[str] = {
+            e.rsplit(":", 1)[0]
+            for e in transport._last_resolver_entries
+            if e.endswith(":127.0.0.2")
+        }
+        expected_pairs: set[str] = {
+            f"{host}:{port}" for host in _CANONICAL_DENY_HOSTS for port in _CANONICAL_DENY_PORTS
+        }
+        assert observed_client_pairs == expected_pairs, (
+            f"client-side deny map drift: the resolve entries cover "
+            f"{observed_client_pairs!r}, expected {expected_pairs!r} "
+            "(see TestDirectRouteBlocksRealEgress._CANONICAL_DENY_HOSTS / _PORTS). "
+            "Emptying or shortening _REAL_UPSTREAM_HOSTS reopens the "
+            "phase-1 real-egress window."
         )
-        assert len(blackholed) == expected_denies, (
-            f"expected {expected_denies} blackhole deny entries "
-            f"(2 ports x {len(CurlCffiContainment._REAL_UPSTREAM_HOSTS)} hosts), got "
-            f"{len(blackholed)}: the deny map was emptied or shortened — the "
-            "phase-1 real-egress window this test exists to close is open again"
-        )
-        assert len(entries) == 1 + expected_denies, (
-            f"unexpected resolve entries in {entries!r}: direct_route injected "
-            "something beyond the harness mapping and the deny map"
+        assert set(_hc._REAL_UPSTREAM_DENY_RESOLVE) == expected_pairs, (
+            "proxy-side deny map drift: the deny map in harness.containment "
+            "must cover the same canonical deny pairs the client does; "
+            "otherwise the phase-2b test stops being a real-egress cross-check."
         )
 
     @pytest.mark.skipif(_NEEDS_311, reason=_SKIP_REASON)
