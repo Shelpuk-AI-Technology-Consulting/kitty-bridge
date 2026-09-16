@@ -105,6 +105,27 @@ __all__ = [
 #: the recorder's reply shape so the bridge parses a non-empty success.
 _DEFAULT_FORMAT = WireFormat.ANTHROPIC_MESSAGES
 
+#: CONNECT targets the harness proxy refuses to resolve to the real
+#: network. ``ConnectProxy.handle`` falls back to the system resolver for
+#: any target not in its ``resolve`` map (``connect_proxy.py:570``), so a
+#: silently-missed upstream swap (the curl slice's ``_CODEX_BACKEND_URL``
+#: seam, say) could tunnel to the real upstream through the *proxy's*
+#: outbound leg — the client's own deny entries cannot see that hop. The
+#: proxy's map is where the deny belongs. ``127.0.0.2`` is an RFC-5735
+#: blackhole: ``asyncio.open_connection`` reaches a closed loopback port
+#: and the CONNECT answers 502 with the attempt still on the record
+#: (source port ``None``) — the swap-live check then fails the phase with
+#: no real egress incurred.
+#: T-E5's OAuth-leg seam rewrites the token URL to the harness hostname
+#: *before* the request, so a swapped drive targets the harness name and
+#: these entries stay inert for it; only the missed-swap shape bites.
+_REAL_UPSTREAM_DENY_RESOLVE: dict[str, tuple[str, int]] = {
+    "chatgpt.com:80": ("127.0.0.2", 80),
+    "chatgpt.com:443": ("127.0.0.2", 443),
+    "auth.openai.com:80": ("127.0.0.2", 80),
+    "auth.openai.com:443": ("127.0.0.2", 443),
+}
+
 #: A budget for one ``drive_*`` request. The green path (resolver mapped to the
 #: recorder's port) completes well under a second; the falsification path
 #: (closed port) sees the bridge answer a 5xx quickly too. Ten seconds is the
@@ -490,7 +511,16 @@ class SealedNetwork:
         try:
             # Proxy second, with the resolve map keyed on the recorder's port.
             target = f"{HARNESS_UPSTREAM_HOST}:{self._recorder.port}"
-            proxy = ConnectProxy(resolve={target: ("127.0.0.1", self._recorder.port)})
+            # Combine the harness entry with the deny entries *under* the
+            # harness entry: ``ConnectProxy`` looks up by ``target`` (host:port
+            # string) and a literal ``upstream.kitty-test.invalid:{port}`` would
+            # never collide with a real upstream hostname, but the deny
+            # entries make a silently-missed swap unable to resolve the real
+            # upstream to a reachable address on the proxy's leg too —
+            # belt-and-braces alongside the curl slice's client-side deny.
+            resolve_map = dict(_REAL_UPSTREAM_DENY_RESOLVE)
+            resolve_map[target] = ("127.0.0.1", self._recorder.port)
+            proxy = ConnectProxy(resolve=resolve_map)
             await proxy.start(server_ssl_context(self._certs.proxy_cert, self._certs.proxy_key))
         except BaseException:
             await recorder.stop()

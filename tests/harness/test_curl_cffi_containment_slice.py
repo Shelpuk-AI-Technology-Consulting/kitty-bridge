@@ -566,34 +566,30 @@ class TestHarnessCodexUrlSeam:
 class TestDirectRouteBlocksRealEgress:
     """A silently-missed ``_CODEX_BACKEND_URL`` swap cannot reach the real upstream.
 
-    ``direct_route`` injects deny entries for ``chatgpt.com`` and
-    ``auth.openai.com`` pointing at ``127.0.0.2`` — the harness never
-    has a path to the real upstream, even if a future product refactor
-    captures ``_CODEX_BACKEND_URL`` at import time, adds a new
-    upstream URL under a different name, or otherwise misses the seam.
-    The integration test forces the seam to miss by replacing it with
-    a no-op and asserts the resulting drive does not reach the real
-    network — ``status != 200``, ``connections == []``, ``captures == []``.
+    Belt-and-braces: ``direct_route`` injects deny entries for
+    ``chatgpt.com`` and ``auth.openai.com`` pointing at ``127.0.0.2``
+    (the **client-side** deny for phase 1 — curl resolves the real
+    hostname to a closed loopback port). On phase 2b the *client*
+    never talks to the real host; the **harness proxy** is the egress
+    path, and ``ConnectProxy`` falls back to system DNS for any target
+    not in its ``resolve`` map — so the deny also lives in
+    ``SealedNetwork``'s map (``_REAL_UPSTREAM_DENY_RESOLVE`` in
+    :mod:`harness.containment`). Together: no plausible regression
+    anywhere in the swap life-cycle can produce a real handshake.
     """
 
-    async def test_a_forced_seam_miss_does_not_reach_the_real_upstream(
+    async def test_phase1_direct_leg_with_forced_seam_miss_does_not_reach_real_upstream(
         self,
         sealed_network: SealedNetwork,
         curl_trusts_test_ca: None,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        """Phase 1 (direct): client-side deny bites; recorder sees nothing."""
         import contextlib as _cl
 
         import harness.test_curl_cffi_containment_slice as _this_module
 
-        # Replace the upstream seam with a no-op so the adapter posts to
-        # the real upstream. The deny entries in ``direct_route`` must keep
-        # the request from reaching it — curl resolves ``chatgpt.com`` to
-        # ``127.0.0.2`` (no listener), the connection fails with
-        # ``ECONNREFUSED``, and the recorder sees nothing. Patched on the
-        # loaded module object (the ``tests.``-prefixed dotted form would
-        # re-import the module and double-register the transport).
         monkeypatch.setattr(
             _this_module,
             "harness_codex_url",
@@ -609,8 +605,8 @@ class TestDirectRouteBlocksRealEgress:
         result = await _drive().drive_phase_1(sealed_network, monkeypatch=monkeypatch, tmp_path=tmp_path)
 
         assert result.status != 200, (
-            f"bridge answered {result.status}: a forced seam miss should not reach a "
-            "real upstream — the deny entries in direct_route are not biting"
+            "bridge answered " + str(result.status) + ": a forced seam miss should not "
+            "reach a real upstream — the client-side deny entries are not biting"
         )
         assert result.connections == [], (
             f"recorder accepted {len(result.connections)} connection(s): a real TLS "
@@ -618,6 +614,75 @@ class TestDirectRouteBlocksRealEgress:
         )
         assert result.captures == [], (
             f"recorder saw {len(result.captures)} capture(s): a real request reached the upstream"
+        )
+
+    @pytest.mark.skipif(_NEEDS_311, reason=_SKIP_REASON)
+    async def test_phase2b_proxied_leg_with_forced_seam_miss_does_not_reach_real_upstream(
+        self,
+        sealed_network: SealedNetwork,
+        curl_trusts_test_ca: None,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Phase 2b (proxied): client-side deny is irrelevant; the proxy's deny bites.
+
+        On a CONNECT through the harness proxy whose target is **not** the
+        harness hostname (i.e., the seam missed and the adapter requested
+        ``chatgpt.com:443``), ``ConnectProxy`` looks up the target in its
+        resolve map. A miss falls back to ``asyncio.open_connection(host,
+        port)`` which resolves via system DNS — the deny entries in
+        :mod:`harness.containment` map ``chatgpt.com:443 → 127.0.0.2``
+        so the proxy resolves the real hostname to a closed loopback port
+        and answers 502. No real handshake occurs from the CI runner; the
+        attempt is on the record with ``source_port is None`` (a refused
+        authenticate-or-resolve).
+        """
+        import contextlib as _cl
+
+        import harness.test_curl_cffi_containment_slice as _this_module
+
+        monkeypatch.setattr(
+            _this_module,
+            "harness_codex_url",
+            lambda harness: _cl.nullcontext("https://chatgpt.com/backend-api/codex/responses"),
+        )
+        monkeypatch.setattr(
+            openai_subscription,
+            "_CODEX_BACKEND_URL",
+            "https://chatgpt.com/backend-api/codex/responses",
+            raising=False,
+        )
+
+        result = await _drive().drive_with_egress(
+            sealed_network,
+            egress=_egress_for(sealed_network),
+            monkeypatch=monkeypatch,
+            tmp_path=tmp_path,
+        )
+
+        assert result.status != 200, (
+            "bridge answered " + str(result.status) + ": a forced seam miss on phase 2b "
+            "should not reach the real upstream — the proxy-side deny entries are not biting"
+        )
+        assert result.connections == [], (
+            f"recorder accepted {len(result.connections)} connection(s): the proxy "
+            "established a tunnel to the real upstream — deny entries in the proxy's "
+            "resolve map did not fire"
+        )
+        assert result.captures == [], (
+            f"recorder saw {len(result.captures)} capture(s): a real request reached the upstream"
+        )
+        assert len(result.attempts) >= 1, (
+            "the proxy should have observed at least one CONNECT attempt before refusing"
+        )
+        for attempt in result.attempts:
+            assert attempt.source_port is None, (
+                f"attempt {attempt!r} carries a tunnel source port: a tunnel was "
+                "established through the proxy to {attempt.target!r}"
+            )
+        assert any("chatgpt.com" in a.target for a in result.attempts), (
+            "no CONNECT to chatgpt.com was recorded: the seam-miss patch did not "
+            "actually route the request to the real upstream"
         )
 
 
