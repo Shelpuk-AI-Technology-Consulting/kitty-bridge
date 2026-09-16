@@ -59,6 +59,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import socket
+import ssl
 import uuid
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
@@ -394,6 +395,7 @@ class SealedNetwork:
         fmt: WireFormat = _DEFAULT_FORMAT,
         *,
         certs: CertFiles,
+        recorder_factory: Callable[[ssl.SSLContext], RecordingUpstream] | None = None,
     ) -> None:
         """Store the components without starting them.
 
@@ -403,7 +405,10 @@ class SealedNetwork:
                 not enter the adapter's choice. It controls the recorder's
                 ``default_format`` so the recorder's reply matches the
                 inbound protocol. The default — Anthropic Messages — is the
-                one the fixture suite exercises end to end.
+                one the fixture suite exercises end to end. **Not applied
+                when a ``recorder_factory`` is supplied** — the factory owns
+                the served format (T-E3..T-E5 each pick the format their
+                recorder speaks).
             certs: The session's throwaway TLS certificates. Both the proxy
                 (``proxy_cert``/``proxy_key``) and the recorder
                 (``target_cert``/``target_key``, already carrying
@@ -414,9 +419,23 @@ class SealedNetwork:
                 here rather than from a pytest fixture because the harness is
                 not a fixture itself — a test asks for ``SealedNetwork``
                 explicitly.
+            recorder_factory: Optional callable the T-E3..T-E5 slices use to
+                host a non-default recorder (e.g. ``CurlRecordingUpstream``,
+                which takes its ``ssl_context`` at construction rather than
+                at ``start()`` — the two start shapes are incompatible, so a
+                ``RecordingUpstream`` and a custom recorder cannot be
+                constructed by the same call). The factory receives the
+                **ready** ``SSLContext`` SealedNetwork builds from the
+                target cert/key (cert ownership stays here — the leaf cert
+                carries ``HARNESS_UPSTREAM_HOST`` in its SAN) and returns a
+                fully constructed recorder; ``SealedNetwork.start`` then
+                calls ``await recorder.start()`` with no arguments.
+                ``fmt`` is not applied when a factory is supplied (the
+                factory owns the served format).
         """
         self._fmt = fmt
         self._certs = certs
+        self._recorder_factory = recorder_factory
         self._proxy: ConnectProxy | None = None
         self._recorder: RecordingUpstream | None = None
 
@@ -456,10 +475,16 @@ class SealedNetwork:
         # so the same key material services both the probe tests' TLS target
         # and the containment harness' TLS recorder without a second
         # generation pass.
-        recorder = RecordingUpstream(default_format=self._fmt)
-        await recorder.start(
-            ssl_context=server_ssl_context(self._certs.target_cert, self._certs.target_key)
-        )
+        target_ctx = server_ssl_context(self._certs.target_cert, self._certs.target_key)
+        if self._recorder_factory is not None:
+            # The factory owns the recorder class and binds the context at
+            # construction (CurlRecordingUpstream's shape); start() takes no
+            # arguments for such a recorder.
+            recorder = self._recorder_factory(target_ctx)
+            await recorder.start()
+        else:
+            recorder = RecordingUpstream(default_format=self._fmt)
+            await recorder.start(ssl_context=target_ctx)
         self._recorder = recorder
 
         try:

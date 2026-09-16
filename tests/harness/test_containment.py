@@ -422,6 +422,119 @@ class TestSealedNetwork:
         with pytest.raises(RuntimeError, match="not running"):
             _ = started[0].port
 
+    async def test_factory_receives_a_real_ssl_context_and_starts_without_a_kwarg(
+        self, certs: CertFiles
+    ) -> None:
+        """A factory-built recorder is started with no ``ssl_context`` argument.
+
+        ``CurlRecordingUpstream`` takes ``ssl_context`` at construction and its
+        ``start()`` takes no arguments; ``RecordingUpstream`` takes the context
+        at ``start()``. The factory contract hands the factory the **ready**
+        ``SSLContext`` so the leaf-cert wiring stays in one place, and
+        ``SealedNetwork.start`` calls ``await recorder.start()`` for a
+        factory-built recorder (no ``ssl_context=`` kwarg) so neither shape
+        breaks. The cert source is verified by the existing
+        ``test_starts_a_proxy_and_a_recorder_sharing_one_resolved_name``
+        (resolve map → target cert/key); here we assert the contract shape —
+        factory called with an ``SSLContext``, recorder started with no
+        ``ssl_context`` kwarg, and the recorder on the harness is the
+        factory's own.
+        """
+        from harness.connect_proxy import server_ssl_context
+
+        server_ctx = server_ssl_context(certs.target_cert, certs.target_key)
+        seen_ctx: list[ssl.SSLContext] = []
+        seen_args: list[dict[str, object]] = []
+        built_recorder: list[RecordingUpstream] = []
+
+        class _FactoryRecorder(RecordingUpstream):
+            def __init__(self, ssl_context: ssl.SSLContext, **kwargs: object) -> None:
+                super().__init__(default_format=WireFormat.OPENAI_RESPONSES)
+                self._ssl_context = ssl_context
+
+            def __post_init__(self) -> None:
+                # Bypass the base recorder's format allow-list — irrelevant
+                # to the factory contract this test asserts.
+                ...  # noqa: PIE790
+
+            async def start(self, *args: object, **kwargs: object) -> None:
+                seen_args.append(kwargs)
+                await RecordingUpstream.start(self, ssl_context=self._ssl_context)
+
+        def _factory(ctx: ssl.SSLContext) -> _FactoryRecorder:
+            seen_ctx.append(ctx)
+            rec = _FactoryRecorder(ctx)
+            built_recorder.append(rec)
+            return rec
+
+        net = SealedNetwork(
+            WireFormat.ANTHROPIC_MESSAGES,
+            certs=certs,
+            recorder_factory=_factory,  # type: ignore[arg-type]
+        )
+        await net.start()
+        try:
+            assert len(seen_ctx) == 1, "the factory was not invoked exactly once"
+            assert isinstance(seen_ctx[0], ssl.SSLContext), (
+                f"factory received {type(seen_ctx[0]).__name__}, not an ssl.SSLContext"
+            )
+            assert len(seen_args) == 1, "the factory's recorder was never started"
+            assert "ssl_context" not in seen_args[0], (
+                f"factory-built recorder's start() received ssl_context kwarg "
+                f"({seen_args[0]!r}); CurlRecordingUpstream.start() takes no arguments"
+                " — the factory binds the context at construction"
+            )
+            assert built_recorder, "no recorder was built by the factory"
+            assert net.recorder is built_recorder[0], (
+                "SealedNetwork's recorder is not the factory-built instance: cert/ctx "
+                "ownership must flow through the factory, not be re-constructed"
+            )
+            # Sanity: the context is the same target-cert context type (server-side
+            # SSL context). Verified by reconstructing with the same key material —
+            # the new object differs by identity, but the structure is what
+            # ``server_ssl_context`` produces.
+            _ = server_ctx  # The contract above is what binds the cert; recording the
+                            # constructed object here would require a spy on
+                            # ``server_ssl_context`` — excessive for what this test
+                            # asserts (the contract shape, not the cert identity).
+        finally:
+            await net.stop()
+
+    async def test_factory_owns_the_served_format(self, certs: CertFiles) -> None:
+        """When a factory is given, ``fmt`` on the constructor is ignored.
+
+        The factory is the T-E3/T-E4/T-E5 extension point and decides which
+        wire format the recorder serves (the curl_cffi slice needs
+        ``OPENAI_RESPONSES``; the botocore slice needs its own). Passing a
+        different ``fmt`` to ``SealedNetwork`` should not override the
+        factory's choice — the test asserts the recorder ends up with the
+        factory's format.
+        """
+        class _FormatRecorder(RecordingUpstream):
+            def __init__(self, ssl_context: ssl.SSLContext, **kwargs: object) -> None:
+                super().__init__(default_format=WireFormat.OPENAI_RESPONSES)
+
+            def __post_init__(self) -> None:
+                # Same allow-list bypass as in the factory-contract test above: the
+                # harness factory is format-agnostic and this test asserts ownership,
+                # not the validity of a specific format under the base recorder's
+                # product-level invariant.
+                ...  # noqa: PIE790 — intentional no-op stub
+
+        net = SealedNetwork(
+            WireFormat.ANTHROPIC_MESSAGES,  # deliberately not the factory's format
+            certs=certs,
+            recorder_factory=lambda ctx: _FormatRecorder(ctx),  # type: ignore[arg-type, return-value]
+        )
+        await net.start()
+        try:
+            assert net.recorder.default_format is WireFormat.OPENAI_RESPONSES, (
+                "factory-built recorder did not own the served format: the factory's "
+                "default_format was overridden by the SealedNetwork fmt argument"
+            )
+        finally:
+            await net.stop()
+
 
 # ── R4: the containment transport extension interface ──────────────────────
 
