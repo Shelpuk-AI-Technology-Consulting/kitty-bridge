@@ -253,6 +253,29 @@ class Trigger(Enum):
     # PROFILE per KBR-186's classification.
     NON_ENTRA_CREDENTIAL = ("non_entra_credential", ArrangingBy.PROFILE)
     CHATGPT_ACCOUNT_ID_PRESENT = ("chatgpt_account_id_present", ArrangingBy.PROFILE)
+    # KBR-214 / KBR-184 (G33). Decided by the CC body's ``tool_choice`` value
+    # and the presence of ``tools``: met when tools exist and the choice is
+    # absent, ``none``, or any value except ``required`` and the named function
+    # form (the two KBR-214 maps onto Converse ``any`` / ``tool``). REQUEST.
+    BEDROCK_FORCES_AUTO_TOOL_CHOICE = (
+        "bedrock_forces_auto_tool_choice",
+        ArrangingBy.REQUEST,
+    )
+    # KBR-214 / KBR-184 (G34). Met when the inbound Anthropic body carries
+    # ``disable_parallel_tool_use: false``; the flag is mapped only when
+    # ``true`` (D2), so an explicit ``false`` is omitted. REQUEST.
+    ANTHROPIC_PARALLEL_FALSE_OMITTED = (
+        "anthropic_parallel_false_omitted",
+        ArrangingBy.REQUEST,
+    )
+    # KBR-214 / KBR-184 (G35). Met when the inbound Anthropic body carries a
+    # ``tool_choice`` that KBR-214 D9/D10 omits: a choice over no tools, or
+    # a forced call to an Anthropic-defined tool (declared ``type`` other
+    # than absent / ``null`` / ``"custom"``). REQUEST.
+    TOOL_CHOICE_OMITTED_AS_LEGAL_BUT_UNSUPPORTED = (
+        "tool_choice_omitted_as_legal_but_unsupported",
+        ArrangingBy.REQUEST,
+    )
 
 
 #: Docstrings on the two adapter-dispatch triggers — the asymmetry is
@@ -376,6 +399,8 @@ def row_shape_problems(row: MutationRow) -> tuple[str, ...]:
 _SERVER = "kitty/bridge/server.py"
 _BASE = "kitty/providers/base.py"
 _SUBSCRIPTION = "kitty/providers/openai_subscription.py"
+_OLLAMA_CLOUD = "kitty/providers/ollama_cloud.py"
+_BEDROCK = "kitty/providers/bedrock.py"
 
 _ALWAYS = Trigger.ALWAYS
 
@@ -416,6 +441,38 @@ _CODEX_DROPPED_CONTROL_FIELDS: tuple[str, ...] = (
     "text",
     "truncation",
     "user",
+)
+
+#: KBR-184 / P24 — the CC-origin twin of `_CODEX_DROPPED_CONTROL_FIELDS`. The
+#: Chat Completions reader's `_PUBLISHED_EXTRA_KEYS` (T-A2 / KBR-34, retrieved
+#: 2026-09-14 from `openai/openai-openapi` master) intersected with the
+#: dropped set: every published top-level CC control field except `store`
+#: (which `_cc_to_responses` rewrites to `False`, not drops — P17's territory)
+#: and `parallel_tool_calls` (G36 / KBR-205 moved it to a canonical knob
+#: address, and KBR-214 began carrying it on this route). 14 - 1 = 13 keys.
+#:
+#: Three keys the ticket listed (`prompt_cache_key`, `prompt_cache_retention`,
+#: `safety_identifier`) are not in T-A2's CC-surface extra table — the reader
+#: residualises them, which §3.3.2 names as a "named, honest failure" rather
+#: than an unclaimed delta, so no row is owed for them.
+#:
+#: The derivation guard `TestP24ClaimsTheDroppedNonSamplingControlFields`
+#: recomputes this set from the AST; widening the reader table or the builder
+#: literal both turn the row red.
+_CC_DROPPED_CONTROL_FIELDS: tuple[str, ...] = (
+    "audio",
+    "function_call",
+    "functions",
+    "metadata",
+    "modalities",
+    "moderation",
+    "prediction",
+    "prompt_cache_options",
+    "reasoning_effort",
+    "service_tier",
+    "user",
+    "verbosity",
+    "web_search_options",
 )
 
 # --------------------------------------------------------------------------
@@ -803,6 +860,34 @@ _BRIDGE_ROWS: tuple[MutationRow, ...] = (
         paths=(c.part_path(c.WILDCARD, c.WILDCARD, "display_name"),),
         conditional=False,
         design_ref="§3.2.1 · §3.3.1a",
+    ),
+    MutationRow(
+        id="M26",
+        # KBR-184 (G31). The Messages→CC carry mints Anthropic ``metadata`` on
+        # the internal key ``_metadata`` (so the Anthropic family can restore
+        # it); the other seventeen routes omit it because Chat Completions' own
+        # ``metadata`` is a stored-completions tag map and a bare mapping would
+        # either put a new field on every request to sixteen third-party
+        # providers or reject every turn (product owner's decision, 2026-09-13).
+        # The eighteenth route, ``openai_subscription``, also drops it: G26 /
+        # P24 claims that one at the provider level.
+        #
+        # ⚠️ The CC reader (T-A2 / KBR-34) projects CC's own ``metadata`` onto
+        # ``envelope.extra[metadata]`` — the **same** address this row claims.
+        # A reader or oracle that conflated the two meanings would mis-classify
+        # any future corpus entry: the Anthropic user-id object and the CC tag
+        # map are different fields. ``envelope.extra`` is keyed by wire key
+        # (§3.3.1b), so the address is shared and the meanings are not.
+        #
+        # Site = the policy point: ``carry_tool_choice_and_metadata`` mints the
+        # internal key; the restore is per-adapter. The 17-route omission is
+        # the bridge's design decision and is named once here rather than as 17
+        # per-adapter rows (the same shape as G28's parallel ``top_k`` gap).
+        site=("kitty/bridge/messages/translator.py:carry_tool_choice_and_metadata",),
+        trigger=_ALWAYS,
+        paths=(c.extra_path("metadata"),),
+        conditional=False,
+        design_ref="§3.2.1 · §3.3.1b · §9.2 G31",
     ),
 )
 
@@ -1459,6 +1544,148 @@ _PROVIDER_ROWS: tuple[MutationRow, ...] = (
         paths=(c.tool_path(c.WILDCARD, "cache_control"),),
         conditional=False,
         design_ref="§3.2.2 · §3.3.1 · §3.3.1a · §9.2 G37",
+    ),
+    MutationRow(
+        id="P24",
+        site=(f"{_SUBSCRIPTION}:OpenAISubscriptionAdapter._cc_to_responses",),
+        trigger=Trigger.CC_ORIGIN_PATH,
+        # KBR-184 (G26). P13's CC-origin twin for the **non-sampling** half:
+        # ``_cc_to_responses`` builds the Responses body from scratch and ships
+        # ``model``, ``messages``→``input``, ``stream``, ``store``, ``tools``,
+        # ``tool_choice``, ``parallel_tool_calls`` and an injected ``reasoning``.
+        # Every other declared Chat Completions control field (T-A2's
+        # ``_PUBLISHED_EXTRA_KEYS``) is dropped. P13 is anchored at the bare
+        # ``conversation.sampling`` and reaches none of these, so T-D5 would
+        # report a false I1 breach on the CC-origin route exactly as it would
+        # have on the Responses-origin one.
+        #
+        # ⚠️ Enumerated, NOT anchored at a bare ``envelope.extra`` — the bare
+        # form matches and would over-claim ``extra[reasoning]`` (P22),
+        # ``extra[store]`` (P17 rewrites it), and ``extra[parallel_tool_calls]``
+        # (G36 / KBR-205 unified the knob address, and ``_cc_to_responses``
+        # carries the field since KBR-214). The ``_CC_DROPPED_CONTROL_FIELDS``
+        # constant is the reader's ``_PUBLISHED_EXTRA_KEYS`` minus what the
+        # builder carries; the derivation guard
+        # ``TestP24ClaimsTheDroppedNonSamplingControlFields`` recomputes it from
+        # the AST, so widening the reader table or the builder literal both
+        # turn the row red.
+        #
+        # The 13 keys are the reader's table minus the builder's carries,
+        # which is ``_PUBLISHED_EXTRA_KEYS − {store}`` today (store is rewritten
+        # to ``False``, not dropped — P17's territory).
+        paths=tuple(c.extra_path(key) for key in _CC_DROPPED_CONTROL_FIELDS),
+        conditional=False,
+        design_ref="§3.2.2 · §3.3.1a · §3.3.1b · §9.2 G26",
+    ),
+    MutationRow(
+        id="P31",
+        # KBR-184 (G32). Ollama ``/api/chat`` defines neither a tool choice
+        # nor a parallel-tool-use knob, so ``OllamaCloudAdapter.translate_to_upstream``
+        # writes neither. Each is an unclaimed ``envelope.extra[...]`` delta
+        # on the ``ollama_cloud`` route — the same class as G26 / P13 / P23.
+        #
+        # ⚠️ ``paths`` must be true of every site (P9e/P9f rule), so this row
+        # names only ``ollama_cloud`` — the bedrock parallel-knob twin gets
+        # its own row (P32). The shared knob address
+        # ``envelope.extra[parallel_tool_calls]`` is the G36 / KBR-205
+        # canonical form; P31 does not need a parallel-knob reader side to
+        # ship the wire key.
+        site=(f"{_OLLAMA_CLOUD}:OllamaCloudAdapter.translate_to_upstream",),
+        trigger=_ALWAYS,
+        paths=(c.extra_path("tool_choice"), c.extra_path("parallel_tool_calls")),
+        conditional=False,
+        design_ref="§3.2.2 · §3.3.1b · §9.2 G32",
+    ),
+    MutationRow(
+        id="P32",
+        # KBR-184 (G32). Bedrock Converse's ``ToolConfiguration`` has no
+        # parallel-tool-use knob (botocore ``bedrock-runtime``), so the
+        # bedrock hook writes no ``parallelToolCalls``. The G36 / KBR-205
+        # canonical knob address (``envelope.extra[parallel_tool_calls]``) is
+        # unclaimed on this route without this row. Site is
+        # ``translate_to_upstream`` rather than the boto3 transport because
+        # that is where the hook-level decision to omit the field lives (the
+        # transport mutates ``modelId`` / ``stream``, P18).
+        site=(f"{_BEDROCK}:BedrockAdapter.translate_to_upstream",),
+        trigger=_ALWAYS,
+        paths=(c.extra_path("parallel_tool_calls"),),
+        conditional=False,
+        design_ref="§3.2.2 · §3.3.1b · §9.2 G32",
+    ),
+    MutationRow(
+        id="P33",
+        # KBR-184 (G33). ``BedrockAdapter.translate_to_upstream`` has always
+        # written ``toolChoice: {"auto": {}}`` whenever tools are present;
+        # KBR-214 maps only ``required`` and the named form onto Converse
+        # ``any`` / ``tool``. Converse's ``ToolChoice`` union has no ``none``,
+        # and dropping ``toolConfig`` is unavailable once a transcript carries
+        # ``toolUse`` / ``toolResult`` (``toolConfig must be defined...``).
+        # The rewrite is conditional on the value: any CC choice that isn't
+        # ``required`` and isn't a named choice to an ordinary tool is
+        # rewritten to ``auto``.
+        #
+        # Shares ``envelope.extra[tool_choice]`` with P35; the two are
+        # distinguishable by site (the P3/P4 precedent
+        # ``test_no_two_rows_are_indistinguishable`` explicitly allows it).
+        # Both are conditional, so the two rows cannot disagree about
+        # whether the address owes a complement. The trigger case and §3.3.2
+        # assertion-2 complement arrive with the T-D5 corpus entries, as for
+        # P22 / P25.
+        site=(f"{_BEDROCK}:BedrockAdapter.translate_to_upstream",),
+        trigger=Trigger.BEDROCK_FORCES_AUTO_TOOL_CHOICE,
+        paths=(c.extra_path("tool_choice"),),
+        conditional=True,
+        design_ref="§3.2.2 · §3.3.1b · §9.2 G33",
+    ),
+    MutationRow(
+        id="P34",
+        # KBR-184 (G34). KBR-214 maps ``disable_parallel_tool_use: true`` onto
+        # ``parallel_tool_calls: false``; ``false`` is omitted because it is
+        # the default on both Anthropic and Chat Completions, and writing it
+        # would add a second field some providers reject (D2). The Anthropic
+        # reader can nonetheless tell them apart, so an explicit ``false``
+        # is a delta — the omission is **correct** and must not be "fixed" by
+        # forwarding it, G29's exact shape.
+        #
+        # Conditional on the value: trigger met when the inbound Anthropic
+        # body carries ``disable_parallel_tool_use: false``. The address
+        # ``envelope.extra[parallel_tool_calls]`` exists as of KBR-205
+        # (§3.3.1b); the row registers the omission now, with the trigger
+        # case + §3.3.2 complement (a body where the flag is ``true`` and
+        # carried) arriving with the T-D5 corpus, as for P25.
+        site=("kitty/bridge/messages/translator.py:carry_tool_choice_and_metadata",),
+        trigger=Trigger.ANTHROPIC_PARALLEL_FALSE_OMITTED,
+        paths=(c.extra_path("parallel_tool_calls"),),
+        conditional=True,
+        design_ref="§3.2.2 · §3.3.1b · §9.2 G34",
+    ),
+    MutationRow(
+        id="P35",
+        # KBR-184 (G35). KBR-214 omits a legal ``tool_choice`` only where
+        # carrying it would create a failure the agent did not cause: (1) a
+        # choice over no tools — legal on Anthropic and ``'tool_choice' is
+        # only allowed when 'tools' are specified`` on OpenAI; (2) a forced
+        # call to an **Anthropic-defined** tool (declared ``type`` other than
+        # absent / ``null`` / ``"custom"``, e.g. Claude Code's
+        # ``web_search_20250305``) — Anthropic flattens it into a schema-less
+        # function nothing on the route can execute
+        # (anthropics/claude-code#56984; omitted on the product owner's
+        # decision, 2026-09-13). ``{"type": "any"}`` over only Anthropic-defined
+        # tools is carried: guarding it would reason over the whole tool
+        # list rather than one name. Forced calls to **undeclared** tools are
+        # not omitted — that is the agent's mistake and the provider's error
+        # names it.
+        #
+        # Shares ``envelope.extra[tool_choice]`` with P33; distinguishable by
+        # site (bedrock auto-rewrite vs Messages-route omission). Case (2)'s
+        # trigger is authorable now that the Anthropic reader carries
+        # ``ToolDecl.type`` (KBR-205, closing G36); the corpus trigger case +
+        # §3.3.2 complement arrive with T-D5.
+        site=("kitty/bridge/messages/translator.py:carry_tool_choice_and_metadata",),
+        trigger=Trigger.TOOL_CHOICE_OMITTED_AS_LEGAL_BUT_UNSUPPORTED,
+        paths=(c.extra_path("tool_choice"),),
+        conditional=True,
+        design_ref="§3.2.2 · §3.3.1b · §9.2 G35",
     ),
 )
 

@@ -63,6 +63,7 @@ _OUT_OF_SCOPE: dict[str, str] = {
 _ALLOWLIST: dict[str, str] = {
     # Logging — never serialized into a request.
     "kitty.bridge": "logger name",
+    "kitty.providers.model_context": "logger name (KBR-71: budget-resolution notices route through --debug)",
     "_kitty_bridge_log": "attribute marking the bridge's own log handler",
     # Filesystem and environment — local only.
     "kitty": "path component under ~/.config or ~/.cache",

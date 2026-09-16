@@ -2720,25 +2720,40 @@ class BridgeServer:
         log_path = Path(self._debug) if isinstance(self._debug, str) else _DEBUG_LOG_PATH
 
         log_path.parent.mkdir(parents=True, exist_ok=True)
-        bridge_logger = logging.getLogger("kitty.bridge")
-        bridge_logger.setLevel(logging.DEBUG)
 
-        # Avoid duplicate handlers on repeated calls
-        has_bridge_handler = any(
-            isinstance(h, logging.FileHandler) and getattr(h, "_kitty_bridge_log", False)
-            for h in bridge_logger.handlers
-        )
-        if not has_bridge_handler:
-            fh = logging.FileHandler(log_path, mode="a", encoding="utf-8")
-            fh._kitty_bridge_log = True  # type: ignore[attr-defined]
-            fh.setLevel(logging.DEBUG)
-            fh.setFormatter(
-                logging.Formatter(
-                    "%(asctime)s.%(msecs)03d %(levelname)-5s %(name)s │ %(message)s",
-                    datefmt="%H:%M:%S",
-                )
+        def _attach_debug_file_handler(target: logging.Logger) -> None:
+            """Point one debug-log handler at ``target``, deduped on re-entry.
+
+            Args:
+                target: The logger to attach the file handler to.
+            """
+            target.setLevel(logging.DEBUG)
+            # Avoid duplicate handlers on repeated calls
+            has_debug_handler = any(
+                isinstance(h, logging.FileHandler) and getattr(h, "_kitty_bridge_log", False)
+                for h in target.handlers
             )
-            bridge_logger.addHandler(fh)
+            if not has_debug_handler:
+                fh = logging.FileHandler(log_path, mode="a", encoding="utf-8")
+                fh._kitty_bridge_log = True  # type: ignore[attr-defined]
+                fh.setLevel(logging.DEBUG)
+                fh.setFormatter(
+                    logging.Formatter(
+                        "%(asctime)s.%(msecs)03d %(levelname)-5s %(name)s │ %(message)s",
+                        datefmt="%H:%M:%S",
+                    )
+                )
+                target.addHandler(fh)
+
+        # The budget-resolution logger is a SIBLING of ``kitty.bridge`` in the
+        # logging tree: its records propagate to root, never through the
+        # bridge logger's handlers, and with no level of its own they die at
+        # root's WARNING default before any handler is consulted. Without its
+        # own attachment, both compaction-budget notices were undeliverable
+        # via --debug — the KBR-170 shadow notice and, since KBR-151, the
+        # default-fallback line.
+        _attach_debug_file_handler(logging.getLogger("kitty.bridge"))
+        _attach_debug_file_handler(logging.getLogger("kitty.providers.model_context"))
 
         # Wire process-level crash handlers so any C-level crash (SIGSEGV)
         # or unhandled Python exception writes to the same debug log.

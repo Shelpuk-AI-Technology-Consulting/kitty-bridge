@@ -464,6 +464,24 @@ class TestTheWholeSuiteIsCoherent:
             # assertion (`t-g1-endpoint-table`, KBR-9) lands red until the
             # README correction closes that defect.
             "tests/test_readme_table_guards.py",
+            # KBR-88 (T-H1). A §6.2.3 source-vs-source contract: the mutmut
+            # scope registry (the machine-readable form of TEST_SUITE.md
+            # section 6.1's mutation-target table) must agree with the live
+            # source. Two artifacts edited by hand, held against each other.
+            "tests/test_mutmut_scope.py",
+            # KBR-88 (T-H1). A §6.2.3 contract against mutmut's per-file
+            # `.meta` JSON shape and the aggregator's bucket routing --
+            # the script is mutmut-coupled (its exit-code mapping comes
+            # from the installed mutmut), and the bucket routing is the
+            # other side of the registry agreement the scope guard tests.
+            "tests/test_aggregate_mutation_baseline.py",
+            # KBR-200 (CB-3). §6.2.3 serialization-boundary guard: the
+            # native-passthrough route must keep the agent's cache
+            # breakpoints intact. Drives the bridge branch end to end and
+            # observes ``_upstream_body_for``; pins the M9 fallback's
+            # breakpoint loss as today's behaviour. New l2 file added by
+            # CB-3.
+            "tests/bridge/test_native_passthrough_cache_breaks.py",
             # KBR-256. A §6.2.3 structural guard: it holds the four streaming
             # handlers' recovery skeletons (register row M6's site list) against
             # the AST of `src/kitty/bridge/server.py` — the same read-two-real-
