@@ -1621,6 +1621,8 @@ whether to change it is Q3.
 | The harness detects a deliberately injected bypass | **L3** | §5.2.2 phase 3 — the falsification control. A containment harness never shown to fail is indistinguishable from one that cannot |
 | Stopping the proxy stops the traffic — no direct fallback | **L3** | §5.2.2 phase 2 |
 | Containment holds for each custom transport | **L3** | §5.5 |
+| A loopback or `localhost` provider is reached directly with egress configured, on the bridge's own sessions — the local-bypass property the §5.2.2 phases deliberately do not exercise | **L3** | **T-E8:** `tests/harness/test_local_bypass_slice.py` |
+| The transport asymmetry — the §5.5 paths apply the proxy unconditionally and consult no `should_bypass` — is pinned so a future fix cannot quietly add one | L1 + L2 structural | **T-E8:** `tests/test_egress_asymmetry.py`; the site inventory and the no-`should_bypass`-in-custom-transport guard in `tests/test_egress_coverage.py` |
 | kitty refuses to start when a backend cannot be proxied | L2 + L4 | Guard unit test + scenario EG-3 |
 | A developer's whole session presents one IP | L4 | Scenario EG-1 |
 

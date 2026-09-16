@@ -216,6 +216,138 @@ class TestEveryStartPathIsGuarded:
         assert constructors == {"cli/launcher.py", "cli/main.py", "bridge_runner.py"}
 
 
+class TestProxyApplicationSitesInventory:
+    """R4 (T-E8): the asymmetry-pin inventory — site-loss and bypass-addition guards.
+
+    **Scope (narrowed from the original R4 claim).** This class catches **source loss**
+    (a site removed) and the **specific bypass-addition shape** of "consulting
+    ``should_bypass`` inside a custom-transport file". It does **not** catch a new
+    transport that adds a proxy-less client construction site — that is the
+    ``TestEveryHttpClientIsAccountedFor`` registry sweep's responsibility and the
+    per-adapter sweep in ``tests/test_wire_shape_honesty.py`` covers adapter additions.
+    The two checks complement each other; both must hold.
+
+    **Why a per-site keyword count.** Three distinct construction functions and three
+    aiohttp consumers cover §5.5's five rows plus the sixth site the catalogue names.
+    The count is the simplest signal a silent deletion cannot pass: removing a site
+    drops the count to zero, this class fails, and the failure names the missing site.
+    """
+
+    #: Custom-transport files that **must not** reference ``should_bypass`` — adding a
+    #: bypass here would silently route local traffic through a rented proxy that
+    #: cannot reach it (the design's §5.5 consequence 1). ``validation.py`` is
+    #: intentionally absent from this set: its ``aiohttp_session_kwargs`` use
+    #: (``validation.py:152``) does consult ``should_bypass`` deliberately, as part of
+    #: the pre-flight key check, and that bypass is by design.
+    _BYPASS_FORBIDDEN_FILES: tuple[str, ...] = (
+        "auth/openai_oauth.py",
+        "providers/ollama_cloud.py",
+        "providers/bedrock.py",
+        "providers/openai_subscription.py",
+        "providers/model_context_sync.py",
+    )
+
+    #: Per-file keyword counts for the proxy-application sites. Adding a site without
+    #: updating this table is the failure mode this guard is designed to surface;
+    #: removing a site (deleting the line) drops the count and the test fails. The
+    #: ``_new_curl_session`` row is the **function definition** (not a call), since
+    #: the function is invoked from a closed surface and a call-count scan would miss
+    #: it after a regression that broke the builder without removing the calls.
+    _EXPECTED_PROXY_APPLICATION_COUNTS: dict[tuple[str, str], int] = {
+        ("auth/openai_oauth.py", "aiohttp_session_kwargs"): 1,
+        ("providers/ollama_cloud.py", "aiohttp_session_kwargs"): 1,
+        ("providers/model_context_sync.py", "aiohttp_session_kwargs"): 1,
+        ("providers/openai_subscription.py", "_new_curl_session"): 1,
+        ("providers/bedrock.py", "_BotoConfig_with_proxies"): 1,
+    }
+
+    @staticmethod
+    def _iter_pattern(pattern: re.Pattern[str]) -> list[tuple[str, int, str]]:
+        """Yield every ``(relative_path, line, text)`` matching ``pattern`` in source."""
+        found: list[tuple[str, int, str]] = []
+        for path in sorted(SRC.rglob("*.py")):
+            rel = path.relative_to(SRC).as_posix()
+            for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+                if pattern.search(line):
+                    found.append((rel, lineno, line.strip()))
+        return found
+
+    def test_each_proxy_application_site_is_still_present(self) -> None:
+        """AC4.1: each site still exists at its recorded location.
+
+        Deleting one of the six sites drops its count below the expected floor and
+        this test fails — naming the deleted site in the assertion message so the
+        fix is local.
+        """
+        aiohttp_session_kwargs = re.compile(r"\baiohttp_session_kwargs\(")
+        new_curl_session = re.compile(r"\bdef _new_curl_session\(")
+        boto_config_with_proxies = re.compile(r"_BotoConfig\s*\(\s*proxies\s*=")
+
+        patterns: dict[str, re.Pattern[str]] = {
+            "aiohttp_session_kwargs": aiohttp_session_kwargs,
+            "_new_curl_session": new_curl_session,
+            "_BotoConfig_with_proxies": boto_config_with_proxies,
+        }
+
+        actual: dict[tuple[str, str], int] = {}
+        for kind, pattern in patterns.items():
+            for rel, _lineno, _line in self._iter_pattern(pattern):
+                key = (rel, kind)
+                actual[key] = actual.get(key, 0) + 1
+
+        offenders: list[str] = []
+        for (rel, kind), expected in self._EXPECTED_PROXY_APPLICATION_COUNTS.items():
+            count = actual.get((rel, kind), 0)
+            if count != expected:
+                offenders.append(f"{rel} ({kind}): expected {expected}, found {count}")
+
+        assert not offenders, (
+            "proxy-application site inventory changed — review each for egress, "
+            "then update _EXPECTED_PROXY_APPLICATION_COUNTS: " + "; ".join(offenders)
+        )
+
+    def test_no_custom_transport_file_consults_should_bypass(self) -> None:
+        """R4 anti-bypass pin: a ``should_bypass`` reference inside a custom-transport file
+        is the regression this guard exists to catch.
+
+        A bypass added to ``auth/openai_oauth.py`` would route the OAuth-login leg
+        through a rented proxy that cannot reach a private LAN, and the
+        behavioural L3 tests in ``tests/harness/test_*_containment_slice.py`` do not
+        drive the OAuth path at startup (R-3 in §5.5 consequence 3). Catching the
+        defect at the structural layer is the cheapest line of defence.
+
+        The companion ``tests/test_egress.py::TestShouldBypass`` pins the
+        ``should_bypass`` function's classification; this guard pins *who calls it*,
+        which is a different property.
+        """
+        pattern = re.compile(r"\bshould_bypass\b")
+        offenders: list[str] = []
+        for rel in self._BYPASS_FORBIDDEN_FILES:
+            for found_rel, lineno, _text in self._iter_pattern(pattern):
+                if found_rel == rel:
+                    offenders.append(f"{rel}:{lineno} — a bypass was added to a custom-transport path")
+                    break
+
+        assert not offenders, (
+            "these custom-transport files must not consult `should_bypass` "
+            "(§5.5 consequence 1 — the proxy is unconditional here): " + "; ".join(offenders)
+        )
+
+    def test_the_scan_actually_finds_something(self) -> None:
+        """A broken regex would silently pass the inventory check above."""
+        aiohttp_session_kwargs = re.compile(r"\baiohttp_session_kwargs\(")
+        aiohttp_matches = {
+            rel
+            for rel, _lineno, _line in self._iter_pattern(aiohttp_session_kwargs)
+            if (rel, "aiohttp_session_kwargs") in self._EXPECTED_PROXY_APPLICATION_COUNTS
+        }
+
+        assert len(aiohttp_matches) == 3, (
+            f"the aiohttp_session_kwargs scan found {len(aiohttp_matches)} sites, "
+            f"expected 3 — the regex or the table is broken: {sorted(aiohttp_matches)}"
+        )
+
+
 class TestTypeSuppressionsAreSpecific:
     """R5: a clean type check must not be achieved by silencing it.
 
@@ -240,8 +372,7 @@ class TestTypeSuppressionsAreSpecific:
         offenders = [f"{rel}:{lineno}" for rel, lineno, line in self._suppressions() if bare.search(line)]
 
         assert not offenders, (
-            "these suppressions disable every check on their line; name the specific "
-            f"error codes instead: {offenders}"
+            f"these suppressions disable every check on their line; name the specific error codes instead: {offenders}"
         )
 
     def test_no_blanket_file_level_suppression(self):
