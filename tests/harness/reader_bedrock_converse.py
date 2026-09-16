@@ -10,11 +10,12 @@ rule §3.3.1 names (a reader validated against kitty's output inherits
 kitty's bugs and the oracle becomes circular).
 
 The schema this reader is written against is the botocore ``bedrock-runtime``
-service model — the machine-readable shape AWS publishes — at the version
-:data:`SCHEMA_VERSION`. ``uv.lock`` pins the botocore build, so a vendor
-schema revision that adds or renames a wire key either picks up here
-automatically (when the pinned botocore is bumped) or is caught by
-:class:`TestSchemaAgreement` against a stale static set.
+service model — the machine-readable shape AWS publishes — at the revision
+:data:`SCHEMA_VERSION` (a pinned literal, not a runtime-derived value, so
+:class:`TestSchemaAgreement` compares a known revision against the live
+model rather than against itself). CI resolves botocore freely, so a live
+model revision that adds or renames a wire key fails
+:class:`TestSchemaAgreement` with the key named.
 
 **Converse has no ``cache_control`` concept.** Anthropic carries a
 ``cache_control`` breakpoint on most blocks; Converse carries a separate
@@ -22,7 +23,9 @@ automatically (when the pinned botocore is bumped) or is caught by
 This reader projects ``cachePoint`` to :class:`~harness.contract.Opaque`
 with the canonical kind ``cache_point`` — not to ``Text.cache_control`` or
 ``Opaque.cache_control``. §3.3.1 names this as the deliberate exception:
-the field is present on one side only, which is what **M16** needs.
+the field is present on one side only, which is what **M16** needs. The
+design's §11 entry ``Q-cache-control-converse`` records this decision;
+§7.4.3 of the same document names it T-A5's own answer to T-A2's Q16.
 """
 
 from __future__ import annotations
@@ -34,18 +37,24 @@ from collections.abc import Mapping, Sequence
 from types import MappingProxyType
 from typing import Any
 
-import botocore
-
 from harness import contract as c
 
 # --------------------------------------------------------------------------
 # Schema agreement
 # --------------------------------------------------------------------------
 
-#: The botocore release this reader was written against. Pinned by
-#: ``uv.lock``; a vendor schema revision that bumps the pin picks up here
-#: automatically.
-SCHEMA_VERSION = f"botocore-{botocore.__version__}"
+#: The botocore release this reader was written against. Pinned as a
+#: **literal** so the schema-agreement test compares a known revision
+#: against the live model, not itself (the Gemini precedent's shape —
+#: ``reader_gemini.SCHEMA_VERSION == "20260910"``). A vendor schema
+#: revision that bumps the installed botocore fails
+#: :class:`TestSchemaAgreement` with the key named; the reader author
+#: then re-derives the frozensets and bumps this literal in the same
+#: change. CI resolves botocore freely (``pip install -e ".[dev]"`` with
+#: an unbounded ``boto3>=1.34`` floor, and ``uv.lock`` is gitignored), so
+#: a *live* model revision can also surface here without any local
+#: change — that is the intended drift detector, not a defect.
+SCHEMA_VERSION = "botocore-1.43.93"
 
 #: The 12 wire-body keys the ``bedrock-runtime:Converse`` operation publishes.
 #: ``modelId`` is a URI parameter on the real wire (``POST /model/{modelId}/...``)
@@ -337,7 +346,6 @@ def _project(body: Mapping[str, Any], model: str, stream: bool) -> c.Request:
             extra[name] = body[name]
 
     extra.update(_read_tool_choice(body, residual))
-    extra.update(_read_inference_extra(body))
 
     system = _read_system(body, residual)
     sampling = _read_inference_config(body, residual)
@@ -524,25 +532,6 @@ def _read_inference_config(
     return MappingProxyType(sampling)
 
 
-def _read_inference_extra(body: Mapping[str, Any]) -> dict[str, Any]:
-    """Surface the raw ``inferenceConfig`` block as an extra entry.
-
-    No register row today anchors ``envelope.extra[inferenceConfig]``, but
-    the block is carried at that address so a future row can name it
-    without the reader changing.
-
-    Args:
-        body: The parsed request body.
-
-    Returns:
-        A dict that maps ``"inferenceConfig"`` to the raw block, or empty
-        when the body carries no ``inferenceConfig``.
-    """
-    if "inferenceConfig" not in body:
-        return {}
-    return {"inferenceConfig": body["inferenceConfig"]}
-
-
 def _read_tool_choice(
     body: Mapping[str, Any], residual: dict[str, Any]
 ) -> dict[str, Any]:
@@ -582,14 +571,18 @@ def _read_tool_choice(
         return {}
 
     if "auto" in choice:
+        _residualise_block_extras(choice, "toolConfig.toolChoice", {"auto"}, residual)
         return {"tool_choice": "auto"}
     if "any" in choice:
+        _residualise_block_extras(choice, "toolConfig.toolChoice", {"any"}, residual)
         return {"tool_choice": "any"}
     if "tool" in choice:
         target = choice["tool"]
         if isinstance(target, Mapping) and isinstance(target.get("name"), str):
+            _residualise_block_extras(choice, "toolConfig.toolChoice", {"tool"}, residual)
             return {"tool_choice": f"tool:{target['name']}"}
         residual["toolConfig.toolChoice.tool"] = target
+        _residualise_block_extras(choice, "toolConfig.toolChoice", {"tool"}, residual)
         return {}
 
     # Unrecognised discriminator — every key on the choice residualises at
@@ -645,12 +638,10 @@ def _read_tools(
             )
 
         if "cachePoint" in entry:
-            extras["cachePoint"] = entry["cachePoint"]
-            _residualise_block_extras(entry, path, {"cachePoint"}, residual)
+            _toggle_or_residualise(entry, path, "cachePoint", "cachePoint", extras, residual)
             continue
         if "systemTool" in entry:
-            extras["systemTool"] = entry["systemTool"]
-            _residualise_block_extras(entry, path, {"systemTool"}, residual)
+            _toggle_or_residualise(entry, path, "systemTool", "systemTool", extras, residual)
             continue
         if "toolSpec" in entry:
             tool_spec = entry["toolSpec"]
@@ -668,6 +659,33 @@ def _read_tools(
         residual[path] = entry
 
     return tuple(declarations), extras
+
+
+def _toggle_or_residualise(
+    entry: Mapping[str, Any],
+    entry_path: str,
+    discriminator: str,
+    extras_key: str,
+    extras: dict[str, Any],
+    residual: dict[str, Any],
+) -> None:
+    """Accumulate a tool-config toggle, or residualise a duplicate.
+
+    Converse allows up to four ``cachePoint`` blocks per request (system,
+    messages content, tools) — the schema does not constrain count. Two
+    ``{"cachePoint": {...}}`` entries inside ``toolConfig.tools`` therefore
+    schema-legal; the reader takes the first value and residualises the
+    rest at their entry path so a future row anchored at
+    ``envelope.extra[cachePoint]`` does not silently lose the count.
+    """
+    value = entry[discriminator]
+    if discriminator in extras:
+        # Loser overwrites winner with no residual would be a §7.4.2 rule 2
+        # hazard; we surface the duplicate at the entry's path.
+        residual[f"{entry_path}.{discriminator}"] = value
+    else:
+        extras[extras_key] = value
+    _residualise_block_extras(entry, entry_path, {discriminator}, residual)
 
 
 def _read_tool_specification(
@@ -923,7 +941,7 @@ def _residualise_block_extras(
 
 def _read_image(
     image: Mapping[str, Any], prefix: str, residual: dict[str, Any]
-) -> c.Image | None:
+) -> c.Image:
     """Project an :class:`ImageBlock` into :class:`~harness.contract.Image`.
 
     The schema publishes ``format`` (required) and ``source`` (required).
@@ -931,24 +949,41 @@ def _read_image(
     :func:`harness.contract.image_digest`) or ``s3Location`` (URI only —
     ``Image.ref``, no digest; §3.3.1's unpinned rule).
 
+    §7.4 rule 7 row 3 ("no branch returns *no part*"): when the wire's
+    payload is undecodable or a leaf is wrongly typed, the part is still
+    produced — residualised at the leaf, the position occupied — so the
+    drop does not shift the indices of every later part. ``Image.digest``
+    is computed by :func:`harness.contract.image_digest` from the wire's
+    raw bytes for the undecodable case (KBR-192's second recipe) and
+    from the canonical-JSON of the malformed leaf otherwise. The KBR-251
+    conformance note in the design names this exact shape.
+
     Args:
         image: The ``image`` value, already known to be a Mapping.
         prefix: The dotted prefix of the parent block.
-        residual: The reader's accumulator, mutated here.
+        residual: The reader's accumulator of unclassifiable values, mutated here.
 
     Returns:
-        The :class:`~harness.contract.Image` or ``None`` when a required
-        field is missing or wrongly typed.
+        The :class:`~harness.contract.Image`. A wrongly-typed leaf does
+        not yield ``None`` — the part is always produced, identity from
+        the wire's own bytes (KBR-192).
     """
     fmt = image.get("format")
     source = image.get("source")
+    image_extras = set(image) - {"format", "source", "error"}
 
-    if not isinstance(fmt, str):
+    media_type: str | None
+    if isinstance(fmt, str):
+        media_type = _normalise_media_type(fmt)
+    else:
         residual[f"{prefix}.format"] = fmt
-        return None
-    if not isinstance(source, Mapping):
-        residual[f"{prefix}.source"] = source
-        return None
+        # The wire carried a non-string ``format``. Carry whatever it said
+        # as the media_type — the reader is honest about what the wire did,
+        # and the residual surfaces the wire-format breach at its own path.
+        media_type = None if fmt is None else str(fmt)
+
+    digest: str | None = None
+    ref: str | None = None
 
     if "bytes" in source:
         raw = source["bytes"]
@@ -959,39 +994,87 @@ def _read_image(
             try:
                 decoded = base64.b64decode(raw, validate=True)
             except (ValueError, TypeError):
+                # §7.4 rule 7 / KBR-251: residualise the leaf AND keep the
+                # part, identifying it by the wire's own raw bytes (KBR-192's
+                # second ``image_digest`` recipe).
                 residual[f"{prefix}.source.bytes"] = raw
-                return None
-            return c.Image(
-                digest=c.image_digest(decoded),
-                media_type=_normalise_media_type(fmt),
-            )
-        residual[f"{prefix}.source.bytes"] = raw
-        return None
-
-    if "s3Location" in source:
+                digest = c.image_digest(raw.encode("utf-8"))
+            else:
+                digest = c.image_digest(decoded)
+        else:
+            # Non-string at the leaf — residualise the leaf AND project
+            # the part using the wire's own bytes (KBR-251 conformed).
+            residual[f"{prefix}.source.bytes"] = raw
+            digest = _wire_identity_digest(raw)
+        # Source-level siblings that the ``bytes`` union member did not
+        # consume (the schema is exactly one of ``bytes`` / ``s3Location``).
+        for wire_key in source:
+            if wire_key != "bytes":
+                residual[f"{prefix}.source.{wire_key}"] = source[wire_key]
+    elif "s3Location" in source:
         s3 = source["s3Location"]
         if isinstance(s3, Mapping) and isinstance(s3.get("uri"), str):
-            return c.Image(
-                digest=None,
-                ref=s3["uri"],
-                media_type=_normalise_media_type(fmt),
-            )
-        residual[f"{prefix}.source.s3Location"] = s3
-        return None
+            ref = s3["uri"]
+        else:
+            # Malformed ``s3Location`` — residualise the leaf AND project
+            # the part with a canonical-JSON identity digest. ``ref`` is
+            # left ``None`` because no string was carried.
+            residual[f"{prefix}.source.s3Location"] = s3
+            digest = _wire_identity_digest(s3)
+        # Source-level siblings that the ``s3Location`` union member did
+        # not consume.
+        for wire_key in source:
+            if wire_key != "s3Location":
+                residual[f"{prefix}.source.{wire_key}"] = source[wire_key]
+    else:
+        # Source carried neither ``bytes`` nor ``s3Location`` — a wire-format
+        # breach. §7.4 rule 7: residualise the leaf AND project the part.
+        residual[f"{prefix}.source"] = source
+        digest = _wire_identity_digest(source)
+        for wire_key in source:
+            residual[f"{prefix}.source.{wire_key}"] = source[wire_key]
 
-    residual[f"{prefix}.source"] = source
-    return None
+    # Image-object-level siblings (e.g. an ``error`` block, a future field).
+    for wire_key in image_extras:
+        residual[f"{prefix}.{wire_key}"] = image[wire_key]
+
+    return c.Image(digest=digest, ref=ref, media_type=media_type)
+
+
+def _wire_identity_digest(value: Any) -> str:
+    """A distinguishing digest of a wire value the reader cannot canonicalise.
+
+    Uses the second of :func:`harness.contract.image_digest`'s recipes
+    (KBR-192, "of the raw encoded bytes the wire carried") — the
+    canonical-JSON serialisation of the value. The result identifies the
+    position from what the wire actually said, so a future schema
+    revision can re-derive the row at this position without ambiguity.
+    """
+    try:
+        return c.image_digest(
+            json.dumps(value, sort_keys=True, default=str, ensure_ascii=True).encode("utf-8")
+        )
+    except TypeError:
+        # ``default=str`` already handles the unhashable case; this is the
+        # belt-and-braces guard for a custom object that resists repr.
+        return c.image_digest(repr(value).encode("utf-8"))
 
 
 def _read_tool_use(
     raw: Any, prefix: str, residual: dict[str, Any]
-) -> c.ToolUse | None:
+) -> c.ToolUse:
     """Project a :class:`ToolUseBlock` into :class:`~harness.contract.ToolUse`.
 
     The schema publishes ``toolUseId``, ``name``, ``input`` (``Document``)
     as required. The reader carries ``id`` through; ``name`` and ``input``
     are required — a missing or wrong-typed value residualises at its
-    path and the part is not produced.
+    path AND the part is produced (KBR-251 / §7.4 rule 7 row 3), so the
+    position is occupied and the indices of every later part do not shift.
+
+    A non-Mapping ``raw`` — the member itself is wrong, the schema says
+    an object and the wire sent a scalar — raises
+    :class:`~harness.contract.UnreadableBodyError` per rule 7's
+    member-wrong row.
 
     Args:
         raw: The ``toolUse`` value.
@@ -999,34 +1082,54 @@ def _read_tool_use(
         residual: The reader's accumulator, mutated here.
 
     Returns:
-        The :class:`~harness.contract.ToolUse` or ``None`` when a required
-        field is missing or wrongly typed.
+        The :class:`~harness.contract.ToolUse`. A wrongly-typed leaf does
+        not yield ``None`` — the part is always produced, identity from
+        a sentinel ``name`` (``""``) and ``id`` (``None``) when those
+        leaves are wrong, and the wire's own bytes for the rest.
     """
     if not isinstance(raw, Mapping):
-        residual[prefix] = raw
-        return None
+        # The member itself is wrong (§7.4 rule 7 row 2) — the schema
+        # declares an object and the wire sent something else. No value
+        # to put in the position; the request is unreadable.
+        raise c.UnreadableBodyError(
+            f"{prefix} must be an object, got {type(raw).__name__}"
+        )
 
     name = raw.get("name")
-    if not isinstance(name, str):
+    if isinstance(name, str):
+        name_value = name
+    else:
         residual[f"{prefix}.name"] = name
-        return None
+        # §7.4 rule 7: occupy the position. An empty-string name is a
+        # wire-format breach, but the call still needs an address — it
+        # cannot be paired with its result otherwise (§3.3.1b's
+        # test-the-projection-can-represent-the-absence-losslessly rule
+        # names the same trade-off).
+        name_value = ""
 
     tool_use_id = raw.get("toolUseId")
-    if tool_use_id is not None and not isinstance(tool_use_id, str):
+    if tool_use_id is None or isinstance(tool_use_id, str):
+        id_value: str | None = tool_use_id
+    else:
         residual[f"{prefix}.toolUseId"] = tool_use_id
-        tool_use_id = None
+        id_value = None
 
     arguments = raw.get("input")
     # Converse carries ``input`` as a Document (JSON value). The
     # lossless form is the value whole — for an object, pass through;
-    # for an array/scalar, residualise at the leaf. ``decode_arguments``
-    # is the string-carrying-formats tool only; applying it would reject
-    # the very form Converse's wire requires.
+    # for an array/scalar, residualise at the leaf AND project the part.
+    # ``decode_arguments`` is the string-carrying-formats tool only;
+    # applying it would reject the very form Converse's wire requires.
     if isinstance(arguments, Mapping):
         arguments_value: Mapping[str, Any] = MappingProxyType(arguments)
     elif arguments is None:
         arguments_value = MappingProxyType({})
     else:
+        # §7.4 rule 7: residualise the leaf AND project the part.
+        # The argument object is non-empty (`{"x": 1}`) on a real wire;
+        # a wire that carried `"input": 1` is a breach but the part still
+        # needs an address. The default is the empty object — the same
+        # decoder rule §3.3.1b uses for absent arguments.
         residual[f"{prefix}.input"] = arguments
         arguments_value = MappingProxyType({})
 
@@ -1035,12 +1138,12 @@ def _read_tool_use(
             continue
         residual[f"{prefix}.{wire_key}"] = raw[wire_key]
 
-    return c.ToolUse(name=name, arguments=arguments_value, id=tool_use_id)
+    return c.ToolUse(name=name_value, arguments=arguments_value, id=id_value)
 
 
 def _read_tool_result(
     raw: Any, prefix: str, residual: dict[str, Any]
-) -> c.ToolResult | None:
+) -> c.ToolResult:
     """Project a :class:`ToolResultBlock` into :class:`~harness.contract.ToolResult`.
 
     The schema publishes ``toolUseId`` and ``content`` as required, plus an
@@ -1048,28 +1151,51 @@ def _read_tool_result(
     ``ToolResultContentBlock`` union members dispatch to ``Text``, ``Image``,
     ``Json``, or one of three Opaque kinds.
 
+    §7.4 rule 7 ("no branch returns *no part*"): when the wire's payload
+    is undecodable or a leaf is wrongly typed, the part is still produced —
+    residualised at the leaf, the position occupied — so the drop does
+    not shift later indices. The KBR-251 conformance note in the design
+    names this exact shape.
+
+    A non-Mapping ``raw`` raises :class:`~harness.contract.UnreadableBodyError`
+    per rule 7 row 2 (the member itself is wrong).
+
     Args:
         raw: The ``toolResult`` value.
         prefix: The dotted prefix of the parent block.
         residual: The reader's accumulator, mutated here.
 
     Returns:
-        The :class:`~harness.contract.ToolResult` or ``None`` when a required
-        field is missing or wrongly typed.
+        The :class:`~harness.contract.ToolResult`. A wrongly-typed leaf does
+        not yield ``None`` — the part is always produced.
     """
     if not isinstance(raw, Mapping):
-        residual[prefix] = raw
-        return None
+        # The member itself is wrong (§7.4 rule 7 row 2) — the schema
+        # declares an object and the wire sent something else.
+        raise c.UnreadableBodyError(
+            f"{prefix} must be an object, got {type(raw).__name__}"
+        )
 
-    tool_use_id = raw.get("toolUseId")
-    if not isinstance(tool_use_id, str):
-        residual[f"{prefix}.toolUseId"] = tool_use_id
-        return None
+    raw_tool_use_id = raw.get("toolUseId")
+    if isinstance(raw_tool_use_id, str):
+        tool_use_id: str | None = raw_tool_use_id
+    else:
+        # §7.4 rule 7: residualise the leaf AND project the part. ``None``
+        # is the documented absent-paired-id value (§3.3.1's ToolResult
+        # class docstring); the position is occupied; the residual
+        # surfaces the wire-format breach at its own path.
+        residual[f"{prefix}.toolUseId"] = raw_tool_use_id
+        tool_use_id = None
 
     content_value = raw.get("content")
-    if not isinstance(content_value, list):
+    if isinstance(content_value, list):
+        content_list: list[Any] = content_value
+    else:
+        # §7.4 rule 7: residualise the leaf AND project the part. The
+        # default is an empty content list — the same absent-value table
+        # §7.4 rule 7 row 2 names.
         residual[f"{prefix}.content"] = content_value
-        return None
+        content_list = []
 
     status = raw.get("status")
     is_error = False
@@ -1080,7 +1206,7 @@ def _read_tool_result(
             is_error = status == "error"
 
     parts: list[c.Text | c.Image | c.Json | c.Opaque] = []
-    for index, block in enumerate(content_value):
+    for index, block in enumerate(content_list):
         path = f"{prefix}.content[{index}]"
         if not isinstance(block, Mapping):
             residual[path] = block
@@ -1092,23 +1218,26 @@ def _read_tool_result(
                 parts.append(c.Text(text))
             else:
                 residual[f"{path}.text"] = text
+            _residualise_block_extras(block, path, {"text"}, residual)
             continue
         if "json" in block:
             json_value = block["json"]
             parts.append(c.Json(json_value))
+            _residualise_block_extras(block, path, {"json"}, residual)
             continue
         if "image" in block:
             image = block["image"]
             if isinstance(image, Mapping):
                 part = _read_image(image, f"{path}.image", residual)
-                if part is not None:
-                    parts.append(part)
+                parts.append(part)  # KBR-251: always occupy the position
             else:
                 residual[f"{path}.image"] = image
+            _residualise_block_extras(block, path, {"image"}, residual)
             continue
         for discriminator in PUBLISHED_TOOL_RESULT_CONTENT_BLOCK_TYPES:
             if discriminator not in _FIRST_CLASS_RESULT_DISCRIMINATORS and discriminator in block:
                 parts.append(_opaque_for(block, discriminator))
+                _residualise_block_extras(block, path, {discriminator}, residual)
                 break
         else:
             residual[path] = block
@@ -1127,7 +1256,7 @@ def _read_tool_result(
 
 def _read_reasoning_content(
     raw: Any, prefix: str, residual: dict[str, Any]
-) -> c.Thinking | c.Opaque | None:
+) -> c.Thinking | c.Opaque:
     """Project a :class:`ReasoningContentBlock` into Thinking or Opaque.
 
     The block has two union members. ``reasoningText`` carries ``text`` and
@@ -1137,44 +1266,72 @@ def _read_reasoning_content(
     projects to :class:`~harness.contract.Opaque` with the canonical kind
     ``redacted_thinking`` reached via :func:`harness.contract.opaque_kind`.
 
+    §7.4 rule 7 ("no branch returns *no part*"): when a leaf is wrong,
+    the part is still produced — residualised at the leaf, the position
+    occupied. The KBR-251 conformance note in the design names this shape.
+
+    A non-Mapping ``raw`` raises :class:`~harness.contract.UnreadableBodyError`
+    per rule 7 row 2 (the member itself is wrong).
+
     Args:
         raw: The ``reasoningContent`` value.
         prefix: The dotted prefix of the parent block.
         residual: The reader's accumulator, mutated here.
 
     Returns:
-        The :class:`~harness.contract.Thinking` (for ``reasoningText``) or
-        :class:`~harness.contract.Opaque` (for ``redactedContent``) or
-        ``None`` when neither branch is well-formed.
+        The :class:`~harness.contract.Thinking` (for ``reasoningText``)
+        or :class:`~harness.contract.Opaque` (for ``redactedContent``).
+        A wrongly-typed leaf does not yield ``None``.
     """
     if not isinstance(raw, Mapping):
-        residual[prefix] = raw
-        return None
+        raise c.UnreadableBodyError(
+            f"{prefix} must be an object, got {type(raw).__name__}"
+        )
 
     if "reasoningText" in raw:
         text_block = raw["reasoningText"]
         if not isinstance(text_block, Mapping):
+            # §7.4 rule 7: residualise the leaf AND project the part.
+            # The default is an empty-text Thinking — the part occupies
+            # its position, the residual surfaces the breach.
             residual[f"{prefix}.reasoningText"] = text_block
-            return None
+            _residualise_block_extras(raw, prefix, {"reasoningText"}, residual)
+            return c.Thinking(text="", signature=None)
         text = text_block.get("text")
-        if not isinstance(text, str):
+        if isinstance(text, str):
+            text_value: str = text
+        else:
+            # §7.4 rule 7: residualise the leaf AND project the part.
             residual[f"{prefix}.reasoningText.text"] = text
-            return None
+            text_value = ""
         signature = text_block.get("signature")
-        if signature is None:
-            signature_value: str | None = None
-        elif isinstance(signature, str):
-            signature_value = signature
+        if signature is None or isinstance(signature, str):
+            signature_value: str | None = signature
         else:
             residual[f"{prefix}.reasoningText.signature"] = signature
             signature_value = None
-        return c.Thinking(text=text, signature=signature_value)
+        # ReasoningText-block siblings — beyond ``text`` and ``signature``.
+        _residualise_block_extras(
+            text_block, f"{prefix}.reasoningText", {"text", "signature"}, residual
+        )
+        # reasoningContent-block siblings — beyond ``reasoningText``.
+        _residualise_block_extras(raw, prefix, {"reasoningText"}, residual)
+        return c.Thinking(text=text_value, signature=signature_value)
 
     if "redactedContent" in raw:
+        # The wire spelling reaches the alias table; the reader passes it
+        # through opaque_kind rather than restating the reconciliation.
+        _residualise_block_extras(raw, prefix, {"redactedContent"}, residual)
         return _opaque_for(raw, "redactedContent")
 
+    # §7.4 rule 7: residualise the leaf AND project the part. The
+    # default is an Opaque identity — the part occupies its position,
+    # the residual surfaces the unrecognised union member at its path.
+    # The digest is of the wire's own bytes, so two unrecognised
+    # reasoning blocks with different wire bytes produce different
+    # identities.
     residual[prefix] = raw
-    return None
+    return _opaque_for(raw, "unknown_reasoning")
 
 
 def _opaque_for(block: Mapping[str, Any], discriminator: str) -> c.Opaque:

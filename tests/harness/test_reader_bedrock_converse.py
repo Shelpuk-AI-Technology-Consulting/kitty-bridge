@@ -24,9 +24,9 @@ from __future__ import annotations
 import base64
 import json
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
-import botocore
 import pytest
 from botocore.session import Session
 
@@ -143,8 +143,23 @@ class TestProtocolConformance:
         assert isinstance(r.BedrockConverseProjection(), c.Projection)
 
     def test_the_schema_version_is_recorded(self) -> None:
-        """A reader with no stated provenance cannot be re-derived."""
-        assert f"botocore-{botocore.__version__}" == r.SCHEMA_VERSION
+        """The revision is a pinned literal — :class:`TestSchemaAgreement`
+        compares a known revision against the live model, not against itself.
+        """
+        assert r.SCHEMA_VERSION == "botocore-1.43.93"
+
+    def test_the_reader_imports_nothing_from_kitty(self) -> None:
+        """R1 — §3.3.1's independent-oracle rule, the structural half.
+
+        Reuses ``test_contract.py``'s regex rather than an AST walk: that
+        pattern deliberately also catches ``from src.kitty ...`` and both
+        dynamic import forms, which an import-node walk would miss.
+        """
+        from harness.test_contract import _KITTY_IMPORT
+
+        source = Path(r.__file__).read_text(encoding="utf-8")
+
+        assert _KITTY_IMPORT.search(source) is None
 
 
 # --------------------------------------------------------------------------
@@ -605,6 +620,69 @@ class TestServerSideToolToggles:
 
         assert projected.conversation.tools == ()
         assert projected.envelope.extra["systemTool"] == {"name": "built_in_search"}
+
+    def test_a_repeated_cache_point_entry_residualises_not_overwrites(self) -> None:
+        """§7.4.2 rule 2's hazard: a duplicate tool-config toggle takes a
+        residual, not a silent overwrite of the winner.
+        """
+        projected = project_untotalled(
+            {
+                "messages": [],
+                "toolConfig": {
+                    "tools": [
+                        {"cachePoint": {"type": "default"}},
+                        {"cachePoint": {"type": "high_frequency"}},
+                    ]
+                },
+            }
+        )
+
+        assert projected.envelope.extra["cachePoint"] == {"type": "default"}
+        assert "toolConfig.tools[1].cachePoint" in projected.residual
+
+
+class TestExtraKeyDisjointness:
+    """§7.4.2 rule 2: a reader that flattens owes a pairwise-disjointness test.
+
+    The namespace is not naturally disjoint — a collision would be
+    introduced by a *schema revision*, not by a request, and the loser
+    would overwrite the winner with no residual and no delta. The Gemini
+    reader's ``test_every_extra_key_this_reader_can_emit_is_addressable``
+    is the precedent: assert over the tables rather than over one body.
+    """
+
+    def test_every_extra_key_this_reader_can_emit_is_addressable(self) -> None:
+        """The four flattening sources are pairwise disjoint.
+
+        ``_TOP_LEVEL_EXTRA_KEYS`` (the eight declared control fields),
+        ``tool_choice`` (the one canonical-value exception, §3.3.1b),
+        ``cachePoint`` and ``systemTool`` (the two Tool-union toggles,
+        §7.4.2 rule 5) — no key may appear in two sources.
+        """
+        toggle_keys = frozenset({"cachePoint", "systemTool"})
+        canonical = frozenset({"tool_choice"})
+        top_level = r.PUBLISHED_TOP_LEVEL_KEYS - {"toolConfig", "inferenceConfig", "messages", "system"}
+
+        # `toolConfig` and `inferenceConfig` are nested containers whose
+        # *leaves* flatten (§7.4.2 rule 2); the container key itself is not
+        # an extra address.
+        assert "toolConfig" not in top_level
+        assert "inferenceConfig" not in top_level
+
+        # Four sources, pairwise disjoint.
+        assert top_level & toggle_keys == set()
+        assert top_level & canonical == set()
+        assert toggle_keys & canonical == set()
+
+    def test_the_toggle_key_names_come_from_one_place(self) -> None:
+        """The two Tool-union toggles are the same literals the reader writes.
+
+        A future disjointness test that restates them as inline strings
+        would drift from the reader's own literals; asserting them against
+        the published ``Tool`` union keeps both sides honest.
+        """
+        assert "cachePoint" in r.PUBLISHED_TOOL_BLOCK_TYPES
+        assert "systemTool" in r.PUBLISHED_TOOL_BLOCK_TYPES
 
 
 # --------------------------------------------------------------------------
@@ -1564,6 +1642,126 @@ class TestDepthFalsification:
             (
                 {"messages": [], "system": [{"text": "x", "mystery": "y"}]},
                 "system[0].mystery",
+            ),
+            # ToolChoice sibling beside a recognised discriminator.
+            (
+                {"messages": [], "toolConfig": {"toolChoice": {"auto": {}, "mystery": "y"}}},
+                "toolConfig.toolChoice.mystery",
+            ),
+            # ToolResult content-block leaf — the dispatcher inside
+            # toolResult.content, a depth the toolResult extras sweep does
+            # not reach.
+            (
+                {
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "toolResult": {
+                                        "toolUseId": "x",
+                                        "content": [{"text": "ok", "mystery": "y"}],
+                                    }
+                                }
+                            ],
+                        }
+                    ]
+                },
+                "messages[0].content[0].toolResult.content[0].mystery",
+            ),
+            # Image-object sibling beyond format/source/error.
+            (
+                {
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "image": {
+                                        "format": "png",
+                                        "source": {"bytes": _b64(b"X")},
+                                        "mystery": "y",
+                                    }
+                                }
+                            ],
+                        }
+                    ]
+                },
+                "messages[0].content[0].image.mystery",
+            ),
+            # ImageSource sibling — a second union member beside ``bytes``.
+            (
+                {
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "image": {
+                                        "format": "png",
+                                        "source": {
+                                            "bytes": _b64(b"X"),
+                                            "s3Location": {"uri": "s3://b/k"},
+                                        },
+                                    }
+                                }
+                            ],
+                        }
+                    ]
+                },
+                "messages[0].content[0].image.source.s3Location",
+            ),
+            # ReasoningText sibling beyond text/signature.
+            (
+                {
+                    "messages": [
+                        {
+                            "role": "assistant",
+                            "content": [
+                                {
+                                    "reasoningContent": {
+                                        "reasoningText": {"text": "t", "mystery": "y"}
+                                    }
+                                }
+                            ],
+                        }
+                    ]
+                },
+                "messages[0].content[0].reasoningContent.reasoningText.mystery",
+            ),
+            # ToolSpec sibling — beyond name/description/inputSchema/strict.
+            (
+                {
+                    "messages": [],
+                    "toolConfig": {
+                        "tools": [
+                            {
+                                "toolSpec": {
+                                    "name": "x",
+                                    "inputSchema": {"type": "object"},
+                                    "mystery": "y",
+                                }
+                            }
+                        ]
+                    },
+                },
+                "toolConfig.tools[0].toolSpec.mystery",
+            ),
+            # Tool-entry sibling — a Tool entry carrying toolSpec and a
+            # stray key.
+            (
+                {
+                    "messages": [],
+                    "toolConfig": {
+                        "tools": [
+                            {
+                                "toolSpec": {"name": "x", "inputSchema": {}},
+                                "mystery": "y",
+                            }
+                        ]
+                    },
+                },
+                "toolConfig.tools[0].mystery",
             ),
         ],
     )
