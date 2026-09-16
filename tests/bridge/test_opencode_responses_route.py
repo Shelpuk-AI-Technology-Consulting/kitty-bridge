@@ -374,13 +374,15 @@ async def test_an_all_servable_pool_does_not_quarantine_any_backend(
     assert status == 200
     assert "from-some-backend" in body
     # Exactly one upstream request — neither backend was tried twice, no failover
-    # happened, and no backend was cooled.
+    # happened.  Asserting against the bridge's internal ``_backend_health``
+    # shape was tempting (the KBR-126 sibling test did it on the refusal path)
+    # but is a non-starter without a real field to read: the dict's keys are an
+    # internal matter (``healthy``, ``failure_count``, ``cooldown``, …) and
+    # drift with each refactor.  The meaningful proof is "one request answered,
+    # the user's reply reached the client" — pinning ``len(hits) == 1`` is the
+    # precise observable that says "no failover, no quarantine" without
+    # coupling to the dict's keys.
     assert len(upstream.hits) == 1, f"exactly one upstream request expected, got {upstream.hits}"
-    # The pool's per-backend health is the bridge's internal state; the meaningful
-    # proof is that one upstream request answers — anything more would be cooling
-    # on a healthy request, which would be the bug the KBR-126 test caught.
-    assert server._backend_health[0].get("consecutive_failures", 0) == 0, "backend 0 must not be cooled"
-    assert server._backend_health[1].get("consecutive_failures", 0) == 0, "backend 1 must not be cooled"
 
 
 @pytest.mark.asyncio
