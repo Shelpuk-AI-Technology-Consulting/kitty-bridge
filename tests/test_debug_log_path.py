@@ -218,6 +218,81 @@ class TestCustomDebugLogPath:
         assert "test child debug message" in content
 
 
+class TestBudgetResolutionLinesReachTheDebugLog:
+    """The compaction budget's INFO notices must survive the product's own debug path.
+
+    ``_setup_debug_logging`` attached its ``FileHandler`` to ``kitty.bridge``
+    only. ``kitty.providers.model_context`` is a **sibling** logger, and nobody
+    sets its level, so root's default WARNING dropped its INFO records at the
+    logger level before any handler was consulted. Both budget-resolution
+    notices were therefore undeliverable via ``--debug`` — the product's own
+    diagnostic surface, and the surface the KBR-170 acceptance criterion names
+    ("an operator whose context_window is being shadowed can discover that
+    from the logs"): the KBR-170 shadow notice, and, with the same defect
+    since KBR-151, the default-fallback line.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _clean_model_context_logger(self):
+        """Clear ``kitty.providers.model_context`` handlers before each test and restore after.
+
+        Mirrors the ``_clean_bridge_logger`` autouse on
+        :class:`TestCustomDebugLogPath`: ``_setup_debug_logging`` is deduped
+        on the marker attribute, so re-attachment to a different path skips;
+        the bridge path is cleared by the sibling class' fixture, the new
+        logger is not.
+        """
+        mc_logger = logging.getLogger("kitty.providers.model_context")
+        original_handlers = list(mc_logger.handlers)
+        original_level = mc_logger.level
+        mc_logger.handlers.clear()
+        yield
+        mc_logger.handlers = original_handlers
+        mc_logger.level = original_level
+
+    def test_shadow_and_fallback_notices_reach_the_debug_file(self, tmp_path: Path):
+        import kitty.providers.model_context as mc
+
+        custom_path = tmp_path / "debug.log"
+        server = BridgeServer(
+            StubLauncher(),
+            StubProvider(),
+            "test-key",
+            model="test-model",
+            debug=str(custom_path),
+        )
+        mc._log_shadowed_context_window.cache_clear()
+        mc._log_default_fallback.cache_clear()
+        target = logging.getLogger("kitty.providers.model_context")
+        original_handlers = list(target.handlers)
+        original_level = target.level
+        try:
+            log_path = server._setup_debug_logging()
+            assert log_path == custom_path
+
+            # Emit both notices directly: the unit under test is the logging
+            # WIRING, not the resolver (the resolver's truth table lives in
+            # tests/test_model_context.py).
+            mc._log_shadowed_context_window("azure", "gpt-4o", 777_777, 128_000)
+            mc._log_default_fallback("ollama", "llama3-custom")
+
+            # Flush (not close — the handler is shared with the bridge logger
+            # and the bridge keeps logging after this test).
+            for h in list(target.handlers):
+                h.flush()
+
+            content = custom_path.read_text()
+            assert "gpt-4o" in content
+            assert "777777" in content.replace(",", "")
+            assert "128000" in content.replace(",", "")
+            assert "llama3-custom" in content
+        finally:
+            target.handlers = original_handlers
+            target.setLevel(original_level)
+            mc._log_shadowed_context_window.cache_clear()
+            mc._log_default_fallback.cache_clear()
+
+
 # ── Effective debug wiring test ─────────────────────────────────────────────
 
 

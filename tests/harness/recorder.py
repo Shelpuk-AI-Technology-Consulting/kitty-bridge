@@ -39,6 +39,7 @@ at teardown and must not use the method, which records a miss as a side effect.
 from __future__ import annotations
 
 import json
+import ssl
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -383,8 +384,16 @@ class RecordingUpstream:
 
     # -- lifecycle ---------------------------------------------------------
 
-    async def start(self) -> None:
+    async def start(self, ssl_context: ssl.SSLContext | None = None) -> None:
         """Bind an ephemeral port and begin accepting.
+
+        Args:
+            ssl_context: Server-side TLS context. When provided, the recorder
+                accepts HTTPS connections; otherwise it speaks plain HTTP. The
+                containment harness ([KBR-62](https://shelpuk.atlassian.net/browse/KBR-62))
+                passes a context whose leaf cert has :data:`harness.connect_proxy.HARNESS_UPSTREAM_HOST`
+                in the subjectAltName so the bridge's outbound ``aiohttp`` client
+                can verify the hop once ``aiohttp_trusts_test_ca`` is in scope.
 
         Raises:
             RuntimeError: When called on an already-started recorder.
@@ -400,7 +409,7 @@ class RecordingUpstream:
         )
         self._runner = web.ServerRunner(server)
         await self._runner.setup()
-        site = web.TCPSite(self._runner, self.host, 0)
+        site = web.TCPSite(self._runner, self.host, 0, ssl_context=ssl_context)
         await site.start()
         # Port 0 means the kernel chose one. `BaseRunner.addresses` is the
         # public way to read it back; the socket underneath is not.

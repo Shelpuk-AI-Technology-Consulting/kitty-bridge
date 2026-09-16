@@ -435,10 +435,17 @@ class OpenAISubscriptionAdapter(OpenAIAdapter):
         - Accept: text/event-stream (Codex backend requires streaming)
         - No Origin/Referer (not a browser request)
         - Authorization: Bearer (from OAuth)
-        - ChatGPT-Account-ID: from JWT (if present)
+        - ChatGPT-Account-Id: from JWT (if present)
 
-        NOTE: Do NOT set ``originator: codex_cli_rs`` — it triggers strict
-        tool validation that only allows Codex CLI's built-in tools.
+        NOTE: Do NOT set ``originator: codex_cli_rs`` **on this body**.  The
+        Codex *backend* (``api.openai.com/v1/responses``) triggers strict tool
+        validation when ``originator`` is present and only accepts Codex CLI's
+        built-in tools, so the API leg deliberately omits it.  The **auth
+        host** (``auth.openai.com``) was probed on 2026-09-15 and is
+        indifferent -- ``kitty.auth.oauth_session.token_request_headers``
+        sends ``originator`` on the four OAuth token POSTs.  See
+        ``.system_design/TEST_SUITE.md`` §4.5 C4a for the decision and the
+        probe evidence.
         """
         headers = {
             "Content-Type": "application/json",

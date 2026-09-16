@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "kitty-bridge"
-version = "1.13.0"
+version = "1.14.0"
 description = "Kitty Bridge — launch coding agents through a local API bridge"
 readme = "README.md"
 license = "MIT"
@@ -49,6 +49,7 @@ kitty = "kitty.cli.main:main"
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
+    "pytest-bdd>=8.1",
     "aioresponses>=0.7",
     "ruff>=0.4",
     "mypy>=1.10",

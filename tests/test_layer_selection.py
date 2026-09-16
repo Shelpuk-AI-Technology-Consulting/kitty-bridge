@@ -475,6 +475,13 @@ class TestTheWholeSuiteIsCoherent:
             # from the installed mutmut), and the bucket routing is the
             # other side of the registry agreement the scope guard tests.
             "tests/test_aggregate_mutation_baseline.py",
+            # KBR-200 (CB-3). §6.2.3 serialization-boundary guard: the
+            # native-passthrough route must keep the agent's cache
+            # breakpoints intact. Drives the bridge branch end to end and
+            # observes ``_upstream_body_for``; pins the M9 fallback's
+            # breakpoint loss as today's behaviour. New l2 file added by
+            # CB-3.
+            "tests/bridge/test_native_passthrough_cache_breaks.py",
         }
 
         actual = {

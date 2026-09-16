@@ -210,6 +210,36 @@ class TestTheCorpusIsProtectedFromLineEndingTranslation:
         assert CORPUS == ROOT / "tests" / "corpus"
         assert list(CORPUS.glob("*.body"))
 
+    def test_no_committed_manifest_carries_crlf(self) -> None:
+        """The checkout end is pinned; this pins the write end (KBR-261).
+
+        `write_entry` used ``Path.write_text`` with default newline translation,
+        which emits LF on Linux and CRLF on Windows regardless of
+        ``.gitattributes``. A Windows contributor running the regen script
+        produced CRLF manifests that CI then compared as a spurious
+        LF-vs-committed byte diff — the failure the L1 roundtrip test
+        documented as "rerun the regen script" when the real problem was
+        the writer, not the bytes.
+
+        The fix is platform-neutral: ``write_entry`` now passes
+        ``newline="\\n"`` so its bytes are LF everywhere. This test is the
+        direct counterpart — read every committed ``.json`` with
+        ``read_bytes()`` (text mode would silently translate ``\\r\\n`` back
+        to ``\\n`` on a Windows runner and mask the very drift it exists to
+        catch) and refuse the file if any pair ever lands.
+        """
+        offenders = [
+            path.name
+            for path in sorted(CORPUS.glob("*.json"))
+            if b"\r\n" in path.read_bytes()
+        ]
+
+        assert offenders == [], (
+            f"committed corpus manifests carry CRLF line endings: {offenders}; "
+            "the .gitattributes -text rule stops git from rewriting on checkout "
+            "but write_entry must also emit LF — see KBR-261"
+        )
+
 
 class TestTheProcedureDescribesTheTool:
     """A capture procedure that has stopped describing the scrubber is a trap."""

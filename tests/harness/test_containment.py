@@ -29,7 +29,11 @@ bypass into the product.
 only §8.2's: ``l3`` is in ``PENDING_ACTIVATION_LAYERS``, so an ``l3`` marker
 today would leave the containment harness's correctness checked by no job at
 all. §8.2 names this module as the T-E1 bullet, so T-K6 inherits the
-relocation.
+relocation. ``test_default_resolver_is_threaded``
+([KBR-259](https://shelpuk.atlassian.net/browse/KBR-259)) pins the aiohttp
+``DefaultResolver`` premise of ``monkeypatched_aiohttp_resolver``; it belongs
+to the same l1 cohort, so the pin and the seam move together when T-K6
+activates the Subsystem job.
 """
 
 from __future__ import annotations
@@ -40,6 +44,7 @@ import socket
 import ssl
 from collections.abc import AsyncGenerator
 
+import aiohttp
 import pytest
 
 from harness import containment
@@ -54,6 +59,7 @@ from harness.containment import (
     monkeypatched_aiohttp_resolver,
     register_containment_transport,
     registered_containment_transports,
+    reset_for_test,
 )
 from harness.containment import (
     instance as report_instance,
@@ -148,8 +154,61 @@ class TestMonkeypatchedResolver:
         ):
             socket.getaddrinfo("other.invalid", 80, type=socket.SOCK_STREAM)
 
+    def test_default_resolver_is_threaded(self) -> None:
+        """Pin aiohttp's ``DefaultResolver`` to ``ThreadedResolver`` (TEST_SUITE.md §5.3).
+
+        The direct-leg seam this class tests — ``monkeypatched_aiohttp_resolver``
+        — works only because the connector the bridge builds resolves through
+        ``socket.getaddrinfo``. With no resolver injected, ``TCPConnector``
+        picks ``aiohttp.resolver.DefaultResolver``; in the no-``aiodns`` build
+        that is ``ThreadedResolver``, whose ``resolve`` calls ``loop.getaddrinfo``.
+        Adding ``aiodns`` ≥ 3.2 (the version whose ``DNSResolver`` exposes
+        ``getaddrinfo``) flips the selection at aiohttp import time to
+        ``AsyncResolver``, which resolves via c-ares and never calls
+        ``socket.getaddrinfo``: the patch silently stops working and every
+        §5.2.2 phase-1 positive control fails for the wrong reason.
+
+        The message names both ``AsyncResolver`` and ``aiodns`` so a future
+        failure points at the cause, and preempts the false-alarm path (a
+        future aiohttp default that still routes through ``socket.getaddrinfo``):
+        update this pin deliberately rather than delete it.
+        """
+        assert aiohttp.resolver.DefaultResolver is aiohttp.resolver.ThreadedResolver, (
+            "aiohttp's DefaultResolver is "
+            f"{aiohttp.resolver.DefaultResolver.__name__}, not ThreadedResolver: "
+            "an aiodns install flips aiohttp.resolver.DefaultResolver to "
+            "AsyncResolver, which resolves via c-ares and never calls "
+            "socket.getaddrinfo, so monkeypatched_aiohttp_resolver "
+            "(tests/harness/containment.py) silently stops working and every "
+            "§5.2.2 phase-1 positive control fails for the wrong reason "
+            "(TEST_SUITE.md §5.3). If a future aiohttp default still routes "
+            "through socket.getaddrinfo, update this pin deliberately rather "
+            "than delete it."
+        )
+
 
 # ── R3: the capability report ──────────────────────────────────────────────
+
+
+@pytest.fixture(autouse=True)
+def _isolate_singleton() -> None:
+    """Reset the capability-report singleton before every test in this module.
+
+    The autouse fixture is declared at module scope (unindented between
+    :class:`TestMonkeypatchedResolver` and :class:`TestCapabilityReport`),
+    so its ``autouse=True`` applies to **every** test in the file, not just
+    the class below it; a class-scoped autouse would be impossible to write
+    in pytest, and the wording here is what the reader needs to know when
+    they look for the seam.
+
+    The singleton is the wire T-E2..T-E5 record into and T-E9's completeness
+    gate reads; a sibling slice's verdict written earlier in the process would
+    leave the per-test "initial state" assertion false. ``reset_for_test``
+    replaces it with a fresh every-``not_attempted`` report before each test;
+    the per-test :func:`capability_report` fixture is unchanged, so unit tests
+    constructing a fresh :class:`CapabilityReport` directly are unaffected.
+    """
+    reset_for_test()
 
 
 class TestCapabilityReport:
@@ -230,6 +289,31 @@ class TestCapabilityReport:
         message = str(excinfo.value)
         for name in ("curl_cffi", "provider_aiohttp", "botocore"):
             assert name in message, f"missing pending transport {name!r} in gate message"
+
+    def test_reset_for_test_replaces_the_singleton_with_every_not_attempted(self) -> None:
+        """``reset_for_test`` returns the singleton to its initial state.
+
+        The autouse fixture in this class already does this; the test is the
+        contract the fixture rests on. A sibling slice that records a verdict
+        into ``instance()`` and then sees another test's
+        ``test_singleton_exposes_every_transport_not_attempted`` go green is
+        what makes the singleton co-tenant-safe.
+        """
+        before = report_instance()
+        before.record("bridge_aiohttp", Outcome.PROVEN)
+        # Before resetting: at least one row is *not* ``not_attempted``.
+        assert before.outcome("bridge_aiohttp") is Outcome.PROVEN
+
+        reset_for_test()
+
+        # After resetting: a fresh object, every row ``not_attempted``.
+        assert report_instance() is not before
+        assert set(report_instance().not_attempted_names()) == {
+            "bridge_aiohttp",
+            "curl_cffi",
+            "provider_aiohttp",
+            "botocore",
+        }
 
 
 # ── R1: the sealed-network harness ─────────────────────────────────────────
@@ -320,8 +404,8 @@ class TestSealedNetwork:
         started: list[RecordingUpstream] = []
 
         class _CapturingRecorder(RecordingUpstream):
-            async def start(self) -> None:
-                await super().start()
+            async def start(self, *args: object, **kwargs: object) -> None:
+                await super().start(*args, **kwargs)  # type: ignore[arg-type]
                 started.append(self)
 
         monkeypatch.setattr(containment, "RecordingUpstream", _CapturingRecorder)
@@ -384,9 +468,15 @@ class TestBridgeAiohttpContainment:
     async def test_drive_phase_1_one_request_reaches_the_recorder_directly(
         self,
         sealed_network: SealedNetwork,
+        aiohttp_trusts_test_ca: None,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """The bridge, egress off, resolver patched, posts once and lands on the harness."""
+        """The bridge, egress off, resolver patched, posts once and lands on the harness.
+
+        The recorder is TLS (see :attr:`SealedNetwork.upstream_base_url`), so
+        the bridge's outbound aiohttp client must trust the harness CA — the
+        fixture's job, on this hop and on the proxied phases' hop alike.
+        """
         result = await BridgeAiohttpContainment().drive_phase_1(sealed_network, monkeypatch=monkeypatch)
 
         assert isinstance(result, Phase1Result)
@@ -410,6 +500,7 @@ class TestBridgeAiohttpContainment:
     async def test_drive_phase_1_with_a_broken_resolver_records_zero_connections(
         self,
         sealed_network: SealedNetwork,
+        aiohttp_trusts_test_ca: None,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Falsification (plan §1.4): a wrong-port resolver must make the green path fail.
@@ -424,7 +515,11 @@ class TestBridgeAiohttpContainment:
         drive's ``status`` comes back as ``-1`` and
         ``text`` carries the ``TimeoutError`` repr. The recorder receives
         nothing in any of those shapes, which is what the green assertion
-        ``captures == 1`` catches.
+        ``captures == 1`` catches. The fixture is taken so the bridge's TLS
+        verify step is in scope on the green path's notional branch — the
+        broken-resolver branch never reaches TLS verify, but the
+        consistency between this test and the green-path one is what the
+        reader expects.
 
         **Cost: ~30 s.** The 10-second client timeout plus ``stop_async()``
         waiting out the bridge's in-flight retries is the price of driving

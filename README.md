@@ -604,7 +604,7 @@ kitty --logging claude
 kitty --log-file /tmp/my-usage.log claude
 ```
 
-**Debug logs** — verbose tracing of requests, responses, and protocol translation:
+**Debug logs** — verbose tracing of requests, responses, and protocol translation; budget-resolution lines for the compaction budget (catalog override, default fallback when no model knows the model):
 
 ```bash
 # Default location: ~/.cache/kitty/bridge.log
@@ -621,18 +621,19 @@ kitty --debug --log-file /tmp/usage.log my-profile bridge
 kitty --debug-file /tmp/debug.log --logging my-profile codex
 ```
 
-| Flag        | What it logs             | Default path                | Custom path flag    |
-|-------------|--------------------------|-----------------------------|---------------------|
-| `--logging` | Token usage              | `~/.cache/kitty/usage.log`  | `--log-file PATH`   |
-| `--debug`   | Request/response tracing | `~/.cache/kitty/bridge.log` | `--debug-file PATH` |
+| Flag        | What it logs                                                       | Default path                | Custom path flag    |
+|-------------|--------------------------------------------------------------------|-----------------------------|---------------------|
+| `--logging` | Token usage                                                        | `~/.cache/kitty/usage.log`  | `--log-file PATH`   |
+| `--debug`   | Request/response tracing and the compaction-budget resolution lines (logger `kitty.providers.model_context`) | `~/.cache/kitty/bridge.log` | `--debug-file PATH` |
 
 ### Cleanup
 
-kitty restores agent config files after the agent exits. Three layers of cleanup:
+kitty restores agent config files after the agent exits. Three automatic cleanup layers, plus manual recovery:
 
 1. **Normal exit** — `finally` block
-2. **Crash / `SIGTERM`** — `atexit` handler
-3. **`SIGKILL` / kernel OOM** — run `kitty cleanup` manually
+2. **Crash** — `atexit` handler
+3. **`SIGTERM`** — forwarded to the agent; the same `finally` block runs when the agent dies from it
+4. **`SIGKILL` / kernel OOM** — manual recovery via `kitty cleanup`
 
 If your agent shows connection errors after a crash, run `kitty cleanup` to restore its configuration files.
 
