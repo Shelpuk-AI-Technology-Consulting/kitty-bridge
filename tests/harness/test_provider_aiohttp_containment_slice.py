@@ -571,8 +571,6 @@ async def _drive_oauth(
         capture, connection and attempt logs for the containment
         assertions.
     """
-    from kitty.auth import openai_oauth as _oauth  # noqa: PLC0415 -- the binding the drive must resolve
-
     saved_egress = get_egress()
     ok = False
     error = ""
@@ -580,10 +578,13 @@ async def _drive_oauth(
         set_egress(egress)
         with harness_oauth_token_url(harness), transport.direct_route(harness):
             # Built inside the seam scope so the patched binding (if a
-            # falsification is in flight) is what the session sees.
-            http = aiohttp.ClientSession(**_oauth.aiohttp_session_kwargs())
+            # falsification is in flight) is what the session sees. The
+            # module-level ``openai_oauth`` name is the same binding the
+            # phase-3 falsification patches, so this construction is what
+            # that patch observes.
+            http = aiohttp.ClientSession(**openai_oauth.aiohttp_session_kwargs())
             try:
-                await _oauth._exchange_code_for_tokens("code", "verifier", "client-id", http)
+                await openai_oauth._exchange_code_for_tokens("code", "verifier", "client-id", http)
                 ok = True
             except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:
                 ok = False
@@ -909,7 +910,7 @@ class TestDriveWithEgress:
 # ── The OAuth login leg — the startup path §5.5 will not leave out ────────
 
 
-class TestTheOAuthLoginLegContainment:
+class TestOAuthLoginLegContainment:
     """The four containment phases for the OAuth login leg.
 
     The leg has no adapter and no bridge: the product reaches the network
