@@ -324,6 +324,10 @@ class TestForegroundBridgeEnforces:
 
         set_egress(EGRESS)
         _patch_provider_registry(monkeypatch, _UnproxyableProvider())
+        # The store is constructed at the top of _run_bridge_balancing and its
+        # __init__ mkdirs the real user config dir; both store and resolver
+        # must be patched, as tests/test_cli_main.py's _balancing_stubs does.
+        _patch_profile_store(monkeypatch, SimpleNamespace(name="ci-pool"))
         _patch_balancing_resolver(monkeypatch, [_profile_stub(name="member-1")])
         seen = _patch_bridge_sentinel(monkeypatch)
 
@@ -491,6 +495,9 @@ def _drive_cli_main_balancing_for_mutant(monkeypatch: pytest.MonkeyPatch) -> Non
     """Drive ``_run_bridge_balancing`` with one member."""
     import kitty.cli.main as cli_main
 
+    # Store and resolver both patched: the store's __init__ mkdirs the real
+    # user config dir, mirroring tests/test_cli_main.py's _balancing_stubs.
+    _patch_profile_store(monkeypatch, SimpleNamespace(name="ci-pool"))
     _patch_balancing_resolver(monkeypatch, [_profile_stub(name="member-1")])
     cli_main._run_bridge_balancing(SimpleNamespace(name="ci-pool"), _cred_store(), validate=False)
 
