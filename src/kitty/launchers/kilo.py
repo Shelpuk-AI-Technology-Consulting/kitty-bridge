@@ -131,6 +131,12 @@ class KiloAdapter(LauncherAdapter):
 
         Raises:
             RuntimeError: If ``build_spawn_config`` was not called first.
+
+        Notes:
+            ``newline=""`` disables universal newlines (``\r\n`` -> ``\n`` on
+            every platform); without it, a CRLF config on disk is silently read
+            as LF, breaking the byte-identity contract that ``cleanup_launch``'s
+            restore asserts against the user's original.
         """
         config_path = settings_path or _DEFAULT_CONFIG_PATH
         if not self._bridge_port:
@@ -140,7 +146,8 @@ class KiloAdapter(LauncherAdapter):
         config: dict = {}
 
         if config_path.exists():
-            original = config_path.read_text(encoding="utf-8")
+            with config_path.open("r", encoding="utf-8", newline="") as f:
+                original = f.read()
             try:
                 config = json.loads(original)
             except json.JSONDecodeError:
@@ -180,6 +187,12 @@ class KiloAdapter(LauncherAdapter):
         Args:
             original: The content returned by ``prepare_launch``.
             settings_path: Path to the Kilo CLI config file (for testing).
+
+        Notes:
+            ``newline=""`` disables CPython's ``\n`` -> ``os.linesep``
+            translation on write; without it, on Windows a ``\n`` in
+            ``original`` becomes ``\r\n`` on disk and breaks the byte-identity
+            contract that ``prepare_launch``'s capture establishes.
         """
         config_path = settings_path or _DEFAULT_CONFIG_PATH
         if original is None:
@@ -191,7 +204,7 @@ class KiloAdapter(LauncherAdapter):
             return
         try:
             config_path.parent.mkdir(parents=True, exist_ok=True)
-            config_path.write_text(original, encoding="utf-8")
+            config_path.write_text(original, encoding="utf-8", newline="")
         except Exception:
             logger.warning("Failed to restore Kilo config")
             raise
