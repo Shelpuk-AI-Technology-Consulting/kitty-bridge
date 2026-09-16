@@ -36,9 +36,9 @@ dependencies = [
     "boto3>=1.34",
     # Declared directly, not only via boto3: botocore implements the
     # containment guarantee (``Config(proxies=)`` precedence over the
-    # ambient proxy environment) that §6.2.4 of TEST_SUITE.md pins — an
-    # undeclared dependency owning a containment guarantee is worse than
-    # an unbounded one. The gate for a botocore bump is
+    # ambient proxy environment) that section 6.2.4 of TEST_SUITE.md pins
+    # -- an undeclared dependency owning a containment guarantee is worse
+    # than an unbounded one. The gate for a botocore bump is
     # tests/harness/test_botocore_transport_contract.py: it fails loudly
     # if a new release rotates the precedence contract, which is the
     # signal to re-pin the floor here.

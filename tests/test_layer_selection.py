@@ -496,6 +496,12 @@ class TestTheWholeSuiteIsCoherent:
             # the curl_cffi/botocore recorders), so this AST pin is their only
             # automated drift enforcement.
             "tests/bridge/test_kbr256_recovery_structure.py",
+            # KBR-64 (T-G11). A §6.2.4 dependency behaviour contract, the
+            # botocore twin of `test_curl_cffi_transport_contract.py`: it
+            # asserts what botocore does with `Config(proxies=)` against
+            # the ambient proxy environment -- an artifact upgraded
+            # separately and by someone else entirely.
+            "tests/harness/test_botocore_transport_contract.py",
         }
 
         actual = {
