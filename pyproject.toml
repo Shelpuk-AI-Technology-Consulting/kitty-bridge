@@ -282,15 +282,7 @@ forbidden_modules = [
 # in this list fails
 # the gate.
 #
-# `src/kitty/bridge/server.py` is deliberately NOT here. Its section 6.1
-# targets are seven BridgeServer methods, but mutmut generates for the whole
-# file: server.py's mutated copy reaches 354 MB / 5.7M lines and the
-# generating worker did not finish in 25 minutes. Mutating just the seven
-# methods needs `# pragma: no mutate block` markers on everything else in
-# the file -- a source change that belongs to its own ticket, not to
-# baseline config. The compaction_and_pairing group is therefore absent
-# from the recorded baseline (see .system_design/MUTATION_BASELINE.md).
-#
+
 # `pytest_add_cli_args_test_selection` is array form -- mutmut's TOML reader
 # requires it (its config schema validates the array shape explicitly).
 #
@@ -308,6 +300,16 @@ forbidden_modules = [
 # `also_copy` carries files outside `source_paths`/`tests/` that the L1
 # selection reads from the repo root. README.md is the one such file today:
 # `tests/bridge/test_compaction_failure_response.py` (an L1 test) reads it.
+# `scripts` is the second: the L2 test
+# `tests/test_aggregate_mutation_baseline.py` imports
+# `scripts/aggregate_mutation_baseline.py` by filesystem path at module
+# level (added in KBR-88 review round 7, after the recorded b680edd run;
+# every mutmut run on main needs this copy or test collection fails
+# before the clean run starts). The whole directory is copied, not the
+# single file, because mutmut 3.8.0's file branch (`shutil.copy2`) does
+# not create the destination's parent directory and dies on a fresh
+# `mutants/` tree; the directory branch (`copytree(dirs_exist_ok=True)`)
+# does.
 # This file must stay ASCII (see the ruff note above): section 6.1 is written
 # out rather than using the section sign.
 [tool.mutmut]
@@ -324,6 +326,13 @@ only_mutate = [
     "src/kitty/bridge/gemini/*",
     "src/kitty/bridge/engine.py",
     "src/kitty/bridge/tool_audit.py",
+    # ``server.py`` carries the seven section-6.1 ``compaction_and_pairing``
+    # methods; every other def/class in it is suppressed by
+    # ``# pragma: no mutate block`` (mutmut's block pragma) so generation
+    # stays fast and the scope narrows to those seven methods. The guard
+    # ``tests/test_mutmut_scope.py::test_server_py_pragma_scheme_marks_everything_but_the_seven``
+    # pins the marker scheme against drift.
+    "src/kitty/bridge/server.py",
     # Every adapter file carrying one of the three provider hooks
     # (translate_to_upstream / normalize_request / build_upstream_headers)
     # -- per-file rather than `providers/*` so the three un-scoped
@@ -358,4 +367,4 @@ only_mutate = [
     "src/kitty/profiles/*",
     "src/kitty/validation.py",
 ]
-also_copy = ["README.md"]
+also_copy = ["README.md", "scripts"]
