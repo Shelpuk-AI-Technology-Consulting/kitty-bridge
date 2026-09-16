@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import ast
 import re
+import textwrap
 from pathlib import Path
 
 import pytest
@@ -178,42 +179,177 @@ class TestNoProxyEnvironmentVariables:
         assert not offenders, f"trust_env=True found at {offenders}"
 
 
+#: The class-definition file: every other `BridgeServer(` in ``src/kitty`` is a construction
+#: site whose enclosing function must hold a preceding `egress_block_reason(` call.
+_BRIDGE_SERVER_DEFINITION_FILE = "bridge/server.py"
+
+
+def _called_name(node: ast.Call) -> str | None:
+    """Return the bare name of a called function, or ``None`` for dotted calls.
+
+    Args:
+        node: The ``ast.Call`` node to inspect.
+
+    Returns:
+        The identifier of a simple ``Name`` callee, e.g. ``"BridgeServer"``,
+        or ``None`` when the callee is an attribute or anything more complex.
+    """
+    if isinstance(node.func, ast.Name):
+        return node.func.id
+    return None
+
+
+def _enclosing_function(
+    tree: ast.Module, lineno: int
+) -> ast.FunctionDef | ast.AsyncFunctionDef | None:
+    """Return the innermost function whose body covers ``lineno``.
+
+    Args:
+        tree: Parsed module to search.
+        lineno: 1-based line number the covering function must span.
+
+    Returns:
+        The innermost (deepest-starting) ``FunctionDef`` or ``AsyncFunctionDef``
+        whose span contains ``lineno``, or ``None`` when the line sits at
+        module scope.
+    """
+    best: ast.FunctionDef | ast.AsyncFunctionDef | None = None
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        end = node.end_lineno or node.lineno
+        if node.lineno <= lineno <= end and (best is None or node.lineno > best.lineno):
+            best = node
+    return best
+
+
+def _iter_bridge_constructions() -> list[tuple[str, int]]:
+    """Find every ``BridgeServer(`` construction under ``src/kitty``.
+
+    Args:
+        (no arguments)
+
+    Returns:
+        ``(relative_path, line_number)`` for each construction, excluding the
+        class-definition file.
+    """
+    found: list[tuple[str, int]] = []
+    for path in sorted(SRC.rglob("*.py")):
+        rel = path.relative_to(SRC).as_posix()
+        if rel == _BRIDGE_SERVER_DEFINITION_FILE:
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call) and _called_name(node) == "BridgeServer":
+                found.append((rel, node.lineno))
+    return found
+
+
+def _is_dominated(tree: ast.Module, target_lineno: int) -> bool:
+    """Report whether a ``BridgeServer`` construction is egress-guarded.
+
+    A construction is dominated when its innermost enclosing function contains
+    a call to ``egress_block_reason`` on an earlier line. A construction at
+    module scope has no enclosing function and is never dominated.
+
+    Args:
+        tree: Parsed module containing the construction.
+        target_lineno: 1-based line number of the ``BridgeServer(`` call.
+
+    Returns:
+        ``True`` when a preceding ``egress_block_reason(`` call exists in the
+        same function scope, ``False`` otherwise.
+    """
+    func = _enclosing_function(tree, target_lineno)
+    if func is None:
+        return False
+    for node in ast.walk(func):
+        if (
+            isinstance(node, ast.Call)
+            and _called_name(node) == "egress_block_reason"
+            and node.lineno < target_lineno
+        ):
+            return True
+    return False
+
+
 class TestEveryStartPathIsGuarded:
     """R10 structurally: a new way to start a bridge must not skip the check.
 
     The first version of this feature wired the fail-closed guard into the agent
     launcher only, leaving foreground `kitty bridge` and the background runner
-    able to start with a provider that cannot honour the proxy. Counting call
-    sites catches that class of omission; a behavioural test of the guard
-    function cannot.
+    able to start with a provider that cannot honour the proxy. The first
+    structural version of this test was file-granular — a file holding a
+    `BridgeServer(` call needed only to contain an `egress_block_reason(` call
+    anywhere. `cli/main.py` already holds two start paths, so a third added
+    there without a guard call would have passed unguarded. Domination is now
+    checked at AST level: the guard call must precede the construction in the
+    same function scope.
     """
 
-    @staticmethod
-    def _files_calling(name: str) -> set[str]:
-        """Return source files containing a call to ``name``."""
-        pattern = re.compile(rf"\b{re.escape(name)}\(")
-        return {
-            path.relative_to(SRC).as_posix()
-            for path in SRC.rglob("*.py")
-            if pattern.search(path.read_text(encoding="utf-8"))
-        }
+    def test_every_construction_is_dominated_by_a_guard_call(self):
+        """Every `BridgeServer(` construction must be preceded by `egress_block_reason(`."""
+        offenders: list[str] = []
+        for rel, lineno in _iter_bridge_constructions():
+            tree = ast.parse((SRC / rel).read_text(encoding="utf-8"), filename=str(SRC / rel))
+            if not _is_dominated(tree, lineno):
+                func = _enclosing_function(tree, lineno)
+                where = func.name if func is not None else "<module scope>"
+                offenders.append(f"{rel}:{lineno} in {where}()")
 
-    def test_every_file_constructing_a_bridge_also_checks_egress(self):
-        constructors = self._files_calling("BridgeServer") - {"bridge/server.py"}
-        guarded = self._files_calling("egress_block_reason")
-
-        unguarded = sorted(constructors - guarded)
-
-        assert not unguarded, (
-            "these files start a BridgeServer without calling egress_block_reason, so a provider "
-            f"that cannot be proxied would leak from them: {unguarded}"
+        assert not offenders, (
+            "these BridgeServer constructions are not dominated by an egress_block_reason call "
+            "in the same function scope, so a provider that cannot be proxied would leak from "
+            f"them: {offenders}"
         )
 
     def test_the_scan_finds_the_known_start_paths(self):
-        """Guards against the regex silently matching nothing."""
-        constructors = self._files_calling("BridgeServer") - {"bridge/server.py"}
+        """Guards against a broken AST walk silently matching nothing."""
+        sites = _iter_bridge_constructions()
+        files = {rel for rel, _lineno in sites}
 
-        assert constructors == {"cli/launcher.py", "cli/main.py", "bridge_runner.py"}
+        assert len(sites) >= 5, (
+            f"the scan found {len(sites)} BridgeServer constructions; at least five start "
+            "paths are known to exist, so the AST walk is likely broken"
+        )
+        assert files == {"cli/launcher.py", "cli/main.py", "bridge_runner.py"}, (
+            f"the set of files constructing BridgeServer changed: {sorted(files)}. Review each "
+            "for egress domination before updating this assertion."
+        )
+
+    def test_undominated_construction_is_caught(self):
+        """Falsification control: the walker must reject an unguarded construction.
+
+        Without this, a broken `_is_dominated` that always returns True would
+        pass every other test in this class while proving nothing.
+        """
+        source = textwrap.dedent(
+            """\
+            from kitty.bridge.server import BridgeServer
+            from kitty.egress_guard import egress_block_reason
+
+            def unguarded():
+                return BridgeServer()
+
+            def guarded():
+                egress_block_reason(None, None, None)
+                return BridgeServer()
+            """
+        )
+        tree = ast.parse(source)
+        constructions = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and _called_name(node) == "BridgeServer"
+        ]
+        assert len(constructions) == 2, "fixture must hold exactly two constructions"
+
+        assert not _is_dominated(tree, constructions[0].lineno), (
+            "an undominated construction must be reported as unguarded"
+        )
+        assert _is_dominated(tree, constructions[1].lineno), (
+            "a guarded construction must be accepted"
+        )
 
 
 class TestTypeSuppressionsAreSpecific:
