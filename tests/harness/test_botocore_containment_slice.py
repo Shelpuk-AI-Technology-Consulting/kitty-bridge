@@ -41,6 +41,7 @@ import pytest
 
 from harness.botocore_containment import BotocoreContainment
 from harness.connect_proxy import (
+    AMBIENT_PROXY_ENV_VARS,
     HARNESS_UPSTREAM_HOST,
     PROXY_PASSWORD,
     CertFiles,
@@ -53,24 +54,6 @@ from harness.containment import (
     reset_for_test,
 )
 from kitty.egress import EgressConfig
-
-#: Every ambient proxy environment variable that botocore's urllib3 reads
-#: (``HTTP_PROXY``, ``HTTPS_PROXY``, ``NO_PROXY``, ``ALL_PROXY`` and their
-#: lowercase forms). The autouse ``_isolate_ambient_proxy_env`` fixture below
-#: clears them before every test so a developer's shell — or a CI runner —
-#: cannot silently defeat phase 1 (egress off) or phase 3 (injected bypass).
-#: T-G11's contract probes are the inverse: they *set* a subset of these to
-#: measure botocore's documented precedence.
-_AMBIENT_PROXY_ENV_VARS: frozenset[str] = frozenset({
-    "HTTP_PROXY",
-    "HTTPS_PROXY",
-    "NO_PROXY",
-    "ALL_PROXY",
-    "http_proxy",
-    "https_proxy",
-    "no_proxy",
-    "all_proxy",
-})
 
 # ── Fixtures ───────────────────────────────────────────────────────────────
 
@@ -147,7 +130,7 @@ def _isolate_ambient_proxy_env(monkeypatch: pytest.MonkeyPatch) -> None:
     Args:
         monkeypatch: Pytest's monkeypatch fixture.
     """
-    for var in sorted(_AMBIENT_PROXY_ENV_VARS):
+    for var in sorted(AMBIENT_PROXY_ENV_VARS):
         monkeypatch.delenv(var, raising=False)
 
 

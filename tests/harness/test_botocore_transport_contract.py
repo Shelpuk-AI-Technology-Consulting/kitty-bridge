@@ -45,26 +45,13 @@ import pytest
 
 from harness.botocore_containment import BotocoreContainment
 from harness.connect_proxy import (
+    AMBIENT_PROXY_ENV_VARS,
     HARNESS_UPSTREAM_HOST,
     CertFiles,
     proxy_config,
 )
 from harness.containment import SealedNetwork
 from harness.contract import WireFormat
-
-#: Every ambient proxy environment variable that botocore's urllib3 reads.
-#: Sharing the constant with the botocore containment slice means a future
-#: addition (``HTTPS_PROXY``, ``no_proxy``, etc.) is one edit, not two.
-_AMBIENT_PROXY_ENV_VARS: frozenset[str] = frozenset({
-    "HTTP_PROXY",
-    "HTTPS_PROXY",
-    "NO_PROXY",
-    "ALL_PROXY",
-    "http_proxy",
-    "https_proxy",
-    "no_proxy",
-    "all_proxy",
-})
 
 #: The proxy URL the contract probes point the bridge at. A dead address
 #: (loopback port 1) so an ambient proxy that wins precedence fails loudly
@@ -115,7 +102,7 @@ def _isolate_ambient_proxy_env(monkeypatch: pytest.MonkeyPatch) -> None:
     Args:
         monkeypatch: Pytest's monkeypatch fixture.
     """
-    for var in sorted(_AMBIENT_PROXY_ENV_VARS):
+    for var in sorted(AMBIENT_PROXY_ENV_VARS):
         monkeypatch.delenv(var, raising=False)
 
 
