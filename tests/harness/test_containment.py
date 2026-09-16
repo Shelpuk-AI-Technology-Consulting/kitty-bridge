@@ -43,6 +43,7 @@ import contextlib
 import socket
 import ssl
 from collections.abc import AsyncGenerator
+from pathlib import Path
 
 import aiohttp
 import pytest
