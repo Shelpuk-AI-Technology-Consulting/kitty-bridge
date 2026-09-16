@@ -66,6 +66,34 @@ def test_eval_task_author_person_refuses_an_empty_name() -> None:
         EvalTaskAuthor.person("   ")  # type: ignore[arg-type]
 
 
+def test_eval_task_author_constructor_refuses_empty_name() -> None:
+    """AC-1.4 (structural) — hand-rolled construction also refuses empty names.
+
+    The ``.person()`` factory refuses empty input at its boundary,
+    but a contributor who hand-constructs
+    ``EvalTaskAuthor(kind="person", name="")`` would otherwise slip
+    past the structural rule. ``__post_init__`` closes that path:
+    every constructor call goes through it, regardless of which
+    factory the caller used. Without this, an empty-name person
+    authorship reaches the loader's gate (which inspects ``kind``
+    only) and silently loads — defeating AC-1.4's intent.
+    """
+    with pytest.raises(ValueError):
+        EvalTaskAuthor(kind="person", name="")
+    with pytest.raises(ValueError):
+        EvalTaskAuthor(kind="person", name="   ")
+    # A non-empty name on a person authorship still constructs.
+    ada = EvalTaskAuthor(kind="person", name="ada")
+    assert ada.kind == "person"
+    assert ada.name == "ada"
+    # MODEL is exempt from the empty-name rule because its name is a
+    # refusal-message label, not an author's identity. A model-shaped
+    # authorship with an empty name still constructs — and the loader
+    # refuses it on the ``kind`` check at the gate.
+    assert EvalTaskAuthor.MODEL.kind == "model"
+    assert EvalTaskAuthor.MODEL.name  # non-empty in practice
+
+
 def test_eval_task_author_person_accepts_a_real_name() -> None:
     """AC-1.1 (construction half) — ``person("ada")`` is a valid authorship."""
     author = EvalTaskAuthor.person("ada")

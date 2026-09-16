@@ -80,19 +80,51 @@ class EvalTaskAuthor:
     accepts. The discipline keeps a contributor from smuggling in a
     model-shaped authorship under a renamed kind.
 
+    The empty-name rule is structural too: ``__post_init__`` refuses
+    any person authorship with an empty or whitespace-only ``name``
+    — so a hand-rolled ``EvalTaskAuthor(kind="person", name="")``
+    cannot bypass :meth:`person`'s refusal by skipping the factory.
+    Every constructor call goes through ``__post_init__``.
+
     Attributes:
         kind: ``"person"`` for an authored-by-a-human task, ``"model"``
             for the rejected sentinel. Any other value is treated as
             model-shaped and refused.
-        name: The author's display name. Required for ``kind == "person"``;
-            the :meth:`person` constructor refuses an empty or
-            whitespace-only value. For ``MODEL``, a short label that
-            the loader names in its refusal messages so a maintainer
-            reading the log sees what was found.
+        name: The author's display name. Required for ``kind == "person"``
+            (enforced in ``__post_init__``): an empty or whitespace-only
+            value raises. For ``MODEL``, a short label that the loader
+            names in its refusal messages so a maintainer reading the
+            log sees what was found.
     """
 
     kind: str
     name: str
+
+    def __post_init__(self) -> None:
+        """Refuse a person authorship with an empty name.
+
+        Mirrors :meth:`person`'s refusal at construction so there is
+        no private path around it: every way to build an
+        :class:`EvalTaskAuthor` — the ``.person()`` factory, a
+        hand-rolled ``EvalTaskAuthor(kind="person", name=...)``
+        call, or even a future subclass — goes through this check.
+        ``MODEL`` (``kind="model"``) is exempt because its name is
+        a refusal-message label, not an author's identity.
+
+        Raises:
+            ValueError: When ``kind == "person"`` and ``name`` is
+                empty or whitespace-only. An empty name is not a
+                traceable authorship, and accepting one would let
+                a contributor bypass the gate's intent with a
+                passable ``kind`` and an empty ``name``.
+        """
+        if self.kind == "person" and not (self.name and self.name.strip()):
+            raise ValueError(
+                "EvalTaskAuthor(kind='person', name=...) requires a non-empty "
+                "name; the author is recorded for traceability and an empty "
+                "name is not a traceable authorship (TEST_SUITE.md §6.4.3: "
+                "independently authored acceptance tests)"
+            )
 
     @staticmethod
     def person(name: str) -> EvalTaskAuthor:
@@ -106,16 +138,20 @@ class EvalTaskAuthor:
             A person authorship carrying ``name``.
 
         Raises:
-            ValueError: When ``name`` is empty or whitespace-only. A
-                person authorship without a name is not a traceable
-                authorship, and accepting one would let a contributor
-                bypass the gate by passing ``""``.
+            ValueError: When ``name`` is empty or whitespace-only.
+                Also raised by ``__post_init__`` if the structural
+                check on the resulting instance fails — every path
+                through ``EvalTaskAuthor(...)`` is checked, so a
+                caller who hand-constructs ``EvalTaskAuthor(kind=
+                "person", name="")`` is refused at construction the
+                same way a caller who went through :meth:`person`
+                would be.
         """
         if not isinstance(name, str) or not name.strip():
             raise ValueError(
                 "EvalTaskAuthor.person() requires a non-empty name; the author "
-                "is recorded for traceability and the empty string is reserved "
-                "for the MODEL sentinel (TEST_SUITE.md §6.4.3: independently "
+                "is recorded for traceability and an empty name is not a "
+                "traceable authorship (TEST_SUITE.md §6.4.3: independently "
                 "authored acceptance tests)"
             )
         return EvalTaskAuthor(kind="person", name=name.strip())

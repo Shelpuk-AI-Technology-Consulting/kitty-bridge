@@ -58,8 +58,11 @@ lambda is refused identically to one with a sophisticated check.
 
 `EvalTaskAuthor.person("")` and `EvalTaskAuthor.person("   ")` both
 raise `ValueError` at construction. A person authorship without a name
-is not a traceable authorship; the empty string is reserved for the
-rejected sentinel.
+is not a traceable authorship, and the empty-name rule is enforced
+structurally — `EvalTaskAuthor.__post_init__` refuses it for any
+`kind="person"` instance, so a hand-rolled
+`EvalTaskAuthor(kind="person", name="")` is refused the same way as
+the public factory.
 
 ## The id rule
 
