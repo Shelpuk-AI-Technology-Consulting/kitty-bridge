@@ -1436,7 +1436,8 @@ exact `proxies=` mapping `openai_subscription` passes, and urllib3 shaped as
 `botocore.httpsession._get_proxy_manager` builds it. This is the strongest asset in the area and
 the foundation the rest of §5 builds on rather than replaces.
 
-**Three things are missing, and they are the gap.**
+**Two things are missing, and they are the gap** — a third (the file-granular start-path
+guard) has since been closed, and is recorded below in the state it reached.
 
 1. **`BridgeServer`'s own request path is untested.** The existing module drives
    `egress_cmd._probe` — the function behind `kitty egress test` — not `_session_for` /
