@@ -283,16 +283,11 @@ def _record_unsupported_if_floor_shape(
         ``True`` when the row was recorded (the caller's normal ``PROVEN``
         path must then be skipped), ``False`` otherwise.
     """
-    if version_info is not None:
-        # Bypass the module-level ``sys`` read so callers (and tests) can
-        # drive the writer directly on any interpreter matrix.
-        if version_info >= (3, 11):
-            return False
-        if outcomes.get(_PHASE_1_NAME) is not _PhaseOutcome.PASSED:
-            return False
-        if not all(name not in outcomes for name in _PROXIED_PHASE_NAMES):
-            return False
-    elif not _floor_unsupported_shape(outcomes):
+    # Delegate the shape check to the helper — it accepts ``version_info``
+    # directly, so the explicit override path is unified with the default
+    # ``sys.version_info`` fallback. The helper is the single source of
+    # truth for the floor-shape predicates.
+    if not _floor_unsupported_shape(outcomes, version_info=version_info):
         return False
     current = report_instance().entries().get(verdict_row)
     if current is None or current.outcome is Outcome.NOT_ATTEMPTED:
@@ -420,8 +415,8 @@ def _record_proven_with_sibling_guard(
             sibling's gate passed.
     """
     if not _gate_passed(outcomes, teardown_outcomes, names):
-        # Caller guards the PROVEN path; ``named in caller scope is an
-        # honest-programming guard. ``Unexpected internal call.
+        # Caller guards the PROVEN path; this assertion is the
+        # belt-and-braces check for an unexpected internal call.
         raise AssertionError(f"{verdict_row!r} PROVEN path entered without a passing gate")
     entries = report_instance().entries()
     sibling = entries.get(sibling_row)
@@ -430,23 +425,13 @@ def _record_proven_with_sibling_guard(
         and sibling is not None
         and sibling.outcome is Outcome.PROVEN
     )
-    # The floor exemption: when the interpreter is below 3.11 and the
-    # sibling's row currently reads ``UNSUPPORTED``, that is the legitimate
-    # work of the sibling's floor-recording path — exempt it. Symmetric
-    # for the sibling's guard in the curl_cffi finaliser.
-    floor_applies = sys.version_info < (3, 11)
-    sibling_floor_exempt = (
-        floor_applies
-        and sibling is not None
-        and sibling.outcome is Outcome.UNSUPPORTED
-    )
     untouched: list[str] = []
     for name, entry in entries.items():
         if name == verdict_row:
             continue
         if entry.outcome is Outcome.NOT_ATTEMPTED:
             continue
-        if name == sibling_row and (sibling_legitimate or sibling_floor_exempt):
+        if name == sibling_row and sibling_legitimate:
             continue
         untouched.append(name)
     if untouched:
