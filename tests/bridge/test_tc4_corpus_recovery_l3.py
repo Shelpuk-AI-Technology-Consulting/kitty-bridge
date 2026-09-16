@@ -555,6 +555,67 @@ class TestTheM6EntryExercisesTheRecoveryPathOnABalancingProfile:
             "failover backend"
         )
 
+    async def test_a_single_backend_streaming_413_recovers_without_a_pool(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The streaming recovery is not balancing-only (KBR-256 round-4 review).
+
+        The M6 row's pre-KBR-256 prose scoped the recovery to balancing
+        profiles because the non-streaming arm lives in
+        ``_request_with_retry_balancing`` alone. The streaming arms gate on
+        ``recovery_retries < n_backends`` with ``n_backends = 1`` in
+        single-backend mode, so a single-profile streaming 413 recovers the
+        same way — the PR's own motivation (``Claude Code`` ships
+        ``stream: true``; today the only backend is cooled down for a
+        conversation that is merely too big). This test holds the prose claim:
+        one backend, oversized streaming 413, compact-retry the same backend,
+        no mark.
+
+        Args:
+            monkeypatch:pytest.MonkeyPatch
+            caplog: The log capture.
+        """
+        monkeypatch.setattr(BridgeServer, "_get_max_context_chars", lambda self: 800_000)
+
+        responder = _make_413_then_streaming_success_responder()
+
+        async with BridgeFixture(
+            transport("aiohttp", WireFormat.ANTHROPIC_MESSAGES, responder=responder),
+        ) as fixture:
+            recorder = fixture.transport.recorder  # type: ignore[attr-defined]
+            entry = _load_entry("m6_recovery_oversized_paired_streaming")
+            inbound_body = json.loads(entry.request.body)
+
+            with caplog.at_level(logging.INFO, logger="kitty.bridge.server"):
+                status, response_text = await fixture.post("/v1/messages", inbound_body)
+
+        assert status == 200, "the single-backend recovery reply must reach the client"
+        # No _backend_health assertion here: the single-backend shape has no
+        # health list at all (`_mark_backend_unhealthy` returns early without a
+        # pool), which is why the pre-KBR-256 single-backend 413 could only
+        # surface the error — there was no failover to take the backend's place.
+        assert len(recorder.requests) == 2, (
+            "the single-backend streaming path must compact and retry the only "
+            "backend once, not mark-and-surface"
+        )
+        first_model = json.loads(recorder.requests[0].body)["model"]
+        second_model = json.loads(recorder.requests[1].body)["model"]
+        assert first_model == second_model, (
+            "both attempts must go to the single backend — there is nowhere "
+            "else to fail over to"
+        )
+        assert len(recorder.requests[1].body) < len(recorder.requests[0].body), (
+            "the retried body must be the tighter-compacted one"
+        )
+        log_blob = "\n".join(record.getMessage() for record in caplog.records)
+        assert "compacting tighter" in log_blob.lower(), (
+            "the recovery log line must fire on the single-backend shape"
+        )
+        assert "event: message_stop" in response_text, (
+            "the client receives the SSE success stream from the recovered "
+            "attempt"
+        )
+
     async def test_the_cc_streaming_413_with_an_oversized_body_engages_tighter_recompaction(
         self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
     ) -> None:
