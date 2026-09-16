@@ -358,6 +358,10 @@ def test_main_exits_zero_when_a_group_is_fully_tested(
             "kitty.bridge.engine.x__map_finish_reason__mutmut_1": 1,
             # provider_hooks: cross-module (any class carrying the hook)
             "kitty.providers.anthropic.xǁAnthropicAdapterǁtranslate_to_upstream__mutmut_1": 1,
+            # compaction_and_pairing: a specific BridgeServer method
+            # (KBR-266 lifted this group out of DEFERRED_GROUPS once
+            # server.py's other defs/classes were pragma-marked).
+            "kitty.bridge.server.xǁBridgeServerǁ_compact_messages__mutmut_1": 1,
         },
     )
     rc = agg.main()
@@ -398,6 +402,10 @@ def test_render_markdown_table_renders_but_does_not_fail_on_unmatched(
             "kitty.egress.x__should_bypass__mutmut_1": 1,
             "kitty.bridge.engine.x__map_finish_reason__mutmut_1": 1,
             "kitty.providers.anthropic.xǁAnthropicAdapterǁtranslate_to_upstream__mutmut_1": 1,
+            # compaction_and_pairing: a specific BridgeServer method
+            # (KBR-266 lifted this group out of DEFERRED_GROUPS once
+            # server.py's other defs/classes were pragma-marked).
+            "kitty.bridge.server.xǁBridgeServerǁ_compact_messages__mutmut_1": 1,
             # Plus one unscoped mutant — its module is not in the
             # registry, so it lands in __unmatched__ with no_tests=1
             # (a finished run, just outside scope).

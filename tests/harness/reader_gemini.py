@@ -58,7 +58,7 @@ import binascii
 import hashlib
 import json
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
 from harness import contract as c
@@ -366,6 +366,368 @@ class GeminiProjection:
             return _project(body, model, stream)
         except (KeyError, TypeError, AttributeError) as exc:
             raise c.UnreadableBodyError(f"unreadable Gemini body: {exc!r}") from exc
+
+
+class GeminiReplyProjection:
+    """Reads a Gemini reply into :class:`~harness.contract.Reply`.
+
+    Implements :class:`~harness.contract.ReplyProjection` for
+    :attr:`~harness.contract.WireFormat.GEMINI`. Schema retrieved 2026-09-16
+    from the v1beta discovery document (``Candidate.finishReason`` enum at the
+    ``Candidate`` schema, 22 values; ``Part`` discriminated fields: ``text``,
+    ``thought``, ``thoughtSignature``, ``inlineData``, ``functionCall``,
+    ``executableCode``, ``codeExecutionResult``, ``fileData``).
+
+    ``Candidate.finishReason`` maps onto :data:`~harness.contract.STOP_REASONS`:
+    ``STOP`` → ``end_turn``; ``MAX_TOKENS`` → ``max_tokens``; absent /
+    ``FINISH_REASON_UNSPECIFIED`` → ``None``. Every other enum value escapes
+    through ``other`` with the wire string in
+    :attr:`~harness.contract.Reply.stop_reason_raw`.
+
+    ``candidates[0].content.parts[]`` carries the assistant's parts. ``text``
+    blocks project as :class:`~harness.contract.Text`; ``{thought: true,
+    text: …}`` blocks project as :class:`~harness.contract.Thinking`;
+    ``functionCall`` arguments arrive as a JSON object (the format encodes
+    them natively — no :func:`decode_arguments` step). Other Part shapes
+    (``inlineData``, ``executableCode``, ``codeExecutionResult``, ``fileData``,
+    or any unmodelled type) project as :class:`~harness.contract.Opaque` so
+    they stay detectable by digest.
+
+    Attributes:
+        wire_format: Always :attr:`~harness.contract.WireFormat.GEMINI`.
+    """
+
+    wire_format = c.WireFormat.GEMINI
+
+    #: Top-level keys the schema's ``GenerateContentResponse`` carries. Every
+    #: one is consumed — the bridge may legitimately rewrite or regenerate
+    #: them (``responseId`` is request-bound; ``modelVersion`` may differ when
+    #: the bridge reroutes; ``promptFeedback`` and ``modelStatus`` carry
+    #: pre-candidate diagnostics the reply grammar does not surface). Listing
+    #: them here is what keeps them out of the residual while letting
+    #: :func:`~harness.contract.verify_total` see them as accounted.
+    _PROJECTION_KEYS = frozenset(
+        {
+            "candidates",
+            "promptFeedback",
+            "responseId",
+            "modelStatus",
+            "modelVersion",
+            "usageMetadata",
+        }
+    )
+
+    #: Keys the ``Candidate`` schema carries. ``content`` and ``finishReason``
+    #: are projected; the rest are consumed (provider-reported diagnostics).
+    _CANDIDATE_KEYS = frozenset(
+        {
+            "index",
+            "content",
+            "urlContextMetadata",
+            "finishMessage",
+            "citationMetadata",
+            "finishReason",
+            "logprobsResult",
+            "safetyRatings",
+            "groundingMetadata",
+        }
+    )
+
+    #: Fields a ``Part`` object may carry. ``text``, ``thought`` + ``text``,
+    #: ``thoughtSignature``, ``functionCall``, ``inlineData``, ``fileData``,
+    #: ``executableCode`` and ``codeExecutionResult`` are the published union
+    #: of discriminated fields. Everything else on a part residualises.
+    _PART_KEYS = frozenset(
+        {
+            "text",
+            "thought",
+            "thoughtSignature",
+            "functionCall",
+            "inlineData",
+            "fileData",
+            "executableCode",
+            "codeExecutionResult",
+        }
+    )
+
+    def read_reply(self, captured: c.CapturedReply) -> c.Reply:
+        """Project a captured Gemini reply.
+
+        Args:
+            captured: The reply as observed on the wire. Only the body is
+                read — the reply URL carries no per-candidate state. SSE
+                reassembly is the caller's responsibility (§7.4 boundary).
+
+        Returns:
+            The wire-independent projection, total over the body.
+
+        Raises:
+            UnreadableBodyError: When the body is not a readable Gemini
+                reply (malformed JSON, ``candidates`` not an array, a content
+                block the reader cannot structurally project).
+        """
+        body = _parse_body(captured.body)
+
+        residual: dict[str, Any] = {}
+        consumed: set[str] = set()
+        for key, value in body.items():
+            if key in self._PROJECTION_KEYS:
+                consumed.add(key)
+            else:
+                residual[c.residual_key(key)] = value
+
+        parts, stop_reason, stop_reason_raw = self._read_candidates(body.get("candidates"), residual)
+
+        usage_raw = body.get("usageMetadata")
+        if isinstance(usage_raw, dict):
+            usage: Mapping[str, Any] = dict(usage_raw)
+        elif usage_raw is None:
+            usage = {}
+        else:
+            residual[c.residual_key("usageMetadata")] = usage_raw
+            usage = {}
+
+        return c.Reply(
+            parts=parts,
+            stop_reason=stop_reason,
+            stop_reason_raw=stop_reason_raw,
+            usage=usage,
+            residual=residual,
+            consumed=frozenset(consumed),
+            source=body,
+        )
+
+    @classmethod
+    def _read_candidates(
+        cls, value: Any, residual: dict[str, Any]
+    ) -> tuple[tuple[c.Part, ...], str | None, str | None]:
+        """Read the reply's ``candidates`` array.
+
+        A reply is expected to carry exactly one candidate — the bridge serves
+        ``candidateCount = 1`` and a reply with more is a real fidelity
+        anomaly, so extra candidates residualise at their indexed paths
+        (§3.3.1's *non-empty residual fails the run*). An empty or absent
+        ``candidates`` array returns ``((), None, None)``.
+
+        Args:
+            value: The wire value (array of candidates, or ``None``).
+            residual: The residual mapping, extended in place.
+
+        Returns:
+            ``(parts, stop_reason, stop_reason_raw)`` from the first
+            candidate.
+
+        Raises:
+            UnreadableBodyError: When the first candidate is structurally
+                unprojectable.
+        """
+        if not isinstance(value, list):
+            residual[c.residual_key("candidates")] = value
+            return (), None, None
+        if not value:
+            return (), None, None
+        first = value[0]
+        if not isinstance(first, dict):
+            raise c.UnreadableBodyError(
+                f"candidates[0] must be an object, got {type(first).__name__}"
+            )
+        for index in range(1, len(value)):
+            residual[c.residual_key("candidates", index=index)] = value[index]
+        _residualise_raw(first, cls._CANDIDATE_KEYS, "candidates[0]", residual)
+        parts = cls._read_content(first.get("content"), residual)
+        stop_reason, stop_reason_raw = cls._map_finish_reason(first.get("finishReason"), residual)
+        return parts, stop_reason, stop_reason_raw
+
+    @classmethod
+    def _read_content(
+        cls, value: Any, residual: dict[str, Any]
+    ) -> tuple[c.Part, ...]:
+        """Read one candidate's ``content`` object.
+
+        Args:
+            value: The wire value (the candidate's ``content``, or ``None``).
+            residual: The residual mapping, extended in place.
+
+        Returns:
+            The projected parts, in wire order.
+
+        Raises:
+            UnreadableBodyError: When ``content`` is not an object or a part
+                carries no recognised field.
+        """
+        if value is None:
+            return ()
+        if not isinstance(value, dict):
+            residual[c.residual_key("candidates[0].content")] = value
+            return ()
+        _residualise_raw(value, {"role", "parts"}, "candidates[0].content", residual)
+        parts_raw = value.get("parts")
+        role = value.get("role")
+        if role is not None and not isinstance(role, str):
+            residual[c.residual_key("candidates[0].content", "role")] = role
+        if not isinstance(parts_raw, list):
+            raise c.UnreadableBodyError(
+                "candidates[0].content.parts must be an array, "
+                f"got {type(parts_raw).__name__}"
+            )
+        parts: list[c.Part] = []
+        for index, part in enumerate(parts_raw):
+            parts.extend(cls._read_part(part, index, residual))
+        return tuple(parts)
+
+    @classmethod
+    def _read_part(
+        cls, part: Any, index: int, residual: dict[str, Any]
+    ) -> tuple[c.Part, ...]:
+        """Read one ``Part`` object into zero or more parts.
+
+        Args:
+            part: The wire value.
+            index: The part's array position.
+            residual: The residual mapping, extended in place.
+
+        Returns:
+            Zero or one part. ``text`` and ``{thought: true, text}`` each
+            yield one part; ``functionCall`` yields one ``ToolUse``;
+            ``inlineData`` yields one ``Image`` (image-generation responses);
+            everything else yields one ``Opaque``.
+
+        Raises:
+            UnreadableBodyError: When ``part`` is not an object, or carries
+                no recognised field.
+        """
+        if not isinstance(part, dict):
+            raise c.UnreadableBodyError(
+                f"candidates[0].content.parts[{index}] must be an object, "
+                f"got {type(part).__name__}"
+            )
+        prefix = f"candidates[0].content.parts[{index}]"
+        _residualise_raw(part, cls._PART_KEYS, prefix, residual)
+
+        # ``text`` — a bare string. A ``{thought: true, text: …}`` part is
+        # routed to ``Thinking`` instead so P5e / P8's complement lands in
+        # the right grammar slot.
+        if "text" in part:
+            if part.get("thought") is True:
+                return (c.Thinking(text=part["text"]),)
+            if isinstance(part["text"], str):
+                return (c.Text(part["text"]),)
+            # ``text`` carries a non-string — residualise at the field path.
+            residual[c.residual_key(prefix, "text")] = part["text"]
+            return ()
+
+        if "functionCall" in part:
+            call = part["functionCall"]
+            if not isinstance(call, dict):
+                raise c.UnreadableBodyError(f"{prefix}.functionCall must be an object")
+            if not isinstance(call.get("name"), str):
+                raise c.UnreadableBodyError(f"{prefix}.functionCall.name must be a string")
+            args = call.get("args") or {}
+            if not isinstance(args, Mapping):
+                args = {}
+            return (
+                c.ToolUse(
+                    name=call["name"],
+                    arguments=dict(args),
+                    id=call.get("id") if isinstance(call.get("id"), str) else None,
+                ),
+            )
+
+        if "inlineData" in part:
+            data = part["inlineData"]
+            if isinstance(data, dict) and isinstance(data.get("mimeType"), str):
+                # Mirror the request direction's decode: ``base64`` with
+                # ``validate=True`` rejects RFC 2045 line breaks the wire
+                # sometimes carries; when that fails, fall back to digesting
+                # the raw encoded bytes (§7.4 rule 7 row 3, KBR-192) so the
+                # image keeps an identity rather than a bare ``None``.
+                payload = data.get("data") if isinstance(data.get("data"), str) else None
+                if payload is None:
+                    digest = ""
+                else:
+                    try:
+                        digest = c.image_digest(base64.b64decode(payload, validate=True))
+                    except (binascii.Error, ValueError):
+                        residual[c.residual_key(f"{prefix}.inlineData", "data")] = payload
+                        digest = c.image_digest(payload.encode("utf-8"))
+                return (c.Image(digest=digest, media_type=data["mimeType"]),)
+            residual[c.residual_key(prefix, "inlineData")] = data
+            return ()
+
+        # Unmodelled / tool-output parts (``fileData``, ``executableCode``,
+        # ``codeExecutionResult``, …) carry as ``Opaque`` so the digest keeps
+        # the payload detectable. The three spellings Gemini publishes here
+        # are camelCase, so ``opaque_kind`` has no canonical name for them
+        # yet — that is the wire's fault, not the reader's, so the
+        # ``ValueError`` is translated to ``UnreadableBodyError`` per §7.4.1's
+        # rule (a reader-raised ``ValueError`` is a reader bug; this is not).
+        # A canonical alias lands with the first real capture of one of these
+        # kinds, the same posture §7.4.1 puts on T-A5's nine camelCase types.
+        kind = next((k for k in ("fileData", "executableCode", "codeExecutionResult") if k in part), None)
+        if kind is not None:
+            try:
+                canonical = c.opaque_kind(kind)
+            except ValueError as exc:
+                raise c.UnreadableBodyError(f"{prefix}: {exc}") from exc
+            return (c.Opaque(kind=canonical, digest=c.opaque_digest(part)),)
+
+        # Truly unrecognised — no recognised field on the part. Residualise
+        # the whole part so the run names the structural anomaly.
+        raise c.UnreadableBodyError(f"{prefix} carries no recognised field")
+
+    @classmethod
+    def _map_finish_reason(
+        cls, value: Any, residual: dict[str, Any]
+    ) -> tuple[str | None, str | None]:
+        """Map the wire ``finishReason`` onto :data:`~harness.contract.STOP_REASONS`.
+
+        Args:
+            value: The wire value (``str``, ``None``, or a non-string — the
+                latter residualises at ``candidates[0].finishReason``).
+            residual: The residual mapping, extended in place.
+
+        Returns:
+            ``(stop_reason, stop_reason_raw)``. Absent /
+            ``FINISH_REASON_UNSPECIFIED`` → ``(None, None)``; ``STOP`` →
+            ``("end_turn", None)``; ``MAX_TOKENS`` → ``("max_tokens", None)``;
+            every other enum value → ``("other", value)`` so T-D10's register
+            match has the wire string.
+        """
+        if value is None or value == "FINISH_REASON_UNSPECIFIED":
+            return None, None
+        if not isinstance(value, str):
+            residual[c.residual_key("candidates[0]", "finishReason")] = value
+            return None, None
+        if value == "STOP":
+            return "end_turn", None
+        if value == "MAX_TOKENS":
+            return "max_tokens", None
+        return "other", value
+
+
+def _residualise_raw(
+    source: Mapping[str, Any],
+    mapped: Iterable[str],
+    prefix: str,
+    residual: dict[str, Any],
+) -> None:
+    """Record every key of ``source`` the caller did not map.
+
+    The reply direction's mirror of the aliased :func:`_residualise` the
+    request direction uses: raw-object semantics, no canonical-name
+    indirection. Kept here (rather than reusing the aliased one) because the
+    request reader's alias table is a property of the *request* vocabulary,
+    and the reply reader maps wire keys directly.
+
+    Args:
+        source: The object being read.
+        mapped: The keys the caller accounted for.
+        prefix: The object's path from the body root.
+        residual: The residual mapping, extended in place.
+    """
+    for key, value in source.items():
+        if key not in set(mapped):
+            residual[c.residual_key(prefix, key)] = value
 
 
 def _read_route(path: str) -> tuple[str, bool]:

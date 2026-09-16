@@ -511,12 +511,11 @@ class TestMiniMaxTokenCompactionPreservesToolPairing:
                 )
 
                 with caplog.at_level(logging.WARNING, logger="kitty.bridge.server"):
-                    async with aiohttp.ClientSession() as session:
-                        async with session.post(
-                            f"http://127.0.0.1:{server.port}/v1/messages",
-                            json=body,
-                        ) as resp:
-                            assert resp.status == 200
+                    async with aiohttp.ClientSession() as session, session.post(
+                        f"http://127.0.0.1:{server.port}/v1/messages",
+                        json=body,
+                    ) as resp:
+                        assert resp.status == 200
             finally:
                 await server.stop_async()
 

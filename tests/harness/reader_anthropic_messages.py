@@ -147,6 +147,186 @@ class AnthropicMessagesProjection:
             raise c.UnreadableBodyError(f"unreadable Anthropic Messages body: {exc!r}") from exc
 
 
+class AnthropicMessagesReplyProjection:
+    """Reads an Anthropic Messages reply into :class:`~harness.contract.Reply`.
+
+    Implements :class:`~harness.contract.ReplyProjection` for
+    :attr:`~harness.contract.WireFormat.ANTHROPIC_MESSAGES`. The reply direction
+    reuses the per-block vocabulary the request reader built: a reply's
+    ``content`` array is a sequence of the same blocks (``text``, ``thinking``,
+    ``redacted_thinking``, ``tool_use``, plus any unmodelled type), so
+    :func:`_read_block` is reused without modification. ``stop_reason`` is mapped
+    onto :data:`~harness.contract.STOP_REASONS`; the published values the canonical
+    set does not list (``pause_turn``, ``refusal``,
+    ``model_context_window_exceeded``) project as ``other`` with the wire value in
+    :attr:`~harness.contract.Reply.stop_reason_raw`, so T-D10's register match has a
+    stable canonical anchor and the wire string to name the delta.
+
+    Attributes:
+        wire_format: Always :attr:`~harness.contract.WireFormat.ANTHROPIC_MESSAGES`.
+    """
+
+    wire_format = c.WireFormat.ANTHROPIC_MESSAGES
+
+    #: ``stop_reason`` values the published schema lists that map straight onto a
+    #: member of :data:`~harness.contract.STOP_REASONS`. Sourced from
+    #: ``docs.claude.com/en/api/messages.md`` (*Stop reason* section, retrieved
+    #: 2026-09-16): ``end_turn``, ``max_tokens``, ``stop_sequence``, ``tool_use``.
+    #: The three remaining published values — ``pause_turn``, ``refusal``,
+    #: ``model_context_window_exceeded`` — project as ``other`` so
+    #: :attr:`~harness.contract.Reply.stop_reason_raw` keeps them distinct for
+    #: T-D10's register match.
+    _CANONICAL_STOP_REASONS = frozenset({"end_turn", "max_tokens", "stop_sequence", "tool_use"})
+
+    #: Top-level keys a reply body carries. Every one is consumed — the bridge
+    #: may legitimately rewrite or regenerate them (``id`` is request-bound;
+    #: ``model`` may differ from the agent's request when M1 fires;
+    #: ``stop_sequence`` only matches when the request named one), so they are
+    #: not I1-carrying and project nowhere on :class:`~harness.contract.Reply`.
+    #: ``container`` and ``stop_details`` joined with the 2026-09-16 schema
+    #: retrieval (the published response example carries both; ``stop_details``
+    #: is the refusal breakdown whose category lives behind
+    #: ``stop_reason = "refusal"``, which the canonical mapping already carries).
+    #: Listing them here is what keeps them out of the residual while letting
+    #: :func:`~harness.contract.verify_total` see them as accounted.
+    _PROJECTION_KEYS = frozenset(
+        {
+            "id",
+            "type",
+            "role",
+            "model",
+            "container",
+            "stop_reason",
+            "stop_details",
+            "stop_sequence",
+            "usage",
+            "content",
+        }
+    )
+
+    def read_reply(self, captured: c.CapturedReply) -> c.Reply:
+        """Project a captured Messages reply.
+
+        Args:
+            captured: The reply as observed on the wire. SSE reassembly is the
+                caller's responsibility — this reader takes a complete body, per
+                the ``ReplyProjection`` protocol's boundary statement (§7.4).
+
+        Returns:
+            The wire-independent projection, total over the body.
+
+        Raises:
+            UnreadableBodyError: When the body is not a readable Messages reply
+                (malformed JSON, ``content`` not an array, a content block the
+                reader cannot structurally project). ``ValueError`` from
+                :meth:`~harness.contract.Reply.__post_init__` is deliberately
+                not caught: it means a reader mis-mapped the stop reason and is
+                a reader bug rather than a transport failure.
+        """
+        body = _parse_body(captured.body)
+
+        residual: dict[str, Any] = {}
+        consumed: set[str] = set()
+
+        # Every key the body lists must be accounted for — either consumed (the
+        # reader handled the value, even if it projects nowhere on ``Reply``) or
+        # residualised at its bare top-level path (the reader did not recognise
+        # it). Bare key per §7.4.1 rule 1: a wholly-unclassified top-level key
+        # is keyed by its own name, never ``residual[x]`` — ``verify_total``
+        # compares ``set(consumed) | set(residual)`` against ``set(source)``.
+        for key, value in body.items():
+            if key in self._PROJECTION_KEYS:
+                consumed.add(key)
+            else:
+                residual[c.residual_key(key)] = value
+
+        stop_reason, stop_reason_raw = self._map_stop_reason(body.get("stop_reason"), residual)
+
+        parts = _read_reply_content(body.get("content"), residual)
+
+        usage_raw = body.get("usage")
+        # ``usage`` is in ``_PROJECTION_KEYS``, so the top-level loop has
+        # already consumed it; this branch only decides whether the value is
+        # carryable or malformed.
+        if isinstance(usage_raw, dict):
+            usage: Mapping[str, Any] = dict(usage_raw)
+        elif usage_raw is None:
+            usage = {}
+        else:
+            # A non-dict ``usage`` is malformed; residualise so the run names it.
+            residual[c.residual_key("usage")] = usage_raw
+            usage = {}
+
+        return c.Reply(
+            parts=parts,
+            stop_reason=stop_reason,
+            stop_reason_raw=stop_reason_raw,
+            usage=usage,
+            residual=residual,
+            consumed=frozenset(consumed),
+            source=body,
+        )
+
+    @classmethod
+    def _map_stop_reason(
+        cls, value: Any, residual: dict[str, Any]
+    ) -> tuple[str | None, str | None]:
+        """Map the wire ``stop_reason`` onto :data:`~harness.contract.STOP_REASONS`.
+
+        Args:
+            value: The wire value (``str`` or ``None``). A non-string value
+                residualises at the body's top-level ``stop_reason`` path — a
+                wrongly-typed value would otherwise coerce through ``str()``
+                and invent a reason the body never sent.
+            residual: The residual mapping, extended in place.
+
+        Returns:
+            ``(stop_reason, stop_reason_raw)`` — the canonical mapped value (or
+            ``None`` when the wire value is absent or wrongly-typed) and the
+            wire's own string when the canonical value is ``other`` (otherwise
+            ``None``).
+        """
+        if value is None:
+            return None, None
+        if not isinstance(value, str):
+            residual[c.residual_key("stop_reason")] = value
+            return None, None
+        if value in cls._CANONICAL_STOP_REASONS:
+            return value, None
+        # The three published values the canonical set does not list (and any
+        # future addition) project as ``other`` so T-D10's register rows can
+        # name the wire value at a stable canonical anchor.
+        return "other", value
+
+
+def _read_reply_content(value: Any, residual: dict[str, Any]) -> tuple[c.Part, ...]:
+    """Read the reply's ``content`` array into :class:`~harness.contract.Part` values.
+
+    Reuses :func:`_read_block` — the per-block vocabulary is identical between
+    request and reply directions (a reply's ``content`` is a sequence of the
+    same blocks the request direction places inside messages). The path prefix
+    is ``content[<i>]``; the block reader builds its own residual keys at that
+    path.
+
+    Args:
+        value: The wire value (array of blocks, or ``None`` when absent).
+        residual: The residual mapping, extended in place.
+
+    Returns:
+        The projected parts, in wire order. An absent or non-array ``content``
+        returns ``()`` and residualises at the body's top-level ``content``
+        path so the run names the structural break (Anthropic's schema
+        requires the array).
+    """
+    if value is None:
+        residual[c.residual_key("content")] = None
+        return ()
+    if not isinstance(value, list):
+        residual[c.residual_key("content")] = value
+        return ()
+    return tuple(_read_block(block, f"content[{index}]", residual) for index, block in enumerate(value))
+
+
 def _parse_body(raw: bytes) -> Mapping[str, Any]:
     """Decode the request body into a JSON object.
 

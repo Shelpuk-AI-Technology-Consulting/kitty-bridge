@@ -13,6 +13,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Mapping
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -1670,9 +1671,7 @@ class TestTheWindowsConsoleDetachment:
             state_path: The state file a stand-in may have written its PID to.
             spawned: The children this test still holds a ``Popen`` for.
         """
-        recorded: int | None = None
-        with contextlib.suppress(OSError, ValueError, KeyError):
-            recorded = json.loads(state_path.read_text())["pid"]
+        recorded: int | None = cls._read_bridge_pid(state_path, deadline_seconds=5.0)
         for child in spawned:
             child.kill()
             child.wait(timeout=30)
@@ -1680,6 +1679,47 @@ class TestTheWindowsConsoleDetachment:
                 child.stdout.close()
         if recorded is not None:
             cls._kill_pid(recorded)
+
+    @staticmethod
+    def _read_bridge_pid(state_path: Path, *, deadline_seconds: float = 10.0) -> int | None:
+        """Read the bridge PID from ``state_path``, polling until readable.
+
+        ``start_bridge`` opens the state file for writing as part of its own
+        bookkeeping; under CI load the bridge stand-in's write and that open
+        can race, and ``read_text()`` on a freshly-truncated empty file returns
+        ``""`` — which :func:`json.loads` turns into ``JSONDecodeError`` on
+        line 1 col 1. The class docstring already states "an empty or
+        truncated answer must fail loudly rather than read as 'the bridge is
+        not attached'": this helper is the loud failure, with a deadline so
+        a genuinely missing state file still surfaces fast.
+
+        Args:
+            state_path: The state file the bridge stand-in / ``start_bridge``
+                wrote to.
+            deadline_seconds: How long to keep polling before giving up.
+
+        Returns:
+            The recorded PID, or ``None`` if the file never became readable.
+            Callers that need the PID must handle ``None`` themselves — the
+            helper does not raise so the ``finally`` cleanup can stay
+            exception-safe.
+        """
+        deadline = time.monotonic() + deadline_seconds
+        while time.monotonic() < deadline:
+            try:
+                text = state_path.read_text()
+            except OSError:
+                text = ""
+            if text:
+                try:
+                    payload = json.loads(text)
+                except ValueError:
+                    payload = None
+                pid = payload["pid"] if isinstance(payload, Mapping) else None
+                if isinstance(pid, int):
+                    return pid
+            time.sleep(0.1)
+        return None
 
     @staticmethod
     def _console_process_pids() -> set[int]:
@@ -1887,7 +1927,11 @@ class TestTheWindowsConsoleDetachment:
             from kitty.bridge.manage import ProcessLiveness, probe_pid
 
             control_pid = int(control_path.read_text())
-            bridge_pid = json.loads(state_path.read_text())["pid"]
+            bridge_pid = self._read_bridge_pid(state_path, deadline_seconds=10.0)
+            assert bridge_pid is not None, (
+                f"the bridge never wrote {state_path} within the deadline; "
+                "the console-break probe cannot prove survival"
+            )
 
             deadline = time.monotonic() + 10
             while probe_pid(control_pid) is ProcessLiveness.ALIVE and time.monotonic() < deadline:
@@ -1924,7 +1968,11 @@ class TestTheWindowsConsoleDetachment:
         spawned: list[subprocess.Popen] = []
         try:
             self._start_bridge_child(self._bridge_script(str(state_path)), state_path, spawned)
-            bridge_pid = json.loads(state_path.read_text())["pid"]
+            bridge_pid = self._read_bridge_pid(state_path, deadline_seconds=10.0)
+            assert bridge_pid is not None, (
+                f"the bridge never wrote {state_path} within the deadline; "
+                "the stop probe cannot prove anything"
+            )
             assert probe_pid(bridge_pid) is ProcessLiveness.ALIVE
 
             stop_bridge(state_path)

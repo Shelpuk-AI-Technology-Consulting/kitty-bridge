@@ -134,9 +134,7 @@ TARGET_GROUPS: dict[str, list[Target]] = {
 # aggregator cannot compute a score. Removing an entry from this set is
 # the migration step for any follow-up ticket that lifts the
 # corresponding `only_mutate` exclusion.
-DEFERRED_GROUPS: frozenset[str] = frozenset({
-    "compaction_and_pairing",
-})
+DEFERRED_GROUPS: frozenset[str] = frozenset()
 
 
 def mangled_patterns(target: Target) -> list[str]:
