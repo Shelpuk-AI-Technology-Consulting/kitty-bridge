@@ -209,11 +209,11 @@ _PROXIED_PHASE_NAMES: frozenset[str] = frozenset({
 #: both slices (the floor is shared); references what a future maintainer
 #: needs to re-derive the decision.
 _FLOOR_UNSUPPORTED_REASON = (
-    "Python <3.11: proxied §5.2.2 phases skip (TLS-in-TLS floor); phase 1 "
-    "(direct leg) passed. Owner scope decision recorded on KBR-63 "
-    "(2026-09-16): record `unsupported` — a permitted partial delivery "
-    "T-E9's completeness gate accepts — rather than leave the row "
-    "`not_attempted`, which the gate rejects."
+    "Python <3.11: a proxied §5.2.2 phase did not run on this interpreter "
+    "(phase 1 ran and came back clean). Owner scope decision recorded on "
+    "KBR-63 (2026-09-16): record `unsupported` — a permitted partial "
+    "delivery T-E9's completeness gate accepts — rather than leave the "
+    "row `not_attempted`, which the gate rejects."
 )
 
 

@@ -291,12 +291,23 @@ class CurlCffiContainment(ContainmentTransport):
         hostname at the recorder's port, injected by patching
         ``curl_cffi.requests.AsyncSession`` — the exact constructor call the
         product makes (``_new_curl_session``) — so the session is **built**
-        with the option. A post-construction ``setopt`` would miss the other
+        with the options. A post-construction ``setopt`` would miss the other
         handles the session's pool (``max_clients``) draws; the
         ``curl_options`` channel applies per request from the session, so
         every handle inherits it. The pinned curl_cffi 0.16.3 accepts no
         ``resolve=`` kwarg; ``curl_options={CurlOpt.RESOLVE: [...]}`` is the
-        only channel.
+        only channel. **Three kinds of entries are injected**:
+
+        * the **harness hostname** at the recorder's port → ``127.0.0.1`` —
+          the seam that makes phase 1 land on the loopback recorder.
+        * **real-upstream deny** entries: ``chatgpt.com`` and
+          ``auth.openai.com`` → ``127.0.0.2`` (RFC 5735 blackhole) for
+          ports 80 and 443. If the ``_CODEX_BACKEND_URL`` seam ever
+          silently misses, curl cannot resolve the real host to a
+          reachable address — the request fails with ``ECONNREFUSED``
+          against loopback, not a real TLS handshake to OpenAI. The
+          phase-2b swap-live check then catches the swap regression with
+          no real egress already incurred.
 
         Entered by **both** drives, so the mapping is in scope on the proxied
         phases too (§5.3 trap 2): a product that wrongly falls back to a
@@ -310,24 +321,33 @@ class CurlCffiContainment(ContainmentTransport):
         Yields:
             ``None``.
         """
-        entry = f"{harness.upstream_host}:{harness.upstream_port}:127.0.0.1"
+        resolver_entries: list[str] = [
+            # Harness hostname at the recorder's port → loopback.
+            f"{harness.upstream_host}:{harness.upstream_port}:127.0.0.1",
+        ]
+        for host in self._REAL_UPSTREAM_HOSTS:
+            # Port-agnostic deny: chatgpt.com is normally reached on 443,
+            # but covering 80 too lets the deny bite regardless of which the
+            # eventual URL uses.
+            for port in (80, 443):
+                resolver_entries.append(f"{host}:{port}:127.0.0.2")
         real_cls = curl_requests.AsyncSession
 
         def _session_with_resolve(**kwargs: Any) -> Any:
-            """Build the real session with the resolve entry merged in.
+            """Build the real session with the resolve entries merged in.
 
             Args:
                 **kwargs: The product's own session kwargs
                     (``impersonate``, ``verify``, ``proxies``,
                     ``curl_options``); forwarded unchanged apart from the
-                    resolve entry merged into ``curl_options``.
+                    resolve entries merged into ``curl_options``.
 
             Returns:
                 The real ``AsyncSession`` the product would have built, plus
-                the resolve mapping.
+                the resolve mappings.
             """
             opts = dict(kwargs.pop("curl_options", None) or {})
-            opts[CurlOpt.RESOLVE] = [entry]
+            opts[CurlOpt.RESOLVE] = list(resolver_entries)
             return real_cls(curl_options=opts, **kwargs)
 
         original = curl_requests.AsyncSession
@@ -339,6 +359,13 @@ class CurlCffiContainment(ContainmentTransport):
             # protocol's `direct_route` takes no fixture, and the house style
             # (T-B2's seams) keeps these usable outside a test body.
             curl_requests.AsyncSession = original
+
+    #: Hosts a silently-missed ``_CODEX_BACKEND_URL`` swap could reach on
+    #: ``openai_subscription``. ``127.0.0.2`` is an RFC-5735-documented
+    #: blackhole address; curling ``{host}:443:127.0.0.2`` resolves the
+    #: hostname to a closed loopback port and the request fails with
+    #: ``ECONNREFUSED``, not a real TLS handshake.
+    _REAL_UPSTREAM_HOSTS: tuple[str, ...] = ("chatgpt.com", "auth.openai.com")
 
     async def drive_phase_1(
         self,
@@ -534,6 +561,64 @@ class TestHarnessCodexUrlSeam:
         monkeypatch.delattr(openai_subscription, "_CODEX_BACKEND_URL")
         with pytest.raises(AttributeError, match="_CODEX_BACKEND_URL"), harness_codex_url(sealed_network):
             pass
+
+
+class TestDirectRouteBlocksRealEgress:
+    """A silently-missed ``_CODEX_BACKEND_URL`` swap cannot reach the real upstream.
+
+    ``direct_route`` injects deny entries for ``chatgpt.com`` and
+    ``auth.openai.com`` pointing at ``127.0.0.2`` — the harness never
+    has a path to the real upstream, even if a future product refactor
+    captures ``_CODEX_BACKEND_URL`` at import time, adds a new
+    upstream URL under a different name, or otherwise misses the seam.
+    The integration test forces the seam to miss by replacing it with
+    a no-op and asserts the resulting drive does not reach the real
+    network — ``status != 200``, ``connections == []``, ``captures == []``.
+    """
+
+    async def test_a_forced_seam_miss_does_not_reach_the_real_upstream(
+        self,
+        sealed_network: SealedNetwork,
+        curl_trusts_test_ca: None,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import contextlib as _cl
+
+        import harness.test_curl_cffi_containment_slice as _this_module
+
+        # Replace the upstream seam with a no-op so the adapter posts to
+        # the real upstream. The deny entries in ``direct_route`` must keep
+        # the request from reaching it — curl resolves ``chatgpt.com`` to
+        # ``127.0.0.2`` (no listener), the connection fails with
+        # ``ECONNREFUSED``, and the recorder sees nothing. Patched on the
+        # loaded module object (the ``tests.``-prefixed dotted form would
+        # re-import the module and double-register the transport).
+        monkeypatch.setattr(
+            _this_module,
+            "harness_codex_url",
+            lambda harness: _cl.nullcontext("https://chatgpt.com/backend-api/codex/responses"),
+        )
+        monkeypatch.setattr(
+            openai_subscription,
+            "_CODEX_BACKEND_URL",
+            "https://chatgpt.com/backend-api/codex/responses",
+            raising=False,
+        )
+
+        result = await _drive().drive_phase_1(sealed_network, monkeypatch=monkeypatch, tmp_path=tmp_path)
+
+        assert result.status != 200, (
+            f"bridge answered {result.status}: a forced seam miss should not reach a "
+            "real upstream — the deny entries in direct_route are not biting"
+        )
+        assert result.connections == [], (
+            f"recorder accepted {len(result.connections)} connection(s): a real TLS "
+            "handshake to chatgpt.com happened from the CI runner"
+        )
+        assert result.captures == [], (
+            f"recorder saw {len(result.captures)} capture(s): a real request reached the upstream"
+        )
 
 
 # ── Phase 1 — positive control (§5.2.2 row 1) ─────────────────────────────
