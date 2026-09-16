@@ -236,13 +236,12 @@ class TestMalformedJsonLogging:
         port = await server.start_async()
         try:
             with caplog.at_level(logging.WARNING, logger="kitty.bridge.server"):
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(
-                        f"http://127.0.0.1:{port}/v1/responses",
-                        data=b"this is not json {",
-                        headers={"Content-Type": "application/json"},
-                    ) as resp:
-                        assert resp.status == 400
+                async with aiohttp.ClientSession() as session, session.post(
+                    f"http://127.0.0.1:{port}/v1/responses",
+                    data=b"this is not json {",
+                    headers={"Content-Type": "application/json"},
+                ) as resp:
+                    assert resp.status == 400
             warning_msgs = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
             assert any("malformed" in m.lower() or "json" in m.lower() for m in warning_msgs), (
                 f"Expected malformed-JSON warning, got: {warning_msgs}"
@@ -258,13 +257,12 @@ class TestMalformedJsonLogging:
         port = await server.start_async()
         try:
             with caplog.at_level(logging.WARNING, logger="kitty.bridge.server"):
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(
-                        f"http://127.0.0.1:{port}/v1/messages",
-                        data=b"not json {",
-                        headers={"Content-Type": "application/json"},
-                    ) as resp:
-                        assert resp.status == 400
+                async with aiohttp.ClientSession() as session, session.post(
+                    f"http://127.0.0.1:{port}/v1/messages",
+                    data=b"not json {",
+                    headers={"Content-Type": "application/json"},
+                ) as resp:
+                    assert resp.status == 400
             warning_msgs = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
             assert any("malformed" in m.lower() or "json" in m.lower() for m in warning_msgs)
         finally:
@@ -278,13 +276,12 @@ class TestMalformedJsonLogging:
         port = await server.start_async()
         try:
             with caplog.at_level(logging.WARNING, logger="kitty.bridge.server"):
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(
-                        f"http://127.0.0.1:{port}/v1beta/models/foo:generateContent",
-                        data=b"not json",
-                        headers={"Content-Type": "application/json"},
-                    ) as resp:
-                        assert resp.status == 400
+                async with aiohttp.ClientSession() as session, session.post(
+                    f"http://127.0.0.1:{port}/v1beta/models/foo:generateContent",
+                    data=b"not json",
+                    headers={"Content-Type": "application/json"},
+                ) as resp:
+                    assert resp.status == 400
             warning_msgs = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
             assert any("malformed" in m.lower() or "json" in m.lower() for m in warning_msgs)
         finally:
@@ -298,13 +295,12 @@ class TestMalformedJsonLogging:
         port = await server.start_async()
         try:
             with caplog.at_level(logging.WARNING, logger="kitty.bridge.server"):
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(
-                        f"http://127.0.0.1:{port}/v1/chat/completions",
-                        data=b"not json",
-                        headers={"Content-Type": "application/json"},
-                    ) as resp:
-                        assert resp.status == 400
+                async with aiohttp.ClientSession() as session, session.post(
+                    f"http://127.0.0.1:{port}/v1/chat/completions",
+                    data=b"not json",
+                    headers={"Content-Type": "application/json"},
+                ) as resp:
+                    assert resp.status == 400
             warning_msgs = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
             assert any("malformed" in m.lower() or "json" in m.lower() for m in warning_msgs)
         finally:
