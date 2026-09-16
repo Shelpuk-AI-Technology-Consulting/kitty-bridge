@@ -3629,14 +3629,29 @@ reader that cannot read a part must still *occupy its position*.
 > reference implementation.
 >
 > **What still diverges, and is owed elsewhere.** Anthropic's missing/wrongly-typed
-> `source.data` (`KeyError` / `TypeError` from `b64decode`) still escapes the reader; the
-> sibling sweep over `input_file` parts (OpenAI's `detail`, future siblings) is not in scope
-> for this ticket; the `_DATA_URL` regex `^data:([^;,]+);base64,(.*)$` rejects
-> `data:;base64,…` (empty media segment) and a case-variant `;BASE64,` marker, routing both to
-> the non-base64 branch — pre-existing defects in the regex, separate ticket. The broader sweep
-> this note once implied — the
-> Responses dispatcher's other `return None` paths for wrongly-typed text and refusal parts —
-> stays tracked under KBR-196, consolidated here.
+> `source.data` (`KeyError` / `TypeError` from `b64decode`) still escapes the reader. Two further
+> items this note once named are **paid 2026-09-16 (KBR-179)**: the `input_file` sibling sweep
+> (the part now carries `opaque_digest(entry)`, with the same no-op `_residualise` sweep the
+> Anthropic reader's `_read_opaque` runs, so a mutated `detail` — a key the published
+> `InputFileContentParam` schema lists but no Opaque slot covers — shows as a digest delta at the
+> part path rather than vanishing), and the `_DATA_URL` regex (`[^;,]*` plus `re.IGNORECASE`, so
+> `data:;base64,…` and a case-variant `;BASE64,` route to the base64 branch by design). KBR-179
+> also aligned the Responses reader's structural boundary with the Messages reader's: an input
+> item whose `type` is present but neither a string nor `null` raises `UnreadableBodyError`
+> naming the path — `Opaque.kind` *is* its value, per §7.4.1.
+>
+> **One asymmetry, recorded so it is not mistaken for an oversight.** The Anthropic
+> `_read_opaque` does *three* things where the Responses branches do *one*: the no-op sweep,
+> the `cache_control` slot (`Opaque.cache_control = _read_cache_control(…)`), and the
+> `opaque_kind` translation. The Responses branches match only the first — deliberately.
+> Responses items and content parts do not carry `cache_control` (OpenAI's spelling is
+> `prompt_cache_breakpoint`, on `InputTextContentParam` / `InputImageContentParam` /
+> `InputFileContentParam`); a reader that filled `Opaque.cache_control` would invent a value
+> the wire never sent. `prompt_cache_breakpoint` rides in the digest until gap **G37** lands a
+> slot for it — visible as a part-level delta, not a clean residual entry, but visible. The
+> broader sweep
+> this note once implied — the Responses dispatcher's other `return None` paths for wrongly-
+> typed text and refusal parts — stays tracked under KBR-196, consolidated here.
 
 > **What this reader leaves on the record — and when it was paid.** Six fields the format
 > publishes, real clients send, and the grammar could not carry residualised and so **failed the
