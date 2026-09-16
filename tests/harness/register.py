@@ -721,8 +721,11 @@ _BRIDGE_ROWS: tuple[MutationRow, ...] = (
         # The native route's guarantee is proven as product behaviour instead
         # (epic KBR-197), not by a complement nobody could author.
         trigger=Trigger.NON_NATIVE_UPSTREAM_WIRE,
-        # Three anchors because Anthropic permits a breakpoint at three carriers
-        # and Claude Code uses all three. Each names the **field**, never the
+        # Four anchors: three block-level carriers (Anthropic permits a
+        # breakpoint at all three and Claude Code uses all three) plus the
+        # top-level automatic-caching form (Anthropic projects it to
+        # `envelope.extra[cache_control]`; KBR-263 closing G38 -- a literal
+        # path, so no `_SHAPES` entry). Each names the **field**, never the
         # block: `conversation.turns[*].parts[*]` would also claim a deleted
         # part, and `conversation.tools[*]` a deleted tool description -- two of
         # §3.3.1's five oracle falsification cases. That is §3.3.1a's P15 lesson
@@ -731,6 +734,7 @@ _BRIDGE_ROWS: tuple[MutationRow, ...] = (
             c.system_path(c.WILDCARD, "cache_control"),
             c.part_path(c.WILDCARD, c.WILDCARD, "cache_control"),
             c.tool_path(c.WILDCARD, "cache_control"),
+            c.extra_path("cache_control"),
         ),
         conditional=False,
         design_ref="§3.2.1 · §3.3.1 · §3.3.1a",
