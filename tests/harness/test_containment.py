@@ -694,10 +694,9 @@ class TestVerdictFloorDetection:
         """Phase 1 passed on <3.11 with all proxied phases absent — the floor shape."""
         from harness.conftest import _floor_unsupported_shape
 
-        outcomes = {
-            _PHASE_1_NAME: _PhaseOutcome.PASSED
-        }
-        assert _floor_unsupported_shape(outcomes, version_info=(3, 10, 0)) is True, (
+        outcomes = {_PHASE_1_NAME: _PhaseOutcome.PASSED}
+        clean = {_PHASE_1_NAME: _PhaseOutcome.PASSED}
+        assert _floor_unsupported_shape(outcomes, clean, version_info=(3, 10, 0)) is True, (
             "phase 1 passed on <3.11 with all proxied phases absent must be the floor shape"
         )
 
@@ -705,12 +704,11 @@ class TestVerdictFloorDetection:
         """From 3.11 up, the floor shape never applies — the gate decides."""
         from harness.conftest import _floor_unsupported_shape
 
-        outcomes = {
-            _PHASE_1_NAME: _PhaseOutcome.PASSED
-        }
-        assert _floor_unsupported_shape(outcomes, version_info=(3, 11, 0)) is False
-        assert _floor_unsupported_shape(outcomes, version_info=(3, 12, 1)) is False
-        assert _floor_unsupported_shape(outcomes, version_info=(3, 13, 0)) is False
+        outcomes = {_PHASE_1_NAME: _PhaseOutcome.PASSED}
+        clean = {_PHASE_1_NAME: _PhaseOutcome.PASSED}
+        assert _floor_unsupported_shape(outcomes, clean, version_info=(3, 11, 0)) is False
+        assert _floor_unsupported_shape(outcomes, clean, version_info=(3, 12, 1)) is False
+        assert _floor_unsupported_shape(outcomes, clean, version_info=(3, 13, 0)) is False
 
     def test_helper_false_when_phase1_did_not_pass(self) -> None:
         """Phase 1 absent, failed, or skipped means the slice did not run clean — not the floor."""
@@ -718,17 +716,38 @@ class TestVerdictFloorDetection:
 
         # Phase 1 absent — a deleted/renamed phase; the finaliser's length
         # check catches that case, not the floor shape.
-        assert _floor_unsupported_shape({}, version_info=(3, 10, 0)) is False
+        assert _floor_unsupported_shape({}, {}, version_info=(3, 10, 0)) is False
         # Phase 1 FAILED — a real failure, not a floor.
-        failed = {
-            _PHASE_1_NAME: _PhaseOutcome.FAILED
-        }
-        assert _floor_unsupported_shape(failed, version_info=(3, 10, 0)) is False
+        failed = {_PHASE_1_NAME: _PhaseOutcome.FAILED}
+        assert _floor_unsupported_shape(failed, {}, version_info=(3, 10, 0)) is False
         # Phase 1 runtime-skipped — also not the floor.
-        skipped = {
-            _PHASE_1_NAME: _PhaseOutcome.SKIPPED
-        }
-        assert _floor_unsupported_shape(skipped, version_info=(3, 10, 0)) is False
+        skipped = {_PHASE_1_NAME: _PhaseOutcome.SKIPPED}
+        assert _floor_unsupported_shape(skipped, {}, version_info=(3, 10, 0)) is False
+
+    def test_helper_false_when_phase1_teardown_failed(self) -> None:
+        """Phase 1 call passed but teardown errored — same standard the gate applies."""
+        from harness.conftest import _floor_unsupported_shape
+
+        outcomes = {_PHASE_1_NAME: _PhaseOutcome.PASSED}
+        teardown_failed = {_PHASE_1_NAME: _PhaseOutcome.FAILED}
+        assert _floor_unsupported_shape(outcomes, teardown_failed, version_info=(3, 10, 0)) is False, (
+            "phase 1 call passed but teardown failed must disqualify the floor shape: the "
+            "gate's standard for every phase is PASSED call + PASSED teardown — the reason "
+            "text would otherwise lie ('phase 1 passed' when phase 1 did not come back clean)"
+        )
+
+    def test_helper_false_when_phase1_teardown_absent(self) -> None:
+        """Phase 1 teardown entry missing — strict form: phase 1 did not come back clean.
+
+        :func:`_gate_passed` requires the teardown entry to be present and PASSED (same
+        as call); the floor helper keeps the same standard. Absent is *not* a free pass
+        — it would otherwise hide a setup-skipped phase 1 from the floor check.
+        """
+        from harness.conftest import _floor_unsupported_shape
+
+        outcomes = {_PHASE_1_NAME: _PhaseOutcome.PASSED}
+        # No teardown entry at all.
+        assert _floor_unsupported_shape(outcomes, {}, version_info=(3, 10, 0)) is False
 
     def test_helper_false_when_any_proxied_phase_is_present(self) -> None:
         """A present proxied phase means real proxied work happened — not the floor."""
@@ -738,14 +757,15 @@ class TestVerdictFloorDetection:
             _PHASE_1_NAME: _PhaseOutcome.PASSED,
             "test_proxy_up_every_peer_port_joins_a_tunnel": _PhaseOutcome.PASSED,
         }
-        assert _floor_unsupported_shape(one_passed, version_info=(3, 10, 0)) is False
+        clean = {_PHASE_1_NAME: _PhaseOutcome.PASSED}
+        assert _floor_unsupported_shape(one_passed, clean, version_info=(3, 10, 0)) is False
         assert any(n in one_passed for n in _PROXIED_PHASE_NAMES)
         # A present-but-failed proxied phase is observed work, not absence.
         one_failed = {
             _PHASE_1_NAME: _PhaseOutcome.PASSED,
             "test_proxy_down_leaves_the_recorder_with_zero_connections": _PhaseOutcome.FAILED,
         }
-        assert _floor_unsupported_shape(one_failed, version_info=(3, 10, 0)) is False
+        assert _floor_unsupported_shape(one_failed, clean, version_info=(3, 10, 0)) is False
 
     def test_recorder_writes_unsupported_with_the_documented_reason(self) -> None:
         """A floor-shape recorder call writes ``UNSUPPORTED`` carrying the reason.
@@ -759,10 +779,9 @@ class TestVerdictFloorDetection:
         from harness.conftest import _record_unsupported_if_floor_shape
         from harness.containment import instance as report_instance
 
-        outcomes = {
-            _PHASE_1_NAME: _PhaseOutcome.PASSED
-        }
-        recorded = _record_unsupported_if_floor_shape(outcomes, "curl_cffi", version_info=(3, 10, 0))
+        outcomes = {_PHASE_1_NAME: _PhaseOutcome.PASSED}
+        clean = {_PHASE_1_NAME: _PhaseOutcome.PASSED}
+        recorded = _record_unsupported_if_floor_shape(outcomes, clean, "curl_cffi", version_info=(3, 10, 0))
 
         assert recorded is True, "the recorder must claim the floor shape it was given"
         row = report_instance().entry("curl_cffi")
@@ -778,23 +797,47 @@ class TestVerdictFloorDetection:
         from harness.containment import instance as report_instance
 
         report_instance().record("curl_cffi", Outcome.PROVEN)
-        outcomes = {
-            _PHASE_1_NAME: _PhaseOutcome.PASSED
-        }
-        recorded = _record_unsupported_if_floor_shape(outcomes, "curl_cffi", version_info=(3, 10, 0))
+        outcomes = {_PHASE_1_NAME: _PhaseOutcome.PASSED}
+        clean = {_PHASE_1_NAME: _PhaseOutcome.PASSED}
+        recorded = _record_unsupported_if_floor_shape(outcomes, clean, "curl_cffi", version_info=(3, 10, 0))
 
         assert recorded is False, "an existing verdict must not be overwritten"
         assert report_instance().entry("curl_cffi").outcome is Outcome.PROVEN
+
+    def test_recorder_noop_when_phase1_teardown_failed(self) -> None:
+        """A phase-1 teardown failure on <3.11 must NOT be claimed as ``UNSUPPORTED``.
+
+        The recorder's reason text is "phase 1 (direct leg) passed" — a claim
+        that is false when the teardown errored. Leaving the row
+        ``NOT_ATTEMPTED`` lets T-E9 surface the real failure.
+        """
+        from harness.conftest import _record_unsupported_if_floor_shape
+        from harness.containment import instance as report_instance
+
+        outcomes = {_PHASE_1_NAME: _PhaseOutcome.PASSED}
+        teardown_failed = {_PHASE_1_NAME: _PhaseOutcome.FAILED}
+        recorded = _record_unsupported_if_floor_shape(
+            outcomes, teardown_failed, "curl_cffi", version_info=(3, 10, 0)
+        )
+
+        assert recorded is False, (
+            "the recorder must not claim UNSUPPORTED for a slice whose phase 1 teardown "
+            "errored — that is a real failure, not a partial delivery"
+        )
+        assert report_instance().entry("curl_cffi").outcome is Outcome.NOT_ATTEMPTED, (
+            "T-E9 must see the row as not_attempted (the slice failed at teardown, not at "
+            "the floor); the floor-recording path here is the one that would have recorded "
+            "UNSUPPORTED were teardowns not consulted"
+        )
 
     def test_recorder_noop_above_311(self) -> None:
         """Above the floor the recorder is a no-op — the gate owns the verdict."""
         from harness.conftest import _record_unsupported_if_floor_shape
         from harness.containment import instance as report_instance
 
-        outcomes = {
-            _PHASE_1_NAME: _PhaseOutcome.PASSED
-        }
-        assert _record_unsupported_if_floor_shape(outcomes, "curl_cffi", version_info=(3, 11, 0)) is False
+        outcomes = {_PHASE_1_NAME: _PhaseOutcome.PASSED}
+        clean = {_PHASE_1_NAME: _PhaseOutcome.PASSED}
+        assert _record_unsupported_if_floor_shape(outcomes, clean, "curl_cffi", version_info=(3, 11, 0)) is False
         assert report_instance().entry("curl_cffi").outcome is Outcome.NOT_ATTEMPTED
 
 

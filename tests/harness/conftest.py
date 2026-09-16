@@ -219,6 +219,7 @@ _FLOOR_UNSUPPORTED_REASON = (
 
 def _floor_unsupported_shape(
     outcomes: dict[str, _PhaseOutcome],
+    teardown_outcomes: dict[str, _PhaseOutcome],
     *,
     phase_1_name: str = _PHASE_1_NAME,
     proxied_names: frozenset[str] = _PROXIED_PHASE_NAMES,
@@ -235,8 +236,19 @@ def _floor_unsupported_shape(
     delivery") are both honoured by recording ``UNSUPPORTED`` in this
     shape rather than leaving the row ``not_attempted``.
 
+    **Phase 1 must have come back clean**, by the gate's own definition
+    (:func:`_gate_passed` requires the same of every phase): a call that
+    passed but a teardown that errored is "did not come back clean", not
+    "partial delivery" — recording ``UNSUPPORTED`` with the reason
+    "phase 1 passed" for such a run would be false. A phase-1 teardown
+    failure therefore disqualifies the floor shape, and the row stays
+    ``NOT_ATTEMPTED`` for T-E9 to surface as a real failure.
+
     Args:
         outcomes: The slice's call-phase outcomes dict.
+        teardown_outcomes: The slice's teardown-phase outcomes dict. Phase
+            1 must be present here and ``PASSED`` — the same standard
+            :func:`_gate_passed` applies to every phase on the ≥3.11 path.
         phase_1_name: The direct-leg phase's name.
         proxied_names: The proxied phases whose **absence** from
             ``outcomes`` is the floor signal — absent, not ``FAILED``
@@ -248,8 +260,9 @@ def _floor_unsupported_shape(
             simulate the 3.10 matrix without patching ``sys``.
 
     Returns:
-        ``True`` iff the version is below the 3.11 floor AND phase 1 ran
-        and passed AND every proxied phase is absent from ``outcomes``.
+        ``True`` iff the version is below the 3.11 floor AND phase 1 ran,
+        passed its call, and came back clean on teardown AND every
+        proxied phase is absent from ``outcomes``.
     """
     if version_info is None:
         version_info = sys.version_info[:3]
@@ -257,11 +270,18 @@ def _floor_unsupported_shape(
         return False
     if outcomes.get(phase_1_name) is not _PhaseOutcome.PASSED:
         return False
+    # Same standard the gate applies on ≥3.11: a phase that passed its
+    # call but errored on teardown did not "come back clean". Recording
+    # `UNSUPPORTED` with the reason "phase 1 passed" for such a run would
+    # be false — the row stays `NOT_ATTEMPTED` and T-E9 surfaces it.
+    if teardown_outcomes.get(phase_1_name) is not _PhaseOutcome.PASSED:
+        return False
     return all(name not in outcomes for name in proxied_names)
 
 
 def _record_unsupported_if_floor_shape(
     outcomes: dict[str, _PhaseOutcome],
+    teardown_outcomes: dict[str, _PhaseOutcome],
     verdict_row: str,
     *,
     version_info: tuple[int, ...] | None = None,
@@ -274,6 +294,9 @@ def _record_unsupported_if_floor_shape(
 
     Args:
         outcomes: The slice's call-phase outcomes dict.
+        teardown_outcomes: The slice's teardown-phase outcomes dict —
+            forwarded to :func:`_floor_unsupported_shape` so a phase-1
+            teardown failure disqualifies the floor shape.
         verdict_row: The capability-report row this slice owns.
         version_info: Override for ``sys.version_info``; defaults to the
             current interpreter. Parameterised so tests can exercise the
@@ -283,11 +306,7 @@ def _record_unsupported_if_floor_shape(
         ``True`` when the row was recorded (the caller's normal ``PROVEN``
         path must then be skipped), ``False`` otherwise.
     """
-    # Delegate the shape check to the helper — it accepts ``version_info``
-    # directly, so the explicit override path is unified with the default
-    # ``sys.version_info`` fallback. The helper is the single source of
-    # truth for the floor-shape predicates.
-    if not _floor_unsupported_shape(outcomes, version_info=version_info):
+    if not _floor_unsupported_shape(outcomes, teardown_outcomes, version_info=version_info):
         return False
     current = report_instance().entries().get(verdict_row)
     if current is None or current.outcome is Outcome.NOT_ATTEMPTED:
@@ -386,7 +405,7 @@ def _record_slice_verdict_at_session_end() -> Iterator[None]:
     # satisfy the plan's T-E3 done-when ("an outcome is recorded") on every
     # supported interpreter; T-E9's gate accepts ``UNSUPPORTED`` as a
     # permitted partial-delivery verdict.
-    _record_unsupported_if_floor_shape(_phase_outcomes, _VERDICT_ROW)
+    _record_unsupported_if_floor_shape(_phase_outcomes, _phase_teardown_outcomes, _VERDICT_ROW)
 
 
 def _record_proven_with_sibling_guard(
@@ -477,7 +496,7 @@ def _record_curl_cffi_slice_verdict_at_session_end() -> Iterator[None]:
         )
         return
     # Floor path — symmetric to the aiohttp finaliser above.
-    _record_unsupported_if_floor_shape(_curl_phase_outcomes, _CURL_CFFI_VERDICT_ROW)
+    _record_unsupported_if_floor_shape(_curl_phase_outcomes, _curl_phase_teardown_outcomes, _CURL_CFFI_VERDICT_ROW)
 
 
 __all__ = [
