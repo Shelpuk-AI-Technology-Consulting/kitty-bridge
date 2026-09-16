@@ -75,6 +75,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import ssl
+import sys
 from collections.abc import AsyncGenerator, Iterator
 from pathlib import Path
 from typing import Any
@@ -102,15 +103,27 @@ from harness.containment import (
 from harness.contract import WireFormat
 from harness.curl_cffi import seed_oauth_session
 from harness.curl_recorder import CODEX_RESPONSES_SUFFIX, CurlRecordingUpstream
-from harness.test_aiohttp_containment_slice import (
-    _AIOHTTP_NEEDS_311 as _NEEDS_311,
-)
-from harness.test_aiohttp_containment_slice import (
-    _AIOHTTP_SKIP_REASON as _SKIP_REASON,
-)
 from kitty.egress import EgressConfig, get_egress, set_egress
 from kitty.providers import openai_subscription
 from kitty.providers.openai_subscription import OpenAISubscriptionAdapter
+
+#: The Python ≥3.11 floor the proxied phases skip below — the same threshold
+#: the aiohttp slice's ``_AIOHTTP_NEEDS_311`` pins. Defined locally rather
+#: than alias-imported so this file reads without an ``aiohttp``-named
+#: constant: the threshold is shared, the transport is not.
+_NEEDS_311 = sys.version_info < (3, 11)
+
+#: Why the proxied §5.2.2 phases skip on Python <3.11. The aiohttp slice's
+#: skipif carries a transport-specific reason (its own
+#: aiohttp/stdlib-asyncio/bpo-44011 framing), which is correct for *that*
+#: slice but misleading here — the curl_cffi floor is the same Python
+#: version, but the rationale is KBR-63's owner scope decision, not a
+#: stdlib-asyncio constraint on libcurl. Defined in this module so a curl
+#: phase's pytest-skip report reads neutrally and the slice's docstring
+#: stays self-consistent.
+_SKIP_REASON = (
+    "Python <3.11: proxied §5.2.2 phases skip (KBR-63 scope decision; see module docstring)"
+)
 
 # ── Fixtures ───────────────────────────────────────────────────────────────
 
