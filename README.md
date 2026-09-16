@@ -433,7 +433,7 @@ is always `0` because there is nowhere to fail over to — check `mode` first.
 |------------------|-------------------|------------------------------------------------------------------------------------------|
 | Anthropic        | `anthropic`       | Direct API only (pay per token). Subscription plans (Claude Pro/Team) are not supported. |
 | AWS Bedrock      | `bedrock`         | Uses boto3 SigV4 auth                                                                    |
-| MS Azure         | `azure`           | Requires deployment name                                                                 |
+| MS Azure         | `azure`           | Requires base URL (the resource root) + deployment name as the model                     |
 | BytePlus         | `byteplus`        |                                                                                          |
 | Google AI Studio | `google_aistudio` | Gemini models via OpenAI-compatible endpoint                                             |
 | Google Vertex AI | `vertex`          | Requires project and location                                                            |

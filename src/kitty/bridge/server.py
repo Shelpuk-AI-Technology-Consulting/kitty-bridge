@@ -8754,15 +8754,25 @@ class BridgeServer:
         provider = self._active_provider
         custom_url: str | None = None
         path: str | None = None
-        if status == 404 and provider.requires_custom_url:
+        if (
+            status == 404
+            and provider.requires_custom_url
+            # KBR-153: only rebuild the URL when the route is model-independent.
+            # Azure requires a custom URL *and* routes on the model (P20), and
+            # the branch has no request in scope, so quoting a URL would name
+            # an endpoint the request never used.  Identity-checked against the
+            # base-class method so an adapter that delegates to `super()` is
+            # excluded for the same reason — per-model delegation is exactly
+            # the shape that motivates the override.
+            and type(provider).get_upstream_path is ProviderAdapter.get_upstream_path
+        ):
             # No request is in scope here -- this formats an error for twelve
-            # call sites, most of which have none -- and both adapters that
-            # require a custom URL inherit `get_upstream_path`, which ignores
-            # the model. So the reported route is model-independent, and saying
-            # so with an empty request is honest where reaching for
-            # `_active_model` would reintroduce KBR-127 in the error path.
-            # `test_no_custom_url_adapter_routes_on_the_model` fails if a future
-            # adapter makes that untrue.
+            # call sites, most of which have none -- and the narrowed branch
+            # only enters for adapters whose `get_upstream_path` ignores the
+            # model. So the reported route is model-independent, and saying so
+            # with an empty request is honest where reaching for `_active_model`
+            # would reintroduce KBR-127 in the error path.  The narrower
+            # invariant lives in `test_an_offender_combining_custom_url_and_per_model_routing_is_explicitly_narrowed`.
             model_independent: dict = {}
             # `redact_url_for_display`, not the userinfo-only `_redact_userinfo` this
             # superseded: a query now composes correctly, and a query is where a

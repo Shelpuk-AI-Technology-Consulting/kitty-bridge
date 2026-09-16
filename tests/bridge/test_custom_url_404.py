@@ -17,6 +17,7 @@ import aiohttp
 import pytest
 
 from kitty.bridge.server import BridgeServer
+from kitty.providers.azure import AzureOpenAIAdapter
 from kitty.providers.custom_openai import CustomOpenAIAdapter
 from kitty.providers.openai import OpenAIAdapter
 
@@ -93,6 +94,27 @@ class TestCustomUrl404Wiring:
     def test_fixed_endpoint_provider_is_untouched(self):
         """A provider whose URL the user never set keeps the old passthrough."""
         server = _server(OpenAIAdapter(), None)
+
+        message = server._translate_upstream_error(404, {"detail": "Not Found"})
+
+        assert "base URL" not in message
+        assert message == '{"detail": "Not Found"}'
+
+    def test_per_model_routing_provider_does_not_get_a_quoted_url(self):
+        """KBR-153 — Azure requires a custom URL *and* routes on the model.
+
+        The 404 branch has no request in scope, and Azure's endpoint path is
+        the deployment id (register row P20): any URL the branch could build
+        from an empty request would name a deployment the request never used.
+        So Azure is narrowed out of the URL rebuild and gets the plain
+        upstream text, exactly like a fixed-endpoint provider — the right
+        answer, since the thing to check first is the model, not the base
+        URL, and the base URL is already quoted in launch-time validation.
+        """
+        server = _server(
+            AzureOpenAIAdapter(),
+            {"base_url": "https://res.openai.azure.com"},
+        )
 
         message = server._translate_upstream_error(404, {"detail": "Not Found"})
 
