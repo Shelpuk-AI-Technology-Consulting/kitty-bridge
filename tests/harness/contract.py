@@ -835,8 +835,23 @@ OPAQUE_ALIASES: Mapping[str, str] = MappingProxyType(
         # OpenAI Responses' attachment, and the name T-A3 first shipped for it.
         "input_file": "document",
         "file": "document",
-        # Bedrock Converse, whose union is camelCase throughout (T-A5).
+        # Bedrock Converse, whose union is camelCase throughout (T-A5).  Of the
+        # nine camelCase ContentBlock members, three project to first-class
+        # parts (`toolUse` → ToolUse, `toolResult` → ToolResult,
+        # `reasoningContent` → Thinking) and three are snake_case already
+        # (`document`, `video`, `audio`); the Tool-union toggles (`cachePoint`,
+        # `systemTool` on a `Tool` entry) never become Opaque at all — they are
+        # envelope extras (§7.4.2 rule 5).  These six reconcile the spelling:
         "searchResult": "search_result",
+        "cachePoint": "cache_point",
+        "guardContent": "guard_content",
+        "citationsContent": "citations_content",
+        "toolAddition": "tool_addition",
+        "toolRemoval": "tool_removal",
+        # `redactedContent` is the nested key inside a Converse
+        # `reasoningContent` block, not a union member: it is the redacted
+        # branch of the same concept Anthropic spells `redacted_thinking`.
+        "redactedContent": "redacted_thinking",
     }
 )
 
@@ -857,7 +872,10 @@ def opaque_kind(wire_type: str) -> str:
     hand.  That is **nine** types for Bedrock Converse, not one: its
     ``ContentBlock`` union carries ``toolUse``, ``toolResult``, ``guardContent``,
     ``cachePoint``, ``reasoningContent``, ``citationsContent``, ``searchResult``,
-    ``toolAddition`` and ``toolRemoval``.
+    ``toolAddition`` and ``toolRemoval``.  Of those nine, only six need an
+    alias — the other three project to first-class parts via the reader's
+    dispatch and never reach :func:`opaque_kind`.  See :data:`OPAQUE_ALIASES`'s
+    inline comment for the split.
 
     Args:
         wire_type: The block or item type as the format spells it.

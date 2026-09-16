@@ -3697,6 +3697,74 @@ reader that cannot read a part must still *occupy its position*.
 > register row to claim it. That is a correct oracle finding, not a reader defect, and it needs a
 > row or a ticket before T-D9 runs.
 
+#### 7.4.3 What T-A5 settled — Converse-specific decisions, and the three §7.4.2 rules it inherits
+
+The Bedrock Converse reader inherits three of §7.4.2's seven rules and settles three Converse-specific
+decisions on top. They are recorded here for the same reason §7.4.2 names — six readers, path-keyed
+residuals, and the same drift if any of them is restated per-reader.
+
+**Rule 2 (inherited).** Converse nests ``inferenceConfig`` (maxTokens / temperature / topP /
+stopSequences) and ``toolConfig.toolChoice`` the same way Gemini nests ``generationConfig`` /
+``toolConfig.functionCallingConfig``, so the leaf-key-on-the-narrowest-anchor rule applies. The
+reader maps each of the four sampling leaves to its canonical §3.3.1b spelling (``max_tokens``,
+``temperature``, ``top_p``, ``stop``) under :attr:`~harness.contract.Conversation.sampling`; ``tool_choice``
+unifies onto ``envelope.extra["tool_choice"]``. The container addresses are *not* emitted — the
+test class :class:`TestExtraKeyDisjointness` pins the four flattening sources pairwise-disjoint
+so a future schema revision that adds a sibling under ``inferenceConfig`` (or any other container)
+fails that test, not the reader's contract.
+
+**Rule 5 (inherited).** Converse's ``Tool`` union is three members: ``toolSpec`` (a client tool
+spec, becomes :class:`~harness.contract.ToolDecl`), plus ``cachePoint`` and ``systemTool``. The
+last two have no ``name`` to bind (cachePoint is a marker, systemTool is a server-side reference),
+so :attr:`~harness.contract.Conversation.tools` cannot hold them — they project to
+``envelope.extra["cachePoint"]`` and ``envelope.extra["systemTool"]`` verbatim. Two ``cachePoint``
+entries inside ``toolConfig.tools`` are schema-legal (Converse allows up to four cachePoints per
+request across system / messages / tools), so the reader takes the first value and residualises
+the duplicate at its entry path (§7.4.2 rule 2's "loser overwrites winner with no residual"
+hazard).
+
+**Rule 7 (inherited).** §7.4.2's "no branch ever returns *no part*" applies to Converse too, and the
+five reader helpers it names — ``_read_image``, ``_read_tool_use``, ``_read_tool_result``,
+``_read_reasoning_content``, and the toolResult content dispatcher — are KBR-251-conformed:
+when a leaf is wrongly typed, the leaf residualises AND the part is produced (identity from the
+wire's own bytes via :func:`harness.contract.image_digest`'s second recipe (KBR-192), or
+canonical-JSON digest for the helpers where bytes do not exist). A non-Mapping member
+(``toolUse``, ``toolResult``, ``reasoningContent``, content block) raises
+:class:`~harness.contract.UnreadableBodyError` per rule 7 row 2 — "the member itself is wrong,
+the schema says an object and the wire sent a scalar."
+
+**Three Converse-specific decisions:**
+
+**1. ``cachePoint`` is an ``Opaque``, not a ``cache_control`` slot.** §3.3.1 records Converse's
+``cachePoint`` as a separate block in the content list, not a field on one. The reader projects
+the block itself to :class:`~harness.contract.Opaque` with the canonical kind ``cache_point``
+(reached via :func:`harness.contract.opaque_kind`), and does **not** fill
+:attr:`~harness.contract.Text.cache_control` or :attr:`~harness.contract.Opaque.cache_control`.
+This is the design's deliberate exception for Converse — Anthropic carries ``cache_control``,
+Converse does not, and forcing one slot for two spellings would put a vendor name into a
+wire-independent value (§3.3.1's P16 objection). The same applies to ``cachePoint`` and
+``guardContent`` inside :attr:`~harness.contract.Conversation.system`: text lifts into
+:attr:`~harness.contract.Conversation.system`; the other two residualise at the entry path
+so the totality check sees them. §11 entry ``Q-cache-control-converse`` records this.
+
+**2. ``toolResult.content[i]`` may carry a ``json`` block.** Converse publishes a ``json``
+ContentBlock inside tool results — the schema is ``{json: <Document>}``, where Document is
+any JSON value (object, array, scalar). The reader maps ``json`` to
+:class:`~harness.contract.Json`, which carries the value verbatim (object, array, or scalar);
+``decode_arguments`` is the string-carrying-formats tool and would reject the object form on
+this wire. A non-Mapping ``input`` on a ``toolUse`` (Converse's natively-object form)
+residualises at its leaf AND the part is projected as ``ToolUse(arguments={})`` per §7.4.2
+rule 7 row 2 (the inherited rule §7.4.3 records three lines above); the empty-mapping
+default matches what §3.3.1b uses for absent arguments. ``decode_arguments`` still rejects a
+value the wire could not carry.
+
+**3. The reader consumes the URL.** :attr:`~harness.contract.CapturedRequest.path` carries
+``/model/{modelId}/converse`` or ``/model/{modelId}/converse-stream`` — the model is a URI
+parameter (NOT a wire-body key) and the streaming flag is the operation (NOT a body field). The
+second reader to consume the URL after Gemini; ``TestRoute`` owns §3.3.5's claim that two
+byte-identical bodies on ``converse`` and ``converse-stream`` yield different
+``envelope.stream`` values.
+
 ### 7.5 The bridge fixture
 
 `tests/harness/bridge.py` — plan task **T-W8** ([KBR-31]). The counterpart of §7.2 on the
@@ -5446,6 +5514,8 @@ Q12 was in that set until 2026-09-12 (KBR-216). Its entry below records the answ
 answer does not settle.
 
 **Q-image-digest-ref — ANSWERED by the product owner, 2026-09-14 (KBR-192).** Yes — `Image.__post_init__` enforces a strict XOR between `digest` and `ref`. Construction with both `None` raises (the blindness KBR-179 names for `Opaque`); construction with both set raises (a phantom delta two readers could populate the pair differently for one image and report on content neither altered). The legitimate reader paths that today produced neither — Gemini's undecodable inlineData base64, Gemini's missing or wrongly-typed `fileData.fileUri`, and Anthropic's missing or wrongly-typed `url` / `file_id` — now give the part identity: the raw-encoded-bytes digest for the first case (the second of `image_digest`'s recipes), and the `opaque_digest` canonical-JSON digest of the malformed blob for the others. The residual still records the bad/missing value, so the run fails visibly at the right path. Dependent passages re-derived: §3.3.1 line 599-602 (the `Image.digest` recipe paragraph, now mentions the raw-bytes second recipe); §7.4 rule 7 row 2 (line 3167) and row 3 (line 3168) (the absent-value table now describes the canonical-JSON and raw-bytes outcomes respectively). Out of scope: the reconciliation ticket for the two earlier reader divergences (§7.4 "Reconciliation owed" line 3183-3186) — KBR-192 unblocks it by giving both branches a compatible answer to the "what identity does an unreadable image carry?" question.
+
+**Q-cache-control-converse — ANSWERED by T-A5 (KBR-37), 2026-09-15.** The Bedrock Converse reader does *not* fill :attr:`~harness.contract.Text.cache_control` (or the Opaque slot) from Converse's ``cachePoint``. Anthropic's ``cache_control`` is a field on a block; Converse's ``cachePoint`` is a *separate block* in the content list (§3.3.1's `cache_control` slot note names this exception explicitly). The reader projects ``cachePoint`` to :class:`~harness.contract.Opaque` with canonical kind ``cache_point`` (reached via :func:`harness.contract.opaque_kind` and the new ``OPAQUE_ALIASES`` entry for it) and leaves :attr:`~harness.contract.Text.cache_control` ``None``. The same decision applies to ``cachePoint`` inside :attr:`~harness.contract.Conversation.system`: text lifts into ``system``; the two non-text block types (``cachePoint``, ``guardContent``) residualise at the entry path. ``M16`` (which claims the cache-point strip on the Anthropic route) does not transfer — Converse's wire has no carrier for the strip to claim. The decision is recorded in §7.4.3 above and exercised by :class:`~harness.tests.harness.test_reader_bedrock_converse.TestResidualsExpectedOnRealTraffic`. *Original question:* does T-A5 fill the ``cache_control`` slot from Converse's ``cachePoint`` block (the way T-A2 filled it from both Chat Completions' ``cache_control`` and ``prompt_cache_breakpoint``), or leave such bodies residualising at the ``cachePoint`` block itself? The first would invent a slot on a format that has no slot concept; the second is what §3.3.1 already names as the deliberate exception.
 
 **Q1 — How faithful should the agent's identity be (F1, G3, KBR-8)?** Three options, materially
 different: (a) forward a curated allowlist of the agent's real headers, uniformly, so every
