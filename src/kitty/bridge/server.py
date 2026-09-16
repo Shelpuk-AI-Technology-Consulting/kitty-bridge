@@ -17,6 +17,7 @@ import sys
 import time
 import traceback
 import uuid
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
 from types import TracebackType
@@ -1912,6 +1913,67 @@ class BridgeServer:
         """
         return request.transport is None or request.transport.is_closing()
 
+    @staticmethod
+    def _debug_url(url: str) -> str:
+        # pragma: no mutate block
+        """Return the form of ``url`` safe to write to the debug log.
+
+        ``--debug`` attaches a FileHandler on ``~/.cache/kitty/bridge.log``,
+        the artifact a user attaches to a bug report, so a credential-bearing
+        query value or userinfo component must not reach it verbatim
+        (SYSTEM_DESIGN.md §9; KBR-156). Every DEBUG log line carrying a
+        composed upstream URL goes through this helper rather than logging
+        ``url`` raw — the redaction rule itself is
+        :meth:`ProviderAdapter.redact_url_for_display
+        <kitty.providers.base.ProviderAdapter.redact_url_for_display>`.
+
+        Args:
+            url: The upstream URL about to be logged.
+
+        Returns:
+            The redacted URL — userinfo dropped, query values and fragment
+            masked, parameter names kept.
+        """
+        return ProviderAdapter.redact_url_for_display(url)
+
+    #: Substrings that mark a header name as credential-bearing. Matched
+    #: case-insensitively against the lowercased name; a name containing any
+    #: of these has its value masked in the debug log.
+    _CREDENTIAL_NAME_STROKES = ("auth", "key", "token", "cookie", "secret", "signature")
+
+    @staticmethod
+    def _debug_headers(headers: Mapping[str, str]) -> dict[str, str]:
+        # pragma: no mutate block
+        """Return a header mapping safe to write to the debug log.
+
+        Headers cannot take the URL rule (mask every value) without
+        destroying the diagnostic — non-credential headers are most of what
+        a developer reads in a header dump. The rule is instead: a header
+        whose **name**, lowercased, contains any of
+        ``_CREDENTIAL_NAME_STROKES`` has its value replaced by the mask;
+        every other header passes verbatim (SYSTEM_DESIGN.md §9.2).
+
+        This deliberately diverges from KBR-143's "mask values
+        indiscriminately, never by name" principle, which is right for
+        query parameters — a guess that is wrong once leaks a key — but
+        cannot be applied to headers without redacting the whole dump. The
+        divergence is recorded in SYSTEM_DESIGN.md §9.2 so a future reader
+        does not "fix" one rule to match the other.
+
+        Args:
+            headers: The header mapping about to be logged (for example
+                ``dict(request.headers)``).
+
+        Returns:
+            A new dict with sensitive values replaced by the mask
+            (``****``) and everything else — names and non-sensitive
+            values — unchanged.
+        """
+        return {
+            name: ("****" if any(stroke in name.lower() for stroke in BridgeServer._CREDENTIAL_NAME_STROKES) else value)
+            for name, value in dict(headers).items()
+        }
+
     async def _select_backend_or_hold(self, request: web.Request) -> AllBackendsUnhealthyError | None:
         # pragma: no mutate block
         """Select a backend, holding the request while recovery is near (KBR-243).
@@ -3344,7 +3406,7 @@ class BridgeServer:
             )
 
         logger.debug("═══ RESPONSES API REQUEST ═══")
-        logger.debug("Request headers: %s", dict(request.headers))
+        logger.debug("Request headers: %s", BridgeServer._debug_headers(request.headers))
         logger.debug("Request body: %s", json.dumps(body, indent=2, ensure_ascii=False))
 
         # Before the body forks: `_original_body` below hands this dict to a custom transport (KBR-144).
@@ -3629,7 +3691,7 @@ class BridgeServer:
                 # serialization can refuse (KBR-126), and logging first would record
                 # a POST that never happens.
                 upstream_body = self._active_provider.translate_to_upstream(cc_request)
-                logger.debug("Upstream POST → %s", url)
+                logger.debug("Upstream POST → %s", BridgeServer._debug_url(url))
 
                 stream_timeout = aiohttp.ClientTimeout(total=None, sock_connect=30, sock_read=_STREAM_READ_TIMEOUT)
 
@@ -3689,7 +3751,7 @@ class BridgeServer:
                     async with upstream:
                         upstream_status = upstream.status
                         logger.debug("Upstream response status: %d", upstream.status)
-                        logger.debug("Upstream response headers: %s", dict(upstream.headers))
+                        logger.debug("Upstream response headers: %s", BridgeServer._debug_headers(upstream.headers))
 
                         if upstream.status not in (200, 201):
                             error_body = await upstream.text()
@@ -4799,7 +4861,7 @@ class BridgeServer:
                 url = self._build_upstream_url(cc_request)
                 headers = self._build_upstream_headers(cc_request)
                 upstream_body = self._upstream_body_for(cc_request)
-                logger.debug("Upstream POST → %s", url)
+                logger.debug("Upstream POST → %s", BridgeServer._debug_url(url))
 
                 stream_timeout = aiohttp.ClientTimeout(total=None, sock_connect=30, sock_read=_STREAM_READ_TIMEOUT)
 
@@ -6275,7 +6337,7 @@ class BridgeServer:
                 url = self._build_upstream_url(cc_request)
                 headers = self._build_upstream_headers(cc_request)
                 upstream_body = self._active_provider.translate_to_upstream(cc_request)
-                logger.debug("Upstream POST → %s", url)
+                logger.debug("Upstream POST → %s", BridgeServer._debug_url(url))
 
                 stream_timeout = aiohttp.ClientTimeout(total=None, sock_connect=30, sock_read=_STREAM_READ_TIMEOUT)
 
@@ -7562,7 +7624,7 @@ class BridgeServer:
                 url = self._build_upstream_url(cc_request)
                 headers = self._build_upstream_headers(cc_request)
                 upstream_body = self._active_provider.translate_to_upstream(cc_request)
-                logger.debug("Upstream POST → %s", url)
+                logger.debug("Upstream POST → %s", BridgeServer._debug_url(url))
 
                 stream_timeout = aiohttp.ClientTimeout(total=None, sock_connect=30, sock_read=_STREAM_READ_TIMEOUT)
 
