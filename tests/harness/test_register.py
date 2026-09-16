@@ -141,11 +141,14 @@ class TestTheRowsThemselves:
         KBR-184: M26 (G31 metadata drop on the Anthropic family), P24 (G26
         CC-origin twin of P23), P31/P32 (G32 ollama + bedrock route drops),
         P33 (G33 Bedrock auto-toolChoice rewrite), P34 (G34 Anthropic
-        parallel-false omission), P35 (G35 omitted legal tool_choice). All
-        literals are the no-reflow damage test — a future change that drops a
-        row or adds one without updating the guard fails loudly.
+        parallel-false omission), P35 (G35 omitted legal tool_choice). The +4
+        over the pre-KBR-137 count is P36/P37/P38/P42, the OpenCode Go
+        Responses-route mutations (whole-body translate, eight CC-only drops,
+        the max_tokens rename, the reasoning injection). All literals are the
+        no-reflow damage test — a future change that drops a row or adds one
+        without updating the guard fails loudly.
         """
-        assert len(r.REGISTER) == 73
+        assert len(r.REGISTER) == 77
 
     def test_the_register_is_a_tuple_and_not_a_list(self) -> None:
         """`mypy` does not run over `tests/`, so the annotation is not enforcement.
@@ -478,11 +481,14 @@ class TestThePathsEachRowTouches:
         Pinned so that widening the escape is a deliberate edit here, not a
         quiet way to make a hard row go away.  M15 (KBR-144) is the seventh: the
         two spellings of a Responses ``input`` are one request, so the rewrite is
-        invisible to a wire-independent projection for P16's reason.
+        invisible to a wire-independent projection for P16's reason.  P36
+        (KBR-137) is the eighth: OpenAI Responses is a fifth wire format M2
+        does not name, and the per-message / envelope-unwrap renames inside it
+        have no path vocabulary, for the same reason P11/P12 have none.
         """
         escaped = {row.id for row in r.REGISTER if not row.is_projectable}
 
-        assert escaped == {"M2", "M9", "M15", "P1", "P11", "P12", "P16"}
+        assert escaped == {"M2", "M9", "M15", "P1", "P11", "P12", "P16", "P36"}
 
     def test_m15_still_binds_the_reader_its_escape_depends_on(self) -> None:
         """M15's escape is only sound while T-A3 reads both spellings alike.

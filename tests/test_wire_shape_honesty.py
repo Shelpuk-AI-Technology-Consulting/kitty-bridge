@@ -20,11 +20,16 @@ that no adapter is silently exempt.
 
 
 `.system_design/TEST_SUITE.md` §6.2.3, "Wire-shape honesty".  Catches finding
-**F5** (KBR-7): ``OpenCodeGoAdapter`` inherited ``upstream_wire_is_messages_api
-== True`` from :class:`~kitty.providers.anthropic.AnthropicAdapter` while
-emitting a Chat Completions body for every model outside ``_MESSAGES_MODELS``.
-The bridge's thinking round-trip repair branches on that declaration, so a
-wrong answer malforms the transcript it was sent to fix.
+**F5** (KBR-7): ``OpenCodeGoAdapter`` inherited a Messages-wire declaration from
+:class:`~kitty.providers.anthropic.AnthropicAdapter` while emitting a Chat
+Completions body for every model outside ``_MESSAGES_MODELS``. The bridge's
+thinking round-trip repair branches on that declaration, so a wrong answer
+malforms the transcript it was sent to fix.
+
+KBR-137 replaced the boolean declaration with the four-valued
+:class:`~kitty.providers.base.WireShape` enum, per §6.2.3's "replace, don't
+extend" rule: ``OpenCodeGoAdapter`` serves four models on the OpenAI Responses
+endpoint, and a ``False`` meaning "Responses" would be KBR-7 in a new costume.
 
 **What this guard does not prove.**  Five things, deliberately, so a green run
 is not over-read:
@@ -61,13 +66,13 @@ is not over-read:
    ``tests/data/opencode_go_endpoints.json`` and enforced by
    ``tests/test_opencode_endpoint_table.py``.  What remains open here is only
    the staleness of the snapshot itself, which no test can see.
-5. **That a ``False`` body is well-formed Chat Completions.**  The declaration
-   is a boolean, so the sweep asserts "Messages" against
-   :attr:`WireShape.MESSAGES` and collapses ``CHAT_COMPLETIONS`` with ``OTHER``.
-   A declared-``False`` adapter that began emitting a malformed body would
-   still pass.  The failure direction is the safe one — a Messages body that
-   degrades to ``OTHER`` turns a ``True``-declaring adapter red — but a green
-   sweep is not a well-formedness check.
+5. **That a non-Messages body is well-formed for its dialect.**  The sweep
+   classifies the emitted body and asserts the declaration agrees.  A
+   declared-``CHAT_COMPLETIONS`` adapter that began emitting a malformed body
+   would still pass — classification reads markers, not well-formedness.  The
+   failure direction is the safe one — a body that degrades to ``OTHER``
+   turns a ``CHAT_COMPLETIONS``- or ``MESSAGES``-declaring adapter red — but
+   a green sweep is not a well-formedness check.
 
 Every check below asserts its own subject set, in the style of
 ``tests/test_egress_coverage.py``, so none can rot into a no-op.
@@ -77,11 +82,14 @@ from __future__ import annotations
 
 import copy
 from dataclasses import dataclass
-from enum import Enum
 
 import pytest
 
-from kitty.providers.base import ProviderAdapter, UnsupportedModelError
+from kitty.providers.base import (
+    ProviderAdapter,
+    UnsupportedModelError,
+    WireShape,
+)
 from kitty.providers.opencode import _MESSAGES_MODELS, _RESPONSES_MODELS
 from kitty.providers.registry import _registry, get_provider
 
@@ -92,12 +100,9 @@ from kitty.providers.registry import _registry, get_provider
 pytestmark = pytest.mark.l2
 
 
-class WireShape(Enum):
-    """The request dialects a provider adapter can put on the wire."""
-
-    MESSAGES = "anthropic_messages"
-    CHAT_COMPLETIONS = "chat_completions"
-    OTHER = "other"
+# `WireShape` is imported from `kitty.providers.base` at module top — the
+# canonical home.  Two definitions (test + production) were the maintenance
+# hazard finding 9 of the KBR-137 design review called out.
 
 
 def classify_wire_shape(body: dict) -> WireShape:
@@ -106,8 +111,14 @@ def classify_wire_shape(body: dict) -> WireShape:
     Keys on **tool-entry shape plus system placement**, never on the presence of
     a top-level ``system`` key: Bedrock's Converse body also carries one and is
     not a Messages body.  Requiring both axes to agree means a body matching
-    neither dialect — Converse, Responses — is reported as
+    neither dialect — Converse, Ollama ``/api/chat`` — is reported as
     :attr:`WireShape.OTHER` rather than guessed at.
+
+    KBR-137 added the :attr:`WireShape.RESPONSES` arm: an OpenAI Responses body
+    declares its tools flat (``name`` directly on the tool, no ``function``
+    envelope) and carries its conversation in ``input``, never in ``messages``.
+    Both axes must agree, so a body with flat tools but no ``input`` is still
+    :attr:`WireShape.OTHER`.
 
     The probe request must therefore carry a system message and a tool; see
     :func:`_probe_request`.  :func:`test_classifier_needs_the_tools_axis` pins
@@ -125,11 +136,14 @@ def classify_wire_shape(body: dict) -> WireShape:
 
     # Anthropic hoists the system prompt to a top-level field and describes a
     # tool with `input_schema`; Chat Completions keeps a system turn and wraps
-    # each tool in a `function` envelope.
+    # each tool in a `function` envelope; OpenAI Responses flattens the tool and
+    # hoists the system prompt into the `instructions` field.
     if first_tool is not None and "input_schema" in first_tool and "system" not in roles:
         return WireShape.MESSAGES
     if first_tool is not None and "function" in first_tool and "system" in roles:
         return WireShape.CHAT_COMPLETIONS
+    if first_tool is not None and "name" in first_tool and "parameters" in first_tool and "input" in body:
+        return WireShape.RESPONSES
     return WireShape.OTHER
 
 
@@ -150,6 +164,9 @@ class _Representation:
             satisfies the contract", which would let any adapter buy a clean
             bill of health by raising — the tautology class this module exists
             to close.  A raise from a model not named here is still a failure.
+            Empty is the steady state since KBR-137 retired ``opencode_go``'s
+            refusal; the tripwire tests keep the subset discipline should a
+            future adapter declare one again.
     """
 
     models: tuple[str, ...]
@@ -182,15 +199,15 @@ REPRESENTATIVE_MODELS: dict[str, _Representation] = {
     "openai": _single_route(),
     "openai_subscription": _single_route(),
     # The one adapter that routes by model.  Every route is represented, and
-    # `test_a_routing_adapter_represents_both_of_its_routes` keeps it that way.
+    # `test_a_routing_adapter_represents_all_of_its_wires` keeps it that way.
     #
     # The names are spelled out rather than splatted from `_MESSAGES_MODELS` /
     # `_RESPONSES_MODELS` **on purpose**.  Building this list from the sets it is
     # checked against makes `test_every_messages_route_model_is_represented` and
-    # `test_every_refused_model_is_represented` true for any content of those
-    # sets — including an empty or a wrong one.  The duplication is the guard,
-    # exactly as it is for the routing snapshot: a list derived from its own
-    # oracle cannot disagree with it.
+    # `test_every_responses_route_model_is_represented` true for any content of
+    # those sets — including an empty or a wrong one.  The duplication is the
+    # guard, exactly as it is for the routing snapshot: a list derived from its
+    # own oracle cannot disagree with it.
     "opencode_go": _Representation(
         models=(
             # /v1/messages
@@ -202,25 +219,19 @@ REPRESENTATIVE_MODELS: dict[str, _Representation] = {
             "qwen3.7-max",
             "qwen3.7-plus",
             "qwen3.6-plus",
+            # /v1/responses — served since KBR-137. Every member, not a sample:
+            # an omitted one would be free to start emitting a body.
+            "grok-4.6",
+            "gpt-5.6-luna",
+            "muse-spark-1.3-contributor",
+            "muse-spark-1.2-contributor",
             # /v1/chat/completions — the default route
             "glm-5.2",
             "kimi-k2.7-code",
             "mimo-v2.5-pro",
             "",
-            # /v1/responses — refused until KBR-137. Every member, not a
-            # sample: an omitted one would be free to start emitting a body.
-            "grok-4.6",
-            "gpt-5.6-luna",
-            "muse-spark-1.3-contributor",
-            "muse-spark-1.2-contributor",
         ),
         default_route_model="glm-5.2",
-        refuses=(
-            "grok-4.6",
-            "gpt-5.6-luna",
-            "muse-spark-1.3-contributor",
-            "muse-spark-1.2-contributor",
-        ),
     ),
     "openrouter": _single_route(),
     "vertex": _single_route(),
@@ -277,10 +288,6 @@ def test_declared_wire_shape_matches_the_emitted_body(provider_type: str, model:
 
     This is the assertion that fails on the unfixed revision for
     ``opencode_go``'s Chat-Completions models.
-
-    Note the declaration is a boolean, so a ``False`` here proves only "not a
-    Messages body" — ``CHAT_COMPLETIONS`` and ``OTHER`` are not distinguished
-    (non-claim 5).
     """
     adapter = get_provider(provider_type)
     rep = REPRESENTATIVE_MODELS[provider_type]
@@ -294,11 +301,10 @@ def test_declared_wire_shape_matches_the_emitted_body(provider_type: str, model:
         return
 
     body = adapter.translate_to_upstream(copy.deepcopy(_probe_request(model)))
-    declared = adapter.upstream_wire_is_messages_api_for_model(model)
+    declared = adapter.upstream_wire_shape_for_model(model)
 
-    assert declared is (classify_wire_shape(body) is WireShape.MESSAGES), (
-        f"{provider_type} × {model!r} declares "
-        f"{'Anthropic Messages' if declared else 'not Anthropic Messages'} "
+    assert declared is classify_wire_shape(body), (
+        f"{provider_type} × {model!r} declares {declared.value} "
         f"but emits {classify_wire_shape(body).value}"
     )
 
@@ -308,13 +314,14 @@ def test_bare_property_matches_the_per_model_form_at_the_default_route_model(pro
     """R6b — the bare property honestly reports the adapter's default route.
 
     Guards the half of KBR-7 the per-model form does not: without this,
-    ``OpenCodeGoAdapter.upstream_wire_is_messages_api`` could drift back to
-    ``True`` with every other test still green.
+    ``OpenCodeGoAdapter.upstream_wire_shape`` could drift away from
+    ``upstream_wire_shape_for_model`` on the default route with every other
+    test still green.
     """
     adapter = get_provider(provider_type)
     default_model = REPRESENTATIVE_MODELS[provider_type].default_route_model
 
-    assert adapter.upstream_wire_is_messages_api is adapter.upstream_wire_is_messages_api_for_model(default_model)
+    assert adapter.upstream_wire_shape is adapter.upstream_wire_shape_for_model(default_model)
 
 
 def test_a_native_passthrough_adapter_speaks_messages_for_every_model():
@@ -335,7 +342,7 @@ def test_a_native_passthrough_adapter_speaks_messages_for_every_model():
     assert set(native) >= {"custom_anthropic", "minimax_token", "zai_coding"}
     for provider_type, adapter in native.items():
         for model in REPRESENTATIVE_MODELS[provider_type].models:
-            assert adapter.upstream_wire_is_messages_api_for_model(model), f"{provider_type} × {model!r}"
+            assert adapter.upstream_wire_shape_for_model(model) is WireShape.MESSAGES, f"{provider_type} × {model!r}"
 
 
 # ── Guards on the guard ────────────────────────────────────────────────────
@@ -352,30 +359,62 @@ def test_every_messages_route_model_is_represented():
     assert covered >= _MESSAGES_MODELS
 
 
-def test_a_routing_adapter_represents_both_of_its_routes():
+def test_every_responses_route_model_is_represented():
+    """R7c (KBR-137) — the Responses route is total, not sampled.
+
+    The counterpart of ``test_every_messages_route_model_is_represented``: the
+    four `/v1/responses` models are servable now, and every member must be
+    under the sweep or it is free to start emitting a body nobody checked.
+    """
+    covered = set(REPRESENTATIVE_MODELS["opencode_go"].models)
+    assert covered >= _RESPONSES_MODELS
+
+
+def test_a_routing_adapter_represents_all_of_its_wires():
     """R7e — the representative table cannot be narrowed until it proves nothing.
 
     An adapter that overrides the per-model form has more than one route.  If
     its list covered only one of them, the sweep would go green while saying
     nothing about the other — the failure mode the sweep exists to catch.
+
+    KBR-137: the opencode_go adapter represents all three values, so the
+    comparison is over the actual declared set rather than a hardcoded
+    boolean pair.  An adapter adding a fourth route value (a fourth wire
+    shape) forces the reference table here to learn it, which is the forced
+    decision the rule asks for.
     """
     checked = 0
     for provider_type, rep in sorted(REPRESENTATIVE_MODELS.items()):
         adapter = get_provider(provider_type)
         overrides = (
-            type(adapter).upstream_wire_is_messages_api_for_model
-            is not ProviderAdapter.upstream_wire_is_messages_api_for_model
+            type(adapter).upstream_wire_shape_for_model
+            is not ProviderAdapter.upstream_wire_shape_for_model
         )
         if not overrides:
             continue
-        declared = {adapter.upstream_wire_is_messages_api_for_model(m) for m in rep.models}
-        assert declared == {True, False}, f"{provider_type} routes by model but only one route is represented"
+        declared = {adapter.upstream_wire_shape_for_model(m) for m in rep.models}
+        assert len(declared) >= 2, f"{provider_type} routes by model but only one wire is represented"
         checked += 1
 
     # Without this the loop passes vacuously the moment no adapter overrides
     # the per-model form — the one check in this module that would otherwise
     # rot into the no-op its docstring promises it cannot become.
     assert checked, "no adapter overrides the per-model form — this check has nothing to guard"
+
+
+def test_the_routing_adapter_declares_three_wires():
+    """KBR-137 — the opencode_go adapter declares all three routed dialects.
+
+    §6.2.3's "replace, don't extend" rule requires a routing adapter with a
+    third wire to declare it.  This is that assertion, stated once rather than
+    inferred from the sweep: if a future route regresses to a refusal or a
+    fallback shape, the reference table here is the first place to look.
+    """
+    adapter = get_provider("opencode_go")
+    rep = REPRESENTATIVE_MODELS["opencode_go"]
+
+    declared = {adapter.upstream_wire_shape_for_model(m) for m in rep.models}
+    assert declared == {WireShape.MESSAGES, WireShape.CHAT_COMPLETIONS, WireShape.RESPONSES}
 
 
 def test_custom_transport_adapters_are_the_known_exempt_set():
@@ -445,23 +484,40 @@ def test_messages_routing_table_is_unchanged():
     )
 
 
-def test_every_refused_model_is_represented():
-    """R11 — a model added to the refusal table cannot skip this file.
+def test_responses_routing_table_is_unchanged():
+    """Tripwire on ``_RESPONSES_MODELS`` (KBR-137) — the literal pin.
 
-    The counterpart of ``test_every_messages_route_model_is_represented``, and
-    total for the same reason: the refusal set is small and every member is a
-    user-visible failure, so sampling it would leave the untested member free to
-    start emitting a body.
+    KBR-126's twin for the Responses route.  The four names are now servable,
+    which makes them **more** perishable, not less: a retired model is a
+    routing-table change that must be paired with the provider's snapshot
+    (``tests/test_opencode_endpoint_table.py``), and this literal is the
+    duplication that makes that pairing visible in two places.
     """
-    covered = set(REPRESENTATIVE_MODELS["opencode_go"].models)
-    assert covered >= _RESPONSES_MODELS
+    assert (
+        frozenset(
+            {
+                "grok-4.6",
+                "gpt-5.6-luna",
+                "muse-spark-1.3-contributor",
+                "muse-spark-1.2-contributor",
+            }
+        )
+        == _RESPONSES_MODELS
+    )
 
 
-def test_a_declared_refusal_set_is_never_empty_where_it_is_used():
-    """The ``refuses`` branch of the sweep must not rot into a dead path."""
+def test_a_declared_refusal_subset_is_represented():
+    """The ``refuses`` discipline: any declared refusal is covered by the sweep.
+
+    Since KBR-137 retired the only refusal in the registry, ``refuses`` is empty
+    everywhere — the steady state.  Kept as a tripwire: the moment an adapter
+    declares a refusal again (KBR-126's shape — a route kitty cannot write a
+    body for), that model must be listed in ``models`` so the sweep's
+    raise-propagation rule can hold it honest, rather than silently passing
+    over a route nobody checked.
+    """
     declaring = {name for name, rep in REPRESENTATIVE_MODELS.items() if rep.refuses}
 
-    assert declaring, "no adapter declares a refusal — the sweep's refusal branch is unreachable"
     for name in declaring:
         assert set(REPRESENTATIVE_MODELS[name].refuses) <= set(REPRESENTATIVE_MODELS[name].models)
 
@@ -469,10 +525,10 @@ def test_a_declared_refusal_set_is_never_empty_where_it_is_used():
 def test_the_routing_adapter_is_not_exempt_from_the_sweep():
     """§2.1(b)'s falsification: the choke point holds only while both are False.
 
-    ``translate_to_upstream`` is the single place the Responses refusal lives,
+    ``translate_to_upstream`` is the single place the Responses body is built,
     and it is reached on every request path *because* this adapter is neither a
-    custom-transport nor a native-passthrough one.  Give it either and the
-    refusal stops being reachable, silently.  ``use_native_messages`` is the
+    custom-transport nor a native-passthrough one.  Give it either and the body
+    stops being reachable, silently.  ``use_native_messages`` is the
     genuinely unpinned half: the custom-transport set is already derived from
     the live registry by the test above.
     """
@@ -507,6 +563,14 @@ _CONVERSE_BODY = {
     "toolConfig": {"tools": [{"toolSpec": {"name": "read_file", "inputSchema": {"json": {}}}}]},
 }
 
+_RESPONSES_BODY = {
+    "model": "grok-4.6",
+    "instructions": "You are a reviewer.",
+    "input": [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]}],
+    "stream": False,
+    "tools": [{"type": "function", "name": "read_file", "description": "Read a file", "parameters": {}}],
+}
+
 
 def test_classifier_recognises_a_messages_body():
     assert classify_wire_shape(_MESSAGES_BODY) is WireShape.MESSAGES
@@ -516,8 +580,17 @@ def test_classifier_recognises_a_chat_completions_body():
     assert classify_wire_shape(_CHAT_COMPLETIONS_BODY) is WireShape.CHAT_COMPLETIONS
 
 
+def test_classifier_recognises_a_responses_body():
+    """KBR-137 — Responses is a fourth dialect with two load-bearing markers.
+
+    Flat tools (``name`` on the tool, no ``function`` envelope) and ``input``
+    (never ``messages``) together — the arms on either side need both.
+    """
+    assert classify_wire_shape(_RESPONSES_BODY) is WireShape.RESPONSES
+
+
 def test_classifier_reports_other_for_a_converse_body():
-    """Converse is a third dialect, not a Messages body wearing a hat.
+    """Converse is a fourth dialect, not a Messages body wearing a hat.
 
     It carries a top-level ``system`` exactly as Messages does, so a classifier
     keying on that alone would call Bedrock dishonest on every request.
@@ -535,6 +608,16 @@ def test_classifier_reports_other_for_a_converse_body_without_tools():
     assert classify_wire_shape(body) is WireShape.OTHER
 
 
+def test_classifier_reports_other_for_a_responses_body_without_input():
+    """A Responses arm without the ``input`` axis is ``OTHER``, not guessed.
+
+    The ``input`` axis is what separates Responses from a hypothetical
+    Messages-flavoured body with flat tools; both axes must agree.
+    """
+    body = {k: v for k, v in _RESPONSES_BODY.items() if k != "input"}
+    assert classify_wire_shape(body) is WireShape.OTHER
+
+
 def test_the_converse_fixture_matches_what_bedrock_actually_emits():
     """Pin the hand-written Converse fixture against the real adapter.
 
@@ -548,6 +631,22 @@ def test_the_converse_fixture_matches_what_bedrock_actually_emits():
     assert ("tools" in emitted) == ("tools" in _CONVERSE_BODY)
     assert ("system" in emitted) == ("system" in _CONVERSE_BODY)
     assert classify_wire_shape(emitted) is classify_wire_shape(_CONVERSE_BODY)
+
+
+def test_the_responses_fixture_matches_what_opencode_go_actually_emits():
+    """Pin the hand-written Responses fixture against the real adapter.
+
+    Same discipline as the Converse twin: ``RESPONSES`` is a named branch, so
+    a typo in ``_RESPONSES_BODY`` would leave its two tests green while
+    proving nothing about a real Responses body.  This asserts the fixture
+    carries the same markers on the axes the classifier reads as the body
+    ``OpenCodeGoAdapter`` emits for a `/v1/responses` model.
+    """
+    emitted = get_provider("opencode_go").translate_to_upstream(copy.deepcopy(_probe_request("grok-4.6")))
+
+    assert ("input" in emitted) == ("input" in _RESPONSES_BODY)
+    assert ("messages" in emitted) == ("messages" in _RESPONSES_BODY)
+    assert classify_wire_shape(emitted) is classify_wire_shape(_RESPONSES_BODY)
 
 
 def test_classifier_needs_the_tools_axis():

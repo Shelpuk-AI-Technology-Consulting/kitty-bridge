@@ -17,6 +17,7 @@ from kitty.bridge.server import (
     _is_thinking_roundtrip_error,
     _repair_thinking_roundtrip,
 )
+from kitty.providers.base import WireShape
 
 # ── Real upstream error bodies ─────────────────────────────────────────────
 # Verbatim from the incident report (kitty-bridge#32) and from DeepSeek's and
@@ -176,7 +177,7 @@ class TestRepairThinkingRoundtripNative:
     def test_assistant_content_list_gains_leading_thinking_block(self):
         """AC-2.1 — the carrier the target asks for is prepended."""
         body = _native_transcript()
-        assert _repair_thinking_roundtrip(body, native=True) is True
+        assert _repair_thinking_roundtrip(body, wire_shape=WireShape.MESSAGES) is True
 
         for msg in body["messages"]:
             if msg["role"] == "assistant":
@@ -186,7 +187,7 @@ class TestRepairThinkingRoundtripNative:
         """AC-2.1 — the repair adds, it never rewrites what is already there."""
         body = _native_transcript()
         original = copy.deepcopy(body["messages"][1]["content"])
-        _repair_thinking_roundtrip(body, native=True)
+        _repair_thinking_roundtrip(body, wire_shape=WireShape.MESSAGES)
 
         assert body["messages"][1]["content"][1:] == original
 
@@ -204,13 +205,13 @@ class TestRepairThinkingRoundtripNative:
             ]
         }
         before = copy.deepcopy(body)
-        assert _repair_thinking_roundtrip(body, native=True) is False
+        assert _repair_thinking_roundtrip(body, wire_shape=WireShape.MESSAGES) is False
         assert body == before
 
     def test_assistant_string_content_becomes_thinking_plus_text(self):
         """AC-2.1 — a string-content assistant turn still needs the carrier."""
         body = {"messages": [{"role": "assistant", "content": "Hi there!"}]}
-        assert _repair_thinking_roundtrip(body, native=True) is True
+        assert _repair_thinking_roundtrip(body, wire_shape=WireShape.MESSAGES) is True
 
         assert body["messages"][0]["content"] == [
             {"type": "thinking", "thinking": ""},
@@ -221,24 +222,24 @@ class TestRepairThinkingRoundtripNative:
         """AC-2.4 — the contract binds assistant turns only."""
         body = _native_transcript()
         before_users = copy.deepcopy([m for m in body["messages"] if m["role"] != "assistant"])
-        _repair_thinking_roundtrip(body, native=True)
+        _repair_thinking_roundtrip(body, wire_shape=WireShape.MESSAGES)
 
         assert [m for m in body["messages"] if m["role"] != "assistant"] == before_users
 
     def test_system_field_is_untouched(self):
         """AC-2.4 — the top-level Anthropic system block is not a message."""
         body = _native_transcript()
-        _repair_thinking_roundtrip(body, native=True)
+        _repair_thinking_roundtrip(body, wire_shape=WireShape.MESSAGES)
 
         assert body["system"] == [{"type": "text", "text": "You are helpful."}]
 
     def test_repair_is_idempotent(self):
         """AC-2.6 — a repaired body reports no further change."""
         body = _native_transcript()
-        assert _repair_thinking_roundtrip(body, native=True) is True
+        assert _repair_thinking_roundtrip(body, wire_shape=WireShape.MESSAGES) is True
 
         after_first = copy.deepcopy(body)
-        assert _repair_thinking_roundtrip(body, native=True) is False
+        assert _repair_thinking_roundtrip(body, wire_shape=WireShape.MESSAGES) is False
         assert body == after_first
 
     def test_original_messages_are_not_mutated(self):
@@ -251,7 +252,7 @@ class TestRepairThinkingRoundtripNative:
         original_list = body["messages"]
         original_snapshot = copy.deepcopy(original_list)
 
-        assert _repair_thinking_roundtrip(body, native=True) is True
+        assert _repair_thinking_roundtrip(body, wire_shape=WireShape.MESSAGES) is True
 
         assert original_list == original_snapshot
         assert body["messages"] is not original_list
@@ -259,11 +260,11 @@ class TestRepairThinkingRoundtripNative:
     def test_no_assistant_messages_reports_no_change(self):
         """AC-2.5 — nothing to repair means the caller must not retry."""
         body = {"messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}]}
-        assert _repair_thinking_roundtrip(body, native=True) is False
+        assert _repair_thinking_roundtrip(body, wire_shape=WireShape.MESSAGES) is False
 
     def test_body_without_messages_reports_no_change(self):
         """AC-2.5 — a malformed body must not crash the repair."""
-        assert _repair_thinking_roundtrip({"model": "x"}, native=True) is False
+        assert _repair_thinking_roundtrip({"model": "x"}, wire_shape=WireShape.MESSAGES) is False
 
 
 class TestRepairLeavesUnrepairableBodiesAlone:
@@ -277,7 +278,7 @@ class TestRepairLeavesUnrepairableBodiesAlone:
         failover path is the correct outcome here.
         """
         body = {"messages": [{"role": "assistant", "content": None}]}
-        assert _repair_thinking_roundtrip(body, native=True) is False
+        assert _repair_thinking_roundtrip(body, wire_shape=WireShape.MESSAGES) is False
         assert body["messages"] == [{"role": "assistant", "content": None}]
 
     def test_body_without_messages_reports_no_change(self):
@@ -289,7 +290,7 @@ class TestRepairLeavesUnrepairableBodiesAlone:
         """
         body = {"contents": [{"role": "model", "parts": [{"text": "hi"}]}]}
         before = copy.deepcopy(body)
-        assert _repair_thinking_roundtrip(body, native=True) is False
+        assert _repair_thinking_roundtrip(body, wire_shape=WireShape.MESSAGES) is False
         assert body == before
 
     def test_partial_repair_still_reports_change(self):
@@ -300,7 +301,7 @@ class TestRepairLeavesUnrepairableBodiesAlone:
                 {"role": "assistant", "content": [{"type": "text", "text": "hi"}]},
             ]
         }
-        assert _repair_thinking_roundtrip(body, native=True) is True
+        assert _repair_thinking_roundtrip(body, wire_shape=WireShape.MESSAGES) is True
         assert body["messages"][0] == {"role": "assistant", "content": None}
         assert body["messages"][1]["content"][0] == {"type": "thinking", "thinking": ""}
 
@@ -311,7 +312,7 @@ class TestRepairThinkingRoundtripChatCompletions:
     def test_assistant_gains_empty_reasoning_content(self):
         """AC-2.3 — the OpenAI-shaped carrier is a sibling field, not a block."""
         body = _cc_transcript()
-        assert _repair_thinking_roundtrip(body, native=False) is True
+        assert _repair_thinking_roundtrip(body, wire_shape=WireShape.CHAT_COMPLETIONS) is True
 
         for msg in body["messages"]:
             if msg["role"] == "assistant":
@@ -320,21 +321,21 @@ class TestRepairThinkingRoundtripChatCompletions:
     def test_existing_reasoning_content_is_preserved(self):
         """AC-2.3 — a real chain of thought is never overwritten with an empty one."""
         body = {"messages": [{"role": "assistant", "content": "hi", "reasoning_content": "real reasoning"}]}
-        assert _repair_thinking_roundtrip(body, native=False) is False
+        assert _repair_thinking_roundtrip(body, wire_shape=WireShape.CHAT_COMPLETIONS) is False
         assert body["messages"][0]["reasoning_content"] == "real reasoning"
 
     def test_tool_calls_are_preserved(self):
         """AC-2.3 — the repair must not disturb the tool-call round-trip."""
         body = _cc_transcript()
         before = copy.deepcopy(body["messages"][2]["tool_calls"])
-        _repair_thinking_roundtrip(body, native=False)
+        _repair_thinking_roundtrip(body, wire_shape=WireShape.CHAT_COMPLETIONS)
 
         assert body["messages"][2]["tool_calls"] == before
 
     def test_tool_and_system_messages_are_untouched(self):
         """AC-2.4 — only assistant turns carry the contract."""
         body = _cc_transcript()
-        _repair_thinking_roundtrip(body, native=False)
+        _repair_thinking_roundtrip(body, wire_shape=WireShape.CHAT_COMPLETIONS)
 
         assert body["messages"][0] == {"role": "system", "content": "You are helpful."}
         assert body["messages"][3] == {"role": "tool", "tool_call_id": "call_1", "content": "a.txt"}
@@ -342,8 +343,8 @@ class TestRepairThinkingRoundtripChatCompletions:
     def test_repair_is_idempotent(self):
         """AC-2.6 — a repaired CC body reports no further change."""
         body = _cc_transcript()
-        assert _repair_thinking_roundtrip(body, native=False) is True
+        assert _repair_thinking_roundtrip(body, wire_shape=WireShape.CHAT_COMPLETIONS) is True
 
         after_first = copy.deepcopy(body)
-        assert _repair_thinking_roundtrip(body, native=False) is False
+        assert _repair_thinking_roundtrip(body, wire_shape=WireShape.CHAT_COMPLETIONS) is False
         assert body == after_first

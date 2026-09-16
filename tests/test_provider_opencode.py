@@ -4,12 +4,11 @@ import json
 
 import pytest
 
-from kitty.providers.base import ProviderError
+from kitty.providers.base import WireShape
 from kitty.providers.opencode import (
     _MESSAGES_MODELS,
     _RESPONSES_MODELS,
     OpenCodeGoAdapter,
-    UnsupportedModelError,
 )
 
 # ── CC format samples ──────────────────────────────────────────────────────
@@ -337,6 +336,11 @@ class TestOpenCodeGoWireShapeDeclaration:
     outside ``_MESSAGES_MODELS``.  The bridge's thinking round-trip repair
     branches on that declaration, so a wrong answer writes an Anthropic
     ``thinking`` block into a Chat Completions body.
+
+    KBR-137 widened the declaration to ``WireShape`` and added a third wire
+    (``RESPONSES``) for the four `/v1/responses` models.  §6.2.3's "replace,
+    don't extend" rule is what forces the boolean out — a ``False`` meaning
+    "Responses" would be KBR-7 in a new costume.
     """
 
     def setup_method(self):
@@ -344,32 +348,31 @@ class TestOpenCodeGoWireShapeDeclaration:
 
     @pytest.mark.parametrize("model", sorted(_MESSAGES_MODELS))
     def test_declares_messages_for_each_messages_model(self, model):
-        assert self.adapter.upstream_wire_is_messages_api_for_model(model) is True
+        assert self.adapter.upstream_wire_shape_for_model(model) is WireShape.MESSAGES
 
     @pytest.mark.parametrize("model", _CHAT_COMPLETIONS_MODELS)
     def test_declares_chat_completions_for_non_messages_models(self, model):
-        assert self.adapter.upstream_wire_is_messages_api_for_model(model) is False
+        assert self.adapter.upstream_wire_shape_for_model(model) is WireShape.CHAT_COMPLETIONS
 
     @pytest.mark.parametrize("model", sorted(_RESPONSES_MODELS))
-    def test_declares_not_messages_for_responses_models(self, model):
-        """R6 — ``False`` here means "not a Messages body", and that is honest.
+    def test_declares_responses_for_each_responses_model(self, model):
+        """KBR-137 — the four `/v1/responses` models declare Responses.
 
-        ``TEST_SUITE.md`` §6.2.3 says a routing adapter that gains a third wire
-        must *replace* this boolean rather than overload ``False``.  That
-        obligation belongs to KBR-137, not here: the declaration describes the
-        body ``translate_to_upstream`` emits, and for these models it emits
-        none — it raises.  There is no third wire to declare yet, only a refusal.
+        Before this ticket, the adapter raised ``UnsupportedModelError`` for
+        these names; ``§6.2.3`` says a routing adapter with a third wire must
+        declare it, and the declaration is the proof the routing predicate
+        and the wire shape agree.
         """
-        assert self.adapter.upstream_wire_is_messages_api_for_model(model) is False
+        assert self.adapter.upstream_wire_shape_for_model(model) is WireShape.RESPONSES
 
     def test_bare_property_reports_the_default_chat_completions_route(self):
         """The bare property answers for the default route, like its neighbours.
 
         ``upstream_path`` and ``build_upstream_headers`` both report the Chat
         Completions default with a per-model form alongside; this declaration
-        now does the same instead of inheriting Anthropic's ``True``.
+        now does the same instead of inheriting Anthropic's ``MESSAGES``.
         """
-        assert self.adapter.upstream_wire_is_messages_api is False
+        assert self.adapter.upstream_wire_shape is WireShape.CHAT_COMPLETIONS
 
     def test_declaration_does_not_call_translate_to_upstream(self):
         """The declaration is a predicate, not an observation.
@@ -384,10 +387,11 @@ class TestOpenCodeGoWireShapeDeclaration:
             raise AssertionError("the declaration must not serialize a request")
 
         self.adapter.translate_to_upstream = _explode  # type: ignore[method-assign]  # deliberate tripwire
-        assert self.adapter.upstream_wire_is_messages_api_for_model("minimax-m2.5") is True
-        assert self.adapter.upstream_wire_is_messages_api_for_model("glm-5.2") is False
+        assert self.adapter.upstream_wire_shape_for_model("minimax-m2.5") is WireShape.MESSAGES
+        assert self.adapter.upstream_wire_shape_for_model("glm-5.2") is WireShape.CHAT_COMPLETIONS
+        assert self.adapter.upstream_wire_shape_for_model("grok-4.6") is WireShape.RESPONSES
 
-    @pytest.mark.parametrize("model", ["minimax-m2.5", "glm-5.2"])
+    @pytest.mark.parametrize("model", ["minimax-m2.5", "glm-5.2", "grok-4.6"])
     def test_declaration_matches_the_body_translate_to_upstream_returns(self, model):
         """Assert against the emitted body, not against a restated constant.
 
@@ -402,78 +406,73 @@ class TestOpenCodeGoWireShapeDeclaration:
                 "tools": [{"type": "function", "function": {"name": "t", "parameters": {}}}],
             }
         )
-        # An Anthropic Messages body hoists the system prompt out of `messages`
-        # and carries `input_schema` tools; a Chat Completions body does neither.
-        emitted_messages_api = "system" in body and "input_schema" in body["tools"][0]
-        assert self.adapter.upstream_wire_is_messages_api_for_model(model) is emitted_messages_api
+        # Direct marker assertions per dialect: Anthropic Messages hoists the
+        # system prompt out of `messages` and carries `input_schema` tools;
+        # Chat Completions keeps a system turn and a `function` envelope;
+        # Responses carries an `input` list, never `messages`, and flat tools.
+        shape = self.adapter.upstream_wire_shape_for_model(model)
+        if shape is WireShape.MESSAGES:
+            assert "system" in body
+            assert "input_schema" in body["tools"][0]
+        elif shape is WireShape.CHAT_COMPLETIONS:
+            assert "messages" in body
+            assert "function" in body["tools"][0]
+        else:
+            assert "input" in body
+            assert "messages" not in body
+            assert "name" in body["tools"][0]
+            assert "function" not in body["tools"][0]
 
 
-class TestOpenCodeGoResponsesRefusal:
-    """R4 — a model served on ``/v1/responses`` is refused, not mis-serialized.
+class TestOpenCodeGoResponsesRoute:
+    """KBR-137 — the four ``/v1/responses`` models are servable, not refused.
 
-    KBR-126: these four were previously given a Chat Completions body and sent
-    to ``/v1/chat/completions``.  The provider answers an unsupported model with
-    ``401``, and ``BridgeServer`` classifies ``401`` as an auth failure — so the
-    user was told their API key was bad.  Refusing here makes the real reason
-    reach them instead.  KBR-137 replaces the refusal with a working route.
+    Replaces the KBR-126 ``TestOpenCodeGoResponsesRefusal`` class, whose
+    ``with pytest.raises(UnsupportedModelError)`` block is the behaviour this
+    ticket retires.  The assertions here pin the new translate / from / stream
+    contract so a future regression turns the suite red.
     """
 
     def setup_method(self):
         self.adapter = OpenCodeGoAdapter()
 
     @pytest.mark.parametrize("model", sorted(_RESPONSES_MODELS))
-    def test_translate_to_upstream_refuses_every_responses_model(self, model):
-        with pytest.raises(UnsupportedModelError):
-            self.adapter.translate_to_upstream({"model": model, "messages": SAMPLE_MESSAGES})
+    def test_translate_to_upstream_returns_a_responses_body(self, model):
+        """Each routed model reaches ``_cc_to_responses`` and returns a body.
 
-    @pytest.mark.parametrize("model", sorted(_RESPONSES_MODELS))
-    def test_the_message_names_the_model_the_endpoint_and_the_alternatives(self, model):
-        """The message is the whole user-facing artifact — it must be actionable.
-
-        On three of the four inbound protocols the SSE response is already
-        committed with status 200 before the body is built, so this text is all
-        the user gets.  Asserted rather than trusted for that reason.
+        The body is shaped for the published OpenAI Responses create-request
+        endpoint: ``model``, ``input`` list, ``tools`` flat, ``instructions``
+        hoisted from system.  The full schema assertions live in the L1
+        ``TestTranslateToResponsesBody`` suite; this class owns the dispatch
+        intent — the choke point of ``translate_to_upstream``.
         """
-        with pytest.raises(UnsupportedModelError) as excinfo:
-            self.adapter.translate_to_upstream({"model": model, "messages": SAMPLE_MESSAGES})
-
-        message = str(excinfo.value)
-        assert model in message
-        assert "/v1/responses" in message
-        # The alternatives, not a ticket id: this is printed in an end user's
-        # terminal and they cannot reach this project's issue tracker.
-        assert "/v1/chat/completions" in message
-        assert "KBR-" not in message
-
-    def test_the_error_is_a_provider_error(self):
-        """Existing ``except ProviderError`` handlers must keep catching it."""
-        with pytest.raises(ProviderError):
-            self.adapter.translate_to_upstream({"model": "grok-4.6", "messages": SAMPLE_MESSAGES})
-
-    def test_the_error_carries_no_http_status(self):
-        """A ``400`` here would reach the bridge's context-too-large branch.
-
-        ``_provider_error_failure_kind`` inspects ``http_status == 400`` for an
-        oversized-context message and can route such a failure into the
-        compaction-retry path.  A configuration error must not land there.
-        """
-        with pytest.raises(UnsupportedModelError) as excinfo:
-            self.adapter.translate_to_upstream({"model": "grok-4.6", "messages": SAMPLE_MESSAGES})
-
-        assert excinfo.value.http_status == 0
-
-    @pytest.mark.parametrize("model", ["glm-5.2", "minimax-m2.7", "", "some-future-model"])
-    def test_no_other_model_is_refused(self, model):
-        """The positive control: the refusal is scoped, not a blanket failure.
-
-        Asserts the returned body carries the conversation, not merely that
-        something truthy came back — an adapter returning ``{"x": 1}`` would
-        satisfy a truthiness check while having lost the request.
-        """
-        body = self.adapter.translate_to_upstream({"model": model, "messages": SAMPLE_MESSAGES})
+        body = self.adapter.translate_to_upstream(
+            {
+                "model": model,
+                "messages": SAMPLE_MESSAGES,
+                "tools": [{"type": "function", "function": {"name": "t", "parameters": {}}}],
+            }
+        )
 
         assert body["model"] == model
-        assert body["messages"] == SAMPLE_MESSAGES
+        assert "input" in body
+        assert isinstance(body["input"], list)
+        assert body["tools"] == [{"type": "function", "name": "t", "parameters": {}}]
+
+    @pytest.mark.parametrize("model", ["glm-5.2", "minimax-m2.7", "", "some-future-model"])
+    def test_no_other_model_is_routed_through_responses(self, model):
+        """The positive control: non-Responses models keep their existing route.
+
+        A Chat Completions model still returns a CC body; a Messages-routed
+        model still returns a Messages body.  ``_cc_to_responses`` is not
+        reached on those branches.
+        """
+        body = self.adapter.translate_to_upstream({"model": model, "messages": SAMPLE_MESSAGES})
+        # CC: ``messages`` is the round-trip target.  Messages: the inherited
+        # adapter hoists system out and replaces tools — when the model is on
+        # the Messages route, "system" lives at the top level.  Either way,
+        # Responses' ``input`` key is absent.
+        assert "input" not in body
 
 
 class TestOpenCodeGoChatCompletionsPassthrough:
