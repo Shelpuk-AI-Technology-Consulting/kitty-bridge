@@ -876,28 +876,31 @@ def _read_content_blocks(
         elif "image" in block:
             image = block["image"]
             if isinstance(image, Mapping):
-                part = _read_image(image, f"{path}.image", residual)
-                if part is not None:
-                    parts.append(part)
+                # KBR-251: _read_image always projects a part, so the
+                # position is always occupied.
+                parts.append(_read_image(image, f"{path}.image", residual))
             else:
                 residual[f"{path}.image"] = image
             _residualise_block_extras(block, path, {"image"}, residual)
         elif "toolUse" in block:
-            part = _read_tool_use(block["toolUse"], f"{path}.toolUse", residual)
-            if part is not None:
-                parts.append(part)
+            # KBR-251: _read_tool_use always projects a part.
+            parts.append(
+                _read_tool_use(block["toolUse"], f"{path}.toolUse", residual)
+            )
             _residualise_block_extras(block, path, {"toolUse"}, residual)
         elif "toolResult" in block:
-            part = _read_tool_result(block["toolResult"], f"{path}.toolResult", residual)
-            if part is not None:
-                parts.append(part)
+            # KBR-251: _read_tool_result always projects a part.
+            parts.append(
+                _read_tool_result(block["toolResult"], f"{path}.toolResult", residual)
+            )
             _residualise_block_extras(block, path, {"toolResult"}, residual)
         elif "reasoningContent" in block:
-            part = _read_reasoning_content(
-                block["reasoningContent"], f"{path}.reasoningContent", residual
+            # KBR-251: _read_reasoning_content always projects a part.
+            parts.append(
+                _read_reasoning_content(
+                    block["reasoningContent"], f"{path}.reasoningContent", residual
+                )
             )
-            if part is not None:
-                parts.append(part)
             _residualise_block_extras(block, path, {"reasoningContent"}, residual)
         else:
             # Eight Opaque-only ContentBlock discriminators — dispatch on the
@@ -970,7 +973,7 @@ def _read_image(
     """
     fmt = image.get("format")
     source = image.get("source")
-    image_extras = set(image) - {"format", "source", "error"}
+    image_extras = set(image) - {"format", "source"}
 
     media_type: str | None
     if isinstance(fmt, str):
@@ -985,7 +988,14 @@ def _read_image(
     digest: str | None = None
     ref: str | None = None
 
-    if "bytes" in source:
+    # Missing or non-Mapping ``source`` — a wire-format breach. §7.4 rule 7
+    # row 2: residualise the leaf AND project the part (KBR-251
+    # conformed). ``"bytes" in source`` would raise ``TypeError`` if source
+    # were a non-container; we catch the breach before the iteration.
+    if source is None or not isinstance(source, Mapping):
+        residual[f"{prefix}.source"] = source
+        digest = _wire_identity_digest(source)
+    elif "bytes" in source:
         raw = source["bytes"]
         # AWS JSON protocol serialises blob members as base64-encoded
         # strings; the wire never carries raw bytes for a blob. A non-string
@@ -1015,6 +1025,13 @@ def _read_image(
         s3 = source["s3Location"]
         if isinstance(s3, Mapping) and isinstance(s3.get("uri"), str):
             ref = s3["uri"]
+            # ``S3Location`` carries an optional ``bucketOwner`` field
+            # beside the required ``uri``. Residualise it — the union is
+            # schema-nested and a key the reader does not consume must be
+            # named at its path (§7.4.1 depth rule).
+            for s3_key in s3:
+                if s3_key != "uri":
+                    residual[f"{prefix}.source.s3Location.{s3_key}"] = s3[s3_key]
         else:
             # Malformed ``s3Location`` — residualise the leaf AND project
             # the part with a canonical-JSON identity digest. ``ref`` is

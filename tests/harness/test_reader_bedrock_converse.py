@@ -621,6 +621,98 @@ class TestServerSideToolToggles:
         assert projected.conversation.tools == ()
         assert projected.envelope.extra["systemTool"] == {"name": "built_in_search"}
 
+    def test_s3_location_carries_bucket_owner_at_its_own_path(self) -> None:
+        """The published ``S3Location`` shape's optional ``bucketOwner`` field
+        residualises at ``source.s3Location.bucketOwner`` (§7.4.1 depth rule).
+        """
+        projected = project_untotalled(
+            {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "image": {
+                                    "format": "png",
+                                    "source": {
+                                        "s3Location": {
+                                            "uri": "s3://bucket/key",
+                                            "bucketOwner": "123456789012",
+                                        }
+                                    },
+                                }
+                            }
+                        ],
+                    }
+                ]
+            }
+        )
+
+        assert (
+            projected.residual["messages[0].content[0].image.source.s3Location.bucketOwner"]
+            == "123456789012"
+        )
+
+    def test_an_image_block_carries_an_error_field_at_its_own_path(self) -> None:
+        """The published ``ImageBlock``'s optional ``error`` field
+        residualises at the parent image's path, not the omitted
+        ``prefix.source`` location.
+        """
+        projected = project_untotalled(
+            {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "image": {
+                                    "format": "png",
+                                    "source": {"bytes": _b64(b"X")},
+                                    "error": {"message": "boom"},
+                                }
+                            }
+                        ],
+                    }
+                ]
+            }
+        )
+
+        assert (
+            projected.residual["messages[0].content[0].image.error"]
+            == {"message": "boom"}
+        )
+
+    def test_an_image_block_with_missing_source_residualises_and_projects(self) -> None:
+        """§7.4 rule 7 row 2: a missing required leaf residualises at its
+        path AND the part is projected (KBR-251 conformed). ``source``
+        absent is a wire-format breach; the reader surfaces it at
+        ``messages[i].content[j].image.source`` and the part keeps its
+        position with a wire-identity digest.
+        """
+        projected = project_untotalled(
+            {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"image": {"format": "png"}}
+                        ],
+                    }
+                ]
+            }
+        )
+
+        assert (
+            projected.residual["messages[0].content[0].image.source"]
+            is None  # not present — the leaf is named
+        )
+        image = projected.conversation.turns[0].parts[0]
+        assert isinstance(image, c.Image)
+        assert image.media_type == "image/png"
+        # The position is occupied; the digest is the wire-identity of
+        # the missing source.
+        assert image.digest == r._wire_identity_digest(None)
+
     def test_a_repeated_cache_point_entry_residualises_not_overwrites(self) -> None:
         """§7.4.2 rule 2's hazard: a duplicate tool-config toggle takes a
         residual, not a silent overwrite of the winner.
@@ -656,10 +748,13 @@ class TestExtraKeyDisjointness:
 
         ``_TOP_LEVEL_EXTRA_KEYS`` (the eight declared control fields),
         ``tool_choice`` (the one canonical-value exception, §3.3.1b),
-        ``cachePoint`` and ``systemTool`` (the two Tool-union toggles,
-        §7.4.2 rule 5) — no key may appear in two sources.
+        and the two Tool-union toggles ``cachePoint`` and ``systemTool``
+        (§7.4.2 rule 5) — no key may appear in two sources. The
+        toggle-key set is derived from the published ``Tool`` union
+        minus the client-tool ``toolSpec``, so the test cannot drift
+        from the reader's literals.
         """
-        toggle_keys = frozenset({"cachePoint", "systemTool"})
+        toggle_keys = r.PUBLISHED_TOOL_BLOCK_TYPES - {"toolSpec"}
         canonical = frozenset({"tool_choice"})
         top_level = r.PUBLISHED_TOP_LEVEL_KEYS - {"toolConfig", "inferenceConfig", "messages", "system"}
 
@@ -938,7 +1033,14 @@ class TestParts:
         assert part.arguments == {"city": "Berlin"}
 
     def test_tool_use_input_must_be_an_object_to_round_trip(self) -> None:
-        """A non-mapping ``input`` residualises; the part is not produced."""
+        """A non-mapping ``input`` residualises; the part is still produced.
+
+        KBR-251 conformed ``_read_tool_use`` to occupy the position: even
+        when a wire-format breach leaves the leaf unreadable, the part
+        is projected with the wire's own bytes for identity. ``ToolUse``
+        is therefore in the parts list (with default-empty ``arguments``),
+        and the residual names the leaf.
+        """
         projected = project_untotalled(
             {
                 "messages": [
