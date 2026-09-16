@@ -34,6 +34,7 @@ import base64
 import json
 import re
 from collections.abc import Collection, Mapping, Sequence
+from types import MappingProxyType
 from typing import Any
 
 from harness import contract as c
@@ -221,6 +222,330 @@ class ChatCompletionsProjection:
             return _project(body)
         except (KeyError, TypeError, AttributeError) as exc:
             raise c.UnreadableBodyError(f"unreadable Chat Completions body: {exc!r}") from exc
+
+
+class ChatCompletionsReplyProjection:
+    """Reads a Chat Completions reply into :class:`~harness.contract.Reply`.
+
+    Implements :class:`~harness.contract.ReplyProjection` for
+    :attr:`~harness.contract.WireFormat.CHAT_COMPLETIONS`. Schema retrieved
+    2026-09-16 from
+    ``https://raw.githubusercontent.com/openai/openai-openapi/main/openapi.yaml``
+    (``CreateChatCompletionResponse`` at line ~36934,
+    ``CreateChatCompletionResponse.choices[].finish_reason`` enum at line ~37155:
+    ``stop``, ``length``, ``tool_calls``, ``content_filter``, ``function_call``).
+
+    ``finish_reason`` maps onto :data:`~harness.contract.STOP_REASONS`:
+    ``stop`` → ``end_turn``; ``length`` → ``max_tokens``; ``tool_calls`` and the
+    deprecated ``function_call`` → ``tool_use``; ``content_filter`` → ``error``;
+    ``null`` (the streaming-chunk case) → ``stop_reason = None``. The wire carries
+    only these five values, so the canonical set covers the mapping and there is
+    no ``other`` escape for this format.
+
+    ``choices[0].message.tool_calls[]`` arguments arrive as a JSON string; the
+    one shared decode rule (§7.4.1, KBR-174) is :func:`decode_arguments`.
+    Reasoning content (``reasoning_content``) is a CC extension; P8's complement
+    projects it as :class:`~harness.contract.Thinking`.
+
+    Attributes:
+        wire_format: Always :attr:`~harness.contract.WireFormat.CHAT_COMPLETIONS`.
+    """
+
+    wire_format = c.WireFormat.CHAT_COMPLETIONS
+
+    #: ``finish_reason`` values that map straight onto a canonical member of
+    #: :data:`~harness.contract.STOP_REASONS`.
+    _FINISH_REASON_MAP: Mapping[str, str] = MappingProxyType(
+        {
+            "stop": "end_turn",
+            "length": "max_tokens",
+            "tool_calls": "tool_use",
+            "function_call": "tool_use",
+            "content_filter": "error",
+        }
+    )
+
+    _PROJECTION_KEYS = frozenset(
+        {
+            "id",
+            "object",
+            "created",
+            "model",
+            "metadata",
+            "moderation",
+            "service_tier",
+            "system_fingerprint",
+            "usage",
+            "choices",
+        }
+    )
+
+    #: Top-level keys a reply's first choice carries. ``index`` and ``logprobs``
+    #: are declared by :class:`CreateChatCompletionResponse` and are consumed
+    #: rather than projected (``logprobs`` is provider-reported, ``index`` is
+    #: the choice's positional identifier).
+    _CHOICE_KEYS = frozenset({"index", "message", "finish_reason", "logprobs"})
+
+    #: Keys a choice's ``message`` object carries. ``audio`` is the audio-output
+    #: variant; ``annotations`` and ``name`` are CC extensions consumed at
+    #: depth so the fail-closed rule does not fire on real replies.
+    _MESSAGE_KEYS = frozenset(
+        {
+            "role",
+            "content",
+            "refusal",
+            "tool_calls",
+            "function_call",
+            "reasoning_content",
+            "annotations",
+            "audio",
+            "name",
+        }
+    )
+
+    def read_reply(self, captured: c.CapturedReply) -> c.Reply:
+        """Project a captured Chat Completions reply.
+
+        Args:
+            captured: The reply as observed on the wire. SSE reassembly is the
+                caller's responsibility (§7.4 boundary).
+
+        Returns:
+            The wire-independent projection, total over the body.
+
+        Raises:
+            UnreadableBodyError: When the body is not a readable Chat
+                Completions reply (malformed JSON, ``choices`` not an array).
+        """
+        body = _parse_body(captured.body)
+
+        residual: dict[str, Any] = {}
+        consumed: set[str] = set()
+        for key, value in body.items():
+            if key in self._PROJECTION_KEYS:
+                consumed.add(key)
+            else:
+                residual[c.residual_key(key)] = value
+
+        parts, stop_reason, stop_reason_raw = self._read_choices(body.get("choices"), residual)
+        usage_raw = body.get("usage")
+        if isinstance(usage_raw, dict):
+            usage: Mapping[str, Any] = dict(usage_raw)
+        elif usage_raw is None:
+            usage = {}
+        else:
+            residual[c.residual_key("usage")] = usage_raw
+            usage = {}
+
+        return c.Reply(
+            parts=parts,
+            stop_reason=stop_reason,
+            stop_reason_raw=stop_reason_raw,
+            usage=usage,
+            residual=residual,
+            consumed=frozenset(consumed),
+            source=body,
+        )
+
+    @classmethod
+    def _read_choices(
+        cls, value: Any, residual: dict[str, Any]
+    ) -> tuple[tuple[c.Part, ...], str | None, str | None]:
+        """Read the reply's ``choices`` array.
+
+        A reply is expected to carry exactly one choice — the bridge serves
+        ``n = 1`` and a reply with more is a real fidelity anomaly, so extra
+        choices residualise at their indexed paths (§3.3.1's *non-empty residual
+        fails the run*). An empty or absent ``choices`` array returns
+        ``((), None, None)``.
+
+        Args:
+            value: The wire value (array of choices, or ``None`` when absent).
+            residual: The residual mapping, extended in place.
+
+        Returns:
+            ``(parts, stop_reason, stop_reason_raw)`` from the first choice.
+
+        Raises:
+            UnreadableBodyError: When the first choice is not an object.
+        """
+        if not isinstance(value, list):
+            residual[c.residual_key("choices")] = value
+            return (), None, None
+        if not value:
+            return (), None, None
+        first = value[0]
+        if not isinstance(first, dict):
+            raise c.UnreadableBodyError(f"choices[0] must be an object, got {type(first).__name__}")
+        for index in range(1, len(value)):
+            # A bridge reply with ``n > 1`` is the anomaly: residualise the
+            # extras at their indexed paths so the run names it.
+            residual[c.residual_key("choices", index=index)] = value[index]
+        _residualise(first, cls._CHOICE_KEYS, "choices[0]", residual)
+        parts = cls._read_message(first.get("message"), residual)
+        stop_reason, stop_reason_raw = cls._map_finish_reason(first.get("finish_reason"), residual)
+        return parts, stop_reason, stop_reason_raw
+
+    @classmethod
+    def _read_message(cls, value: Any, residual: dict[str, Any]) -> tuple[c.Part, ...]:
+        """Read one ``message`` object into a parts tuple.
+
+        Args:
+            value: The wire value (the choice's ``message`` object, or ``None``).
+            residual: The residual mapping, extended in place.
+
+        Returns:
+            The projected parts, in wire order: ``Text`` (content), ``Text``
+            (refusal — §7.4.1 records the refusal case as *content whose
+            identity is a run of text*), then ``ToolUse`` per ``tool_call``,
+            then ``Thinking`` for ``reasoning_content``. The legacy
+            ``function_call`` key projects as an additional ``ToolUse`` when
+            present (the deprecated single-call form). Unknown message keys
+            residualise at ``choices[0].message.<key>`` so the fail-closed
+            rule fires on unmodelled payload.
+
+        Raises:
+            UnreadableBodyError: When ``message`` is not an object or a
+                ``tool_calls`` entry lacks the required ``function.name``.
+        """
+        if not isinstance(value, dict):
+            residual[c.residual_key("choices[0].message")] = value
+            return ()
+
+        _residualise(value, cls._MESSAGE_KEYS, "choices[0].message", residual)
+
+        parts: list[c.Part] = []
+
+        # ``content`` — a bare string, or ``null`` for tool-only replies.
+        content = value.get("content")
+        if isinstance(content, str):
+            parts.append(c.Text(content))
+        elif content is not None:
+            residual[c.residual_key("choices[0].message", "content")] = content
+
+        # ``refusal`` — a bare string; §7.4.1 records it as text-identity. An
+        # empty string carries no semantic and is treated as absent so a wire
+        # that always emits ``refusal: ""`` does not invent a refusal text.
+        refusal = value.get("refusal")
+        if isinstance(refusal, str) and refusal:
+            parts.append(c.Text(refusal))
+        elif refusal is not None and not isinstance(refusal, str):
+            residual[c.residual_key("choices[0].message", "refusal")] = refusal
+
+        # ``tool_calls`` — each is a function-call payload with arguments as a
+        # JSON string; the one shared decode rule (§7.4.1, KBR-174) handles it.
+        # A wrongly-typed value residualises at its own path; a malformed
+        # *entry* (not a dict, or no string ``function.name``) raises
+        # ``UnreadableBodyError`` because there is no partial projection to
+        # salvage — §7.4.1.
+        tool_calls = value.get("tool_calls")
+        if tool_calls is not None:
+            if not isinstance(tool_calls, list):
+                residual[c.residual_key("choices[0].message", "tool_calls")] = tool_calls
+            else:
+                for index, call in enumerate(tool_calls):
+                    if not isinstance(call, dict):
+                        residual[
+                            c.residual_key("choices[0].message.tool_calls", index=index)
+                        ] = call
+                        continue
+                    if not isinstance(call.get("function"), dict):
+                        raise c.UnreadableBodyError(
+                            f"choices[0].message.tool_calls[{index}].function must be an object"
+                        )
+                    if not isinstance(call["function"].get("name"), str):
+                        raise c.UnreadableBodyError(
+                            f"choices[0].message.tool_calls[{index}].function.name must be a string"
+                        )
+                    parts.append(
+                        c.ToolUse(
+                            name=call["function"]["name"],
+                            arguments=c.decode_arguments(
+                                call["function"].get("arguments"),
+                                f"choices[0].message.tool_calls[{index}].function.arguments",
+                                residual,
+                            ),
+                            id=call.get("id") if isinstance(call.get("id"), str) else None,
+                        )
+                    )
+
+        # ``reasoning_content`` — CC extension; P8's complement. An empty string
+        # still projects as a Thinking part so its absence is observable (§3.3.1).
+        reasoning = value.get("reasoning_content")
+        if isinstance(reasoning, str):
+            parts.append(c.Thinking(text=reasoning))
+        elif reasoning is not None:
+            residual[c.residual_key("choices[0].message", "reasoning_content")] = reasoning
+
+        # The legacy ``function_call`` key, when present alongside ``tool_calls``,
+        # projects as an additional ``ToolUse`` (deprecated form). A dict
+        # without a string ``name`` is malformed — there is no partial call
+        # to salvage — and raises.
+        function_call = value.get("function_call")
+        if function_call is not None:
+            if not isinstance(function_call, dict):
+                residual[c.residual_key("choices[0].message", "function_call")] = function_call
+            elif not isinstance(function_call.get("name"), str):
+                raise c.UnreadableBodyError(
+                    "choices[0].message.function_call.name must be a string"
+                )
+            else:
+                parts.append(
+                    c.ToolUse(
+                        name=function_call["name"],
+                        arguments=c.decode_arguments(
+                            function_call.get("arguments"),
+                            "choices[0].message.function_call.arguments",
+                            residual,
+                        ),
+                    )
+                )
+
+        # ``audio`` — the audio-output variant of a message. Carries as
+        # ``Opaque`` so the payload stays detectable by digest; ``opaque_kind``
+        # raises for non-snake_case wire spellings, which is the wire's fault,
+        # not the reader's, so the ``ValueError`` becomes ``UnreadableBodyError``
+        # per §7.4.1.
+        audio = value.get("audio")
+        if audio is not None:
+            try:
+                canonical = c.opaque_kind("audio")
+            except ValueError as exc:
+                raise c.UnreadableBodyError(
+                    f"choices[0].message.audio: {exc}"
+                ) from exc
+            parts.append(c.Opaque(kind=canonical, digest=c.opaque_digest(audio)))
+
+        return tuple(parts)
+
+    @classmethod
+    def _map_finish_reason(
+        cls, value: Any, residual: dict[str, Any]
+    ) -> tuple[str | None, str | None]:
+        """Map the wire ``finish_reason`` onto :data:`~harness.contract.STOP_REASONS`.
+
+        Args:
+            value: The wire value (``str``, ``None``, or a non-string — the
+                latter residualises at ``choices[0].finish_reason``).
+            residual: The residual mapping, extended in place.
+
+        Returns:
+            ``(stop_reason, stop_reason_raw)``. ``None`` for an absent or
+            non-string value. A string outside the published five-value enum
+            escapes through ``other`` with the wire string in
+            ``stop_reason_raw`` — the same posture §3.3.1 puts on Anthropic
+            and Gemini, so a future vendor addition fails the run only when
+            T-D10's register match cannot name it, not here.
+        """
+        if value is None:
+            return None, None
+        if not isinstance(value, str):
+            residual[c.residual_key("choices[0]", "finish_reason")] = value
+            return None, None
+        mapped = cls._FINISH_REASON_MAP.get(value)
+        if mapped is not None:
+            return mapped, None
+        return "other", value
 
 
 def _parse_body(raw: bytes) -> Mapping[str, Any]:
