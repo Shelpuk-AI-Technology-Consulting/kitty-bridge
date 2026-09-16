@@ -682,14 +682,15 @@ class TestDirectRouteBlocksRealEgress:
             )
         # The exact CONNECT target the forced seam miss produces: the adapter
         # posts to `https://chatgpt.com/...`, curl issues `CONNECT
-        # chatgpt.com:443`. Membership in the set (not a substring check —
-        # CodeQL flags `"host" in target` as incomplete URL sanitisation)
-        # proves the seam-miss patch actually routed the request at the real
-        # upstream, which is the premise the deny entries then refute.
-        targets = {a.target for a in result.attempts}
-        assert "chatgpt.com:443" in targets, (
-            f"no CONNECT to chatgpt.com:443 in {sorted(targets)}: the seam-miss "
-            "patch did not actually route the request to the real upstream"
+        # chatgpt.com:443`. Exact equality (CodeQL's
+        # py/incomplete-url-substring-sanitization flags any containment
+        # check over a URL-derived value — `in` on a string AND membership
+        # in a collection of them) proves the seam-miss patch actually
+        # routed the request at the real upstream, which is the premise
+        # the deny entries then refute.
+        assert any(a.target == "chatgpt.com:443" for a in result.attempts), (
+            f"no CONNECT to chatgpt.com:443 in {sorted({a.target for a in result.attempts})}: "
+            "the seam-miss patch did not actually route the request to the real upstream"
         )
 
 
