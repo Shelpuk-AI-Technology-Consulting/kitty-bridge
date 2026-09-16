@@ -692,6 +692,52 @@ async def test_a_reasoning_only_prefix_releases_the_hold_and_is_not_retried(monk
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(("provider_factory", "model"), _MESSAGES_WIRE)
+async def test_an_empty_converted_stream_fires_the_empty_ladder_on_every_messages_wire_adapter(
+    provider_factory, model, monkeypatch
+):
+    """KBR-248 AC-1 (sibling coverage) — the hold fires on every converted route.
+
+    The hold is gated on ``stream_converter is not None`` and reaches the
+    same ``_cc_chunk_carries_content`` predicate on every adapter the
+    converter covers. This test parametrises the AC-1 empty-ladder claim over
+    the five Messages-wire adapters so a sibling whose converter output shape
+    differs (thinking-only prefixes, ``OpenCodeGoResponses`` envelope) cannot
+    silently regress the fix.
+
+    Args:
+        provider_factory: Builds a Messages-wire adapter.
+        model: A model that adapter serves on its Messages wire.
+        monkeypatch: Pytest fixture, collapses the retry backoff.
+    """
+    provider = provider_factory()
+    empty = _render_sse([
+        {
+            "type": "message_start",
+            "message": {
+                "id": "m",
+                "type": "message",
+                "role": "assistant",
+                "model": model,
+                "content": [],
+                "usage": {"input_tokens": 1, "output_tokens": 0},
+            },
+        },
+        {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 0}},
+        {"type": "message_stop"},
+    ])
+    good = _render_sse(_anthropic_events())
+
+    _server, status, client_body, calls, _bodies = await _stream(
+        BridgeProtocol.CHAT_COMPLETIONS_API, provider, model, [(200, empty), (200, good)], monkeypatch
+    )
+
+    assert status == 200
+    assert calls == 2
+    assert "hello" in client_body
+
+
+@pytest.mark.asyncio
 async def test_an_exhausted_empty_ladder_ends_in_the_d4_terminal_error(monkeypatch):
     """KBR-248 AC-5 — every attempt empty ends in the D4 error, not the empty stream.
 

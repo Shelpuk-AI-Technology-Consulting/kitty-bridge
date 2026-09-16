@@ -7725,6 +7725,10 @@ class BridgeServer:
                         held.append(translated)  # noqa: B023
                         held_bytes += len(translated)
                         # D5: bound the hold rather than grow it without limit.
+                        # Note: unlike ``PreambleHold``, which caps the raw
+                        # upstream bytes fed to ``feed()``, this cap bounds the
+                        # *translated* lines the converter emitted — same
+                        # constant, a related but not identical quantity.
                         if held_bytes > MAX_HELD_BYTES:
                             for held_line in held:  # noqa: B023
                                 await sr.write(held_line)

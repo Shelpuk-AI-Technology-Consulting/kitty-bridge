@@ -410,7 +410,13 @@ logic. A no means byte-identical to the pre-KBR-232 behaviour.
   authorise. The empty-response ladder and its D4 exhaustion terminal, by
   contrast, are route-wide: a raw Chat Completions ladder-exhausting stream
   (e.g. repeated empty 200 bodies) ends in the same `type: "empty_response"`
-  D4 event, conforming to Q14 bullet 4.
+  D4 event, conforming to Q14 bullet 4. **Known asymmetry, deliberate:** the
+  streaming hold treats a non-empty `reasoning_content` delta as content
+  (thinking-only replies succeed immediately), while the route's non-streaming
+  empty-detection (`_is_empty_cc_response`) does not read `reasoning_content`
+  and would retry a reasoning-only reply. Aligning the non-streaming detector
+  is a separate ticket; the asymmetry is pinned by
+  `test_a_reasoning_only_prefix_releases_the_hold_and_is_not_retried`.
   The hold is byte-capped at `PreambleHold.MAX_HELD_BYTES` (D5 fail-open). An exhausted
   ladder emits the route's D4 terminal error (`type: "empty_response"` + ``[DONE]``),
   matching Q14 bullet 4 and the KBR-235/KBR-250 siblings; the backend is not marked
