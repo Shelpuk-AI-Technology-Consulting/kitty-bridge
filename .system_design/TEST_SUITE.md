@@ -4307,6 +4307,20 @@ release must not wait on an LLM eval. Both cannot hold. Evals and the live-agent
 **alerting**, not gating: they are nondeterministic and depend on a third party's availability,
 and a release that can be blocked by someone else's rate limiter is not a release process.
 
+**The "Gates a release" and "Gates a PR" columns are now enforced, not merely stated
+(KBR-152).** Repository ruleset `21038306` carries a `required_status_checks` rule
+that names `ci-required` and nothing else — the aggregate that `ci.yml`'s 🔴-marked
+header says every job in that file feeds. Before KBR-152 the ruleset carried
+`deletion`, `non_fast_forward` and `pull_request` only, and a pull request with a
+four-version red test matrix could merge through the GitHub UI or API; the gate
+computed a verdict nothing obliged anyone to honour. The four "gates a release"
+rows above are also "gates a PR" rows by construction — the same matrix, the same
+aggregate — so a release branch that bypasses the PR gate still passes through
+`publish.yml`, which calls `tests.yml` for the same checks. The two product-
+owner decisions the ruleset carries alongside the new rule (`required_approving_
+review_count: 0` and the single `bypass_mode: always` actor) are outside KBR-152's
+scope and untouched.
+
 **`ratchet` exempts one named assertion, not a scenario.** A scenario-wide exemption is a
 blanket amnesty: a broken fixture, a failure in a `Given` step, or an unrelated regression inside
 that scenario all become invisible, indistinguishable from the known defect. That is a worse
