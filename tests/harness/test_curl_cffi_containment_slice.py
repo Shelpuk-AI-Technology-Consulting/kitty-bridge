@@ -680,9 +680,16 @@ class TestDirectRouteBlocksRealEgress:
                 f"attempt {attempt!r} carries a tunnel source port: a tunnel was "
                 "established through the proxy to {attempt.target!r}"
             )
-        assert any("chatgpt.com" in a.target for a in result.attempts), (
-            "no CONNECT to chatgpt.com was recorded: the seam-miss patch did not "
-            "actually route the request to the real upstream"
+        # The exact CONNECT target the forced seam miss produces: the adapter
+        # posts to `https://chatgpt.com/...`, curl issues `CONNECT
+        # chatgpt.com:443`. Membership in the set (not a substring check —
+        # CodeQL flags `"host" in target` as incomplete URL sanitisation)
+        # proves the seam-miss patch actually routed the request at the real
+        # upstream, which is the premise the deny entries then refute.
+        targets = {a.target for a in result.attempts}
+        assert "chatgpt.com:443" in targets, (
+            f"no CONNECT to chatgpt.com:443 in {sorted(targets)}: the seam-miss "
+            "patch did not actually route the request to the real upstream"
         )
 
 
