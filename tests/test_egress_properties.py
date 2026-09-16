@@ -176,28 +176,33 @@ def test_p4_masked_password_component_is_exactly_the_mask(proxy_tuple: tuple[str
 # ── P5 — redact_url_for_display per-shape post-conditions ────────────────
 
 
-def _assert_userinfo_redacted(redacted: str, password: str, username: str) -> None:
-    """Assert the redacted URL carries no userinfo and no password substring.
+def _assert_userinfo_redacted(redacted: str, original_url: str, password: str, username: str) -> None:
+    """Assert the redacted URL carries no userinfo, by structure not substring.
+
+    The structural form: the redacted netloc must equal the original
+    netloc minus its userinfo (everything up to the last ``@``). Parsing
+    both sides and comparing means a credential that happens to look like
+    a substring of the host cannot false-fail the property — the same
+    §6.1 warning P4's comment records ("password ``proxy``, host
+    ``proxy.example``").
 
     Args:
         redacted: The output of ``redact_url_for_display``.
+        original_url: The unredacted input, whose netloc supplies the
+            host the output must be reduced to.
         password: The password that was in the input userinfo.
         username: The username that was in the input userinfo.
     """
+    del password, username  # witnesses of what the userinfo carried; the structural check below is the assertion
     parts = urlsplit(redacted)
-    assert "@" not in parts.netloc, (
-        f"redacted URL {redacted!r} still has a userinfo separator in netloc"
+    original_netloc = urlsplit(original_url).netloc
+    assert "@" in original_netloc, (
+        f"strategy produced a userinfo URL without an @ in its netloc: {original_url!r}"
     )
-    # ``password not in redacted`` is the §6.1-required structural shape;
-    # ``username not in parts.netloc`` is the honest half — the username
-    # legitimately may survive in a query parameter name or fragment on
-    # some other URL, but in this branch it is the userinfo's username,
-    # and it must not reappear in the authority.
-    assert password not in redacted, (
-        f"password {password!r} survived in redacted URL {redacted!r}"
-    )
-    assert username not in parts.netloc, (
-        f"username {username!r} survived in netloc of redacted URL {redacted!r}"
+    bare_host = original_netloc.rsplit("@", 1)[1]
+    assert parts.netloc == bare_host, (
+        f"redacted netloc {parts.netloc!r} != the bare host {bare_host!r} "
+        f"the userinfo must be reduced to (input {original_url!r})"
     )
 
 
@@ -241,7 +246,7 @@ def test_p5_redact_url_for_display_per_shape(shapes: dict[str, str]) -> None:
             # the split from the input, which is how the userinfo parse
             # could share a bug with the redactor under test.
             username, password = shapes["expected_userinfo"]
-            _assert_userinfo_redacted(redacted, password, username)
+            _assert_userinfo_redacted(redacted, url, password, username)
         elif key == "query_value":
             expected_name = shapes["expected_query"][0]
             pairs = _query_pairs(urlsplit(redacted).query)
@@ -273,29 +278,28 @@ def test_p5_redact_url_for_display_per_shape(shapes: dict[str, str]) -> None:
             )
             assert pairs[name] == "****"
         elif key == "unparseable":
-            # The contract: ``urlsplit`` rejects the URL, so
-            # ``redact_url_for_display`` delegates to
-            # ``_redact_unparseable_url``, which over-redacts by design
-            # (SYSTEM_DESIGN.md §9; ``providers/base.py``). Assert the
-            # equivalence exactly rather than only checking the tail —
-            # the helper's exact drop of everything from the first ``?``
-            # is the property, and a future regression in the textual
-            # path (e.g. a half-fix that keeps part of the query) is
-            # caught here.
-            assert redacted == ProviderAdapter._redact_unparseable_url(url), (
-                f"unparseable URL not redacted to _redact_unparseable_url; "
+            # The contract: the sentinel secret must not survive. The
+            # strategy's sentinel (``SECRET_<body>_END``) is structurally
+            # absent from every other field the strategy generates, so
+            # this absence check cannot false-fail on a coincidental
+            # substring of the host — and it asserts the property ("no
+            # credential verbatim") rather than the helper's private
+            # delegate, which a regression could satisfy on both sides
+            # at once.
+            secret = shapes["expected_unparseable_secret"]
+            assert secret not in redacted, (
+                f"sentinel secret {secret!r} survived textual redaction; "
                 f"got {redacted!r}"
             )
         elif key == "no_authority":
-            # The contract: ``urlsplit`` reads the credentials into the
-            # path (out of reach of any netloc rule), so the helper
-            # delegates to ``_redact_unparseable_url``. The spec pins
-            # that equivalence exactly — a future regression that lets
-            # part of the userinfo-prefixed path through would fail
-            # here.
-            assert redacted == ProviderAdapter._redact_unparseable_url(url), (
-                f"no-authority URL not redacted to _redact_unparseable_url; "
-                f"got {redacted!r}"
+            # Same sentinel reasoning: the password lives in the path,
+            # out of reach of any netloc rule, and the sentinel witness
+            # lets the property assert its absence without depending on
+            # the helper's exact textual output.
+            password = shapes["expected_no_authority_password"]
+            assert password not in redacted, (
+                f"sentinel password {password!r} survived in no-authority "
+                f"redacted URL {redacted!r}"
             )
         elif key == "fragment":
             # Structural: the fragment is replaced wholesale by the mask.

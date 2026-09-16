@@ -191,10 +191,35 @@ def hostnames_outside_localhost_family() -> st.SearchStrategy[str]:
 #: unless the form under test asks for encoding.
 _CRED_ALPHABET = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 
+#: Fixed prefix and suffix wrapped around every sentinel credential. The
+#: ``SECRET_`` / ``_END`` markers are absent from any host, path, query,
+#: or fragment the strategy generates, so a sentinel cannot collide with
+#: any other field and the absence-of-secret assertion is sound
+#: regardless of how long the inner body is.
+_SENTINEL_PREFIX = "SECRET_"
+_SENTINEL_SUFFIX = "_END"
+
 #: The characters whose URL-encoding the round-trip property exercises. `@`
 #: and `:` are the two that break a naive userinfo split; `/` is included
 #: because a decoder that re-escapes rather than unescapes fails on it.
 _ENCODED_STROKES = ("@", ":", "/")
+
+
+def _sentinel_text() -> st.SearchStrategy[str]:
+    """Return a strategy drawing distinctive, collision-free credentials.
+
+    The body is short alphanumeric text wrapped in fixed ``SECRET_`` /
+    ``_END`` markers so no host, path, query or fragment the other
+    strategies generate can contain the string. Length 8-16 chars is
+    enough to make the inner body distinctive within the markers —
+    the markers are what keep it collision-free, not the length.
+
+    Returns:
+        A strategy whose examples are ``SECRET_<body>_END`` strings.
+    """
+    return st.text(alphabet=_CRED_ALPHABET, min_size=8, max_size=16).map(
+        lambda body: f"{_SENTINEL_PREFIX}{body}{_SENTINEL_SUFFIX}"
+    )
 
 
 def _credential_text() -> st.SearchStrategy[str]:
@@ -232,19 +257,19 @@ def proxy_urls_with_credentials() -> st.SearchStrategy[tuple[str, str, str]]:
     """Return a strategy drawing proxy URLs with credentials, in all three forms.
 
     §6.1: "test percent-encoded and URL-embedded forms as separate cases."
-    The strategy produces the **triple** ``(scheme://host:port, username,
-    password)`` the round-trip property asserts against, alongside the URL
-    in one of the three writings a user could put in the environment or a
-    profile: cleartext userinfo, percent-encoded userinfo, and the bare URL
-    (no credentials — the credential components are ``None``).
+    The strategy produces the 4-tuple ``(proxy_origin, username,
+    password, written_url)`` the round-trip property asserts against,
+    alongside the URL in one of the three writings a user could put in the
+    environment or a profile: cleartext userinfo, percent-encoded
+    userinfo, and the bare URL (no credentials — the credential
+    components are ``None``).
 
     Returns:
-        A strategy of ``(plain_url, username_or_None, password_or_None,
-        written_url)`` tuples — no; see the concrete shape below. Each
-        example is a 4-tuple ``(proxy_origin, username, password,
-        written_url)`` where ``written_url`` embeds the credentials in one
-        of the three forms and ``proxy_origin`` is the scheme/host/port
-        part the parser must preserve.
+        A strategy whose examples are 4-tuples
+        ``(proxy_origin, username, password, written_url)`` where
+        ``written_url`` embeds the credentials in one of the three forms
+        and ``proxy_origin`` is the scheme/host/port part the parser
+        must preserve.
     """
     origin = st.builds(
         lambda scheme, label, port: f"{scheme}://{label}.proxy.invalid:{port}",
@@ -360,29 +385,40 @@ def upstream_urls_with_credentials() -> st.SearchStrategy[dict[str, str | None]]
     )
 
     # Malformed IPv6 brackets trip ``urlsplit``; the helper then redacts
-    # textually (deliberately over-broad).  Generated URL must include both
-    # a query (so ``?****`` is exercised) and a userinfo-style fragment
-    # the textual redaction strips.  The property asserts equality with
-    # ``_redact_unparseable_url(url)`` rather than a substring, so no
-    # separate expected-secret field is needed here.
-    unparseable_query = st.text(alphabet=_CRED_ALPHABET, min_size=12, max_size=24).map(
-        lambda secret: {"unparseable": f"https://[::1/v1/messages?code={secret}"}
+    # textually (deliberately over-broad).  The URL carries a sentinel
+    # secret so the property can assert ``secret not in redacted``
+    # structurally — the sentinel markers (``SECRET_`` / ``_END``) are
+    # absent from any host, path, query, or fragment the strategy emits,
+    # so an absence check is collision-free.
+    unparseable_query = _sentinel_text().map(
+        lambda secret: {
+            "unparseable": f"https://[::1/v1/messages?code={secret}",
+            "expected_unparseable_secret": secret,
+        }
     )
-    unparseable_userinfo = st.text(alphabet=_CRED_ALPHABET, min_size=12, max_size=24).map(
-        lambda secret: {"unparseable": f"https://[{secret}@host/v1"}
+    unparseable_userinfo = _sentinel_text().map(
+        lambda secret: {
+            "unparseable": f"https://[{secret}@host/v1",
+            "expected_unparseable_secret": secret,
+        }
     )
     unparseable = unparseable_query | unparseable_userinfo
 
-    # Same shape story: the credentials live in the path, out of reach of
-    # any netloc rule; the property pins the helper's textual equivalent
-    # exactly.
+    # Same sentinel strategy for the no-authority shape: credentials live
+    # in the path (out of reach of any netloc rule), and a sentinel
+    # witness lets the property assert the password is gone without
+    # depending on the helper's exact textual output.
     no_authority = st.builds(
-        lambda scheme, u, p, h, pth: {"no_authority": f"{scheme}:{u}:{p}@{h}{pth}"},
+        lambda scheme, u, p, h, pth, sentinel: {
+            "no_authority": f"{scheme}:{u}:{p}@{h}{pth}",
+            "expected_no_authority_password": sentinel,
+        },
         st.sampled_from(("u", "x")),
         user,
         password,
         host,
         path,
+        _sentinel_text(),
     )
 
     # Fragment is masked wholesale — the structural property asserts the
