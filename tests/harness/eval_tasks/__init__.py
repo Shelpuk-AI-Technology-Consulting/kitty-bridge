@@ -325,7 +325,11 @@ def _harvest_task(path: Path, stem: str, source: bytes) -> EvalTask:
         # single-read design above.
         code = compile(source, str(path), "exec")
         exec(code, module.__dict__)  # noqa: S102 — controlled input, sandboxed by spec
-    except BaseException as exc:
+    except Exception as exc:
+        # ``Exception``, not ``BaseException`` — a Ctrl-C mid-load
+        # or a module that calls ``sys.exit()`` must propagate so the
+        # operator can stop a long nightly, mirroring
+        # ``harness.eval_harness.run_eval``'s own per-trial guard.
         raise ValueError(
             f"eval task module {path.name!r} failed to import; the loader does "
             "not catch and rewrite the error, so the original traceback is "

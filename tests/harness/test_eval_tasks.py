@@ -426,9 +426,15 @@ def test_load_task_set_refuses_an_empty_registry(tmp_path: Path) -> None:
 def test_load_task_set_skips_underscore_prefixed_modules(tmp_path: Path) -> None:
     """The underscore convention marks "not a task" — the loader honours it.
 
+    The proof needs a sibling task: with only ``_draft.py`` the test
+    passes either way — the underscore filter produces an empty
+    registry (refused), but a broken filter would let ``_draft``
+    reach the stem check, fail on the leading ``_``, and refuse
+    identically. A second valid task lets the assertion be
+    ``[task.id for task in loaded.tasks] == ["kept"]`` — proving
+    the filter **silently skipped** the draft, not refused it.
     Without the convention a contributor could leave a half-written
-    task module called ``_wip.py`` and have it silently load. Skipping
-    these modules means a deliberate "not yet" stays "not yet".
+    task module called ``_wip.py`` and have it silently load.
     """
     _write_task_module(
         tmp_path,
@@ -446,10 +452,28 @@ def test_load_task_set_skips_underscore_prefixed_modules(tmp_path: Path) -> None
         )
         """,
     )
+    _write_task_module(
+        tmp_path,
+        "kept",
+        """
+        from harness.eval_harness import Verdict
+        from harness.eval_tasks import EvalTask, EvalTaskAuthor
 
-    # The registry is empty (the loader skips _draft.py) and is refused.
-    with pytest.raises(ValueError):
-        load_task_set(root=tmp_path)
+        TASK = EvalTask(
+            id="kept",
+            prompt="hi",
+            acceptance_check=lambda _reply: Verdict.PASS,
+            authored_by=EvalTaskAuthor.person("ada"),
+        )
+        """,
+    )
+
+    loaded = load_task_set(root=tmp_path)
+    # The draft is silently skipped; the kept one loads. A broken
+    # filter would let _draft reach the stem check (leading ``_``
+    # fails ``^[a-z][a-z0-9_]*$``) and refuse the entire load —
+    # ``loaded.tasks`` would be empty, not ``["kept"]``.
+    assert [task.id for task in loaded.tasks] == ["kept"]
 
 
 # ── REQ 2 — Determinism, atomicity, content-addressed revision ──────────────
