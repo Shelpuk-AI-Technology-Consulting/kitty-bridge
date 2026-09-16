@@ -42,12 +42,14 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import ssl
 import uuid
 from collections.abc import Iterator
 from typing import TYPE_CHECKING, ClassVar
 
 import aiohttp
 
+from harness.botocore_recorder import _SERVED_FORMAT, BedrockRecordingUpstream
 from harness.containment import (
     _DRIVE_TIMEOUT,
     Phase1Result,
@@ -391,6 +393,65 @@ class BotocoreContainment:
         )
 
 
+# ── Recorder lifecycle adapter ─────────────────────────────────────────────
+#
+# :class:`SealedNetwork`'s factory shape (main's T-E3) calls
+# ``await recorder.start()`` with no arguments on a factory-built recorder.
+# :class:`BedrockRecordingUpstream` inherits
+# ``start(ssl_context: SSLContext | None = None)`` from
+# :class:`RecordingUpstream`, whose TLS context is supplied at start time,
+# not at construction. The wrapper below captures the harness's
+# ``SSLContext`` at construction so the harness's factory contract and the
+# bedrock recorder's lifecycle signature stay in agreement without touching
+# the upstream botocore recorder module.
+
+
+class _TlsBedrockRecordingUpstream(BedrockRecordingUpstream):
+    """A ``BedrockRecordingUpstream`` whose TLS context is bound at construction.
+
+    The parent class takes the ``SSLContext`` at ``start()``; the harness's
+    factory shape passes the context at construction and expects
+    ``start()`` to take no arguments. The wrapper closes the gap by
+    capturing the context here and forwarding it inside ``start()`` — the
+    recording path, the harness's TLS-handling path and the
+    ``bedrock-recorder-as-recordable-target`` contract all stay unchanged.
+
+    Attributes:
+        ssl_context: The captured ``SSLContext`` the harness built from
+            ``certs.target_cert`` / ``certs.target_key``; applied at
+            ``start()``.
+    """
+
+    ssl_context: ssl.SSLContext | None = None
+
+    def __init__(self, *, ssl_context: ssl.SSLContext, default_format: object = None) -> None:
+        """Store ``ssl_context`` for later application at ``start()``.
+
+        Args:
+            ssl_context: The harness's TLS context; applied at start time.
+            default_format: Accepted for API symmetry with the other
+                factories, ignored — the parent class's ``__post_init__``
+                rejects any format this recorder does not serve, so the
+                value is fixed at construction and callers that pass
+                :attr:`WireFormat.BEDROCK_CONVERSE` keep their intent
+                explicit without the wrapper carrying a second copy of
+                the served-format set.
+        """
+        super().__init__(default_format=_SERVED_FORMAT)
+        self.ssl_context = ssl_context
+
+    async def start(self, *args: object, **kwargs: object) -> None:
+        """Apply the captured ``SSLContext`` and start the listener.
+
+        Args:
+            *args: Unused; required only to satisfy the harness's
+                ``recorder.start()`` (no-arguments) contract.
+            **kwargs: Unused; ``ssl_context`` is taken from
+                :attr:`ssl_context` instead.
+        """
+        await super().start(ssl_context=self.ssl_context)  # type: ignore[arg-type]
+
+
 # ── Registration ───────────────────────────────────────────────────────────
 #
 # Following the same pattern :mod:`harness.botocore` uses for the bridge
@@ -400,6 +461,9 @@ class BotocoreContainment:
 # of :mod:`harness.containment`. A circular import would otherwise arise
 # because this module already imports :class:`SealedNetwork`,
 # :func:`monkeypatched_aiohttp_resolver` and :class:`Phase1Result` from it.
+
+
+__all__ = ["BotocoreContainment", "_TlsBedrockRecordingUpstream"]
 
 
 register_containment_transport(BotocoreContainment.name, BotocoreContainment)

@@ -35,6 +35,7 @@ all. T-K6 inherits the relocation for all four sibling slices.
 
 from __future__ import annotations
 
+import ssl
 from collections.abc import AsyncGenerator
 
 import pytest
@@ -53,6 +54,7 @@ from harness.containment import (
     SealedNetwork,
     reset_for_test,
 )
+from harness.recorder import RecordingUpstream
 from kitty.egress import EgressConfig
 
 # ── Fixtures ───────────────────────────────────────────────────────────────
@@ -77,16 +79,45 @@ async def sealed_network(certs: CertFiles) -> AsyncGenerator[SealedNetwork, None
     wrong-format failure ``test_botocore.py``'s own recorder factory exists
     to prevent.
 
+    The factory follows the curl_cffi slice's shape (main's T-E3):
+    ``SealedNetwork`` passes the harness's ready ``SSLContext`` to the
+    factory at construction time, and the factory returns a recorder whose
+    ``start()`` takes no arguments. ``BedrockRecordingUpstream`` inherits
+    ``start(ssl_context=...)`` from ``RecordingUpstream`` — the
+    ``BotocoreContainment`` module ships a small
+    :class:`_TlsBedrockRecordingUpstream` wrapper that captures the
+    context at construction and applies it at start, so the harness's
+    factory contract and the bedrock recorder's lifecycle signature stay
+    in agreement.
+
     Yields:
         The running harness.
     """
-    from harness.botocore_recorder import BedrockRecordingUpstream
+    from harness.botocore_containment import (
+        _TlsBedrockRecordingUpstream as _TlsBotocoreRecorder,
+    )
     from harness.contract import WireFormat
+
+    def _factory(ctx: ssl.SSLContext) -> RecordingUpstream:
+        """Build the botocore recorder with the harness CA bound at construction.
+
+        Args:
+            ctx: The harness's TLS context — leaf cert carries
+                ``HARNESS_UPSTREAM_HOST`` in its SAN.
+
+        Returns:
+            A fully-constructed recorder whose ``start()`` applies the
+            captured context.
+        """
+        return _TlsBotocoreRecorder(
+            default_format=WireFormat.BEDROCK_CONVERSE,
+            ssl_context=ctx,
+        )
 
     net = SealedNetwork(
         WireFormat.BEDROCK_CONVERSE,
         certs=certs,
-        recorder_factory=BedrockRecordingUpstream,
+        recorder_factory=_factory,
     )
     await net.start()
     try:
