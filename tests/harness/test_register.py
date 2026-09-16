@@ -128,20 +128,24 @@ _SHAPES: tuple[tuple[str, str], ...] = (
 
 
 class TestTheRowsThemselves:
-    """§3.2 publishes 66 live rows; the data must be those rows and no others."""
+    """§3.2 publishes 73 live rows; the data must be those rows and no others."""
 
     def test_the_register_holds_every_live_row(self) -> None:
-        """24 bridge-level rows less the withdrawn M13, plus 42 provider-level.
+        """25 bridge-level rows less the withdrawn M13, plus 48 provider-level.
 
         The +8 over the pre-KBR-195 count is the eight Gemini inbound rows
         KBR-195 added (M18..M25). The +1 over the pre-KBR-44 count is P5f
         (KBR-44). The +5 over the pre-KBR-258 count is P26..P30, the five
         Chat Completions cache-breakpoint drops the Anthropic adapter family
-        performs on the translated route. Both literals are the no-reflow
-        damage test — a future change that drops a row or adds one without
-        updating the guard fails loudly.
+        performs on the translated route. The +7 over the pre-KBR-184 count is
+        KBR-184: M26 (G31 metadata drop on the Anthropic family), P24 (G26
+        CC-origin twin of P23), P31/P32 (G32 ollama + bedrock route drops),
+        P33 (G33 Bedrock auto-toolChoice rewrite), P34 (G34 Anthropic
+        parallel-false omission), P35 (G35 omitted legal tool_choice). All
+        literals are the no-reflow damage test — a future change that drops a
+        row or adds one without updating the guard fails loudly.
         """
-        assert len(r.REGISTER) == 66
+        assert len(r.REGISTER) == 73
 
     def test_the_register_is_a_tuple_and_not_a_list(self) -> None:
         """`mypy` does not run over `tests/`, so the annotation is not enforcement.
@@ -638,6 +642,9 @@ class TestTheTriggerArrangingBy:
             r.Trigger.NON_ENTRA_CREDENTIAL: r.ArrangingBy.PROFILE,
             r.Trigger.CHATGPT_ACCOUNT_ID_PRESENT: r.ArrangingBy.PROFILE,
             r.Trigger.THINKING_SIGNATURE_REJECTED: r.ArrangingBy.RESPONSE,
+            r.Trigger.BEDROCK_FORCES_AUTO_TOOL_CHOICE: r.ArrangingBy.REQUEST,
+            r.Trigger.ANTHROPIC_PARALLEL_FALSE_OMITTED: r.ArrangingBy.REQUEST,
+            r.Trigger.TOOL_CHOICE_OMITTED_AS_LEGAL_BUT_UNSUPPORTED: r.ArrangingBy.REQUEST,
         }
 
         assert set(expected) == set(r.Trigger) - {r.Trigger.ALWAYS}, (
