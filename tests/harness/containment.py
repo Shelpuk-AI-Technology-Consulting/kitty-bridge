@@ -394,6 +394,7 @@ class SealedNetwork:
         fmt: WireFormat = _DEFAULT_FORMAT,
         *,
         certs: CertFiles,
+        recorder_factory: Callable[[WireFormat], RecordingUpstream] | None = None,
     ) -> None:
         """Store the components without starting them.
 
@@ -414,9 +415,26 @@ class SealedNetwork:
                 here rather than from a pytest fixture because the harness is
                 not a fixture itself — a test asks for ``SealedNetwork``
                 explicitly.
+            recorder_factory: A callable producing the recorder, given the
+                wire format. Defaults to the primary
+                :class:`~harness.recorder.RecordingUpstream` (anthropic and
+                chat-completions shapes). Sibling slices pass a recorder
+                that speaks the format the botocore or curl_cffi transports
+                serve (e.g. :class:`~harness.botocore_recorder.BedrockRecordingUpstream`),
+                so a request on the bridge's botocore leg is answered in the
+                expected upstream format. The harness asserts nothing about
+                response shape itself; this is the seam the sibling slice's
+                recorder answers at, and the sibling passes its concrete
+                factory explicitly so the choice stays at the call site.
         """
         self._fmt = fmt
         self._certs = certs
+        # A ``None`` factory falls back to the primary recorder class via a
+        # module-level lookup **at start time**, not at construction time —
+        # so a test that patches ``containment.RecordingUpstream`` reaches
+        # the recorder this harness builds, and a sibling slice that passes
+        # an explicit factory uses the factory it supplied.
+        self._recorder_factory: Callable[[WireFormat], RecordingUpstream] | None = recorder_factory
         self._proxy: ConnectProxy | None = None
         self._recorder: RecordingUpstream | None = None
 
@@ -456,7 +474,7 @@ class SealedNetwork:
         # so the same key material services both the probe tests' TLS target
         # and the containment harness' TLS recorder without a second
         # generation pass.
-        recorder = RecordingUpstream(default_format=self._fmt)
+        recorder = (self._recorder_factory or RecordingUpstream)(self._fmt)
         await recorder.start(
             ssl_context=server_ssl_context(self._certs.target_cert, self._certs.target_key)
         )
@@ -554,6 +572,27 @@ class SealedNetwork:
             port) hold.
         """
         return f"https://{self.upstream_host}:{self.upstream_port}"
+
+    @property
+    def ca_path(self) -> str:
+        """Return the path of the throwaway CA certificate the harness uses.
+
+        The recorder and the proxy present leaves signed by this CA, so a
+        client whose own trust store does not carry it — botocore's urllib3
+        in particular, whose ``AWS_CA_BUNDLE`` channel is environment-bound —
+        reads this property to point its trust at the harness CA.
+
+        Returns:
+            The CA certificate path.
+
+        Raises:
+            RuntimeError: When the harness has not been started, for the
+                same half-started-state reason
+                :attr:`upstream_port` raises.
+        """
+        if self._recorder is None:
+            raise RuntimeError("sealed network is not running; call start() first")
+        return str(self._certs.ca)
 
     @property
     def proxy_url(self) -> str:
