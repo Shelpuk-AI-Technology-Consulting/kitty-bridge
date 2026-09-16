@@ -399,11 +399,18 @@ def _record_proven_with_sibling_guard(
 ) -> None:
     """Write the gate's ``PROVEN`` row, asserting no foreign row was mutated.
 
-    The sibling-row exemption accepts ``PROVEN`` (when the sibling's gate
-    also passed) **or** ``UNSUPPORTED`` (when the floor-skip shape applies
-    — both slices share the floor). Order-independent: when the sibling's
-    finaliser hasn't run yet, its row is ``NOT_ATTEMPTED`` and never
-    enters the untouched list.
+    The sibling-row exemption accepts ``PROVEN`` — and only ``PROVEN`` —
+    when the sibling's gate also passed. A sibling row reading
+    ``UNSUPPORTED`` never needs exempting here: this function is reached
+    only through a passing gate, which on the reachable paths means the
+    interpreter is ≥3.11 (below it the proxied phases are setup-skipped
+    and the gate cannot pass), and the sibling's floor recorder no-ops on
+    ≥3.11 — so a sibling ``UNSUPPORTED`` row cannot legitimately coexist
+    with this ``PROVEN`` write, and if one is observed it is a defect the
+    guard is right to surface.
+
+    Order-independent: when the sibling's finaliser hasn't run yet, its
+    row is ``NOT_ATTEMPTED`` and never enters the untouched list.
 
     Args:
         outcomes: The slice's call-phase outcomes.
