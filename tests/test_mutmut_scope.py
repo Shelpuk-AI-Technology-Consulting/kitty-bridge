@@ -415,7 +415,11 @@ def test_every_only_mutate_entry_has_a_registry_row() -> None:
 
 
 def _server_source() -> str:
-    """Return the live ``server.py`` source text."""
+    """Return the live ``server.py`` source text.
+
+    Returns:
+        The file's contents as a single string (LF line endings preserved).
+    """
     return (
         Path(__file__).resolve().parent.parent
         / "src" / "kitty" / "bridge" / "server.py"
@@ -432,6 +436,14 @@ def _pragma_marked_defs(source: str) -> set[str]:
     see ``mutmut/mutation/pragma_handling.py`` ``_scan_body_stmts`` and
     ``_visit_compound_header``), so they carry no pragma of their own
     and would only generate false negatives here.
+
+    Args:
+        source: The server.py source text.
+
+    Returns:
+        Names of block-level defs/classes whose body header carries a
+        ``# pragma: no mutate block`` line. Includes ``"BridgeServer"``
+        if a class-level pragma was placed on it.
     """
     tree = ast.parse(source)
     lines = source.split("\n")
@@ -473,6 +485,13 @@ def _block_level_defs(source: str) -> set[str]:
 
     Nested defs/classes are skipped — they are governed transitively by
     their enclosing marked parent.
+
+    Args:
+        source: The server.py source text.
+
+    Returns:
+        Names of every def/class at module top-level plus each direct
+        child of ``BridgeServer``. Includes ``"BridgeServer"`` itself.
     """
     tree = ast.parse(source)
     names: set[str] = set()

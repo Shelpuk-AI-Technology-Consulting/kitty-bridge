@@ -36,6 +36,10 @@ SEVEN: frozenset[str] = frozenset(
         "_get_max_context_chars",
     }
 )
+# SEVEN must stay in lockstep with TARGET_GROUPS["compaction_and_pairing"]
+# in tests/mutmut_scope.py. The L2 guard compares server.py's unmarked set
+# against the registry, so a registry edit trips the guard — but this
+# script's re-run path consults only SEVEN, so update both together.
 
 
 def collect_insertions(
@@ -45,6 +49,14 @@ def collect_insertions(
 
     Indent is derived from the body's first statement's leading whitespace — the
     pragma sits at the body's indent level, one line above the first statement.
+
+    Args:
+        lines: The source file split on newlines (unmutated).
+        tree: The parsed AST of the same source.
+
+    Returns:
+        Insertion specs in ascending line order, one per out-of-scope
+        def/class. Already-marked defs are skipped (idempotency).
     """
     insertions: list[tuple[int, str]] = []
 
@@ -103,6 +115,11 @@ def apply(lines: list[str], insertions: list[tuple[int, str]]) -> None:
 
     Reversing ensures earlier insertions do not shift the indices of later
     ones.
+
+    Args:
+        lines: The source file split on newlines; mutated in place.
+        insertions: ``(0-indexed_insertion_point, indent)`` pairs from
+            :func:`collect_insertions`.
     """
     insertions.sort(key=lambda pair: pair[0], reverse=True)
     for index, indent in insertions:
@@ -110,6 +127,17 @@ def apply(lines: list[str], insertions: list[tuple[int, str]]) -> None:
 
 
 def main(path: pathlib.Path) -> int:
+    """Mark every out-of-scope def/class in ``path`` with the pragma.
+
+    Idempotent: a second run on an already-marked file is a no-op.
+
+    Args:
+        path: Path to the Python source file (``server.py``).
+
+    Returns:
+        0 when pragmas were written; 1 when the file was already fully
+        marked (a no-op run).
+    """
     src = path.read_text()
     lines = src.split("\n")
     tree = ast.parse(src)
