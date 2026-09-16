@@ -350,3 +350,29 @@ class TestFalsification:
         projected = rsp.ResponsesReplyProjection().read_reply(_reply(PUBLISHED_FULL_RESPONSE))
 
         c.verify_total(projected)
+
+    @pytest.mark.parametrize(
+        ("block_kind", "text_field", "bad_value"),
+        [("output_text", "text", 42), ("refusal", "refusal", 42)],
+    )
+    def test_wrongly_typed_message_content_residualises(
+        self, block_kind: str, text_field: str, bad_value: Any
+    ) -> None:
+        """R3 / W5 — a wrongly-typed ``text`` / ``refusal`` residualises at
+        its own path (§7.4.1: the rule is general).
+        """
+        message = {
+            "type": "message",
+            "id": "msg_1",
+            "status": "completed",
+            "role": "assistant",
+            "content": [{"type": block_kind, text_field: bad_value, "annotations": []}],
+        }
+        body = json.loads(json.dumps(PUBLISHED_FULL_RESPONSE))
+        body["output"] = [message]
+
+        projected = rsp.ResponsesReplyProjection().read_reply(_reply(body))
+
+        assert f"output[0].content[0].{text_field}" in projected.residual
+        with pytest.raises(c.ResidualFieldsError, match=text_field):
+            c.verify_total(projected)

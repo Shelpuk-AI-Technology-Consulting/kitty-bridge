@@ -218,6 +218,26 @@ class TestContentShapes:
         with pytest.raises(c.ResidualFieldsError, match="choices\\[1\\]"):
             c.verify_total(projected)
 
+    def test_audio_message_projects_as_opaque(self) -> None:
+        """R2 / W4 — the audio-output variant carries as ``Opaque`` so the
+        payload stays detectable by digest (§7.4.1)."""
+        audio = {
+            "id": "audio_abc",
+            "data": "base64-encoded-bytes",
+            "transcript": "Hello.",
+            "expires_at": 1234567890,
+        }
+        message = {"role": "assistant", "content": None, "audio": audio}
+        body = self._body_with_message(message, "stop")
+
+        projected = cc.ChatCompletionsReplyProjection().read_reply(_reply(body))
+
+        c.verify_total(projected)
+        audio_part = projected.parts[0]
+        assert isinstance(audio_part, c.Opaque)
+        assert audio_part.kind == "audio"
+        assert audio_part.digest
+
 
 # --------------------------------------------------------------------------
 # R4 — the finish-reason mapping, canonical and escaped
@@ -318,3 +338,24 @@ class TestFalsification:
         projected = cc.ChatCompletionsReplyProjection().read_reply(_reply(PUBLISHED_FULL_RESPONSE))
 
         c.verify_total(projected)
+
+    @pytest.mark.parametrize(
+        ("field", "bad_value"),
+        [
+            ("tool_calls", "not-a-list"),
+            ("reasoning_content", {"wrong": "type"}),
+            ("function_call", "not-a-dict"),
+        ],
+    )
+    def test_wrongly_typed_message_field_residualises(self, field: str, bad_value: Any) -> None:
+        """R3 / W3 — a wrongly-typed optional leaf residualises at its own
+        path (§7.4.1: the rule is general, not per-field).
+        """
+        body = json.loads(json.dumps(PUBLISHED_FULL_RESPONSE))
+        body["choices"][0]["message"][field] = bad_value
+
+        projected = cc.ChatCompletionsReplyProjection().read_reply(_reply(body))
+
+        assert f"choices[0].message.{field}" in projected.residual
+        with pytest.raises(c.ResidualFieldsError, match=field):
+            c.verify_total(projected)

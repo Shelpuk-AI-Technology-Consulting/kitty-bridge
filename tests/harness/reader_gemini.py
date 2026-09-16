@@ -560,6 +560,7 @@ class GeminiReplyProjection:
         if not isinstance(value, dict):
             residual[c.residual_key("candidates[0].content")] = value
             return ()
+        _residualise_raw(value, {"role", "parts"}, "candidates[0].content", residual)
         parts_raw = value.get("parts")
         role = value.get("role")
         if role is not None and not isinstance(role, str):
@@ -655,12 +656,20 @@ class GeminiReplyProjection:
 
         # Unmodelled / tool-output parts (``fileData``, ``executableCode``,
         # ``codeExecutionResult``, …) carry as ``Opaque`` so the digest keeps
-        # the payload detectable. ``opaque_kind`` returns the wire type
-        # itself for most Gemini types (they are already snake_case); the
-        # alias table reconciles the rest.
+        # the payload detectable. The three spellings Gemini publishes here
+        # are camelCase, so ``opaque_kind`` has no canonical name for them
+        # yet — that is the wire's fault, not the reader's, so the
+        # ``ValueError`` is translated to ``UnreadableBodyError`` per §7.4.1's
+        # rule (a reader-raised ``ValueError`` is a reader bug; this is not).
+        # A canonical alias lands with the first real capture of one of these
+        # kinds, the same posture §7.4.1 puts on T-A5's nine camelCase types.
         kind = next((k for k in ("fileData", "executableCode", "codeExecutionResult") if k in part), None)
         if kind is not None:
-            return (c.Opaque(kind=c.opaque_kind(kind), digest=c.opaque_digest(part)),)
+            try:
+                canonical = c.opaque_kind(kind)
+            except ValueError as exc:
+                raise c.UnreadableBodyError(f"{prefix}: {exc}") from exc
+            return (c.Opaque(kind=canonical, digest=c.opaque_digest(part)),)
 
         # Truly unrecognised — no recognised field on the part. Residualise
         # the whole part so the run names the structural anomaly.

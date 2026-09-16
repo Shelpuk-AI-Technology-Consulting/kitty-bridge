@@ -1192,6 +1192,7 @@ class ResponsesProjection:
 
         return merged
 
+
 class ResponsesReplyProjection:
     """Reads an OpenAI Responses reply into :class:`~harness.contract.Reply`.
 
@@ -1497,10 +1498,16 @@ class ResponsesReplyProjection:
                 text = block.get("text")
                 if isinstance(text, str):
                     parts.append(c.Text(text))
+                elif text is not None:
+                    # A wrongly-typed ``text`` (the schema requires a string)
+                    # residualises at its own path so the run names it.
+                    residual[c.residual_key(block_prefix, "text")] = text
             elif block_kind == "refusal":
                 text = block.get("refusal")
                 if isinstance(text, str):
                     parts.append(c.Text(text))
+                elif text is not None:
+                    residual[c.residual_key(block_prefix, "refusal")] = text
         return tuple(parts)
 
     @classmethod

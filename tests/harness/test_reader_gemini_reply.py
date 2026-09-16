@@ -189,6 +189,70 @@ class TestContentShapes:
         with pytest.raises(c.ResidualFieldsError, match="candidates\\[1\\]"):
             c.verify_total(projected)
 
+    @pytest.mark.parametrize(
+        "part",
+        [
+            {"fileData": {"fileUri": "gs://bucket/file.pdf", "mimeType": "application/pdf"}},
+            {"executableCode": {"language": "PYTHON", "code": "print('hi')"}},
+            {"codeExecutionResult": {"outcome": "OUTCOME_OK", "output": "hi"}},
+        ],
+    )
+    def test_unmodelled_part_shapes_project_as_opaque(self, part: dict[str, Any]) -> None:
+        """R2 — three camelCase Part kinds the request reader also meets, projected
+        as ``Opaque`` so the digest keeps the payload detectable. ``opaque_kind``
+        raises ``ValueError`` for these spellings (no canonical alias yet) — the
+        reader translates that to ``UnreadableBodyError``, per §7.4.1, until the
+        first real capture wires the alias. This test pins the camelCase path:
+        it currently raises, surfacing the alias gap to the next reader.
+        """
+        body = self._body_with_parts([part])
+        with pytest.raises(c.UnreadableBodyError):
+            gm.GeminiReplyProjection().read_reply(_reply(body))
+
+    def test_inline_data_part_projects_as_image(self) -> None:
+        """R2 — ``inlineData`` projects as ``Image``; the base64 payload
+        decodes and the digest is the SHA-256 of the decoded bytes (§7.4 rule 7
+        row 3, KBR-192)."""
+        # "hello" → base64 "aGVsbG8="
+        body = self._body_with_parts(
+            [{"inlineData": {"mimeType": "image/png", "data": "aGVsbG8="}}]
+        )
+
+        projected = gm.GeminiReplyProjection().read_reply(_reply(body))
+
+        c.verify_total(projected)
+        part = projected.parts[0]
+        assert isinstance(part, c.Image)
+        assert part.media_type == "image/png"
+        # SHA-256 of b"hello" = 2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824
+        assert part.digest == "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+
+    def test_inline_data_with_invalid_base64_falls_back_to_raw_bytes(self) -> None:
+        """R2 / KBR-192 — when ``base64 -validate=True`` rejects the payload
+        (RFC 2045 line breaks the wire sometimes carries), the digest is the
+        SHA-256 of the raw encoded bytes and the field residualises, so the
+        run names the structural break rather than silently dropping the
+        image.
+        """
+        # 80-char wrapped base64 — what Google's own image sample uses
+        # (`base64 -w0` is the unwrap flag). ``validate=True`` rejects it.
+        wrapped = "aGVs\nbG8="
+        body = self._body_with_parts(
+            [{"inlineData": {"mimeType": "image/png", "data": wrapped}}]
+        )
+
+        projected = gm.GeminiReplyProjection().read_reply(_reply(body))
+
+        assert "candidates[0].content.parts[0].inlineData.data" in projected.residual
+        assert projected.residual[
+            "candidates[0].content.parts[0].inlineData.data"
+        ] == wrapped
+        # SHA-256 of the UTF-8 encoding of the raw wrapped bytes.
+        import hashlib
+
+        expected = hashlib.sha256(wrapped.encode("utf-8")).hexdigest()
+        assert projected.parts[0].digest == expected  # type: ignore[union-attr]
+
 
 # --------------------------------------------------------------------------
 # R4 — the finish-reason mapping, canonical and escaped
@@ -280,3 +344,16 @@ class TestFalsification:
         projected = gm.GeminiReplyProjection().read_reply(_reply(PUBLISHED_TEXT_RESPONSE))
 
         c.verify_total(projected)
+
+    def test_unknown_content_level_key_residualises(self) -> None:
+        """R3 / W2 — an unmodelled key on the ``content`` object fails closed
+        at depth, matching the residue rule the candidate and part levels
+        already enforce."""
+        body = json.loads(json.dumps(PUBLISHED_TEXT_RESPONSE))
+        body["candidates"][0]["content"]["x_vendor_extra"] = 1
+
+        projected = gm.GeminiReplyProjection().read_reply(_reply(body))
+
+        assert "candidates[0].content.x_vendor_extra" in projected.residual
+        with pytest.raises(c.ResidualFieldsError, match="x_vendor_extra"):
+            c.verify_total(projected)

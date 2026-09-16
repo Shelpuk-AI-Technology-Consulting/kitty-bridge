@@ -434,52 +434,87 @@ class ChatCompletionsReplyProjection:
 
         # ``tool_calls`` — each is a function-call payload with arguments as a
         # JSON string; the one shared decode rule (§7.4.1, KBR-174) handles it.
+        # A wrongly-typed value residualises at its own path; a malformed
+        # *entry* (not a dict, or no string ``function.name``) raises
+        # ``UnreadableBodyError`` because there is no partial projection to
+        # salvage — §7.4.1.
         tool_calls = value.get("tool_calls")
-        if isinstance(tool_calls, list):
-            for index, call in enumerate(tool_calls):
-                if not isinstance(call, dict):
-                    residual[c.residual_key("choices[0].message.tool_calls", index=index)] = call
-                    continue
-                if not isinstance(call.get("function"), dict):
-                    raise c.UnreadableBodyError(
-                        f"choices[0].message.tool_calls[{index}].function must be an object"
+        if tool_calls is not None:
+            if not isinstance(tool_calls, list):
+                residual[c.residual_key("choices[0].message", "tool_calls")] = tool_calls
+            else:
+                for index, call in enumerate(tool_calls):
+                    if not isinstance(call, dict):
+                        residual[
+                            c.residual_key("choices[0].message.tool_calls", index=index)
+                        ] = call
+                        continue
+                    if not isinstance(call.get("function"), dict):
+                        raise c.UnreadableBodyError(
+                            f"choices[0].message.tool_calls[{index}].function must be an object"
+                        )
+                    if not isinstance(call["function"].get("name"), str):
+                        raise c.UnreadableBodyError(
+                            f"choices[0].message.tool_calls[{index}].function.name must be a string"
+                        )
+                    parts.append(
+                        c.ToolUse(
+                            name=call["function"]["name"],
+                            arguments=c.decode_arguments(
+                                call["function"].get("arguments"),
+                                f"choices[0].message.tool_calls[{index}].function.arguments",
+                                residual,
+                            ),
+                            id=call.get("id") if isinstance(call.get("id"), str) else None,
+                        )
                     )
-                if not isinstance(call["function"].get("name"), str):
-                    raise c.UnreadableBodyError(
-                        f"choices[0].message.tool_calls[{index}].function.name must be a string"
-                    )
-                parts.append(
-                    c.ToolUse(
-                        name=call["function"]["name"],
-                        arguments=c.decode_arguments(
-                            call["function"].get("arguments"),
-                            f"choices[0].message.tool_calls[{index}].function.arguments",
-                            residual,
-                        ),
-                        id=call.get("id") if isinstance(call.get("id"), str) else None,
-                    )
-                )
 
         # ``reasoning_content`` — CC extension; P8's complement. An empty string
         # still projects as a Thinking part so its absence is observable (§3.3.1).
         reasoning = value.get("reasoning_content")
         if isinstance(reasoning, str):
             parts.append(c.Thinking(text=reasoning))
+        elif reasoning is not None:
+            residual[c.residual_key("choices[0].message", "reasoning_content")] = reasoning
 
         # The legacy ``function_call`` key, when present alongside ``tool_calls``,
-        # projects as an additional ``ToolUse`` (deprecated form).
+        # projects as an additional ``ToolUse`` (deprecated form). A dict
+        # without a string ``name`` is malformed — there is no partial call
+        # to salvage — and raises.
         function_call = value.get("function_call")
-        if isinstance(function_call, dict) and isinstance(function_call.get("name"), str):
-            parts.append(
-                c.ToolUse(
-                    name=function_call["name"],
-                    arguments=c.decode_arguments(
-                        function_call.get("arguments"),
-                        "choices[0].message.function_call.arguments",
-                        residual,
-                    ),
+        if function_call is not None:
+            if not isinstance(function_call, dict):
+                residual[c.residual_key("choices[0].message", "function_call")] = function_call
+            elif not isinstance(function_call.get("name"), str):
+                raise c.UnreadableBodyError(
+                    "choices[0].message.function_call.name must be a string"
                 )
-            )
+            else:
+                parts.append(
+                    c.ToolUse(
+                        name=function_call["name"],
+                        arguments=c.decode_arguments(
+                            function_call.get("arguments"),
+                            "choices[0].message.function_call.arguments",
+                            residual,
+                        ),
+                    )
+                )
+
+        # ``audio`` — the audio-output variant of a message. Carries as
+        # ``Opaque`` so the payload stays detectable by digest; ``opaque_kind``
+        # raises for non-snake_case wire spellings, which is the wire's fault,
+        # not the reader's, so the ``ValueError`` becomes ``UnreadableBodyError``
+        # per §7.4.1.
+        audio = value.get("audio")
+        if audio is not None:
+            try:
+                canonical = c.opaque_kind("audio")
+            except ValueError as exc:
+                raise c.UnreadableBodyError(
+                    f"choices[0].message.audio: {exc}"
+                ) from exc
+            parts.append(c.Opaque(kind=canonical, digest=c.opaque_digest(audio)))
 
         return tuple(parts)
 
