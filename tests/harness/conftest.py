@@ -303,8 +303,13 @@ def _record_unsupported_if_floor_shape(
             writer path on any interpreter matrix without patching ``sys``.
 
     Returns:
-        ``True`` when the row was recorded (the caller's normal ``PROVEN``
-        path must then be skipped), ``False`` otherwise.
+        ``True`` when the row was recorded — i.e. the floor shape applied
+        and the row was still ``NOT_ATTEMPTED``. Returned for
+        testability and readability; the finalisers call this as the
+        last statement of their non-``PROVEN`` branch, so the value is
+        not consulted by any caller today, but the contract is part of
+        the recorder's shape (a ``False`` return always means "no write
+        happened", which the unit tests pin).
     """
     if not _floor_unsupported_shape(outcomes, teardown_outcomes, version_info=version_info):
         return False

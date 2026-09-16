@@ -76,6 +76,7 @@ import asyncio
 import contextlib
 import ssl
 import sys
+import tempfile
 from collections.abc import AsyncGenerator, Iterator
 from pathlib import Path
 from typing import Any
@@ -331,6 +332,13 @@ class CurlCffiContainment(ContainmentTransport):
             # eventual URL uses.
             for port in (80, 443):
                 resolver_entries.append(f"{host}:{port}:127.0.0.2")
+        # Expose the constructed entries on the instance so the wiring
+        # can be asserted independently of the egress behaviour — the
+        # phase-1 deny test asserts on this snapshot (count + loopback
+        # suffix structure, no hostname literals) so an empty or shortened
+        # ``_REAL_UPSTREAM_HOSTS`` fails the test even if the seam-miss
+        # itself still fails for unrelated reasons.
+        self._last_resolver_entries: list[str] = list(resolver_entries)
         real_cls = curl_requests.AsyncSession
 
         def _session_with_resolve(**kwargs: Any) -> Any:
@@ -372,24 +380,33 @@ class CurlCffiContainment(ContainmentTransport):
         harness: SealedNetwork,
         *,
         monkeypatch: pytest.MonkeyPatch,
-        tmp_path: Path,
+        resolver_port: int | None = None,
     ) -> Phase1Result:
         """Drive one request through the bridge with egress off (§5.2.2 phase 1).
+
+        The signature matches the ``ContainmentTransport`` protocol exactly.
+        ``resolver_port`` is accepted and **ignored**: the protocol declares
+        it as the falsification seam (a broken resolver must make the
+        positive control fail), and the aiohttp slice drives that seam
+        through its monkeypatched resolver. The curl slice's resolver is
+        the harness's own resolve map — applied per drive by
+        :meth:`direct_route`, not a resolver the transport consults — so
+        there is no "broken resolver" variant to inject; this slice's
+        falsification seam is the phase-3 ``get_egress`` patch instead.
 
         Args:
             harness: The sealed network the request is driven against.
             monkeypatch: Pytest's monkeypatch fixture; reserved for the
                 calling test's own patches (the direct route manages its own
                 scope).
-            tmp_path: Where the seeded OAuth session file lives; the adapter
-                reads ``cc_request["_resolved_key"]`` as a path.
+            resolver_port: Ignored; present for protocol substitutability.
 
         Returns:
             A :class:`Phase1Result` with the recorder's observations. With
             egress off and the resolve mapping in scope, ``status == 200``,
             ``len(captures) == 1``, ``attempts == []``.
         """
-        return await self._drive(harness, egress=None, monkeypatch=monkeypatch, tmp_path=tmp_path)
+        return await self._drive(harness, egress=None, monkeypatch=monkeypatch)
 
     async def drive_with_egress(
         self,
@@ -397,7 +414,7 @@ class CurlCffiContainment(ContainmentTransport):
         *,
         egress: EgressConfig,
         monkeypatch: pytest.MonkeyPatch,
-        tmp_path: Path,
+        resolver_port: int | None = None,
     ) -> Phase1Result:
         """Drive one request through the bridge with egress configured (§5.2.2 phases 2/2b/3).
 
@@ -416,6 +433,9 @@ class CurlCffiContainment(ContainmentTransport):
         detects the bypass instead of the test passing vacuously on a DNS
         failure (§5.3 trap 2).
 
+        ``resolver_port`` is accepted and ignored — see
+        :meth:`drive_phase_1` for the protocol-substitutability note.
+
         Args:
             harness: The sealed network the request is driven against.
             egress: The configuration to install. Typical value:
@@ -423,12 +443,12 @@ class CurlCffiContainment(ContainmentTransport):
                 subcase.
             monkeypatch: Pytest's monkeypatch fixture; reserved for the
                 calling test's own patches.
-            tmp_path: Where the seeded OAuth session file lives.
+            resolver_port: Ignored; present for protocol substitutability.
 
         Returns:
             A :class:`Phase1Result` with the recorder's observations.
         """
-        return await self._drive(harness, egress=egress, monkeypatch=monkeypatch, tmp_path=tmp_path)
+        return await self._drive(harness, egress=egress, monkeypatch=monkeypatch)
 
     async def _drive(
         self,
@@ -436,7 +456,6 @@ class CurlCffiContainment(ContainmentTransport):
         *,
         egress: EgressConfig | None,
         monkeypatch: pytest.MonkeyPatch,
-        tmp_path: Path,
     ) -> Phase1Result:
         """The drive both entry points share; ``egress=None`` is phase 1.
 
@@ -445,13 +464,20 @@ class CurlCffiContainment(ContainmentTransport):
         the drive propagates *after* the global is restored — the ``finally``
         ordering is what keeps the process default intact on a failing drive.
 
+        The OAuth session file is a throwaway owned by the drive: a
+        :class:`tempfile.TemporaryDirectory` is created on entry, the
+        session is seeded into it, and the directory is cleaned up on
+        return. That keeps the public ``drive_phase_1`` / ``drive_with_egress``
+        signatures matched to the :class:`ContainmentTransport` protocol
+        exactly (no ``tmp_path`` kwarg — the protocol is the common kwarg
+        set across all transports).
+
         Args:
             harness: The sealed network the request is driven against.
             egress: The configuration to install, or ``None`` for the direct
                 leg.
             monkeypatch: Pytest's monkeypatch fixture (unused here; the
                 parameter keeps the two entry points' signatures identical).
-            tmp_path: Where the seeded OAuth session file lives.
 
         Returns:
             A :class:`Phase1Result` with the bridge's status, the recorder's
@@ -465,65 +491,59 @@ class CurlCffiContainment(ContainmentTransport):
 
         # A fresh adapter per drive: the session (and its egress mapping) is
         # built lazily on the first request, so the configuration below is
-        # what the session sees. A fresh OAuth session file per drive, because
-        # `seed_oauth_session` stamps `now`-relative expiry — a stale file
-        # from an earlier phase would fire the refresh leg, which is T-E5's
-        # scope, not this slice's.
-        oauth_key = seed_oauth_session(tmp_path)
+        # what the session sees. The OAuth session file lives in a drive-owned
+        # temp dir (cleaned on return) so callers don't need to provide one.
+        with tempfile.TemporaryDirectory() as _oauth_dir:
+            oauth_key = seed_oauth_session(Path(_oauth_dir))
 
-        saved_egress = get_egress()
-        status: int = -1
-        text: str = ""
-        try:
-            set_egress(egress)
-            with harness_codex_url(harness), self.direct_route(harness):
-                adapter = OpenAISubscriptionAdapter()
-                server = BridgeServer(
-                    None,  # type: ignore[arg-type]
-                    adapter,
-                    oauth_key,
-                    model=MODEL,
-                    provider_config={},
-                    egress=egress,
-                )
-                try:
-                    bridge_port = await server.start_async()
+            saved_egress = get_egress()
+            status: int = -1
+            text: str = ""
+            try:
+                set_egress(egress)
+                with harness_codex_url(harness), self.direct_route(harness):
+                    adapter = OpenAISubscriptionAdapter()
+                    server = BridgeServer(
+                        None,  # type: ignore[arg-type]
+                        adapter,
+                        oauth_key,
+                        model=MODEL,
+                        provider_config={},
+                        egress=egress,
+                    )
+                    try:
+                        bridge_port = await server.start_async()
 
-                    # The same body the T-B2 round-trip drives: Responses
-                    # inbound, trivial content, non-streaming — the recorder
-                    # replies with its minimal SSE success and the bridge
-                    # parses it. The marker is unique per drive so a capture
-                    # from an earlier phase cannot satisfy a later assertion.
-                    sent = marker()
-                    body = minimal_inbound_body(InboundProtocol.RESPONSES, sent)
+                        sent = marker()
+                        body = minimal_inbound_body(InboundProtocol.RESPONSES, sent)
 
-                    async with aiohttp.ClientSession() as client:
-                        response = await client.post(
-                            f"http://127.0.0.1:{bridge_port}{inbound_path(InboundProtocol.RESPONSES)}",
-                            json=body,
-                            timeout=aiohttp.ClientTimeout(total=_DRIVE_TIMEOUT),
-                        )
-                        text = await response.text()
-                        status = response.status
-                except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:
-                    # The bridge either timed out or failed its own outbound
-                    # connect — both shapes the test client's ``status``
-                    # field cannot represent. Carry the exception in ``text``
-                    # so a failing drive is diagnosable from its result alone.
-                    status = -1
-                    text = repr(exc)
-                finally:
-                    await server.stop_async()
-        finally:
-            set_egress(saved_egress)
+                        async with aiohttp.ClientSession() as client:
+                            response = await client.post(
+                                f"http://127.0.0.1:{bridge_port}{inbound_path(InboundProtocol.RESPONSES)}",
+                                json=body,
+                                timeout=aiohttp.ClientTimeout(total=_DRIVE_TIMEOUT),
+                            )
+                            text = await response.text()
+                            status = response.status
+                    except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:
+                        # The bridge either timed out or failed its own outbound
+                        # connect — both shapes the test client's ``status``
+                        # field cannot represent. Carry the exception in ``text``
+                        # so a failing drive is diagnosable from its result alone.
+                        status = -1
+                        text = repr(exc)
+                    finally:
+                        await server.stop_async()
+            finally:
+                set_egress(saved_egress)
 
-        return Phase1Result(
-            status=status,
-            text=text,
-            captures=list(harness.recorder.requests),
-            connections=list(harness.recorder.connections),
-            attempts=list(harness.proxy.attempts),
-        )
+            return Phase1Result(
+                status=status,
+                text=text,
+                captures=list(harness.recorder.requests),
+                connections=list(harness.recorder.connections),
+                attempts=list(harness.proxy.attempts),
+            )
 
 
 #: A budget for one drive request (T-E1's value). The green path completes in
@@ -582,10 +602,20 @@ class TestDirectRouteBlocksRealEgress:
         self,
         sealed_network: SealedNetwork,
         curl_trusts_test_ca: None,
-        tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Phase 1 (direct): client-side deny bites; recorder sees nothing."""
+        """Phase 1 (direct): client-side deny bites; recorder sees nothing.
+
+        The wiring assertion at the end is what makes this test
+        non-vacuous: the three egress assertions below hold identically
+        whether the deny entries are present (curl dials the blackhole)
+        or absent (the drive fails for an unrelated reason — bad seeded
+        token, DNS refusal). Asserting on the constructed resolver-entry
+        snapshot — one harness entry, ``2 × len(_REAL_UPSTREAM_HOSTS)``
+        blackhole entries, nothing else — fails the moment the deny map
+        is emptied or removed, which is the regression the test name
+        promises to catch.
+        """
         import contextlib as _cl
 
         import harness.test_curl_cffi_containment_slice as _this_module
@@ -602,7 +632,8 @@ class TestDirectRouteBlocksRealEgress:
             raising=False,
         )
 
-        result = await _drive().drive_phase_1(sealed_network, monkeypatch=monkeypatch, tmp_path=tmp_path)
+        transport = _drive()
+        result = await transport.drive_phase_1(sealed_network, monkeypatch=monkeypatch)
 
         assert result.status != 200, (
             "bridge answered " + str(result.status) + ": a forced seam miss should not "
@@ -616,12 +647,34 @@ class TestDirectRouteBlocksRealEgress:
             f"recorder saw {len(result.captures)} capture(s): a real request reached the upstream"
         )
 
+        # Wiring assertion — see the docstring. Counts and loopback/blackhole
+        # suffixes only: no hostname literals (CodeQL's
+        # py/incomplete-url-substring-sanitization tracks those through any
+        # comparison with a URL-derived value).
+        entries = transport._last_resolver_entries
+        loopback = [e for e in entries if e.endswith(":127.0.0.1")]
+        blackholed = [e for e in entries if e.endswith(":127.0.0.2")]
+        expected_denies = 2 * len(CurlCffiContainment._REAL_UPSTREAM_HOSTS)
+        assert len(loopback) == 1, (
+            f"expected exactly 1 harness resolve entry, got {loopback!r}: the "
+            "harness-hostname mapping is missing from direct_route"
+        )
+        assert len(blackholed) == expected_denies, (
+            f"expected {expected_denies} blackhole deny entries "
+            f"(2 ports x {len(CurlCffiContainment._REAL_UPSTREAM_HOSTS)} hosts), got "
+            f"{len(blackholed)}: the deny map was emptied or shortened — the "
+            "phase-1 real-egress window this test exists to close is open again"
+        )
+        assert len(entries) == 1 + expected_denies, (
+            f"unexpected resolve entries in {entries!r}: direct_route injected "
+            "something beyond the harness mapping and the deny map"
+        )
+
     @pytest.mark.skipif(_NEEDS_311, reason=_SKIP_REASON)
     async def test_phase2b_proxied_leg_with_forced_seam_miss_does_not_reach_real_upstream(
         self,
         sealed_network: SealedNetwork,
         curl_trusts_test_ca: None,
-        tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Phase 2b (proxied): client-side deny is irrelevant; the proxy's deny bites.
@@ -657,8 +710,7 @@ class TestDirectRouteBlocksRealEgress:
             sealed_network,
             egress=_egress_for(sealed_network),
             monkeypatch=monkeypatch,
-            tmp_path=tmp_path,
-        )
+                    )
 
         assert result.status != 200, (
             "bridge answered " + str(result.status) + ": a forced seam miss on phase 2b "
@@ -709,11 +761,10 @@ class TestPhase1PositiveControl:
         self,
         sealed_network: SealedNetwork,
         curl_trusts_test_ca: None,
-        tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Green path on the TLS recorder: 200, one capture, real peer port, zero attempts."""
-        result = await _drive().drive_phase_1(sealed_network, monkeypatch=monkeypatch, tmp_path=tmp_path)
+        result = await _drive().drive_phase_1(sealed_network, monkeypatch=monkeypatch)
 
         assert result.status == 200, f"bridge answered {result.status}: {result.text!r}"
         assert len(result.captures) == 1, f"recorder saw {len(result.captures)} capture(s)"
@@ -744,14 +795,13 @@ class TestPhase2ContainmentProxyDown:
         self,
         sealed_network: SealedNetwork,
         curl_trusts_test_ca: None,
-        tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Stop the proxy, drive once, assert the recorder holds nothing and the drive failed."""
         await sealed_network.proxy.stop()
 
         result = await _drive().drive_with_egress(
-            sealed_network, egress=_egress_for(sealed_network), monkeypatch=monkeypatch, tmp_path=tmp_path
+            sealed_network, egress=_egress_for(sealed_network), monkeypatch=monkeypatch
         )
 
         assert result.status != 200, (
@@ -788,14 +838,13 @@ class TestPhase2bContainmentHealthy:
         self,
         sealed_network: SealedNetwork,
         curl_trusts_test_ca: None,
-        tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Three drives, every recorded peer port matches a tunnel source port."""
         egress = _egress_for(sealed_network)
         for _ in range(3):
             result = await _drive().drive_with_egress(
-                sealed_network, egress=egress, monkeypatch=monkeypatch, tmp_path=tmp_path
+                sealed_network, egress=egress, monkeypatch=monkeypatch
             )
             assert result.status == 200, f"drive answered {result.status}: {result.text!r}"
 
@@ -819,7 +868,6 @@ class TestPhase2bContainmentHealthy:
         self,
         sealed_network: SealedNetwork,
         curl_trusts_test_ca: None,
-        tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """407 ⇒ the recorder holds nothing; the failed tunnel's attempt carries no port.
@@ -831,8 +879,7 @@ class TestPhase2bContainmentHealthy:
             sealed_network,
             egress=_egress_for(sealed_network, password="wrong"),
             monkeypatch=monkeypatch,
-            tmp_path=tmp_path,
-        )
+                    )
 
         assert result.status != 200, f"drive answered {result.status} on wrong proxy credentials"
         assert result.connections == [], (
@@ -869,7 +916,6 @@ class TestPhase3Falsification:
         self,
         sealed_network: SealedNetwork,
         curl_trusts_test_ca: None,
-        tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Patched ``get_egress`` ⇒ the recorder sees a connection the proxy cannot explain.
@@ -885,7 +931,7 @@ class TestPhase3Falsification:
         monkeypatch.setattr(openai_subscription, "get_egress", lambda: None)
 
         result = await _drive().drive_with_egress(
-            sealed_network, egress=_egress_for(sealed_network), monkeypatch=monkeypatch, tmp_path=tmp_path
+            sealed_network, egress=_egress_for(sealed_network), monkeypatch=monkeypatch
         )
 
         # The bypass worked: the bridge reached the recorder directly (the
@@ -924,7 +970,6 @@ class TestDriveWithEgress:
         self,
         sealed_network: SealedNetwork,
         curl_trusts_test_ca: None,
-        tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Green path: egress enabled, proxy up, one request lands on the recorder.
@@ -938,7 +983,7 @@ class TestDriveWithEgress:
         """
         egress = _egress_for(sealed_network)
         result = await _drive().drive_with_egress(
-            sealed_network, egress=egress, monkeypatch=monkeypatch, tmp_path=tmp_path
+            sealed_network, egress=egress, monkeypatch=monkeypatch
         )
 
         assert isinstance(result, Phase1Result)

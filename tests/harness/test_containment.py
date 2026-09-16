@@ -675,9 +675,6 @@ class TestBridgeAiohttpContainment:
         )
 
 
-# ── Helpers (private) ─────────────────────────────────────────────────────
-
-
 class TestVerdictFloorDetection:
     """The Python <3.11 floor-skip shape — the plan §8 done-when, honoured.
 
@@ -839,6 +836,9 @@ class TestVerdictFloorDetection:
         clean = {_PHASE_1_NAME: _PhaseOutcome.PASSED}
         assert _record_unsupported_if_floor_shape(outcomes, clean, "curl_cffi", version_info=(3, 11, 0)) is False
         assert report_instance().entry("curl_cffi").outcome is Outcome.NOT_ATTEMPTED
+
+
+# ── Helpers (private) ─────────────────────────────────────────────────────
 
 
 def _find_closed_port() -> int:
