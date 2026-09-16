@@ -1062,6 +1062,16 @@ class TestParts:
 
         assert "messages[0].content[0].toolUse.input" in projected.residual
 
+        # KBR-251 — the part is still produced even on a wire-format breach.
+        # Without this assertion a regression that reverted `_read_tool_use`
+        # to `return None` on non-Mapping input would still pass the
+        # residual-only assertion above.
+        assert len(projected.conversation.turns[0].parts) == 1
+        part = projected.conversation.turns[0].parts[0]
+        assert isinstance(part, c.ToolUse)
+        assert part.name == "get_weather"  # the name survived; only `input` was bad
+        assert part.arguments == {}
+
     def test_tool_result_text(self) -> None:
         """``toolResult.content[text]`` → ``ToolResult(content=[Text])``."""
         projected = project(
