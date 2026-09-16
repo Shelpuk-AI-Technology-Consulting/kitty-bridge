@@ -1338,6 +1338,61 @@ class TestReasoningContent:
         assert isinstance(part, c.Opaque)
         assert part.kind == "redacted_thinking"
 
+    def test_a_multi_discriminator_block_is_dispatched_in_a_stable_order(self) -> None:
+        """Schema-illegal but defensible: a block carrying two Opaque-only
+        discriminators. The dispatch must pick the same
+        :attr:`~harness.contract.Opaque.kind` every run — a schema revision
+        that grows ``PUBLISHED_CONTENT_BLOCK_TYPES`` (a frozenset) would
+        otherwise vary the chosen kind under ``PYTHONHASHSEED``. The
+        tuple ``_OPAQUE_CONTENT_BLOCK_ORDER`` is sorted, so two runs
+        against the same input agree on the kind.
+        """
+        body = {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [{"document": {}, "video": {}}],
+                }
+            ]
+        }
+        first = project_untotalled(body).conversation.turns[0].parts[0]
+        second = project_untotalled(body).conversation.turns[0].parts[0]
+
+        assert isinstance(first, c.Opaque)
+        assert first.kind == second.kind
+        # The sorted-tuple order has ``document`` before ``video``; the
+        # dispatch picks the first match in that order.
+        assert first.kind == "document"
+
+    def test_neither_member_residualises_and_projects_an_unknown_reasoning(self) -> None:
+        """A ``reasoningContent`` with neither union member occupies the position
+        with an Opaque identity (KBR-251 / §7.4.2 rule 7 — the part is
+        never vacated). The whole block residualises at its parent path so
+        the totality check sees the breach; ``Opaque.kind`` is the
+        ``unknown_reasoning`` sentinel.
+        """
+        projected = project_untotalled(
+            {
+                "messages": [
+                    {
+                        "role": "assistant",
+                        "content": [
+                            {"reasoningContent": {"unrecognised": "key"}}
+                        ],
+                    }
+                ]
+            }
+        )
+
+        # Position occupied.
+        part = projected.conversation.turns[0].parts[0]
+        assert isinstance(part, c.Opaque)
+        assert part.kind == "unknown_reasoning"
+
+        # The whole block residualises at its parent path so the
+        # totality check sees it.
+        assert "messages[0].content[0].reasoningContent" in projected.residual
+
 
 # --------------------------------------------------------------------------
 # Falsification: every optional leaf fails closed
@@ -2064,7 +2119,7 @@ class TestSchemaAgreement:
 
     @pytest.fixture(scope="module")
     def live_schema(self) -> dict[str, Any]:
-        """Pull the live service model — pinned by ``uv.lock``."""
+        """Pull the live service model for comparison against the pinned literal."""
         sm = Session().get_service_model("bedrock-runtime")
         op = sm.operation_model("Converse")
         return {"input_shape": op.input_shape}

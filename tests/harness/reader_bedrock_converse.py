@@ -198,6 +198,27 @@ _FIRST_CLASS_RESULT_DISCRIMINATORS: frozenset[str] = frozenset(
     {"text", "json", "image"}
 )
 
+#: Opaque-only ContentBlock discriminators in a stable iteration order.
+#: The fallthrough loop below uses this tuple rather than the frozenset
+#: directly because frozenset iteration order is
+#: ``PYTHONHASHSEED``-dependent — a schema-illegal multi-discriminator
+#: block (e.g. ``{"document": …, "video": …}``) would project a different
+#: ``Opaque.kind`` per run, and the digest would be stable but the
+#: projected kind would not. The fixed if/elif chain above is
+#: deterministic; this gives the opaque fallthrough the same property.
+#: Derived from the published frozenset (and the
+#: :data:`_FIRST_CLASS_DISCRIMINATORS` carve-out) so a schema revision
+#: that adds an Opaque-only block grows this order without ceremony.
+_OPAQUE_CONTENT_BLOCK_ORDER: tuple[str, ...] = tuple(
+    sorted(PUBLISHED_CONTENT_BLOCK_TYPES - _FIRST_CLASS_DISCRIMINATORS)
+)
+
+#: Opaque-only ToolResultContentBlock discriminators in stable order.
+#: See :data:`_OPAQUE_CONTENT_BLOCK_ORDER`.
+_OPAQUE_RESULT_CONTENT_BLOCK_ORDER: tuple[str, ...] = tuple(
+    sorted(PUBLISHED_TOOL_RESULT_CONTENT_BLOCK_TYPES - _FIRST_CLASS_RESULT_DISCRIMINATORS)
+)
+
 
 # --------------------------------------------------------------------------
 # Public entry
@@ -915,10 +936,11 @@ def _read_content_blocks(
             )
             _residualise_block_extras(block, path, {"reasoningContent"}, residual)
         else:
-            # Eight Opaque-only ContentBlock discriminators — dispatch on the
-            # first matching discriminator key.
-            for discriminator in PUBLISHED_CONTENT_BLOCK_TYPES:
-                if discriminator not in _FIRST_CLASS_DISCRIMINATORS and discriminator in block:
+            # Opaque-only ContentBlock discriminators — dispatch on the
+            # first matching discriminator key in a stable order
+            # (``_OPAQUE_CONTENT_BLOCK_ORDER``).
+            for discriminator in _OPAQUE_CONTENT_BLOCK_ORDER:
+                if discriminator in block:
                     parts.append(_opaque_for(block, discriminator))
                     _residualise_block_extras(block, path, {discriminator}, residual)
                     break
@@ -1058,7 +1080,11 @@ def _read_image(
     else:
         # Source carried neither ``bytes`` nor ``s3Location`` — a wire-format
         # breach. §7.4 rule 7: residualise the leaf AND project the part.
-        residual[f"{prefix}.source"] = source
+        # The arm matches the ``bytes`` and ``s3Location`` arms above: it
+        # writes only the per-child residual, never the parent — the
+        # parent would duplicate the same value at two depths and a
+        # register row anchored at either would see a key the other arm
+        # would not have written.
         digest = _wire_identity_digest(source)
         for wire_key in source:
             residual[f"{prefix}.source.{wire_key}"] = source[wire_key]
@@ -1273,8 +1299,8 @@ def _read_tool_result(
                 residual[f"{path}.image"] = image
             _residualise_block_extras(block, path, {"image"}, residual)
             continue
-        for discriminator in PUBLISHED_TOOL_RESULT_CONTENT_BLOCK_TYPES:
-            if discriminator not in _FIRST_CLASS_RESULT_DISCRIMINATORS and discriminator in block:
+        for discriminator in _OPAQUE_RESULT_CONTENT_BLOCK_ORDER:
+            if discriminator in block:
                 parts.append(_opaque_for(block, discriminator))
                 _residualise_block_extras(block, path, {discriminator}, residual)
                 break
@@ -1447,7 +1473,7 @@ def _normalise_media_type(format_str: str) -> str:
         The conventional ``image/<fmt>`` form, or the original string
         when it does not match a known bare format (a vendor-specific
         extension is carried through; the
-        :class:`~harness.tests.harness.test_reader_bedrock_converse.TestImageSources`
+        :class:`~harness.test_reader_bedrock_converse.TestImageSources`
         class catches a regression here).
     """
     bare = format_str.lower()
