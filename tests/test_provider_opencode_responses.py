@@ -33,6 +33,7 @@ import pytest
 from kitty.bridge.server import _repair_thinking_roundtrip
 from kitty.providers.base import WireShape
 from kitty.providers.opencode import (
+    _RESPONSES_MODELS,
     OpenCodeGoAdapter,
     OpenCodeGoResponsesCCStreamConverter,
     _responses_to_cc,
@@ -507,6 +508,40 @@ class TestOpenCodeGoResponsesCCStreamConverter:
             "function": {"arguments": '{"x":'},
         }
 
+    def test_arguments_done_after_deltas_does_not_duplicate_arguments(self):
+        """KBR-137 review finding 2 — the spec sequence is deltas × N → .done →
+        output_item.done, and the .done event carries the FULL arguments so a
+        client that lost deltas can recover.  A client that received every
+        delta must NOT also receive .done's full string, or the CC client
+        concatenates both and the model sees its tool arguments doubled.
+        """
+        converter = OpenCodeGoResponsesCCStreamConverter()
+        _feed(
+            converter,
+            {
+                "type": "response.output_item.added",
+                "item": {"id": "fc_1", "type": "function_call", "call_id": "a", "name": "f", "arguments": ""},
+            },
+        )
+        first = _feed(
+            converter,
+            {"type": "response.function_call_arguments.delta", "item_id": "fc_1", "delta": '{"k":'},
+        )
+        second = _feed(
+            converter,
+            {"type": "response.function_call_arguments.delta", "item_id": "fc_1", "delta": "1}"},
+        )
+        # Both deltas must cross; the client concatenates them into one body.
+        assert first[0]["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"] == '{"k":'
+        assert second[0]["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"] == "1}"
+
+        # .done is a no-op: the full string is exactly what the deltas summed to.
+        done_event = (
+            b'data: {"type": "response.function_call_arguments.done", '
+            b'"item_id": "fc_1", "arguments": "{\\"k\\":1}"}\n\n'
+        )
+        assert converter.feed(done_event) == []
+
     def test_arguments_delta_without_an_added_item_is_dropped(self):
         """An orphan delta has nowhere to land — dropping beats a crash or a
         fabricated index that would splice two calls' arguments together."""
@@ -695,6 +730,53 @@ class TestResponsesStreamHappyPath:
         assert tool_names == {0: "f"}
         assert tool_arguments == {0: '{"k":1}'}
         assert finish_reason == "stop"
+
+
+class TestRouteIsExercisedAcrossAllFourResponsesModels:
+    """KBR-137 — every routed model reaches the Responses builder, and the
+    response direction recognises a Responses body by its shape.
+
+    Lives at L1 (not L3) so the four-model coverage runs in the gating
+    ``l1 or l2`` job — see ``.system_design/TEST_SUITE.md`` §8 on layer
+    activation.  A separate L3 subsystem round-trip can be added under T-K6
+    once that layer activates; today the route contract is fully pinned
+    by these assertions against the in-process adapter.
+    """
+
+    def setup_method(self):
+        self.adapter = OpenCodeGoAdapter()
+
+    @pytest.mark.parametrize("model", sorted(_RESPONSES_MODELS))
+    def test_cc_to_responses_returns_a_well_formed_body(self, model):
+        body = self.adapter._cc_to_responses(
+            {
+                "model": model,
+                "messages": [{"role": "user", "content": "hi"}],
+                "tools": [{"type": "function", "function": {"name": "f", "parameters": {}}}],
+            }
+        )
+        assert body["model"] == model
+        assert isinstance(body["input"], list)
+        assert body["tools"] == [{"type": "function", "name": "f", "parameters": {}}]
+
+    @pytest.mark.parametrize("model", sorted(_RESPONSES_MODELS))
+    def test_translate_from_upstream_uses_the_responses_route(self, model):
+        responses_json = {
+            "object": "response",
+            "model": model,
+            "status": "completed",
+            "output": [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "ok"}],
+                }
+            ],
+        }
+        cc = self.adapter.translate_from_upstream(responses_json)
+        assert cc["model"] == model
+        assert cc["choices"][0]["message"]["content"] == "ok"
+        assert cc["choices"][0]["finish_reason"] == "stop"
 
 
 # ── _repair_thinking_roundtrip over WireShape ──────────────────────────────

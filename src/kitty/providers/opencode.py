@@ -27,6 +27,20 @@ Completions chunks through :class:`OpenCodeGoResponsesCCStreamConverter`.
 The wire-shape declaration became three-valued (per
 ``.system_design/TEST_SUITE.md`` §6.2.3) — the boolean ``False`` cannot
 honestly express three wires.
+
+**Thinking carriage on the Responses route.**  ``forwards_thinking_signature``
+is intentionally ``False`` for the OpenCode Go adapter, so the KBR-228
+``_thinking_blocks`` carriage carried on the Chat Completions message dict
+is never restored on any route — including the Responses one.  The
+Responses wire defines a ``reasoning`` item that *could* carry the
+reasoning across, but translating the CC carriage into it is not done
+here because (a) the four ``_RESPONSES_MODELS`` upstreams' tolerance for
+``reasoning`` items in ``input`` is unverified, and (b) a live probe —
+which this ticket cannot land for lack of a paid key — is the only honest
+way to settle it.  KBR-246's evidence-gathering work is the documented
+next step; until then the loss is deliberate, and a key-holder can land
+the translation by populating ``_build_responses_input``'s assistant branch
+with the corresponding ``reasoning`` item.
 """
 
 from __future__ import annotations
@@ -390,6 +404,13 @@ class OpenCodeGoResponsesCCStreamConverter:
         # fragments would otherwise double the string under the same
         # ``index``. Mirrors ``AnthropicCCStreamConverter._arguments_complete``.
         self._arguments_complete: set[str] = set()
+        # Items whose arguments crossed as at least one ``delta`` fragment.
+        # The Responses spec's ``function_call_arguments.done`` carries the
+        # FULL arguments precisely so a client that lost deltas can recover —
+        # a client that received every delta must not also receive ``.done``'s
+        # string, or the CC client concatenates both and the model sees its
+        # tool arguments doubled.
+        self._deltas_seen: set[str] = set()
 
     def feed(self, raw_bytes: bytes) -> list[bytes]:
         """Convert one upstream SSE line into Chat Completions SSE lines.
@@ -481,6 +502,7 @@ class OpenCodeGoResponsesCCStreamConverter:
             item_id = event.get("item_id") or event.get("id") or ""
             if item_id not in self._tool_indices or item_id in self._arguments_complete:
                 return []
+            self._deltas_seen.add(item_id)
             return [
                 self._sse_chunk(
                     {
@@ -501,6 +523,11 @@ class OpenCodeGoResponsesCCStreamConverter:
                 return []
             cc_index = self._tool_indices.get(item_id, -1)
             if cc_index == -1:
+                return []
+            # The deltas carried the same string the .done event carries; the
+            # client already has it.  Skip the emission rather than duplicate.
+            if item_id in self._deltas_seen:
+                self._arguments_complete.add(item_id)
                 return []
             self._arguments_complete.add(item_id)
             return [
