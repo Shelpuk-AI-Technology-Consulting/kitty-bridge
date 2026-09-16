@@ -143,12 +143,13 @@ body. Established by reading `src/kitty/bridge/server.py` and all 23 adapters in
 
 #### 3.2.1 Bridge-level
 
-Twenty-two request-path rows — the original fourteen (M1–M11, M15, M16 and M17), two
+Twenty-three request-path rows — the original fourteen (M1–M11, M15, M16 and M17), two
 id-synthesis rows added by KBR-195 (M18, M19), and six KBR-194 Gemini-side slot drops on
-the Gemini inbound route (M20–M25) — one response-path row (M12), and the routing row
-**M14** (§3.3.5), which is listed here because the destination is a mutation surface the body cannot
-show. Twenty-five rows in all. The former substitution row M13 is **withdrawn** — KBR-5 replaced it
-with a downstream error, so it mutates nothing — leaving **twenty-four live** bridge-level rows.
+the Gemini inbound route (M20–M25), plus KBR-184's M26 (the Anthropic-family `metadata`
+drop, G31) — one response-path row (M12), and the routing row **M14** (§3.3.5), which is
+listed here because the destination is a mutation surface the body cannot show. Twenty-six rows
+in all. The former substitution row M13 is **withdrawn** — KBR-5 replaced it with a downstream
+error, so it mutates nothing — leaving **twenty-five live** bridge-level rows.
 
 | # | Mutation | Site | Trigger | Why it is necessary |
 |---|---|---|---|---|
@@ -272,13 +273,15 @@ entry nobody could ever write. The list is also written out id by id rather than
 range: `P9a–c` names three rows in one token, and §3.2.4's guard has to either guess at the
 expansion or drop two rows from the comparison. It refuses the notation instead.
 
-**The P family's one gap was a reservation, and it has landed.** `P22` was held for the
+**The P family's reservations have landed.** `P22` was held for the
 `reasoning` injection §9.2's G23 registers; P23 landed first (KBR-171) and did not take the
 reserved id, because an id is how every ticket and document refers to a row. P22 has since
-landed at the reserved id (KBR-149). One reservation remains: **P24** is held for §9.2's G26,
-whose enumeration waits on the Chat Completions reader's control-field table (T-A2). The register
-is ordered by **document position**, not numerically — §3.2.2 already interleaves P20 and P21
-between P6 and P7 — so a row arriving out of numeric order costs nothing.
+landed at the reserved id (KBR-149). `P24` was held for §9.2's G26, whose enumeration
+waited on the Chat Completions reader's control-field table (T-A2 / KBR-34, landed
+2026-09-15); P24 has now landed at the reserved id (KBR-184) with thirteen enumerated
+paths, closing G26. No reservation remains in the P family. The register is ordered by
+**document position**, not numerically — §3.2.2 already interleaves P20 and P21 between
+P6 and P7 — so a row arriving out of numeric order costs nothing.
 
 **Register maintenance.** The register is the specification. A pull request that adds a mutation
 site without adding a row fails the L2 register guards (§6.2.3). **A row's table entry here and its

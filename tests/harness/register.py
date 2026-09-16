@@ -399,7 +399,6 @@ def row_shape_problems(row: MutationRow) -> tuple[str, ...]:
 _SERVER = "kitty/bridge/server.py"
 _BASE = "kitty/providers/base.py"
 _SUBSCRIPTION = "kitty/providers/openai_subscription.py"
-_MESSAGES = "kitty/bridge/messages/translator.py"
 _OLLAMA_CLOUD = "kitty/providers/ollama_cloud.py"
 _BEDROCK = "kitty/providers/bedrock.py"
 
