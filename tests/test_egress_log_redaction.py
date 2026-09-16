@@ -53,8 +53,10 @@ _EXPECTED_COUNTS: dict[str, int] = {
 
 #: Per-kind witness: the exact line text the scan expects to find at
 #: each known site, so a silent rewrite fails this test before the
-#: broader regex tests can pass with a different line.  Multiple
-#: entries per kind name each call site explicitly.
+#: broader regex tests can pass with a different line.  ``header-dump``
+#: has one entry per call site; ``url-dump`` has one because all four
+#: sites share the same form — the count guard above catches a change
+#: in the *number* of occurrences, which is what would matter.
 _KNOWN_SITE_TEXTS: dict[str, tuple[str, ...]] = {
     "url-dump": (
         'logger.debug("Upstream POST → %s", BridgeServer._debug_url(url))',
@@ -108,15 +110,14 @@ class TestDebugRedactionSitesAreCovered:
             "BridgeServer._debug_headers."
         )
 
-    def test_no_offending_site_added_without_a_helper(self) -> None:
-        """A new offending DEBUG site without the helper is also caught.
+    def test_every_known_site_kind_is_still_present(self) -> None:
+        """Every pattern kind still matches at least one site in the source.
 
-        Complements the previous test by also checking sites that *do*
-        carry the helper substring: the guard's negative form asserts
-        every match uses the helper, but a positive form (every helper
-        call has a matching call site) protects against a *removed*
-        helper call leaving a stale helper reference.  The two together
-        pin the relationship.
+        Complements the previous test: the negative form asserts every
+        match uses the helper; this one asserts no *kind* has vanished —
+        a kind gone from the source means either the sites were removed
+        (the count guard catches that) or the regex stopped matching
+        (this test names the regex as the thing to fix).
         """
         actual_kinds = {kind for kind, _line, _lineno in _iter_redact_sites()}
         expected_kinds = set(_KNOWN_SITE_TEXTS)

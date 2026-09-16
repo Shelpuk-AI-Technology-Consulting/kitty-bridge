@@ -362,26 +362,22 @@ def upstream_urls_with_credentials() -> st.SearchStrategy[dict[str, str | None]]
     # Malformed IPv6 brackets trip ``urlsplit``; the helper then redacts
     # textually (deliberately over-broad).  Generated URL must include both
     # a query (so ``?****`` is exercised) and a userinfo-style fragment
-    # the textual redaction strips.
+    # the textual redaction strips.  The property asserts equality with
+    # ``_redact_unparseable_url(url)`` rather than a substring, so no
+    # separate expected-secret field is needed here.
     unparseable_query = st.text(alphabet=_CRED_ALPHABET, min_size=12, max_size=24).map(
-        lambda secret: {
-            "unparseable": f"https://[::1/v1/messages?code={secret}",
-            "expected_unparseable_secret": secret,
-        }
+        lambda secret: {"unparseable": f"https://[::1/v1/messages?code={secret}"}
     )
     unparseable_userinfo = st.text(alphabet=_CRED_ALPHABET, min_size=12, max_size=24).map(
-        lambda secret: {
-            "unparseable": f"https://[{secret}@host/v1",
-            "expected_unparseable_secret": secret,
-        }
+        lambda secret: {"unparseable": f"https://[{secret}@host/v1"}
     )
     unparseable = unparseable_query | unparseable_userinfo
 
+    # Same shape story: the credentials live in the path, out of reach of
+    # any netloc rule; the property pins the helper's textual equivalent
+    # exactly.
     no_authority = st.builds(
-        lambda scheme, u, p, h, pth: {
-            "no_authority": f"{scheme}:{u}:{p}@{h}{pth}",
-            "expected_no_authority_password": p,
-        },
+        lambda scheme, u, p, h, pth: {"no_authority": f"{scheme}:{u}:{p}@{h}{pth}"},
         st.sampled_from(("u", "x")),
         user,
         password,
@@ -389,11 +385,11 @@ def upstream_urls_with_credentials() -> st.SearchStrategy[dict[str, str | None]]
         path,
     )
 
+    # Fragment is masked wholesale — the structural property asserts the
+    # output's fragment is exactly ``****``, which is sufficient to pin
+    # the secret's removal without a separate expected-* field.
     fragment = st.builds(
-        lambda scheme, h, pth, secret: {
-            "fragment": f"{scheme}://{h}{pth}#token={secret}",
-            "expected_fragment_secret": secret,
-        },
+        lambda scheme, h, pth, secret: {"fragment": f"{scheme}://{h}{pth}#token={secret}"},
         st.sampled_from(("https",)),
         host,
         path,

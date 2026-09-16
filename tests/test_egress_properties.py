@@ -93,20 +93,16 @@ def test_p2_no_hostname_outside_the_localhost_family_is_bypassed(host: str) -> N
     assert should_bypass(f"https://{host}/v1") is False
 
 
-# Stated with the family excluded, this property has two deliberate
-# counterpart examples that anchor the boundary; they assert what the
-# generator cannot.
-@pytest.mark.parametrize(
-    "url",
-    [
-        "http://localhost:11434",
-        "http://LOCALHOST:11434",
-        "http://foo.localhost/v1",
-        "http://upstream.localhost/v1",
-    ],
-)
-def test_p2_localhost_family_is_bypassed_regardless_of_case_or_subdomain(url: str) -> None:
-    """The ``localhost`` family is bypassed regardless of case or prefix.
+# Stated with the family excluded, this property has a deliberate
+# counterpart that anchors the boundary: every `localhost`-family hostname
+# the strategy emits — the bare name and any `*.localhost` suffix — must
+# be bypassed.  The test consumes the strategy directly rather than
+# re-listing spellings by hand; case-insensitivity is pinned by the
+# example tests in `tests/test_egress.py`.
+@given(egr.localhost_family_hostnames().map(lambda host: f"http://{host}/v1"))
+@settings(max_examples=20)
+def test_p2_localhost_family_is_bypassed(url: str) -> None:
+    """Every ``localhost``-family hostname the strategy emits is bypassed.
 
     Args:
         url: A URL whose hostname is ``localhost`` or a ``.localhost`` suffix.
@@ -192,11 +188,16 @@ def _assert_userinfo_redacted(redacted: str, password: str, username: str) -> No
     assert "@" not in parts.netloc, (
         f"redacted URL {redacted!r} still has a userinfo separator in netloc"
     )
+    # ``password not in redacted`` is the §6.1-required structural shape;
+    # ``username not in parts.netloc`` is the honest half — the username
+    # legitimately may survive in a query parameter name or fragment on
+    # some other URL, but in this branch it is the userinfo's username,
+    # and it must not reappear in the authority.
     assert password not in redacted, (
         f"password {password!r} survived in redacted URL {redacted!r}"
     )
     assert username not in parts.netloc, (
-        f"username {username!r} survived in redacted URL {redacted!r}"
+        f"username {username!r} survived in netloc of redacted URL {redacted!r}"
     )
 
 
@@ -235,7 +236,11 @@ def test_p5_redact_url_for_display_per_shape(shapes: dict[str, str]) -> None:
             continue
         redacted = ProviderAdapter.redact_url_for_display(url)
         if key == "userinfo":
-            _, username, password, *_ = urlsplit(url).netloc.partition(":")
+            # The strategy carries the (username, password) pair it built
+            # the URL from — consume it directly rather than re-deriving
+            # the split from the input, which is how the userinfo parse
+            # could share a bug with the redactor under test.
+            username, password = shapes["expected_userinfo"]
             _assert_userinfo_redacted(redacted, password, username)
         elif key == "query_value":
             expected_name = shapes["expected_query"][0]
@@ -282,16 +287,15 @@ def test_p5_redact_url_for_display_per_shape(shapes: dict[str, str]) -> None:
                 f"got {redacted!r}"
             )
         elif key == "no_authority":
-            # Structural: the userinfo prefix is the credential-bearing
-            # component, and the helper drops it. Asserting the userinfo
-            # prefix is absent is the structural form of "the password
-            # did not survive".
-            password = shapes["expected_no_authority_password"]
-            username = url.partition(":")[2].partition(":")[0]
-            prefix = f"{username}:{password}@"
-            assert prefix not in redacted, (
-                f"userinfo prefix {prefix!r} survived in no-authority "
-                f"redacted URL {redacted!r}"
+            # The contract: ``urlsplit`` reads the credentials into the
+            # path (out of reach of any netloc rule), so the helper
+            # delegates to ``_redact_unparseable_url``. The spec pins
+            # that equivalence exactly — a future regression that lets
+            # part of the userinfo-prefixed path through would fail
+            # here.
+            assert redacted == ProviderAdapter._redact_unparseable_url(url), (
+                f"no-authority URL not redacted to _redact_unparseable_url; "
+                f"got {redacted!r}"
             )
         elif key == "fragment":
             # Structural: the fragment is replaced wholesale by the mask.
@@ -307,27 +311,31 @@ def test_p5_redact_url_for_display_per_shape(shapes: dict[str, str]) -> None:
 # helper→artifact loop the structural guard cannot.
 
 
-def _bridge_logger_capture() -> StringIO:
+def _bridge_logger_capture() -> tuple[StringIO, int]:
     """Attach a fresh ``StringIO`` handler to ``kitty.bridge`` for one test.
 
     Returns:
-        The buffer the handler writes formatted records into.
+        The buffer the handler writes formatted records into, plus the
+        logger's prior level — the caller restores it on teardown so
+        one test does not silently change the level another test sees.
     """
     buffer = StringIO()
     handler = logging.StreamHandler(buffer)
     handler.setLevel(logging.DEBUG)
     handler.setFormatter(logging.Formatter("%(message)s"))
     logger = logging.getLogger("kitty.bridge")
+    prior_level = logger.level
     logger.setLevel(logging.DEBUG)
     logger.addHandler(handler)
-    return buffer
+    return buffer, prior_level
 
 
-def _drain_handler(buffer: StringIO) -> str:
-    """Return the formatted record text and detach the handler.
+def _drain_handler(buffer: StringIO, prior_level: int) -> str:
+    """Return the formatted record text, detach the handler, restore the level.
 
     Args:
         buffer: The buffer returned by :func:`_bridge_logger_capture`.
+        prior_level: The level recorded before the test attached its handler.
     """
     logger = logging.getLogger("kitty.bridge")
     for handler in list(logger.handlers):
@@ -335,6 +343,7 @@ def _drain_handler(buffer: StringIO) -> str:
             logger.removeHandler(handler)
             handler.close()
             break
+    logger.setLevel(prior_level)
     return buffer.getvalue()
 
 
@@ -350,17 +359,58 @@ def test_debug_url_helper_redacts_the_emitted_record(url: str) -> None:
     """
     from kitty.bridge.server import BridgeServer  # noqa: PLC0415 — import here to surface the helper's home
 
-    buffer = _bridge_logger_capture()
+    buffer, prior_level = _bridge_logger_capture()
     try:
         logging.getLogger("kitty.bridge").debug("Upstream POST → %s", BridgeServer._debug_url(url))
         rendered = buffer.getvalue()
     finally:
-        _drain_handler(buffer)
+        _drain_handler(buffer, prior_level)
 
     parts = urlsplit(url)
     expected_userinfo = parts.netloc.partition("@")[0]
     assert expected_userinfo not in rendered, (
         f"userinfo {expected_userinfo!r} survived in the DEBUG record: {rendered!r}"
+    )
+
+
+def test_debug_headers_helper_redacts_the_emitted_record() -> None:
+    """``_debug_headers`` produces a redacted record when the bridge logs through it.
+
+    Closes the helper→artifact loop for the header redaction. The dict-
+    level assertions prove the helper returns the right dict; this test
+    proves a ``logger.debug("... headers: %s", _debug_headers(...))``
+    call writes a record whose formatted text carries the mask in place
+    of every credential-bearing header value.
+    """
+    from kitty.bridge.server import BridgeServer  # noqa: PLC0415
+
+    headers = {
+        "authorization": "Bearer super-secret-bridge-key",
+        "x-goog-api-key": "AIza-fake-google-key",
+        "content-type": "application/json",
+        "anthropic-version": "2024-02-01",
+    }
+
+    buffer, prior_level = _bridge_logger_capture()
+    try:
+        logging.getLogger("kitty.bridge").debug(
+            "Request headers: %s", BridgeServer._debug_headers(headers)
+        )
+        rendered = buffer.getvalue()
+    finally:
+        _drain_handler(buffer, prior_level)
+
+    assert "super-secret-bridge-key" not in rendered, (
+        f"authorization value survived in the DEBUG record: {rendered!r}"
+    )
+    assert "AIza-fake-google-key" not in rendered, (
+        f"x-goog-api-key value survived in the DEBUG record: {rendered!r}"
+    )
+    assert "application/json" in rendered, (
+        f"non-sensitive header content-type was masked; got {rendered!r}"
+    )
+    assert "2024-02-01" in rendered, (
+        f"non-sensitive header anthropic-version was masked; got {rendered!r}"
     )
 
 

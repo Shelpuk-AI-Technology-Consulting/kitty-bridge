@@ -498,7 +498,7 @@ class TestTheWholeSuiteIsCoherent:
             "tests/bridge/test_kbr256_recovery_structure.py",
             # KBR-73 (T-F4). A §6.2.3 structural guard: holds the four
             # ``Upstream POST`` URL-dump sites and the two header-dump sites
-            # against the live AST of `src/kitty/bridge/server.py` so a
+            # against the source text of `src/kitty/bridge/server.py` so a
             # future handler that logs a credential-bearing URL or header
             # dict without the redaction helper fails in CI.
             "tests/test_egress_log_redaction.py",
