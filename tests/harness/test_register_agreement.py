@@ -288,13 +288,13 @@ class TestTheParserReadsTheDesignDocument:
     def test_the_parser_reads_both_tables(self, markdown: str) -> None:
         """A parser that read only §3.2.1 would still look healthy on the M rows."""
         assert len([i for i in r.parse_register_markdown(markdown).live_ids if i.startswith("M")]) == 25
-        assert len([i for i in r.parse_register_markdown(markdown).live_ids if i.startswith("P")]) == 48
+        assert len([i for i in r.parse_register_markdown(markdown).live_ids if i.startswith("P")]) == 52
 
     def test_the_parser_reads_the_unconditional_list(self, markdown: str) -> None:
         """§3.2.2's closing paragraph is the only place the exemption is written down."""
         parsed = r.parse_register_markdown(markdown)
 
-        assert len(parsed.unconditional_ids) == 43
+        assert len(parsed.unconditional_ids) == 46
         # KBR-184: the four new unconditional ids (M26, P24, P31, P32) must
         # appear in the published sentence alongside the long-standing
         # M14/P20/P21 spot-checks.

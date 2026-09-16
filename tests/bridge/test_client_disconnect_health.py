@@ -43,7 +43,7 @@ from kitty.bridge.server import (
 )
 from kitty.launchers.base import LauncherAdapter, SpawnConfig
 from kitty.profiles.schema import Profile
-from kitty.providers.base import ProviderAdapter
+from kitty.providers.base import ProviderAdapter, WireShape
 from kitty.types import BridgeProtocol
 
 # ── Test infrastructure ──────────────────────────────────────────────────
@@ -88,8 +88,8 @@ class _StubProvider(ProviderAdapter):
         return self._native
 
     @property
-    def upstream_wire_is_messages_api(self) -> bool:
-        return self._native
+    def upstream_wire_shape(self) -> WireShape:
+        return WireShape.MESSAGES if self._native else WireShape.CHAT_COMPLETIONS
 
     @property
     def upstream_path(self) -> str:

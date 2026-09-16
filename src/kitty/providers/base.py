@@ -4,11 +4,36 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
+from enum import Enum
 from urllib.parse import urlsplit, urlunsplit
 
 # Stands in for anything withheld from a message or a log. Spelled the same as
 # `kitty.egress._MASK`, which masks a proxy password, so one convention covers both.
 _MASK = "****"
+
+
+class WireShape(Enum):
+    """The dialect an adapter's ``translate_to_upstream`` puts on the wire.
+
+    Replaces KBR-7's boolean ``upstream_wire_is_messages_api`` declaration,
+    which §6.2.3 of ``.system_design/TEST_SUITE.md`` requires to be **replaced**
+    rather than extended the moment a routing adapter gains a third wire — a
+    ``False`` meaning "Responses" would be that defect in a new costume
+    (KBR-137).
+
+    Members:
+
+    * :attr:`MESSAGES` — an Anthropic Messages body.
+    * :attr:`CHAT_COMPLETIONS` — a Chat Completions body.
+    * :attr:`RESPONSES` — an OpenAI Responses body.
+    * :attr:`OTHER` — a body matching none of the named dialects. Bedrock's
+      Converse body lands here today.
+    """
+
+    MESSAGES = "anthropic_messages"
+    CHAT_COMPLETIONS = "chat_completions"
+    RESPONSES = "openai_responses"
+    OTHER = "other"
 
 
 class ProviderAdapter(ABC):
@@ -460,8 +485,8 @@ class ProviderAdapter(ABC):
         The per-model form of :meth:`build_upstream_headers`, for adapters
         that authenticate differently depending on which endpoint the model
         routes to — the same pairing as :attr:`upstream_path` /
-        :meth:`get_upstream_path` and :attr:`upstream_wire_is_messages_api` /
-        :meth:`upstream_wire_is_messages_api_for_model`.
+        :meth:`get_upstream_path` and :attr:`upstream_wire_shape` /
+        :meth:`upstream_wire_shape_for_model`.
 
         Concrete here, and deliberately not an optional hook the bridge
         reaches for with ``hasattr``: an adapter that routes auth per model
@@ -623,7 +648,8 @@ class ProviderAdapter(ABC):
         Chat Completions translation layer and forwards Messages API request,
         response, and SSE event formats directly through this adapter.
 
-        True here must imply :meth:`upstream_wire_is_messages_api_for_model`
+        True here must imply :meth:`upstream_wire_shape_for_model` returning
+        :attr:`WireShape.MESSAGES`
         for every model: the bridge forwards a Messages-wire stream to the
         client unchanged, and a native adapter with any other wire would have
         its raw stream forwarded (KBR-227).
@@ -631,8 +657,8 @@ class ProviderAdapter(ABC):
         return False
 
     @property
-    def upstream_wire_is_messages_api(self) -> bool:
-        """Whether ``translate_to_upstream`` emits an Anthropic Messages body.
+    def upstream_wire_shape(self) -> WireShape:
+        """The dialect ``translate_to_upstream`` emits on this adapter's default route.
 
         Distinct from :attr:`use_native_messages`, which says whether the
         bridge may skip its own translation layer.  This one describes the
@@ -645,20 +671,25 @@ class ProviderAdapter(ABC):
         round-trip repair — must branch on the declared wire shape, never on
         the request flag.
 
-        On an adapter that routes by model this answers only for the **default**
-        route.  A caller holding a model must ask
-        :meth:`upstream_wire_is_messages_api_for_model` instead: branching on
-        this property with a routed adapter in hand is what KBR-7 was.
+        KBR-137 replaced KBR-7's boolean ``upstream_wire_is_messages_api``
+        with this enum, per §6.2.3 of ``.system_design/TEST_SUITE.md``: a
+        routing adapter that gains a third wire must **replace** the
+        declaration, not extend a ``False`` to mean "Responses".
+
+        On an adapter that routes by model this answers only for the
+        **default** route.  A caller holding a model must ask
+        :meth:`upstream_wire_shape_for_model` instead: branching on this
+        property with a routed adapter in hand is what KBR-7 was.
         """
-        return False
+        return WireShape.CHAT_COMPLETIONS
 
-    def upstream_wire_is_messages_api_for_model(self, model: str) -> bool:
-        """Whether ``translate_to_upstream`` emits a Messages body for *model*.
+    def upstream_wire_shape_for_model(self, model: str) -> WireShape:
+        """The dialect ``translate_to_upstream`` emits for *model*.
 
-        The per-model form of :attr:`upstream_wire_is_messages_api`, for
-        adapters that route to different endpoints depending on the model —
-        the same pairing as :attr:`upstream_path` / :meth:`get_upstream_path`
-        and ``build_upstream_headers`` / ``build_upstream_headers_for_model``.
+        The per-model form of :attr:`upstream_wire_shape`, for adapters that
+        route to different endpoints depending on the model — the same
+        pairing as :attr:`upstream_path` / :meth:`get_upstream_path` and
+        ``build_upstream_headers`` / ``build_upstream_headers_for_model``.
 
         Callers that have a model in hand must use this rather than the bare
         property, and must read the model from the request being serialized so
@@ -675,9 +706,10 @@ class ProviderAdapter(ABC):
                 normalize again — it would disagree with its own router.
 
         Returns:
-            True when the body for *model* is an Anthropic Messages body.
+            The :class:`WireShape` of the body ``translate_to_upstream``
+            would emit for *model*.
         """
-        return self.upstream_wire_is_messages_api
+        return self.upstream_wire_shape
 
     @property
     def use_custom_transport(self) -> bool:

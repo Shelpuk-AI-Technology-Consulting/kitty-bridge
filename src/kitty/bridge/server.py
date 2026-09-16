@@ -55,7 +55,8 @@ from kitty.bridge.tool_audit import AUDIT_MARKER, ToolUseAuditor, collect_tool_s
 from kitty.cloudflare import is_cloudflare_block
 from kitty.egress import EgressConfig, should_bypass
 from kitty.providers.anthropic import AnthropicCCStreamConverter
-from kitty.providers.base import ProviderAdapter, ProviderError, UnsupportedModelError
+from kitty.providers.base import ProviderAdapter, ProviderError, UnsupportedModelError, WireShape
+from kitty.providers.opencode import OpenCodeGoResponsesCCStreamConverter
 
 if TYPE_CHECKING:
     # Type-only imports. The layering contract in pyproject.toml forbids
@@ -611,7 +612,7 @@ def _route_model(cc_request: dict) -> str:
     return model if isinstance(model, str) else ""
 
 
-def _repair_thinking_roundtrip(body: dict, *, native: bool) -> bool:
+def _repair_thinking_roundtrip(body: dict, *, wire_shape: WireShape) -> bool:
     # pragma: no mutate block
     """Give every assistant turn the thinking carrier its target requires.
 
@@ -633,13 +634,23 @@ def _repair_thinking_roundtrip(body: dict, *, native: bool) -> bool:
     retrying a byte-identical request.
 
     The dialect is passed in rather than inferred, because
-    ``{"role": "assistant", "content": "..."}`` is valid in both and guessing
-    would silently write the wrong carrier for one of them.  It must come from
-    :meth:`ProviderAdapter.upstream_wire_is_messages_api_for_model`, asked with
-    the model the body was serialized for — not from the bare property, which
-    on a model-routing adapter answers only for the default route (KBR-7), and
-    not from ``_native_messages_request`` — see
+    ``{"role": "assistant", "content": "..."}`` is valid in multiple dialects
+    and guessing would silently write the wrong carrier for one of them.  It
+    must come from :meth:`ProviderAdapter.upstream_wire_shape_for_model`,
+    asked with the model the body was serialized for — not from the bare
+    property, which on a model-routing adapter answers only for the default
+    route (KBR-7), and not from ``_native_messages_request`` — see
     :meth:`BridgeServer._upstream_body_for`.
+
+    KBR-137 widened the dialect from a boolean to :class:`WireShape`.  Only
+    the two dialects that already define a carrier are rewritten here:
+    :attr:`WireShape.MESSAGES` (an Anthropic ``thinking`` content block) and
+    :attr:`WireShape.CHAT_COMPLETIONS` (a ``reasoning_content`` field).  The
+    other two return ``False`` without touching the body — the carrier
+    semantics on an OpenAI Responses body (``reasoning`` items) or a
+    Converse body is a different operation this function does not implement,
+    and a caller must not add such a backend to
+    ``_thinking_repair_backends`` for want of a carrier it cannot write.
 
     Changed messages are **copied**, not edited in place, and ``messages`` is
     replaced with a new list.  ``translate_to_upstream`` returns a shallow copy
@@ -651,15 +662,26 @@ def _repair_thinking_roundtrip(body: dict, *, native: bool) -> bool:
     Args:
         body: The outgoing upstream body.  Its ``messages`` key is rebound when
             anything changes; the original list and its messages are untouched.
-        native: True when ``body`` is an Anthropic Messages body (the carrier
-            is a ``thinking`` content block), False when it is a Chat
-            Completions body (the carrier is a ``reasoning_content`` field).
+        wire_shape: The dialect ``body`` is written in —
+            :attr:`WireShape.MESSAGES` for an Anthropic Messages body,
+            :attr:`WireShape.CHAT_COMPLETIONS` for a Chat Completions body.
+            Any other value leaves ``body`` unchanged.
 
     Returns:
         True if at least one assistant message was changed.  The caller must
         only retry when this is True — a False means the transcript already
         satisfies the contract and the rejection has another cause.
     """
+    # The two dialects this function can write a carrier for.  Responses and
+    # Converse bodies return False below — the honest answer, since no carrier
+    # shape is defined for them.
+    if wire_shape is WireShape.MESSAGES:
+        native = True
+    elif wire_shape is WireShape.CHAT_COMPLETIONS:
+        native = False
+    else:
+        return False
+
     messages = body.get("messages")
     if not isinstance(messages, list):
         return False
@@ -3660,7 +3682,7 @@ class BridgeServer:
                     # client can read: each line is converted to a Chat Completions
                     # chunk first (KBR-232).  Re-created per attempt so a failover onto
                     # a Chat Completions-wire backend re-evaluates the gate.
-                    stream_converter = AnthropicCCStreamConverter() if self._serves_messages_wire(cc_request) else None
+                    stream_converter = self._stream_converter_for(cc_request)
                     upstream = await self._open_upstream_stream(
                         url, upstream_body, headers, stream_timeout, transport_grace
                     )
@@ -4943,15 +4965,25 @@ class BridgeServer:
                                 # (issue #32): repair and retry the same backend.
                                 # A False repair means nothing changed, so retrying
                                 # would re-send identical bytes — fall through.
+                                #
+                                # KBR-137: the repair writes a carrier only for
+                                # MESSAGES and CHAT_COMPLETIONS bodies.  A Responses
+                                # or OTHER backend has no carrier semantics for this
+                                # function, so the branch is skipped entirely: a
+                                # flag added to ``_thinking_repair_backends`` there
+                                # would never produce a repair on a later turn, and
+                                # the retry would re-send identical bytes.
+                                wire_shape_for_repair = self._active_provider.upstream_wire_shape_for_model(
+                                    _route_model(cc_request)
+                                )
                                 if (
-                                    not (strip_body is upstream_body and strip_count)
+                                    wire_shape_for_repair in (WireShape.MESSAGES, WireShape.CHAT_COMPLETIONS)
+                                    and not (strip_body is upstream_body and strip_count)
                                     and attempt < max_attempts - 1
                                     and _is_thinking_roundtrip_error(upstream.status, error_body)
                                     and _repair_thinking_roundtrip(
                                         upstream_body,
-                                        native=self._active_provider.upstream_wire_is_messages_api_for_model(
-                                            _route_model(cc_request)
-                                        ),
+                                        wire_shape=wire_shape_for_repair,
                                     )
                                 ):
                                     self._thinking_repair_backends.add(self._current_backend_idx)
@@ -6289,7 +6321,7 @@ class BridgeServer:
                     # client can read: each line is converted to a Chat Completions
                     # chunk first (KBR-232).  Re-created per attempt so a failover onto
                     # a Chat Completions-wire backend re-evaluates the gate.
-                    stream_converter = AnthropicCCStreamConverter() if self._serves_messages_wire(cc_request) else None
+                    stream_converter = self._stream_converter_for(cc_request)
                     upstream = await self._open_upstream_stream(
                         url, upstream_body, headers, stream_timeout, transport_grace
                     )
@@ -7582,7 +7614,7 @@ class BridgeServer:
                     # Completions client can read: each line is converted before the
                     # per-line logic (KBR-232).  Re-created per attempt so a failover
                     # onto a Chat Completions-wire backend re-evaluates the gate.
-                    stream_converter = AnthropicCCStreamConverter() if self._serves_messages_wire(cc_request) else None
+                    stream_converter = self._stream_converter_for(cc_request)
                     upstream = await self._open_upstream_stream(
                         url, upstream_body, headers, stream_timeout, transport_grace
                     )
@@ -9506,9 +9538,9 @@ class BridgeServer:
             True when the upstream's reply is an Anthropic Messages stream.
         """
         provider = self._active_provider
-        return provider.use_native_messages or provider.upstream_wire_is_messages_api_for_model(
+        return provider.use_native_messages or provider.upstream_wire_shape_for_model(
             _route_model(cc_request)
-        )
+        ) is WireShape.MESSAGES
 
     def _upstream_body_for(self, cc_request: dict) -> dict:
         # pragma: no mutate block
@@ -9546,9 +9578,41 @@ class BridgeServer:
         if self._current_backend_idx in self._thinking_repair_backends:
             _repair_thinking_roundtrip(
                 upstream_body,
-                native=self._active_provider.upstream_wire_is_messages_api_for_model(_route_model(cc_request)),
+                wire_shape=self._active_provider.upstream_wire_shape_for_model(_route_model(cc_request)),
             )
         return upstream_body
+
+    def _stream_converter_for(
+        self, cc_request: dict
+    ) -> AnthropicCCStreamConverter | OpenCodeGoResponsesCCStreamConverter | None:
+        # pragma: no mutate block
+        """Return the stateful SSE→CC converter for this request, or None.
+
+        Each streaming handler creates one converter per attempt and feeds it
+        each ``data:`` line before its own per-line logic (KBR-232).  The
+        converter is needed when the upstream speaks a wire the per-byte
+        helper :meth:`ProviderAdapter.translate_upstream_stream_event` cannot
+        represent — which today is the two routed dialects,
+        :attr:`WireShape.MESSAGES` (anthropic's per-event stream) and
+        :attr:`WireShape.RESPONSES` (openai's per-event stream).  Other
+        dialects (CC, Ollama ``/api/chat``, Converse) pass through the bare
+        helper and need no converter.
+
+        Args:
+            cc_request: The request, normalized for the selected backend; its
+                model is read through :func:`_route_model`.
+
+        Returns:
+            An :class:`AnthropicCCStreamConverter` for a Messages upstream,
+            an :class:`OpenCodeGoResponsesCCStreamConverter` for an OpenCode
+            Go Responses upstream, else ``None``.
+        """
+        if self._serves_messages_wire(cc_request):
+            return AnthropicCCStreamConverter()
+        provider = self._active_provider
+        if provider.upstream_wire_shape_for_model(_route_model(cc_request)) is WireShape.RESPONSES:
+            return OpenCodeGoResponsesCCStreamConverter()
+        return None
 
     def _build_upstream_headers(self, cc_request: dict) -> dict[str, str]:
         # pragma: no mutate block
