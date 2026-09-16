@@ -93,6 +93,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import socket
+import ssl
 import sys
 from collections.abc import AsyncGenerator, Iterator
 from dataclasses import dataclass
@@ -172,7 +173,7 @@ async def sealed_network(certs: CertFiles) -> AsyncGenerator[SealedNetwork, None
         The running harness.
     """
 
-    def _factory(ctx: ssl_context_type) -> ProviderTlsRecordingUpstream:
+    def _factory(ctx: ssl.SSLContext) -> ProviderTlsRecordingUpstream:
         return ProviderTlsRecordingUpstream(default_format=WireFormat.OLLAMA_CHAT, ssl_context=ctx)
 
     net = SealedNetwork(WireFormat.ANTHROPIC_MESSAGES, certs=certs, recorder_factory=_factory)
@@ -282,11 +283,6 @@ def harness_oauth_token_url(harness: SealedNetwork) -> Iterator[str]:
 
 
 # ── The containment transport (§5.2.2's extension interface) ──────────────
-
-
-#: The TLS context type, aliased so the factory closure's annotation reads
-#: without importing :mod:`ssl` under a second name at use sites.
-ssl_context_type = __import__("ssl").SSLContext
 
 
 class ProviderAiohttpContainment(ContainmentTransport):
