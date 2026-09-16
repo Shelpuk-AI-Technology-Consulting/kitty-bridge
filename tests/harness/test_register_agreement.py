@@ -35,6 +35,7 @@ from pathlib import Path
 import pytest
 
 from harness import contract as c
+from harness import reader_chat_completions as cc_reader
 from harness import reader_responses as reader
 from harness import register as r
 
@@ -56,6 +57,92 @@ _SRC = _REPO_ROOT / "src"
 #: allowlist would agree with the code instead of checking it.
 _ALLOWLIST_MODULE = _SRC / "kitty" / "providers" / "openai_subscription.py"
 _ALLOWLIST_NAME = "_ALLOWED_RESPONSES_PARAMS"
+#: The CC-origin body builder on the same adapter; P24's derivation guard
+#: reads its output-body literal keys to compute the "carries" set — the
+#: keys the builder ships on the wire (rewritten, not dropped) — and P24
+#: therefore does not claim.
+_CC_TO_RESPONSES_NAME = "_cc_to_responses"
+
+
+def _cc_to_responses_carries(source: str) -> frozenset[str]:
+    """Read the keys ``_cc_to_responses`` writes into its output body.
+
+    Reads the builder as text so the register, which imports nothing from
+    ``src/kitty``, cannot accidentally agree with the code instead of
+    checking it. Returns the subset of
+    ``reader_chat_completions._PUBLISHED_EXTRA_KEYS`` that the builder ships
+    on the wire — rewritten, not dropped, keys. P24's claim is the reader
+    table minus this set.
+
+    Args:
+        source: The full source text of ``openai_subscription.py``.
+
+    Returns:
+        The extra-key table members the builder carries. Today: ``{"store"}``
+        (forced to ``False``, claimed by P17 on the rewritten half).
+
+    Raises:
+        AssertionError: When ``source`` does not define ``_cc_to_responses`` —
+            the guard must not pass for an empty read (plan §1.4).
+    """
+    tree = ast.parse(source)
+    fn = next(
+        (
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and node.name == _CC_TO_RESPONSES_NAME
+        ),
+        None,
+    )
+    assert fn is not None, (
+        f"{_CC_TO_RESPONSES_NAME} is not defined in the adapter source — "
+        "the derivation guard must not pass for an empty read (plan §1.4)"
+    )
+
+    carried: set[str] = set()
+
+    def _str(node: ast.AST | None) -> str | None:
+        """Return ``node.value`` if it is a string ``Constant``, else ``None``.
+
+        A dict literal's key can be ``None`` (a ``**`` unpacking), so the
+        annotation accepts it and this guard declines it the same way.
+        """
+        if node is None:
+            return None
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return node.value
+        return None
+
+    # ``body: dict = {"model": ..., ...}`` — the initial literal.
+    for stmt in fn.body:
+        if (
+            isinstance(stmt, ast.AnnAssign)
+            and isinstance(stmt.target, ast.Name)
+            and stmt.target.id == "body"
+            and isinstance(stmt.value, ast.Dict)
+        ):
+            for key_node in stmt.value.keys:
+                name = _str(key_node)
+                if name is not None:
+                    carried.add(name)
+
+    # ``body["X"] = ...`` — every later assignment to a string-keyed body
+    # member, inside whichever ``if`` guards it. ``Subscript.slice`` is the
+    # key expression directly on every Python this repo runs (3.9 removed
+    # the ``ast.Index`` wrapper).
+    for node in ast.walk(fn):
+        if (
+            isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Subscript)
+            and isinstance(node.targets[0].value, ast.Name)
+            and node.targets[0].value.id == "body"
+        ):
+            name = _str(node.targets[0].slice)
+            if name is not None:
+                carried.add(name)
+
+    return frozenset(carried & cc_reader._PUBLISHED_EXTRA_KEYS)
 
 
 @pytest.fixture(scope="module")
@@ -200,15 +287,18 @@ class TestTheParserReadsTheDesignDocument:
 
     def test_the_parser_reads_both_tables(self, markdown: str) -> None:
         """A parser that read only §3.2.1 would still look healthy on the M rows."""
-        assert len([i for i in r.parse_register_markdown(markdown).live_ids if i.startswith("M")]) == 24
-        assert len([i for i in r.parse_register_markdown(markdown).live_ids if i.startswith("P")]) == 42
+        assert len([i for i in r.parse_register_markdown(markdown).live_ids if i.startswith("M")]) == 25
+        assert len([i for i in r.parse_register_markdown(markdown).live_ids if i.startswith("P")]) == 48
 
     def test_the_parser_reads_the_unconditional_list(self, markdown: str) -> None:
         """§3.2.2's closing paragraph is the only place the exemption is written down."""
         parsed = r.parse_register_markdown(markdown)
 
-        assert len(parsed.unconditional_ids) == 39
-        assert {"M14", "P20", "P21"} <= set(parsed.unconditional_ids)
+        assert len(parsed.unconditional_ids) == 43
+        # KBR-184: the four new unconditional ids (M26, P24, P31, P32) must
+        # appear in the published sentence alongside the long-standing
+        # M14/P20/P21 spot-checks.
+        assert {"M14", "P20", "P21", "M26", "P24", "P31", "P32"} <= set(parsed.unconditional_ids)
 
     def test_a_document_with_no_register_tables_is_an_error_not_an_empty_result(self) -> None:
         """An empty parse is the failure mode §6.2 exists to prevent.
@@ -626,6 +716,131 @@ class TestP23ClaimsTheControlFieldsOutsideTheCodexAllowlist:
         # the test passes for a key the reader never classified in the first place.
         assert {"include", "reasoning"} <= allowlist & reader._EXTRA_KEYS
         assert not any(c.path_matches(path, c.extra_path("include")) for path in p23.paths)
+
+
+class TestP24ClaimsTheDroppedNonSamplingControlFields:
+    """KBR-184 / G26 — P24's thirteen paths are recomputed here, never transcribed.
+
+    §3.2.2's P24 enumerates the CC-origin control fields ``_cc_to_responses``
+    drops rather than anchoring at a bare ``envelope.extra``, for the reason
+    §3.3.1a gives. The enumeration is the Chat Completions reader's
+    ``_PUBLISHED_EXTRA_KEYS`` (T-A2 / KBR-34) minus what the builder ships on
+    the wire — rewritten, not dropped, keys. Any change to the reader's
+    table or to the builder's body literal widens or narrows P24's claim,
+    and this guard catches it.
+
+    ⚠️ **What this does not prove**, said here because the class name invites
+    the stronger reading. It does not make P24 independent of the code: once
+    the code changes, the only route back to green is to edit the row to
+    match, which is the trade §3.2.4 records. And "dropped" means **never
+    copied** — the reader projects CC ``metadata`` to ``envelope.extra[metadata]``
+    and the builder does not write it, so the address is a delta P24 claims.
+    The reader's table is the sound left-hand side because
+    ``test_reader_chat_completions`` pins it against the published schema,
+    and §8's determinism rules forbid reading the vendor schema directly —
+    a vendor revision goes undetected, which is G24's shape.
+    """
+
+    def test_the_row_claims_every_dropped_key_and_nothing_else(self) -> None:
+        """AC R2.1 — set equality, so over- and under-claim both fail loudly."""
+        rows = [row for row in r.REGISTER if row.id == "P24"]
+        assert rows, "P24 is not in the register data — KBR-184's CC-origin drops are unclaimed"
+
+        source = _ALLOWLIST_MODULE.read_text(encoding="utf-8")
+        carries = _cc_to_responses_carries(source)
+
+        assert set(rows[0].paths) == {
+            c.extra_path(key) for key in cc_reader._PUBLISHED_EXTRA_KEYS - carries
+        }
+
+    def test_widening_the_builder_to_carry_a_dropped_key_would_unclaim_it(self) -> None:
+        """AC R2.2 — the builder half of the derivation is live, not decoration.
+
+        A guard that ignored its builder argument would pass the set-equality
+        above and go on passing after the adapter started shipping, say,
+        ``metadata`` upstream — the loud under-claiming direction.
+        """
+        real_source = _ALLOWLIST_MODULE.read_text(encoding="utf-8")
+        real_carries = _cc_to_responses_carries(real_source)
+
+        # Plant: the builder adds ``metadata`` to its output body literal.
+        # ``_prepare_responses_body`` also writes ``"store": False,`` earlier
+        # in the file, so the first occurrence is the wrong builder's
+        # literal — target the last one, which is ``_cc_to_responses``'s.
+        needle = '"store": False,'
+        plant = '"store": False,\n            "metadata": None,'
+        idx = real_source.rfind(needle)
+        assert idx >= 0, "the plant's needle is gone from the adapter source"
+        widened_source = real_source[:idx] + plant + real_source[idx + len(needle):]
+        assert widened_source != real_source, "the plant did not mutate the source"
+
+        widened_carries = _cc_to_responses_carries(widened_source)
+
+        assert "metadata" in widened_carries
+        assert widened_carries != real_carries
+
+        narrowed = {c.extra_path(key) for key in cc_reader._PUBLISHED_EXTRA_KEYS - widened_carries}
+        assert c.extra_path("metadata") not in narrowed
+        assert narrowed != {
+            c.extra_path(key) for key in cc_reader._PUBLISHED_EXTRA_KEYS - real_carries
+        }
+
+    def test_dropping_a_control_field_from_the_reader_would_unclaim_it(self) -> None:
+        """AC R2.3 — the reader's table decides which keys are addressable at all.
+
+        If the reader stopped classifying ``metadata`` as an ``envelope.extra``
+        key, the row's claim at ``envelope.extra[metadata]`` would no longer
+        be derivable from the table — the row would over-claim.
+        """
+        real_source = _ALLOWLIST_MODULE.read_text(encoding="utf-8")
+        real_carries = _cc_to_responses_carries(real_source)
+
+        narrowed_table = cc_reader._PUBLISHED_EXTRA_KEYS - {"metadata"}
+        narrowed = {c.extra_path(key) for key in narrowed_table - real_carries}
+
+        assert c.extra_path("metadata") not in narrowed
+        assert narrowed != {
+            c.extra_path(key) for key in cc_reader._PUBLISHED_EXTRA_KEYS - real_carries
+        }
+
+    def test_a_source_that_does_not_define_the_builder_is_an_error(self) -> None:
+        """Plan §1.4's deliberate defect — an empty read must not pass.
+
+        A source with no ``_cc_to_responses`` makes every published key look
+        dropped, which the set-equality test would report as a register
+        problem while the real fault was the parse.
+        """
+        with pytest.raises(AssertionError, match=_CC_TO_RESPONSES_NAME):
+            _cc_to_responses_carries("UNRELATED = frozenset({'model'})\n")
+
+    def test_the_builder_read_finds_the_real_one(self, symbols: frozenset[str]) -> None:
+        """The positive control §6.2 requires beside the negative one above."""
+        assert (
+            f"kitty/providers/openai_subscription.py:OpenAISubscriptionAdapter.{_CC_TO_RESPONSES_NAME}"
+            in symbols
+        )
+
+        carries = _cc_to_responses_carries(_ALLOWLIST_MODULE.read_text(encoding="utf-8"))
+
+        assert "store" in carries
+        assert "metadata" not in carries
+        assert "tool_choice" not in carries  # not in _PUBLISHED_EXTRA_KEYS (handled separately)
+        assert "parallel_tool_calls" not in carries  # G36 moved it off extra
+
+    def test_the_published_row_names_the_same_thirteen_keys(self, markdown: str) -> None:
+        """§3.2.2's P24 cell is a path list in all but spelling, so it is reconciled too.
+
+        §3.2.4 declines to reconcile paths against the markdown because "the
+        tables have no path column". P24's Mutation cell enumerates the
+        thirteen wire keys in backticks, the same shape P23 carries; a
+        second copy of the data is reconciled or it rots in silence.
+        """
+        cell = published_row_cell(markdown, "P24", "Mutation")
+
+        assert set(re.findall(r"`(\w+)`", cell)) == set(r._CC_DROPPED_CONTROL_FIELDS)
+        assert "**thirteen**" in markdown, (
+            "§3.2.2's P24 cell no longer states the count it enumerates"
+        )
 
 
 class TestP25ClaimsTheFalsyAllowlistedDrop:
