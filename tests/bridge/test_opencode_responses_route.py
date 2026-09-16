@@ -350,13 +350,20 @@ def _pin_round_robin(monkeypatch) -> None:
 async def test_an_all_servable_pool_does_not_quarantine_any_backend(
     upstream: _CountingUpstream, monkeypatch
 ):
-    """Pool-level positive control: every backend can serve; the request succeeds
-    on the first attempt; no backend is quarantined.
+    """Pool-level positive control: the request succeeds on the first attempt.
 
-    The KBR-126 sibling test ``test_a_refused_backend_does_not_take_its_siblings_down``
-    measured the same property for the unservable-backend case.  This one
-    proves the contrapositive: a healthy pool is not cooled by a successful
-    round-trip.
+    Round-5 review tightened the docstring: this test pins **``len(hits) == 1``
+    on a successful round-trip**, which is the precise observable that says
+    "no failover happened, no second backend was consulted" for a single
+    request.  It does **not** prove "a healthy pool is never cooled" — that
+    claim would need a *second* request after a failure (or an assertion
+    against the bridge's ``_backend_health`` shape, which is too
+    implementation-coupled).  The KBR-126 sibling test
+    ``test_a_refused_backend_does_not_take_its_siblings_down`` measured the
+    refusal-specific sister claim; with the refusal retired, that test has
+    no analogue on the new route, and the broader "no coercion of a
+    healthy backend" guarantee belongs to bridge-internal coverage, not
+    KBR-137.
     """
     _pin_round_robin(monkeypatch)
     upstream.reply_text = "from-some-backend"

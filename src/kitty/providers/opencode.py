@@ -171,6 +171,41 @@ def _response_format_to_text_format(response_format: dict) -> dict:
     return dict(response_format)
 
 
+def _flatten_content_to_text(content: Any) -> str:
+    """Flatten a Chat Completions message's content to a single string.
+
+    CC's spec-legal shape for an assistant, system, or tool message includes
+    ``content`` as either a string or a list of typed parts — every assistant
+    turn Claude Code emits is list-form, and tool results may be either.
+    Shipping ``str(content)`` on a list would emit ``[{'type': 'text', …}]``
+    as Python repr — that string then becomes part of the model's context,
+    which is an I1 breach.
+
+    The user branch (above) and the system branch already apply this
+    discipline per KBR-222.  This helper makes the assistant and tool
+    branches use the same one-line flattening.
+
+    Args:
+        content: A CC message's ``content`` field; ``None`` is treated as
+            empty.
+
+    Returns:
+        ``""`` for empty / ``None``; a string; or the parts' ``text`` joined
+        with ``"\\n"``.  Non-text parts in a list are silently dropped
+        (their information is image / audio, and the Responses input does
+        not carry those anyway).
+    """
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n".join(
+            part.get("text", "")
+            for part in content
+            if isinstance(part, dict) and part.get("type") == "text"
+        )
+    return ""
+
+
 def _build_responses_input(messages: list[dict]) -> tuple[list[dict], str]:
     """Translate Chat Completions ``messages`` to Responses ``input`` + ``instructions``.
 
@@ -241,7 +276,7 @@ def _build_responses_input(messages: list[dict]) -> tuple[list[dict], str]:
             continue
 
         if role == "assistant":
-            text = content if isinstance(content, str) else (str(content) if content is not None else "")
+            text = _flatten_content_to_text(content)
             item: dict = {
                 "type": "message",
                 "role": "assistant",
@@ -265,7 +300,7 @@ def _build_responses_input(messages: list[dict]) -> tuple[list[dict], str]:
             continue
 
         if role == "tool":
-            output = str(content) if content is not None else ""
+            output = _flatten_content_to_text(content)
             input_items.append(
                 {
                     "type": "function_call_output",
@@ -577,7 +612,16 @@ class OpenCodeGoResponsesCCStreamConverter:
             return [self._finish_chunk("stop"), b"data: [DONE]\n\n"]
 
         if event_type == "response.incomplete":
-            # same shape as ``response.completed`` but finish_reason="length"
+            # Twin of ``response.completed``: a stream terminated by the model
+            # hitting ``max_output_tokens`` or context length.  The usage
+            # fields ride on the ``response`` object the same way the
+            # ``completed`` twin carries them — round up the same fields so
+            # the finish chunk records the truncated reply's accounting.
+            response = event.get("response") or {}
+            self._model = response.get("model", self._model)
+            usage_in = (response.get("usage") or event.get("usage") or {})
+            self._input_tokens = usage_in.get("input_tokens", 0)
+            self._output_tokens = usage_in.get("output_tokens", 0)
             return [self._finish_chunk("length"), b"data: [DONE]\n\n"]
 
         if event_type == "response.failed":

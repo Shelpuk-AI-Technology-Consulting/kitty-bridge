@@ -142,6 +142,57 @@ class TestTranslateToResponsesBody:
         )
         assert body["input"] == [{"type": "function_call_output", "call_id": "call_9", "output": "42"}]
 
+    def test_tool_message_list_content_flattens_to_text(self):
+        """Round-5 review — a list-form tool result must flatten to its text
+        parts.  ``str(content)`` on a list produces the Python repr, and a
+        tool result is agent-read content: shipping the repr would put
+        ``[{'type': 'text', 'text': 'I read it'}]`` into the model's context
+        as though that string were the tool's output.
+        """
+        body = self.adapter._cc_to_responses(
+            {
+                "model": _MODEL,
+                "messages": [
+                    {
+                        "role": "tool",
+                        "tool_call_id": "call_9",
+                        "content": [{"type": "text", "text": "I read it"}, {"type": "text", "text": "twice"}],
+                    }
+                ],
+            }
+        )
+        assert body["input"] == [
+            {"type": "function_call_output", "call_id": "call_9", "output": "I read it\ntwice"}
+        ]
+
+    def test_assistant_message_list_content_flattens_to_text(self):
+        """Round-5 review — a list-form assistant content must flatten to its
+        text parts, the same discipline the user branch already applies
+        (KBR-222).  ``str(content)`` would ship a Python repr as the model's
+        own words.
+        """
+        body = self.adapter._cc_to_responses(
+            {
+                "model": _MODEL,
+                "messages": [
+                    {
+                        "role": "assistant",
+                        "content": [
+                            {"type": "text", "text": "Reading"},
+                            {"type": "text", "text": "now"},
+                        ],
+                    }
+                ],
+            }
+        )
+        assert body["input"] == [
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "Reading\nnow"}],
+            }
+        ]
+
     def test_assistant_tool_calls_become_function_call_items(self):
         body = self.adapter._cc_to_responses(
             {
@@ -654,6 +705,27 @@ class TestOpenCodeGoResponsesCCStreamConverter:
         )
         chunk = json.loads(lines[0][6:])
         assert chunk["choices"][0]["finish_reason"] == "length"
+        assert lines[1] == b"data: [DONE]\n\n"
+
+    def test_incomplete_emits_usage_matching_the_completed_twin(self):
+        """Round-5 review — ``response.incomplete`` is the truncated-tail twin
+        of ``response.completed`` and carries usage the same way.  The finish
+        chunk must carry the truncated reply's usage, or the CC client loses
+        its accounting on every hit-the-ceiling reply."""
+        converter = OpenCodeGoResponsesCCStreamConverter()
+        converter.feed(b'data: {"type": "response.created", "response": {"model": "grok-4.6"}}\n\n')
+        lines = _feed_done(
+            converter,
+            {
+                "type": "response.incomplete",
+                "response": {
+                    "model": _MODEL,
+                    "usage": {"input_tokens": 5, "output_tokens": 3, "total_tokens": 8},
+                },
+            },
+        )
+        chunk = json.loads(lines[0][6:])
+        assert chunk["usage"] == {"prompt_tokens": 5, "completion_tokens": 3, "total_tokens": 8}
         assert lines[1] == b"data: [DONE]\n\n"
 
     def test_failed_emits_an_error_chunk_the_detector_sees(self):
