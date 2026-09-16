@@ -422,8 +422,8 @@ class TestSealedNetwork:
         with pytest.raises(RuntimeError, match="not running"):
             _ = started[0].port
 
-    async def test_factory_receives_a_real_ssl_context_and_starts_without_a_kwarg(
-        self, certs: CertFiles
+    async def test_factory_receives_the_target_ssl_context_and_starts_without_a_kwarg(
+        self, certs: CertFiles, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A factory-built recorder is started with no ``ssl_context`` argument.
 
@@ -433,17 +433,26 @@ class TestSealedNetwork:
         ``SSLContext`` so the leaf-cert wiring stays in one place, and
         ``SealedNetwork.start`` calls ``await recorder.start()`` for a
         factory-built recorder (no ``ssl_context=`` kwarg) so neither shape
-        breaks. The cert source is verified by the existing
-        ``test_starts_a_proxy_and_a_recorder_sharing_one_resolved_name``
-        (resolve map → target cert/key); here we assert the contract shape —
-        factory called with an ``SSLContext``, recorder started with no
-        ``ssl_context`` kwarg, and the recorder on the harness is the
-        factory's own.
+        breaks. The cert identity (not just the shape) is asserted via a
+        ``server_ssl_context`` spy — the spy and ``SealedNetwork.start`` see
+        the **same** ``SSLContext`` object, so ``is`` is a real identity check.
         """
         from harness.connect_proxy import server_ssl_context
 
-        server_ctx = server_ssl_context(certs.target_cert, certs.target_key)
-        seen_ctx: list[ssl.SSLContext] = []
+        spy_ctx: list[tuple[Path, Path, ssl.SSLContext]] = []
+        real_server_ctx = server_ssl_context
+
+        def _recording_server_ctx(cert: Path, key: Path) -> ssl.SSLContext:
+            ctx = real_server_ctx(cert, key)
+            # SealedNetwork.start builds TWO contexts — the proxy's and the
+            # recorder's — so the spy records the cert/key alongside and the
+            # assertion matches on the target pair, not on call order.
+            spy_ctx.append((cert, key, ctx))
+            return ctx
+
+        monkeypatch.setattr(containment, "server_ssl_context", _recording_server_ctx)
+
+        seen_factory_ctx: list[ssl.SSLContext] = []
         seen_args: list[dict[str, object]] = []
         built_recorder: list[RecordingUpstream] = []
 
@@ -459,10 +468,13 @@ class TestSealedNetwork:
 
             async def start(self, *args: object, **kwargs: object) -> None:
                 seen_args.append(kwargs)
+                # Delegate to the real start so the recorder actually binds a
+                # port; the resolve map built by SealedNetwork reads
+                # ``self._recorder.port``, which the base class populates.
                 await RecordingUpstream.start(self, ssl_context=self._ssl_context)
 
         def _factory(ctx: ssl.SSLContext) -> _FactoryRecorder:
-            seen_ctx.append(ctx)
+            seen_factory_ctx.append(ctx)
             rec = _FactoryRecorder(ctx)
             built_recorder.append(rec)
             return rec
@@ -474,9 +486,21 @@ class TestSealedNetwork:
         )
         await net.start()
         try:
-            assert len(seen_ctx) == 1, "the factory was not invoked exactly once"
-            assert isinstance(seen_ctx[0], ssl.SSLContext), (
-                f"factory received {type(seen_ctx[0]).__name__}, not an ssl.SSLContext"
+            assert len(seen_factory_ctx) == 1, "the factory was not invoked exactly once"
+            target_spy = [(k, c) for cert, k, c in spy_ctx if cert == certs.target_cert]
+            assert len(target_spy) == 1, (
+                f"SealedNetwork did not build a recorder SSLContext from target_cert "
+                f"via the spy (spy recorded {[(cert, k) for cert, k, _ in spy_ctx]})"
+            )
+            key_used, ctx_for_target = target_spy[0]
+            assert key_used == certs.target_key, (
+                "SealedNetwork's target-cert ctx was built with the wrong key "
+                f"(got {key_used}, expected {certs.target_key})"
+            )
+            assert seen_factory_ctx[0] is ctx_for_target, (
+                "factory did not receive the SSLContext SealedNetwork built from the "
+                "target cert/key — cert ownership must stay with SealedNetwork "
+                f"(target cert carries {HARNESS_UPSTREAM_HOST!r} in its SAN)"
             )
             assert len(seen_args) == 1, "the factory's recorder was never started"
             assert "ssl_context" not in seen_args[0], (
@@ -489,14 +513,6 @@ class TestSealedNetwork:
                 "SealedNetwork's recorder is not the factory-built instance: cert/ctx "
                 "ownership must flow through the factory, not be re-constructed"
             )
-            # Sanity: the context is the same target-cert context type (server-side
-            # SSL context). Verified by reconstructing with the same key material —
-            # the new object differs by identity, but the structure is what
-            # ``server_ssl_context`` produces.
-            _ = server_ctx  # The contract above is what binds the cert; recording the
-                            # constructed object here would require a spy on
-                            # ``server_ssl_context`` — excessive for what this test
-                            # asserts (the contract shape, not the cert identity).
         finally:
             await net.stop()
 
