@@ -246,12 +246,20 @@ def _iter_bridge_constructions() -> list[tuple[str, int]]:
     return found
 
 
-#: Nested scopes whose bodies do not execute when the enclosing function
-#: runs — a guard call lexically inside one of these does not dominate a
-#: construction in the enclosing function. Comprehensions are deliberately
-#: excluded: their implicit scope executes eagerly at the line where they
-#: appear, so calls inside them DO dominate at that line.
-_DEFERRED_SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)
+#: Nested scopes whose bodies do NOT execute when the enclosing function runs —
+#: a guard call lexically inside any of these does not dominate a construction
+#: in the enclosing function. ``GeneratorExp`` is included because generator
+#: bodies are lazy (their ``elt`` only runs on iteration, not on the line where
+#: the ``( ... for ... )`` expression appears); ``ListComp`` / ``SetComp`` /
+#: ``DictComp`` are deliberately excluded because their elements execute
+#: eagerly at the line where the comprehension appears.
+_DEFERRED_SCOPES = (
+    ast.FunctionDef,
+    ast.AsyncFunctionDef,
+    ast.ClassDef,
+    ast.Lambda,
+    ast.GeneratorExp,
+)
 
 
 def _calls_in_own_scope(scope: ast.AST):
@@ -263,10 +271,11 @@ def _calls_in_own_scope(scope: ast.AST):
 
     Yields:
         Every ``ast.Call`` directly in the scope, plus any in eagerly-executed
-        subexpressions (comprehensions, conditional expressions, etc.). Calls
-        in nested ``def`` / ``class`` / ``lambda`` bodies are skipped entirely
-        — their bodies do not run when the enclosing scope runs, so they
-        cannot dominate anything here.
+        subexpressions (``ListComp``/``SetComp``/``DictComp`` elts, conditional
+        expressions, etc.). Calls in deferred subtrees — nested ``def`` /
+        ``class`` / ``lambda`` bodies, and generator-expression elts — are
+        skipped entirely; those bodies do not run when the enclosing scope
+        runs, so they cannot dominate anything here.
     """
     stack = list(ast.iter_child_nodes(scope))
     while stack:
@@ -396,6 +405,12 @@ class TestEveryStartPathIsGuarded:
                 def _helper():
                     egress_block_reason(None, None, None)
                 return BridgeServer()
+
+            def guard_inside_generator():
+                # Generator elt is lazy; the guard does not execute until iteration.
+                gen = (egress_block_reason(None, None, None) for _ in range(1))
+                next(gen)
+                return BridgeServer()
             """
         )
         tree = ast.parse(source)
@@ -407,7 +422,7 @@ class TestEveryStartPathIsGuarded:
             ),
             key=lambda n: n.lineno,
         )
-        assert len(constructions) == 4, "fixture must hold exactly four constructions"
+        assert len(constructions) == 5, "fixture must hold exactly five constructions"
 
         assert not _is_dominated(tree, constructions[0].lineno), (
             "sibling-undominated: a construction with no preceding guard must be reported"
@@ -422,6 +437,10 @@ class TestEveryStartPathIsGuarded:
         assert not _is_dominated(tree, constructions[3].lineno), (
             "outer-construction/inner-guard: a guard confined to a nested helper scope "
             "must not dominate a construction in the enclosing function"
+        )
+        assert not _is_dominated(tree, constructions[4].lineno), (
+            "outer-construction/inner-generator-guard: a guard inside a generator expression "
+            "is lazy and must not dominate a sibling-level construction"
         )
 
     def test_dotted_construction_spellings_are_matched(self):
@@ -478,6 +497,37 @@ class TestEveryStartPathIsGuarded:
         assert not offenders, (
             "BridgeServer is imported under an alias, so a construction call would be "
             f"invisible to the AST walker: {offenders}"
+        )
+
+    def test_aliased_bridge_server_import_is_detected(self):
+        """Falsification control: a synthetic aliased import is flagged.
+
+        The live tree has zero aliased ``BridgeServer`` imports, so the matcher
+        is unproven by data — the test above is structurally incapable of
+        failing on a regression like ``endswith("BS")``. This probe parses a
+        small aliased import and asserts the matcher finds it; a regression
+        that obscures the alias match will fail this test.
+        """
+        source = textwrap.dedent(
+            """\
+            from kitty.bridge.server import BridgeServer as BS
+
+            def aliased_call():
+                return BS()
+            """
+        )
+        tree = ast.parse(source)
+        found: list[str] = []
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.Import, ast.ImportFrom)):
+                continue
+            for alias in node.names:
+                if alias.name.endswith("BridgeServer") and alias.asname:
+                    found.append(f"line {node.lineno}: `{alias.name} as {alias.asname}`")
+
+        assert found == ["line 1: `BridgeServer as BS`"], (
+            "the alias matcher must surface `from kitty.bridge.server import "
+            f"BridgeServer as BS` as an offender; got {found}"
         )
 
 
