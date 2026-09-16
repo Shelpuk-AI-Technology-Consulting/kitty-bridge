@@ -7,7 +7,7 @@ is the offline witness for a live repository setting that the ticket's
 own acceptance procedure (a throwaway pull request that must refuse to
 merge) only exercises once.
 
-Twelve cases pin the contract:
+Fourteen cases pin the contract:
 
 * the pre-change shape — three rules, no ``required_status_checks``
   row — reads as **not** enforced (the defect KBR-152 filed);
@@ -19,7 +19,9 @@ Twelve cases pin the contract:
   rows, a non-dict parameters value, a non-dict check entry, a rule
   that is not a dict at all;
 * ``main``'s three exit codes — 0 (enforced), 1 (not enforced), 2
-  (the ``gh`` call itself failed).
+  (the ``gh`` call itself failed) — and the JSON parse step
+  ``main`` actually performs between the shell-out and the decision,
+  stubbed at the process boundary rather than the parsed-list one.
 
 **Layer.** L2 — the subject is a script outside ``src/kitty`` that
 consumes a data format GitHub defines and edits, held against inline
