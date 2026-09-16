@@ -226,9 +226,6 @@ def _enclosing_function(
 def _iter_bridge_constructions() -> list[tuple[str, int]]:
     """Find every ``BridgeServer(`` construction under ``src/kitty``.
 
-    Args:
-        (no arguments)
-
     Returns:
         ``(relative_path, line_number)`` for each construction, excluding the
         class-definition file.
@@ -321,7 +318,11 @@ class TestEveryStartPathIsGuarded:
         """Falsification control: the walker must reject an unguarded construction.
 
         Without this, a broken `_is_dominated` that always returns True would
-        pass every other test in this class while proving nothing.
+        pass every other test in this class while proving nothing. The third
+        case — a guard in an outer function with the construction in an
+        inner one — closes the "innermost vs outermost enclosing function"
+        blind spot; a walker that picks the outermost covering function would
+        accept the inner construction while still passing the first two cases.
         """
         source = textwrap.dedent(
             """\
@@ -334,6 +335,12 @@ class TestEveryStartPathIsGuarded:
             def guarded():
                 egress_block_reason(None, None, None)
                 return BridgeServer()
+
+            def outer_with_inner_construction():
+                egress_block_reason(None, None, None)
+                def inner():
+                    return BridgeServer()
+                return inner
             """
         )
         tree = ast.parse(source)
@@ -342,13 +349,17 @@ class TestEveryStartPathIsGuarded:
             for node in ast.walk(tree)
             if isinstance(node, ast.Call) and _called_name(node) == "BridgeServer"
         ]
-        assert len(constructions) == 2, "fixture must hold exactly two constructions"
+        assert len(constructions) == 3, "fixture must hold exactly three constructions"
 
         assert not _is_dominated(tree, constructions[0].lineno), (
-            "an undominated construction must be reported as unguarded"
+            "an undominated sibling construction must be reported as unguarded"
         )
         assert _is_dominated(tree, constructions[1].lineno), (
-            "a guarded construction must be accepted"
+            "a guarded sibling construction must be accepted"
+        )
+        assert not _is_dominated(tree, constructions[2].lineno), (
+            "a construction inside an inner function must not be dominated by a "
+            "guard living in the outer function"
         )
 
 
