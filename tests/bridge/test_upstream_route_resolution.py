@@ -240,6 +240,19 @@ class TestOpenCodeGoWithoutAProfileModel:
 class TestAzureDeploymentPath:
     """Azure puts the model in the path, so an un-normalized name is a broken URL."""
 
+    @staticmethod
+    def _azure_config() -> dict[str, str]:
+        """Return a working ``provider_config`` for an Azure server in tests.
+
+        KBR-153 made the adapter require a base URL; an Azure server with no
+        ``provider_config`` is now a launch-time failure (the bridge raises on
+        ``build_base_url``), not a silent placeholder.  The tests in this class
+        assert the deployment-path rule, not base-URL resolution, and so
+        supply a working config.
+        """
+
+        return {"base_url": "https://res.openai.azure.com"}
+
     def test_a_prefixed_profile_model_does_not_leak_its_prefix_into_the_path(self) -> None:
         """``azure/my-deploy`` must address the deployment ``my-deploy``.
 
@@ -247,7 +260,11 @@ class TestAzureDeploymentPath:
         ``/openai/deployments/azure/my-deploy/chat/completions`` — addressing a
         deployment that cannot exist.
         """
-        server = _server(AzureOpenAIAdapter(), model="azure/my-deploy")
+        server = _server(
+            AzureOpenAIAdapter(),
+            model="azure/my-deploy",
+            provider_config=self._azure_config(),
+        )
 
         url, _, _ = _route(server, "gpt-4o")
 
@@ -264,7 +281,10 @@ class TestAzureDeploymentPath:
         is correct whenever the deployment is named after the model and no worse
         otherwise.
         """
-        server = _server(AzureOpenAIAdapter())
+        server = _server(
+            AzureOpenAIAdapter(),
+            provider_config=self._azure_config(),
+        )
 
         url, _, _ = _route(server, "my-deploy")
 
@@ -323,18 +343,25 @@ class TestTheRoutingKeyFallback:
 class TestTheCustomUrlErrorPathStaysModelIndependent:
     """The 404 message rebuilds a route with no request in scope."""
 
-    def test_no_custom_url_adapter_routes_on_the_model(self) -> None:
-        """``_translate_upstream_error`` may only skip the model while this holds.
+    def test_an_offender_combining_custom_url_and_per_model_routing_is_explicitly_narrowed(
+        self,
+    ) -> None:
+        """An adapter that requires a custom URL *and* routes on the model must be
+        excluded from the 404 URL rebuild — by the server narrowing or by widening
+        the branch to pass the model.
 
-        KBR-134's 404 branch reports the URL the bridge asked for, and it runs
-        where no ``cc_request`` exists. It is sound only because both adapters
-        that set ``requires_custom_url`` inherit ``get_upstream_path``, which
-        ignores its argument — so the reported route cannot depend on the model.
+        KBR-153 makes Azure the third ``requires_custom_url`` adapter, and it
+        routes on the model because its path carries the deployment id (register
+        row P20).  The branch builds its URL from an empty request, so reporting
+        an endpoint the request never used would mislead the user on 404 — the
+        one moment the message names the URL.  The narrow is the form this test
+        chose (``type(get_upstream_path) is ProviderAdapter.get_upstream_path``).
 
-        An adapter that required a custom URL *and* routed per model would make
-        that message name an endpoint the request never used, which on a 404 is
-        the one moment the user is being told to go and check it. This fails
-        first, so that lands as a decision rather than a wrong error string.
+        The functional half of the rule — "excluded really means excluded" —
+        lives in :mod:`tests.bridge.test_custom_url_404`.  This test pins the
+        *membership* of the excluded set so a future adapter combining both
+        flags fails fast here rather than leaking a wrong URL into a 404
+        message.
         """
         offenders = sorted(
             name
@@ -343,17 +370,18 @@ class TestTheCustomUrlErrorPathStaysModelIndependent:
             and type(get_provider(name)).get_upstream_path is not ProviderAdapter.get_upstream_path
         )
 
-        assert not offenders, (
-            f"{offenders} both require a custom URL and route on the model. The 404 branch in "
-            "_translate_upstream_error builds its route from an empty request, so it would now "
-            "report the wrong endpoint; give it the real model or narrow the branch."
+        assert offenders == ["azure"], (
+            f"{offenders} require a custom URL and route on the model. The 404 branch "
+            "in _translate_upstream_error builds its route from an empty request, so it "
+            "would report the wrong endpoint; narrow the branch (the path taken here) "
+            "or give it the real model."
         )
 
     def test_the_subject_set_is_not_empty(self) -> None:
         """The check above passes trivially if no adapter requires a custom URL."""
         requiring = sorted(name for name in _registry if get_provider(name).requires_custom_url)
 
-        assert requiring == ["custom_anthropic", "custom_openai"], requiring
+        assert requiring == ["azure", "custom_anthropic", "custom_openai"], requiring
 
 
 class TestTheRoutingKeySurvivesSerialization:
