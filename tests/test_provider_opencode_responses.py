@@ -198,7 +198,7 @@ class TestTranslateToResponsesBody:
     # ── Tools ─────────────────────────────────────────────────────────
 
     def test_tools_envelope_unwrapped(self):
-        """Register row P39 — CC's function envelope becomes Responses' flat form."""
+        """P36 — CC's function envelope becomes Responses' flat form."""
         body = self.adapter._cc_to_responses(
             {
                 **_CC_BASE,
@@ -224,7 +224,7 @@ class TestTranslateToResponsesBody:
         ]
 
     def test_strict_is_carried_not_stripped(self):
-        """P39 carries ``strict`` — P15's Codex strip does not apply here."""
+        """P36 — ``strict`` is carried (P15's Codex strip does not apply here)."""
         body = self.adapter._cc_to_responses(
             {**_CC_BASE, "tools": [{"type": "function", "function": {"name": "t", "strict": True, "parameters": {}}}]}
         )
@@ -242,7 +242,7 @@ class TestTranslateToResponsesBody:
         assert body["tool_choice"] == mode
 
     def test_tool_choice_named_function_unwrapped(self):
-        """Register row P40 — the CC envelope unwraps to the flat form."""
+        """P36 — the CC envelope unwraps to the flat form."""
         tool_choice = {"type": "function", "function": {"name": "t"}}
         body = self.adapter._cc_to_responses({**_CC_BASE, "tool_choice": tool_choice})
         assert body["tool_choice"] == {"type": "function", "name": "t"}
@@ -262,7 +262,7 @@ class TestTranslateToResponsesBody:
         assert body["text"] == {"format": {"type": "json_object"}}
 
     def test_response_format_json_schema_hoists_one_level(self):
-        """Register row P41 — json_schema's nesting lifts one level."""
+        """P36 — json_schema's nesting lifts one level."""
         schema = {"type": "object", "properties": {}}
         body = self.adapter._cc_to_responses(
             {
@@ -541,6 +541,52 @@ class TestOpenCodeGoResponsesCCStreamConverter:
             b'"item_id": "fc_1", "arguments": "{\\"k\\":1}"}\n\n'
         )
         assert converter.feed(done_event) == []
+
+    def test_output_text_done_with_no_prior_deltas_emits_carried_text(self):
+        """KBR-137 review finding — ``response.output_text.done`` is the recovery
+        channel for a backend that streams no ``response.output_text.delta``
+        events and closes the content part with the full text.  When that
+        happens, the converter must emit the carried text as a CC chunk — the
+        CC client's view of the model is "empty" without it.
+        """
+        converter = OpenCodeGoResponsesCCStreamConverter()
+        # created → done with text but no deltas.  The carried text must reach
+        # the client.
+        _feed(converter, {"type": "response.created", "response": {"model": "m"}})
+        chunks = _feed(
+            converter,
+            {
+                "type": "response.output_text.done",
+                "item_id": "msg_1",
+                "output_index": 0,
+                "content_index": 0,
+                "text": "full reply in done",
+            },
+        )
+        assert len(chunks) == 1
+        assert chunks[0]["choices"][0]["delta"]["content"] == "full reply in done"
+
+    def test_output_text_done_after_deltas_does_not_duplicate_text(self):
+        """Symmetric to the arguments case: a done event after deltas is a no-op
+        for text content too.  Otherwise the client concatenates the carried
+        full text with the deltas, doubling the model's reply.
+        """
+        converter = OpenCodeGoResponsesCCStreamConverter()
+        _feed(converter, {"type": "response.created", "response": {"model": "m"}})
+        _feed(converter, {"type": "response.output_text.delta", "item_id": "msg_1", "delta": "Check"})
+        _feed(converter, {"type": "response.output_text.delta", "item_id": "msg_1", "delta": "ing"})
+        # Done after deltas is a no-op.
+        chunks = _feed(
+            converter,
+            {
+                "type": "response.output_text.done",
+                "item_id": "msg_1",
+                "output_index": 0,
+                "content_index": 0,
+                "text": "Checking",
+            },
+        )
+        assert chunks == []
 
     def test_arguments_delta_without_an_added_item_is_dropped(self):
         """An orphan delta has nowhere to land — dropping beats a crash or a

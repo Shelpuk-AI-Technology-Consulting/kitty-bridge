@@ -86,7 +86,7 @@ _MESSAGES_MODELS: frozenset[str] = frozenset(
 )
 
 # Models served via the OpenAI Responses API endpoint.  Routed truthfully by
-# `get_upstream_path` and refused by `translate_to_upstream` until KBR-137.
+# `get_upstream_path`; sent via `_cc_to_responses` since KBR-137.
 _RESPONSES_MODELS: frozenset[str] = frozenset(
     {
         "grok-4.6",
@@ -386,6 +386,12 @@ class OpenCodeGoResponsesCCStreamConverter:
     feeds it each ``data:`` line before its own per-line logic.
     """
 
+    #: Sentinel ``item_id`` for events that arrive without one — the
+    #: delta/.done bookkeeping below must still see them as the same item,
+    #: and an OpenAI Responses stream has only one message item in flight at
+    #: a time, so conflating them is safe.
+    _UNTRACKED = "<untracked>"
+
     def __init__(self) -> None:
         #: One id per stream — Chat Completions clients correlate a reply's
         #: chunks by it. A fresh UUID per attempt, mirroring the Anthropic
@@ -411,6 +417,11 @@ class OpenCodeGoResponsesCCStreamConverter:
         # string, or the CC client concatenates both and the model sees its
         # tool arguments doubled.
         self._deltas_seen: set[str] = set()
+        # Items whose text content has crossed as at least one ``delta`` —
+        # symmetric to ``_deltas_seen``.  ``response.output_text.done`` carries
+        # the full text so a client that lost deltas can recover; a client that
+        # received every delta must not also receive ``.done``'s string.
+        self._text_emitted: set[str] = set()
 
     def feed(self, raw_bytes: bytes) -> list[bytes]:
         """Convert one upstream SSE line into Chat Completions SSE lines.
@@ -487,16 +498,27 @@ class OpenCodeGoResponsesCCStreamConverter:
             return []
 
         if event_type == "response.output_text.delta":
+            item_id = event.get("item_id") or self._UNTRACKED
+            self._text_emitted.add(item_id)
             return [self._sse_chunk({"content": event.get("delta", "")})]
 
         if event_type == "response.output_text.done":
-            # Some backends ship the full text only on .done.  The CC stream
-            # has already emitted deltas, so .done is a no-op here; the
-            # Anthropic mirror carries through the same discipline.
+            # ``response.output_text.done`` carries the full text so a client
+            # that lost the deltas can recover.  Two cases:
+            #   * deltas already emitted — ``_text_emitted`` has the item id;
+            #     .done is a no-op, otherwise the client concatenates both and
+            #     the model's reply is doubled.
+            #   * no deltas — some backends ship the full text only on .done.
+            #     The carried text is the whole answer; emit it as a chunk or
+            #     the client receives an empty reply.
+            item_id = event.get("item_id") or self._UNTRACKED
             text = event.get("text")
             if text is None:
                 return []
-            return [self._sse_chunk({"content": ""})]
+            if item_id in self._text_emitted:
+                return []
+            self._text_emitted.add(item_id)
+            return [self._sse_chunk({"content": text})]
 
         if event_type == "response.function_call_arguments.delta":
             item_id = event.get("item_id") or event.get("id") or ""
@@ -575,7 +597,8 @@ class OpenCodeGoResponsesCCStreamConverter:
             ]
 
         if event_type == "error":
-            # Anthropic's same-named event passes through unchanged.
+            # The Responses spec's ``{"type":"error"}`` event carries the
+            # marker ``_is_upstream_stream_error`` keys on, so it crosses as-is.
             return [raw_bytes]
 
         # response.output_text.annotation_added, response.refusal.*,
@@ -641,11 +664,10 @@ class OpenCodeGoAdapter(AnthropicAdapter):
 
     Routes on the model name across the provider's three endpoints:
     ``/v1/messages`` (Anthropic Messages), ``/v1/chat/completions``
-    (passthrough, the default route), and ``/v1/responses`` — which
-    :meth:`get_upstream_path` reports truthfully and
-    :meth:`translate_to_upstream` refuses with
-    :class:`~kitty.providers.base.UnsupportedModelError`, because kitty cannot
-    write a Responses body on this transport yet (KBR-137).
+    (passthrough, the default route), and ``/v1/responses`` (OpenAI
+    Responses).  All three are now servable since KBR-137 — the
+    :class:`~kitty.providers.base.UnsupportedModelError` the KBR-126
+    refusal raised for the Responses-routed models is gone.
 
     F16: Anthropic Messages translation is inherited from ``AnthropicAdapter``
     instead of duplicating the translation helpers here.
@@ -719,11 +741,11 @@ class OpenCodeGoAdapter(AnthropicAdapter):
     def get_upstream_path(self, model: str) -> str:
         """Return the endpoint the provider serves *model* on.
 
-        Reports ``/v1/responses`` truthfully for models this adapter refuses to
-        serialize.  Returning the default route for them instead would cost
-        nothing at runtime — no request is ever built — and would put back the
-        lie in the routing table that KBR-126 exists to remove, as well as
-        forcing an exemption list into the snapshot guard.
+        Reports ``/v1/responses`` for the ``_RESPONSES_MODELS`` set, ``/v1/messages``
+        for the Messages set, else the Chat Completions default.  Reporting the
+        default route for the routed models would put back the lie in the
+        routing table that KBR-126 exists to remove, as well as forcing an
+        exemption list into the snapshot guard.
 
         Args:
             model: The model name, as ``translate_to_upstream`` reads it.
@@ -798,11 +820,10 @@ class OpenCodeGoAdapter(AnthropicAdapter):
     def translate_to_upstream(self, cc_request: dict) -> dict:
         """Serialize *cc_request* in the dialect this model's endpoint speaks.
 
-        This is the choke point for the Responses refusal.  Every request path
-        in ``server.py`` reaches this method — directly or through
-        ``BridgeServer._upstream_body_for`` — because this adapter is neither a
-        custom-transport nor a native-passthrough one, so nothing can ship a
-        body without passing here.
+        Every request path in ``server.py`` reaches this method — directly or
+        through ``BridgeServer._upstream_body_for`` — because this adapter is
+        neither a custom-transport nor a native-passthrough one, so nothing
+        can ship a body without passing here.
 
         Args:
             cc_request: The normalized Chat Completions request.
@@ -894,7 +915,7 @@ class OpenCodeGoAdapter(AnthropicAdapter):
         if effort and effort != "none":
             body["reasoning"] = {"effort": effort}
 
-        # Register row P39 — tools envelope unwrap.  ``strict`` is carried:
+        # P36 — tools envelope unwrap.  ``strict`` is carried:
         # the OpenAI Responses spec defines the field, and P15's Codex-specific
         # strip does not apply to this provider.
         cc_tools = cc_request.get("tools") or []
@@ -913,11 +934,11 @@ class OpenCodeGoAdapter(AnthropicAdapter):
                 tools.append(flat)
             body["tools"] = tools
 
-        # Register row P40 — tool_choice envelope unwrap.
+        # P36 — tool_choice envelope unwrap.
         if cc_request.get("tool_choice") is not None:
             body["tool_choice"] = _responses_tool_choice(cc_request["tool_choice"])
 
-        # Register row P41 — response_format moves to text.format.
+        # P36 — response_format moves to text.format.
         response_format = cc_request.get("response_format")
         if isinstance(response_format, dict):
             body["text"] = {"format": _response_format_to_text_format(response_format)}

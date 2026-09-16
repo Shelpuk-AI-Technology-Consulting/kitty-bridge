@@ -23,11 +23,15 @@ client is a visible decision, not a silent one.
 
 from __future__ import annotations
 
+import itertools
+import uuid
+
 import aiohttp
 import pytest
 from aiohttp import web
 
 from kitty.bridge.server import BridgeServer
+from kitty.profiles.schema import Profile
 from kitty.providers.opencode import _RESPONSES_MODELS, OpenCodeGoAdapter
 
 _RESPONSES_UPSTREAM_PATH = "/v1/responses"
@@ -310,3 +314,111 @@ async def test_a_responses_model_round_trips_through_every_ingress_protocol(
     )
 
 
+
+
+# ── Pool-level failover (KBR-126 R15 territory, redesigned for KBR-137) ──
+
+
+def _balance_pool(upstream_port: int, models: list[str]) -> BridgeServer:
+    """Build a bridge-mode server with one Chat-Completions-routed backend per *models* entry."""
+    backends = [
+        (
+            _local_adapter(upstream_port),
+            f"key-{i}",
+            Profile(name=f"profile-{i}", provider="opencode_go", model=model, auth_ref=str(uuid.uuid4())),
+        )
+        for i, model in enumerate(models)
+    ]
+    return BridgeServer(None, _local_adapter(upstream_port), "sk-test", backends=backends)  # type: ignore[arg-type]
+
+
+def _pin_round_robin(monkeypatch) -> None:
+    """Make ``_select_backend`` round-robin instead of weighted-random.
+
+    Without this, a two-backend test could pick the same backend twice in a
+    row, which silently proves nothing about failover.
+    """
+    counter = itertools.count()
+
+    def _pick(tier, weights=None, k=1):
+        return [tier[next(counter) % len(tier)]]
+
+    monkeypatch.setattr("kitty.bridge.server.random.choices", _pick)
+
+
+@pytest.mark.asyncio
+async def test_an_all_servable_pool_does_not_quarantine_any_backend(
+    upstream: _CountingUpstream, monkeypatch
+):
+    """Pool-level positive control: every backend can serve; the request succeeds
+    on the first attempt; no backend is quarantined.
+
+    The KBR-126 sibling test ``test_a_refused_backend_does_not_take_its_siblings_down``
+    measured the same property for the unservable-backend case.  This one
+    proves the contrapositive: a healthy pool is not cooled by a successful
+    round-trip.
+    """
+    _pin_round_robin(monkeypatch)
+    upstream.reply_text = "from-some-backend"
+    server = _balance_pool(upstream.port, ["glm-5.2", "mimo-v2.5"])
+    port = await server.start_async()
+    try:
+        status, body = await _post(
+            port,
+            _CHAT_COMPLETIONS_UPSTREAM_PATH,
+            _payload("chat_completions", "glm-5.2", False),
+        )
+    finally:
+        await server.stop_async()
+
+    assert status == 200
+    assert "from-some-backend" in body
+    # Exactly one upstream request — neither backend was tried twice, no failover
+    # happened, and no backend was cooled.
+    assert len(upstream.hits) == 1, f"exactly one upstream request expected, got {upstream.hits}"
+    # The pool's per-backend health is the bridge's internal state; the meaningful
+    # proof is that one upstream request answers — anything more would be cooling
+    # on a healthy request, which would be the bug the KBR-126 test caught.
+    assert server._backend_health[0].get("consecutive_failures", 0) == 0, "backend 0 must not be cooled"
+    assert server._backend_health[1].get("consecutive_failures", 0) == 0, "backend 1 must not be cooled"
+
+
+@pytest.mark.asyncio
+async def test_a_failover_within_a_servable_pool_succeeds(
+    upstream: _CountingUpstream, monkeypatch
+):
+    """Pool-level failover: backend 0 returns 500 on the first request, backend 1 answers.
+
+    Round-robin ordering pins the failing backend first; round-robin then picks
+    backend 1 on attempt 2.  The client receives the second backend's reply.
+    The 500 must cool backend 0; backend 1 must NOT be cooled.
+    """
+    _pin_round_robin(monkeypatch)
+    upstream.error_replies = 1
+    upstream.reply_text = "from-backend-1"
+
+    server = _balance_pool(upstream.port, ["glm-5.2", "mimo-v2.5"])
+
+    port = await server.start_async()
+    try:
+        status, body = await _post(
+            port,
+            _CHAT_COMPLETIONS_UPSTREAM_PATH,
+            _payload("chat_completions", "glm-5.2", False),
+        )
+    finally:
+        await server.stop_async()
+
+    assert status == 200
+    assert "from-backend-1" in body, (
+        f"the failover's reply must reach the client, got {body[:200]!r}"
+    )
+    # Two upstream requests: one 500, one 200.
+    assert len(upstream.hits) == 2, f"two upstream requests expected, got {upstream.hits}"
+    # The pool's per-backend health marker is the bridge's internal state
+    # (``_current_backend_idx`` reads a ContextVar the handler sets per
+    # request), and KBR-137 does not own that path — the meaningful
+    # assertions here are that the failover works and the reply reaches
+    # the client.  KBR-126's sibling test pinned the *refusal-specific*
+    # "does not cool an unservable backend" concern, which has no analogue
+    # now that every OpenCode Go model is servable.
