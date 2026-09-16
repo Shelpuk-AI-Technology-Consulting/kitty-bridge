@@ -59,6 +59,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import socket
+import ssl
 import uuid
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
@@ -103,6 +104,27 @@ __all__ = [
 #: selection (it goes through ``provider_config["base_url"]``) but controls
 #: the recorder's reply shape so the bridge parses a non-empty success.
 _DEFAULT_FORMAT = WireFormat.ANTHROPIC_MESSAGES
+
+#: CONNECT targets the harness proxy refuses to resolve to the real
+#: network. ``ConnectProxy.handle`` falls back to the system resolver for
+#: any target not in its ``resolve`` map (``connect_proxy.py:570``), so a
+#: silently-missed upstream swap (the curl slice's ``_CODEX_BACKEND_URL``
+#: seam, say) could tunnel to the real upstream through the *proxy's*
+#: outbound leg — the client's own deny entries cannot see that hop. The
+#: proxy's map is where the deny belongs. ``127.0.0.2`` is an RFC-5735
+#: blackhole: ``asyncio.open_connection`` reaches a closed loopback port
+#: and the CONNECT answers 502 with the attempt still on the record
+#: (source port ``None``) — the swap-live check then fails the phase with
+#: no real egress incurred.
+#: T-E5's OAuth-leg seam rewrites the token URL to the harness hostname
+#: *before* the request, so a swapped drive targets the harness name and
+#: these entries stay inert for it; only the missed-swap shape bites.
+_REAL_UPSTREAM_DENY_RESOLVE: dict[str, tuple[str, int]] = {
+    "chatgpt.com:80": ("127.0.0.2", 80),
+    "chatgpt.com:443": ("127.0.0.2", 443),
+    "auth.openai.com:80": ("127.0.0.2", 80),
+    "auth.openai.com:443": ("127.0.0.2", 443),
+}
 
 #: A budget for one ``drive_*`` request. The green path (resolver mapped to the
 #: recorder's port) completes well under a second; the falsification path
@@ -394,6 +416,7 @@ class SealedNetwork:
         fmt: WireFormat = _DEFAULT_FORMAT,
         *,
         certs: CertFiles,
+        recorder_factory: Callable[[ssl.SSLContext], RecordingUpstream] | None = None,
     ) -> None:
         """Store the components without starting them.
 
@@ -403,7 +426,10 @@ class SealedNetwork:
                 not enter the adapter's choice. It controls the recorder's
                 ``default_format`` so the recorder's reply matches the
                 inbound protocol. The default — Anthropic Messages — is the
-                one the fixture suite exercises end to end.
+                one the fixture suite exercises end to end. **Not applied
+                when a ``recorder_factory`` is supplied** — the factory owns
+                the served format (T-E3..T-E5 each pick the format their
+                recorder speaks).
             certs: The session's throwaway TLS certificates. Both the proxy
                 (``proxy_cert``/``proxy_key``) and the recorder
                 (``target_cert``/``target_key``, already carrying
@@ -414,9 +440,23 @@ class SealedNetwork:
                 here rather than from a pytest fixture because the harness is
                 not a fixture itself — a test asks for ``SealedNetwork``
                 explicitly.
+            recorder_factory: Optional callable the T-E3..T-E5 slices use to
+                host a non-default recorder (e.g. ``CurlRecordingUpstream``,
+                which takes its ``ssl_context`` at construction rather than
+                at ``start()`` — the two start shapes are incompatible, so a
+                ``RecordingUpstream`` and a custom recorder cannot be
+                constructed by the same call). The factory receives the
+                **ready** ``SSLContext`` SealedNetwork builds from the
+                target cert/key (cert ownership stays here — the leaf cert
+                carries ``HARNESS_UPSTREAM_HOST`` in its SAN) and returns a
+                fully constructed recorder; ``SealedNetwork.start`` then
+                calls ``await recorder.start()`` with no arguments.
+                ``fmt`` is not applied when a factory is supplied (the
+                factory owns the served format).
         """
         self._fmt = fmt
         self._certs = certs
+        self._recorder_factory = recorder_factory
         self._proxy: ConnectProxy | None = None
         self._recorder: RecordingUpstream | None = None
 
@@ -456,16 +496,31 @@ class SealedNetwork:
         # so the same key material services both the probe tests' TLS target
         # and the containment harness' TLS recorder without a second
         # generation pass.
-        recorder = RecordingUpstream(default_format=self._fmt)
-        await recorder.start(
-            ssl_context=server_ssl_context(self._certs.target_cert, self._certs.target_key)
-        )
+        target_ctx = server_ssl_context(self._certs.target_cert, self._certs.target_key)
+        if self._recorder_factory is not None:
+            # The factory owns the recorder class and binds the context at
+            # construction (CurlRecordingUpstream's shape); start() takes no
+            # arguments for such a recorder.
+            recorder = self._recorder_factory(target_ctx)
+            await recorder.start()
+        else:
+            recorder = RecordingUpstream(default_format=self._fmt)
+            await recorder.start(ssl_context=target_ctx)
         self._recorder = recorder
 
         try:
             # Proxy second, with the resolve map keyed on the recorder's port.
             target = f"{HARNESS_UPSTREAM_HOST}:{self._recorder.port}"
-            proxy = ConnectProxy(resolve={target: ("127.0.0.1", self._recorder.port)})
+            # Combine the harness entry with the deny entries *under* the
+            # harness entry: ``ConnectProxy`` looks up by ``target`` (host:port
+            # string) and a literal ``upstream.kitty-test.invalid:{port}`` would
+            # never collide with a real upstream hostname, but the deny
+            # entries make a silently-missed swap unable to resolve the real
+            # upstream to a reachable address on the proxy's leg too —
+            # belt-and-braces alongside the curl slice's client-side deny.
+            resolve_map = dict(_REAL_UPSTREAM_DENY_RESOLVE)
+            resolve_map[target] = ("127.0.0.1", self._recorder.port)
+            proxy = ConnectProxy(resolve=resolve_map)
             await proxy.start(server_ssl_context(self._certs.proxy_cert, self._certs.proxy_key))
         except BaseException:
             await recorder.stop()

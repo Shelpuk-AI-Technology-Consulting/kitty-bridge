@@ -43,11 +43,13 @@ import contextlib
 import socket
 import ssl
 from collections.abc import AsyncGenerator
+from pathlib import Path
 
 import aiohttp
 import pytest
 
 from harness import containment
+from harness.conftest import _PHASE_1_NAME, _PhaseOutcome
 from harness.connect_proxy import HARNESS_UPSTREAM_HOST, CertFiles, ConnectProxy
 from harness.containment import (
     BridgeAiohttpContainment,
@@ -422,6 +424,135 @@ class TestSealedNetwork:
         with pytest.raises(RuntimeError, match="not running"):
             _ = started[0].port
 
+    async def test_factory_receives_the_target_ssl_context_and_starts_without_a_kwarg(
+        self, certs: CertFiles, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A factory-built recorder is started with no ``ssl_context`` argument.
+
+        ``CurlRecordingUpstream`` takes ``ssl_context`` at construction and its
+        ``start()`` takes no arguments; ``RecordingUpstream`` takes the context
+        at ``start()``. The factory contract hands the factory the **ready**
+        ``SSLContext`` so the leaf-cert wiring stays in one place, and
+        ``SealedNetwork.start`` calls ``await recorder.start()`` for a
+        factory-built recorder (no ``ssl_context=`` kwarg) so neither shape
+        breaks. The cert identity (not just the shape) is asserted via a
+        ``server_ssl_context`` spy — the spy and ``SealedNetwork.start`` see
+        the **same** ``SSLContext`` object, so ``is`` is a real identity check.
+        """
+        from harness.connect_proxy import server_ssl_context
+
+        spy_ctx: list[tuple[Path, Path, ssl.SSLContext]] = []
+        real_server_ctx = server_ssl_context
+
+        def _recording_server_ctx(cert: Path, key: Path) -> ssl.SSLContext:
+            ctx = real_server_ctx(cert, key)
+            # SealedNetwork.start builds TWO contexts — the proxy's and the
+            # recorder's — so the spy records the cert/key alongside and the
+            # assertion matches on the target pair, not on call order.
+            spy_ctx.append((cert, key, ctx))
+            return ctx
+
+        monkeypatch.setattr(containment, "server_ssl_context", _recording_server_ctx)
+
+        seen_factory_ctx: list[ssl.SSLContext] = []
+        seen_args: list[dict[str, object]] = []
+        built_recorder: list[RecordingUpstream] = []
+
+        class _FactoryRecorder(RecordingUpstream):
+            def __init__(self, ssl_context: ssl.SSLContext, **kwargs: object) -> None:
+                super().__init__(default_format=WireFormat.OPENAI_RESPONSES)
+                self._ssl_context = ssl_context
+
+            def __post_init__(self) -> None:
+                # Bypass the base recorder's format allow-list — irrelevant
+                # to the factory contract this test asserts.
+                ...  # noqa: PIE790
+
+            async def start(self, *args: object, **kwargs: object) -> None:
+                seen_args.append(kwargs)
+                # Delegate to the real start so the recorder actually binds a
+                # port; the resolve map built by SealedNetwork reads
+                # ``self._recorder.port``, which the base class populates.
+                await RecordingUpstream.start(self, ssl_context=self._ssl_context)
+
+        def _factory(ctx: ssl.SSLContext) -> _FactoryRecorder:
+            seen_factory_ctx.append(ctx)
+            rec = _FactoryRecorder(ctx)
+            built_recorder.append(rec)
+            return rec
+
+        net = SealedNetwork(
+            WireFormat.ANTHROPIC_MESSAGES,
+            certs=certs,
+            recorder_factory=_factory,  # type: ignore[arg-type]
+        )
+        await net.start()
+        try:
+            assert len(seen_factory_ctx) == 1, "the factory was not invoked exactly once"
+            target_spy = [(k, c) for cert, k, c in spy_ctx if cert == certs.target_cert]
+            assert len(target_spy) == 1, (
+                f"SealedNetwork did not build a recorder SSLContext from target_cert "
+                f"via the spy (spy recorded {[(cert, k) for cert, k, _ in spy_ctx]})"
+            )
+            key_used, ctx_for_target = target_spy[0]
+            assert key_used == certs.target_key, (
+                "SealedNetwork's target-cert ctx was built with the wrong key "
+                f"(got {key_used}, expected {certs.target_key})"
+            )
+            assert seen_factory_ctx[0] is ctx_for_target, (
+                "factory did not receive the SSLContext SealedNetwork built from the "
+                "target cert/key — cert ownership must stay with SealedNetwork "
+                f"(target cert carries {HARNESS_UPSTREAM_HOST!r} in its SAN)"
+            )
+            assert len(seen_args) == 1, "the factory's recorder was never started"
+            assert "ssl_context" not in seen_args[0], (
+                f"factory-built recorder's start() received ssl_context kwarg "
+                f"({seen_args[0]!r}); CurlRecordingUpstream.start() takes no arguments"
+                " — the factory binds the context at construction"
+            )
+            assert built_recorder, "no recorder was built by the factory"
+            assert net.recorder is built_recorder[0], (
+                "SealedNetwork's recorder is not the factory-built instance: cert/ctx "
+                "ownership must flow through the factory, not be re-constructed"
+            )
+        finally:
+            await net.stop()
+
+    async def test_factory_owns_the_served_format(self, certs: CertFiles) -> None:
+        """When a factory is given, ``fmt`` on the constructor is ignored.
+
+        The factory is the T-E3/T-E4/T-E5 extension point and decides which
+        wire format the recorder serves (the curl_cffi slice needs
+        ``OPENAI_RESPONSES``; the botocore slice needs its own). Passing a
+        different ``fmt`` to ``SealedNetwork`` should not override the
+        factory's choice — the test asserts the recorder ends up with the
+        factory's format.
+        """
+        class _FormatRecorder(RecordingUpstream):
+            def __init__(self, ssl_context: ssl.SSLContext, **kwargs: object) -> None:
+                super().__init__(default_format=WireFormat.OPENAI_RESPONSES)
+
+            def __post_init__(self) -> None:
+                # Same allow-list bypass as in the factory-contract test above: the
+                # harness factory is format-agnostic and this test asserts ownership,
+                # not the validity of a specific format under the base recorder's
+                # product-level invariant.
+                ...  # noqa: PIE790 — intentional no-op stub
+
+        net = SealedNetwork(
+            WireFormat.ANTHROPIC_MESSAGES,  # deliberately not the factory's format
+            certs=certs,
+            recorder_factory=lambda ctx: _FormatRecorder(ctx),  # type: ignore[arg-type, return-value]
+        )
+        await net.start()
+        try:
+            assert net.recorder.default_format is WireFormat.OPENAI_RESPONSES, (
+                "factory-built recorder did not own the served format: the factory's "
+                "default_format was overridden by the SealedNetwork fmt argument"
+            )
+        finally:
+            await net.stop()
+
 
 # ── R4: the containment transport extension interface ──────────────────────
 
@@ -542,6 +673,169 @@ class TestBridgeAiohttpContainment:
             f"recorder saw {len(result.captures)} capture(s) with a broken resolver: "
             "if the bridge really failed to reach it, the recorder must hold nothing"
         )
+
+
+class TestVerdictFloorDetection:
+    """The Python <3.11 floor-skip shape — the plan §8 done-when, honoured.
+
+    The floor shape is: phase 1 ran and passed, the proxied phases are
+    setup-skipped (absent from the outcomes dict), on an interpreter below
+    3.11. The plan T-E3 row's done-when ("an outcome is recorded") requires
+    the row to be claimed on every supported interpreter; T-E9's
+    completeness gate accepts ``UNSUPPORTED`` as a permitted partial
+    delivery. These tests pin the helper that detects the shape and the
+    recorder that writes it.
+    """
+
+    def test_helper_true_on_below_311_with_phase1_passed_and_proxied_absent(self) -> None:
+        """Phase 1 passed on <3.11 with all proxied phases absent — the floor shape."""
+        from harness.conftest import _floor_unsupported_shape
+
+        outcomes = {_PHASE_1_NAME: _PhaseOutcome.PASSED}
+        clean = {_PHASE_1_NAME: _PhaseOutcome.PASSED}
+        assert _floor_unsupported_shape(outcomes, clean, version_info=(3, 10, 0)) is True, (
+            "phase 1 passed on <3.11 with all proxied phases absent must be the floor shape"
+        )
+
+    def test_helper_false_on_or_above_311(self) -> None:
+        """From 3.11 up, the floor shape never applies — the gate decides."""
+        from harness.conftest import _floor_unsupported_shape
+
+        outcomes = {_PHASE_1_NAME: _PhaseOutcome.PASSED}
+        clean = {_PHASE_1_NAME: _PhaseOutcome.PASSED}
+        assert _floor_unsupported_shape(outcomes, clean, version_info=(3, 11, 0)) is False
+        assert _floor_unsupported_shape(outcomes, clean, version_info=(3, 12, 1)) is False
+        assert _floor_unsupported_shape(outcomes, clean, version_info=(3, 13, 0)) is False
+
+    def test_helper_false_when_phase1_did_not_pass(self) -> None:
+        """Phase 1 absent, failed, or skipped means the slice did not run clean — not the floor."""
+        from harness.conftest import _floor_unsupported_shape
+
+        # Phase 1 absent — a deleted/renamed phase; the finaliser's length
+        # check catches that case, not the floor shape.
+        assert _floor_unsupported_shape({}, {}, version_info=(3, 10, 0)) is False
+        # Phase 1 FAILED — a real failure, not a floor.
+        failed = {_PHASE_1_NAME: _PhaseOutcome.FAILED}
+        assert _floor_unsupported_shape(failed, {}, version_info=(3, 10, 0)) is False
+        # Phase 1 runtime-skipped — also not the floor.
+        skipped = {_PHASE_1_NAME: _PhaseOutcome.SKIPPED}
+        assert _floor_unsupported_shape(skipped, {}, version_info=(3, 10, 0)) is False
+
+    def test_helper_false_when_phase1_teardown_failed(self) -> None:
+        """Phase 1 call passed but teardown errored — same standard the gate applies."""
+        from harness.conftest import _floor_unsupported_shape
+
+        outcomes = {_PHASE_1_NAME: _PhaseOutcome.PASSED}
+        teardown_failed = {_PHASE_1_NAME: _PhaseOutcome.FAILED}
+        assert _floor_unsupported_shape(outcomes, teardown_failed, version_info=(3, 10, 0)) is False, (
+            "phase 1 call passed but teardown failed must disqualify the floor shape: the "
+            "gate's standard for every phase is PASSED call + PASSED teardown — the reason "
+            "text would otherwise lie ('phase 1 passed' when phase 1 did not come back clean)"
+        )
+
+    def test_helper_false_when_phase1_teardown_absent(self) -> None:
+        """Phase 1 teardown entry missing — strict form: phase 1 did not come back clean.
+
+        :func:`_gate_passed` requires the teardown entry to be present and PASSED (same
+        as call); the floor helper keeps the same standard. Absent is *not* a free pass
+        — it would otherwise hide a setup-skipped phase 1 from the floor check.
+        """
+        from harness.conftest import _floor_unsupported_shape
+
+        outcomes = {_PHASE_1_NAME: _PhaseOutcome.PASSED}
+        # No teardown entry at all.
+        assert _floor_unsupported_shape(outcomes, {}, version_info=(3, 10, 0)) is False
+
+    def test_helper_false_when_any_proxied_phase_is_present(self) -> None:
+        """A present proxied phase means real proxied work happened — not the floor."""
+        from harness.conftest import _PROXIED_PHASE_NAMES, _floor_unsupported_shape
+
+        one_passed = {
+            _PHASE_1_NAME: _PhaseOutcome.PASSED,
+            "test_proxy_up_every_peer_port_joins_a_tunnel": _PhaseOutcome.PASSED,
+        }
+        clean = {_PHASE_1_NAME: _PhaseOutcome.PASSED}
+        assert _floor_unsupported_shape(one_passed, clean, version_info=(3, 10, 0)) is False
+        assert any(n in one_passed for n in _PROXIED_PHASE_NAMES)
+        # A present-but-failed proxied phase is observed work, not absence.
+        one_failed = {
+            _PHASE_1_NAME: _PhaseOutcome.PASSED,
+            "test_proxy_down_leaves_the_recorder_with_zero_connections": _PhaseOutcome.FAILED,
+        }
+        assert _floor_unsupported_shape(one_failed, clean, version_info=(3, 10, 0)) is False
+
+    def test_recorder_writes_unsupported_with_the_documented_reason(self) -> None:
+        """A floor-shape recorder call writes ``UNSUPPORTED`` carrying the reason.
+
+        The autouse ``_isolate_singleton`` at module scope resets the
+        singleton before this test, so the only mutation observed is the
+        recorder's own. The writer path is driven through the recorder's
+        ``version_info`` override, so the test proves the row's shape on
+        any interpreter — the 3.10 CI leg exercises the real path.
+        """
+        from harness.conftest import _record_unsupported_if_floor_shape
+        from harness.containment import instance as report_instance
+
+        outcomes = {_PHASE_1_NAME: _PhaseOutcome.PASSED}
+        clean = {_PHASE_1_NAME: _PhaseOutcome.PASSED}
+        recorded = _record_unsupported_if_floor_shape(outcomes, clean, "curl_cffi", version_info=(3, 10, 0))
+
+        assert recorded is True, "the recorder must claim the floor shape it was given"
+        row = report_instance().entry("curl_cffi")
+        assert row.outcome is Outcome.UNSUPPORTED
+        assert row.reason is not None and "Python <3.11" in row.reason, (
+            f"the recorded reason must name the floor (got {row.reason!r}) so a "
+            "future maintainer can re-derive the decision"
+        )
+
+    def test_recorder_does_not_overwrite_an_existing_verdict(self) -> None:
+        """A row that is no longer ``NOT_ATTEMPTED`` is left untouched."""
+        from harness.conftest import _record_unsupported_if_floor_shape
+        from harness.containment import instance as report_instance
+
+        report_instance().record("curl_cffi", Outcome.PROVEN)
+        outcomes = {_PHASE_1_NAME: _PhaseOutcome.PASSED}
+        clean = {_PHASE_1_NAME: _PhaseOutcome.PASSED}
+        recorded = _record_unsupported_if_floor_shape(outcomes, clean, "curl_cffi", version_info=(3, 10, 0))
+
+        assert recorded is False, "an existing verdict must not be overwritten"
+        assert report_instance().entry("curl_cffi").outcome is Outcome.PROVEN
+
+    def test_recorder_noop_when_phase1_teardown_failed(self) -> None:
+        """A phase-1 teardown failure on <3.11 must NOT be claimed as ``UNSUPPORTED``.
+
+        The recorder's reason text is "phase 1 (direct leg) passed" — a claim
+        that is false when the teardown errored. Leaving the row
+        ``NOT_ATTEMPTED`` lets T-E9 surface the real failure.
+        """
+        from harness.conftest import _record_unsupported_if_floor_shape
+        from harness.containment import instance as report_instance
+
+        outcomes = {_PHASE_1_NAME: _PhaseOutcome.PASSED}
+        teardown_failed = {_PHASE_1_NAME: _PhaseOutcome.FAILED}
+        recorded = _record_unsupported_if_floor_shape(
+            outcomes, teardown_failed, "curl_cffi", version_info=(3, 10, 0)
+        )
+
+        assert recorded is False, (
+            "the recorder must not claim UNSUPPORTED for a slice whose phase 1 teardown "
+            "errored — that is a real failure, not a partial delivery"
+        )
+        assert report_instance().entry("curl_cffi").outcome is Outcome.NOT_ATTEMPTED, (
+            "T-E9 must see the row as not_attempted (the slice failed at teardown, not at "
+            "the floor); the floor-recording path here is the one that would have recorded "
+            "UNSUPPORTED were teardowns not consulted"
+        )
+
+    def test_recorder_noop_above_311(self) -> None:
+        """Above the floor the recorder is a no-op — the gate owns the verdict."""
+        from harness.conftest import _record_unsupported_if_floor_shape
+        from harness.containment import instance as report_instance
+
+        outcomes = {_PHASE_1_NAME: _PhaseOutcome.PASSED}
+        clean = {_PHASE_1_NAME: _PhaseOutcome.PASSED}
+        assert _record_unsupported_if_floor_shape(outcomes, clean, "curl_cffi", version_info=(3, 11, 0)) is False
+        assert report_instance().entry("curl_cffi").outcome is Outcome.NOT_ATTEMPTED
 
 
 # ── Helpers (private) ─────────────────────────────────────────────────────
