@@ -50,35 +50,21 @@ _EMPTY_ASSISTANT_FALLBACK_TEXT = (
 #: with the same spelling (KBR-221 R1).
 _RESPONSES_SIMPLE_TOOL_CHOICES: frozenset[str] = frozenset({"auto", "none", "required"})
 
-#: Responses ``tool_choice`` object forms whose ``type`` alone selects a hosted
-#: built-in (the ``ToolChoiceTypes`` union plus the three ``Specific*``
-#: singletons).  No Chat Completions form exists for any of them, and nothing on
-#: a translated route could execute one (KBR-221 D5 / D10).
-_RESPONSES_HOSTED_TOOL_CHOICE_TYPES: frozenset[str] = frozenset(
-    {
-        "file_search",
-        "web_search_preview",
-        "computer",
-        "computer_use_preview",
-        "computer_use",
-        "web_search_preview_2025_03_11",
-        "image_generation",
-        "code_interpreter",
-        "programmatic_tool_calling",
-        "apply_patch",
-        "shell",
-    }
-)
-
 
 def _names_degraded_responses_tool(tools: object, name: str) -> bool:
     """Report whether the inbound Responses ``tools`` list declares ``name`` as a tool the hop degraded.
 
     A function-typed ``tool_choice`` is only forceable onto a tool the route
     still declares as a function.  ``type: "custom"`` freeform tools and the
-    hosted types in :data:`_RESPONSES_HOSTED_TOOL_CHOICE_TYPES` carry no Chat
-    Completions form on this hop -- forcing a call to one would force a call
-    nothing on the route can execute (KBR-221 D10).
+    hosted ``ToolChoiceTypes`` built-ins (``web_search_preview`` and the rest,
+    enumerated in :mod:`kitty.bridge.responses.translator` prose and in the
+    ``TestResponsesToolChoice.test_tool_choice_hosted_is_omitted`` parametrize)
+    carry no Chat Completions form on this hop -- forcing a call to one would
+    force a call nothing on the route can execute (KBR-221 D10).  This helper
+    tests the simple property ``type != "function"`` because it catches every
+    non-function declaration -- hosted types, ``custom``, anything malformed
+    the wire may yet publish -- without enumerating the closed set in two
+    places that would have to stay in sync.
 
     A name the list does not declare is **not** reported: that body is the
     agent's mistake, and the provider's error says so better than a silent
