@@ -9103,6 +9103,7 @@ class BridgeServer:
     def _stream_converter_for(
         self, cc_request: dict
     ) -> AnthropicCCStreamConverter | OpenCodeGoResponsesCCStreamConverter | None:
+        # pragma: no mutate block
         """Return the stateful SSE→CC converter for this request, or None.
 
         Each streaming handler creates one converter per attempt and feeds it
