@@ -475,6 +475,12 @@ class TestTheWholeSuiteIsCoherent:
             # from the installed mutmut), and the bucket routing is the
             # other side of the registry agreement the scope guard tests.
             "tests/test_aggregate_mutation_baseline.py",
+            # KBR-152. A §6.2.3 contract against the live branch-rules JSON
+            # GitHub defines and edits: the verifier's pure decision is
+            # pinned against inline snapshots of that format, so a rule
+            # shape nobody recognised reads as *not* enforced rather than
+            # as blessed.
+            "tests/test_verify_required_status_checks.py",
             # KBR-200 (CB-3). §6.2.3 serialization-boundary guard: the
             # native-passthrough route must keep the agent's cache
             # breakpoints intact. Drives the bridge branch end to end and
