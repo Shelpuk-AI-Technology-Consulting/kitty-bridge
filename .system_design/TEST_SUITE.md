@@ -1872,6 +1872,15 @@ None`. `mutmut` closes that gap.
 - **Triage rule:** (a) a survivor revealing a missing assertion → strengthen the test; (b)
   revealing untested behaviour → add a test; (c) genuinely equivalent → suppress at the site with
   `# pragma: no mutate` **and a comment saying why**. Never dismiss a survivor silently.
+  This triage pragma and [KBR-266](https://shelpuk.atlassian.net/browse/KBR-266)'s
+  scope-narrowing markers on `server.py` are two different uses of the same
+  pragma string: the triage use suppresses one known-equivalent mutant and
+  carries its per-site "why" comment; the scope-narrowing use marks whole
+  out-of-scope defs/classes so generation stays bounded (the "why" lives in
+  `pyproject.toml`'s `[tool.mutmut]` comment and the marker-scheme guard's
+  docstring, not at each of the 135 sites). A future reader grepping the
+  source should not expect a per-site comment at every scope-narrowing
+  marker.
 - **Cadence — to be set by measurement, not assertion.** The full scoped run is nightly. Whether
   a **changed-code** mutation run also fits the per-PR gate is an open question with a numeric
   answer: measure the wall-clock of `mutmut run` restricted to functions touched by a
@@ -1885,10 +1894,26 @@ the machine-readable scope in `tests/mutmut_scope.py`. The baseline is
 **provisional** until [KBR-115](https://shelpuk.atlassian.net/browse/KBR-115)
 (T-K6) reclassifies the socket/process modules §8.2 enumerates out of
 `l1`; the current numbers are **optimistic**, since kills currently
-credited through substantively-L3 tests vanish on re-measure. One group
-(`compaction_and_pairing`) is **deferred** in this baseline — mutmut
-generates per-file, `server.py` is too large to mutate wholly, and
-selective `# pragma: no mutate` markers belong to a follow-up ticket.
+credited through substantively-L3 tests vanish on re-measure. The
+seventh group, `compaction_and_pairing`, moves from deferred to
+measured with this change — see `MUTATION_BASELINE.md` for the row.
+It was initially deferred because mutmut generates per-file and the
+unscoped mutated copy of `server.py` reached 354 MB without finishing
+generation; [KBR-266](https://shelpuk.atlassian.net/browse/KBR-266)
+narrows generation by marking every def/class in `server.py` except
+the seven `BridgeServer` methods the group names with
+`# pragma: no mutate block`. The marker scheme is pinned by
+`tests/test_mutmut_scope.py::test_server_py_pragma_scheme_marks_everything_but_the_seven`:
+a stray block-level pragma on one of the seven's def headers (or on
+the `BridgeServer` class itself) silently shrinks the measured I1
+core, and a missing pragma elsewhere re-opens whole-file generation.
+The guard inspects block-level defs/classes only — a pragma placed
+*inside* one of the seven's bodies on a leading line of a nested
+statement suppresses that branch's mutations without the guard
+noticing; mutmut's config-level `do_not_mutate_patterns` (a regex on
+source lines) is a parallel silent-shrink path the guard cannot see,
+surfaced by the per-group TOTAL count in `MUTATION_BASELINE.md`
+against the previous run.
 
 ### 6.2 L2 — Contract
 

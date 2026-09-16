@@ -25,6 +25,7 @@ hand. The two halves of the ``l1 or l2`` job.
 
 from __future__ import annotations
 
+import ast
 import fnmatch
 import re
 import sys
@@ -395,6 +396,138 @@ def test_every_only_mutate_entry_has_a_registry_row() -> None:
                 f"missing an entry, or the glob list has grown wider "
                 f"than the registry's scope"
             )
+
+
+# ── server.py pragma scheme (KBR-266) ───────────────────────────────────
+#
+# ``server.py`` is in ``only_mutate`` only because every def/class in it
+# except the seven §6.1 ``compaction_and_pairing`` methods carries
+# ``# pragma: no mutate block`` (mutmut generates per *file*; unscoped
+# generation of this ~9k-line file hit 354 MB and did not finish in 25
+# minutes — see MUTATION_BASELINE.md's deferred-groups history). The
+# scheme has two silent failure modes this guard pins:
+#
+# * a pragma landing on one of the seven shrinks the I1 core's measured
+#   surface without any test noticing (the run just reports fewer
+#   mutants), and
+# * a pragma missing from a new def/class re-opens whole-file generation
+#   — the 354 MB blow-up returns on the next ``mutmut run``.
+
+
+def _server_source() -> str:
+    """Return the live ``server.py`` source text."""
+    return (
+        Path(__file__).resolve().parent.parent
+        / "src" / "kitty" / "bridge" / "server.py"
+    ).read_text()
+
+
+def _pragma_marked_defs(source: str) -> set[str]:
+    """Return the names of block-level defs/classes whose body header carries the pragma.
+
+    Only block-level defs/classes — the ones the script directly marks —
+    are checked. Nested defs/classes inside a marked parent are
+    transitively suppressed by the parent's pragma (mutmut's block
+    pragma marks every subsequent statement in the enclosing body —
+    see ``mutmut/mutation/pragma_handling.py`` ``_scan_body_stmts`` and
+    ``_visit_compound_header``), so they carry no pragma of their own
+    and would only generate false negatives here.
+    """
+    tree = ast.parse(source)
+    lines = source.split("\n")
+
+    def is_marked(node: ast.AST) -> bool:
+        if not isinstance(
+            node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+        ) or not node.body:
+            return False
+        # Pragma sits at 0-indexed line ``body[0].lineno - 2`` (one line
+        # above the first body statement).
+        header_line = node.body[0].lineno - 2
+        return (
+            0 <= header_line < len(lines)
+            and lines[header_line].lstrip().startswith("# pragma: no mutate")
+        )
+
+    marked: set[str] = set()
+    for node in tree.body:
+        if not isinstance(
+            node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+        ):
+            continue
+        if is_marked(node):
+            marked.add(node.name)
+        if node.name == "BridgeServer":
+            # The class itself is never marked (a class-level pragma would
+            # suppress the seven); check each direct child method.
+            for child in node.body:
+                if isinstance(
+                    child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+                ) and is_marked(child):
+                    marked.add(child.name)
+    return marked
+
+
+def _block_level_defs(source: str) -> set[str]:
+    """Return the names of every def/class at Module or BridgeServer body level.
+
+    Nested defs/classes are skipped — they are governed transitively by
+    their enclosing marked parent.
+    """
+    tree = ast.parse(source)
+    names: set[str] = set()
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names.add(node.name)
+            if node.name == "BridgeServer":
+                for child in node.body:
+                    if isinstance(
+                        child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+                    ):
+                        names.add(child.name)
+    return names
+
+
+def test_server_py_pragma_scheme_marks_everything_but_the_seven() -> None:
+    """The seven §6.1 methods are the only unmarked defs/classes in server.py.
+
+    Every other def/class must carry ``# pragma: no mutate block`` (the
+    whole-file generation blow-up), and none of the seven may carry one
+    (each suppressed method silently drops out of the measured I1 core).
+    BridgeServer's methods are checked individually — the class itself is
+    never marked, since a class-level pragma would suppress the seven.
+    """
+    source = _server_source()
+    marked = _pragma_marked_defs(source)
+    block_level = _block_level_defs(source)
+    compaction = {
+        name
+        for t in TARGET_GROUPS["compaction_and_pairing"]
+        for name in [t.function_or_method]
+        if name is not None
+    }
+    # BridgeServer itself is the carrier — a class-level pragma would
+    # suppress every child including the seven (a block pragma on the
+    # class body's header marks the whole class body). Pin the
+    # docstring's claim: the carrier must be present and never marked.
+    assert "BridgeServer" in block_level, (
+        "BridgeServer class missing from server.py — the registry's "
+        "compaction_and_pairing rows point at it; the file has changed "
+        "shape and the registry must be re-derived"
+    )
+    assert "BridgeServer" not in marked, (
+        "BridgeServer carries a class-level `# pragma: no mutate block` "
+        "— the pragma suppresses the whole class body including the "
+        "seven compaction_and_pairing methods, which then generate zero "
+        "mutants and the measured I1 core silently vanishes"
+    )
+    unmarked = (block_level - marked) - {"BridgeServer"}
+    assert unmarked == compaction, (
+        f"server.py's unmarked block-level defs/classes {sorted(unmarked)} "
+        f"must equal the compaction_and_pairing registry rows "
+        f"{sorted(compaction)} — a stray pragma shrinks the measured I1 "
+        f"core, a missing pragma re-opens whole-file mutant generation"
+    )
 
 
 # ── Falsification cases ─────────────────────────────────────────────────

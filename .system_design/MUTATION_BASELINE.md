@@ -37,22 +37,22 @@ registry, not in `pyproject.toml`.
 | | |
 |---|---|
 | Mutmut | 3.8.0 |
-| Commit | `b680edd` |
-| Date | 2026-09-15 |
-| Host | Linux dev workstation, 8 CPU, idle |
+| Commit | `b680edd` for the six measured groups; `compaction_and_pairing` row from [KBR-266](https://shelpuk.atlassian.net/browse/KBR-266) at commit `4f38421` (see the [note below](#compaction_and_pairing-no-longer-deferred-score-still-pending)) |
+| Date | 2026-09-15 (b680edd); 2026-09-16 (KBR-266, partial) |
+| Host | Linux dev workstation, 8 CPU. b680edd was recorded idle; the KBR-266 per-mutant test phase ran under sibling-session contention |
 | Selection | `pytest -m l1` minus `tests/test_internal_keys_not_sent_upstream.py` (see the deselect rationale below) |
 | Score formula | mutmut badge formula as this aggregator computes it: `(killed + timeout) / tested`, where `tested = total − skipped − not_checked`. Timeouts count as kills; `no_tests` and `suspicious` dilute the score; `skipped` and `not_checked` drop out of the denominator (unexamined mutants are neither kills nor evidence of a gap) |
 
 | Group | Total | Tested | Killed | Survived | Timeout | No tests | Suspicious | Not checked | Score |
 |---|---|---|---|---|---|---|---|---|---|
 | translators_and_engine | 4040 | 3084 | 2103 | 971 | 10 | 0 | 0 | 956 | 68.5% |
-| compaction_and_pairing | -- | -- | -- | -- | -- | -- | -- | -- | _deferred_ |
+| compaction_and_pairing | 648 | 0 | -- | -- | -- | -- | -- | 648 | _pending_ — see [the note below](#compaction_and_pairing-no-longer-deferred-score-still-pending) |
 | provider_hooks | 1045 | 1026 | 860 | 166 | 0 | 0 | 0 | 19 | 83.8% |
 | model_context | 183 | 73 | 43 | 30 | 0 | 0 | 0 | 110 | 58.9% |
 | openai_subscription | 474 | 474 | 236 | 238 | 0 | 0 | 0 | 0 | 49.8% |
 | egress | 125 | 124 | 94 | 30 | 0 | 0 | 0 | 1 | 75.8% |
 | supporting | 773 | 686 | 445 | 241 | 0 | 0 | 0 | 87 | 64.9% |
-| **TOTAL** | **6640** | **5467** | **3781** | **1676** | **10** | **0** | **0** | **1173** | **69.3%** |
+| **TOTAL** | **7288** | **5467** | **3781** | **1676** | **10** | **0** | **0** | **1821** | **61.4%** of tested (648 in `compaction_and_pairing` pending) |
 
 Column meanings, so the numbers recompute from the formula:
 
@@ -73,28 +73,39 @@ results, so re-running `mutmut run` with the same patterns resumes from
 the current state and completes the table — KBR-91's nightly job is the
 natural home for that.
 
-## Deferred groups
+## `compaction_and_pairing`: no longer deferred, score still pending
 
-The registry's `DEFERRED_GROUPS` names groups whose baseline is pending,
-not measured. Today that is **`compaction_and_pairing`** — the seven
-BridgeServer methods §6.1 lists as "Compaction and pairing".
+[KBR-266](https://shelpuk.atlassian.net/browse/KBR-266) lifted the group
+out of `DEFERRED_GROUPS` by landing `# pragma: no mutate block` markers
+on every def/class in `server.py` except the seven `BridgeServer`
+methods the group names (pinned by
+`tests/test_mutmut_scope.py::test_server_py_pragma_scheme_marks_everything_but_the_seven`).
+`server.py` rejoined `only_mutate`, and mutmut generates mutants for
+those methods: **648 mutants in scope, generated in 63 seconds**
+(previously the whole file mutated to 354 MB / 5.7 M lines and the
+generating worker did not finish in 25 minutes).
 
-**Why.** mutmut generates mutants per *file*, not per function. Those
-seven methods live in `src/kitty/bridge/server.py`, a ~7,900-line file;
-mutmut's mutated copy of it reaches 354 MB / 5.7M lines and the
-generating worker did not finish in 25 minutes on an idle 8-CPU
-workstation. Mutating only the seven methods needs `# pragma: no mutate
-block` markers on everything else in the file — a source change that
-belongs to its own ticket, not to baseline configuration. The group is
-therefore excluded from `only_mutate` in `pyproject.toml` (with the
-reason inline) and named in the registry's `DEFERRED_GROUPS` until
-someone lands those markers.
+**Why the score row is still `_pending_`, not measured.** The run that
+generated the mutants recorded the test-to-mutant associations (the
+stats phase completed; 532–596 L1 tests associate with each of the five
+compaction methods), but the subsequent per-mutant test phase did not
+run to completion: the clean-test run that precedes it exercises L1
+tests which make real upstream calls, and under sibling-session
+contention on the recording workstation those calls stalled in
+`CLOSE_WAIT` with no per-test timeout bound
+(`pytest-timeout` is not a dev dependency). The stats cache is
+`mutants/mutmut-stats.json`; re-running `mutmut run` with the group's
+patterns on an idle workstation resumes from it and skips the ~20
+minute stats phase. Recording the score is the re-measure obligation
+below, and [KBR-91](https://shelpuk.atlassian.net/browse/KBR-91)'s
+per-group threshold rule applies to every group in §6.1's table — the
+table is not complete until the seventh row measures.
 
 **Consequence for the thresholds.** [KBR-91](https://shelpuk.atlassian.net/browse/KBR-91)
 (T-H3) cannot set a per-group threshold for `compaction_and_pairing`
-until this gap closes. Its "≥ 85% killed per target group" rule applies
-to every group in §6.1's table, and the table is not complete until the
-seventh row measures.
+until the score above records. Its "≥ 85% killed per target group" rule
+applies to every group in §6.1's table, and the table is not complete
+until the seventh row measures.
 
 ## Why the numbers are provisional
 
@@ -140,6 +151,23 @@ reference after that point is the outcome to avoid.
   for the same reason, so one `--deselect` only shifts the failure to
   the next case. Investigating the trampoline interaction further is
   its own ticket, not T-H1 scope.
+- `also_copy = ["README.md", "scripts"]` (KBR-266) — `tests/test_aggregate_mutation_baseline.py`
+  imports `scripts/aggregate_mutation_baseline.py` by filesystem path
+  at module level, so a fresh `mutants/` tree needs `scripts/` inside
+  it or test collection fails before the clean run starts. The entry
+  postdates the recorded b680edd run (the L2 test landed in KBR-88
+  review round 7); every run on main needed it from then on. The
+  directory form (not the single file) is deliberate: mutmut 3.8.0's
+  file branch (`shutil.copy2`) does not create the destination's
+  parent directory and dies on a fresh `mutants/` tree; the directory
+  branch (`copytree(dirs_exist_ok=True)`) does.
+- `do_not_mutate_patterns` is unused, and the
+  `# pragma: no mutate block` markers on `server.py` (KBR-266) are the
+  only suppression mechanism in scope. Either mechanism silently
+  shrinks a group's measured surface: the marker scheme is pinned by
+  `tests/test_mutmut_scope.py::test_server_py_pragma_scheme_marks_everything_but_the_seven`,
+  but `do_not_mutate_patterns` changes have no guard — the per-group
+  TOTAL against the previous run is the only thing that would notice.
 - `mutate_only_covered_lines` is **not** enabled — known crash class on
   single-init C extensions (mutmut #528, fixed in #566); kitty imports
   `curl_cffi` and `boto3`. Do not enable without verifying the fix first.

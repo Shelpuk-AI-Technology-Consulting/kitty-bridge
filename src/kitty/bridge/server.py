@@ -81,6 +81,7 @@ _crash_handlers_installed = False
 
 
 def _setup_crash_handlers(log_path: Path, *, state_path: str | None = None) -> None:
+    # pragma: no mutate block
     """Install process-level crash handlers that write to *log_path*.
 
     Three layers, from most to least severe:
@@ -161,6 +162,7 @@ def _setup_crash_handlers(log_path: Path, *, state_path: str | None = None) -> N
 
 
 def _has_tool_use_blocks(body: dict) -> bool:
+    # pragma: no mutate block
     """Return True if any message in *body* uses Anthropic-format ``tool_use`` content blocks.
 
     When a native-passthrough provider forwards an Anthropic Messages body,
@@ -178,6 +180,7 @@ def _has_tool_use_blocks(body: dict) -> bool:
 
 
 def _assistant_native_tool_use_ids(msg: dict) -> list[str]:
+    # pragma: no mutate block
     """Return ``tool_use`` ids from an Anthropic-native assistant message.
 
     In native passthrough, an assistant turn's tool calls live as
@@ -207,6 +210,7 @@ def _assistant_native_tool_use_ids(msg: dict) -> list[str]:
 
 
 def _user_native_tool_result_ids(msg: dict) -> list[str]:
+    # pragma: no mutate block
     """Return ``tool_use_id`` values from ``tool_result`` blocks on a native user message.
 
     In native passthrough, tool results are ``{"type": "tool_result",
@@ -235,11 +239,13 @@ def _user_native_tool_result_ids(msg: dict) -> list[str]:
 
 
 def _user_has_tool_result(msg: dict) -> bool:
+    # pragma: no mutate block
     """Return True if a native user message carries at least one ``tool_result`` block."""
     return bool(_user_native_tool_result_ids(msg))
 
 
 def _drop_orphan_response_outputs(items: list) -> tuple[list, list]:
+    # pragma: no mutate block
     """Split a Responses ``input`` array into kept items and orphan outputs.
 
     The Responses-shape pairing rule, mirroring
@@ -280,6 +286,7 @@ def _drop_orphan_response_outputs(items: list) -> tuple[list, list]:
 
 
 def _is_tool_use_format_error(status: int, body: object) -> bool:
+    # pragma: no mutate block
     """Return True if the upstream error indicates a tool_use format mismatch.
 
     Detects these patterns across multiple provider error formats:
@@ -331,6 +338,7 @@ _THINKING_CARRIER_BLOCK = {"type": "thinking", "thinking": ""}
 
 
 def _is_thinking_roundtrip_error(status: int, body: object) -> bool:
+    # pragma: no mutate block
     """Return True if the upstream rejected the transcript's thinking round-trip.
 
     Providers whose thinking mode is stateful across tool calls (DeepSeek,
@@ -367,6 +375,7 @@ def _is_thinking_roundtrip_error(status: int, body: object) -> bool:
 
 
 def _with_thinking_carrier(msg: dict, *, native: bool) -> dict | None:
+    # pragma: no mutate block
     """Return a copy of an assistant message carrying the thinking carrier.
 
     Adds the empty carrier the target's thinking mode requires: a leading
@@ -431,6 +440,7 @@ _THINKING_SIGNATURE_PATTERNS: tuple[tuple[str, ...], ...] = (
 
 
 def _is_thinking_signature_error(status: int, body: object) -> bool:
+    # pragma: no mutate block
     """Return True if Anthropic rejected a thinking block's signature in the transcript.
 
     api.anthropic.com verifies every ``thinking`` block it is sent back: a block
@@ -467,6 +477,7 @@ _MAX_THINKING_STRIPS = 3
 
 
 def _strip_thinking_blocks(body: dict, *, through_message: int | None = None) -> bool:
+    # pragma: no mutate block
     """Remove ``thinking`` and ``redacted_thinking`` blocks that Anthropic will not verify.
 
     With ``through_message`` unset every such block goes: the recovery
@@ -517,6 +528,7 @@ def _strip_thinking_blocks(body: dict, *, through_message: int | None = None) ->
 
 
 def _is_unverifiable_thinking(block: object, *, in_range: bool) -> bool:
+    # pragma: no mutate block
     """Return whether a content block is thinking the strip must remove.
 
     Args:
@@ -533,6 +545,7 @@ def _is_unverifiable_thinking(block: object, *, in_range: bool) -> bool:
 
 
 def _recover_rejected_thinking(body: dict, error_body: object, strips_done: int) -> bool:
+    # pragma: no mutate block
     """Strip the thinking a signature rejection names, escalating to every block on the last try.
 
     The first two strips are targeted at the message the rejection names (see
@@ -562,6 +575,7 @@ def _recover_rejected_thinking(body: dict, error_body: object, strips_done: int)
 
 
 def _route_model(cc_request: dict) -> str:
+    # pragma: no mutate block
     """Return the model every routing decision for this request must read.
 
     One question — "which model is this request for?" — kept in one place. On
@@ -598,6 +612,7 @@ def _route_model(cc_request: dict) -> str:
 
 
 def _repair_thinking_roundtrip(body: dict, *, native: bool) -> bool:
+    # pragma: no mutate block
     """Give every assistant turn the thinking carrier its target requires.
 
     Repairs the transcript so a backend enforcing a thinking round-trip
@@ -666,6 +681,7 @@ def _repair_thinking_roundtrip(body: dict, *, native: bool) -> bool:
 
 
 def _normalize_cc_stop(cc_request: dict) -> None:
+    # pragma: no mutate block
     """Rewrite a string ``stop`` into the single-item list form, in place.
 
     OpenAI's ``StopConfiguration`` declares ``stop`` as ``oneOf`` a string or an
@@ -700,6 +716,7 @@ def _normalize_cc_stop(cc_request: dict) -> None:
 
 
 def _convert_native_to_cc_format(body: dict) -> dict:
+    # pragma: no mutate block
     """Convert an Anthropic Messages body to Chat Completions format.
 
     Handles:
@@ -955,6 +972,7 @@ _NATIVE_TRUNCATING_STOP_REASONS = frozenset({"max_tokens", "model_context_window
 
 
 def _d3_truncation_error_body(stop_reason: str) -> dict:
+    # pragma: no mutate block
     """Build the D3 ``400`` body for a reply that truncated before any content.
 
     Q14 D3: the body is an ``invalid_request_error`` carrying a ``reason`` marker, so the
@@ -1018,6 +1036,7 @@ _RECOVERY_HOLD_JITTER_SECONDS = 2.0
 
 
 def _recovery_hold_jitter() -> float:
+    # pragma: no mutate block
     """Return a random de-synchronisation delay for a recovery hold, in seconds."""
     return random.uniform(0.0, _RECOVERY_HOLD_JITTER_SECONDS)
 # A blip on the wire between kitty and the provider is not a provider outage.
@@ -1048,6 +1067,7 @@ _CAUSE_HEADLINES: dict[str, str] = {
 
 
 class AllBackendsUnhealthyError(Exception):
+    # pragma: no mutate block
     """Raised when all backends are unhealthy and the soonest retry exceeds the fast-fail threshold.
 
     Attributes:
@@ -1083,6 +1103,7 @@ _OVERSIZED_INPUT_THRESHOLD = 600_000
 
 
 def _header_value(value: str) -> str:
+    # pragma: no mutate block
     """Return a header-safe rendering of a profile or model name.
 
     aiohttp rejects CR, LF and NUL in header values as header injection, and
@@ -1104,6 +1125,7 @@ def _header_value(value: str) -> str:
 
 
 def _token_count(value: object) -> int:
+    # pragma: no mutate block
     """Return an upstream token count as an int, treating anything else as zero.
 
     Usage blocks come from third-party providers, so a missing or malformed
@@ -1120,6 +1142,7 @@ def _token_count(value: object) -> int:
 
 
 class ClientDisconnectedError(Exception):
+    # pragma: no mutate block
     """Raised when writing to the *client* connection fails.
 
     aiohttp reports a dead client with the same ``ConnectionResetError``
@@ -1134,6 +1157,7 @@ class ClientDisconnectedError(Exception):
 
 
 class TransportGrace:
+    # pragma: no mutate block
     """Per-request budget for riding out upstream connection trouble.
 
     Tracks how long the current request has been fighting connection errors on
@@ -1192,6 +1216,7 @@ class TransportGrace:
 
 
 async def _write_client(stream: web.StreamResponse, data: bytes) -> None:
+    # pragma: no mutate block
     """Write bytes to the client, tagging a client-side failure as such.
 
     Args:
@@ -1208,6 +1233,7 @@ async def _write_client(stream: web.StreamResponse, data: bytes) -> None:
 
 
 def _stops_for_blocks_the_client_saw(buffered_events: list[str]) -> list[str]:
+    # pragma: no mutate block
     """Pick the ``content_block_stop`` events a client needs from an unsent finish buffer.
 
     A finish chunk's events are held back until the stream ends. If the stream
@@ -1240,6 +1266,7 @@ def _stops_for_blocks_the_client_saw(buffered_events: list[str]) -> list[str]:
 
 
 def _usable_upstream_error_payload(hold: PreambleHold) -> dict | None:
+    # pragma: no mutate block
     """Return the hold's recorded error payload when its ``error`` value is a dict.
 
     Recognition on the hold admits any JSON object an error event carries, but
@@ -1259,6 +1286,7 @@ def _usable_upstream_error_payload(hold: PreambleHold) -> dict | None:
 
 
 def _is_retryable_exception(exc: Exception) -> bool:
+    # pragma: no mutate block
     """Return True for transient network exceptions that should be retried."""
     # A gone client is not an upstream fault: retrying has nobody to serve.
     if isinstance(exc, ClientDisconnectedError):
@@ -1275,6 +1303,7 @@ def _is_retryable_exception(exc: Exception) -> bool:
 
 
 def _is_transport_error(exc: Exception) -> bool:
+    # pragma: no mutate block
     """Return True for connection-reset / transport errors (not timeouts)."""
     # Guard the substring check below: the wrapped client-side message can
     # read like an upstream reset, and only the type says where it came from.
@@ -1299,6 +1328,7 @@ def _is_transport_error(exc: Exception) -> bool:
 
 
 def is_entitlement_error(status: int, body: object) -> bool:
+    # pragma: no mutate block
     """Return True if an HTTP 403 body indicates a plan / entitlement error.
 
     The bridge treats a credential 401/403 as ``auth`` (a 15 min cooldown,
@@ -1326,6 +1356,7 @@ def is_entitlement_error(status: int, body: object) -> bool:
 
 
 def _truncate_for_log(text: str, limit: int = 2000) -> str:
+    # pragma: no mutate block
     """Truncate long strings for logs while preserving the total original size."""
     if len(text) <= limit:
         return text
@@ -1333,6 +1364,7 @@ def _truncate_for_log(text: str, limit: int = 2000) -> str:
 
 
 def _log_cloudflare_block(status: int, body: str) -> None:
+    # pragma: no mutate block
     """Log a Cloudflare block without exposing HTML at warning/error level."""
     logger.warning("Upstream Cloudflare block %d", status)
     logger.debug("Upstream Cloudflare response body: %s", _truncate_for_log(body))
@@ -1344,6 +1376,7 @@ def _append_sse_chunk(
     *,
     max_line_bytes: int = _SSE_MAX_LINE_BYTES,
 ) -> list[str]:
+    # pragma: no mutate block
     """Append a raw upstream chunk to the SSE line buffer and return complete lines.
 
     Implements F23 (UTF-8 multi-byte survival) and F24 (unbounded buffer guard):
@@ -1391,6 +1424,7 @@ def _append_sse_chunk(
 
 
 class CompactionFailedError(Exception):
+    # pragma: no mutate block
     """Raised when compaction leaves a conversation with no non-system message.
 
     The request cannot be sent: an upstream provider rejects a conversation
@@ -1410,6 +1444,7 @@ class CompactionFailedError(Exception):
 
 
 class UpstreamError(Exception):
+    # pragma: no mutate block
     """Raised when the upstream provider returns a non-retryable error or retries are exhausted."""
 
     def __init__(self, status: int, body: object) -> None:
@@ -1425,6 +1460,7 @@ class UpstreamError(Exception):
 # concurrent requests within the same event loop never accidentally
 # use another request's backend.
 class _BackendContext(TypedDict, total=False):
+    # pragma: no mutate block
     """Per-request record of which balancing backend was selected.
 
     Concurrent requests each need their own view of the chosen backend, so this
@@ -1479,6 +1515,7 @@ class BridgeServer:
         _usage_log_path: Path | None = None,
     ) -> None:
         # TLS validation: both or neither
+        # pragma: no mutate block
         if tls_cert and not tls_key:
             raise ValueError("tls_cert provided without tls_key — both are required for TLS")
         if tls_key and not tls_cert:
@@ -1631,51 +1668,63 @@ class BridgeServer:
 
     @property
     def _active_provider(self) -> ProviderAdapter:
+        # pragma: no mutate block
         return _backend_context.get(_EMPTY_CTX).get("provider", self._provider)
 
     @_active_provider.setter
     def _active_provider(self, value: ProviderAdapter) -> None:
+        # pragma: no mutate block
         self._provider = value
 
     @property
     def _active_key(self) -> str:
+        # pragma: no mutate block
         return _backend_context.get(_EMPTY_CTX).get("key", self._key)
 
     @_active_key.setter
     def _active_key(self, value: str) -> None:
+        # pragma: no mutate block
         self._key = value
 
     @property
     def _active_model(self) -> str | None:
+        # pragma: no mutate block
         return _backend_context.get(_EMPTY_CTX).get("model", self._model)
 
     @_active_model.setter
     def _active_model(self, value: str | None) -> None:
+        # pragma: no mutate block
         self._model = value
 
     @property
     def _current_backend_idx(self) -> int:
+        # pragma: no mutate block
         return _backend_context.get(_EMPTY_CTX).get("idx", self._backend_idx)
 
     @_current_backend_idx.setter
     def _current_backend_idx(self, value: int) -> None:
+        # pragma: no mutate block
         self._backend_idx = value
 
     @property
     def _active_provider_config(self) -> dict:
+        # pragma: no mutate block
         return _backend_context.get(_EMPTY_CTX).get("provider_config", self.__dict__.get("_provider_config", {}))
 
     @_active_provider_config.setter
     def _active_provider_config(self, value: dict) -> None:
+        # pragma: no mutate block
         self.__dict__["_provider_config"] = value
 
     def _get_backend_context(self) -> _BackendContext:
+        # pragma: no mutate block
         """Return the current request's backend context from the ContextVar."""
         return _backend_context.get(_EMPTY_CTX)
 
     def _get_next_backend(
         self, *, require_streaming: bool = False
     ) -> tuple[ProviderAdapter, str, str | None, dict, int]:
+        # pragma: no mutate block
         """Select a healthy backend at random, weighted by past reliability.
 
         Backends in cooldown (unhealthy) are skipped. Among the remainder,
@@ -1826,6 +1875,7 @@ class BridgeServer:
 
     @staticmethod
     def _client_gone(request: web.Request) -> bool:
+        # pragma: no mutate block
         """Return True when the client connection is closed or closing.
 
         aiohttp runs with ``handler_cancellation`` off, so a disconnected
@@ -1841,6 +1891,7 @@ class BridgeServer:
         return request.transport is None or request.transport.is_closing()
 
     async def _select_backend_or_hold(self, request: web.Request) -> AllBackendsUnhealthyError | None:
+        # pragma: no mutate block
         """Select a backend, holding the request while recovery is near (KBR-243).
 
         On arrival with every backend cooling down, an immediate 503 makes the
@@ -1908,6 +1959,7 @@ class BridgeServer:
         return pending
 
     def _get_backend_family(self, index: int) -> str:
+        # pragma: no mutate block
         if not self._backends or index < 0 or index >= len(self._backends):
             return "default"
         provider = self._backends[index][0]
@@ -1919,6 +1971,7 @@ class BridgeServer:
         return type(provider).__name__
 
     def _mark_backend_unhealthy(self, index: int, *, cooldown: int | None = None, failure_kind: str = "hard") -> None:
+        # pragma: no mutate block
         """Mark a backend as unhealthy and log the event.
 
         failure_kind: "hard" (default), "stream", "transport", "rate_limit", "cloudflare", or "auth".
@@ -1998,6 +2051,7 @@ class BridgeServer:
         )
 
     def _any_healthy_backend(self, *, require_streaming: bool = False) -> bool:
+        # pragma: no mutate block
         """Check if there's at least one healthy backend remaining."""
         if not self._backends:
             return False
@@ -2017,6 +2071,7 @@ class BridgeServer:
         return False
 
     def _mark_backend_healthy(self, index: int) -> None:
+        # pragma: no mutate block
         """Reset a backend to healthy state after a successful request.
 
         Resets ``healthy``, ``failed_at``, ``stream_error_count``, and
@@ -2041,6 +2096,7 @@ class BridgeServer:
         max_attempts: int,
         cf_retried: set[int],
     ) -> str:
+        # pragma: no mutate block
         idx = self._current_backend_idx
         if idx not in cf_retried:
             cf_retried.add(idx)
@@ -2051,6 +2107,7 @@ class BridgeServer:
         return "surface"
 
     def _get_stream_error_cooldown(self, backend_idx: int) -> int:
+        # pragma: no mutate block
         """Return cooldown for a transient stream error on the given backend.
 
         Uses exponential backoff starting at 30s, doubling on repeated failures.
@@ -2065,6 +2122,7 @@ class BridgeServer:
         return int(min(30 * (2**count), self._backend_cooldown))
 
     def _get_transport_error_cooldown(self, backend_idx: int) -> int:
+        # pragma: no mutate block
         """Return cooldown for a transport/connection-reset failure.
 
         Uses the configured backend_cooldown as base and escalates by 50%
@@ -2080,6 +2138,7 @@ class BridgeServer:
 
     @staticmethod
     def _is_upstream_stream_error(chunk: dict) -> bool:
+        # pragma: no mutate block
         """Return True if a streaming chunk from the upstream contains an error."""
         # Chat Completions error in SSE data
         if chunk.get("error") is not None:
@@ -2097,6 +2156,7 @@ class BridgeServer:
 
     @staticmethod
     def _error_response(data: dict, *, status: int = 400, headers: dict | None = None) -> web.Response:
+        # pragma: no mutate block
         hdrs = {"Connection": "close"}
         if headers:
             hdrs.update(headers)
@@ -2104,6 +2164,7 @@ class BridgeServer:
 
     @staticmethod
     def _all_unhealthy_payload(exc: AllBackendsUnhealthyError) -> dict:
+        # pragma: no mutate block
         """Compute the protocol-agnostic cause payload for the all-unhealthy 503.
 
         The message names the soonest retry window and, per backend, the
@@ -2165,6 +2226,7 @@ class BridgeServer:
 
     @staticmethod
     def _all_unhealthy_response(exc: AllBackendsUnhealthyError, *, style: str = "anthropic") -> web.Response:
+        # pragma: no mutate block
         """Build the 503 response for an AllBackendsUnhealthyError.
 
         Includes a ``Retry-After`` header (in seconds) so clients can back off
@@ -2240,6 +2302,7 @@ class BridgeServer:
         return BridgeServer._error_response(body, status=503, headers={"Retry-After": str(exc.retry_after)})
 
     def _empty_response_context(self, upstream_error: str | None = None) -> dict:
+        # pragma: no mutate block
         """Build diagnostic context for empty-response fallback text.
 
         When ``upstream_error`` is provided, the actual upstream error message
@@ -2258,6 +2321,7 @@ class BridgeServer:
 
     @staticmethod
     def _is_empty_cc_response(cc_response: dict) -> bool:
+        # pragma: no mutate block
         """Return True if a Chat Completions response has no content and no tool calls.
 
         Used to detect empty upstream responses (HTTP 200 but no meaningful output).
@@ -2290,6 +2354,7 @@ class BridgeServer:
 
     @staticmethod
     def _is_non_retryable_reply(cc_response: dict) -> bool:
+        # pragma: no mutate block
         """Return True when no retry can improve on this reply, so the ladder returns it at once.
 
         True for a reply that carries content — the ladder's success path — and for a D3
@@ -2311,6 +2376,7 @@ class BridgeServer:
 
     @staticmethod
     def _messages_truncation_before_content(cc_response: dict) -> str | None:
+        # pragma: no mutate block
         """Return the stop reason when a Messages-shaped reply truncated before any content.
 
         Q14 D3 (``TEST_SUITE.md`` §11): a reply whose stop reason is ``max_tokens`` or
@@ -2335,6 +2401,7 @@ class BridgeServer:
 
     @staticmethod
     def _chunk_has_finish_reason(chunk: dict) -> bool:
+        # pragma: no mutate block
         """Return True if a streaming chunk contains a finish_reason."""
         choices = chunk.get("choices", [])
         if choices and isinstance(choices[0], dict):
@@ -2342,6 +2409,7 @@ class BridgeServer:
         return False
 
     def _select_backend(self, *, require_streaming: bool = False) -> _BackendContext:
+        # pragma: no mutate block
         """Select next backend and set active fields for the current request.
 
         When require_streaming is True, only selects backends whose provider
@@ -2386,6 +2454,7 @@ class BridgeServer:
         return result
 
     def _record_attempt(self, backend_idx: int, model: str | None, attempt: int, previous_idx: int | None) -> None:
+        # pragma: no mutate block
         """Record one upstream attempt in the session attribution counters.
 
         A re-selection only counts as a failover when it lands on a *different*
@@ -2414,6 +2483,7 @@ class BridgeServer:
         self._model_stats(model)["attempts"] += 1
 
     def _attribution_headers(self) -> dict[str, str]:
+        # pragma: no mutate block
         """Return the ``X-Kitty-*`` headers describing the current request's backend.
 
         Names the backend selected when the headers are sent. No stream
@@ -2467,6 +2537,7 @@ class BridgeServer:
 
     @staticmethod
     def _compaction_failed_response(*, style: str = "anthropic") -> web.Response:
+        # pragma: no mutate block
         """Build the 400 returned when no non-system message survives compaction.
 
         The envelope is protocol-native, matching :meth:`_all_unhealthy_response`
@@ -2512,6 +2583,7 @@ class BridgeServer:
         return BridgeServer._error_response(body)
 
     def _model_stats(self, model: str | None) -> dict[str, int]:
+        # pragma: no mutate block
         """Return the mutable attribution record for a real model name.
 
         Args:
@@ -2528,6 +2600,7 @@ class BridgeServer:
         )
 
     def _session_stats(self) -> dict:
+        # pragma: no mutate block
         """Build the machine-readable record of what actually served this session.
 
         This is the single document behind ``GET /stats`` and the shutdown
@@ -2615,6 +2688,7 @@ class BridgeServer:
         }
 
     def _record_malformed_tool_use(self) -> None:
+        # pragma: no mutate block
         """Count one malformed ``tool_use`` against the serving backend.
 
         Surfaced by ``GET /stats`` and the shutdown summary so the signal
@@ -2625,6 +2699,7 @@ class BridgeServer:
         self._stats_malformed_tool_use[idx] = self._stats_malformed_tool_use.get(idx, 0) + 1
 
     def _record_thinking_stripped(self) -> None:
+        # pragma: no mutate block
         """Count one M17 thinking strip against the serving backend.
 
         Surfaced by ``GET /stats`` and the shutdown summary next to
@@ -2635,6 +2710,7 @@ class BridgeServer:
         self._stats_thinking_stripped[idx] = self._stats_thinking_stripped.get(idx, 0) + 1
 
     def _backend_label(self) -> str:
+        # pragma: no mutate block
         """Return a short identifier for the backend currently serving.
 
         Used to point a diagnostic warning at a specific pool member, which is
@@ -2650,6 +2726,7 @@ class BridgeServer:
         return str(getattr(self._active_provider, "provider_type", type(self._active_provider).__name__))
 
     def _audit_response_tool_use(self, result: object, schemas: dict[str, dict]) -> None:
+        # pragma: no mutate block
         """Report every ``tool_use`` block in a non-streaming Messages response.
 
         The streaming paths assemble their blocks incrementally; a complete
@@ -2680,6 +2757,7 @@ class BridgeServer:
             logger.debug("%s auditing failed, continuing: %s: %s", AUDIT_MARKER, type(exc).__name__, exc)
 
     def _log_backend_selection(self) -> None:
+        # pragma: no mutate block
         """Log diagnostic info about the currently selected backend."""
         idx = self._current_backend_idx
         provider = self._active_provider
@@ -2703,15 +2781,18 @@ class BridgeServer:
 
     @property
     def port(self) -> int:
+        # pragma: no mutate block
         return self._port
 
     @property
     def log_path(self) -> Path | None:
+        # pragma: no mutate block
         return self._log_path
 
     # ── Debug Logging ─────────────────────────────────────────────────────
 
     def _setup_debug_logging(self) -> Path | None:
+        # pragma: no mutate block
         """Configure file-based debug logging if debug mode is enabled. Returns log path or None."""
         if not self._debug:
             return None
@@ -2762,6 +2843,7 @@ class BridgeServer:
         return log_path
 
     def _log_usage(self, usage: dict | None) -> None:
+        # pragma: no mutate block
         """Record a completed upstream call and append a JSONL usage entry.
 
         Attribution counting happens unconditionally — it is what tells a
@@ -2803,6 +2885,7 @@ class BridgeServer:
     # ── Lifecycle ─────────────────────────────────────────────────────────
 
     def _should_warn_no_tls(self) -> bool:
+        # pragma: no mutate block
         """Return True if binding to non-localhost without TLS."""
         if self._tls_cert and self._tls_key:
             return False
@@ -2810,6 +2893,7 @@ class BridgeServer:
         return host not in ("127.0.0.1", "localhost", "::1")
 
     async def start_async(self) -> int:
+        # pragma: no mutate block
         """Create the aiohttp app, register routes, start listening. Returns bound port."""
         self._started_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         self._log_path = self._setup_debug_logging()
@@ -2892,10 +2976,12 @@ class BridgeServer:
         return self._port
 
     def start(self) -> int:
+        # pragma: no mutate block
         """Synchronous wrapper around start_async."""
         return asyncio.get_event_loop().run_until_complete(self.start_async())
 
     async def stop_async(self) -> None:
+        # pragma: no mutate block
         """Gracefully stop the server and close every HTTP client session.
 
         The order is the safety argument, not an accident.  ``_runner.cleanup()``
@@ -2946,6 +3032,7 @@ class BridgeServer:
         logger.info("Bridge server stopped")
 
     async def _close_provider_transports(self) -> None:
+        # pragma: no mutate block
         """Close the HTTP transport owned by every adapter this bridge holds.
 
         Adapters with ``use_custom_transport`` build a client of their own that
@@ -2977,10 +3064,12 @@ class BridgeServer:
                 logger.warning("Failed to close transport for provider %s: %s", type(provider).__name__, exc)
 
     def stop(self) -> None:
+        # pragma: no mutate block
         """Synchronous wrapper around stop_async."""
         asyncio.get_event_loop().run_until_complete(self.stop_async())
 
     def _write_session_summary(self) -> None:
+        # pragma: no mutate block
         """Write the session attribution document to the nominated path.
 
         Written last, so the record covers the whole session. This is the
@@ -3008,6 +3097,7 @@ class BridgeServer:
     # ── Route registration ────────────────────────────────────────────────
 
     def _register_routes(self, app: web.Application) -> None:
+        # pragma: no mutate block
         app.router.add_get("/healthz", self._handle_healthz)
         app.router.add_get("/stats", self._handle_stats)
 
@@ -3050,6 +3140,7 @@ class BridgeServer:
     @web.middleware
     async def _auth_middleware(self, request: web.Request, handler: object) -> web.StreamResponse:
         # If no keys configured, allow all
+        # pragma: no mutate block
         if not self._keys_entries:
             return await handler(request)  # type: ignore[misc, no-any-return, operator]
 
@@ -3075,6 +3166,7 @@ class BridgeServer:
 
     @web.middleware
     async def _attribution_middleware(self, request: web.Request, handler: object) -> web.StreamResponse:
+        # pragma: no mutate block
         """Stamp the backend attribution headers onto the outgoing response.
 
         Streaming handlers prepare their own response and therefore stamp
@@ -3098,6 +3190,7 @@ class BridgeServer:
 
     @web.middleware
     async def _access_log_middleware(self, request: web.Request, handler: object) -> web.StreamResponse:
+        # pragma: no mutate block
         start = time.monotonic()
         response: web.StreamResponse | None = None
         try:
@@ -3115,6 +3208,7 @@ class BridgeServer:
         return response  # type: ignore[return-value]
 
     def _write_access_log(self, request: web.Request, response: web.StreamResponse | None, elapsed_ms: int) -> None:
+        # pragma: no mutate block
         if self._access_log_file is None:
             return
 
@@ -3144,6 +3238,7 @@ class BridgeServer:
     # ── Health check ──────────────────────────────────────────────────────
 
     async def _handle_healthz(self, request: web.Request) -> web.Response:
+        # pragma: no mutate block
         if not self._backends:
             return web.json_response({"status": "ok"})
         now = time.monotonic()
@@ -3170,6 +3265,7 @@ class BridgeServer:
         return web.json_response({"status": status, "backends": backends}, status=http_status)
 
     async def _handle_stats(self, request: web.Request) -> web.Response:
+        # pragma: no mutate block
         """Serve the live session attribution record.
 
         Sibling of ``/healthz``: where that reports whether the bridge can
@@ -3186,6 +3282,7 @@ class BridgeServer:
         return web.json_response(self._session_stats())
 
     async def _handle_models(self, request: web.Request) -> web.Response:
+        # pragma: no mutate block
         """Return OpenAI-compatible model list."""
         import time
 
@@ -3207,6 +3304,7 @@ class BridgeServer:
     # ── Responses API handler ─────────────────────────────────────────────
 
     async def _handle_responses(self, request: web.Request) -> web.StreamResponse:
+        # pragma: no mutate block
         exc = await self._select_backend_or_hold(request)
         if exc is not None:
             return self._all_unhealthy_response(exc, style="openai_responses")
@@ -3335,6 +3433,7 @@ class BridgeServer:
         translator: ResponsesTranslator,
         cc_request: dict,
     ) -> web.StreamResponse:
+        # pragma: no mutate block
         response_id = f"resp_{uuid.uuid4().hex[:24]}"
         model = cc_request.get("model", body.get("model", ""))
         logger.debug("═══ STREAM RESPONSES START ═══ response_id=%s model=%s", response_id, model)
@@ -4098,6 +4197,7 @@ class BridgeServer:
     # ── Messages API handler ──────────────────────────────────────────────
 
     async def _handle_messages(self, request: web.Request) -> web.StreamResponse:
+        # pragma: no mutate block
         exc = await self._select_backend_or_hold(request)
         if exc is not None:
             return self._all_unhealthy_response(exc, style="anthropic")
@@ -4212,6 +4312,7 @@ class BridgeServer:
         translator: MessagesTranslator,
         cc_request: dict,
     ) -> web.StreamResponse:
+        # pragma: no mutate block
         """Stream an Anthropic Messages response to the client from one upstream request.
 
         Three upstream shapes share this handler and its retry loop: a custom
@@ -5678,6 +5779,7 @@ class BridgeServer:
         )
 
     async def _handle_gemini(self, request: web.Request) -> web.StreamResponse:
+        # pragma: no mutate block
         """Handle Gemini generateContent / streamGenerateContent requests."""
         exc = await self._select_backend_or_hold(request)
         if exc is not None:
@@ -5766,6 +5868,7 @@ class BridgeServer:
         translator: GeminiTranslator,
         cc_request: dict,
     ) -> web.StreamResponse:
+        # pragma: no mutate block
         """Stream Gemini generateContent response via SSE."""
         logger.debug("═══ STREAM GEMINI START ═══")
 
@@ -6411,6 +6514,7 @@ class BridgeServer:
     # ── Chat Completions pass-through handler ─────────────────────────────
 
     async def _request_with_retry(self, cc_request: dict) -> dict:
+        # pragma: no mutate block
         """Make an upstream request with automatic retry on errors and empty responses.
 
         For non-balancing mode (no backends): retries empty responses up to
@@ -6428,6 +6532,7 @@ class BridgeServer:
         return await self._request_with_retry_single(cc_request, grace)
 
     async def _request_with_retry_single(self, cc_request: dict, grace: TransportGrace) -> dict:
+        # pragma: no mutate block
         """Non-balancing retry: retry empty responses with backoff.
 
         Args:
@@ -6468,6 +6573,7 @@ class BridgeServer:
         return cc_response
 
     async def _request_with_retry_balancing(self, cc_request: dict, grace: TransportGrace) -> dict:
+        # pragma: no mutate block
         """Balancing retry: failover across backends on errors or empty responses.
 
         Args:
@@ -6778,6 +6884,7 @@ class BridgeServer:
         return last_response
 
     async def _handle_chat_completions(self, request: web.Request) -> web.StreamResponse:
+        # pragma: no mutate block
         """Handle Chat Completions pass-through requests.
 
         No translation is needed — the agent sends CC format and the upstream
@@ -6865,6 +6972,7 @@ class BridgeServer:
         request: web.Request,
         cc_request: dict,
     ) -> web.StreamResponse:
+        # pragma: no mutate block
         """Stream Chat Completions response via SSE pass-through."""
         logger.debug("═══ STREAM CHAT COMPLETIONS PASS-THROUGH START ═══")
 
@@ -8033,6 +8141,7 @@ class BridgeServer:
         return count
 
     def _truncate_oversized_responses_outputs(self, body: dict) -> int:
+        # pragma: no mutate block
         """Shrink any oversized ``function_call_output`` string in a Responses body.
 
         The Responses-route twin of :meth:`_truncate_oversized_tool_results`
@@ -8064,6 +8173,7 @@ class BridgeServer:
         return count
 
     def _drop_orphan_responses_tool_outputs(self, body: dict) -> int:
+        # pragma: no mutate block
         """Drop ``function_call_output`` items whose call was never declared.
 
         The Responses-route twin of :meth:`_validate_tool_call_pairing`
@@ -8100,6 +8210,7 @@ class BridgeServer:
         compacted_messages: list[dict],
         translator: ResponsesTranslator,
     ) -> int:
+        # pragma: no mutate block
         """Prune a Responses body's ``input`` to the conversation compaction kept.
 
         The Responses-route arm of register row **M5** (KBR-169): on
@@ -8206,6 +8317,7 @@ class BridgeServer:
 
     @staticmethod
     def _is_oversized_request(cc_request: dict) -> bool:
+        # pragma: no mutate block
         """Return True if the request's messages exceed the oversized threshold.
 
         A soft heuristic (~180K tokens): above this, a high-reasoning /
@@ -8268,6 +8380,7 @@ class BridgeServer:
         )
 
     def _maybe_warn_oversized(self, cc_request: dict) -> None:
+        # pragma: no mutate block
         """Emit a one-time-per-request WARNING if the request is oversized."""
         if self._is_oversized_request(cc_request):
             provider_names = (
@@ -8378,6 +8491,7 @@ class BridgeServer:
             raise CompactionFailedError("pairing validation left no non-system message")
 
     def _check_request_size(self, cc_request: dict) -> web.Response | None:
+        # pragma: no mutate block
         """Return a 400 error if the translated request exceeds the safe size limit.
 
         Returns None if the request is within limits, or a json_response to return
@@ -8408,6 +8522,7 @@ class BridgeServer:
         return None
 
     def _build_client_session(self, *, proxied: bool) -> aiohttp.ClientSession:
+        # pragma: no mutate block
         """Construct an upstream HTTP session.
 
         Args:
@@ -8433,6 +8548,7 @@ class BridgeServer:
         return aiohttp.ClientSession(**kwargs)
 
     async def _session_for(self, url: str) -> aiohttp.ClientSession:
+        # pragma: no mutate block
         """Return the session that must be used to reach a destination.
 
         Two sessions are kept rather than one, because aiohttp resolves a
@@ -8456,6 +8572,7 @@ class BridgeServer:
         return self._proxy_session
 
     async def _get_session(self) -> aiohttp.ClientSession:
+        # pragma: no mutate block
         """Return the direct (unproxied) upstream session.
 
         Used for loopback and private destinations, and for everything when no
@@ -8471,6 +8588,7 @@ class BridgeServer:
 
     @staticmethod
     def _is_rate_limit_error(status: int, body: object) -> bool:
+        # pragma: no mutate block
         """Return True if the upstream error indicates rate limiting or quota exhaustion.
 
         Detects known error codes (e.g. 1310) and message patterns regardless
@@ -8488,6 +8606,7 @@ class BridgeServer:
 
     @staticmethod
     def _should_retry_stream(status: int, error_body: str) -> bool:
+        # pragma: no mutate block
         """Return True if a streaming error should trigger a retry / backend switch."""
         if BridgeServer._is_cloudflare_block(status, error_body):
             return False
@@ -8499,6 +8618,7 @@ class BridgeServer:
 
     @staticmethod
     def _is_non_retryable_error_code(status: int, body: object) -> bool:
+        # pragma: no mutate block
         """Return True if the upstream error body contains a non-retryable error code.
 
         Some providers return permanent-failure error codes with 5xx HTTP status
@@ -8522,6 +8642,7 @@ class BridgeServer:
 
     @staticmethod
     def _extract_error_fields(body: object) -> tuple[str, str]:
+        # pragma: no mutate block
         """Extract (code, message) from an upstream error body.
 
         Handles both dict bodies (from non-streaming path) and raw JSON
@@ -8569,6 +8690,7 @@ class BridgeServer:
 
     @staticmethod
     def _is_context_too_large_error(status: int, body: object) -> bool:
+        # pragma: no mutate block
         """Return True if an upstream body indicates a context-too-large error.
 
         Distinct from auth/entitlement (the request would succeed with a
@@ -8643,6 +8765,7 @@ class BridgeServer:
         custom_url: str | None = None,
         appended_path: str | None = None,
     ) -> str:
+        # pragma: no mutate block
         """Translate an upstream HTTP error into a user-friendly message.
 
         For auth errors (401/403), returns a clear message indicating the
@@ -8733,6 +8856,7 @@ class BridgeServer:
         return details
 
     def _translate_upstream_error(self, status: int, body: object) -> str:
+        # pragma: no mutate block
         """Translate an upstream error, supplying this request's endpoint context.
 
         An instance method rather than a static one so that every existing call
@@ -8773,6 +8897,7 @@ class BridgeServer:
 
     @staticmethod
     def _map_provider_error(exc: Exception) -> tuple[int, str]:
+        # pragma: no mutate block
         """Map a custom-transport exception to (http_status, error_type).
 
         Uses ProviderError.http_status when available; falls back to 502
@@ -8791,6 +8916,7 @@ class BridgeServer:
 
     @staticmethod
     def _provider_error_failure_kind(exc: Exception) -> str:
+        # pragma: no mutate block
         """Determine the correct failure_kind for _mark_backend_unhealthy.
 
         Uses ProviderError.http_status to pick the right classification so
@@ -8826,12 +8952,14 @@ class BridgeServer:
 
     @staticmethod
     def _retry_after_from_exc(exc: Exception) -> int | None:
+        # pragma: no mutate block
         """Extract a retry-after cooldown from a ProviderError, if present."""
         if isinstance(exc, ProviderError):
             return getattr(exc, "retry_after", None)
         return None
 
     def _custom_transport_error_message(self, exc: Exception) -> str:
+        # pragma: no mutate block
         """Build an actionable error message for custom-transport failures.
 
         For auth failures, includes the backend profile name and re-login
@@ -8850,6 +8978,7 @@ class BridgeServer:
         )
 
     def _build_upstream_url(self, cc_request: dict) -> str:
+        # pragma: no mutate block
         """Build the upstream endpoint URL for the request about to be sent.
 
         The path is resolved from :func:`_route_model`, which is where the rule
@@ -8875,6 +9004,7 @@ class BridgeServer:
         return self._active_provider.compose_upstream_url(base, path)
 
     def _serves_messages_wire(self, cc_request: dict) -> bool:
+        # pragma: no mutate block
         """Return whether the selected backend's upstream speaks Anthropic Messages for this request.
 
         A ``/v1/messages`` stream from such an upstream is already in the
@@ -8899,6 +9029,7 @@ class BridgeServer:
         )
 
     def _upstream_body_for(self, cc_request: dict) -> dict:
+        # pragma: no mutate block
         """Serialize ``cc_request`` for the backend currently selected.
 
         Wraps :meth:`ProviderAdapter.translate_to_upstream` with the one piece
@@ -8938,6 +9069,7 @@ class BridgeServer:
         return upstream_body
 
     def _build_upstream_headers(self, cc_request: dict) -> dict[str, str]:
+        # pragma: no mutate block
         """Build the upstream auth headers for the request about to be sent.
 
         The auth scheme is resolved from :func:`_route_model`, for the reason
@@ -8959,6 +9091,7 @@ class BridgeServer:
         return self._active_provider.build_upstream_headers_for_model(self._active_key, _route_model(cc_request))
 
     async def _wait_out_transport_blip(self, exc: Exception, grace: TransportGrace) -> bool:
+        # pragma: no mutate block
         """Sleep out a connection blip, or report that the grace period is over.
 
         The single place that decides whether a failure on the wire to the
@@ -8997,6 +9130,7 @@ class BridgeServer:
         timeout: aiohttp.ClientTimeout,
         grace: TransportGrace,
     ) -> aiohttp.ClientResponse:
+        # pragma: no mutate block
         """Open an upstream SSE response, riding out connection blips.
 
         Connecting is the one part of a streamed request that can be retried
@@ -9028,6 +9162,7 @@ class BridgeServer:
     async def _make_upstream_request(
         self, cc_request: dict, *, retry_rate_limit: bool = True, grace: TransportGrace | None = None
     ) -> dict:
+        # pragma: no mutate block
         """Send a non-streaming request upstream.
 
         For providers with ``use_custom_transport=True``, delegates to the
