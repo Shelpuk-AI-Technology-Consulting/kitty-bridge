@@ -1,7 +1,7 @@
 """Harness-level pytest conftest: shared fixtures and the slice verdict gates.
 
 This conftest applies to every test under :mod:`tests/harness/`. It serves
-two purposes, both narrow:
+three purposes, all narrow:
 
 * the ``pytest_runtest_makereport`` hook populates per-phase outcome
   dictionaries for each registered slice — :data:`_phase_outcomes` /
@@ -18,13 +18,31 @@ two purposes, both narrow:
   shape applies: phase 1 ran and passed, the proxied phases are
   setup-skipped. The plan T-E3 done-when ("an outcome is recorded") and
   T-E9's gate semantics ("``unsupported`` is a permitted outcome for
-  partial delivery") are both honoured on every supported interpreter.
+  partial delivery") are both honoured on every supported interpreter;
+* the ``_enforce_containment_completeness`` session-scope fixture reads
+  the singleton at finalisation and asserts every **landed** slice's
+  verdict row is in a permitted state. Landed slices are those whose
+  descriptor appears in :data:`_SLICES` — adding a sibling's descriptor
+  there (T-E4, T-E5) tightens the gate with no edit to T-E9. The gate
+  fixture is **defined first** in this file so its teardown is **last**
+  (pytest reverses finalisation order for independent session-scope
+  fixtures), which is the only ordering in which the slice finalisers'
+  verdicts are already written when the gate reads them.
 
 The mechanism is what makes the verdicts honest. A test that records
 ``PROVEN`` itself would pass with the four phases deleted, and on
 Python <3.11 — where phases 2/2b/3 skip because of TLS-in-TLS — would record
 ``PROVEN`` after phase 1 alone. The hook is a falsifiable witness to "every
 phase ran" — the verdict cannot be written without that witness agreeing.
+
+**Descriptor shape.** Each :data:`_SLICES` tuple binds five fields, in this
+order: ``(file_prefix, phase_names, outcomes, teardown_outcomes, verdict_row)``.
+The trailing ``verdict_row`` is the :class:`~harness.containment.CapabilityReport`
+row the slice's finaliser records into. :func:`_landed_verdict_rows` returns
+the set of verdict rows registered across all descriptors, and the T-E9
+gate passes that set to
+:meth:`~harness.containment.CapabilityReport.require_completeness`
+so a slice that has not yet landed (no descriptor) is exempt by design.
 
 **A note for sibling slices (T-E4..T-E5).** The verdict recording is the
 session-finaliser's job, and it runs **after** every test in the process,
@@ -51,6 +69,120 @@ import pytest
 
 from harness.containment import Outcome
 from harness.containment import instance as report_instance
+
+
+def _validate_slices() -> None:
+    """Raise at import when any :data:`_SLICES` descriptor is malformed.
+
+    A descriptor with the wrong arity would otherwise surface as a generic
+    ``ValueError: not enough values to unpack`` at the **first matching
+    phase test**, mid-session, with a traceback naming the test rather than
+    the bad descriptor — and duplicated ``verdict_row`` or ``file_prefix``
+    values would silently mis-record or mis-dispatch outcomes between two
+    slices. Checking at conftest import fails the whole session with the
+    offending descriptor named, which is the only message a future T-E4 /
+    T-E5 author can act on without re-deriving the shape.
+
+    Raises:
+        ValueError: When a descriptor's arity is wrong, when its
+            ``file_prefix`` or ``verdict_row`` is not a string, or when
+            either value is duplicated across descriptors.
+    """
+    prefixes: list[str] = []
+    rows: list[str] = []
+    for descriptor in _SLICES:
+        if len(descriptor) != 5:
+            raise ValueError(
+                f"_SLICES descriptor {descriptor!r} binds {len(descriptor)} fields, expected 5: "
+                "(file_prefix, phase_names, outcomes, teardown_outcomes, verdict_row)"
+            )
+        prefix, _names, _outcomes, _teardown_outcomes, verdict_row = descriptor
+        if not isinstance(prefix, str):
+            raise ValueError(f"_SLICES descriptor {descriptor!r} has a non-string file_prefix: {prefix!r}")
+        if not isinstance(verdict_row, str):
+            raise ValueError(f"_SLICES descriptor {descriptor!r} has a non-string verdict_row: {verdict_row!r}")
+        prefixes.append(prefix)
+        rows.append(verdict_row)
+    duplicated_prefixes = sorted({p for p in prefixes if prefixes.count(p) > 1})
+    if duplicated_prefixes:
+        raise ValueError(f"_SLICES descriptors share file prefixes {duplicated_prefixes}: outcomes would mis-dispatch")
+    duplicated_rows = sorted({r for r in rows if rows.count(r) > 1})
+    if duplicated_rows:
+        raise ValueError(f"_SLICES descriptors share verdict rows {duplicated_rows}: verdicts would mis-record")
+
+
+def _landed_verdict_rows() -> frozenset[str]:
+    """Return the verdict rows whose owning slice has a registered descriptor.
+
+    A row absent from the returned set belongs to a slice that has not
+    landed yet — its descriptor appears in :data:`_SLICES` when the slice
+    ships, which is the auto-tightening property KBR-69's gate rests on:
+    the session-end gate enforces exactly this set, so a sibling landing
+    its descriptor immediately subjects its row to the gate with no edit
+    to the gate itself.
+
+    Returns:
+        A ``frozenset`` (immutable for downstream callers, matching the
+        module's other name-set constants).
+    """
+    return frozenset(verdict_row for *_rest, verdict_row in _SLICES)
+
+
+def _run_completeness_gate() -> None:
+    """Apply the T-E9 completeness check to the live singleton.
+
+    Pure over :func:`report_instance` and :data:`_SLICES`: a unit test can
+    drive this directly with a synthetic singleton state, and the autouse
+    session-scope fixture calls it at session finalisation. Two short-circuits
+    keep the gate from firing when it has nothing to say:
+
+    * **No slice has recorded.** A run that touches the singleton only
+      through ``reset_for_test()`` (e.g. ``tests.harness.test_containment``
+      in isolation) leaves every row ``NOT_ATTEMPTED``; firing the gate
+      would fail a green run for a defect that does not exist.
+    * **No verdict row is registered as landed.** Defensive: today every
+      :data:`_SLICES` entry has a verdict row, so this branch never fires
+      in production, but the closed-set property means a malformed conftest
+      that produced an empty landed set would fail in a noisier way at
+      the seam rather than silently passing.
+
+    Raises:
+        AssertionError: Forwarded from
+        :meth:`harness.containment.CapabilityReport.require_completeness`
+        when any landed row is ``not_attempted`` or ``failed``. The message
+        names every offending row, sorted, and groups them by defect kind.
+    """
+    singleton = report_instance()
+    landed = _landed_verdict_rows()
+    if not landed:
+        return
+    any_recorded = any(
+        entry.outcome is not Outcome.NOT_ATTEMPTED for entry in singleton.entries().values()
+    )
+    if not any_recorded:
+        return
+    singleton.require_completeness(landed_rows=landed)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _enforce_containment_completeness() -> Iterator[None]:
+    """Fail the session when a **landed** slice's verdict row is invalid.
+
+    Calls :func:`_run_completeness_gate` at finalisation.
+
+    **Ordering contract.** This fixture is defined **first** in this
+    conftest on purpose. Pytest finalises independent session-scope
+    fixtures in reverse definition order, so this fixture's teardown runs
+    **after** the two slice finalisers (defined further down) have written
+    their verdicts. Defining it last — the natural reading of "the gate
+    runs after everything" — would make it finalise **first**, read a
+    report no finaliser has touched yet, and fail every green session.
+
+    Yields:
+        ``None``, with the completeness check in the finalisation.
+    """
+    yield
+    _run_completeness_gate()
 
 
 class _PhaseOutcome(enum.Enum):
@@ -137,17 +269,33 @@ _phase_teardown_outcomes: dict[str, _PhaseOutcome] = {}
 
 
 #: Per-slice gate descriptors the hook iterates. Each tuple binds a
-#: ``(file_prefix, phase_names, outcomes, teardown_outcomes)`` so a test's
-#: phase outcome is dispatched to the right slice by its nodeid prefix —
-#: the only signal that lets the hook tell the T-E2 and T-E3 slices apart,
-#: since the two slices share method names by design.
+#: ``(file_prefix, phase_names, outcomes, teardown_outcomes, verdict_row)``
+#: so a test's phase outcome is dispatched to the right slice by its
+#: nodeid prefix — the only signal that lets the hook tell the T-E2 and
+#: T-E3 slices apart, since the two slices share method names by design.
+#: The trailing ``verdict_row`` is the row the slice's finaliser records
+#: into; T-E9's completeness gate uses it as the registry of *landed*
+#: slices, so a verdict row that has no descriptor here is exempt
+#: (the slice hasn't landed yet — its descriptor will appear when the
+#: slice ships).
 _SLICES: tuple[
-    tuple[str, frozenset[str], dict[str, _PhaseOutcome], dict[str, _PhaseOutcome]],
+    tuple[str, frozenset[str], dict[str, _PhaseOutcome], dict[str, _PhaseOutcome], str],
     ...,
 ] = (
-    (_SLICE_FILE_PREFIX, _PHASE_TEST_NAMES, _phase_outcomes, _phase_teardown_outcomes),
-    (_CURL_CFFI_SLICE_FILE_PREFIX, _CURL_CFFI_PHASE_TEST_NAMES, _curl_phase_outcomes, _curl_phase_teardown_outcomes),
+    (
+        _SLICE_FILE_PREFIX, _PHASE_TEST_NAMES, _phase_outcomes, _phase_teardown_outcomes, _VERDICT_ROW,
+    ),
+    (
+        _CURL_CFFI_SLICE_FILE_PREFIX, _CURL_CFFI_PHASE_TEST_NAMES,
+        _curl_phase_outcomes, _curl_phase_teardown_outcomes, _CURL_CFFI_VERDICT_ROW,
+    ),
 )
+
+# The descriptor table is the single source of truth for both the hook's
+# dispatch and the T-E9 gate's "landed" set — a malformed row would corrupt
+# both, so it is validated the moment the module loads, not at the first
+# test that happens to match a bad prefix.
+_validate_slices()
 
 
 def _gate_passed(
@@ -346,7 +494,7 @@ def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo[None]) ->
         verdict = _PhaseOutcome.SKIPPED
     else:
         verdict = _PhaseOutcome.FAILED
-    for prefix, names, outcomes, teardown_outcomes in _SLICES:
+    for prefix, names, outcomes, teardown_outcomes, _verdict_row in _SLICES:
         if item.nodeid.startswith(prefix) and item.name in names:
             target = outcomes if rep.when == "call" else teardown_outcomes
             target[item.name] = verdict

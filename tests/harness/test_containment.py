@@ -273,8 +273,16 @@ class TestCapabilityReport:
         # wire T-E2..T-E5 record into and T-E9's gate reads.
         assert report_instance() is report
 
-    def test_require_completeness_raises_when_any_transport_pending(self, capability_report: CapabilityReport) -> None:
-        """``require_completeness`` is what the future T-E9 completeness gate calls."""
+    def test_require_completeness_raises_when_any_transport_unrecorded(
+        self, capability_report: CapabilityReport
+    ) -> None:
+        """``require_completeness`` is what the T-E9 completeness gate calls.
+
+        The strict interpretation (no ``landed_rows`` argument) checks every
+        registered transport and rejects both ``not_attempted`` and ``failed``
+        rows. The KBR-69 session-end gate passes a narrower ``landed_rows``
+        set; this test pins the broader, unfiltered contract that backs it.
+        """
         capability_report.record("bridge_aiohttp", Outcome.PROVEN)
         capability_report.record("curl_cffi", Outcome.PROVEN)
         capability_report.record("provider_aiohttp", Outcome.PROVEN)
@@ -290,7 +298,88 @@ class TestCapabilityReport:
         # diagnosable without a re-run.
         message = str(excinfo.value)
         for name in ("curl_cffi", "provider_aiohttp", "botocore"):
-            assert name in message, f"missing pending transport {name!r} in gate message"
+            assert name in message, f"missing unrecorded transport {name!r} in gate message"
+
+    def test_require_completeness_accepts_unsupported(self, capability_report: CapabilityReport) -> None:
+        """``unsupported`` is a permitted partial-delivery verdict (KBR-69 done-when)."""
+        capability_report.record("bridge_aiohttp", Outcome.UNSUPPORTED, reason="no direct route")
+        capability_report.record("curl_cffi", Outcome.PROVEN)
+        capability_report.record("provider_aiohttp", Outcome.PROVEN)
+        capability_report.record("botocore", Outcome.PROVEN)
+        # No raise: the one permitted verdict short of `proven`.
+        capability_report.require_completeness()
+
+    def test_require_completeness_rejects_failed_outcome(self, capability_report: CapabilityReport) -> None:
+        """``failed`` is a product defect the gate must surface, never a pass.
+
+        Falsification case (plan §1.4) for the gate's second half: KBR-69's
+        done-when is "``unsupported`` is permitted … ``failed`` is not" — a
+        gate that has never been shown to reject a ``failed`` row is
+        indistinguishable from one that cannot.
+        """
+        capability_report.record("bridge_aiohttp", Outcome.PROVEN)
+        capability_report.record("curl_cffi", Outcome.PROVEN)
+        capability_report.record("provider_aiohttp", Outcome.PROVEN)
+        capability_report.record("botocore", Outcome.FAILED)
+        with pytest.raises(AssertionError, match="botocore") as excinfo:
+            capability_report.require_completeness()
+        assert "failed" in str(excinfo.value)
+
+    def test_require_completeness_message_lists_every_offending_row(self, capability_report: CapabilityReport) -> None:
+        """One run, every defect named — a CI failure is diagnosable without a re-run."""
+        capability_report.record("curl_cffi", Outcome.FAILED)
+        with pytest.raises(AssertionError) as excinfo:
+            capability_report.require_completeness()
+        message = str(excinfo.value)
+        # Every row that is neither PROVEN nor UNSUPPORTED is named: the
+        # FAILED row, and the three rows still not_attempted.
+        for name in ("bridge_aiohttp", "curl_cffi", "provider_aiohttp", "botocore"):
+            assert name in message, f"missing offending transport {name!r} in gate message"
+        assert "not_attempted" in message
+        assert "failed" in message
+
+    def test_require_completeness_exempts_unlanded_rows(self, capability_report: CapabilityReport) -> None:
+        """``landed_rows`` is the registry of slices the gate checks (KBR-69 done-when).
+
+        A row that is still ``not_attempted`` because its slice has not
+        landed yet (no finaliser registered, no descriptor in the
+        ``_SLICES`` table) is *not* the gate's failure — the gate's job is
+        to surface incomplete containment for slices that have shipped, not
+        to demand slices that have not. The T-E9 session-end fixture passes
+        exactly this set; the unit test pins the property at the seam.
+        """
+        # `provider_aiohttp` and `botocore` are still not_attempted — KBR-64
+        # and KBR-65 are in flight. Without `landed_rows`, the gate raises.
+        with pytest.raises(AssertionError):
+            capability_report.require_completeness()
+
+        # The two landed slices (T-E2 bridge_aiohttp, T-E3 curl_cffi) record
+        # their verdicts. The gate passes when only those rows are checked:
+        # the unlanded rows remain `not_attempted`, but they are exempt.
+        capability_report.record("bridge_aiohttp", Outcome.PROVEN)
+        capability_report.record("curl_cffi", Outcome.PROVEN)
+        capability_report.require_completeness(
+            landed_rows=frozenset({"bridge_aiohttp", "curl_cffi"})
+        )
+
+    def test_require_completeness_with_landed_rows_omits_exempt_rows_from_message(
+        self, capability_report: CapabilityReport
+    ) -> None:
+        """The message names only the offending rows inside ``landed_rows``."""
+        capability_report.record("bridge_aiohttp", Outcome.FAILED)
+        with pytest.raises(AssertionError) as excinfo:
+            capability_report.require_completeness(
+                landed_rows=frozenset({"bridge_aiohttp", "curl_cffi"})
+            )
+        message = str(excinfo.value)
+        assert "bridge_aiohttp" in message
+        # curl_cffi is in `landed_rows` and is `not_attempted` → named.
+        assert "curl_cffi" in message
+        # provider_aiohttp and botocore are NOT in `landed_rows` → absent
+        # from the message by construction, so the diagnostic is scoped to
+        # what the caller asked for.
+        assert "provider_aiohttp" not in message
+        assert "botocore" not in message
 
     def test_reset_for_test_replaces_the_singleton_with_every_not_attempted(self) -> None:
         """``reset_for_test`` returns the singleton to its initial state.
@@ -316,6 +405,86 @@ class TestCapabilityReport:
             "provider_aiohttp",
             "botocore",
         }
+
+
+# ── R4: the session-end completeness gate ────────────────────────────────
+
+
+class TestCompletenessGate:
+    """The session-end gate the T-E9 fixture calls at finalisation.
+
+    The gate is pure over :func:`harness.conftest._run_completeness_gate`:
+    a unit test drives it directly with a synthetic singleton state, so the
+    landed-rows detection and the no-slice-ran skip are tested without
+    standing up a session-wide fixture.
+    """
+
+    def test_landed_verdict_rows_returns_descriptor_rows(
+        self,
+    ) -> None:
+        """``_landed_verdict_rows`` mirrors the verdict_row of every ``_SLICES`` entry."""
+        from harness.conftest import _SLICES, _landed_verdict_rows
+
+        expected = {descriptor[4] for descriptor in _SLICES}
+        assert _landed_verdict_rows() == frozenset(expected)
+
+    def test_run_completeness_gate_skips_when_no_slice_ran(self) -> None:
+        """An untouched singleton is not a defect — the gate is a no-op.
+
+        Without the skip, running :mod:`tests.harness.test_containment` in
+        isolation would fail every CI leg on the very gate the gate is
+        supposed to enable: the singleton's initial every-``not_attempted``
+        state would raise. Falsification: temporarily remove the ``any_recorded``
+        guard and this test starts failing.
+        """
+        from harness.conftest import _run_completeness_gate
+
+        # ``_isolate_singleton`` has reset to a fresh every-not_attempted
+        # state before this test; the gate must accept that as "no work".
+        _run_completeness_gate()  # no raise
+
+    def test_run_completeness_gate_raises_on_failed_landed_row(self) -> None:
+        """``failed`` on a landed row is a product defect the gate surfaces.
+
+        Falsification case (plan §1.4) for the session-end path: a gate
+        that has never been shown to fail on a real defect is
+        indistinguishable from one that cannot.
+        """
+        from harness.conftest import _run_completeness_gate
+
+        report_instance().record("bridge_aiohttp", Outcome.FAILED)
+        with pytest.raises(AssertionError, match="bridge_aiohttp") as excinfo:
+            _run_completeness_gate()
+        assert "failed" in str(excinfo.value)
+
+    def test_run_completeness_gate_accepts_unsupported_landed_row(self) -> None:
+        """``UNSUPPORTED`` is the partial-delivery verdict the design accepts."""
+        from harness.conftest import _run_completeness_gate
+
+        report_instance().record("bridge_aiohttp", Outcome.PROVEN)
+        report_instance().record("curl_cffi", Outcome.UNSUPPORTED, reason="no direct route")
+        # No raise: the only landed-but-not-PROVEN outcome the gate accepts.
+        _run_completeness_gate()
+
+    def test_run_completeness_gate_ignores_unlanded_rows(self) -> None:
+        """A row whose owning slice has not landed is exempt, regardless of outcome.
+
+        The auto-tightening property KBR-69 ships: today ``botocore`` and
+        ``provider_aiohttp`` have no descriptors in ``_SLICES`` (their slices
+        are KBR-64 and KBR-65, still in flight), so they are exempt even if
+        a test leaves a verdict on them. When the slices land and add their
+        descriptors, those rows become subject to the gate with no edit to
+        it.
+        """
+        from harness.conftest import _run_completeness_gate
+
+        # Both landed rows PROVEN — gate passes.
+        report_instance().record("bridge_aiohttp", Outcome.PROVEN)
+        report_instance().record("curl_cffi", Outcome.PROVEN)
+        # Unlanded rows in any state — gate still passes.
+        report_instance().record("botocore", Outcome.FAILED)
+        report_instance().record("provider_aiohttp", Outcome.NOT_ATTEMPTED)
+        _run_completeness_gate()  # no raise
 
 
 # ── R1: the sealed-network harness ─────────────────────────────────────────

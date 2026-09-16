@@ -61,7 +61,7 @@ import contextlib
 import socket
 import ssl
 import uuid
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING, Any, ClassVar, Protocol, runtime_checkable
@@ -275,25 +275,76 @@ class CapabilityReport:
         """
         return tuple(name for name, entry in self._entries.items() if entry.outcome is Outcome.NOT_ATTEMPTED)
 
-    def require_completeness(self) -> None:
-        """Raise when any transport's verdict is still ``not_attempted``.
+    def require_completeness(
+        self,
+        *,
+        landed_rows: Iterable[str] | None = None,
+    ) -> None:
+        """Raise when any **checked** transport is in an invalid recorded-outcome state.
 
-        The future T-E9 completeness gate (§5.3) calls this; the call site is
-        a separate ticket. T-E1 ships the assertion so the gate has a single,
-        named seam to call — three separate tickets inventing their own
-        completeness check is the kind of coordination failure the milestone
-        structure exists to prevent.
+        The closed set of permitted outcomes is :attr:`Outcome.PROVEN` and
+        :attr:`Outcome.UNSUPPORTED` — ``unsupported`` is the partial-delivery
+        verdict the slice's finaliser records when it cannot be given a direct
+        route, and the design accepts it (KBR-69's done-when). Every other
+        outcome is a defect the gate exists to surface:
+
+        * ``not_attempted`` — the slice never recorded, despite landing. The
+          conftest's per-slice finalisers write ``PROVEN`` or ``UNSUPPORTED``
+          once every phase of a landed slice has run; a row that is still
+          ``not_attempted`` at session end is a slice that ran but did not
+          write, or one that was deleted/renamed so its phases never reached
+          the hook.
+        * ``failed`` — the slice recorded a product defect; the verdict itself
+          is the explanation, the slice's ticket is the follow-up. The ticket
+          names ``failed`` as not-permitted precisely because the gate is
+          the surface that flips a defect from "written into the report" to
+          "blocking the run".
+
+        The T-E9 completeness gate (§5.3, plan task **T-E9** /
+        [KBR-69](https://shelpuk.atlassian.net/browse/KBR-69)) calls this
+        with ``landed_rows`` set to the conftest's ``_SLICES`` registry —
+        the row of a slice that hasn't landed yet is exempt, and the
+        automatic tightening KBR-69 ships is the property that adding a
+        sibling slice's descriptor to ``_SLICES`` immediately subjects its
+        row to this check, with no edit to the gate.
+
+        Args:
+            landed_rows: The verdict rows the caller considers landed. When
+                ``None``, every registered transport is checked (the strict
+                interpretation of KBR-69's done-when: "every transport"). When
+                a non-empty set, only the rows in the set are checked; a
+                ``not_attempted`` row outside the set is silently accepted,
+                and a name in the set that is not a registered transport is
+                silently ignored (the conftest's ``_SLICES`` is the source
+                of truth for both sets, so a mismatch there is a conftest
+                bug, not a report bug). Pass the conftest's
+                :data:`harness.conftest._SLICES`-derived set when the call
+                site is the session-end gate. Unit tests that want the
+                strict interpretation omit the argument.
 
         Raises:
-            AssertionError: When at least one transport is still
-                ``not_attempted``. The message names every pending transport
-                (sorted for a deterministic diff against the report's
-                registration order) so a CI failure is diagnosable without
-                a re-run.
+            AssertionError: When at least one **checked** transport is in an
+                invalid state (``not_attempted`` or ``failed``). The message
+                names every offending transport (sorted for a deterministic
+                diff against the report's registration order) and groups them
+                by defect kind so a CI failure is diagnosable without a
+                re-run. Transports outside ``landed_rows`` are absent from the
+                message, by construction.
         """
-        pending = self.not_attempted_names()
-        if pending:
-            raise AssertionError(f"containment completeness gate failed; verdicts still pending: {sorted(pending)}")
+        if landed_rows is None:
+            check: list[tuple[str, ReportEntry]] = list(self._entries.items())
+        else:
+            check = [(name, entry) for name, entry in self._entries.items() if name in landed_rows]
+        not_attempted = sorted(name for name, entry in check if entry.outcome is Outcome.NOT_ATTEMPTED)
+        failed = sorted(name for name, entry in check if entry.outcome is Outcome.FAILED)
+        if not not_attempted and not failed:
+            return
+        parts: list[str] = []
+        if not_attempted:
+            parts.append(f"verdicts still pending (not_attempted): {not_attempted}")
+        if failed:
+            parts.append(f"verdicts recorded as product defects (failed): {failed}")
+        raise AssertionError("containment completeness gate failed; " + "; ".join(parts))
 
 
 #: The in-process singleton T-E2..T-E5 reach through and T-E9 reads.
