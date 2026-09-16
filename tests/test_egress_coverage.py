@@ -227,6 +227,50 @@ def _enclosing_function(
     return best
 
 
+def _iter_constructions_in_tree(tree: ast.AST) -> list[ast.Call]:
+    """Yield every ``BridgeServer(`` ``Call`` node anywhere in ``tree``.
+
+    Args:
+        tree: Any parsed AST (module, function body, etc.).
+
+    Returns:
+        Every ``ast.Call`` whose callee is a ``Name`` or final ``Attribute``
+        named ``"BridgeServer"``. The matcher is shared by the live-source
+        scan and the synthetic-tree falsification probes so a regression to
+        the matching logic is exercised by both.
+    """
+    return [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and _called_name(node) == "BridgeServer"
+    ]
+
+
+def _iter_aliased_bridge_server_imports_in_tree(tree: ast.AST) -> list[tuple[int, str, str]]:
+    """Yield every aliased ``BridgeServer`` import in ``tree``.
+
+    Args:
+        tree: Any parsed AST (module, function body, etc.).
+
+    Returns:
+        ``(lineno, original_name, asname)`` for each ``import ... BridgeServer as
+        <asname>`` (or ``from ... import BridgeServer as <asname>``) binding. A
+        renamed import hides any construction site that uses the alias from
+        the construction walker, so any aliased import is itself a guard
+        failure. The matcher is shared by the live-source scan and the
+        synthetic-tree falsification probe so a regression to the matching
+        logic is exercised by both.
+    """
+    found: list[tuple[int, str, str]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.Import, ast.ImportFrom)):
+            continue
+        for alias in node.names:
+            if alias.name.endswith("BridgeServer") and alias.asname:
+                found.append((node.lineno, alias.name, alias.asname))
+    return found
+
+
 def _iter_bridge_constructions() -> list[tuple[str, int]]:
     """Find every ``BridgeServer(`` construction under ``src/kitty``.
 
@@ -240,9 +284,8 @@ def _iter_bridge_constructions() -> list[tuple[str, int]]:
         if rel == _BRIDGE_SERVER_DEFINITION_FILE:
             continue
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Call) and _called_name(node) == "BridgeServer":
-                found.append((rel, node.lineno))
+        for node in _iter_constructions_in_tree(tree):
+            found.append((rel, node.lineno))
     return found
 
 
@@ -366,9 +409,9 @@ class TestEveryStartPathIsGuarded:
         """Falsification control: the walker must reject an unguarded construction.
 
         Without this, a broken `_is_dominated` that always returns True would
-        pass every other test in this class while proving nothing. The four
-        shapes exercise every pairwise combination of {construction, guard}
-        across {own scope, nested scope}:
+        pass every other test in this class while proving nothing. The five
+        shapes exercise the pairwise combinations of {construction, guard}
+        across {own scope, nested scope}, plus generator laziness:
 
         - **sibling-undominated** — guard absent (the degenerate case).
         - **sibling-dominated** — guard precedes construction in the same scope.
@@ -382,6 +425,12 @@ class TestEveryStartPathIsGuarded:
           indistinguishable from an unguarded code path. A walker that used
           plain ``ast.walk(func)`` over the entire enclosing function would
           wrongly accept this shape.
+        - **outer-construction, guard inside a generator expression** —
+          generator bodies are lazy (the ``elt`` runs only on iteration), so
+          this is the same deferral shape as the nested-def case with the
+          guard written inline rather than in a helper. A walker that omitted
+          ``ast.GeneratorExp`` from ``_DEFERRED_SCOPES`` would wrongly accept
+          this shape.
         """
         source = textwrap.dedent(
             """\
@@ -415,12 +464,7 @@ class TestEveryStartPathIsGuarded:
         )
         tree = ast.parse(source)
         constructions = sorted(
-            (
-                node
-                for node in ast.walk(tree)
-                if isinstance(node, ast.Call) and _called_name(node) == "BridgeServer"
-            ),
-            key=lambda n: n.lineno,
+            _iter_constructions_in_tree(tree), key=lambda n: n.lineno
         )
         assert len(constructions) == 5, "fixture must hold exactly five constructions"
 
@@ -450,7 +494,9 @@ class TestEveryStartPathIsGuarded:
         written as ``kitty.bridge.server.BridgeServer(...)`` would be invisible
         to the construction scan and the guard would silently miss it. The
         scan against ``SRC`` is bound to the source tree, so this helper probe
-        exercises the matching logic directly against a synthetic dotted call.
+        exercises the production matcher (``_iter_constructions_in_tree``) on
+        a synthetic dotted call — a regression in the shared helper fails
+        this test.
         """
         source = textwrap.dedent(
             """\
@@ -461,11 +507,7 @@ class TestEveryStartPathIsGuarded:
             """
         )
         tree = ast.parse(source)
-        matched = [
-            node
-            for node in ast.walk(tree)
-            if isinstance(node, ast.Call) and _called_name(node) == "BridgeServer"
-        ]
+        matched = _iter_constructions_in_tree(tree)
         assert len(matched) == 1, (
             "a dotted `mod.BridgeServer(...)` call must be matched by the walker; the "
             "Attribute branch of `_called_name` may have regressed"
@@ -486,14 +528,8 @@ class TestEveryStartPathIsGuarded:
         for path in sorted(SRC.rglob("*.py")):
             rel = path.relative_to(SRC).as_posix()
             tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-            for node in ast.walk(tree):
-                if not isinstance(node, (ast.Import, ast.ImportFrom)):
-                    continue
-                for alias in node.names:
-                    if alias.name.endswith("BridgeServer") and alias.asname:
-                        offenders.append(
-                            f"{rel}:{node.lineno}: `{alias.name} as {alias.asname}`"
-                        )
+            for lineno, original, asname in _iter_aliased_bridge_server_imports_in_tree(tree):
+                offenders.append(f"{rel}:{lineno}: `{original} as {asname}`")
         assert not offenders, (
             "BridgeServer is imported under an alias, so a construction call would be "
             f"invisible to the AST walker: {offenders}"
@@ -505,8 +541,10 @@ class TestEveryStartPathIsGuarded:
         The live tree has zero aliased ``BridgeServer`` imports, so the matcher
         is unproven by data — the test above is structurally incapable of
         failing on a regression like ``endswith("BS")``. This probe parses a
-        small aliased import and asserts the matcher finds it; a regression
-        that obscures the alias match will fail this test.
+        small aliased import and exercises the **production** matcher
+        (``_iter_aliased_bridge_server_imports_in_tree``) on it, so a
+        regression in the shared helper fails this test rather than only its
+        own copy of the loop.
         """
         source = textwrap.dedent(
             """\
@@ -517,17 +555,12 @@ class TestEveryStartPathIsGuarded:
             """
         )
         tree = ast.parse(source)
-        found: list[str] = []
-        for node in ast.walk(tree):
-            if not isinstance(node, (ast.Import, ast.ImportFrom)):
-                continue
-            for alias in node.names:
-                if alias.name.endswith("BridgeServer") and alias.asname:
-                    found.append(f"line {node.lineno}: `{alias.name} as {alias.asname}`")
+        offenders = _iter_aliased_bridge_server_imports_in_tree(tree)
+        formatted = [f"line {lineno}: `{original} as {asname}`" for lineno, original, asname in offenders]
 
-        assert found == ["line 1: `BridgeServer as BS`"], (
+        assert formatted == ["line 1: `BridgeServer as BS`"], (
             "the alias matcher must surface `from kitty.bridge.server import "
-            f"BridgeServer as BS` as an offender; got {found}"
+            f"BridgeServer as BS` as an offender; got {formatted}"
         )
 
 

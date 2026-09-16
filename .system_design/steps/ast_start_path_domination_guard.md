@@ -27,13 +27,15 @@ gap 3 and the fix is specified in §6.2.3 (Start-path domination row).
 - The helper walks `src/kitty/**.py` with `ast.parse` and excludes
   `bridge/server.py` (the class definition, line 1483).
 - Falsification control per `TEST_SUITE.md` §1.4: an in-test `textwrap.dedent` source
-  string constructs four `BridgeServer(` shapes that exercise every pairwise
-  combination of {construction, guard} across {own scope, nested scope} — sibling-
-  undominated, sibling-dominated, outer-guard with inner-construction (a guard does not
-  cross into an inner function), and outer-construction with the only guard confined to
-  a nested helper scope (a guard confined to a nested def does not dominate the
-  enclosing scope). The fourth shape closes the "guard inside a nested def" blind spot
-  a plain `ast.walk(func)` would leave open.
+  string constructs five `BridgeServer(` shapes that exercise the pairwise
+  combinations of {construction, guard} across {own scope, nested scope}, plus
+  generator laziness — sibling-undominated, sibling-dominated, outer-guard with
+  inner-construction (a guard does not cross into an inner function), outer-
+  construction with the only guard confined to a nested helper scope (a guard in a
+  deferred nested def does not dominate the enclosing scope), and outer-
+  construction with the only guard inside a generator expression (a guard in a lazy
+  generator elt does not dominate either). The fourth and fifth shapes close the
+  blind spots a plain `ast.walk(func)` would leave open.
 - Construction matcher matches `Name` and `Attribute.attr` spellings, so dotted
   `mod.BridgeServer(...)` constructions are not invisible to the scan; a separate
   test asserts no file aliases `BridgeServer` under a renamed binding, since a renamed
