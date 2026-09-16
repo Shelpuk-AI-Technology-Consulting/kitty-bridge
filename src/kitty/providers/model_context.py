@@ -324,6 +324,38 @@ def _log_default_fallback(provider: str, model: str) -> None:
     )
 
 
+@cache
+def _log_shadowed_context_window(provider: str, model: str, catalog_tokens: int, config_tokens: int) -> None:
+    """Report that the overrides catalog outranks the profile's ``context_window``.
+
+    The precedence itself is deliberate — the owner kept the catalog on top when
+    the question was raised as KBR-170 — so the line exists for visibility, not
+    as an alarm: ``INFO``, naming the model and both values, and the remedy.
+
+    The cache key carries both values, not just ``(provider, model)``: the
+    synced catalog can change between requests without a release, and a new
+    effective number is a new shadowing the operator needs to see. Within one
+    stable state the budget is recomputed on every request, so an unconditional
+    line would be one per turn.
+
+    Args:
+        provider: The provider type, for identifying which profile is affected.
+        model: The model name **as configured** — never the prefix-stripped
+            tail, which is a string the operator never wrote.
+        catalog_tokens: The context length the overrides catalog resolved.
+        config_tokens: The ``context_window`` the profile set and is losing to.
+    """
+    logger.info(
+        "Overrides catalog pins %s/%s to %d tokens; the profile's context_window "
+        "of %d is ignored. Omit the model from the overrides catalog to let "
+        "provider_config take effect.",
+        provider,
+        model,
+        catalog_tokens,
+        config_tokens,
+    )
+
+
 def get_model_context_tokens(
     provider: str,
     model: str,
@@ -341,15 +373,24 @@ def get_model_context_tokens(
     the same window however it is spelled: bare, or carrying any single vendor
     or provider prefix (KBR-151).
 
-    WARNING: an entry in the overrides catalog silently trumps a per-profile
-    ``provider_config["context_window"]``. To make a profile's context_window
-    take effect, omit that model from the overrides file — noting that since
-    KBR-151 one key captures **every** prefixed spelling of its model, so
-    ``openai/gpt-4o``, ``gpt-4o`` and ``azure/gpt-4o`` are one entry to omit,
-    not three. A key's own prefix does not scope it to that vendor.
+    The overrides catalog outranks ``provider_config["context_window"]`` by
+    owner decision (KBR-170, folded into KBR-71 on 2026-09-15). When the two
+    disagree the shadowed value is announced once per
+    ``(provider, model, effective, ignored)`` at ``INFO`` — see
+    :func:`_log_shadowed_context_window` — so an operator whose hand-written
+    setting is being outvoted by a file synced from the network can discover
+    that from the logs at INFO level. ``INFO`` (not ``WARNING``) because the
+    precedence is deliberate — this is visibility, not an alarm — and
+    discoverability depends on the operator's logging config emitting at
+    INFO for the ``kitty.providers.model_context`` logger; handlers that
+    filter INFO out will need to surface this logger's events explicitly.
     """
     override = _lookup_override(model)
     if override is not None:
+        if provider_config:
+            config_tokens = _coerce_context_tokens(provider_config.get("context_window"))
+            if config_tokens is not None and config_tokens != override:
+                _log_shadowed_context_window(provider, model, override, config_tokens)
         return override
 
     if provider_config and "context_window" in provider_config:
