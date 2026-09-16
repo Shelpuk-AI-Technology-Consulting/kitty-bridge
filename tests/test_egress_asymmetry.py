@@ -65,7 +65,7 @@ class TestCurlCffiSite:
         ``should_bypass`` would have to add the URL parameter first, which this
         test's spy shape (kwargs only, no URL) makes visible.
         """
-        from curl_cffi.const import CurlOpt
+        from curl_cffi import CurlOpt
 
         import kitty.providers.openai_subscription as subscription
 
