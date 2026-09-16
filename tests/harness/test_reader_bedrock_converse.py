@@ -1435,7 +1435,14 @@ class TestEveryOptionalLeafFailsClosed:
         assert "messages[0].content[0].image.source.bytes" in projected.residual
 
     def test_a_non_string_image_format_residualises(self) -> None:
-        """``image.format`` must be a string."""
+        """``image.format`` must be a string.
+
+        KBR-251 / §7.4 rule 7 row 3: the part is still produced, and the
+        reader's "honest about what the wire said" choice carries
+        ``media_type = str(fmt)`` — ``"7"`` when the wire said ``7``. A
+        regression to ``media_type = None`` would silently lose that
+        identity, so the value is pinned here.
+        """
         projected = project_untotalled(
             {
                 "messages": [
@@ -1450,6 +1457,11 @@ class TestEveryOptionalLeafFailsClosed:
         )
 
         assert "messages[0].content[0].image.format" in projected.residual
+
+        part = projected.conversation.turns[0].parts[0]
+        assert isinstance(part, c.Image)
+        assert part.media_type == "7"
+        assert part.digest == c.image_digest(b"x")
 
     def test_a_non_string_tool_use_name_residualises(self) -> None:
         """``toolUse.name`` must be a string."""
