@@ -790,7 +790,7 @@ class TestContentBlocks:
         assert part.kind == kind
         c.verify_total(projected)
 
-    @pytest.mark.parametrize("kind", ["myCustomBlock", "guardContent", "toolAddition"])
+    @pytest.mark.parametrize("kind", ["myCustomBlock", "toolUse"])
     def test_a_type_with_no_canonical_name_is_an_unreadable_body_not_a_reader_bug(self, kind: str) -> None:
         """KBR-174 — the diagnosis must name the wire, not the harness.
 
@@ -800,6 +800,14 @@ class TestContentBlocks:
         it — matching the branch above, which already raises `UnreadableBodyError`
         for a non-string `type`. Left untranslated, a camelCase vendor type would
         be reported as a defect in this harness.
+
+        ``toolUse`` is Converse's ``ContentBlock`` spelling for a block that
+        projects to a first-class :class:`~harness.contract.ToolUse` — no
+        Anthropic body carries it, and it has no ``OPAQUE_ALIASES`` entry
+        because it never becomes :class:`~harness.contract.Opaque`. Passing
+        it to the Anthropic reader proves the diagnosis still names the
+        wire, not the harness, for camelCase types that the shared table
+        does not reconcile.
         """
         body = _minimal(messages=[{"role": "user", "content": [{"type": kind, "x": 1}]}])
 

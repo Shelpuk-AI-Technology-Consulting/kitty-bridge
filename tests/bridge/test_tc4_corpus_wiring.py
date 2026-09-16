@@ -7,7 +7,7 @@ A corpus entry that names a code path but never reaches it is the F25 failure
 KBR-5 measured: ``TestCompactionPostCondition``'s fixtures looked like coverage
 and proved nothing, because a surviving user turn always defeated the
 post-condition they were named for.  This module is the second reader for
-T-C4's three entries: each one is loaded from ``tests/corpus/`` and run through
+T-C4's four entries: each one is loaded from ``tests/corpus/`` and run through
 the real compactor on a server whose context budget matches the test's intent —
 so an entry whose shape drifts goes red here, not silently.
 
@@ -53,11 +53,23 @@ pytestmark = pytest.mark.l1
 #: The committed corpus root.
 CORPUS = Path(__file__).resolve().parents[1] / "corpus"
 
-#: The three T-C4 entry ids. Each maps to a single AC the wiring tests hold.
+#: The four T-C4 entry ids (KBR-256 adds the streaming twin). Each maps to a
+#: single AC the wiring tests hold.
 TC4_ENTRY_IDS = (
     "m6_recovery_oversized_paired",
+    "m6_recovery_oversized_paired_streaming",  # KBR-256: same wiring shape as the non-streaming twin.
     "m5_irreducible_single_final_turn",
     "system_prompt_over_window_compacts_normally",
+)
+
+#: Both M6 twins. The recovery's wiring properties (oversized gate, pre-flight
+#: survival, no-orphan pairing) are pinned per twin: the streaming entry is a
+#: builder output (scripts/build_corpus_m6_streaming.py), and a builder drift —
+#: e.g. a re-compaction applied before write — would otherwise be caught by
+#: nothing at this layer.
+M6_ENTRY_IDS = (
+    "m6_recovery_oversized_paired",
+    "m6_recovery_oversized_paired_streaming",
 )
 
 
@@ -180,7 +192,7 @@ class TestTheEntriesAreCommittedAndDeclared:
         cross-task — it lives in
         :mod:`tests.harness.test_corpus_lint::TestTheCommittedCorpusHasNoOrphanEntries`
         where the allowlist can know about every documented task. This
-        test asserts only its own half: TC4's three entries plus
+        test asserts only its own half: TC4's four entries plus
         ``format_example`` are all present in the corpus.
         """
         ids = {entry.id for entry in k.load_corpus(CORPUS)}
@@ -197,29 +209,37 @@ class TestTheEntriesAreCommittedAndDeclared:
 class TestTheEntriesReachTheirPaths:
     """The entries reach the paths they are named for, on a server whose budget fits."""
 
-    def test_the_m6_entry_exceeds_the_oversized_threshold_on_the_committed_body(self) -> None:
+    @pytest.mark.parametrize("entry_id", M6_ENTRY_IDS)
+    def test_the_m6_entry_exceeds_the_oversized_threshold_on_the_committed_body(self, entry_id: str) -> None:
         """The recovery gate opens only past 600,000 serialized characters.
 
         Measured on the committed body — the README rule that triggers are
         declared against what landed, never against the pre-scrub capture. The
         messages array is what ``_is_oversized_request`` serializes. AC-3's
         first half — the second (post-pre-flight) is the test below.
+
+        Args:
+            entry_id: Which M6 twin to measure — both must clear the gate.
         """
-        entry = _load_entry("m6_recovery_oversized_paired")
+        entry = _load_entry(entry_id)
         body = json.loads(entry.request.body)
 
         serialized = len(json.dumps(body["messages"], ensure_ascii=False))
 
         assert serialized > _OVERSIZED_INPUT_THRESHOLD
 
-    def test_the_m6_entry_survives_preflight_compaction_still_oversized(self) -> None:
+    @pytest.mark.parametrize("entry_id", M6_ENTRY_IDS)
+    def test_the_m6_entry_survives_preflight_compaction_still_oversized(self, entry_id: str) -> None:
         """The recovery entry is well-paired, so pre-flight succeeds.
 
         The budget is sized so pre-flight compaction's threshold short-circuit
         leaves the body unchanged — the body must still exceed the oversized
         gate so the upstream has a reason to 413 and the recovery path engages.
+
+        Args:
+            entry_id: Which M6 twin to measure — both must survive pre-flight.
         """
-        entry = _load_entry("m6_recovery_oversized_paired")
+        entry = _load_entry(entry_id)
         cc_request = json.loads(entry.request.body)
         before = len(json.dumps(cc_request["messages"], ensure_ascii=False))
 
@@ -240,7 +260,8 @@ class TestTheEntriesReachTheirPaths:
             "otherwise the upstream has no reason to 413"
         )
 
-    def test_the_m6_entry_has_no_orphan_tool_messages(self) -> None:
+    @pytest.mark.parametrize("entry_id", M6_ENTRY_IDS)
+    def test_the_m6_entry_has_no_orphan_tool_messages(self, entry_id: str) -> None:
         """The well-paired property is structural, not enforced by test discipline.
 
         This is the anti-F25 half for the M6 entry: if an authoring drift added
@@ -257,8 +278,11 @@ class TestTheEntriesReachTheirPaths:
         whose ``tool_use`` no assistant turn carries. The entry is inbound
         Anthropic Messages, so the native shape is the one a real drift would
         introduce.
+
+        Args:
+            entry_id: Which M6 twin to check — both must be well-paired.
         """
-        entry = _load_entry("m6_recovery_oversized_paired")
+        entry = _load_entry(entry_id)
         body = json.loads(entry.request.body)
 
         # Chat Completions shape: assistant ``tool_calls[].id`` declares, a

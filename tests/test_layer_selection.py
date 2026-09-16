@@ -475,6 +475,12 @@ class TestTheWholeSuiteIsCoherent:
             # from the installed mutmut), and the bucket routing is the
             # other side of the registry agreement the scope guard tests.
             "tests/test_aggregate_mutation_baseline.py",
+            # KBR-152. A §6.2.3 contract against the live branch-rules JSON
+            # GitHub defines and edits: the verifier's pure decision is
+            # pinned against inline snapshots of that format, so a rule
+            # shape nobody recognised reads as *not* enforced rather than
+            # as blessed.
+            "tests/test_verify_required_status_checks.py",
             # KBR-200 (CB-3). §6.2.3 serialization-boundary guard: the
             # native-passthrough route must keep the agent's cache
             # breakpoints intact. Drives the bridge branch end to end and
@@ -482,6 +488,14 @@ class TestTheWholeSuiteIsCoherent:
             # breakpoint loss as today's behaviour. New l2 file added by
             # CB-3.
             "tests/bridge/test_native_passthrough_cache_breaks.py",
+            # KBR-256. A §6.2.3 structural guard: it holds the four streaming
+            # handlers' recovery skeletons (register row M6's site list) against
+            # the AST of `src/kitty/bridge/server.py` — the same read-two-real-
+            # artifacts shape as `test_register_agreement.py`. Two of the four
+            # copies have no behavioural L3 case yet (Responses/Gemini wait on
+            # the curl_cffi/botocore recorders), so this AST pin is their only
+            # automated drift enforcement.
+            "tests/bridge/test_kbr256_recovery_structure.py",
         }
 
         actual = {

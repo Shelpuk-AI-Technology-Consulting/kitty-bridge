@@ -578,6 +578,13 @@ _BRIDGE_ROWS: tuple[MutationRow, ...] = (
         site=(
             f"{_SERVER}:BridgeServer._compact_with_tighter_budget",
             f"{_SERVER}:BridgeServer._request_with_retry_balancing",
+            # KBR-256: the four streaming ladders engage the same recovery on a
+            # pre-byte oversized 413 (position-as-guarantee for the three eager-
+            # prepared routes; `sr is None` on `_stream_messages`).
+            f"{_SERVER}:BridgeServer._stream_messages",
+            f"{_SERVER}:BridgeServer._stream_responses",
+            f"{_SERVER}:BridgeServer._stream_gemini",
+            f"{_SERVER}:BridgeServer._stream_chat_completions",
         ),
         trigger=Trigger.UPSTREAM_REJECTED_OVERSIZED_ON_BALANCING,
         paths=(c.CONVERSATION_TURNS,),
@@ -721,8 +728,11 @@ _BRIDGE_ROWS: tuple[MutationRow, ...] = (
         # The native route's guarantee is proven as product behaviour instead
         # (epic KBR-197), not by a complement nobody could author.
         trigger=Trigger.NON_NATIVE_UPSTREAM_WIRE,
-        # Three anchors because Anthropic permits a breakpoint at three carriers
-        # and Claude Code uses all three. Each names the **field**, never the
+        # Four anchors: three block-level carriers (Anthropic permits a
+        # breakpoint at all three and Claude Code uses all three) plus the
+        # top-level automatic-caching form (Anthropic projects it to
+        # `envelope.extra[cache_control]`; KBR-263 closing G38 -- a literal
+        # path, so no `_SHAPES` entry). Each names the **field**, never the
         # block: `conversation.turns[*].parts[*]` would also claim a deleted
         # part, and `conversation.tools[*]` a deleted tool description -- two of
         # §3.3.1's five oracle falsification cases. That is §3.3.1a's P15 lesson
@@ -731,6 +741,7 @@ _BRIDGE_ROWS: tuple[MutationRow, ...] = (
             c.system_path(c.WILDCARD, "cache_control"),
             c.part_path(c.WILDCARD, c.WILDCARD, "cache_control"),
             c.tool_path(c.WILDCARD, "cache_control"),
+            c.extra_path("cache_control"),
         ),
         conditional=False,
         design_ref="§3.2.1 · §3.3.1 · §3.3.1a",
@@ -1679,6 +1690,92 @@ _PROVIDER_ROWS: tuple[MutationRow, ...] = (
         paths=(c.extra_path("tool_choice"),),
         conditional=True,
         design_ref="§3.2.2 · §3.3.1b · §9.2 G35",
+    ),
+    # KBR-137 — OpenCode Go's four `/v1/responses` models are now servable.
+    # The whole-protocol translate, the eight CC-only drops, the
+    # max_tokens→max_output_tokens rename, and the reasoning injection are
+    # the four mutations the Responses route performs; P39–P41 (tools
+    # envelope unwrap, tool_choice envelope unwrap, response_format → text.format
+    # nesting move) are part of P36's whole-protocol claim, like P22 was
+    # part of the Codex P13–P17 set rather than a row of its own. The
+    # projection has no path vocabulary for an envelope unwrap, and the L1
+    # tests in ``tests/test_provider_opencode_responses.py`` pin each
+    # mutation directly. ``UNCONDITIONAL`` per the test gate (§3.2.2 footer):
+    # every request on the route meets the trigger.
+    MutationRow(
+        id="P36",
+        site=("kitty/providers/opencode.py:OpenCodeGoAdapter._cc_to_responses",),
+        trigger=Trigger.CC_ORIGIN_PATH,
+        # Whole-body translation into OpenAI Responses — a fifth wire format
+        # M2 does not name. Same reason as P11/P12: the projection is what
+        # makes the formats comparable, so the translation itself names no
+        # field. The per-message parts (system → instructions, user →
+        # input_text, assistant → output_text, tool → function_call_output)
+        # are part of this single claim, as the P22 message-level translation
+        # was on the Responses-origin twin.
+        paths=(c.NOT_PROJECTABLE,),
+        conditional=False,
+        design_ref="§3.2.2 · §3.3.4 · KBR-137",
+        not_projectable_reason=(
+            "KBR-137 adds a fifth wire format — OpenAI Responses — that M2 does "
+            "not name. Like P11/P12, the projection is what makes the formats "
+            "comparable, so the whole-protocol translate names no field. The "
+            "per-message renames (system→instructions, user→input_text, "
+            "assistant→output_text, tool→function_call_output), the tools and "
+            "tool_choice envelope unwraps, and the response_format nesting move "
+            "are all part of this single claim; they are pinned by the L1 tests "
+            "in ``tests/test_provider_opencode_responses.py`` and not by §3.3.1, "
+            "because no path vocabulary names an envelope unwrap."
+        ),
+    ),
+    MutationRow(
+        id="P37",
+        site=("kitty/providers/opencode.py:OpenCodeGoAdapter._cc_to_responses",),
+        trigger=Trigger.CC_ORIGIN_PATH,
+        # The eight CC sampling / control fields absent from the OpenAI
+        # Responses create-request schema (verified 2026-09-16 against
+        # ``openai/openai-openapi`` master). Verified at the spec, not from
+        # the builder's source — a future spec addition turns this row red.
+        # ``stream_options`` is included because Responses' ``stream_options``
+        # has different semantics (``include_obfuscation``, not
+        # ``include_usage``); the CC value is silently dropped, not translated.
+        paths=tuple(c.extra_path(key) for key in (
+            "frequency_penalty",
+            "presence_penalty",
+            "seed",
+            "logit_bias",
+            "n",
+            "stop",
+            "logprobs",
+            "stream_options",
+        )),
+        conditional=False,
+        design_ref="§3.2.2 · §3.3.1 · §3.3.1a · KBR-137",
+    ),
+    MutationRow(
+        id="P38",
+        site=("kitty/providers/opencode.py:OpenCodeGoAdapter._cc_to_responses",),
+        trigger=Trigger.CC_ORIGIN_PATH,
+        # Rename the CC token-budget spellings to the Responses spelling.
+        # Precedence (max_output_tokens > max_completion_tokens > max_tokens)
+        # lives in the builder; the row claims the two CC addresses that
+        # disappear, not the Responses address that already lives at its
+        # own name.
+        paths=(c.extra_path("max_tokens"), c.extra_path("max_completion_tokens")),
+        conditional=False,
+        design_ref="§3.2.2 · §3.3.1 · §3.3.1a · KBR-137",
+    ),
+    MutationRow(
+        id="P42",
+        site=("kitty/providers/opencode.py:OpenCodeGoAdapter._cc_to_responses",),
+        trigger=Trigger.REASONING_EFFORT_PRESENT,
+        # Passthrough of an agent signal in the target's own spelling, P3/P4
+        # class. The CC value rides on ``_reasoning_effort`` (an internal key,
+        # stripped by P1's ``_INTERNAL_KEYS``); the Responses address
+        # ``envelope.extra[reasoning]`` is created here.
+        paths=(c.extra_path("reasoning"),),
+        conditional=True,
+        design_ref="§3.2.2 · §3.3.1 · §3.3.1a · KBR-137",
     ),
 )
 

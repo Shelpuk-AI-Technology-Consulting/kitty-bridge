@@ -10,7 +10,7 @@ from collections.abc import Awaitable, Callable
 
 from kitty.egress import get_egress
 from kitty.providers.anthropic import _safe_json_load_args
-from kitty.providers.base import ProviderAdapter, ProviderError
+from kitty.providers.base import ProviderAdapter, ProviderError, WireShape
 
 __all__ = ["BedrockAdapter"]
 
@@ -86,6 +86,18 @@ class BedrockAdapter(ProviderAdapter):
     @property
     def use_custom_transport(self) -> bool:
         return True
+
+    @property
+    def upstream_wire_shape(self) -> WireShape:
+        """:attr:`WireShape.OTHER` — Bedrock Converse is a fifth wire, not Messages.
+
+        KBR-137 added this declaration.  The default is
+        :attr:`~kitty.providers.base.WireShape.CHAT_COMPLETIONS`, which would
+        mis-label Bedrock's Converse body (``inferenceConfig``, ``toolSpec``,
+        ``system: [{text: …}]``) as Chat Completions and let a CC-style
+        thinking-carrier recovery reach a body that does not accept it.
+        """
+        return WireShape.OTHER
 
     # ── Credential helpers ───────────────────────────────────────────────
 

@@ -2,11 +2,19 @@
 
 from __future__ import annotations
 
+from urllib.parse import urlsplit, urlunsplit
+
 from kitty.providers.base import ProviderAdapter, ProviderError
 
 __all__ = ["AzureOpenAIAdapter"]
 
 _API_VERSION = "2024-10-21"
+
+# Where a pasted Azure endpoint stops being a resource and starts being a
+# deployment.  The deployment segment after this marker is dynamic — it is the
+# request's model, per register row P20 — so a URL carrying it is right for
+# exactly one request and is cut back to the resource root on configuration.
+_DEPLOYMENT_MARKER = "/openai/deployments/"
 
 
 class AzureOpenAIAdapter(ProviderAdapter):
@@ -20,6 +28,11 @@ class AzureOpenAIAdapter(ProviderAdapter):
     - **Auth header**: ``api-key: KEY`` instead of ``Authorization: Bearer``
     - **Model selection**: via deployment-id in the URL, not ``model`` in the body
 
+    The deployment id is the request's normalized model (register row P20):
+    a profile whose model is ``gpt-4o`` addresses the deployment *named*
+    ``gpt-4o``, so a user is expected to type a deployment name as the model.
+    The base URL is the resource root — required, see :meth:`build_base_url`.
+
     Supports two auth modes:
     - **API key**: stored in Kitty's credential store, sent as ``api-key`` header
     - **Microsoft Entra ID token**: obtained via ``az account get-access-token``,
@@ -32,12 +45,98 @@ class AzureOpenAIAdapter(ProviderAdapter):
 
     @property
     def default_base_url(self) -> str:
+        # A template, not an address: nothing substitutes ``{resource}``, and
+        # :meth:`build_base_url` refuses to return it (KBR-153).  It stays only
+        # to satisfy the abstract property contract.
         return "https://{resource}.openai.azure.com"
 
     @property
     def upstream_path(self) -> str:
         """Default path — actual path is built dynamically per deployment."""
         return self.get_upstream_path("model")
+
+    @property
+    def requires_custom_url(self) -> bool:
+        """Whether the setup wizards prompt for this provider's base URL.
+
+        True since KBR-153: without it no wizard ever wrote
+        ``provider_config["base_url"]``, and the placeholder in
+        :attr:`default_base_url` was left for DNS to fail on.
+        """
+        return True
+
+    def build_base_url(self, provider_config: dict | None) -> str:
+        """Return the Azure resource root from the profile's configured base URL.
+
+        The endpoint Azure documents is
+        ``https://<resource>.openai.azure.com/openai/deployments/<deployment>/
+        chat/completions?api-version=<v>``, and the ``<resource>`` in
+        :attr:`default_base_url` is a template nothing substitutes — so a base
+        URL is required, and a pasted full endpoint is cut back to the
+        resource root: the deployment segment is the request's model (P20),
+        which :meth:`get_upstream_path` appends at request time.
+
+        Args:
+            provider_config: The profile's provider configuration.
+
+        Returns:
+            The base URL the deployment path is appended to.
+
+        Raises:
+            ValueError: When no base URL is configured, or the configured
+                value is not an ``http(s)://`` URL — the same contract
+                ``custom_openai.build_base_url`` states, and the shape
+                ``kitty.validation.validate_api_key`` turns into the
+                launch-time message naming what is missing.
+        """
+        # An absent value and an empty one are the same fault — a profile that
+        # never named its resource — and get the missing-URL message rather
+        # than the malformed-URL one quoting an empty string.
+        url = (provider_config or {}).get("base_url")
+        if not url:
+            raise ValueError(
+                "The azure provider requires a base_url entry in provider_config — the "
+                "resource root, e.g. https://my-resource.openai.azure.com. Re-run "
+                "`kitty setup` to enter it."
+            )
+        if not url.startswith(("http://", "https://")):
+            raise ValueError(
+                f"Invalid base_url in provider_config: {url!r}. Must be a non-empty "
+                "http:// or https:// URL."
+            )
+        return self._cut_deployment_segment(url)
+
+    @staticmethod
+    def _cut_deployment_segment(url: str) -> str:
+        """Drop everything from the first deployment marker onward.
+
+        The marker is searched in the **parsed path**, not the raw string, so a
+        query or fragment that merely contains it is left alone, and a
+        percent-encoded path segment is not decoded into one.  The first
+        occurrence wins: a doubled pasted path still resolves to the resource
+        root, matching what composition would request for the unwritten URL.
+
+        An unparseable URL is returned untouched rather than allowed to raise:
+        :meth:`build_base_url` runs inside ``kitty.validation.validate_api_key``
+        outside its own ``try`` — the same reason
+        ``ProviderAdapter._strip_endpoint_suffix`` behaves this way.
+
+        Args:
+            url: The validated base URL.
+
+        Returns:
+            The URL with its path truncated at the marker, or ``url``
+            unchanged when the marker is absent or the URL cannot be parsed.
+        """
+        # `urlsplit` rejects a malformed IPv6 literal such as "https://[::1/v1".
+        try:
+            parts = urlsplit(url)
+        except ValueError:
+            return url
+        marker = parts.path.find(_DEPLOYMENT_MARKER)
+        if marker == -1:
+            return url
+        return urlunsplit(parts._replace(path=parts.path[:marker]))
 
     def get_upstream_path(self, model: str) -> str:
         """Build the upstream path for a specific deployment.

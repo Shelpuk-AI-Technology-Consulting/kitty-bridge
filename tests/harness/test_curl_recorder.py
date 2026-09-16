@@ -174,6 +174,18 @@ class TestTheRecorderPassesEveryConformanceCheck:
     async def test_per_session_check(self, recorder: CurlRecordingUpstream, check, probing_client_context) -> None:
         """A full session — several probes and one silent connection — judged whole.
 
+        The silent connection's peer port fills in asynchronously: the
+        recorder creates the record at accept time with ``peer_port = -1``
+        and :meth:`~harness.curl_recorder.CurlRecordingUpstream.connection_made`
+        completes it on a later loop iteration, when the server-side
+        handshake finishes — which can be *after* the client-side
+        ``wrap_socket`` that :func:`_open_only` returns on (measured on the
+        macOS leg, 2026-09-16: the check read the log between the two and
+        saw the record still carrying ``-1``). So before any check runs, the
+        test waits on the condition — the record carrying the reported
+        port — with the same bounded timeout every other async-appearing
+        assertion in this file uses.
+
         Args:
             recorder: The started recorder.
             check: One of the four per-session checks.
@@ -186,6 +198,11 @@ class TestTheRecorderPassesEveryConformanceCheck:
             recorder.host, recorder.port, _responses_probe("two"), marker="two", ssl_context=probing_client_context
         )
         silent = await asyncio.to_thread(_open_only, recorder, ssl_context=probing_client_context)
+        await _wait_until(
+            recorder,
+            lambda r: silent in {c.peer_port for c in r.connections},
+            timeout=2.0,
+        )
         recording = recording_of(recorder)
         check(recording, [first, second], [silent])
 

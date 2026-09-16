@@ -55,7 +55,8 @@ from kitty.bridge.tool_audit import AUDIT_MARKER, ToolUseAuditor, collect_tool_s
 from kitty.cloudflare import is_cloudflare_block
 from kitty.egress import EgressConfig, should_bypass
 from kitty.providers.anthropic import AnthropicCCStreamConverter
-from kitty.providers.base import ProviderAdapter, ProviderError, UnsupportedModelError
+from kitty.providers.base import ProviderAdapter, ProviderError, UnsupportedModelError, WireShape
+from kitty.providers.opencode import OpenCodeGoResponsesCCStreamConverter
 
 if TYPE_CHECKING:
     # Type-only imports. The layering contract in pyproject.toml forbids
@@ -611,7 +612,7 @@ def _route_model(cc_request: dict) -> str:
     return model if isinstance(model, str) else ""
 
 
-def _repair_thinking_roundtrip(body: dict, *, native: bool) -> bool:
+def _repair_thinking_roundtrip(body: dict, *, wire_shape: WireShape) -> bool:
     # pragma: no mutate block
     """Give every assistant turn the thinking carrier its target requires.
 
@@ -633,13 +634,23 @@ def _repair_thinking_roundtrip(body: dict, *, native: bool) -> bool:
     retrying a byte-identical request.
 
     The dialect is passed in rather than inferred, because
-    ``{"role": "assistant", "content": "..."}`` is valid in both and guessing
-    would silently write the wrong carrier for one of them.  It must come from
-    :meth:`ProviderAdapter.upstream_wire_is_messages_api_for_model`, asked with
-    the model the body was serialized for — not from the bare property, which
-    on a model-routing adapter answers only for the default route (KBR-7), and
-    not from ``_native_messages_request`` — see
+    ``{"role": "assistant", "content": "..."}`` is valid in multiple dialects
+    and guessing would silently write the wrong carrier for one of them.  It
+    must come from :meth:`ProviderAdapter.upstream_wire_shape_for_model`,
+    asked with the model the body was serialized for — not from the bare
+    property, which on a model-routing adapter answers only for the default
+    route (KBR-7), and not from ``_native_messages_request`` — see
     :meth:`BridgeServer._upstream_body_for`.
+
+    KBR-137 widened the dialect from a boolean to :class:`WireShape`.  Only
+    the two dialects that already define a carrier are rewritten here:
+    :attr:`WireShape.MESSAGES` (an Anthropic ``thinking`` content block) and
+    :attr:`WireShape.CHAT_COMPLETIONS` (a ``reasoning_content`` field).  The
+    other two return ``False`` without touching the body — the carrier
+    semantics on an OpenAI Responses body (``reasoning`` items) or a
+    Converse body is a different operation this function does not implement,
+    and a caller must not add such a backend to
+    ``_thinking_repair_backends`` for want of a carrier it cannot write.
 
     Changed messages are **copied**, not edited in place, and ``messages`` is
     replaced with a new list.  ``translate_to_upstream`` returns a shallow copy
@@ -651,15 +662,26 @@ def _repair_thinking_roundtrip(body: dict, *, native: bool) -> bool:
     Args:
         body: The outgoing upstream body.  Its ``messages`` key is rebound when
             anything changes; the original list and its messages are untouched.
-        native: True when ``body`` is an Anthropic Messages body (the carrier
-            is a ``thinking`` content block), False when it is a Chat
-            Completions body (the carrier is a ``reasoning_content`` field).
+        wire_shape: The dialect ``body`` is written in —
+            :attr:`WireShape.MESSAGES` for an Anthropic Messages body,
+            :attr:`WireShape.CHAT_COMPLETIONS` for a Chat Completions body.
+            Any other value leaves ``body`` unchanged.
 
     Returns:
         True if at least one assistant message was changed.  The caller must
         only retry when this is True — a False means the transcript already
         satisfies the contract and the rejection has another cause.
     """
+    # The two dialects this function can write a carrier for.  Responses and
+    # Converse bodies return False below — the honest answer, since no carrier
+    # shape is defined for them.
+    if wire_shape is WireShape.MESSAGES:
+        native = True
+    elif wire_shape is WireShape.CHAT_COMPLETIONS:
+        native = False
+    else:
+        return False
+
     messages = body.get("messages")
     if not isinstance(messages, list):
         return False
@@ -3622,8 +3644,16 @@ class BridgeServer:
                 strip_body: dict | None = None
                 strip_count = 0
                 strip_retries = 0
-                for raw_attempt in range(max_attempts + _MAX_THINKING_STRIPS):
-                    attempt = raw_attempt - strip_retries
+                # KBR-256: compact-and-retry budget — one recovery per attempt ordinal,
+                # at most n_backends per request (parity with the non-streaming ladder,
+                # where each backend gets one inline recovery). `last_recovery_attempt`
+                # blocks a second recovery on the compacted re-POST's own attempt: a
+                # second 413 there is the standard mark-unhealthy arm's input, not
+                # another recovery.
+                recovery_retries = 0
+                last_recovery_attempt: int | None = None
+                for raw_attempt in range(max_attempts + _MAX_THINKING_STRIPS + n_backends):
+                    attempt = raw_attempt - strip_retries - recovery_retries
                     # The extra iterations exist only to give strips back. Without
                     # this the loop could run past the last real attempt — a
                     # `continue` that does not check `attempt` (the tool_use
@@ -3652,7 +3682,7 @@ class BridgeServer:
                     # client can read: each line is converted to a Chat Completions
                     # chunk first (KBR-232).  Re-created per attempt so a failover onto
                     # a Chat Completions-wire backend re-evaluates the gate.
-                    stream_converter = AnthropicCCStreamConverter() if self._serves_messages_wire(cc_request) else None
+                    stream_converter = self._stream_converter_for(cc_request)
                     upstream = await self._open_upstream_stream(
                         url, upstream_body, headers, stream_timeout, transport_grace
                     )
@@ -3719,6 +3749,114 @@ class BridgeServer:
                                     max_attempts,
                                 )
                                 continue
+
+                            # KBR-256: an oversized 413 on a pre-byte streaming attempt
+                            # recovers exactly like the non-streaming M6 path — compact
+                            # tighter and retry the same backend. Streaming previously
+                            # fell through to the mark-unhealthy + failover arm, cooling
+                            # down a healthy backend for a conversation that is too big
+                            # and never attempting the recovery the M6 row documents.
+                            # The Responses handler prepares ``sr`` eagerly, so the
+                            # pre-byte gate is the *position* of this block (before
+                            # the mark-unhealthy arm, in the status-error branch which
+                            # reads no body content): any client write terminates the
+                            # attempt loop (KBR-183/Q14(a)), so a 413 is structurally
+                            # pre-emission. The block's position is itself part of the
+                            # contract, alongside the other same-backend repairs.
+                            if (
+                                attempt < max_attempts - 1
+                                and upstream.status in (400, 413)
+                                and recovery_retries < n_backends
+                                and last_recovery_attempt != attempt
+                                and BridgeServer._is_context_too_large_error(upstream.status, error_body)
+                                and self._is_oversized_request(cc_request)
+                            ):
+                                logger.info(
+                                    "Responses stream attempt %d/%d reported context-too-large; "
+                                    "compacting tighter (factor=0.5) and retrying same backend "
+                                    "(no failover, no mark-unhealthy)",
+                                    attempt + 1,
+                                    max_attempts,
+                                )
+                                try:
+                                    self._compact_with_tighter_budget(cc_request, factor=0.5)
+                                except CompactionFailedError:
+                                    # KBR-5 parity: cannot shrink further for THIS backend's
+                                    # budget. Fail over without marking — no second upstream
+                                    # request was made against the compacted body, so there
+                                    # is no evidence against this backend, and the pool's
+                                    # minimum context means a larger-context sibling may
+                                    # still accept it.
+                                    logger.info(
+                                        "Responses stream attempt %d/%d: conversation cannot be "
+                                        "compacted further; failing over without marking the "
+                                        "backend unhealthy",
+                                        attempt + 1,
+                                        max_attempts,
+                                    )
+                                    recovery_retries = min(recovery_retries + 1, n_backends)
+                                    if (
+                                        self._backends
+                                        and self._current_backend_idx >= 0
+                                        and self._any_healthy_backend()
+                                    ):
+                                        self._select_backend()
+                                        self._normalize_model(cc_request)
+                                        self._active_provider.normalize_request(cc_request)
+                                        # KBR-249 cross-class re-dispatch, mirroring the mark
+                                        # block below. KBR-242 contract: invalidate the lifecycle
+                                        # strings so the re-entry's `start_events is None` rebuild
+                                        # starts from a clean state.
+                                        if self._active_provider.use_custom_transport:
+                                            if _crossings >= _max_crossings:
+                                                logger.warning(
+                                                    "Re-dispatch cap reached (%d crossings, cap %d); "
+                                                    "not crossing plain → custom",
+                                                    _crossings, _max_crossings,
+                                                )
+                                                _cross_cap_hit = True
+                                                break
+                                            _crossings += 1
+                                            translator.reset()
+                                            start_events = None
+                                            logger.info(
+                                                "Re-dispatching plain → custom after transport-class "
+                                                "failover (attempt %d, %d crossings)",
+                                                attempt + 1, _crossings,
+                                            )
+                                            _cross_mode_to_custom = True
+                                            break
+                                        url = self._build_upstream_url(cc_request)
+                                        headers = self._build_upstream_headers(cc_request)
+                                        upstream_body = self._active_provider.translate_to_upstream(cc_request)
+                                        continue
+                                    # Nowhere to fail over to — surface the upstream error
+                                    # directly. The mark-unhealthy arm below must not run: the
+                                    # 413 is the conversation's fault, not the backend's (the
+                                    # non-streaming fallback never marks).
+                                    logger.error("Upstream error %d: %s", upstream.status, error_body)
+                                    terminal_status = "incomplete"
+                                    error_msg = self._translate_upstream_error(upstream.status, error_body)
+                                    error_event = responses_format_error(
+                                        {"code": "upstream_error", "message": error_msg},
+                                        seq=translator._next_seq(),
+                                    )
+                                    await sr.write(error_event.encode())
+                                    break
+                                else:
+                                    # Compaction succeeded — re-POST the same backend with the
+                                    # compacted body. The counter gives the attempt back
+                                    # (thinking-strip shape), so this re-POST does not consume
+                                    # the failover budget. If the re-POST 413s again, the
+                                    # `last_recovery_attempt` guard routes it to the standard
+                                    # mark-unhealthy arm (second-413 parity with the
+                                    # non-streaming path).
+                                    recovery_retries = min(recovery_retries + 1, n_backends)
+                                    last_recovery_attempt = attempt
+                                    url = self._build_upstream_url(cc_request)
+                                    headers = self._build_upstream_headers(cc_request)
+                                    upstream_body = self._active_provider.translate_to_upstream(cc_request)
+                                    continue
 
                             # In balancing mode: mark unhealthy and try next backend for ANY error —
                             # except a signature rejection recovery could not fix: that history fails
@@ -4676,14 +4814,24 @@ class BridgeServer:
                 strip_count = 0
                 # Strips given back to the attempt budget; capped so failovers cannot extend it forever.
                 strip_retries = 0
+                # KBR-256: compact-and-retry budget — one recovery per attempt ordinal,
+                # at most n_backends per request (parity with the non-streaming ladder,
+                # where each backend gets one inline recovery). `last_recovery_attempt`
+                # blocks a second recovery on the compacted re-POST's own attempt: a
+                # second 413 there is the standard mark-unhealthy arm's input, not
+                # another recovery.
+                recovery_retries = 0
+                last_recovery_attempt: int | None = None
                 # A grace retry re-sends to the *same* backend after a connection
                 # blip, so it must not spend a failover attempt or pull the
                 # empty-response schedule forward — the loop is extended by the most
                 # grace can use, and `attempt` counts only real backend attempts.
-                for raw_attempt in range(max_attempts + len(_TRANSPORT_GRACE_DELAYS) + _MAX_THINKING_STRIPS):
+                for raw_attempt in range(
+                    max_attempts + len(_TRANSPORT_GRACE_DELAYS) + _MAX_THINKING_STRIPS + n_backends
+                ):
                     # A thinking strip re-sends the bridge's own repaired history, like a grace retry,
                     # so it gets its attempt back rather than pulling the empty-response schedule forward.
-                    attempt = raw_attempt - transport_grace.retries - strip_retries
+                    attempt = raw_attempt - transport_grace.retries - strip_retries - recovery_retries
                     # The extra iterations exist only to give grace retries back.
                     # Without this the loop could run past the last real attempt —
                     # a `continue` that does not check `attempt` (the tool_use
@@ -4817,15 +4965,25 @@ class BridgeServer:
                                 # (issue #32): repair and retry the same backend.
                                 # A False repair means nothing changed, so retrying
                                 # would re-send identical bytes — fall through.
+                                #
+                                # KBR-137: the repair writes a carrier only for
+                                # MESSAGES and CHAT_COMPLETIONS bodies.  A Responses
+                                # or OTHER backend has no carrier semantics for this
+                                # function, so the branch is skipped entirely: a
+                                # flag added to ``_thinking_repair_backends`` there
+                                # would never produce a repair on a later turn, and
+                                # the retry would re-send identical bytes.
+                                wire_shape_for_repair = self._active_provider.upstream_wire_shape_for_model(
+                                    _route_model(cc_request)
+                                )
                                 if (
-                                    not (strip_body is upstream_body and strip_count)
+                                    wire_shape_for_repair in (WireShape.MESSAGES, WireShape.CHAT_COMPLETIONS)
+                                    and not (strip_body is upstream_body and strip_count)
                                     and attempt < max_attempts - 1
                                     and _is_thinking_roundtrip_error(upstream.status, error_body)
                                     and _repair_thinking_roundtrip(
                                         upstream_body,
-                                        native=self._active_provider.upstream_wire_is_messages_api_for_model(
-                                            _route_model(cc_request)
-                                        ),
+                                        wire_shape=wire_shape_for_repair,
                                     )
                                 ):
                                     self._thinking_repair_backends.add(self._current_backend_idx)
@@ -4837,6 +4995,121 @@ class BridgeServer:
                                         max_attempts,
                                     )
                                     continue
+
+                                # KBR-256: an oversized 413 on a pre-byte streaming attempt
+                                # recovers exactly like the non-streaming M6 path — compact
+                                # tighter and retry the same backend. Streaming previously
+                                # fell through to the mark-unhealthy + failover arm, cooling
+                                # down a healthy backend for a conversation that is too big
+                                # and never attempting the recovery the M6 row documents.
+                                # The pre-byte gate (`sr is None`) is defensive: the
+                                # status branch reads no body content, so a 413 is
+                                # structurally pre-emission today — but a future code path
+                                # that delivered a status 413 after emission must not
+                                # recover, because the recovery cannot take written bytes
+                                # back (Q14(a)). Position of this block is itself part of
+                                # the contract: before the mark-unhealthy arm, alongside the
+                                # other same-backend repairs.
+                                if (
+                                    attempt < max_attempts - 1
+                                    and sr is None
+                                    and upstream.status in (400, 413)
+                                    and recovery_retries < n_backends
+                                    and last_recovery_attempt != attempt
+                                    and BridgeServer._is_context_too_large_error(upstream.status, error_body)
+                                    and self._is_oversized_request(cc_request)
+                                ):
+                                    logger.info(
+                                        "Messages stream attempt %d/%d reported context-too-large; "
+                                        "compacting tighter (factor=0.5) and retrying same backend "
+                                        "(no failover, no mark-unhealthy)",
+                                        attempt + 1,
+                                        max_attempts,
+                                    )
+                                    try:
+                                        self._compact_with_tighter_budget(cc_request, factor=0.5)
+                                    except CompactionFailedError:
+                                        # KBR-5 parity: cannot shrink further for THIS
+                                        # backend's budget. Fail over without marking — no
+                                        # second upstream request was made against the
+                                        # compacted body, so there is no evidence against
+                                        # this backend, and the pool's minimum context means
+                                        # a larger-context sibling may still accept it.
+                                        logger.info(
+                                            "Messages stream attempt %d/%d: conversation cannot be "
+                                            "compacted further; failing over without marking the "
+                                            "backend unhealthy",
+                                            attempt + 1,
+                                            max_attempts,
+                                        )
+                                        recovery_retries = min(recovery_retries + 1, n_backends)
+                                        if (
+                                            self._backends
+                                            and self._current_backend_idx >= 0
+                                            and self._any_healthy_backend()
+                                        ):
+                                            self._select_backend()
+                                            self._normalize_model(cc_request)
+                                            self._active_provider.normalize_request(cc_request)
+                                            # KBR-249: cross-class failover — same contract as
+                                            # the generic arm below; the 413 is pre-body-read,
+                                            # so the translator's seq state is untouched and
+                                            # only the crossing itself needs the reset.
+                                            if self._active_provider.use_custom_transport:
+                                                if _crossings >= _max_crossings:
+                                                    logger.warning(
+                                                        "Re-dispatch cap reached (%d crossings, cap %d); "
+                                                        "not crossing plain → custom for %s",
+                                                        _crossings,
+                                                        _max_crossings,
+                                                        message_id,
+                                                    )
+                                                    _cross_cap_hit = True
+                                                    break
+                                                _crossings += 1
+                                                translator.reset()
+                                                logger.info(
+                                                    "Re-dispatching plain → custom after transport-class "
+                                                    "failover (attempt %d, %d crossings)",
+                                                    attempt + 1,
+                                                    _crossings,
+                                                )
+                                                _cross_mode_to_custom = True
+                                                break
+                                            url = self._build_upstream_url(cc_request)
+                                            headers = self._build_upstream_headers(cc_request)
+                                            upstream_body = self._upstream_body_for(cc_request)
+                                            continue
+                                        # Nowhere to fail over to — surface the upstream error
+                                        # directly. The mark-unhealthy arm below must not run:
+                                        # the 413 is the conversation's fault, not the
+                                        # backend's (the non-streaming fallback never marks).
+                                        logger.error("Upstream error %d: %s", upstream.status, error_body)
+                                        error_msg = self._translate_upstream_error(upstream.status, error_body)
+                                        error_data = {
+                                            "type": "error",
+                                            "error": {"type": "api_error", "message": error_msg},
+                                        }
+                                        if sr is None:
+                                            _last_error_status = upstream.status
+                                            return _make_error_response(error_data, status=upstream.status)
+                                        await _write_client(sr, messages_format_error(error_data).encode())
+                                        break
+                                    else:
+                                        # Compaction succeeded — re-POST the same backend with
+                                        # the compacted body. The counter gives the attempt
+                                        # back (thinking-strip shape), so this re-POST does not
+                                        # consume the failover budget or pull the empty-response
+                                        # schedule forward. If the re-POST 413s again, the
+                                        # `last_recovery_attempt` guard above routes it to the
+                                        # standard mark-unhealthy arm (second-413 parity with
+                                        # the non-streaming path).
+                                        recovery_retries = min(recovery_retries + 1, n_backends)
+                                        last_recovery_attempt = attempt
+                                        url = self._build_upstream_url(cc_request)
+                                        headers = self._build_upstream_headers(cc_request)
+                                        upstream_body = self._upstream_body_for(cc_request)
+                                        continue
 
                                 retryable = self._should_retry_stream(upstream.status, error_body)
                                 # In balancing mode: mark unhealthy and try next backend for ANY error —
@@ -6017,8 +6290,16 @@ class BridgeServer:
                 strip_body: dict | None = None
                 strip_count = 0
                 strip_retries = 0
-                for raw_attempt in range(max_attempts + _MAX_THINKING_STRIPS):
-                    attempt = raw_attempt - strip_retries
+                # KBR-256: compact-and-retry budget — one recovery per attempt ordinal,
+                # at most n_backends per request (parity with the non-streaming ladder,
+                # where each backend gets one inline recovery). `last_recovery_attempt`
+                # blocks a second recovery on the compacted re-POST's own attempt: a
+                # second 413 there is the standard mark-unhealthy arm's input, not
+                # another recovery.
+                recovery_retries = 0
+                last_recovery_attempt: int | None = None
+                for raw_attempt in range(max_attempts + _MAX_THINKING_STRIPS + n_backends):
+                    attempt = raw_attempt - strip_retries - recovery_retries
                     # The extra iterations exist only to give strips back. Without
                     # this the loop could run past the last real attempt — a
                     # `continue` that does not check `attempt` (the tool_use
@@ -6040,7 +6321,7 @@ class BridgeServer:
                     # client can read: each line is converted to a Chat Completions
                     # chunk first (KBR-232).  Re-created per attempt so a failover onto
                     # a Chat Completions-wire backend re-evaluates the gate.
-                    stream_converter = AnthropicCCStreamConverter() if self._serves_messages_wire(cc_request) else None
+                    stream_converter = self._stream_converter_for(cc_request)
                     upstream = await self._open_upstream_stream(
                         url, upstream_body, headers, stream_timeout, transport_grace
                     )
@@ -6109,6 +6390,114 @@ class BridgeServer:
                                     max_attempts,
                                 )
                                 continue
+
+                            # KBR-256: an oversized 413 on a pre-byte streaming attempt
+                            # recovers exactly like the non-streaming M6 path — compact
+                            # tighter and retry the same backend. Streaming previously
+                            # fell through to the mark-unhealthy + failover arm, cooling
+                            # down a healthy backend for a conversation that is too big
+                            # and never attempting the recovery the M6 row documents.
+                            # The Gemini handler prepares ``sr`` eagerly, so the pre-byte
+                            # gate is the *position* of this block (before the mark-
+                            # unhealthy arm, in the status-error branch which reads no
+                            # body content): any client write terminates the attempt
+                            # loop (KBR-183/Q14(a)), so a 413 is structurally pre-emission.
+                            # The block's position is itself part of the contract.
+                            if (
+                                attempt < max_attempts - 1
+                                and upstream.status in (400, 413)
+                                and recovery_retries < n_backends
+                                and last_recovery_attempt != attempt
+                                and BridgeServer._is_context_too_large_error(upstream.status, error_body)
+                                and self._is_oversized_request(cc_request)
+                            ):
+                                logger.info(
+                                    "Gemini stream attempt %d/%d reported context-too-large; "
+                                    "compacting tighter (factor=0.5) and retrying same backend "
+                                    "(no failover, no mark-unhealthy)",
+                                    attempt + 1,
+                                    max_attempts,
+                                )
+                                try:
+                                    self._compact_with_tighter_budget(cc_request, factor=0.5)
+                                except CompactionFailedError:
+                                    # KBR-5 parity: cannot shrink further for THIS backend's
+                                    # budget. Fail over without marking — no second upstream
+                                    # request was made against the compacted body, so there
+                                    # is no evidence against this backend, and the pool's
+                                    # minimum context means a larger-context sibling may
+                                    # still accept it.
+                                    logger.info(
+                                        "Gemini stream attempt %d/%d: conversation cannot be "
+                                        "compacted further; failing over without marking the "
+                                        "backend unhealthy",
+                                        attempt + 1,
+                                        max_attempts,
+                                    )
+                                    recovery_retries = min(recovery_retries + 1, n_backends)
+                                    if (
+                                        self._backends
+                                        and self._current_backend_idx >= 0
+                                        and self._any_healthy_backend()
+                                    ):
+                                        # F22 contract: clear stale tool buffers before select,
+                                        # same as the mark block below.
+                                        translator.reset()
+                                        self._select_backend()
+                                        self._normalize_model(cc_request)
+                                        self._active_provider.normalize_request(cc_request)
+                                        # KBR-249 cross-class re-dispatch — translator is already
+                                        # reset above (F22).
+                                        if self._active_provider.use_custom_transport:
+                                            if _crossings >= _max_crossings:
+                                                logger.warning(
+                                                    "Re-dispatch cap reached (%d crossings, cap %d); "
+                                                    "not crossing plain → custom",
+                                                    _crossings, _max_crossings,
+                                                )
+                                                _cross_cap_hit = True
+                                                break
+                                            _crossings += 1
+                                            logger.info(
+                                                "Re-dispatching plain → custom after transport-class "
+                                                "failover (attempt %d, %d crossings)",
+                                                attempt + 1, _crossings,
+                                            )
+                                            _cross_mode_to_custom = True
+                                            break
+                                        url = self._build_upstream_url(cc_request)
+                                        headers = self._build_upstream_headers(cc_request)
+                                        upstream_body = self._active_provider.translate_to_upstream(cc_request)
+                                        continue
+                                    # Nowhere to fail over to — surface the upstream error
+                                    # directly. The mark-unhealthy arm below must not run: the
+                                    # 413 is the conversation's fault, not the backend's (the
+                                    # non-streaming fallback never marks).
+                                    logger.error("Upstream error %d: %s", upstream.status, error_body)
+                                    error_msg = self._translate_upstream_error(upstream.status, error_body)
+                                    error_payload = {
+                                        "error": {"code": upstream.status, "message": error_msg}
+                                    }
+                                    error_sse = f"data: {json.dumps(error_payload)}\n\n"
+                                    try:
+                                        await sr.write(error_sse.encode())
+                                    except (ConnectionResetError, BrokenPipeError, OSError):
+                                        logger.debug("Client disconnected before upstream error could be sent")
+                                    break
+                                else:
+                                    # Compaction succeeded — re-POST the same backend with the
+                                    # compacted body. The counter gives the attempt back
+                                    # (thinking-strip shape), so this re-POST does not consume
+                                    # the failover budget. If the re-POST 413s again, the
+                                    # `last_recovery_attempt` guard routes it to the standard
+                                    # mark-unhealthy arm (second-413 parity with the
+                                    # non-streaming path).
+                                    recovery_retries = min(recovery_retries + 1, n_backends)
+                                    last_recovery_attempt = attempt
+                                    url = self._build_upstream_url(cc_request)
+                                    headers = self._build_upstream_headers(cc_request)
+                                    upstream_body = self._active_provider.translate_to_upstream(cc_request)
+                                    continue
 
                             # In balancing mode: mark unhealthy and try next backend for ANY error —
                             # except a signature rejection recovery could not fix: that history fails
@@ -7188,8 +7577,16 @@ class BridgeServer:
                 strip_body: dict | None = None
                 strip_count = 0
                 strip_retries = 0
-                for raw_attempt in range(max_attempts + _MAX_THINKING_STRIPS):
-                    attempt = raw_attempt - strip_retries
+                # KBR-256: compact-and-retry budget — one recovery per attempt ordinal,
+                # at most n_backends per request (parity with the non-streaming ladder,
+                # where each backend gets one inline recovery). `last_recovery_attempt`
+                # blocks a second recovery on the compacted re-POST's own attempt: a
+                # second 413 there is the standard mark-unhealthy arm's input, not
+                # another recovery.
+                recovery_retries = 0
+                last_recovery_attempt: int | None = None
+                for raw_attempt in range(max_attempts + _MAX_THINKING_STRIPS + n_backends):
+                    attempt = raw_attempt - strip_retries - recovery_retries
                     # The extra iterations exist only to give strips back. Without
                     # this the loop could run past the last real attempt — a
                     # `continue` that does not check `attempt` (the tool_use
@@ -7217,7 +7614,7 @@ class BridgeServer:
                     # Completions client can read: each line is converted before the
                     # per-line logic (KBR-232).  Re-created per attempt so a failover
                     # onto a Chat Completions-wire backend re-evaluates the gate.
-                    stream_converter = AnthropicCCStreamConverter() if self._serves_messages_wire(cc_request) else None
+                    stream_converter = self._stream_converter_for(cc_request)
                     upstream = await self._open_upstream_stream(
                         url, upstream_body, headers, stream_timeout, transport_grace
                     )
@@ -7287,6 +7684,113 @@ class BridgeServer:
                                     max_attempts,
                                 )
                                 continue
+
+                            # KBR-256: an oversized 413 on a pre-byte streaming attempt
+                            # recovers exactly like the non-streaming M6 path — compact
+                            # tighter and retry the same backend. Streaming previously
+                            # fell through to the mark-unhealthy + failover arm, cooling
+                            # down a healthy backend for a conversation that is too big
+                            # and never attempting the recovery the M6 row documents.
+                            # The Chat Completions handler prepares ``sr`` eagerly, so
+                            # the pre-byte gate is the *position* of this block (before
+                            # the mark-unhealthy arm, in the status-error branch which
+                            # reads no body content): any client write terminates the
+                            # attempt loop (KBR-183/Q14(a)), so a 413 is structurally
+                            # pre-emission. The block's position is itself part of the
+                            # contract.
+                            if (
+                                attempt < max_attempts - 1
+                                and upstream.status in (400, 413)
+                                and recovery_retries < n_backends
+                                and last_recovery_attempt != attempt
+                                and BridgeServer._is_context_too_large_error(upstream.status, error_body)
+                                and self._is_oversized_request(cc_request)
+                            ):
+                                logger.info(
+                                    "CC stream attempt %d/%d reported context-too-large; "
+                                    "compacting tighter (factor=0.5) and retrying same backend "
+                                    "(no failover, no mark-unhealthy)",
+                                    attempt + 1,
+                                    max_attempts,
+                                )
+                                try:
+                                    self._compact_with_tighter_budget(cc_request, factor=0.5)
+                                except CompactionFailedError:
+                                    # KBR-5 parity: cannot shrink further for THIS backend's
+                                    # budget. Fail over without marking — no second upstream
+                                    # request was made against the compacted body, so there
+                                    # is no evidence against this backend, and the pool's
+                                    # minimum context means a larger-context sibling may
+                                    # still accept it.
+                                    logger.info(
+                                        "CC stream attempt %d/%d: conversation cannot be "
+                                        "compacted further; failing over without marking the "
+                                        "backend unhealthy",
+                                        attempt + 1,
+                                        max_attempts,
+                                    )
+                                    recovery_retries = min(recovery_retries + 1, n_backends)
+                                    if (
+                                        self._backends
+                                        and self._current_backend_idx >= 0
+                                        and self._any_healthy_backend()
+                                    ):
+                                        self._select_backend()
+                                        self._normalize_model(cc_request)
+                                        self._active_provider.normalize_request(cc_request)
+                                        # KBR-249 cross-class re-dispatch — pass-through: no
+                                        # translator to reset; per-attempt buffers are
+                                        # re-initialised by the attempt-loop prologue.
+                                        if self._active_provider.use_custom_transport:
+                                            if _crossings >= _max_crossings:
+                                                logger.warning(
+                                                    "Re-dispatch cap reached (%d crossings, cap %d); "
+                                                    "not crossing plain → custom",
+                                                    _crossings, _max_crossings,
+                                                )
+                                                _cross_cap_hit = True
+                                                break
+                                            _crossings += 1
+                                            logger.info(
+                                                "Re-dispatching plain → custom after transport-class "
+                                                "failover (attempt %d, %d crossings)",
+                                                attempt + 1, _crossings,
+                                            )
+                                            _cross_mode_to_custom = True
+                                            break
+                                        url = self._build_upstream_url(cc_request)
+                                        headers = self._build_upstream_headers(cc_request)
+                                        upstream_body = self._active_provider.translate_to_upstream(cc_request)
+                                        continue
+                                    # Nowhere to fail over to — surface the upstream error
+                                    # directly. The mark-unhealthy arm below must not run: the
+                                    # 413 is the conversation's fault, not the backend's (the
+                                    # non-streaming fallback never marks).
+                                    logger.error("Upstream error %d: %s", upstream.status, error_body)
+                                    error_msg = self._translate_upstream_error(upstream.status, error_body)
+                                    error_payload = {
+                                        "error": {"message": error_msg, "type": "upstream_error"}
+                                    }
+                                    error_sse = f"data: {json.dumps(error_payload)}\n\n"
+                                    try:
+                                        await sr.write(error_sse.encode())
+                                    except (ConnectionResetError, BrokenPipeError, OSError):
+                                        logger.debug("Client disconnected before upstream error could be sent")
+                                    break
+                                else:
+                                    # Compaction succeeded — re-POST the same backend with the
+                                    # compacted body. The counter gives the attempt back
+                                    # (thinking-strip shape), so this re-POST does not consume
+                                    # the failover budget. If the re-POST 413s again, the
+                                    # `last_recovery_attempt` guard routes it to the standard
+                                    # mark-unhealthy arm (second-413 parity with the
+                                    # non-streaming path).
+                                    recovery_retries = min(recovery_retries + 1, n_backends)
+                                    last_recovery_attempt = attempt
+                                    url = self._build_upstream_url(cc_request)
+                                    headers = self._build_upstream_headers(cc_request)
+                                    upstream_body = self._active_provider.translate_to_upstream(cc_request)
+                                    continue
 
                             # In balancing mode: mark unhealthy and try next backend for ANY error —
                             # except a signature rejection recovery could not fix: that history fails
@@ -8878,15 +9382,25 @@ class BridgeServer:
         provider = self._active_provider
         custom_url: str | None = None
         path: str | None = None
-        if status == 404 and provider.requires_custom_url:
+        if (
+            status == 404
+            and provider.requires_custom_url
+            # KBR-153: only rebuild the URL when the route is model-independent.
+            # Azure requires a custom URL *and* routes on the model (P20), and
+            # the branch has no request in scope, so quoting a URL would name
+            # an endpoint the request never used.  Identity-checked against the
+            # base-class method so an adapter that delegates to `super()` is
+            # excluded for the same reason — per-model delegation is exactly
+            # the shape that motivates the override.
+            and type(provider).get_upstream_path is ProviderAdapter.get_upstream_path
+        ):
             # No request is in scope here -- this formats an error for twelve
-            # call sites, most of which have none -- and both adapters that
-            # require a custom URL inherit `get_upstream_path`, which ignores
-            # the model. So the reported route is model-independent, and saying
-            # so with an empty request is honest where reaching for
-            # `_active_model` would reintroduce KBR-127 in the error path.
-            # `test_no_custom_url_adapter_routes_on_the_model` fails if a future
-            # adapter makes that untrue.
+            # call sites, most of which have none -- and the narrowed branch
+            # only enters for adapters whose `get_upstream_path` ignores the
+            # model. So the reported route is model-independent, and saying so
+            # with an empty request is honest where reaching for `_active_model`
+            # would reintroduce KBR-127 in the error path.  The narrower
+            # invariant lives in `test_an_offender_combining_custom_url_and_per_model_routing_is_explicitly_narrowed`.
             model_independent: dict = {}
             # `redact_url_for_display`, not the userinfo-only `_redact_userinfo` this
             # superseded: a query now composes correctly, and a query is where a
@@ -9024,9 +9538,9 @@ class BridgeServer:
             True when the upstream's reply is an Anthropic Messages stream.
         """
         provider = self._active_provider
-        return provider.use_native_messages or provider.upstream_wire_is_messages_api_for_model(
+        return provider.use_native_messages or provider.upstream_wire_shape_for_model(
             _route_model(cc_request)
-        )
+        ) is WireShape.MESSAGES
 
     def _upstream_body_for(self, cc_request: dict) -> dict:
         # pragma: no mutate block
@@ -9064,9 +9578,41 @@ class BridgeServer:
         if self._current_backend_idx in self._thinking_repair_backends:
             _repair_thinking_roundtrip(
                 upstream_body,
-                native=self._active_provider.upstream_wire_is_messages_api_for_model(_route_model(cc_request)),
+                wire_shape=self._active_provider.upstream_wire_shape_for_model(_route_model(cc_request)),
             )
         return upstream_body
+
+    def _stream_converter_for(
+        self, cc_request: dict
+    ) -> AnthropicCCStreamConverter | OpenCodeGoResponsesCCStreamConverter | None:
+        # pragma: no mutate block
+        """Return the stateful SSE→CC converter for this request, or None.
+
+        Each streaming handler creates one converter per attempt and feeds it
+        each ``data:`` line before its own per-line logic (KBR-232).  The
+        converter is needed when the upstream speaks a wire the per-byte
+        helper :meth:`ProviderAdapter.translate_upstream_stream_event` cannot
+        represent — which today is the two routed dialects,
+        :attr:`WireShape.MESSAGES` (anthropic's per-event stream) and
+        :attr:`WireShape.RESPONSES` (openai's per-event stream).  Other
+        dialects (CC, Ollama ``/api/chat``, Converse) pass through the bare
+        helper and need no converter.
+
+        Args:
+            cc_request: The request, normalized for the selected backend; its
+                model is read through :func:`_route_model`.
+
+        Returns:
+            An :class:`AnthropicCCStreamConverter` for a Messages upstream,
+            an :class:`OpenCodeGoResponsesCCStreamConverter` for an OpenCode
+            Go Responses upstream, else ``None``.
+        """
+        if self._serves_messages_wire(cc_request):
+            return AnthropicCCStreamConverter()
+        provider = self._active_provider
+        if provider.upstream_wire_shape_for_model(_route_model(cc_request)) is WireShape.RESPONSES:
+            return OpenCodeGoResponsesCCStreamConverter()
+        return None
 
     def _build_upstream_headers(self, cc_request: dict) -> dict[str, str]:
         # pragma: no mutate block

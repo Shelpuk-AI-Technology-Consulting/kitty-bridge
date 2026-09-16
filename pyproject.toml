@@ -162,6 +162,14 @@ select = [
     "SIM",  # flake8-simplify
 ]
 
+[tool.ruff.lint.per-file-ignores]
+# KBR-152 acceptance canary: the file's `assert False` is deliberate (the
+# file's own docstring says it must be red so KBR-152's `--require-category`
+# guard has something to fail on). The pytest runner exercises it under the
+# dedicated acceptance job; the ruff gate here only needs to tolerate the
+# specific B011 violation that an `assert False` raises.
+"tests/test_kbr152_throwaway_canary.py" = ["B011"]
+
 [tool.mypy]
 python_version = "3.10"
 warn_return_any = true
