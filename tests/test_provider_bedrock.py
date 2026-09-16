@@ -2,6 +2,9 @@
 
 from unittest.mock import MagicMock, patch
 
+import botocore.exceptions
+import botocore.session
+import botocore.validate
 import pytest
 
 from kitty.providers.base import ProviderError
@@ -300,9 +303,94 @@ class TestBedrockTranslateToUpstream:
         result = self.adapter.translate_to_upstream(cc)
         assistant_msg = result["messages"][1]
         assert assistant_msg["content"][0] == {
-            "reasoningContent": {"text": "I should check the weather tool first."},
+            "reasoningContent": {
+                "reasoningText": {"text": "I should check the weather tool first."}
+            },
         }
         assert "toolUse" in assistant_msg["content"][1]
+
+    def test_assistant_reasoning_block_passes_bedrock_schema_validation(self):
+        """Both reasoningContent emission shapes survive the live botocore schema.
+
+        KBR-264. The oracle is ``botocore.validate.validate_parameters`` against
+        the installed ``bedrock-runtime`` ``Converse.input_shape`` — the same
+        published service model the T-A5 reader (KBR-37) checks the union
+        members against. The negative control pins that the pre-KBR-264
+        spelling is rejected by the same oracle, so a regression to the old
+        shape fails here instead of at AWS.
+        """
+        input_shape = (
+            botocore.session.Session()
+            .get_service_model("bedrock-runtime")
+            .operation_model("Converse")
+            .input_shape
+        )
+
+        # Populated branch — an upstream ``reasoning_content`` string.
+        cc = {
+            "model": "us.anthropic.claude-sonnet-4-20250514",
+            "messages": [
+                {"role": "user", "content": "What's the weather?"},
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "reasoning_content": "I should check the weather tool first.",
+                    "tool_calls": [
+                        {
+                            "id": "call_abc",
+                            "type": "function",
+                            "function": {"name": "get_weather", "arguments": '{"city": "London"}'},
+                        }
+                    ],
+                },
+            ],
+            "stream": False,
+        }
+        converse_request = self.adapter.translate_to_upstream(cc)
+        botocore.validate.validate_parameters(converse_request, input_shape)
+
+        # Empty branch — ``_thinking_enabled`` injects an empty reasoningContent
+        # for the first assistant turn. This branch ships on every thinking
+        # turn whose earlier tool-call turn lacks ``reasoning_content``, so it
+        # is validated against the schema too.
+        cc_empty = {
+            "model": "us.anthropic.claude-sonnet-4-20250514",
+            "messages": [
+                {"role": "user", "content": "What's the weather?"},
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "call_abc",
+                            "type": "function",
+                            "function": {"name": "get_weather", "arguments": '{"city": "London"}'},
+                        }
+                    ],
+                },
+                {"role": "tool", "tool_call_id": "call_abc", "content": "15°C"},
+            ],
+            "stream": False,
+            "_thinking_enabled": True,
+        }
+        empty_branch_request = self.adapter.translate_to_upstream(cc_empty)
+        botocore.validate.validate_parameters(empty_branch_request, input_shape)
+
+        # Negative control: the pre-KBR-264 spelling is rejected by the same
+        # oracle — populated and empty — so a partial regression (one branch
+        # fixed, one left behind) fails with a legible ``ParamValidationError``.
+        for old_block in (
+            {"reasoningContent": {"text": "I should check the weather tool first."}},
+            {"reasoningContent": {"text": ""}},
+        ):
+            with pytest.raises(botocore.exceptions.ParamValidationError):
+                botocore.validate.validate_parameters(
+                    {
+                        "modelId": "us.anthropic.claude-sonnet-4-20250514",
+                        "messages": [{"role": "assistant", "content": [old_block]}],
+                    },
+                    input_shape,
+                )
 
     def test_tool_result_becomes_tool_result_block(self):
         cc = {
@@ -840,7 +928,7 @@ class TestThinkingEnabledToolCallGap:
         assert assistant_with_tools["role"] == "assistant"
         reasoning_blocks = [b for b in assistant_with_tools["content"] if "reasoningContent" in b]
         assert len(reasoning_blocks) == 1, "Should inject empty reasoningContent when thinking enabled"
-        assert reasoning_blocks[0]["reasoningContent"]["text"] == ""
+        assert reasoning_blocks[0]["reasoningContent"]["reasoningText"]["text"] == ""
 
     def test_thinking_enabled_text_only_assistant_without_reasoning_gets_empty_reasoning(self):
         cc = {
@@ -862,7 +950,7 @@ class TestThinkingEnabledToolCallGap:
         first_assistant = result["messages"][1]
         reasoning_blocks = [b for b in first_assistant["content"] if "reasoningContent" in b]
         assert len(reasoning_blocks) == 1, "Should inject empty reasoningContent for text-only assistant"
-        assert reasoning_blocks[0]["reasoningContent"]["text"] == ""
+        assert reasoning_blocks[0]["reasoningContent"]["reasoningText"]["text"] == ""
 
     def test_thinking_not_enabled_no_injection(self):
         cc = {
@@ -912,7 +1000,10 @@ class TestThinkingEnabledToolCallGap:
         assistant_msg = result["messages"][0]
         reasoning_blocks = [b for b in assistant_msg["content"] if "reasoningContent" in b]
         assert len(reasoning_blocks) == 1
-        assert reasoning_blocks[0]["reasoningContent"]["text"] == "Existing reasoning here."
+        assert (
+            reasoning_blocks[0]["reasoningContent"]["reasoningText"]["text"]
+            == "Existing reasoning here."
+        )
 
 
 class TestBedrockStreamErrorEvents:

@@ -701,3 +701,82 @@ b""`; this is one line and leaves every existing KBR-204 case byte-identical.
   excluded — its `stdout.isatty=True` patches drive `display.py:169`'s rendering
   decision (an adjacent site left alone per §7.3), not the guard, and the seam
   extension does not apply to it.
+
+---
+
+## 8. Bedrock adapter — Converse reasoningContent emission
+
+Traces to [KBR-264](https://shelpuk.atlassian.net/browse/KBR-264). Read alongside
+`TEST_SUITE.md` §3.3 (transparency oracle) and §7.2 (bedrock recorder), which own the bridge's
+view of the Converse wire; this section owns the adapter's view of one content-block spelling.
+
+### 8.1 The rule
+
+`kitty.providers.bedrock.BedrockAdapter._translate_assistant_msg` emits the assistant
+`reasoningContent` block in the **schema-correct** spelling:
+
+```
+{"reasoningContent": {"reasoningText": {"text": <reasoning>}}}
+```
+
+The two branches — present `reasoning_content` (populated inner `text`) and the
+`_thinking_enabled=True` empty-injection branch (inner `text` carries `""`) — use the same
+nested spelling. There is no top-level `text` inside `reasoningContent`: the published botocore
+`bedrock-runtime` `ReasoningContentBlock` union is exactly `{reasoningText, redactedContent}`,
+and `reasoningText` carries `text`. The installed service model (botocore `1.43.93` in the dev venv; the pinned version
+is recorded in the upstream lockfile, which `uv.lock` does not commit in this worktree) is
+the authority; the reader (T-A5, KBR-37) and the adapter agree on that authority. (The
+reader's `TestSchemaAgreement::test_reasoning_content_block_members_match_the_live_service_model`
+asserting the union lives on PR #177's branch, OPEN at the time of writing; this section's
+`validate_parameters` oracle in §8.2 stands on its own against the installed botocore.)
+
+### 8.2 The contract oracle
+
+L1 asserts the adapter's emission against the live service model, not against a hand-typed
+schema. The call:
+
+```python
+from botocore.session import Session
+from botocore.validate import validate_parameters
+
+input_shape = (
+    Session()
+    .get_service_model("bedrock-runtime")
+    .operation_model("Converse")
+    .input_shape
+)
+validate_parameters(emitted_converse_request, input_shape)
+```
+
+A `botocore.exceptions.ParamValidationError` on the old spelling — `Unknown parameter in
+messages[0].content[0].reasoningContent: "text", must be one of: reasoningText, redactedContent`
+— is the rejection that motivates this fix, and it is the regression sentinel: the same call
+on the new spelling returns no error. The oracle lives in `tests/test_provider_bedrock.py`
+(the adapter's own L1 file), not in `tests/harness/`, because the claim under test is the
+*adapter's emission*, not the reader's view of one.
+
+### 8.3 Decisions, and why
+
+- **Two-branch symmetry.** Both the present-reasoning and the
+  `_thinking_enabled`-injected-empty branches use the same nested spelling — the fix
+  *preserves* the symmetry both branches already had (they previously shared the wrong
+  spelling) while correcting both. Letting the branches diverge would re-create the
+  rejection the moment one of them is exercised against the live model.
+- **No content-block reordering, no new blocks.** The fix changes the spelling of one
+  member; the surrounding list (`text`, `toolUse`, …) is untouched. Per
+  `TEST_SUITE.md` §3.2.3, the bedrock recorder observes the body *after* the transport's
+  `modelId` / `stream` pops (P18); the adapter's emission is what reaches the recorder on
+  the hook path.
+- **Contract oracle at L1, not L2.** The reader's similar test
+  (`TestSchemaAgreement::test_reasoning_content_block_members_match_the_live_service_model`)
+  is in `tests/harness/test_reader_bedrock_converse.py` (the L2 reader file). The adapter's
+  counterpart lives at L1 because the claim is the *adapter's* shape, not the schema as a
+  shared vocabulary. Keeping the two close to the code they assert on is the
+  `tests/layers.py` default-layer-by-path rule; duplicating the oracle into a harness file
+  would break that rule without buying locality.
+- **No harness register row.** No row in the Permitted-Mutation Register (TEST_SUITE.md §3.2)
+  pins the old `{"reasoningContent": {"text": …}}` spelling; the only mention of
+  `reasoningContent` in TEST_SUITE.md is the schema content-block member name. The fix does
+  not change a register row and does not need a new one — a register row would be the right
+  place for a *product decision* about whether to carry reasoning, not for a schema-typo
+  fix.

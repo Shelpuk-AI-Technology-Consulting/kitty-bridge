@@ -276,12 +276,18 @@ class BedrockAdapter(ProviderAdapter):
         """
         content_blocks: list[dict] = []
 
+        # KBR-264: the published botocore ``bedrock-runtime`` ``ReasoningContentBlock``
+        # union is exactly ``{reasoningText, redactedContent}``; ``reasoningText``
+        # nests the ``text`` member. A top-level ``text`` inside ``reasoningContent``
+        # is rejected by ``botocore.validate.validate_parameters`` before the
+        # request reaches AWS, so every thinking-enabled Converse call must use the
+        # nested spelling — populated and empty alike.
         reasoning = msg.get("reasoning_content")
         thinking_enabled = (cc_request or {}).get("_thinking_enabled")
         if reasoning:
-            content_blocks.append({"reasoningContent": {"text": reasoning}})
+            content_blocks.append({"reasoningContent": {"reasoningText": {"text": reasoning}}})
         elif thinking_enabled:
-            content_blocks.append({"reasoningContent": {"text": ""}})
+            content_blocks.append({"reasoningContent": {"reasoningText": {"text": ""}}})
 
         text = msg.get("content")
         if text:
