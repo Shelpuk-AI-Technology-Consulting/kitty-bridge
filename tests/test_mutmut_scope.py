@@ -330,8 +330,20 @@ def test_every_only_mutate_entry_has_a_registry_row() -> None:
     scope to a file §6.1 does not name.
     """
     globs = _only_mutate_globs()
+    # Normalize all path-to-string conversions to POSIX form. On
+    # Windows, ``Path.relative_to(...).__str__()`` emits backslashes,
+    # while the ``only_mutate`` globs in pyproject.toml use forward
+    # slashes (and ``fnmatch.fnmatch`` calls ``os.path.normcase`` which
+    # converts the pattern's slashes to backslashes on Windows, so
+    # globs end up matching backslashed rels). The subsequent
+    # ``startswith(f + "/")`` check then uses a forward slash against
+    # a backslashed string and never matches. Normalizing here keeps
+    # the test platform-independent.
+    def _posix(path: Path) -> str:
+        return path.as_posix()
+
     repo_root = Path(__file__).resolve().parent.parent
-    registry_files = set()
+    registry_files: set[str] = set()
     cross_module_hooks: set[str] = set()
     for _group, target in all_targets():
         if target.module == "*":
@@ -350,9 +362,8 @@ def test_every_only_mutate_entry_has_a_registry_row() -> None:
         path = repo_root / "src" / "kitty" / rel.replace(".", "/")
         for candidate in (path.with_suffix(".py"), path):  # file or dir
             if candidate.exists():
-                # Store repo-relative so the comparison below matches
-                # the walked paths' spelling.
-                registry_files.add(str(candidate.relative_to(repo_root)))
+                # Store repo-relative, POSIX-normalized.
+                registry_files.add(_posix(candidate.relative_to(repo_root)))
                 break
 
     # Add hook-carrying provider files to the in-scope set, since
@@ -368,13 +379,13 @@ def test_every_only_mutate_entry_has_a_registry_row() -> None:
         if providers_dir.is_dir():
             for path in providers_dir.glob("*.py"):
                 if hook_re.search(path.read_text()):
-                    registry_files.add(str(path.relative_to(repo_root)))
+                    registry_files.add(_posix(path.relative_to(repo_root)))
 
     # Walk the repo and assert every matched .py file has a registry
     # entry. Walk, rather than enumerate, because glob coverage can
     # span whole directories (`kitty.profiles/*`).
     for path in sorted(repo_root.glob("src/kitty/**/*.py")):
-        rel = str(path.relative_to(repo_root))
+        rel = _posix(path.relative_to(repo_root))
         if any(fnmatch.fnmatch(rel, g) for g in globs):
             assert rel in registry_files or any(
                 rel.startswith(f + "/") for f in registry_files
