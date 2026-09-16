@@ -49,6 +49,7 @@ import aiohttp
 import pytest
 
 from harness import containment
+from harness.conftest import _PHASE_1_NAME, _PhaseOutcome
 from harness.connect_proxy import HARNESS_UPSTREAM_HOST, CertFiles, ConnectProxy
 from harness.containment import (
     BridgeAiohttpContainment,
@@ -675,6 +676,126 @@ class TestBridgeAiohttpContainment:
 
 
 # ── Helpers (private) ─────────────────────────────────────────────────────
+
+
+class TestVerdictFloorDetection:
+    """The Python <3.11 floor-skip shape — the plan §8 done-when, honoured.
+
+    The floor shape is: phase 1 ran and passed, the proxied phases are
+    setup-skipped (absent from the outcomes dict), on an interpreter below
+    3.11. The plan T-E3 row's done-when ("an outcome is recorded") requires
+    the row to be claimed on every supported interpreter; T-E9's
+    completeness gate accepts ``UNSUPPORTED`` as a permitted partial
+    delivery. These tests pin the helper that detects the shape and the
+    recorder that writes it.
+    """
+
+    def test_helper_true_on_below_311_with_phase1_passed_and_proxied_absent(self) -> None:
+        """Phase 1 passed on <3.11 with all proxied phases absent — the floor shape."""
+        from harness.conftest import _floor_unsupported_shape
+
+        outcomes = {
+            _PHASE_1_NAME: _PhaseOutcome.PASSED
+        }
+        assert _floor_unsupported_shape(outcomes, version_info=(3, 10, 0)) is True, (
+            "phase 1 passed on <3.11 with all proxied phases absent must be the floor shape"
+        )
+
+    def test_helper_false_on_or_above_311(self) -> None:
+        """From 3.11 up, the floor shape never applies — the gate decides."""
+        from harness.conftest import _floor_unsupported_shape
+
+        outcomes = {
+            _PHASE_1_NAME: _PhaseOutcome.PASSED
+        }
+        assert _floor_unsupported_shape(outcomes, version_info=(3, 11, 0)) is False
+        assert _floor_unsupported_shape(outcomes, version_info=(3, 12, 1)) is False
+        assert _floor_unsupported_shape(outcomes, version_info=(3, 13, 0)) is False
+
+    def test_helper_false_when_phase1_did_not_pass(self) -> None:
+        """Phase 1 absent, failed, or skipped means the slice did not run clean — not the floor."""
+        from harness.conftest import _floor_unsupported_shape
+
+        # Phase 1 absent — a deleted/renamed phase; the finaliser's length
+        # check catches that case, not the floor shape.
+        assert _floor_unsupported_shape({}, version_info=(3, 10, 0)) is False
+        # Phase 1 FAILED — a real failure, not a floor.
+        failed = {
+            _PHASE_1_NAME: _PhaseOutcome.FAILED
+        }
+        assert _floor_unsupported_shape(failed, version_info=(3, 10, 0)) is False
+        # Phase 1 runtime-skipped — also not the floor.
+        skipped = {
+            _PHASE_1_NAME: _PhaseOutcome.SKIPPED
+        }
+        assert _floor_unsupported_shape(skipped, version_info=(3, 10, 0)) is False
+
+    def test_helper_false_when_any_proxied_phase_is_present(self) -> None:
+        """A present proxied phase means real proxied work happened — not the floor."""
+        from harness.conftest import _PROXIED_PHASE_NAMES, _floor_unsupported_shape
+
+        one_passed = {
+            _PHASE_1_NAME: _PhaseOutcome.PASSED,
+            "test_proxy_up_every_peer_port_joins_a_tunnel": _PhaseOutcome.PASSED,
+        }
+        assert _floor_unsupported_shape(one_passed, version_info=(3, 10, 0)) is False
+        assert any(n in one_passed for n in _PROXIED_PHASE_NAMES)
+        # A present-but-failed proxied phase is observed work, not absence.
+        one_failed = {
+            _PHASE_1_NAME: _PhaseOutcome.PASSED,
+            "test_proxy_down_leaves_the_recorder_with_zero_connections": _PhaseOutcome.FAILED,
+        }
+        assert _floor_unsupported_shape(one_failed, version_info=(3, 10, 0)) is False
+
+    def test_recorder_writes_unsupported_with_the_documented_reason(self) -> None:
+        """A floor-shape recorder call writes ``UNSUPPORTED`` carrying the reason.
+
+        The autouse ``_isolate_singleton`` at module scope resets the
+        singleton before this test, so the only mutation observed is the
+        recorder's own. The writer path is driven through the recorder's
+        ``version_info`` override, so the test proves the row's shape on
+        any interpreter — the 3.10 CI leg exercises the real path.
+        """
+        from harness.conftest import _record_unsupported_if_floor_shape
+        from harness.containment import instance as report_instance
+
+        outcomes = {
+            _PHASE_1_NAME: _PhaseOutcome.PASSED
+        }
+        recorded = _record_unsupported_if_floor_shape(outcomes, "curl_cffi", version_info=(3, 10, 0))
+
+        assert recorded is True, "the recorder must claim the floor shape it was given"
+        row = report_instance().entry("curl_cffi")
+        assert row.outcome is Outcome.UNSUPPORTED
+        assert row.reason is not None and "Python <3.11" in row.reason, (
+            f"the recorded reason must name the floor (got {row.reason!r}) so a "
+            "future maintainer can re-derive the decision"
+        )
+
+    def test_recorder_does_not_overwrite_an_existing_verdict(self) -> None:
+        """A row that is no longer ``NOT_ATTEMPTED`` is left untouched."""
+        from harness.conftest import _record_unsupported_if_floor_shape
+        from harness.containment import instance as report_instance
+
+        report_instance().record("curl_cffi", Outcome.PROVEN)
+        outcomes = {
+            _PHASE_1_NAME: _PhaseOutcome.PASSED
+        }
+        recorded = _record_unsupported_if_floor_shape(outcomes, "curl_cffi", version_info=(3, 10, 0))
+
+        assert recorded is False, "an existing verdict must not be overwritten"
+        assert report_instance().entry("curl_cffi").outcome is Outcome.PROVEN
+
+    def test_recorder_noop_above_311(self) -> None:
+        """Above the floor the recorder is a no-op — the gate owns the verdict."""
+        from harness.conftest import _record_unsupported_if_floor_shape
+        from harness.containment import instance as report_instance
+
+        outcomes = {
+            _PHASE_1_NAME: _PhaseOutcome.PASSED
+        }
+        assert _record_unsupported_if_floor_shape(outcomes, "curl_cffi", version_info=(3, 11, 0)) is False
+        assert report_instance().entry("curl_cffi").outcome is Outcome.NOT_ATTEMPTED
 
 
 def _find_closed_port() -> int:
