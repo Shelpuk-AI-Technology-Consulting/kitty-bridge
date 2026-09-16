@@ -301,6 +301,27 @@ is the classic exfiltration vector; and dropping the head-repository comparison.
 
 ## The merge gate in `ci.yml`
 
+🔴 **`ci-required` is required on `main` via repository ruleset `21038306`
+(KBR-152).** A `required_status_checks` rule names the aggregate and
+nothing else — naming the four `test / Python 3.x` matrix contexts directly
+would re-create the drift the aggregate exists to prevent, since adding or
+renaming a matrix job would then mean editing branch protection. Before
+KBR-152 the ruleset carried three rules (`deletion`, `non_fast_forward`,
+`pull_request`) and nothing else: a pull request with a four-version red
+test matrix could merge through the UI or API, and the aggregate's verdict
+was advisory. With the fourth rule in place, a pull request whose
+`ci-required` aggregate failed is refused by the GitHub merge API for
+every actor — the ruleset's one `bypass_mode: always` actor excepted,
+which the ticket flags as a deliberate scope-out for the solo maintainer.
+`scripts/verify_required_status_checks.py` is the cheap, re-runnable
+witness for the setting: it reads `GET /repos/{owner}/{repo}/rules/
+branches/main`, asserts the rule list carries exactly one
+`required_status_checks` row naming exactly `ci-required`, and exits 0,
+1 or 2 (1: not enforced; 2: the `gh` read itself failed — never a verdict
+about the setting). Its `tests/test_verify_required_status_checks.py`
+contract pins the decision over inline snapshots of every shape GitHub
+can return, so a future API revision cannot bless a half-configured gate.
+
 `ci-required` is the single aggregate: it carries `if: always()` and fails unless
 every dependency succeeded. Two shapes to flag:
 
