@@ -86,6 +86,7 @@ class TestTheCommittedCorpus:
 #: and drives the entries through the real compactor).
 TC4_ENTRY_IDS = (
     "m6_recovery_oversized_paired",
+    "m6_recovery_oversized_paired_streaming",
     "m5_irreducible_single_final_turn",
     "system_prompt_over_window_compacts_normally",
 )

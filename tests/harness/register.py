@@ -578,6 +578,13 @@ _BRIDGE_ROWS: tuple[MutationRow, ...] = (
         site=(
             f"{_SERVER}:BridgeServer._compact_with_tighter_budget",
             f"{_SERVER}:BridgeServer._request_with_retry_balancing",
+            # KBR-256: the four streaming ladders engage the same recovery on a
+            # pre-byte oversized 413 (position-as-guarantee for the three eager-
+            # prepared routes; `sr is None` on `_stream_messages`).
+            f"{_SERVER}:BridgeServer._stream_messages",
+            f"{_SERVER}:BridgeServer._stream_responses",
+            f"{_SERVER}:BridgeServer._stream_gemini",
+            f"{_SERVER}:BridgeServer._stream_chat_completions",
         ),
         trigger=Trigger.UPSTREAM_REJECTED_OVERSIZED_ON_BALANCING,
         paths=(c.CONVERSATION_TURNS,),

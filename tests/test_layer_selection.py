@@ -488,6 +488,14 @@ class TestTheWholeSuiteIsCoherent:
             # breakpoint loss as today's behaviour. New l2 file added by
             # CB-3.
             "tests/bridge/test_native_passthrough_cache_breaks.py",
+            # KBR-256. A §6.2.3 structural guard: it holds the four streaming
+            # handlers' recovery skeletons (register row M6's site list) against
+            # the AST of `src/kitty/bridge/server.py` — the same read-two-real-
+            # artifacts shape as `test_register_agreement.py`. Two of the four
+            # copies have no behavioural L3 case yet (Responses/Gemini wait on
+            # the curl_cffi/botocore recorders), so this AST pin is their only
+            # automated drift enforcement.
+            "tests/bridge/test_kbr256_recovery_structure.py",
         }
 
         actual = {
