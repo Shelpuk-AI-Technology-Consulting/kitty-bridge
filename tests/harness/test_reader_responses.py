@@ -518,7 +518,10 @@ class TestContentParts:
             }
         )
 
-        assert projected.conversation.turns[0].parts == (c.Opaque("document"),)
+        part = projected.conversation.turns[0].parts[0]
+        assert isinstance(part, c.Opaque)
+        assert part.kind == "document"
+        assert part.digest == c.opaque_digest({"type": "input_file", "file_id": "file-123"})
 
     def test_a_data_url_image_is_digested(self) -> None:
         """`image_digest` is pinned so six readers agree on one image.
@@ -824,6 +827,187 @@ class TestUndecodableImagePayloads:
         assert parts[2] == c.Text("last")
 
 
+class TestInputFileDigests:
+    """The sibling sweep the KBR-251 observations comment recorded.
+
+    The Responses reader's ``input_file`` branch used to build an ``Opaque``
+    with no digest and no sweep, so ``detail`` (carried by the File input
+    entry of :data:`_PUBLISHED_EXAMPLES`) and any future sibling vanished
+    silently. The fix mirrors ``reader_anthropic_messages._read_opaque``: the
+    digest rides on the part, and a no-op sweep runs before projection — both
+    readers spell "Opaque consumes its payload" the same way.
+    """
+
+    def test_an_input_file_carries_the_payload_digest(self) -> None:
+        """§7.4.1: the part is detectable, not just projected."""
+        entry = {"type": "input_file", "file_id": "file-123"}
+
+        projected = project({"input": [{"role": "user", "content": [entry]}]})
+
+        part = projected.conversation.turns[0].parts[0]
+        assert isinstance(part, c.Opaque)
+        assert part.kind == "document"
+        assert part.digest == c.opaque_digest(entry)
+
+    def test_an_input_files_digest_changes_when_a_sibling_changes(self) -> None:
+        """The hole KBR-179 closes, on this content part too.
+
+        A bridge that mutated ``detail`` (or ``filename``, ``file_url``, anything
+        the grammar does not model) used to be invisible because the Opaque had
+        no digest. The digest rides on the part now, so the mutation changes
+        the digest and the oracle sees it.
+        """
+        original = {"type": "input_file", "file_id": "f-1", "detail": "auto"}
+        mutated = {"type": "input_file", "file_id": "f-1", "detail": "high"}
+
+        first = project({"input": [{"role": "user", "content": [original]}]}).conversation.turns[0].parts[0]
+        second = project({"input": [{"role": "user", "content": [mutated]}]}).conversation.turns[0].parts[0]
+
+        assert isinstance(first, c.Opaque) and isinstance(second, c.Opaque)
+        assert first.kind == second.kind == "document"
+        assert first.digest != second.digest
+
+    def test_a_payload_key_is_excluded_from_the_digest(self) -> None:
+        """The recipe excludes ``cache_control``; the Responses published
+        schemas do not place it on items or content parts, so this is a
+        recipe-contract test rather than a real-traffic visibility test. The
+        Anthropic cache field rides in the digest (not the residual, not the
+        part) by design — for Anthropic's reader the part carries it on the
+        slot, but the *Opaque* digest always strips it so two differently-
+        placed ``cache_control`` blocks digest identically.
+
+        What a Responses request would actually carry is
+        ``prompt_cache_breakpoint``, which the recipe does not strip — see
+        the next test for the real-traffic contract.
+        """
+        with_cc = {"type": "input_file", "file_id": "f-1", "cache_control": {"type": "ephemeral"}}
+        without_cc = {"type": "input_file", "file_id": "f-1"}
+
+        with_part = project({"input": [{"role": "user", "content": [with_cc]}]}).conversation.turns[0].parts[0]
+        without_part = project({"input": [{"role": "user", "content": [without_cc]}]}).conversation.turns[0].parts[0]
+
+        assert isinstance(with_part, c.Opaque) and isinstance(without_part, c.Opaque)
+        # `opaque_digest` strips `cache_control`; the two bodies digest
+        # identically even though one carries it.
+        assert with_part.digest == without_part.digest
+
+    def test_a_responses_cache_breakpoint_changes_the_digest(self) -> None:
+        """OpenAI's published equivalent of ``cache_control`` rides in the
+        digest because the recipe does not strip it (``prompt_cache_breakpoint``
+        is the OpenAI spelling, on the content part; ``cache_control`` is
+        Anthropic's). Until G37 lands a slot for it, a breakpoint mutation
+        shows as a part-level digest delta — visible, not silent.
+        """
+        without_bp = {"type": "input_file", "file_id": "f-1"}
+        with_bp = {
+            "type": "input_file",
+            "file_id": "f-1",
+            "prompt_cache_breakpoint": {"type": "ephemeral"},
+        }
+
+        without_part = project({"input": [{"role": "user", "content": [without_bp]}]}).conversation.turns[0].parts[0]
+        with_part = project({"input": [{"role": "user", "content": [with_bp]}]}).conversation.turns[0].parts[0]
+
+        assert isinstance(without_part, c.Opaque) and isinstance(with_part, c.Opaque)
+        assert with_part.digest != without_part.digest
+
+    def test_the_published_file_input_example_round_trips_with_an_empty_residual(self) -> None:
+        """The §7.4 acceptance criterion this fix must not break.
+
+        The eight ``x-oaiMeta`` request examples are the suite's oracle against
+        the published schema, parametrised in
+        :class:`TestPublishedExamples`. The File input example carries ``detail``
+        (a key the schema does list on ``InputFileContentParam``, but that no
+        Opaque slot covers) and ``file_url``; the reader consumes both into the
+        digest rather than residualising them, or this assertion fails on legal
+        traffic.
+        """
+        projected = project(_PUBLISHED_EXAMPLES["File input"])
+
+        assert projected.residual == {}
+        assert projected.envelope.model == "gpt-6-astra"
+        # The file is the only part in the user turn, and it is the document.
+        assert projected.conversation.turns, "every published example carries input"
+        part = projected.conversation.turns[0].parts[-1]
+        assert isinstance(part, c.Opaque)
+        assert part.kind == "document"
+        assert part.digest == c.opaque_digest(
+            {"type": "input_file", "file_url": "https://example.test/2024ltr.pdf", "detail": "auto"}
+        )
+
+
+class TestDataUrlRegexAcceptance:
+    """Two legal shapes the pre-KBR-179 regex routed to the non-base64 branch.
+
+    ``data:;base64,…`` (empty media segment — RFC 2397 permits a zero-length
+    media type) and a case-variant ``;BASE64,`` / ``;Base64,`` marker (the
+    grammar spells the marker literally ``;base64``, but real senders and
+    browsers treat the encoding token case-insensitively, consistent with
+    RFC 2045's Content-Transfer-Encoding) were both rejected by the case-
+    sensitive ``[^;,]+`` regex; the routing handled them gracefully, but the
+    regex was the defect.
+    """
+
+    def test_an_empty_media_segment_routes_through_the_base64_branch(self) -> None:
+        """``data:;base64,<payload>`` is a legal RFC 2397 form."""
+        raw = b"\x89PNG\r\n\x1a\nfake"
+        url = "data:;base64," + base64.b64encode(raw).decode("ascii")
+
+        projected = project(
+            {"input": [{"role": "user", "content": [{"type": "input_image", "image_url": url}]}]}
+        )
+
+        # Decodes cleanly, so it is the canonical Image shape — with no media
+        # type, mirroring the empty-media convention. `None` (not `""`) so it
+        # agrees with the non-base64 branch — both spell "absent" the same way.
+        part = projected.conversation.turns[0].parts[0]
+        assert isinstance(part, c.Image)
+        assert part.digest == hashlib.sha256(raw).hexdigest()
+        assert part.media_type is None
+
+    def test_a_uppercase_base64_marker_routes_through_the_base64_branch(self) -> None:
+        """``;BASE64,`` and ``;Base64,`` are both legal per RFC 2045."""
+        raw = b"raw-bytes"
+        url = "data:image/png;BASE64," + base64.b64encode(raw).decode("ascii")
+
+        projected = project(
+            {"input": [{"role": "user", "content": [{"type": "input_image", "image_url": url}]}]}
+        )
+
+        part = projected.conversation.turns[0].parts[0]
+        assert isinstance(part, c.Image)
+        assert part.digest == hashlib.sha256(raw).hexdigest()
+        assert part.media_type == "image/png"
+
+    def test_a_mixed_case_base64_marker_routes_through_the_base64_branch(self) -> None:
+        """``;Base64,`` (mixed case) — the third spelling a permissive reader must accept."""
+        raw = b"another-payload"
+        url = "data:image/jpeg;Base64," + base64.b64encode(raw).decode("ascii")
+
+        projected = project(
+            {"input": [{"role": "user", "content": [{"type": "input_image", "image_url": url}]}]}
+        )
+
+        part = projected.conversation.turns[0].parts[0]
+        assert isinstance(part, c.Image)
+        assert part.digest == hashlib.sha256(raw).hexdigest()
+        assert part.media_type == "image/jpeg"
+
+    def test_the_canonical_base64_data_url_still_decodes(self) -> None:
+        """Regression net for the relaxation — the common case keeps working."""
+        raw = b"\x89PNG\r\n\x1a\nfake"
+        url = "data:image/png;base64," + base64.b64encode(raw).decode("ascii")
+
+        projected = project(
+            {"input": [{"role": "user", "content": [{"type": "input_image", "image_url": url}]}]}
+        )
+
+        part = projected.conversation.turns[0].parts[0]
+        assert isinstance(part, c.Image)
+        assert part.digest == hashlib.sha256(raw).hexdigest()
+        assert part.media_type == "image/png"
+
+
 class TestFunctionCall:
     """`function_call` items and their JSON-string arguments."""
 
@@ -981,10 +1165,15 @@ class TestFunctionCallOutput:
 
         result = projected.conversation.turns[0].parts[0]
         assert isinstance(result, c.ToolResult)
-        assert result.content == (
+        file_part = result.content[-1]
+        assert isinstance(file_part, c.Opaque)
+        assert file_part.kind == "document"
+        assert file_part.digest == c.opaque_digest({"type": "input_file", "file_id": "file-1"})
+        # Compare the rest by content; the file part is asserted separately above
+        # because its digest is the very thing this change fixes.
+        assert result.content[:-1] == (
             c.Text("see attached"),
             c.Image(digest=hashlib.sha256(raw).hexdigest(), media_type="image/png"),
-            c.Opaque("document"),
         )
 
     def test_a_content_type_the_output_branch_does_not_publish_residualises(self) -> None:
@@ -1141,25 +1330,44 @@ class TestOpaqueItems:
         """Because paths are index-based, one wrong role corrupts every later path."""
         projected = project({"input": [{"type": kind}]})
 
-        assert projected.conversation.turns == (c.Turn("user", [c.Opaque(kind)]),)
+        turn = projected.conversation.turns[0]
+        assert turn.role == "user"
+        assert len(turn.parts) == 1
+        part = turn.parts[0]
+        assert isinstance(part, c.Opaque)
+        assert part.kind == kind
 
     @pytest.mark.parametrize("kind", sorted(r._OPAQUE_ASSISTANT_ITEMS))
     def test_a_model_produced_item_lands_in_an_assistant_turn(self, kind: str) -> None:
         """The other half of the role table, asserted per type rather than in prose."""
         projected = project({"input": [{"type": kind}]})
 
-        assert projected.conversation.turns == (c.Turn("assistant", [c.Opaque(kind)]),)
+        turn = projected.conversation.turns[0]
+        assert turn.role == "assistant"
+        assert len(turn.parts) == 1
+        part = turn.parts[0]
+        assert isinstance(part, c.Opaque)
+        assert part.kind == kind
 
     def test_a_null_type_counts_as_absent_rather_than_as_an_unknown_type(self) -> None:
         """`ItemReferenceParam.type` is `anyOf[enum, null]`, so this is legal traffic.
 
         A reader dispatching on `"type" in item` rather than on the value being a
         string would residualise this and fail the run on a valid body. The
-        `type`-absent test cannot catch that regression; this one can.
+        `type`-absent test cannot catch that regression; this one can. KBR-179
+        extends this rule: ``None`` is *not* a present-but-wrongly-typed
+        ``type`` (that would raise) — it is the schema's own absent spelling.
         """
-        projected = project({"input": [{"id": "msg_1", "type": None}]})
+        item = {"id": "msg_1", "type": None}
+        projected = project({"input": [item]})
 
-        assert projected.conversation.turns == (c.Turn("user", [c.Opaque("item_reference")]),)
+        turn = projected.conversation.turns[0]
+        assert turn.role == "user"
+        assert len(turn.parts) == 1
+        part = turn.parts[0]
+        assert isinstance(part, c.Opaque)
+        assert part.kind == "item_reference"
+        assert part.digest == c.opaque_digest(item)
 
     def test_additional_tools_lands_in_a_user_turn_despite_declaring_developer(self) -> None:
         """The named exception whose reasoning is hardest to guess from the rule.
@@ -1175,16 +1383,28 @@ class TestOpaqueItems:
         future reader seeing `role: "developer"` would reasonably try to lift it
         and would then be changing turn indices for every later turn.
         """
-        projected = project({"input": [{"type": "additional_tools", "role": "developer"}]})
+        item = {"type": "additional_tools", "role": "developer"}
+        projected = project({"input": [item]})
 
         assert projected.conversation.system == ()
-        assert projected.conversation.turns == (c.Turn("user", [c.Opaque("additional_tools")]),)
+        turn = projected.conversation.turns[0]
+        assert turn.role == "user"
+        part = turn.parts[0]
+        assert isinstance(part, c.Opaque)
+        assert part.kind == "additional_tools"
+        assert part.digest == c.opaque_digest(item)
 
     def test_an_item_reference_is_recognised_without_a_type(self) -> None:
         """`ItemReferenceParam.type` is nullable, so `{"id": ...}` alone is legal."""
-        projected = project({"input": [{"id": "msg_1"}]})
+        item = {"id": "msg_1"}
+        projected = project({"input": [item]})
 
-        assert projected.conversation.turns == (c.Turn("user", [c.Opaque("item_reference")]),)
+        turn = projected.conversation.turns[0]
+        assert turn.role == "user"
+        part = turn.parts[0]
+        assert isinstance(part, c.Opaque)
+        assert part.kind == "item_reference"
+        assert part.digest == c.opaque_digest(item)
 
     def test_the_closed_sets_are_internally_consistent_and_sized_as_recorded(self) -> None:
         """A guard on the module's own tables — **not** on OpenAI's schema.
@@ -1232,6 +1452,106 @@ class TestOpaqueItems:
         by_rule = {k for k in r.PUBLISHED_ITEM_TYPES if k.endswith("_output")} | exceptions
 
         assert by_rule - r._MODELLED_ITEMS == r._OPAQUE_USER_ITEMS
+
+
+# --------------------------------------------------------------------------
+# KBR-179 — unmodelled input items carry their payload digest, so a swapped
+# item produces a delta the oracle can see (§7.4.1, R3 in this ticket).
+# --------------------------------------------------------------------------
+
+
+class TestOpaqueItemDigests:
+    """The payload digest makes a swapped unmodelled item visible.
+
+    §7.4.1 puts ``digest`` on :class:`contract.Opaque` precisely so two different
+    items of the same kind do not project identically — the silent hole the
+    Responses reader had on `main`. The recipe is pinned in
+    :func:`contract.opaque_digest`; these tests pin the *call sites* that put
+    it on the part.
+    """
+
+    @pytest.mark.parametrize("kind", sorted(r._OPAQUE_USER_ITEMS))
+    def test_a_user_side_opaque_item_carries_the_payload_digest(self, kind: str) -> None:
+        """§7.4.1: ``digest`` carries the body that ``kind`` does not.
+
+        A reader that built ``c.Opaque(kind)`` with no digest would project
+        every item of one type identically, so a mutated body would be invisible
+        — the hole KBR-179 closes.
+        """
+        item = {"type": kind, "id": "tag-1", "queries": ["alpha"]}
+
+        projected = project({"input": [item]})
+
+        part = projected.conversation.turns[0].parts[0]
+        assert isinstance(part, c.Opaque)
+        assert part.kind == kind
+        assert part.digest == c.opaque_digest(item)
+
+    @pytest.mark.parametrize("kind", sorted(r._OPAQUE_ASSISTANT_ITEMS))
+    def test_an_assistant_side_opaque_item_carries_the_payload_digest(self, kind: str) -> None:
+        """The other half of the role table."""
+        item = {"type": kind, "id": "tag-1", "action": {"type": "search", "query": "kitten"}}
+
+        projected = project({"input": [item]})
+
+        part = projected.conversation.turns[0].parts[0]
+        assert isinstance(part, c.Opaque)
+        assert part.kind == kind
+        assert part.digest == c.opaque_digest(item)
+
+    def test_two_differing_items_of_the_same_kind_project_unequally(self) -> None:
+        """The ticket's own failing case, inverted: a swap now produces a delta.
+
+        On `main` before the fix this projected two equal ``Opaque(kind=…)``
+        values for these two items, so a bridge that swapped ``alpha`` for
+        ``beta`` was invisible. After the fix the digests differ.
+        """
+        alpha = {"type": "additional_tools", "id": "a1", "queries": ["alpha"]}
+        beta = {"type": "additional_tools", "id": "b2", "queries": ["beta"]}
+
+        first = project({"input": [alpha]}).conversation.turns[0].parts[0]
+        second = project({"input": [beta]}).conversation.turns[0].parts[0]
+
+        assert isinstance(first, c.Opaque) and isinstance(second, c.Opaque)
+        assert first.digest != second.digest
+
+    def test_an_input_items_payload_is_excluded_from_its_kind_but_kept_in_the_digest(self) -> None:
+        """The recipe strips ``type``; here only the discriminator is in scope.
+
+        ``cache_control`` is Anthropic-specific and not published on Responses
+        items, so the only exclusion the recipe applies here is the discriminator
+        the Opaque already carries as :attr:`Opaque.kind` — a reader that fed the
+        discriminator back into the digest would double-count it.
+        """
+        item = {"type": "additional_tools", "id": "x", "queries": ["alpha"]}
+
+        projected = project({"input": [item]})
+
+        part = projected.conversation.turns[0].parts[0]
+        assert isinstance(part, c.Opaque)
+        # The digest covers the payload without the discriminator — which is
+        # exactly what `opaque_digest` enforces; restating the expectation here
+        # pins the *call site*, not the recipe.
+        assert part.digest == c.opaque_digest({"id": "x", "queries": ["alpha"]})
+
+    def test_three_reader_layouts_for_the_same_item_kind_match(self) -> None:
+        """Symmetry with :func:`reader_anthropic_messages._read_opaque`.
+
+        The Anthropic reader runs ``_residualise(block, set(block), …)`` — a
+        no-op sweep that documents the design (Opaque consumes its payload).
+        The Responses reader adopts the same shape, so a maintainer seeing
+        either sweep reads the same story.
+        """
+        item = {"type": "web_search_call", "id": "ws_1", "action": {"type": "search"}}
+
+        projected = project({"input": [item]})
+
+        # Every key the wire sent is consumed — nothing residualises beneath
+        # the Opaque — and the digest carries the payload.
+        assert projected.residual == {}
+        part = projected.conversation.turns[0].parts[0]
+        assert isinstance(part, c.Opaque)
+        assert part.digest == c.opaque_digest(item)
 
 
 # --------------------------------------------------------------------------
@@ -1666,7 +1986,6 @@ class TestFailureShapes:
                 "input[0].content[0]",
                 id="content-type",
             ),
-            pytest.param({"input": [{"type": ["reasoning"]}]}, "input[0]", id="item-type"),
             pytest.param({"tools": [{"type": ["function"], "name": "f"}]}, "tools[0]", id="tool-type"),
         ],
     )
@@ -1690,6 +2009,44 @@ class TestFailureShapes:
         assert set(projected.residual) == {expected_key}
         with pytest.raises(c.ResidualFieldsError):
             c.verify_total(projected)
+
+    @pytest.mark.parametrize(
+        ("body", "expected_type_name"),
+        [
+            pytest.param({"input": [{"type": ["reasoning"]}]}, "list", id="item-type-list"),
+            pytest.param({"input": [{"type": {"kind": "reasoning"}}]}, "dict", id="item-type-object"),
+            pytest.param({"input": [{"type": 7, "queries": ["alpha"]}]}, "int", id="item-type-number"),
+        ],
+    )
+    def test_an_input_items_type_that_is_not_a_string_or_null_is_an_unreadable_body(
+        self, body: Any, expected_type_name: str
+    ) -> None:
+        """KBR-179's structural half: the discriminator *is* the value.
+
+        §7.4.1 scopes the wrongly-typed-leaf rule to leaves with an absent value
+        to fall back to. `Opaque.kind`, `Text.text` and `Thinking.text` have none
+        — they *are* their value — so those cases raise `UnreadableBodyError`,
+        and the Anthropic Messages reader has raised on the same shape since
+        T-A1. The Responses reader used to residualise the whole entry here,
+        which hid nothing but handed T-D1 a different diagnosis for the same
+        class of malformed body; the readers now agree on *raise*.
+
+        AC-3 names the path and the observed type in the message, so a human
+        triaging a malformed-body run can locate the bad item from the message
+        alone — the assertion below pins both, rather than just the exception
+        class.
+        """
+        with pytest.raises(c.UnreadableBodyError) as exc_info:
+            r.ResponsesProjection().read_request(captured(body))
+
+        assert "input[0]" in str(exc_info.value), (
+            "the raise must name the item's path so a malformed body can be triaged from "
+            f"the message alone (got {exc_info.value!r})"
+        )
+        assert expected_type_name in str(exc_info.value), (
+            f"the raise must name the observed type (expected {expected_type_name!r} in "
+            f"{exc_info.value!r})"
+        )
 
     def test_a_message_role_that_is_not_even_a_string_is_an_unreadable_body(self) -> None:
         """R11's named case, in the shape that breaks a naive membership test.

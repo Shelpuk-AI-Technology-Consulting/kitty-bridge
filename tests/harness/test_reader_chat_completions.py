@@ -23,6 +23,7 @@ positive assertion in this module. §1.4's harness rule.
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 from typing import Any
 
@@ -830,6 +831,75 @@ class TestMessages:
             "messages[0].content[0].image_url.url": "data:image/png,abc",
             "messages[0].content[0].cache_control": {"type": "ephemeral"},
         }
+
+    def test_an_empty_media_segment_routes_through_the_base64_branch(self) -> None:
+        """``data:;base64,<payload>`` is a legal RFC 2397 form — the same shape
+        the Responses reader accepts (KBR-179 keeps the two regexes in
+        lockstep, so the cross-format comparison cannot see a delta no
+        mutation caused on this input).
+        """
+        raw = b"\x89PNG\r\n\x1a\nfake"
+        payload = base64.b64encode(raw).decode("ascii")
+        url = "data:;base64," + payload
+
+        projected = _read(
+            {
+                "model": "gpt-6-astra",
+                "messages": [
+                    {"role": "user", "content": [{"type": "image_url", "image_url": {"url": url}}]},
+                ],
+            }
+        )
+
+        image = projected.conversation.turns[0].parts[0]
+        assert isinstance(image, c.Image)
+        assert image.digest == hashlib.sha256(raw).hexdigest()
+        # `None` (not `""`) so both URL branches and both readers spell
+        # "absent" identically.
+        assert image.media_type is None
+
+    def test_an_uppercase_base64_marker_routes_through_the_base64_branch(self) -> None:
+        """``;BASE64,`` is the spelling some senders use; the reader matches it
+        case-insensitively (the same convention the Responses reader adopted
+        for KBR-179, kept in lockstep here).
+        """
+        raw = b"raw-bytes"
+        payload = base64.b64encode(raw).decode("ascii")
+        url = "data:image/png;BASE64," + payload
+
+        projected = _read(
+            {
+                "model": "gpt-6-astra",
+                "messages": [
+                    {"role": "user", "content": [{"type": "image_url", "image_url": {"url": url}}]},
+                ],
+            }
+        )
+
+        image = projected.conversation.turns[0].parts[0]
+        assert isinstance(image, c.Image)
+        assert image.digest == hashlib.sha256(raw).hexdigest()
+        assert image.media_type == "image/png"
+
+    def test_a_mixed_case_base64_marker_routes_through_the_base64_branch(self) -> None:
+        """``;Base64,`` — the third spelling a permissive reader must accept."""
+        raw = b"another-payload"
+        payload = base64.b64encode(raw).decode("ascii")
+        url = "data:image/jpeg;Base64," + payload
+
+        projected = _read(
+            {
+                "model": "gpt-6-astra",
+                "messages": [
+                    {"role": "user", "content": [{"type": "image_url", "image_url": {"url": url}}]},
+                ],
+            }
+        )
+
+        image = projected.conversation.turns[0].parts[0]
+        assert isinstance(image, c.Image)
+        assert image.digest == hashlib.sha256(raw).hexdigest()
+        assert image.media_type == "image/jpeg"
 
     def test_a_non_json_arguments_string_residualises_at_its_path(self) -> None:
         """R3.8 — the shared ``decode_arguments`` rule: a non-JSON string residualises at its path."""

@@ -24,7 +24,11 @@ left over.  But ``consumed`` covers *top-level* keys only (§3.3.1's stated
 boundary), so a value dropped from *inside* a key this module claims is not
 caught here.  Two such blind spots are deliberate and are named in the task's
 requirements rather than left implied: the internals of the 27 opaque item types
-(a mutated shell command inside a ``local_shell_call`` is invisible), and
+(**detected** since KBR-179 — every unmodelled item now carries a payload digest,
+so a mutated shell command inside a ``local_shell_call`` changes the digest and
+shows as a delta at the part path — but not *addressed* per field: the delta is
+at the part, not at the sibling key that changed, because the projection keeps
+no field-level structure for an unmodelled type), and
 ``previous_response_id`` / ``conversation``, which move history server-side so a
 formally total projection can still be missing turns.
 """
@@ -213,8 +217,14 @@ _TOOL_CHOICE_BY_TYPE = frozenset(
     }
 )
 
-#: A ``data:`` URL carrying base64 image bytes, with its media type.
-_DATA_URL = re.compile(r"^data:([^;,]+);base64,(.*)$", re.DOTALL)
+#: A ``data:`` URL carrying base64 image bytes, with its media type.  RFC 2397
+#: puts no minimum on the media segment (``data:;base64,…`` is legal).  The
+#: ``;base64`` marker is matched case-insensitively because real senders spell
+#: it that way and the convention everywhere else in the URL grammar treats
+#: encoding tokens case-insensitively (RFC 2045's Content-Transfer-Encoding
+#: values included) — both shapes previously routed to the non-base64 branch,
+#: which handled them gracefully but by accident rather than by design (KBR-179).
+_DATA_URL = re.compile(r"^data:([^;,]*);base64,(.*)$", re.DOTALL | re.IGNORECASE)
 
 #: Any ``data:`` URL at all.  Matched separately so that a *non*-base64 data URL
 #: — ``data:image/png,abc`` — residualises instead of falling through to
@@ -300,8 +310,11 @@ class ResponsesProjection:
 
         Raises:
             UnreadableBodyError: When the body is not a JSON object, when
-                ``input`` is neither a string nor an array, or when a ``message``
-                item carries a role no published schema defines.
+                ``input`` is neither a string nor an array, when a ``message``
+                item carries a role no published schema defines, or when an
+                input item's ``type`` is present but neither a string nor
+                ``null`` (KBR-179 — the reader names the item's path and the
+                observed type in the message).
         """
         body = self._parse(captured.body)
 
@@ -599,7 +612,9 @@ class ResponsesProjection:
             residual: Accumulator of unclassifiable values, mutated here.
 
         Raises:
-            UnreadableBodyError: When a ``message`` item carries an undefined role.
+            UnreadableBodyError: When a ``message`` item carries an undefined
+                role, or when the item's ``type`` is present but neither a
+                string nor ``None`` (KBR-179).
         """
         path = c.residual_key("input", index=index)
 
@@ -607,7 +622,7 @@ class ResponsesProjection:
             residual[path] = item
             return
 
-        kind = self._item_type(item)
+        kind = self._item_type(item, path)
 
         if kind == "message":
             self._read_message(item, path, system, turns, residual)
@@ -618,9 +633,23 @@ class ResponsesProjection:
         elif kind == "reasoning":
             turns.append(c.Turn("assistant", self._read_reasoning(item, path, residual)))
         elif kind in _OPAQUE_USER_ITEMS:
-            turns.append(c.Turn("user", [c.Opaque(kind)]))
+            # `Opaque` consumes its payload (mirroring
+            # :func:`reader_anthropic_messages._read_opaque`): the digest rides
+            # on the part so a swapped or mutated body shows as a delta at the
+            # part path. The sweep is **structural symmetry, a no-op by
+            # construction** — ``set(item)`` claims every key, so nothing
+            # residualises beneath the Opaque, matching the Anthropic reader's
+            # own ``_residualise(block, set(block), …)``. A reader that ever
+            # needs to exclude a sibling (e.g. ``cache_control`` on a format
+            # that publishes it) replaces the mapped set and the no-op becomes
+            # a real filter (KBR-179).
+            _residualise(item, set(item), path, residual)
+            turns.append(c.Turn("user", [c.Opaque(kind, digest=c.opaque_digest(item))]))
         elif kind in _OPAQUE_ASSISTANT_ITEMS:
-            turns.append(c.Turn("assistant", [c.Opaque(kind)]))
+            # See the comment on the user-side branch above; this is the same
+            # Opaque shape for model-produced items.
+            _residualise(item, set(item), path, residual)
+            turns.append(c.Turn("assistant", [c.Opaque(kind, digest=c.opaque_digest(item))]))
         else:
             # An item type outside all 31 published values. §3.3.1: adding a
             # shape to a wire format must force a deliberate decision, so this
@@ -628,7 +657,7 @@ class ResponsesProjection:
             residual[path] = item
 
     @staticmethod
-    def _item_type(item: Mapping[str, Any]) -> str | None:
+    def _item_type(item: Mapping[str, Any], path: str) -> str | None:
         """Return an item's discriminator, inferring it when the wire omits it.
 
         ``EasyInputMessage``, ``FunctionCallOutputItemParam`` and
@@ -637,13 +666,32 @@ class ResponsesProjection:
 
         Args:
             item: The raw item.
+            path: The item's path from the body root, which the raise message
+                names — the sibling role raise spells it the same way, and a
+                malformed body a human must triage reads the path off the
+                message rather than re-deriving it from the input array.
 
         Returns:
             The item's type, or ``None`` when it cannot be inferred.
+
+        Raises:
+            UnreadableBodyError: When ``type`` is present but neither a string
+                nor ``None``.
         """
         declared = item.get("type")
         if isinstance(declared, str):
             return declared
+
+        # `None` is the schema's own "absent" spelling on `ItemReferenceParam`,
+        # so it must not raise — the inference below is what keeps it legal.
+        # A present-but-non-string type raises (KBR-179): the discriminator *is*
+        # the value the projection hangs the part on, §7.4.1 scopes the
+        # wrongly-typed-leaf rule to leaves with an absent value to fall back
+        # to, and the Anthropic Messages reader has raised on the same shape
+        # since T-A1 — the readers agree because a disagreement hands T-D1 two
+        # different diagnoses for one class of malformed body.
+        if declared is not None:
+            raise c.UnreadableBodyError(f"{path} type must be a string or null, got {type(declared).__name__}")
 
         # A `role` makes it a message — the published `EasyInputMessage`, which
         # is the shape every hand-written example uses. An `id` alone is an item
@@ -811,7 +859,15 @@ class ResponsesProjection:
         # both spell this `document`, and T-A3 first shipped `file` for it —
         # one concept under two names is the delta no register row can claim.
         if kind == "input_file":
-            return c.Opaque(c.opaque_kind("input_file"))
+            # `Opaque` consumes its payload — same shape as the Anthropic reader's
+            # `_read_opaque` and as the unmodelled-item branches in `_read_item`
+            # above. The digest rides on the part so a mutated sibling (``detail``,
+            # ``filename``, ``file_url``) is visible as a delta at the part path
+            # rather than vanishing silently (KBR-179 / KBR-251 observations).
+            # The sweep is structural symmetry, a no-op by construction — see
+            # the `_read_item` comment for why it stays in the code anyway.
+            _residualise(entry, set(entry), path, residual)
+            return c.Opaque(c.opaque_kind("input_file"), digest=c.opaque_digest(entry))
 
         residual[path] = entry
         return None
@@ -860,10 +916,14 @@ class ResponsesProjection:
                     # The identity is the wire's own bytes of the payload —
                     # the second of `image_digest`'s recipes (KBR-192). The
                     # media type *is* stated here and carried separately, so a
-                    # changed media type stays its own delta.
+                    # changed media type stays its own delta; an empty segment
+                    # is spelled `None` so it agrees with the non-base64 branch.
                     residual[c.residual_key(path, "image_url")] = url
-                    return c.Image(digest=c.image_digest(payload.encode("utf-8")), media_type=media_type)
-                return c.Image(digest=c.image_digest(raw), media_type=media_type)
+                    return c.Image(
+                        digest=c.image_digest(payload.encode("utf-8")),
+                        media_type=media_type or None,
+                    )
+                return c.Image(digest=c.image_digest(raw), media_type=media_type or None)
 
             # A data URL that is not base64 carries bytes this reader cannot
             # canonicalise; putting it in `ref` would make it compare unequal
