@@ -1303,7 +1303,16 @@ def write_entry(root: Path, entry: CorpusEntry, *, extra: Sequence[str] = ()) ->
     root.mkdir(parents=True, exist_ok=True)
     (root / body_file).write_bytes(scrubbed.body)
     path = root / f"{entry.id}.json"
-    path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    # `newline="\n"` forces LF on every platform (KBR-261): without it, the
+    # default text-mode translation rewrites every `\n` to `\r\n` on Windows
+    # regardless of `.gitattributes`, so a Windows regen commits a CRLF
+    # manifest and CI's L1 roundtrip test then reports the resulting
+    # LF-vs-committed byte diff as pure line-ending drift.
+    path.write_text(
+        json.dumps(manifest, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
     return path
 
 
