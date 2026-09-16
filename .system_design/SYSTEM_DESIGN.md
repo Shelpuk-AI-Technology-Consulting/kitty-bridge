@@ -396,10 +396,25 @@ logic. A no means byte-identical to the pre-KBR-232 behaviour.
 
 ### 5.4 Known limits
 
-- On `/v1/chat/completions` a converted stream's role chunk sets `has_content`, so a
-  content-less completion reaches the client as a well-formed skeleton rather than triggering
-  the empty-response ladder — as before KBR-232. A CC-side preamble hold would be the
-  KBR-155 counterpart and is not built.
+- **KBR-248 closed the converted-route gap on `/v1/chat/completions`.** A converted
+  stream's role chunk used to set `has_content`, so a content-less completion reached the
+  client as a well-formed skeleton and the empty-response ladder could not fire there — as
+  before KBR-232. The handler now runs a converter-gated pre-emission hold (the CC-side
+  KBR-155 counterpart): non-content converted lines (the role chunk, the finish chunk,
+  ``[DONE]``) are withheld until the first content-bearing delta (non-empty `content`,
+  `tool_calls`, or `reasoning_content`), so an empty attempt stays pre-emission and the
+  existing ladder fires. The hold is gated on `stream_converter is not None` — the **hold** only applies to
+  the converted route; raw Chat Completions-wire upstreams still write through
+  every line, because the ticket's scope is the converted route and widening the
+  hold to every plain-POST CC provider is a product decision KBR-248 does not
+  authorise. The empty-response ladder and its D4 exhaustion terminal, by
+  contrast, are route-wide: a raw Chat Completions ladder-exhausting stream
+  (e.g. repeated empty 200 bodies) ends in the same `type: "empty_response"`
+  D4 event, conforming to Q14 bullet 4.
+  The hold is byte-capped at `PreambleHold.MAX_HELD_BYTES` (D5 fail-open). An exhausted
+  ladder emits the route's D4 terminal error (`type: "empty_response"` + ``[DONE]``),
+  matching Q14 bullet 4 and the KBR-235/KBR-250 siblings; the backend is not marked
+  healthy on that path.
 - In-stream error failover on `/v1/chat/completions` needs a backend pool; pool-less the
   error surfaces to the client (which is still the fix: the per-event translator used to
   swallow the error and deliver a truncated success).
