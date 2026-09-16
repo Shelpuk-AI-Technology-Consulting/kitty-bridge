@@ -173,8 +173,16 @@ _TOOL_CHOICE_ALLOWED_MODES: Mapping[str, str] = {
     "required": "any",
 }
 
-#: A ``data:`` URL carrying base64 image bytes, with its media type.
-_DATA_URL = re.compile(r"^data:([^;,]+);base64,(.*)$", re.DOTALL)
+#: A ``data:`` URL carrying base64 image bytes, with its media type.  Kept
+#: in lockstep with the Responses reader (``reader_responses._DATA_URL``):
+#: the two readers must produce one :class:`~harness.contract.Image` for one
+#: image, and a regex that accepts ``data:;base64,…`` in one and rejects it
+#: in the other would report a delta no mutation caused (KBR-179's defect 2).
+#: The grammar in RFC 2397 puts no minimum on the media segment, and the
+#: ``;base64`` marker is matched case-insensitively for the same reason the
+#: Responses reader does — browsers/WHATWG and RFC 2045's case-insensitive
+#: Content-Transfer-Encoding tokens both treat the encoding case-insensitively.
+_DATA_URL = re.compile(r"^data:([^;,]*);base64,(.*)$", re.DOTALL | re.IGNORECASE)
 
 #: Any ``data:`` URL at all — a non-base64 one residualises instead of falling
 #: through to :attr:`~harness.contract.Image.ref`, so a projection cannot agree
@@ -805,7 +813,7 @@ def _read_image_part(
 
         return c.Image(
             digest=c.image_digest(decoded),
-            media_type=media_type,
+            media_type=media_type or None,
             cache_control=cache_control,
         )
     if _ANY_DATA_URL.match(url):

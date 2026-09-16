@@ -24,7 +24,11 @@ left over.  But ``consumed`` covers *top-level* keys only (§3.3.1's stated
 boundary), so a value dropped from *inside* a key this module claims is not
 caught here.  Two such blind spots are deliberate and are named in the task's
 requirements rather than left implied: the internals of the 27 opaque item types
-(a mutated shell command inside a ``local_shell_call`` is invisible), and
+(**detected** since KBR-179 — every unmodelled item now carries a payload digest,
+so a mutated shell command inside a ``local_shell_call`` changes the digest and
+shows as a delta at the part path — but not *addressed* per field: the delta is
+at the part, not at the sibling key that changed, because the projection keeps
+no field-level structure for an unmodelled type), and
 ``previous_response_id`` / ``conversation``, which move history server-side so a
 formally total projection can still be missing turns.
 """
@@ -306,8 +310,11 @@ class ResponsesProjection:
 
         Raises:
             UnreadableBodyError: When the body is not a JSON object, when
-                ``input`` is neither a string nor an array, or when a ``message``
-                item carries a role no published schema defines.
+                ``input`` is neither a string nor an array, when a ``message``
+                item carries a role no published schema defines, or when an
+                input item's ``type`` is present but neither a string nor
+                ``null`` (KBR-179 — the reader names the item's path and the
+                observed type in the message).
         """
         body = self._parse(captured.body)
 
