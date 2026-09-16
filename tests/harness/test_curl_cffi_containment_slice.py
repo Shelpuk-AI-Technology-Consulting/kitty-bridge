@@ -38,14 +38,17 @@ too (§5.3 trap 2): a product that wrongly falls back to a direct route still
 resolves the harness hostname to the recorder, and §5.2.1's join detects the
 bypass instead of the test passing vacuously on a DNS failure.
 
-**TLS-in-TLS and the Python floor.** Phase 1 (direct leg) runs on every
-supported Python. The proxied phases (2/2b/3) carry the same Python ≥3.11
-``skipif`` as T-E2 — the owner's scope decision on KBR-63 (comment,
-2026-09-16): the standard wording, imported from T-E2's file, a uniform
-verdict matrix across the interpreter set, and zero gate-budget on the 3.10
-legs. libcurl itself tunnels HTTPS-through-HTTPS on older interpreters; the
-floor is *not* a libcurl constraint, and this comment exists so the next
-reader does not mistake it for one.
+**Python <3.11 floor.** Phase 1 (direct leg) runs on every supported
+Python. The proxied phases (2/2b/3) carry the same Python ≥3.11
+``skipif`` as the aiohttp slice — the owner's scope decision on
+KBR-63 (comment, 2026-09-16), imported as the standard wording from
+T-E2's file. On interpreters below 3.11 the verdict gate in
+:mod:`harness.conftest` records this slice's row as ``UNSUPPORTED``
+with the documented floor reason, so the plan's "an outcome is
+recorded" done-when holds on every supported interpreter and T-E9's
+completeness gate (which accepts ``UNSUPPORTED`` as a permitted
+partial delivery) sees a claimed row. CI's 3.10 leg exercises the
+writer end-to-end.
 
 **The refresh leg is out of scope.** The seeded OAuth session is fresh, so no
 token refresh fires during a drive; the refresh leg's own containment drive is
