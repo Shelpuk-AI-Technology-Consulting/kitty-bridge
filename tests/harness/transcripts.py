@@ -1631,10 +1631,40 @@ def responses_problems(body: object) -> list[str]:
                 problems.append(f"input[{index}] function_call_output has no 'call_id'")
             else:
                 output_ids_by_item.setdefault(index, set()).add(call_id)
+            # The published schema allows ``output`` as a plain string or as
+            # an array of input_text / input_image / input_file parts. The
+            # string branch is what the truncation twin reads; the list
+            # branch must still be shape-checked or a malformed list output
+            # slips past the reporter into a property that assumes strings
+            # (and silently under-covers). Reasoning items are not
+            # strategy-emitted, so this is the only item kind that needs a
+            # union shape check today.
             if "output" not in item:
                 problems.append(
                     f"input[{index}] function_call_output has no 'output'"
                 )
+            else:
+                output_value = item["output"]
+                if isinstance(output_value, list):
+                    for part_index, part in enumerate(output_value):
+                        if not isinstance(part, dict):
+                            problems.append(
+                                f"input[{index}].output[{part_index}] is not a dict"
+                            )
+                            continue
+                        part_type = part.get("type")
+                        if part_type not in {
+                            "input_text",
+                            "input_image",
+                            "input_file",
+                        }:
+                            problems.append(
+                                f"input[{index}].output[{part_index}] unknown output part type {part_type!r}"
+                            )
+                elif not isinstance(output_value, str):
+                    problems.append(
+                        f"input[{index}] function_call_output 'output' must be a string or a list of parts"
+                    )
 
     call_ids_ever = {tid for ids in call_ids_by_item.values() for tid in ids}
     output_ids_ever = {tid for ids in output_ids_by_item.values() for tid in ids}

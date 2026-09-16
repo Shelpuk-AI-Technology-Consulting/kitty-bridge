@@ -939,6 +939,30 @@ _RESPONSES_DEFECTS: list[tuple[str, dict, str]] = [
         },
         "consecutive message items with role 'user'",
     ),
+    (
+        "function_call_output 'output' is neither a string nor a list of parts",
+        {
+            "model": "gpt-4o",
+            "tools": [{"type": "function", "name": "f", "parameters": {}}],
+            "input": [
+                {"type": "function_call", "call_id": "a", "name": "f", "arguments": "{}"},
+                {"type": "function_call_output", "call_id": "a", "output": 42},
+            ],
+        },
+        "function_call_output 'output' must be a string or a list of parts",
+    ),
+    (
+        "function_call_output 'output' list carries an unknown part type",
+        {
+            "model": "gpt-4o",
+            "tools": [{"type": "function", "name": "f", "parameters": {}}],
+            "input": [
+                {"type": "function_call", "call_id": "a", "name": "f", "arguments": "{}"},
+                {"type": "function_call_output", "call_id": "a", "output": [{"type": "made_up", "text": "x"}]},
+            ],
+        },
+        "unknown output part type 'made_up'",
+    ),
 ]
 
 
