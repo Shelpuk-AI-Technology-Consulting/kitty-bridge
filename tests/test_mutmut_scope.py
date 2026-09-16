@@ -419,11 +419,19 @@ def _server_source() -> str:
 
     Returns:
         The file's contents as a single string (LF line endings preserved).
+
+    Note:
+        ``encoding="utf-8"`` is load-bearing: server.py carries non-ASCII
+        docstring bytes (em-dashes and similar), and on Windows runners
+        whose default locale is cp1252 the platform-default ``open()``
+        encoding would raise ``UnicodeDecodeError`` on the first such
+        byte. The pragma scheme must hold on every platform the repo's
+        test matrix covers.
     """
     return (
         Path(__file__).resolve().parent.parent
         / "src" / "kitty" / "bridge" / "server.py"
-    ).read_text()
+    ).read_text(encoding="utf-8")
 
 
 def _pragma_marked_defs(source: str) -> set[str]:
