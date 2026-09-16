@@ -73,6 +73,16 @@ def test_every_documented_export_is_importable() -> None:
         "cc_tool_pair",
         "cc_request",
         "cc_problems",
+        # T-F3 (KBR-72) addition — OpenAI Responses strategies and reporter.
+        # The twins' L1 properties consume these the same way T-F2 consumes
+        # the CC / Messages strategies: per-test mutations on top of
+        # request-level composites; the substrate owns the validity claim.
+        "responses_tool_definition",
+        "responses_function_call_item",
+        "responses_function_call_output_item",
+        "responses_message_item",
+        "responses_request",
+        "responses_problems",
     }
 
     missing = expected - set(t.__all__)
@@ -795,6 +805,217 @@ def test_cc_problems_rejects_nan_float() -> None:
     )
 
 
+# ── T-F3 addition: the Responses format (KBR-72) ──────────────────────────
+#
+# Mirrors the per-format sections above. The Responses substrate was added by
+# KBR-72 to support the L1 properties for
+# ``BridgeServer._truncate_oversized_responses_outputs`` and
+# ``BridgeServer._drop_orphan_responses_tool_outputs`` (register rows M3 / M7),
+# whose wire rules are stated by ``responses_problems`` and whose inputs are
+# valid Responses request bodies drawn from ``responses_request()``. The
+# composite stays valid by construction (paired call / output items, fixture
+# role alternation, named tools).
+
+
+@given(t.responses_request())
+@settings(max_examples=200)
+def test_every_responses_request_body_reports_no_problems(body: object) -> None:
+    """Every generated OpenAI Responses body is valid by ``responses_problems``."""
+    assert t.responses_problems(body) == []
+
+
+@given(t.responses_request())
+@settings(max_examples=200)
+def test_every_responses_request_body_is_json_strict(body: dict) -> None:
+    """Every generated Responses body round-trips through ``json.dumps(allow_nan=False)``."""
+    serialised = json.dumps(body, allow_nan=False)
+    assert isinstance(serialised, str)
+    reloaded = json.loads(serialised)
+    assert t.responses_problems(reloaded) == []
+
+
+@given(t.responses_request())
+def test_responses_request_composite_holds_the_pairing_invariant(body: dict) -> None:
+    """The Responses conversation composite owns the pairing invariant (R6 analogue)."""
+    assert t.responses_problems(body) == []
+
+
+_RESPONSES_DEFECTS: list[tuple[str, dict, str]] = [
+    (
+        "missing model",
+        {"input": [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "x"}]}]},
+        "missing required field 'model'",
+    ),
+    (
+        "input is a string instead of a list",
+        {"model": "gpt-4o", "input": "hi"},
+        "'input' must be a list",
+    ),
+    (
+        "function_call_output with no declaring function_call anywhere",
+        {
+            "model": "gpt-4o",
+            "tools": [{"type": "function", "name": "f", "parameters": {}}],
+            "input": [
+                {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "x"}]},
+                {"type": "function_call_output", "call_id": "orphan-1", "output": "y"},
+            ],
+        },
+        "function_call_output 'orphan-1' has no matching function_call",
+    ),
+    (
+        "function_call with no answering output",
+        {
+            "model": "gpt-4o",
+            "tools": [{"type": "function", "name": "f", "parameters": {}}],
+            "input": [
+                {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "x"}]},
+                {
+                    "type": "function_call",
+                    "call_id": "call-1",
+                    "name": "f",
+                    "arguments": "{}",
+                },
+                {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "y"}]},
+                {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "z"}]},
+            ],
+        },
+        "function_call 'call-1' has no matching function_call_output",
+    ),
+    (
+        "unknown item type",
+        {
+            "model": "gpt-4o",
+            "input": [
+                {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "x"}]},
+                {"type": "made_up_kind", "call_id": "x"},
+            ],
+        },
+        "unknown input item type 'made_up_kind'",
+    ),
+    (
+        "function_call targets undeclared tool name",
+        {
+            "model": "gpt-4o",
+            "tools": [{"type": "function", "name": "declared", "parameters": {}}],
+            "input": [
+                {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "x"}]},
+                {
+                    "type": "function_call",
+                    "call_id": "call-1",
+                    "name": "not_declared",
+                    "arguments": "{}",
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call-1",
+                    "output": "y",
+                },
+            ],
+        },
+        "function_call targets undeclared tool 'not_declared'",
+    ),
+    (
+        "forward-reference output before its declaring call",
+        {
+            "model": "gpt-4o",
+            "tools": [{"type": "function", "name": "f", "parameters": {}}],
+            "input": [
+                {"type": "function_call_output", "call_id": "a", "output": "early"},
+                {"type": "function_call", "call_id": "a", "name": "f", "arguments": "{}"},
+                {"type": "function_call_output", "call_id": "a", "output": "late"},
+            ],
+        },
+        "function_call_output 'a' answered before its declaring function_call",
+    ),
+    (
+        "consecutive message items repeat a role (fixture-rule violation)",
+        {
+            "model": "gpt-4o",
+            "input": [
+                {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]},
+                {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "again"}]},
+            ],
+        },
+        "consecutive message items with role 'user'",
+    ),
+    (
+        "function_call_output 'output' is neither a string nor a list of parts",
+        {
+            "model": "gpt-4o",
+            "tools": [{"type": "function", "name": "f", "parameters": {}}],
+            "input": [
+                {"type": "function_call", "call_id": "a", "name": "f", "arguments": "{}"},
+                {"type": "function_call_output", "call_id": "a", "output": 42},
+            ],
+        },
+        "function_call_output 'output' must be a string or a list of parts",
+    ),
+    (
+        "function_call_output 'output' list carries an unknown part type",
+        {
+            "model": "gpt-4o",
+            "tools": [{"type": "function", "name": "f", "parameters": {}}],
+            "input": [
+                {"type": "function_call", "call_id": "a", "name": "f", "arguments": "{}"},
+                {"type": "function_call_output", "call_id": "a", "output": [{"type": "made_up", "text": "x"}]},
+            ],
+        },
+        "unknown output part type 'made_up'",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("label", "body", "expected_problem"),
+    _RESPONSES_DEFECTS,
+    ids=[c[0] for c in _RESPONSES_DEFECTS],
+)
+def test_responses_problems_catches_every_listed_defect(
+    label: str, body: dict, expected_problem: str
+) -> None:
+    """The Responses reporter names every violation it claims to catch."""
+    problems = t.responses_problems(body)
+    assert problems, f"reporter returned [] on a body with defect {label!r}"
+    assert any(
+        expected_problem in problem for problem in problems
+    ), f"reporter did not name {expected_problem!r} on {label!r}: got {problems}"
+
+
+def test_responses_problems_does_not_fire_on_innocent_text() -> None:
+    """Negative control: the Responses reporter returns ``[]`` on a hand-crafted minimal valid body."""
+    body = {
+        "model": "gpt-4o",
+        "tools": [{"type": "function", "name": "f", "parameters": {"type": "object", "properties": {}}}],
+        "input": [
+            {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Hello."}]},
+            {
+                "type": "function_call",
+                "call_id": "call-1",
+                "name": "f",
+                "arguments": "{}",
+            },
+            {"type": "function_call_output", "call_id": "call-1", "output": "ok"},
+            {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Hi."}]},
+            {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Bye."}]},
+        ],
+    }
+    assert t.responses_problems(body) == []
+
+
+def test_responses_problems_rejects_nan_float() -> None:
+    """A Responses body with NaN is not JSON-strictly serialisable."""
+    body = {
+        "model": "gpt-4o",
+        "input": [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]}],
+        "temperature": float("nan"),
+    }
+    problems = t.responses_problems(body)
+    assert any("JSON" in problem for problem in problems), (
+        f"reporter did not flag the NaN: {problems}"
+    )
+
+
 #: Hostile shapes the reporters must survive without raising (M1). Downstream
 #: T-F3 mutates valid bodies to produce its orphan-tool_result scenario, and a
 #: mutation that deletes a key or replaces a value with ``None`` or a wrong
@@ -870,6 +1091,31 @@ _HOSTILE_INPUT_CASES: list[tuple[str, str, object, str]] = [
         },
         "'tool_calls' must be a list when present",
     ),
+    (
+        "responses input contains a non-dict item",
+        "responses",
+        {"model": "x", "input": [1]},
+        "input[0] is not a dict",
+    ),
+    (
+        "responses function_call_output has missing call_id",
+        "responses",
+        {
+            "model": "x",
+            "tools": [{"type": "function", "name": "f", "parameters": {}}],
+            "input": [
+                {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "x"}]},
+                {"type": "function_call_output", "output": "y"},
+            ],
+        },
+        "input[1] function_call_output has no 'call_id'",
+    ),
+    (
+        "responses model is not a string",
+        "responses",
+        {"model": 5, "input": [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "x"}]}]},
+        "'model' must be a non-empty string",
+    ),
 ]
 
 
@@ -881,14 +1127,18 @@ _HOSTILE_INPUT_CASES: list[tuple[str, str, object, str]] = [
 def test_reporters_never_raise_on_hostile_input(
     label: str, format_name: str, body: object, expected_problem: str
 ) -> None:
-    """Both reporters return a problem list — never raise — on hostile shapes (M1).
+    """Every reporter returns a problem list — never raise — on hostile shapes (M1).
 
     The docstring promise is scoped the way the sibling scopes it
     (``cache_breakpoints.request_problems``): *on any value handed in, the
     reporter returns a list*. A raise inside a property run crashes the test
     instead of reporting the violation, so the contract is enforced here.
     """
-    reporter = t.messages_problems if format_name == "messages" else t.cc_problems
+    reporter = {
+        "messages": t.messages_problems,
+        "cc": t.cc_problems,
+        "responses": t.responses_problems,
+    }[format_name]
 
     problems = reporter(body)
 

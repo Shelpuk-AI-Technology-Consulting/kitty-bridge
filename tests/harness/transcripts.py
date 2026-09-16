@@ -1,6 +1,7 @@
-"""Hypothesis strategies that generate valid Anthropic Messages and Chat Completions transcripts.
+"""Hypothesis strategies that generate valid Anthropic Messages, Chat Completions, and OpenAI Responses transcripts.
 
-`.system_design/TEST_SUITE.md` §6.1 · plan **T-F1** (KBR-70).
+`.system_design/TEST_SUITE.md` §6.1 · plan **T-F1** (KBR-70) with the
+OpenAI Responses addition for **T-F3** (KBR-72).
 
 The L1 suite today is entirely example-based; the §6.1 property list (compaction,
 pairing, truncation, egress, anomaly, translator) needs property-based tests
@@ -8,11 +9,16 @@ running against pure logic. Property tests for the *transcript-shaped* targets �
 ``MessagesTranslator`` (T-F6), ``_compact_messages`` (T-F2),
 ``_validate_tool_call_pairing`` and ``_truncate_oversized_tool_results`` (T-F3) —
 compose scenarios from valid request bodies, and they need to vary far enough
-through the space that one example test could not cover. This module provides the
-composable building blocks: whole-request strategies, single-message strategies,
-single-block strategies, and tool-definition strategies, plus a per-format
-``problems()`` reporter that states what "valid" means so a generated body can be
-handed back and asserted well-formed.
+through the space that one example test could not cover. The Responses
+strategies ship with KBR-72 to support the L1 properties for the Responses
+twins of pairing and truncation (``BridgeServer._drop_orphan_responses_tool_outputs``
+and ``BridgeServer._truncate_oversized_responses_outputs``, register rows M7 / M3),
+whose wire rule mirrors the CC / native pair and whose inputs are valid
+Responses request bodies. This module provides the composable building blocks:
+whole-request strategies, single-message strategies, single-block strategies,
+and tool-definition strategies, plus a per-format ``problems()`` reporter that
+states what "valid" means so a generated body can be handed back and asserted
+well-formed.
 
 **Out of scope (recording the boundary here so it does not get re-litigated).**
 
@@ -83,6 +89,13 @@ __all__ = [
     "cc_tool_pair",
     "cc_request",
     "cc_problems",
+    # OpenAI Responses strategies (T-F3 / KBR-72)
+    "responses_tool_definition",
+    "responses_function_call_item",
+    "responses_function_call_output_item",
+    "responses_message_item",
+    "responses_request",
+    "responses_problems",
 ]
 
 
@@ -539,7 +552,12 @@ def _build_messages_request(
             # user-role iteration sees ``turns[-1]`` is an assistant
             # tool_use turn and answers it via the first arm above, which
             # # keeps the conversation strictly alternating. ``messages_tool_pair``
-            # remains exported for downstream consumers (T-F3, R5).
+            # (and its sibling ``cc_tool_pair``) remain exported for any
+            # future consumer that needs a single drawn pair — the
+            # request-level composites compose them here, and the
+            # content-length cap (``_short_ascii_text``, max 16 chars) makes
+            # them unsuitable for the T-F3 truncation property, which builds
+            # its own oversize-content mutation strategies instead.
             pair = draw(messages_tool_pair(tools))
             turns.append(pair[0])
             continue
@@ -1254,6 +1272,427 @@ def cc_problems(body: object) -> list[str]:
             if earlier:
                 problems.append(
                     f"tool_result {tid!r} answered too late at messages[{index}]"
+                )
+
+    return problems
+
+
+# ── OpenAI Responses: block-level strategies ────────────────────────────────
+
+
+def responses_tool_definition() -> st.SearchStrategy[dict[str, Any]]:
+    """Return a strategy over OpenAI Responses ``tools`` declarations.
+
+    Returns:
+        A Hypothesis strategy that yields
+        ``{"type": "function", "name": ..., "description": ..., "parameters": {...}}``.
+        ``parameters`` is the same minimal JSON-schema object the CC and
+        Messages tool definitions emit (``{"type": "object", ...}``) — the
+        Responses API accepts richer schemas, but the substrate keeps tool
+        payloads minimal so the property tests do not exercise a schema
+        surface the reporters do not pin. The name uses the same alphabet as
+        the Anthropic / Chat Completions tool definitions so strategies
+        compose across formats when a future cross-format test needs it.
+    """
+    return st.builds(
+        lambda n, d, p: {
+            "type": "function",
+            "name": n,
+            "description": d,
+            "parameters": p,
+        },
+        n=_name_strategy(),
+        d=_short_ascii_text(min_size=1),
+        p=_path_schema(),
+    )
+
+
+def responses_function_call_item(
+    tools: list[dict[str, Any]],
+) -> st.SearchStrategy[dict[str, Any]]:
+    """Return a strategy over a single Responses ``function_call`` item.
+
+    Args:
+        tools: The request's tool declarations; the strategy picks ``name``
+            uniformly from this list.
+
+    Returns:
+        A Hypothesis strategy that yields
+        ``{"type": "function_call", "call_id": <unique>, "name": ..., "arguments": "..."}``.
+
+    Raises:
+        ValueError: When ``tools`` is empty (see :func:`cc_tool_call` for the
+            analogous rationale: an unaddressable ``function_call`` would be
+            an I1 violation the substrate refuses to emit).
+    """
+    if not tools:
+        raise ValueError(
+            "responses_function_call_item requires at least one declared tool; "
+            "an unaddressable function_call is an I1 violation the substrate does not emit."
+        )
+    return st.builds(
+        lambda tool, unique: {
+            "type": "function_call",
+            "call_id": unique,
+            "name": tool["name"],
+            "arguments": "{}",
+        },
+        tool=st.sampled_from(tools),
+        unique=st.uuids().map(str),
+    )
+
+
+def responses_function_call_output_item(
+    call_id: str,
+) -> st.SearchStrategy[dict[str, Any]]:
+    """Return a strategy over a Responses ``function_call_output`` item.
+
+    Args:
+        call_id: The ``call_id`` of the ``function_call`` this output answers.
+
+    Returns:
+        A Hypothesis strategy that yields
+        ``{"type": "function_call_output", "call_id": <id>, "output": <str>}``.
+        ``output`` is always a string here; the structured (list) branch is
+        exercised by the truncation property's constructed cases, since the
+        substrate would otherwise have to pin a content-parts shape the
+        reporters do not enforce.
+    """
+    return st.builds(
+        lambda text: {
+            "type": "function_call_output",
+            "call_id": call_id,
+            "output": text,
+        },
+        text=_short_ascii_text(),
+    )
+
+
+def responses_message_item(role: str) -> st.SearchStrategy[dict[str, Any]]:
+    """Return a strategy over a Responses ``message`` item.
+
+    Args:
+        role: The role the item carries. Must be one of ``"user"``,
+            ``"assistant"``, or ``"system"``; the conversation composite is
+            the only caller and always passes a fixture-rule role.
+
+    Returns:
+        A Hypothesis strategy that yields
+        ``{"type": "message", "role": ..., "content": [parts]}``. User and
+        system items carry one to two ``input_text`` parts; assistant items
+        carry one ``output_text`` part. The Responses API also accepts
+        ``content`` as a plain string for ``message`` items; the substrate
+        emits the list shape to keep the property tests' iteration over parts
+        shape-stable (the twin functions ignore message content shape).
+    """
+    if role not in {"user", "assistant", "system"}:
+        raise ValueError(
+            f"responses_message_item role must be user|assistant|system, got {role!r}"
+        )
+
+    if role == "assistant":
+        return st.builds(
+            lambda text: {
+                "type": "message",
+                "role": role,
+                "content": [{"type": "output_text", "text": text}],
+            },
+            text=_short_ascii_text(),
+        )
+    return st.builds(
+        lambda text, extra: {
+            "type": "message",
+            "role": role,
+            "content": [
+                {"type": "input_text", "text": text},
+                {"type": "input_text", "text": extra},
+            ],
+        },
+        text=_short_ascii_text(),
+        extra=_short_ascii_text(),
+    )
+
+
+# ── OpenAI Responses: request-level composite ──────────────────────────────
+
+
+def responses_request() -> st.SearchStrategy[dict[str, Any]]:
+    """Return a strategy over complete OpenAI Responses request bodies.
+
+    The composite draws N message-rounds, alternating user / assistant,
+    starting and ending with a user message, and inserts a
+    ``function_call`` → ``function_call_output`` pair at each assistant turn
+    with probability ½ when ``tools`` is non-empty — the output item is
+    absorbed immediately so call / output adjacency holds. The pairing
+    invariant is owned here (R6): output items declare a ``call_id`` drawn
+    from the immediately-prior call, so the input list is valid by
+    construction.
+
+    The composite's body carries the minimum required envelope (``model``,
+    ``input``, ``tools``, ``stream``); optional Responses keys like
+    ``instructions``, ``store``, ``metadata`` are out of scope — the twin
+    functions under test read only ``input``, so adding more keys would
+    expand the reporters without exercising new behaviour.
+
+    Returns:
+        A Hypothesis strategy that yields a fresh, JSON-serialisable
+        OpenAI Responses request body whose :func:`responses_problems`
+        returns ``[]``.
+    """
+    return _build_responses_request()
+
+
+@st.composite
+def _build_responses_request(draw: st.DrawFn) -> dict[str, Any]:
+    """Build one valid OpenAI Responses request body.
+
+    Args:
+        draw: The Hypothesis draw callable.
+
+    Returns:
+        A request body that satisfies every rule :func:`responses_problems`
+        enforces.
+    """
+    tools = draw(st.lists(responses_tool_definition(), min_size=1, max_size=3))
+    # Same fixture rule as the CC / Messages composites: alternating user /
+    # assistant message items, start and end on user, so the conversation is
+    # structurally well-formed even after orphan injection from the
+    # T-F3 mutation strategies.
+    n_pairs = draw(st.integers(min_value=1, max_value=3))
+
+    items: list[dict[str, Any]] = []
+    roles: list[str] = []
+    for _ in range(n_pairs):
+        roles.extend(["user", "assistant"])
+    roles.append("user")
+
+    for role in roles:
+        # Answer the immediately-prior function_call before considering the
+        # current role. The Responses API does not require adjacency of
+        # function_call and function_call_output, but the fixture enforces
+        # it so the substrate's emitted pairing matches the wire rule the
+        # properties consume ("output's call_id declared by a preceding
+        # call") without surfacing a forward-reference edge case in the
+        # composite itself.
+        if items and items[-1].get("type") == "function_call":
+            items.append(draw(responses_function_call_output_item(items[-1]["call_id"])))
+            continue
+
+        if role == "assistant" and draw(st.booleans()):
+            items.append(draw(responses_function_call_item(tools)))
+            continue
+
+        items.append(draw(responses_message_item(role)))
+
+    return {
+        "model": draw(st.sampled_from(OPENAI_MODELS)),
+        "input": items,
+        "tools": tools,
+        "stream": draw(st.booleans()),
+    }
+
+
+# ── OpenAI Responses: reporter ─────────────────────────────────────────────
+
+
+def responses_problems(body: object) -> list[str]:
+    """Report every way an OpenAI Responses body breaks the rules this fixture promises.
+
+    Args:
+        body: The request body to inspect. May be any value; the reporter
+            never raises.
+
+    Returns:
+        One message per violation. Empty list means the body is well-formed
+        per the rules recorded in the module docstring: required fields,
+        message-item role alternation (fixture rule, mirroring the CC /
+        Messages reporters), ``call_id`` pairing with preceding-call
+        semantics, and JSON-strict serialisability. Size and content-string
+        length are deliberately **not** flagged — size constraints belong to
+        the consuming property test (T-F3's truncation property) and
+        asserting them in the substrate would forbid the over-limit cases
+        the property exercises.
+    """
+    problems: list[str] = []
+
+    if not isinstance(body, dict):
+        problems.append(f"body must be a dict, got {type(body).__name__}")
+        return problems
+
+    for required in ("model", "input"):
+        if required not in body:
+            problems.append(f"missing required field {required!r}")
+
+    model = body.get("model")
+    if "model" in body and not (isinstance(model, str) and model):
+        problems.append("'model' must be a non-empty string")
+
+    input_items = body.get("input")
+    if not isinstance(input_items, list):
+        problems.append("'input' must be a list")
+        return problems
+    if not input_items:
+        problems.append("'input' must be a non-empty list")
+        return problems
+
+    try:
+        json.dumps(body, allow_nan=False)
+    except (TypeError, ValueError) as exc:
+        problems.append(f"body is not JSON-strictly serialisable: {exc}")
+
+    # Declared tool names. The composite always emits ``tools``; a body
+    # that omits it has no declared set and every function_call would flag
+    # as undeclared — mirroring the Chat Completions reporter's posture.
+    raw_tools = body.get("tools")
+    if raw_tools is None:
+        if "tools" in body:
+            problems.append("'tools' must be a list when present")
+        declared_tool_names: set[str] = set()
+    elif isinstance(raw_tools, list):
+        declared_tool_names = {
+            tool.get("name")
+            for tool in raw_tools
+            if isinstance(tool, dict) and isinstance(tool.get("name"), str)
+        }
+    else:
+        problems.append("'tools' must be a list when present")
+        declared_tool_names = set()
+
+    call_ids_by_item: dict[int, set[str]] = {}
+    output_ids_by_item: dict[int, set[str]] = {}
+
+    last_role: str | None = None
+    for index, item in enumerate(input_items):
+        if not isinstance(item, dict):
+            problems.append(f"input[{index}] is not a dict")
+            continue
+        item_type = item.get("type")
+        if not isinstance(item_type, str) or not item_type:
+            problems.append(f"input[{index}] has no 'type'")
+            continue
+        if item_type not in {"message", "function_call", "function_call_output", "reasoning"}:
+            problems.append(f"input[{index}] unknown input item type {item_type!r}")
+            continue
+        if item_type == "message":
+            role = item.get("role")
+            if not (isinstance(role, str) and role in {"user", "assistant", "system"}):
+                problems.append(f"input[{index}] message has invalid 'role' {role!r}")
+                role = None
+            content = item.get("content")
+            if not isinstance(content, list):
+                problems.append(f"input[{index}] message 'content' must be a list")
+            else:
+                for part_index, part in enumerate(content):
+                    if not isinstance(part, dict):
+                        problems.append(
+                            f"input[{index}].content[{part_index}] is not a dict"
+                        )
+                        continue
+                    part_type = part.get("type")
+                    if part_type not in {
+                        "input_text",
+                        "output_text",
+                        "input_image",
+                        "input_file",
+                    }:
+                        problems.append(
+                            f"input[{index}].content[{part_index}] unknown part type {part_type!r}"
+                        )
+            # Fixture rule: consecutive message items may not repeat a role
+            # — matches the CC / Messages fixture's alternation posture so
+            # the conversation composite emits a stable shape.
+            if role and last_role and role == last_role and role in {"user", "assistant"}:
+                problems.append(
+                    f"input[{index}] consecutive message items with role {role!r}"
+                )
+            if role:
+                last_role = role
+        elif item_type == "function_call":
+            call_id = item.get("call_id")
+            if not (isinstance(call_id, str) and call_id):
+                problems.append(f"input[{index}] function_call has no 'call_id'")
+            else:
+                call_ids_by_item.setdefault(index, set()).add(call_id)
+            name = item.get("name")
+            if not (isinstance(name, str) and name):
+                problems.append(f"input[{index}] function_call has no 'name'")
+            elif declared_tool_names and name not in declared_tool_names:
+                problems.append(
+                    f"input[{index}] function_call targets undeclared tool {name!r}"
+                )
+            arguments = item.get("arguments")
+            if not isinstance(arguments, str):
+                problems.append(
+                    f"input[{index}] function_call 'arguments' must be a string"
+                )
+        elif item_type == "function_call_output":
+            call_id = item.get("call_id")
+            if not (isinstance(call_id, str) and call_id):
+                problems.append(f"input[{index}] function_call_output has no 'call_id'")
+            else:
+                output_ids_by_item.setdefault(index, set()).add(call_id)
+            # The published schema allows ``output`` as a plain string or as
+            # an array of input_text / input_image / input_file parts. The
+            # string branch is what the truncation twin reads; the list
+            # branch must still be shape-checked or a malformed list output
+            # slips past the reporter into a property that assumes strings
+            # (and silently under-covers). Reasoning items are not
+            # strategy-emitted, so this is the only item kind that needs a
+            # union shape check today.
+            if "output" not in item:
+                problems.append(
+                    f"input[{index}] function_call_output has no 'output'"
+                )
+            else:
+                output_value = item["output"]
+                if isinstance(output_value, list):
+                    for part_index, part in enumerate(output_value):
+                        if not isinstance(part, dict):
+                            problems.append(
+                                f"input[{index}].output[{part_index}] is not a dict"
+                            )
+                            continue
+                        part_type = part.get("type")
+                        if part_type not in {
+                            "input_text",
+                            "input_image",
+                            "input_file",
+                        }:
+                            problems.append(
+                                f"input[{index}].output[{part_index}] unknown output part type {part_type!r}"
+                            )
+                elif not isinstance(output_value, str):
+                    problems.append(
+                        f"input[{index}] function_call_output 'output' must be a string or a list of parts"
+                    )
+
+    call_ids_ever = {tid for ids in call_ids_by_item.values() for tid in ids}
+    output_ids_ever = {tid for ids in output_ids_by_item.values() for tid in ids}
+    for tid in output_ids_ever - call_ids_ever:
+        problems.append(
+            f"function_call_output {tid!r} has no matching function_call"
+        )
+    for tid in call_ids_ever - output_ids_ever:
+        problems.append(
+            f"function_call {tid!r} has no matching function_call_output"
+        )
+
+    # Forward-reference guard: an output whose FIRST declaring call appears
+    # *after* it violates the wire rule "output's call_id declared by a
+    # preceding call". The set-level checks above already catch the "no call
+    # anywhere" and "no output anywhere" cases; this catches the wrong-order
+    # case, which a property test's orphan injection can construct.
+    first_call_index: dict[str, int] = {}
+    for index in sorted(call_ids_by_item):
+        for tid in call_ids_by_item[index]:
+            first_call_index.setdefault(tid, index)
+    for index in sorted(output_ids_by_item):
+        for tid in output_ids_by_item[index]:
+            declared_at = first_call_index.get(tid)
+            if declared_at is None or declared_at >= index:
+                problems.append(
+                    f"input[{index}] function_call_output {tid!r} answered "
+                    f"before its declaring function_call"
                 )
 
     return problems
