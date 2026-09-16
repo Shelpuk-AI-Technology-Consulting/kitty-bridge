@@ -26,7 +26,10 @@ test, not as a comment.
 sockets to reach a real recorder/proxy pair, but they drive through the
 :class:`~harness.botocore_containment.BotocoreContainment` drive surface
 and assert on the harness's own observability, so the harness (§5.5's
-infra) is the boundary under test, not the product's own infra.
+infra) is the boundary under test, not the product's own infra. The
+``l2`` marker matches ``tests/test_curl_cffi_transport_contract.py``'s
+twin — §6.2.4 "dependency behaviour contracts" — and lands the file in
+the ``l1 or l2`` fast-gate selection of ``tests.yml``.
 
 **Autouse ambient-env isolation.** Each test strips the eight ambient proxy
 variables (``HTTP_PROXY``, ``HTTPS_PROXY``, ``NO_PROXY``, ``ALL_PROXY`` and
@@ -39,11 +42,17 @@ shared with the botocore containment slice.
 
 from __future__ import annotations
 
+import ssl
 from collections.abc import AsyncGenerator
 
 import pytest
 
-from harness.botocore_containment import BotocoreContainment
+from harness.botocore_containment import (
+    BotocoreContainment,
+)
+from harness.botocore_containment import (
+    _TlsBedrockRecordingUpstream as _TlsBotocoreRecorder,
+)
 from harness.connect_proxy import (
     AMBIENT_PROXY_ENV_VARS,
     HARNESS_UPSTREAM_HOST,
@@ -52,6 +61,9 @@ from harness.connect_proxy import (
 )
 from harness.containment import SealedNetwork
 from harness.contract import WireFormat
+from harness.recorder import RecordingUpstream
+
+pytestmark = pytest.mark.l2
 
 #: The proxy URL the contract probes point the bridge at. A dead address
 #: (loopback port 1) so an ambient proxy that wins precedence fails loudly
@@ -75,12 +87,26 @@ async def sealed_network(certs: CertFiles) -> AsyncGenerator[SealedNetwork, None
     Yields:
         The running harness.
     """
-    from harness.botocore_recorder import BedrockRecordingUpstream
+    def _factory(ctx: ssl.SSLContext) -> RecordingUpstream:
+        """Build the botocore recorder with the harness CA bound at construction.
+
+        Args:
+            ctx: The harness's TLS context — leaf cert carries
+                ``HARNESS_UPSTREAM_HOST`` in its SAN.
+
+        Returns:
+            A fully-constructed recorder whose ``start()`` applies the
+            captured context.
+        """
+        return _TlsBotocoreRecorder(
+            default_format=WireFormat.BEDROCK_CONVERSE,
+            ssl_context=ctx,
+        )
 
     net = SealedNetwork(
         WireFormat.BEDROCK_CONVERSE,
         certs=certs,
-        recorder_factory=BedrockRecordingUpstream,
+        recorder_factory=_factory,
     )
     await net.start()
     try:
