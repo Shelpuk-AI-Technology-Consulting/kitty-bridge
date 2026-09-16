@@ -26,9 +26,19 @@ gap 3 and the fix is specified in §6.2.3 (Start-path domination row).
   AST-level guard unchanged.
 - The helper walks `src/kitty/**.py` with `ast.parse` and excludes
   `bridge/server.py` (the class definition, line 1483).
-- Falsification control per `TEST_SUITE.md` §1.4: an in-test `textwrap.dedent` source string
-  constructs one undominated and one dominated `BridgeServer(`, asserting both classifications.
-  Without this, the test is structurally incapable of failing.
+- Falsification control per `TEST_SUITE.md` §1.4: an in-test `textwrap.dedent` source
+  string constructs four `BridgeServer(` shapes that exercise every pairwise
+  combination of {construction, guard} across {own scope, nested scope} — sibling-
+  undominated, sibling-dominated, outer-guard with inner-construction (a guard does not
+  cross into an inner function), and outer-construction with the only guard confined to
+  a nested helper scope (a guard confined to a nested def does not dominate the
+  enclosing scope). The fourth shape closes the "guard inside a nested def" blind spot
+  a plain `ast.walk(func)` would leave open.
+- Construction matcher matches `Name` and `Attribute.attr` spellings, so dotted
+  `mod.BridgeServer(...)` constructions are not invisible to the scan; a separate
+  test asserts no file aliases `BridgeServer` under a renamed binding, since a renamed
+  import (`from kitty.bridge.server import BridgeServer as BS`) cannot be detected
+  without import resolution — forcing a deliberate decision if one is added.
 - Self-guard for known-positives (matches the pattern of
   `TestEveryHttpClientIsAccountedFor::test_the_scan_actually_finds_something`): asserts the
   scan finds at least five sites across exactly the three expected files.

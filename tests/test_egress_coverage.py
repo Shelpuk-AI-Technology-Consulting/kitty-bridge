@@ -185,17 +185,21 @@ _BRIDGE_SERVER_DEFINITION_FILE = "bridge/server.py"
 
 
 def _called_name(node: ast.Call) -> str | None:
-    """Return the bare name of a called function, or ``None`` for dotted calls.
+    """Return the called function's short name, or ``None`` for other shapes.
 
     Args:
         node: The ``ast.Call`` node to inspect.
 
     Returns:
-        The identifier of a simple ``Name`` callee, e.g. ``"BridgeServer"``,
-        or ``None`` when the callee is an attribute or anything more complex.
+        The callee's identifier as a string — the ``Name.id`` for a bare call
+        such as ``BridgeServer(...)`` or the ``Attribute.attr`` for a dotted
+        call such as ``kitty.bridge.server.BridgeServer(...)``. ``None`` for
+        any other shape (subscripts, calls, etc.).
     """
     if isinstance(node.func, ast.Name):
         return node.func.id
+    if isinstance(node.func, ast.Attribute):
+        return node.func.attr
     return None
 
 
@@ -242,12 +246,47 @@ def _iter_bridge_constructions() -> list[tuple[str, int]]:
     return found
 
 
+#: Nested scopes whose bodies do not execute when the enclosing function
+#: runs — a guard call lexically inside one of these does not dominate a
+#: construction in the enclosing function. Comprehensions are deliberately
+#: excluded: their implicit scope executes eagerly at the line where they
+#: appear, so calls inside them DO dominate at that line.
+_DEFERRED_SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)
+
+
+def _calls_in_own_scope(scope: ast.AST):
+    """Yield ``Call`` nodes in ``scope``'s own body, skipping deferred subtrees.
+
+    Args:
+        scope: An ``ast`` node whose direct body is executed when the scope
+            runs (typically a function).
+
+    Yields:
+        Every ``ast.Call`` directly in the scope, plus any in eagerly-executed
+        subexpressions (comprehensions, conditional expressions, etc.). Calls
+        in nested ``def`` / ``class`` / ``lambda`` bodies are skipped entirely
+        — their bodies do not run when the enclosing scope runs, so they
+        cannot dominate anything here.
+    """
+    stack = list(ast.iter_child_nodes(scope))
+    while stack:
+        node = stack.pop()
+        if isinstance(node, ast.Call):
+            yield node
+        if isinstance(node, _DEFERRED_SCOPES):
+            continue
+        stack.extend(ast.iter_child_nodes(node))
+
+
 def _is_dominated(tree: ast.Module, target_lineno: int) -> bool:
     """Report whether a ``BridgeServer`` construction is egress-guarded.
 
-    A construction is dominated when its innermost enclosing function contains
-    a call to ``egress_block_reason`` on an earlier line. A construction at
-    module scope has no enclosing function and is never dominated.
+    A construction is dominated when its innermost enclosing function holds a
+    call to ``egress_block_reason`` on an earlier line, in the function's own
+    body (not in a nested helper scope, whose body is deferred and would not
+    have run by the time the construction executes unless explicitly invoked).
+    A construction at module scope has no enclosing function and is never
+    dominated.
 
     Args:
         tree: Parsed module containing the construction.
@@ -260,7 +299,7 @@ def _is_dominated(tree: ast.Module, target_lineno: int) -> bool:
     func = _enclosing_function(tree, target_lineno)
     if func is None:
         return False
-    for node in ast.walk(func):
+    for node in _calls_in_own_scope(func):
         if (
             isinstance(node, ast.Call)
             and _called_name(node) == "egress_block_reason"
@@ -318,11 +357,22 @@ class TestEveryStartPathIsGuarded:
         """Falsification control: the walker must reject an unguarded construction.
 
         Without this, a broken `_is_dominated` that always returns True would
-        pass every other test in this class while proving nothing. The third
-        case — a guard in an outer function with the construction in an
-        inner one — closes the "innermost vs outermost enclosing function"
-        blind spot; a walker that picks the outermost covering function would
-        accept the inner construction while still passing the first two cases.
+        pass every other test in this class while proving nothing. The four
+        shapes exercise every pairwise combination of {construction, guard}
+        across {own scope, nested scope}:
+
+        - **sibling-undominated** — guard absent (the degenerate case).
+        - **sibling-dominated** — guard precedes construction in the same scope.
+        - **outer-guard, inner-construction** — guards are not transitive into
+          inner scopes; this closes the "innermost vs outermost enclosing
+          function" blind spot. A walker that picked the outermost covering
+          function would accept the inner construction here.
+        - **outer-construction, inner-guard (never invoked)** — guards confined
+          to nested scopes do not dominate a construction in the enclosing
+          scope, because the nested helper is deferred and structurally
+          indistinguishable from an unguarded code path. A walker that used
+          plain ``ast.walk(func)`` over the entire enclosing function would
+          wrongly accept this shape.
         """
         source = textwrap.dedent(
             """\
@@ -341,25 +391,93 @@ class TestEveryStartPathIsGuarded:
                 def inner():
                     return BridgeServer()
                 return inner
+
+            def guard_confined_to_nested_def():
+                def _helper():
+                    egress_block_reason(None, None, None)
+                return BridgeServer()
             """
         )
         tree = ast.parse(source)
-        constructions = [
+        constructions = sorted(
+            (
+                node
+                for node in ast.walk(tree)
+                if isinstance(node, ast.Call) and _called_name(node) == "BridgeServer"
+            ),
+            key=lambda n: n.lineno,
+        )
+        assert len(constructions) == 4, "fixture must hold exactly four constructions"
+
+        assert not _is_dominated(tree, constructions[0].lineno), (
+            "sibling-undominated: a construction with no preceding guard must be reported"
+        )
+        assert _is_dominated(tree, constructions[1].lineno), (
+            "sibling-dominated: a guard in the same scope must be accepted"
+        )
+        assert not _is_dominated(tree, constructions[2].lineno), (
+            "outer-guard/inner-construction: a guard in the outer scope must not dominate "
+            "a construction in an inner function"
+        )
+        assert not _is_dominated(tree, constructions[3].lineno), (
+            "outer-construction/inner-guard: a guard confined to a nested helper scope "
+            "must not dominate a construction in the enclosing function"
+        )
+
+    def test_dotted_construction_spellings_are_matched(self):
+        """The ``Attribute`` branch is load-bearing: ``mod.BridgeServer(...)`` must be found.
+
+        Without the ``Attribute`` branch in ``_called_name``, a construction
+        written as ``kitty.bridge.server.BridgeServer(...)`` would be invisible
+        to the construction scan and the guard would silently miss it. The
+        scan against ``SRC`` is bound to the source tree, so this helper probe
+        exercises the matching logic directly against a synthetic dotted call.
+        """
+        source = textwrap.dedent(
+            """\
+            import kitty.bridge.server
+
+            def dotted_call():
+                return kitty.bridge.server.BridgeServer()
+            """
+        )
+        tree = ast.parse(source)
+        matched = [
             node
             for node in ast.walk(tree)
             if isinstance(node, ast.Call) and _called_name(node) == "BridgeServer"
         ]
-        assert len(constructions) == 3, "fixture must hold exactly three constructions"
+        assert len(matched) == 1, (
+            "a dotted `mod.BridgeServer(...)` call must be matched by the walker; the "
+            "Attribute branch of `_called_name` may have regressed"
+        )
 
-        assert not _is_dominated(tree, constructions[0].lineno), (
-            "an undominated sibling construction must be reported as unguarded"
-        )
-        assert _is_dominated(tree, constructions[1].lineno), (
-            "a guarded sibling construction must be accepted"
-        )
-        assert not _is_dominated(tree, constructions[2].lineno), (
-            "a construction inside an inner function must not be dominated by a "
-            "guard living in the outer function"
+    def test_no_aliased_bridge_server_imports(self):
+        """An aliased import would hide a construction from the Name/Attribute matcher.
+
+        The construction walker matches ``BridgeServer(...)`` as a ``Name`` or
+        the final ``Attribute`` of ``mod.BridgeServer(...)``. It cannot see a
+        construction under a renamed alias — ``from kitty.bridge.server
+        import BridgeServer as BS; BS(...)`` — without resolving imports. No
+        production file aliases it today; if any file starts to, the safety
+        net is to fail this test and force a deliberate decision (extend the
+        walker or rename the import back).
+        """
+        offenders: list[str] = []
+        for path in sorted(SRC.rglob("*.py")):
+            rel = path.relative_to(SRC).as_posix()
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            for node in ast.walk(tree):
+                if not isinstance(node, (ast.Import, ast.ImportFrom)):
+                    continue
+                for alias in node.names:
+                    if alias.name.endswith("BridgeServer") and alias.asname:
+                        offenders.append(
+                            f"{rel}:{node.lineno}: `{alias.name} as {alias.asname}`"
+                        )
+        assert not offenders, (
+            "BridgeServer is imported under an alias, so a construction call would be "
+            f"invisible to the AST walker: {offenders}"
         )
 
 
