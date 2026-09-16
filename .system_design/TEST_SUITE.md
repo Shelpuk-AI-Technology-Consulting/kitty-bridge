@@ -3642,10 +3642,11 @@ ContentBlock inside tool results — the schema is ``{json: <Document>}``, where
 any JSON value (object, array, scalar). The reader maps ``json`` to
 :class:`~harness.contract.Json`, which carries the value verbatim (object, array, or scalar);
 ``decode_arguments`` is the string-carrying-formats tool and would reject the object form on
-this wire. A non-Mapping ``input`` on a ``toolUse`` (Converse's natively-object form) residualises
-at its leaf — the part is *not* projected as ``{}``, per the §3.3.1b "an already-decoded object
-is rejected, not accepted" rule (the reader accepts the *object* form because Converse's wire
-requires it; the rule still rejects a value the wire could not carry).
+this wire. A non-Mapping ``input`` on a ``toolUse`` (Converse's natively-object form)
+residualises at its leaf AND the part is projected as ``ToolUse(arguments={})`` per §7.4.2
+rule 7 row 2 (the inherited rule §7.4.3 records three lines above); the empty-mapping
+default matches what §3.3.1b uses for absent arguments. ``decode_arguments`` still rejects a
+value the wire could not carry.
 
 **3. The reader consumes the URL.** :attr:`~harness.contract.CapturedRequest.path` carries
 ``/model/{modelId}/converse`` or ``/model/{modelId}/converse-stream`` — the model is a URI

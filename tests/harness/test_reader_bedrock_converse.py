@@ -1671,6 +1671,113 @@ class TestFailureShapes:
         with pytest.raises(c.UnreadableBodyError):
             r.BedrockConverseProjection().read_request(cap)
 
+    def test_a_wrong_typed_text_block_raises(self) -> None:
+        """§7.4.2 rule 7 row 1 — ``text`` is the value that IS the part.
+
+        ``Text("")`` fabricates an empty part that P5e and P8 inject
+        deliberately; raising here means the run fails visibly at the
+        right path. The Anthropic reader raises on the same shape.
+        """
+        cap = captured(
+            {"messages": [{"role": "user", "content": [{"text": 7}]}]}
+        )
+        with pytest.raises(c.UnreadableBodyError, match=r"\.text must be a string"):
+            r.BedrockConverseProjection().read_request(cap)
+
+    def test_a_wrong_typed_system_text_raises(self) -> None:
+        """Same as ``text`` in a message — the system-block text branch."""
+        cap = captured({"messages": [], "system": [{"text": 7}]})
+        with pytest.raises(c.UnreadableBodyError, match=r"\.text must be a string"):
+            r.BedrockConverseProjection().read_request(cap)
+
+    def test_a_wrong_typed_tool_result_text_raises(self) -> None:
+        """Same as ``text`` in a toolResult content block."""
+        cap = captured(
+            {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "toolResult": {
+                                    "toolUseId": "x",
+                                    "content": [{"text": 7}],
+                                }
+                            }
+                        ],
+                    }
+                ]
+            }
+        )
+        with pytest.raises(c.UnreadableBodyError, match=r"\.text must be a string"):
+            r.BedrockConverseProjection().read_request(cap)
+
+    def test_a_non_mapping_tool_result_content_block_raises(self) -> None:
+        """§7.4.2 rule 7 row 4 — the member itself is wrong.
+
+        ``toolResult.content[i]`` is declared a ContentBlock (object);
+        a scalar there is the member wrong.
+        """
+        cap = captured(
+            {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"toolResult": {"toolUseId": "x", "content": [7]}}
+                        ],
+                    }
+                ]
+            }
+        )
+        with pytest.raises(c.UnreadableBodyError, match=r"must be an object"):
+            r.BedrockConverseProjection().read_request(cap)
+
+    def test_a_wrong_typed_reasoning_text_raises(self) -> None:
+        """§7.4.2 rule 7 row 1 — a ``Thinking``'s text is the value that IS
+        the part. ``Thinking("")`` fabricates an empty thought that P5e
+        injects deliberately; raising here means the run fails visibly.
+        """
+        cap = captured(
+            {
+                "messages": [
+                    {
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "reasoningContent": {
+                                    "reasoningText": {"text": 7}
+                                }
+                            }
+                        ],
+                    }
+                ]
+            }
+        )
+        with pytest.raises(
+            c.UnreadableBodyError, match=r"reasoningText\.text must be a string"
+        ):
+            r.BedrockConverseProjection().read_request(cap)
+
+    def test_a_non_mapping_reasoning_text_raises(self) -> None:
+        """§7.4.2 rule 7 row 4 — ``reasoningText`` is declared an object."""
+        cap = captured(
+            {
+                "messages": [
+                    {
+                        "role": "assistant",
+                        "content": [
+                            {"reasoningContent": {"reasoningText": "not-an-object"}}
+                        ],
+                    }
+                ]
+            }
+        )
+        with pytest.raises(
+            c.UnreadableBodyError, match=r"reasoningText must be an object"
+        ):
+            r.BedrockConverseProjection().read_request(cap)
+
 
 # --------------------------------------------------------------------------
 # Totality over the whole surface

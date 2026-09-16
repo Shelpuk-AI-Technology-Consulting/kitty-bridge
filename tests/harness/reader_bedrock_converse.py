@@ -443,10 +443,16 @@ def _read_system(
 
         if "text" in block:
             text = block["text"]
-            if isinstance(text, str):
-                parts.append(c.Text(text))
-            else:
-                residual[f"{path}.text"] = text
+            if not isinstance(text, str):
+                # §7.4.2 rule 7 row 1: ``text`` is the value that IS the
+                # part — the grammar has no absent value to fall back to,
+                # and ``Text("")`` fabricates an empty part that P5e and
+                # P8 inject deliberately. The Anthropic reader raises on
+                # the same shape.
+                raise c.UnreadableBodyError(
+                    f"{path}.text must be a string, got {type(text).__name__}"
+                )
+            parts.append(c.Text(text))
             _residualise_block_extras(block, path, {"text"}, residual)
             continue
 
@@ -868,10 +874,16 @@ def _read_content_blocks(
 
         if "text" in block:
             text = block["text"]
-            if isinstance(text, str):
-                parts.append(c.Text(text))
-            else:
-                residual[f"{path}.text"] = text
+            if not isinstance(text, str):
+                # §7.4.2 rule 7 row 1: ``text`` is the value that IS the
+                # part — the grammar has no absent value to fall back to,
+                # and ``Text("")`` fabricates an empty part that P5e and
+                # P8 inject deliberately. The Anthropic reader raises on
+                # the same shape.
+                raise c.UnreadableBodyError(
+                    f"{path}.text must be a string, got {type(text).__name__}"
+                )
+            parts.append(c.Text(text))
             _residualise_block_extras(block, path, {"text"}, residual)
         elif "image" in block:
             image = block["image"]
@@ -1226,15 +1238,25 @@ def _read_tool_result(
     for index, block in enumerate(content_list):
         path = f"{prefix}.content[{index}]"
         if not isinstance(block, Mapping):
-            residual[path] = block
-            continue
+            # §7.4.2 rule 7 row 4: the member itself is wrong — the schema
+            # declares an object and the wire sent a scalar. Same shape
+            # `_read_content_blocks` raises on at the message-content level.
+            raise c.UnreadableBodyError(
+                f"{path} must be an object, got {type(block).__name__}"
+            )
 
         if "text" in block:
             text = block["text"]
-            if isinstance(text, str):
-                parts.append(c.Text(text))
-            else:
-                residual[f"{path}.text"] = text
+            if not isinstance(text, str):
+                # §7.4.2 rule 7 row 1: ``text`` is the value that IS the
+                # part — the grammar has no absent value to fall back to,
+                # and ``Text("")`` fabricates an empty part that P5e and
+                # P8 inject deliberately. The Anthropic reader raises on
+                # the same shape.
+                raise c.UnreadableBodyError(
+                    f"{path}.text must be a string, got {type(text).__name__}"
+                )
+            parts.append(c.Text(text))
             _residualise_block_extras(block, path, {"text"}, residual)
             continue
         if "json" in block:
@@ -1283,12 +1305,16 @@ def _read_reasoning_content(
     projects to :class:`~harness.contract.Opaque` with the canonical kind
     ``redacted_thinking`` reached via :func:`harness.contract.opaque_kind`.
 
-    §7.4 rule 7 ("no branch returns *no part*"): when a leaf is wrong,
-    the part is still produced — residualised at the leaf, the position
-    occupied. The KBR-251 conformance note in the design names this shape.
-
-    A non-Mapping ``raw`` raises :class:`~harness.contract.UnreadableBodyError`
-    per rule 7 row 2 (the member itself is wrong).
+    §7.4 rule 7 "no branch ever returns *no part*" applies here too:
+    a wrongly-typed ``reasoningText.text`` is the value that IS the part
+    (§7.4.2 rule 7 row 1 — a ``Thinking``'s text — ``Thinking("")``
+    fabricates an empty thought that P5e injects deliberately), so the
+    reader raises :class:`~harness.contract.UnreadableBodyError` rather
+    than project a fabricated empty thought; a non-Mapping
+    ``reasoningText`` is the member itself wrong (row 4 — a container
+    with no value to put in the position); and a non-Mapping ``raw``
+    is the same row 4 (the schema declares an object and the wire sent
+    a scalar).
 
     Args:
         raw: The ``reasoningContent`` value.
@@ -1308,19 +1334,23 @@ def _read_reasoning_content(
     if "reasoningText" in raw:
         text_block = raw["reasoningText"]
         if not isinstance(text_block, Mapping):
-            # §7.4 rule 7: residualise the leaf AND project the part.
-            # The default is an empty-text Thinking — the part occupies
-            # its position, the residual surfaces the breach.
-            residual[f"{prefix}.reasoningText"] = text_block
-            _residualise_block_extras(raw, prefix, {"reasoningText"}, residual)
-            return c.Thinking(text="", signature=None)
+            # §7.4.2 rule 7 row 4: the container the part's text comes from
+            # is not an object — no value to put in the position, and the
+            # position cannot be vacated.
+            raise c.UnreadableBodyError(
+                f"{prefix}.reasoningText must be an object, "
+                f"got {type(text_block).__name__}"
+            )
         text = text_block.get("text")
-        if isinstance(text, str):
-            text_value: str = text
-        else:
-            # §7.4 rule 7: residualise the leaf AND project the part.
-            residual[f"{prefix}.reasoningText.text"] = text
-            text_value = ""
+        if not isinstance(text, str):
+            # §7.4.2 rule 7 row 1: a Thinking's text is the value that IS
+            # the part — ``Thinking("")`` fabricates an empty thought,
+            # which P5e injects deliberately.
+            raise c.UnreadableBodyError(
+                f"{prefix}.reasoningText.text must be a string, "
+                f"got {type(text).__name__}"
+            )
+        text_value: str = text
         signature = text_block.get("signature")
         if signature is None or isinstance(signature, str):
             signature_value: str | None = signature
