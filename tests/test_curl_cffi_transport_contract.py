@@ -282,6 +282,11 @@ class TestAmbientHttpProxy:
       uppercase ``HTTP_PROXY`` for ``http://`` where Linux/macOS ignore
       it; the dedicated probe asserts the platform-divergent reading so
       a release that flips either direction on either platform turns red.
+
+    The scheme-agnostic catch-all (``ALL_PROXY``/``all_proxy``) is pinned
+    here too, at the bottom of the class — libcurl consults it for
+    ``http://`` requests exactly as it does for ``https://``, so the
+    https leg's pin does not cover this scheme.
     """
 
     @pytest.mark.asyncio
@@ -374,6 +379,51 @@ class TestAmbientHttpProxy:
         await _session().post(url, data={"a": "b"}, timeout=_TIMEOUT)
 
         assert (direct.hits, ambient_rec.hits) == (1, 0)
+
+    @pytest.mark.asyncio
+    async def test_the_ambient_all_proxy_is_read_when_the_mapping_is_absent(
+        self, target, ambient, monkeypatch
+    ) -> None:
+        """**The falsification control** for the catch-all on the ``http://`` leg.
+
+        Mirrors the lowercase-``http_proxy`` falsification at the top of
+        this class, with the scheme-agnostic variable: ``ALL_PROXY``
+        applies to every scheme, so a release that ignored it entirely
+        would leave every precedence probe in this file green while the
+        environment silently stopped steering anything. Without the
+        mapping, the catch-all is the only proxy source and the request
+        must land on the ambient listener.
+        """
+        url, direct = target
+        ambient_url, ambient_rec = ambient
+        monkeypatch.setenv("ALL_PROXY", ambient_url)
+
+        await _session().post(url, data={"a": "b"}, timeout=_TIMEOUT)
+
+        assert (ambient_rec.hits, direct.hits) == (1, 0)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("var", ["ALL_PROXY", "all_proxy"])
+    async def test_an_ambient_all_proxy_does_not_defeat_the_mapping(
+        self, target, proxy, ambient, monkeypatch, var: str
+    ) -> None:
+        """The mapping is the last word when the catch-all disagrees, on ``http://`` too.
+
+        ``ALL_PROXY``/``all_proxy`` are scheme-agnostic — libcurl consults
+        them for ``http://`` requests exactly as it does for ``https://``
+        — so the https leg's precedence pin (:class:`TestAmbientHttpsProxy`)
+        does not cover this scheme. Both casings pinned: a release that
+        honoured the catch-all for one scheme but not the other would be
+        a containment-direction change worth a red test.
+        """
+        url, direct = target
+        proxy_url, gateway = proxy
+        ambient_url, ambient_rec = ambient
+        monkeypatch.setenv(var, ambient_url)
+
+        await _session(proxies={"http": proxy_url, "https": proxy_url}).post(url, data={"a": "b"}, timeout=_TIMEOUT)
+
+        assert (gateway.hits, ambient_rec.hits, direct.hits) == (1, 0, 0)
 
 
 class TestAmbientHttpsProxy:
@@ -503,12 +553,11 @@ class TestAmbientHttpsProxy:
 
         Parametrized over every scheme-scoped ambient variable the
         precedence probes above also cover: a release that stops reading
-        one of them must turn red here, even though its precedence probe
-        would already turn red in isolation. Without this falsification,
-        a release that ignored ``https_proxy`` (for example) while still
-        honouring ``HTTPS_PROXY`` would stay green on the precedence
-        probe for ``HTTPS_PROXY`` — the parametrized probe's failure is
-        the only signal that *that* variable went missing.
+        one of them must turn red here. Without this falsification, a
+        release that ignored ``https_proxy`` (for example) would stay
+        green on its precedence probe — the mapping wins either way — so
+        the parametrized probe's failure is the only signal that *that*
+        variable went missing.
         """
         monkeypatch.setenv(var, _DEAD_PROXY_URL)
 

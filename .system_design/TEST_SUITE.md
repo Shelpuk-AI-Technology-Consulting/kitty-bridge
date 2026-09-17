@@ -1751,10 +1751,13 @@ configured mapping as well, and the same file now pins all four directions plus 
 `tests/test_curl_cffi_transport_contract.py::TestAmbientHttpProxy` and `::TestAmbientHttpsProxy`.
 One measured platform divergence is pinned per-platform: the curl_cffi Windows build consults
 uppercase `HTTP_PROXY` for `http://` where Linux/macOS honour libcurl's CGI exception and ignore it.
-**`botocore` is untouched and unmeasured.** §6.2.4's row expects `Config(proxies=)` to take precedence over the environment — but
-that is exactly the shape of expectation the `curl_cffi` row carried until KBR-161 measured it and
-found the reverse. Until someone probes it, the Bedrock path's behaviour under an ambient
-`NO_PROXY` is unknown, not known-good. **KBR-173.**
+**`botocore` is now measured and closed** ([KBR-64](https://shelpuk.atlassian.net/browse/KBR-64), PR #204):
+`Config(proxies=)` takes precedence over the environment — both directions verified (matching
+`NO_PROXY` does not defeat the mapping; a dead ambient `HTTPS_PROXY` is not consulted when the
+mapping is set), plus a falsification control that proves the contract probe can fail when
+broken. Pinned at `tests/harness/test_botocore_transport_contract.py`, mirroring the curl_cffi
+file's shape, and `botocore` is now a declared direct dependency (`pyproject.toml` ≥ 1.34)
+rather than an undeclared transitive of `boto3`.
 
 ---
 
@@ -2161,7 +2164,7 @@ a clear message rather than in production. The pin situation is worse than a gla
 |---|---|---|
 | `aiohttp` | `>=3.11,<3.14` | A session built with `proxy=`/`proxy_auth=` proxies, and a per-request `proxy=None` cannot escape it. `_build_client_session` sets the proxy at session level precisely so no call site can forget it, and `_session_for` depends on a request being unable to opt out. |
 | `curl_cffi` | `>=0.7` — **unbounded** | **Landed (KBR-161 + KBR-85): `tests/test_curl_cffi_transport_contract.py`.** `proxies=` is honoured; `data=dict` form-encodes (the token grants depend on it); an explicit `User-Agent` beats the one `impersonate=` injects (the whole of KBR-161's fix depends on it); the impersonation target still exists. On the environment, the measured answer is the *opposite* of what this row assumed: a matching ambient `NO_PROXY` **defeats** `proxies=`, and only `CURLOPT_NOPROXY` overrides it — both directions pinned, since a future release reversing either must turn red rather than silently change containment. **The same precedence question now extends to the scheme-scoped ambient variables (KBR-85)**: `proxies=` beats lowercase `http_proxy` for `http://` URLs (uppercase `HTTP_PROXY` is a documented libcurl CGI-security no-op on Linux/macOS, but the curl_cffi 0.16.3 Windows build honours it — both pinned per-platform so a release that flips either direction turns red) and beats `HTTPS_PROXY` / `https_proxy` / `ALL_PROXY` / `all_proxy` for `https://` URLs — the leg the OpenAI OAuth refresh rides, and the leg an ambient variable would defeat on. `HTTPS_PROXY` is therefore not a separate contract: the curl_cffi-side half of §5.5's ambient-proxy story is now closed for every scheme, on every supported platform. |
-| `botocore` | **not declared at all** — arrives transitively via `boto3>=1.34` | `Config(proxies=)` is honoured and takes precedence over the environment. It is botocore, not boto3, that implements this. An undeclared dependency owning a containment guarantee is worse than an unbounded one. |
+| `botocore` | `>=1.34` (declared directly in `pyproject.toml` so a `botocore` bump goes through the lockfile rather than `boto3`'s transitives — KBR-64 closed the original "arrives transitively" complaint) | `Config(proxies=)` is honoured and takes precedence over the environment (`NO_PROXY`, `HTTP(S)_PROXY`), the dead-address falsification proves the contract can fail when broken, and `Config(proxies=)` wins over a matching ambient `NO_PROXY` in both directions — all pinned at `tests/harness/test_botocore_transport_contract.py`. **Landed ([KBR-64](https://shelpuk.atlassian.net/browse/KBR-64), PR #204).** |
 | `keyring` | `>=23.0` | Backend resolution on each supported platform. |
 | CPython `ipaddress` | `requires-python = ">=3.10"` — **minor only, no patch floor** | Two consumers. **I3:** `should_bypass` reads `is_loopback or is_private or is_link_local`, so the disjunction's verdict on the IPv4-mapped form of each range must be pinned — see the masking note below. **Liveness:** `_connect_target` reads `IPv6Address.ipv4_mapped` (the mapped `IPv4Address` for `::ffff:x.x.x.x`, `None` otherwise) and `is_unspecified` for `0.0.0.0` and `::`. What must **not** be pinned is `IPv6Address("::ffff:0.0.0.0").is_unspecified`: CPython [gh-122792](https://github.com/python/cpython/issues/122792) changed it mid-branch, so its value is a property of the patch release, and the code is written not to read it. |
 
