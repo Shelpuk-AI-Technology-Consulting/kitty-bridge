@@ -269,12 +269,19 @@ class TestAmbientHttpProxy:
     that order, these probes turn red instead of letting a user's shell
     silently redirect provider traffic away from the configured gateway.
 
-    One libcurl quirk shapes these probes: for ``http://`` targets libcurl
-    reads **only the lowercase** ``http_proxy``; the uppercase
-    ``HTTP_PROXY`` is deliberately a no-op (a CGI-environment security
-    exception, honoured for every other scheme's variable). A probe that
-    set the uppercase name would pass vacuously, so the mapping test pins
-    the lowercase form and a dedicated probe pins the no-op itself.
+    Two libcurl quirks shape these probes:
+
+    * **Casing.** On Linux/macOS libcurl reads **only the lowercase**
+      ``http_proxy`` for ``http://`` targets; the uppercase ``HTTP_PROXY``
+      is a deliberate no-op (the documented CGI-environment security
+      exception). Uppercase names ARE honoured for every other scheme.
+      The mapping probe therefore pins the lowercase form, and a
+      dedicated per-platform probe pins the uppercase form's actual
+      reading.
+    * **Platform divergence.** curl_cffi 0.16.3's Windows build honours
+      uppercase ``HTTP_PROXY`` for ``http://`` where Linux/macOS ignore
+      it; the dedicated probe asserts the platform-divergent reading so
+      a release that flips either direction on either platform turns red.
     """
 
     @pytest.mark.asyncio
@@ -314,9 +321,7 @@ class TestAmbientHttpProxy:
         assert (gateway.hits, ambient_rec.hits, direct.hits) == (1, 0, 0)
 
     @pytest.mark.asyncio
-    async def test_uppercase_http_proxy_for_an_http_target(
-        self, target, proxy, ambient, monkeypatch
-    ) -> None:
+    async def test_uppercase_http_proxy_for_an_http_target(self, target, proxy, ambient, monkeypatch) -> None:
         """Uppercase ``HTTP_PROXY`` behaviour is platform-divergent.
 
         libcurl's documented CGI-environment exception ignores uppercase
@@ -347,24 +352,28 @@ class TestAmbientHttpProxy:
 
     @pytest.mark.asyncio
     async def test_an_ambient_https_proxy_is_not_consulted_for_an_http_target(
-        self, target, proxy, ambient, monkeypatch
+        self, target, ambient, monkeypatch
     ) -> None:
-        """``HTTPS_PROXY`` is scheme-scoped: it must not touch an ``http://`` request.
+        """``HTTPS_PROXY`` is scheme-scoped: it must not steer an ``http://`` request.
 
-        The OAuth leg is https-only, so this probe pins the scoping rule
-        rather than the https-direction precedence — that one lives in
-        :class:`TestAmbientHttpsProxy`. What would break kitty here is
-        curl_cffi treating the variable as a catch-all; this test says it
-        may not.
+        No ``proxies=`` mapping is set here — deliberately. With a mapping
+        in place, ``CURLOPT_PROXY`` wins over the environment and the
+        request reaches the configured gateway whether or not
+        ``HTTPS_PROXY`` was consulted for the ``http://`` scheme, so the
+        probe would pass vacuously. Without one, the ambient variable is
+        the only proxy source: if a release ever treated ``HTTPS_PROXY``
+        as a catch-all for every scheme, this request would land on the
+        ambient listener and the probe would go red. The OAuth leg is
+        https-only, so what this pins is the scoping rule itself; the
+        https-direction precedence lives in :class:`TestAmbientHttpsProxy`.
         """
         url, direct = target
-        proxy_url, gateway = proxy
         ambient_url, ambient_rec = ambient
         monkeypatch.setenv("HTTPS_PROXY", ambient_url)
 
-        await _session(proxies={"http": proxy_url, "https": proxy_url}).post(url, data={"a": "b"}, timeout=_TIMEOUT)
+        await _session().post(url, data={"a": "b"}, timeout=_TIMEOUT)
 
-        assert (gateway.hits, ambient_rec.hits, direct.hits) == (1, 0, 0)
+        assert (direct.hits, ambient_rec.hits) == (1, 0)
 
 
 class TestAmbientHttpsProxy:
@@ -482,22 +491,26 @@ class TestAmbientHttpsProxy:
         assert connect_proxy.attempts[0].authenticated is True
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("var", ["HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"])
     async def test_an_ambient_https_proxy_is_read_when_the_mapping_is_absent(
         self,
         connect_proxy: ConnectProxy,
         tls_target: TlsTarget,
         monkeypatch: pytest.MonkeyPatch,
+        var: str,
     ) -> None:
-        """**The falsification control**: curl_cffi does read ``HTTPS_PROXY``.
+        """**The falsification control**: curl_cffi reads the env var in question.
 
-        With no mapping, the ambient variable is the only proxy source —
-        the request must fail loudly against the dead address, proving
-        the variable was consulted. Without this test, the precedence
-        probes above could pass vacuously: curl_cffi ignoring
-        ``HTTPS_PROXY`` entirely would look identical to the mapping
-        winning.
+        Parametrized over every scheme-scoped ambient variable the
+        precedence probes above also cover: a release that stops reading
+        one of them must turn red here, even though its precedence probe
+        would already turn red in isolation. Without this falsification,
+        a release that ignored ``https_proxy`` (for example) while still
+        honouring ``HTTPS_PROXY`` would stay green on the precedence
+        probe for ``HTTPS_PROXY`` — the parametrized probe's failure is
+        the only signal that *that* variable went missing.
         """
-        monkeypatch.setenv("HTTPS_PROXY", _DEAD_PROXY_URL)
+        monkeypatch.setenv(var, _DEAD_PROXY_URL)
 
         with pytest.raises(RequestsError) as exc_info:
             await _session().post(self._https_target(tls_target), data={"a": "b"}, timeout=_TIMEOUT)
