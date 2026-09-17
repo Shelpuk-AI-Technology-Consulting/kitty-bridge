@@ -261,12 +261,12 @@ def _path(protocol: str, model: str, streaming: bool) -> str:
         ("chat_completions", False),
         ("chat_completions", True),
         ("messages", False),
-        # `messages-True` exercises the Messages-ingress streaming handler's
-        # own empty-response retry ladder.  That path is pre-existing bridge
-        # behaviour, not KBR-137's responsibility: the converter emits well-formed
-        # CC chunks (asserted at L1) but the handler's translator does not yet
-        # treat the CC chunks as a non-empty stream.  Follow-up work; for now
-        # the non-streaming Messages case pins the translator contract.
+        # `messages-True` (KBR-274): the Messages-ingress streaming handler now
+        # feeds its upstream `data:` lines through the same
+        # `self._stream_converter_for(cc_request)` per-attempt allocation
+        # `_stream_responses` has used since KBR-232, so a Responses SSE stream
+        # crosses as CC chunks and the empty-response ladder no longer fires.
+        ("messages", True),
         ("responses", False),
         ("responses", True),
         ("gemini", False),

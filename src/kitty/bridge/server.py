@@ -5432,6 +5432,14 @@ class BridgeServer:
                                     }
                                 return _make_error_response(exhaustion_error, status=502)
 
+                            # KBR-274: a wire the per-byte helper cannot represent (today
+                            # the OpenCode Go Responses route) has each SSE line converted
+                            # to a Chat Completions chunk first, mirroring
+                            # `_stream_responses`'s KBR-232 gate.  Allocated after the
+                            # Messages-wire dispatch so the passthrough branch never
+                            # creates a converter it cannot feed; re-created per attempt
+                            # so a failover onto another wire re-evaluates the gate.
+                            stream_converter = self._stream_converter_for(cc_request)
                             line_buffer = bytearray()  # F23+F24: byte-based buffering
                             done = False
                             stream_error = False
@@ -5461,57 +5469,52 @@ class BridgeServer:
                                     if not line:
                                         continue
                                     if line.startswith("data: "):
-                                        data_str = line[6:]
-                                        if data_str.strip() == "[DONE]":
-                                            done = True
-                                            break
-                                        try:
-                                            chunk = json.loads(data_str)
-                                        except json.JSONDecodeError:
-                                            logger.warning("Failed to parse upstream SSE data: %s", data_str[:200])
-                                            continue
-                                        # In balancing mode: detect in-stream errors and failover
-                                        if self._is_upstream_stream_error(chunk):
-                                            logger.warning(
-                                                "Upstream sent error in stream chunk: %s", json.dumps(chunk)[:500]
-                                            )
-                                            if self._backends and self._current_backend_idx >= 0:
-                                                cooldown = self._get_stream_error_cooldown(self._current_backend_idx)
-                                                self._mark_backend_unhealthy(
-                                                    self._current_backend_idx, cooldown=cooldown
+                                        # KBR-274: on a Responses-wire upstream the line is a
+                                        # Responses event; the converter's output lines re-enter
+                                        # the same body below and are never re-fed to it.
+                                        upstream_lines = (
+                                            [
+                                                converted.decode("utf-8").removesuffix("\n\n")
+                                                for converted in stream_converter.feed(f"{line}\n\n".encode())
+                                            ]
+                                            if stream_converter is not None
+                                            else [line]
+                                        )
+                                        for line in upstream_lines:
+                                            data_str = line[6:]
+                                            if data_str.strip() == "[DONE]":
+                                                done = True
+                                                break
+                                            try:
+                                                chunk = json.loads(data_str)
+                                            except json.JSONDecodeError:
+                                                logger.warning(
+                                                    "Failed to parse upstream SSE data: %s", data_str[:200]
+                                                )
+                                                continue
+                                            # In balancing mode: detect in-stream errors and failover
+                                            if self._is_upstream_stream_error(chunk):
+                                                logger.warning(
+                                                    "Upstream sent error in stream chunk: %s",
+                                                    json.dumps(chunk)[:500],
+                                                )
+                                                if self._backends and self._current_backend_idx >= 0:
+                                                    cooldown = self._get_stream_error_cooldown(
+                                                        self._current_backend_idx
                                                     )
-                                                if self._any_healthy_backend():
-                                                    stream_error = True
-                                                    done = True
-                                                    break
-                                            # No healthy backends — skip the error chunk; let terminal error handle it
-                                            stream_error = True
-                                            done = True
-                                            break
-                                        events = translator.translate_stream_chunk(message_id, model, chunk)
-                                        # Buffer finish events to detect empty responses before writing
-                                        if self._chunk_has_finish_reason(chunk):
-                                            last_usage = chunk.get("usage")
-                                            finish_events.extend(events)
-                                        else:
-                                            for event in events:
-                                                s = await _ensure_prepared()
-                                                encoded = event.encode()
-                                                await _write_client(s, encoded)
-                                                auditor.feed(encoded)
-                                                events_emitted = True
-
-                            logger.debug("Upstream stream ended. chunks=%d done=%s", chunk_count, done)
-
-                            # Flush remaining buffer (last chunk without trailing \n)
-                            if not done and line_buffer:
-                                line = line_buffer.decode("utf-8", errors="replace").strip()
-                                if line.startswith("data: "):
-                                    data_str = line[6:]
-                                    if data_str.strip() != "[DONE]":
-                                        try:
-                                            chunk = json.loads(data_str)
+                                                    self._mark_backend_unhealthy(
+                                                        self._current_backend_idx, cooldown=cooldown
+                                                        )
+                                                    if self._any_healthy_backend():
+                                                        stream_error = True
+                                                        done = True
+                                                        break
+                                                # No healthy backends — let the terminal error handle it
+                                                stream_error = True
+                                                done = True
+                                                break
                                             events = translator.translate_stream_chunk(message_id, model, chunk)
+                                            # Buffer finish events to detect empty responses before writing
                                             if self._chunk_has_finish_reason(chunk):
                                                 last_usage = chunk.get("usage")
                                                 finish_events.extend(events)
@@ -5521,12 +5524,50 @@ class BridgeServer:
                                                     encoded = event.encode()
                                                     await _write_client(s, encoded)
                                                     auditor.feed(encoded)
-                                                    # A flushed event is as client-visible as a
-                                                    # loop-written one: the emptiness gate and the
-                                                    # FI-8.3 truncation guard both read this flag.
                                                     events_emitted = True
-                                        except json.JSONDecodeError:
-                                            logger.warning("Failed to parse flushed SSE data: %s", data_str[:200])
+                                        if done:
+                                            break
+
+                            logger.debug("Upstream stream ended. chunks=%d done=%s", chunk_count, done)
+
+                            # Flush remaining buffer (last chunk without trailing \n)
+                            if not done and line_buffer:
+                                line = line_buffer.decode("utf-8", errors="replace").strip()
+                                if line.startswith("data: "):
+                                    # KBR-274: same conversion as the main loop above.
+                                    upstream_lines = (
+                                        [
+                                            converted.decode("utf-8").removesuffix("\n\n")
+                                            for converted in stream_converter.feed(f"{line}\n\n".encode())
+                                        ]
+                                        if stream_converter is not None
+                                        else [line]
+                                    )
+                                    for line in upstream_lines:
+                                        data_str = line[6:]
+                                        if data_str.strip() != "[DONE]":
+                                            try:
+                                                chunk = json.loads(data_str)
+                                                events = translator.translate_stream_chunk(
+                                                    message_id, model, chunk
+                                                )
+                                                if self._chunk_has_finish_reason(chunk):
+                                                    last_usage = chunk.get("usage")
+                                                    finish_events.extend(events)
+                                                else:
+                                                    for event in events:
+                                                        s = await _ensure_prepared()
+                                                        encoded = event.encode()
+                                                        await _write_client(s, encoded)
+                                                        auditor.feed(encoded)
+                                                        # A flushed event is as client-visible as a
+                                                        # loop-written one: the emptiness gate and the
+                                                        # FI-8.3 truncation guard both read this flag.
+                                                        events_emitted = True
+                                            except json.JSONDecodeError:
+                                                logger.warning(
+                                                    "Failed to parse flushed SSE data: %s", data_str[:200]
+                                                )
 
                             # Handle in-stream error failover
                             # FI-8.3: clean upstream truncation (done=False, no error chunk)
