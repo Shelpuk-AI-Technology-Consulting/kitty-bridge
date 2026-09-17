@@ -47,6 +47,13 @@ class OllamaAdapter(ProviderAdapter):
     def build_base_url(self, provider_config: dict) -> str:
         """Build the base URL, allowing override via provider_config.
 
+        A configured ``base_url`` is normalised through
+        :meth:`ProviderAdapter._strip_endpoint_suffix`, so a user who pastes
+        the full documented endpoint (``http://host:11434/v1/chat/completions``)
+        composes to that endpoint rather than to a doubled path (KBR-134,
+        KBR-157).  Unlike ``custom_openai``, no scheme check is applied: a
+        loopback ``http://`` URL is the ordinary case for this provider.
+
         Args:
             provider_config: May contain ``base_url`` to override default.
 
@@ -54,7 +61,11 @@ class OllamaAdapter(ProviderAdapter):
             Base URL string.
         """
         url = (provider_config or {}).get("base_url")
-        return str(url) if url else self.default_base_url
+        if not url:
+            return self.default_base_url
+        # KBR-157: a pasted full endpoint would otherwise be composed into a
+        # doubled path and rejected upstream as a missing model.
+        return self._strip_endpoint_suffix(str(url), self.upstream_path)
 
     def build_upstream_headers(self, api_key: str) -> dict[str, str]:
         """Build headers for Ollama.

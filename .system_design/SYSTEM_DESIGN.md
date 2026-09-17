@@ -334,6 +334,7 @@ the EOF-without-finish fallback: `finalize_interrupted_stream` /
 | X1 | A shared per-translator counter allocated at open, not a slot derived from upstream numbers | Deriving the Responses `output_index` from CC's tool-call index (the pre-fix behaviour) collides the moment two item kinds are live: text and reasoning were pinned to 0 and the first call took CC's 0, so any pair of the three item kinds claimed one slot and two `output_item.done` events closed it. The downstream slot positions *our* items; anchoring it to an upstream authorial number leaves it undefined whenever an item opens outside the anchor's frame. Mirrors KBR-226's Messages fix — one mechanism per wire, not one per defect. |
 | X2 | `output_index` added to the arguments events rather than left omitted | The vendor grammar requires the field on both events (verified against the generated SDK types). A client positioning by `output_index` — the client class the defect is about — needs it there as much as on `output_item.*`. Additive: existing clients tolerate the extra field. |
 | X3 | `response.completed`'s `output` sorted by slot, not by emission order | Opening order and slot order diverge once text can open before reasoning (or a call before text). The completed array is the client's canonical final view; positional clients read it by position. Two lines; removes the last positional surprise. |
+| X4 | On the response direction, carry the upstream CC `tool_calls[].id` to the emitted `functionCall` part; do **not** synthesise | Mirror of KBR-195 (request-side): the response direction used to read only `tc["function"]["name"]` and `tc["function"]["arguments"]`, dropping the upstream id by omission. KBR-195's request-side `or`-echo only works if the client received an id to echo back, which the response direction never gave it. Rule is **emit when present, omit when absent** (Gemini `FunctionCall.id` is optional per `v1beta`); synthesis stays on the request side, where Chat Completions requires an id. **Presence tests differ on purpose and the asymmetry is load-bearing:** the response side uses `is not None` (the contract is `Optional[str]` — emit the wire value verbatim), the request side uses `or` (an empty string is no usable id, synthesise). Emitting `id: ""` verbatim would round-trip into the request-side `or` and synthesise, mis-pairing the loop this rule closes. The streaming open branch is **name-keyed** per §4.2 — the id riding the opening (name-bearing) delta is stored; an id on a later delta is deliberately ignored. The Gemini reader already reads `functionCall.id` faithfully (KBR-36), so the fix is translator-only and no reader change is owed. The register row that would claim `reply.parts[*].id` waits on T-D10's response-direction Reply projection ([KBR-59](https://shelpuk.atlassian.net/browse/KBR-59), To Do) — the row to add there is the response-direction mirror of M18/M19, conditional on the upstream chunk carrying an id; a `NOT_PROJECTABLE` row is not an option (KBR-195 §8: the reader projects `ToolUse.id` on the request side, and the response side is symmetric). |
 
 ### 4.4 Verification
 
@@ -341,6 +342,10 @@ the EOF-without-finish fallback: `finalize_interrupted_stream` /
   `tests/bridge/test_responses_translator.py`): distinct increasing slots, interleaved
   argument routing by per-call meta, one close per slot at its own slot, a later item at
   the next free slot, EOF fallback, reset.
+- **L1** (`tests/test_gemini_translator.py::TestTranslateResponseToolCallIdEcho`,
+  KBR-257): sync present/absent echo and the streaming carry from the opening delta
+  to the finish emit. Two of three tests red at the base revision before the fix
+  (KBR-221 plan §16 discipline); the absent case is the regression guard.
 - **Server-level** (`tests/bridge/test_parallel_tool_use_stream.py`,
   `tests/bridge/test_responses_output_index_stream.py`): the client-visible byte stream
   walked end to end against the decided shape.
@@ -406,10 +411,31 @@ other non-Messages wire behaves byte-identically to the pre-KBR-232 code.
   Responses stream enters the empty-response ladder through the existing
   `translator.response_was_empty` branch, exactly as a content-less CC stream does
   (KBR-274).
-- On `/v1/chat/completions` a converted stream's role chunk sets `has_content`, so a
-  content-less completion reaches the client as a well-formed skeleton rather than triggering
-  the empty-response ladder — as before KBR-232. A CC-side preamble hold would be the
-  KBR-155 counterpart and is not built.
+- **KBR-248 closed the converted-route gap on `/v1/chat/completions`.** A converted
+  stream's role chunk used to set `has_content`, so a content-less completion reached the
+  client as a well-formed skeleton and the empty-response ladder could not fire there — as
+  before KBR-232. The handler now runs a converter-gated pre-emission hold (the CC-side
+  KBR-155 counterpart): non-content converted lines (the role chunk, the finish chunk,
+  ``[DONE]``) are withheld until the first content-bearing delta (non-empty `content`,
+  `tool_calls`, or `reasoning_content`), so an empty attempt stays pre-emission and the
+  existing ladder fires. The hold is gated on `stream_converter is not None` — the **hold** only applies to
+  the converted route; raw Chat Completions-wire upstreams still write through
+  every line, because the ticket's scope is the converted route and widening the
+  hold to every plain-POST CC provider is a product decision KBR-248 does not
+  authorise. The empty-response ladder and its D4 exhaustion terminal, by
+  contrast, are route-wide: a raw Chat Completions ladder-exhausting stream
+  (e.g. repeated empty 200 bodies) ends in the same `type: "empty_response"`
+  D4 event, conforming to Q14 bullet 4. **Known asymmetry, deliberate:** the
+  streaming hold treats a non-empty `reasoning_content` delta as content
+  (thinking-only replies succeed immediately), while the route's non-streaming
+  empty-detection (`_is_empty_cc_response`) does not read `reasoning_content`
+  and would retry a reasoning-only reply. Aligning the non-streaming detector
+  is a separate ticket; the asymmetry is pinned by
+  `test_a_reasoning_only_prefix_releases_the_hold_and_is_not_retried`.
+  The hold is byte-capped at `PreambleHold.MAX_HELD_BYTES` (D5 fail-open). An exhausted
+  ladder emits the route's D4 terminal error (`type: "empty_response"` + ``[DONE]``),
+  matching Q14 bullet 4 and the KBR-235/KBR-250 siblings; the backend is not marked
+  healthy on that path.
 - In-stream error failover on `/v1/chat/completions` needs a backend pool; pool-less the
   error surfaces to the client (which is still the fix: the per-event translator used to
   swallow the error and deliver a truncated success).

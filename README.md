@@ -333,14 +333,16 @@ Point your tool at `http://localhost:<port>` and it just works.
 
 **Available endpoints:**
 
-| Endpoint                          | Protocol           | Used by         |
-|-----------------------------------|--------------------|-----------------|
-| `POST /v1/chat/completions`       | Chat Completions   | General purpose |
-| `POST /v1/messages`               | Anthropic Messages | Claude Code     |
-| `POST /v1/responses`              | OpenAI Responses   | Codex           |
-| `POST /v1/gemini/generateContent` | Gemini             | Gemini CLI      |
-| `GET /healthz`                    | Health check       | Monitoring      |
-| `GET /stats`                      | Session record     | Attribution     |
+| Endpoint                                               | Protocol           | Used by          |
+|--------------------------------------------------------|--------------------|------------------|
+| `POST /v1/chat/completions`                            | Chat Completions   | General purpose  |
+| `POST /v1/messages`                                    | Anthropic Messages | Claude Code      |
+| `POST /v1/responses`                                   | OpenAI Responses   | Codex            |
+| `POST /v1beta/models/{model:.*}:generateContent`       | Gemini             | Gemini CLI       |
+| `POST /v1beta/models/{model:.*}:streamGenerateContent` | Gemini             | Gemini CLI       |
+| `GET /v1/models`                                       | OpenAI Models      | Tool integration |
+| `GET /healthz`                                         | Health check       | Monitoring       |
+| `GET /stats`                                           | Session record     | Attribution      |
 
 **Background bridges:** `kitty bridge start`, `stop`, `restart`, and `status` manage a bridge running in the background,
 tracked in `bridge_state.json`.
@@ -463,9 +465,10 @@ is always `0` because there is nowhere to fail over to — check `mode` first.
 
 **Generic:**
 
-| Provider                     | Type ID         | Notes                                                          |
-|------------------------------|-----------------|----------------------------------------------------------------|
-| **Custom OpenAI-Compatible** | `custom_openai` | Any service with a `/v1/chat/completions` endpoint — see below |
+| Provider                        | Type ID            | Notes                                                          |
+|---------------------------------|--------------------|----------------------------------------------------------------|
+| **Custom OpenAI-Compatible**    | `custom_openai`    | Any service with a `/v1/chat/completions` endpoint — see below |
+| **Custom Anthropic-Compatible** | `custom_anthropic` | Any service with an `/v1/messages` endpoint — see below        |
 
 ### Custom OpenAI-Compatible Provider
 
@@ -510,6 +513,18 @@ $ kitty claude
 | LM Studio    | `http://localhost:1234/v1`              |
 
 Both HTTPS and HTTP (local) endpoints are supported.
+
+### Custom Anthropic-Compatible Provider
+
+Use the `custom_anthropic` provider to connect to **any** service that exposes an Anthropic-compatible Messages API.
+This works with self-hosted front-ends for Anthropic-format models and any other service that accepts
+`POST /v1/messages` with `x-api-key` auth and SSE streaming.
+
+**The base URL ends at the API root** — Kitty appends `/v1/messages` itself. Give it
+`https://api.anthropic.com`, not `https://api.anthropic.com/v1/messages`.
+
+Pasting the full endpoint works anyway: Kitty drops the duplicate `/v1/messages` instead of failing.
+That holds for an endpoint carrying a query string too, and the query is kept and sent with every request.
 
 ## Commands
 
@@ -716,19 +731,28 @@ Applies to providers kitty talks to in Anthropic's own format: `anthropic`, `cus
 `minimax_token`, and `opencode_go` for the models it serves on Anthropic's format — and to every provider kitty
 converts to Chat Completions. On the Anthropic-format side kitty holds back the start of each streamed reply until it
 carries text or a tool call, so a reply with nothing in it — or only thinking, up to 10 MiB of it — can be retried
-before your agent sees it; on the translated side a streamed reply that carries no content and no completion marker
-takes the same ladder. This error means every attempt kitty made came back empty. Nothing reached the agent, so simply
-resend; if it persists, the provider or model is misbehaving.
+before your agent sees it; on the translated side — Chat Completions, Responses, and Gemini clients over a
+Messages-wire upstream — a streamed reply that carries no text, tool call, or reasoning takes the same ladder —
+whether or not it ends with a completion marker — with the same release rule on the first content-bearing delta. One asymmetry to note: on the
+Chat Completions route, that reasoning-counts-as-content release is streamed-only — a non-streaming Chat Completions
+request with a reasoning-only reply is still treated as empty and retried. The exhaustion terminal itself is
+route-wide: a plain-POST Chat Completions-wire provider (OpenAI, OpenRouter, DeepSeek, or any other Chat Completions
+backend) whose every attempt comes back content-less lands on the same `type: "empty_response"` D4 event, because
+the empty ladder is what the terminal serves. This error means every attempt kitty made came back empty. Nothing
+reached the agent, so simply resend; if it persists, the provider or model is misbehaving.
 
 The response is a `502` carrying `"reason": "empty_response"` for clients that expect JSON
 (`/v1/messages` non-stream and streamed). For streaming clients that expect SSE
-(`/v1/responses` to Codex CLI; `/v1beta/...:streamGenerateContent` to Gemini CLI) the
+(`/v1/responses` to Codex CLI; `/v1beta/...:streamGenerateContent` to Gemini CLI;
+`/v1/chat/completions` to Kilo, OpenCode, and any Chat Completions client) the
 exhaustion is delivered inside the open stream as an SSE error event carrying the
 route-specific D4 discriminator — `code: "empty_response"` on the Responses wire,
 `reason: "empty_response"` inside the nested `error` object on the Gemini wire
 (where the integer `code: 502` matches the messages branch's exhaustion status,
-mirroring its timeout/exception `code: 504`/`code: 500` precedent) —
-followed by the stream's normal lifecycle closer. The HTTP status stays
+mirroring its timeout/exception `code: 504`/`code: 500` precedent),
+`type: "empty_response"` inside the nested `error` object on the Chat Completions wire —
+followed by the stream's normal lifecycle closer (`response.completed(incomplete)` on the Responses wire,
+`write_eof` on the Gemini wire, `[DONE]` on the Chat Completions wire). The HTTP status stays
 `200 text/event-stream` throughout; the discriminator inside the payload marks the
 stream as an exhausted-empty one, distinguishable from any other terminal event.
 

@@ -460,9 +460,9 @@ class TestTheWholeSuiteIsCoherent:
             # KBR-76 (T-G1). A §6.2.3 docs-vs-code guard with four arms: the
             # README's endpoint table, `X-Kitty-*` attribution-header table,
             # `KITTY_*` env-var register and logging-flag table, each held
-            # against the code artefact that implements it. One exempt
-            # assertion (`t-g1-endpoint-table`, KBR-9) lands red until the
-            # README correction closes that defect.
+            # against the code artefact that implements it. All four gate
+            # normally; the KBR-9 endpoint-table exemption was withdrawn
+            # together with the README correction on 2026-09-17.
             "tests/test_readme_table_guards.py",
             # KBR-88 (T-H1). A §6.2.3 source-vs-source contract: the mutmut
             # scope registry (the machine-readable form of TEST_SUITE.md
@@ -502,6 +502,12 @@ class TestTheWholeSuiteIsCoherent:
             # future handler that logs a credential-bearing URL or header
             # dict without the redaction helper fails in CI.
             "tests/test_egress_log_redaction.py",
+            # KBR-64 (T-G11). A §6.2.4 dependency behaviour contract, the
+            # botocore twin of `test_curl_cffi_transport_contract.py`: it
+            # asserts what botocore does with `Config(proxies=)` against
+            # the ambient proxy environment -- an artifact upgraded
+            # separately and by someone else entirely.
+            "tests/harness/test_botocore_transport_contract.py",
         }
 
         actual = {
