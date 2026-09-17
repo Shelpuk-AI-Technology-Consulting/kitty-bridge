@@ -371,7 +371,16 @@ def main(steps_dir: Path = _STEPS_DIR) -> int:
         for line in errors:
             print(line, file=sys.stderr)
         return 1
-    write_index(entries, steps_dir.parent / "INDEX.md")
+    # The write side of the same named-error contract the read side
+    # honours: an unwritable index path — a read-only filesystem, a
+    # stray ``INDEX.md/`` directory in place of the file, a Windows
+    # ACL — must surface as a named error rather than a traceback.
+    index_path = steps_dir.parent / "INDEX.md"
+    try:
+        write_index(entries, index_path)
+    except OSError as exc:
+        print(f"{index_path}: cannot write index: {exc}", file=sys.stderr)
+        return 1
     return 0
 
 

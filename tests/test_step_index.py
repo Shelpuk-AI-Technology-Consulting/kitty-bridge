@@ -461,3 +461,17 @@ def test_empty_steps_directory_fails_loud(tmp_path: Path) -> None:
     index_path = tmp_path / "INDEX.md"
     assert rsi.main(_steps_dir(tmp_path)) == 1
     assert not index_path.exists()
+
+
+def test_unwritable_index_path_surfaces_named_error(tmp_path: Path) -> None:
+    """An unwritable index path surfaces as a named error, not a traceback.
+
+    A stray ``INDEX.md/`` directory in place of the file — the same
+    failure shape the read-side ``OSError`` catch addresses — must
+    surface on stderr as a named error with exit 1, not as a Python
+    traceback. Symmetric to ``test_directory_in_place_of_step_file_surfaces_named_error``.
+    """
+    steps = _steps_dir(tmp_path)
+    _step(tmp_path, "a", id_="alpha_step")
+    (tmp_path / "INDEX.md").mkdir()
+    assert rsi.main(steps) == 1
