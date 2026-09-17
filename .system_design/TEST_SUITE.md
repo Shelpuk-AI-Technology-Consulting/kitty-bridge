@@ -2176,7 +2176,8 @@ The ambient-environment cases are not hypothetical: `kitty.egress`'s docstring r
 divergence, and a user with `HTTP_PROXY` set in their shell exercises it on two of three stacks.
 
 **The standard library is a dependency, and it is declared to the wrong precision.** Three of the
-other rows name a version range; `botocore` names none at all. The interpreter is a third shape —
+other rows name a version range, and `botocore` now does too (`>=1.34`, declared directly since
+KBR-64 — see the row above). The interpreter is the remaining shape —
 declared, but only to the *minor*, so `requires-python` admits both sides of a behaviour change that
 moved at a patch boundary. That is how KBR-146 reached `main` green: `ipaddress` answered one way on
 the runner and the other way on a stock Ubuntu 24.04 developer box, and nothing in the tree asserted

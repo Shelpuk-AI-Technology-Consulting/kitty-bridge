@@ -605,10 +605,10 @@ class TestAmbientHttpsProxy:
         """``HTTP_PROXY`` / ``http_proxy`` are scheme-scoped: must not steer an ``https://`` request.
 
         The mirror of
-        :meth:`TestAmbientHttpProxy.test_an_ambient_https_proxy_is_not_consulted_for_an_https_target`-
-        shaped probes — without it, the scoping matrix is pinned in only
-        one of its two directions, and a release that started consulting
-        the ``http`` variable for ``https://`` requests would leave every
+        :meth:`TestAmbientHttpProxy.test_an_ambient_https_proxy_is_not_consulted_for_an_http_target`
+        — without it, the scoping matrix is pinned in only one of its
+        two directions, and a release that started consulting the
+        ``http`` variable for ``https://`` requests would leave every
         other probe green while §5.5's closure claim no longer held.
         The ambient variable is set to a dead address with no
         ``proxies=`` mapping in place: if the release ever consulted the
