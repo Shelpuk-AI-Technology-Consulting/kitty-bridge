@@ -338,14 +338,19 @@ def test_the_module_finds_known_positives() -> None:
     entirely. The count is a floor, not a spec — adding cases raises it,
     deleting them breaches it. The floor is the current count (7), so a
     silent deletion of any one case is a red, not a slow rot.
+
+    The module's own namespace is walked via ``sys.modules`` rather than
+    re-imported through ``import tests.…``: ``tests/`` is a pytest rootdir,
+    not a package (no ``__init__.py``), so that import only resolves when
+    the repository root is on ``sys.path`` — true for a ``python -m pytest``
+    run, false for the bare ``pytest`` the CI workflow invokes.
     """
     import inspect
-
-    import tests.test_aiohttp_transport_contract as mod
+    import sys
 
     behavioural: list[str] = []
-    for _class_name, cls in inspect.getmembers(mod, inspect.isclass):
-        if cls.__module__ != mod.__name__:
+    for cls in vars(sys.modules[__name__]).values():
+        if not inspect.isclass(cls) or cls.__module__ != __name__:
             continue
         behavioural.extend(
             name for name, obj in inspect.getmembers(cls, inspect.iscoroutinefunction) if name.startswith("test_")
