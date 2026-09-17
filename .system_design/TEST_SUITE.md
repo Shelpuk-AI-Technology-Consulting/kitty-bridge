@@ -2009,13 +2009,19 @@ answers 200 — not the permissive "neither 400 nor 500"). Pre-flight:
 `contents: "x"` 500 on the four other POST routes and asserts they each answer 400
 after the per-route ingress normalisers in `src/kitty/bridge/server.py`
 (`_normalize_messages_request`, `_normalize_chat_completions_request`,
-`_normalize_gemini_request`) are wired. The `_normalize_messages_request`
-normaliser additionally refuses a missing ``model`` — the translator subscripts
-`messages_request["model"]` unguarded at `src/kitty/bridge/messages/translator.py:364`,
-so a missing field was a 500 before this task. **No silent exemption** — every
-guard in this list gates normally. **Stream is bounded to ``false`` in the schema**
-because the recording upstream replies non-streaming, and ``stream: true`` bodies
-would spin the bridge's empty-response retry ladder; streaming is exercised by L3
+`_normalize_gemini_request`) are wired. `_normalize_messages_request` validates
+``messages`` (list of objects), ``tools`` (list of dicts whose ``name``
+is a non-empty string — Anthropic's tool shape is flat) and requires ``model``
+(the translator subscripts both unguarded at
+`src/kitty/bridge/messages/translator.py:364` and `:391`).
+`_normalize_chat_completions_request` validates ``messages`` **only** — the CC
+route passes tools through to the upstream without iterating them (no measured
+CC tools 500), and a flat ``tool["name"]`` check would 400 every legitimate
+CC tool body whose contract nests ``name`` under ``function``. `_normalize_gemini_request`
+validates ``contents`` (list of objects). **No silent exemption** — every guard in
+this list gates normally. **Stream is bounded to ``false`` in the schema** because
+the recording upstream replies non-streaming, and ``stream: true`` bodies would
+spin the bridge's empty-response retry ladder; streaming is exercised by L3
 bridge tests (`tests/bridge/`).
 
 #### 6.2.2 SSE event grammar

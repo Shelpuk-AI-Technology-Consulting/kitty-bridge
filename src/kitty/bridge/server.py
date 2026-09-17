@@ -267,10 +267,17 @@ def _normalize_chat_completions_request(body: object) -> dict:
     """Validate a Chat-Completions body shape at the trust boundary.
 
     The CC compaction path iterates ``body["messages"]`` unguarded; a string
-    here crashes inside ``_apply_compaction``. The ``tools`` member is
-    iterated by the provider's own normaliser and by upstream-passthrough
-    paths; a non-list / non-dict member crashes the same way. The guard
-    runs before any bridge-side work that reads ``messages`` or ``tools``.
+    here crashes inside ``_apply_compaction``. The guard runs before any
+    bridge-side work that reads ``messages``.
+
+    ``tools`` is deliberately **not** validated: the CC route passes tool
+    definitions through to the upstream without iterating them (measured —
+    non-array and non-object tool bodies answer 200 today), and the CC
+    tool contract nests ``name`` under ``function``
+    (``{"type": "function", "function": {"name": ...}}``), so a flat
+    ``tool["name"]`` check of the kind ``_normalize_messages_request``
+    performs would 400 every legitimate CC tool body. There is no measured
+    CC tools 500 for a guard to prevent.
 
     Args:
         body: The decoded inbound request body. Typed ``object`` because
@@ -281,8 +288,7 @@ def _normalize_chat_completions_request(body: object) -> dict:
 
     Raises:
         InvalidChatCompletionsRequest: ``body`` is not a JSON object, or
-            ``messages`` is present and is not a list of objects, or
-            ``tools`` is present and is not a list of objects.
+            ``messages`` is present and is not a list of objects.
     """
     if not isinstance(body, dict):
         raise InvalidChatCompletionsRequest(
@@ -298,22 +304,6 @@ def _normalize_chat_completions_request(body: object) -> dict:
             if not isinstance(element, dict):
                 raise InvalidChatCompletionsRequest(
                     f"'messages[{index}]' must be an object, got {type(element).__name__}"
-                )
-    if "tools" in body:
-        tools = body["tools"]
-        if not isinstance(tools, list):
-            raise InvalidChatCompletionsRequest(
-                f"'tools' must be an array, got {type(tools).__name__}"
-            )
-        for index, tool in enumerate(tools):
-            if not isinstance(tool, dict):
-                raise InvalidChatCompletionsRequest(
-                    f"'tools[{index}]' must be an object, got {type(tool).__name__}"
-                )
-            # Same translator pattern as Messages: ``t["name"]`` unguarded.
-            if not isinstance(tool.get("name"), str) or not tool.get("name"):
-                raise InvalidChatCompletionsRequest(
-                    f"'tools[{index}].name' must be a non-empty string"
                 )
     return body
 

@@ -208,7 +208,13 @@ paths:
           description: The model identifier.
           schema:
             type: string
-            pattern: "[^/:?#]+"
+            # Conservative positive pattern: real model names are
+            # `[A-Za-z0-9._~-]` runs. The earlier negated pattern
+            # (`[^/:?#]+`) admitted newlines and other characters aiohttp
+            # will not route (404 — an undocumented status the gate then
+            # flags), so the fuzzer stayed inside the routable set only
+            # by luck.
+            pattern: "[A-Za-z0-9._~-]+"
       requestBody:
         required: true
         content:
@@ -248,7 +254,13 @@ paths:
           description: The model identifier.
           schema:
             type: string
-            pattern: "[^/:?#]+"
+            # Conservative positive pattern: real model names are
+            # `[A-Za-z0-9._~-]` runs. The earlier negated pattern
+            # (`[^/:?#]+`) admitted newlines and other characters aiohttp
+            # will not route (404 — an undocumented status the gate then
+            # flags), so the fuzzer stayed inside the routable set only
+            # by luck.
+            pattern: "[A-Za-z0-9._~-]+"
       requestBody:
         required: true
         content:

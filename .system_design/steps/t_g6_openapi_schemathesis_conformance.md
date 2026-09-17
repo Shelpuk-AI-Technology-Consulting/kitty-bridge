@@ -103,3 +103,16 @@ fixed in this task, per the plan's "no sibling leaves the suite red waiting".
 * **Code-review round 1:** the SSE 200 schema descriptions now state
   plainly that the L2 gate bounds `stream` to `false` and drives only the
   JSON path — the SSE schema is for human readers, not for the gate.
+* **Code-review round 2 (the missed L1 layer):** `_normalize_chat_completions_request`
+  initially validated `tools[].name` flat, which 400s every legitimate CC tool
+  body (CC's contract nests `name` under `function`). Removed the CC tools
+  block — the CC route has no measured tools-500 (tools pass through to the
+  upstream), and a flat guard of the kind `_normalize_messages_request`
+  performs would actively break every CC client. Reviewer's lesson:
+  **L2-green is not gate-green** when the change touches code with a non-trivial
+  L1 footprint — re-run `-m l1` after every server.py edit, not just `-m l2`.
+* **Conformance round 3:** Gemini's path-parameter pattern `[^/:?#]+` admitted
+  newlines and other characters aiohttp's `{model:.*}` would not route,
+  producing 404s on cases the conformance run flagged as `UndefinedStatusCode`.
+  Tightened to a conservative positive pattern `[A-Za-z0-9._~-]+` covering
+  every real model name we know of (`gpt-4o`, `claude-3-...`, etc.).
