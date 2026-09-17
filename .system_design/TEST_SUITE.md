@@ -299,14 +299,15 @@ The register is only enforceable at the point where bytes are handed to a transp
 is **not** `translate_to_upstream` for any of the three custom-transport providers, and assuming
 it is hid seven rows in the first draft: on `openai_subscription` the hook is **never invoked on
 the request path at all** — `_cc_to_responses` builds the Responses body inside the transport
-(P13–P17) — while on `bedrock` and `ollama_cloud` the hook builds the body and the transport then
-**mutates it** (P18, P19).
+(P13–P17); on `ollama_cloud` the hook builds the body and the transport then **mutates it** (P19);
+on `bedrock` the hook builds the body and the pure builder `_bedrock_body` (extracted from the
+two transports by KBR-89 / T-H2, which the transports call) applies the P18 pops.
 
 | Path | Adapters | Where the final bytes are decided |
 |---|---|---|
 | Bridge aiohttp | the 20 default-transport adapters | The `json=` body passed to `session.post` in `_make_upstream_request` / `_open_upstream_stream` |
 | curl_cffi | `openai_subscription` | Built **inside the transport**: `_cc_to_responses` (CC-origin) or `_prepare_responses_body` (Responses-origin). The adapter hook's output is not what ships. |
-| botocore | `bedrock` | Built by `translate_to_upstream`, then **mutated** in `make_request` / `stream_request` (P18). Capture after the mutation. |
+| botocore | `bedrock` | Built by `translate_to_upstream`, then **mutated** by `BedrockAdapter._bedrock_body` (P18; the transports splat `modelId=<model_id>, **body` verbatim). Capture after the mutation. |
 | provider aiohttp | `ollama_cloud` | Built by `translate_to_upstream`, then **mutated** in `make_request` / `stream_request` (P19). Capture after the mutation. |
 
 Every guard and every oracle run in this document targets the right-hand column, never the hook
@@ -2795,7 +2796,7 @@ same interface to the tests:
 | aiohttp server — bridge sessions | the 20 default-transport adapters | The primary; speaks Anthropic Messages and Chat Completions |
 | aiohttp server — provider sessions | `ollama_cloud`, and the `openai_subscription` **OAuth login leg** | Those adapters build their own sessions and never touch `_session_for`, so the bridge recorder never sees them. The OAuth leg runs at startup, before anything else has been proven (§5.5). The **refresh** leg moved to `curl_cffi` in KBR-161 and is the row below's (§7.2.3) |
 | curl_cffi-reachable server | `openai_subscription` serving path, and the OAuth **refresh** leg | Terminates TLS with the harness certificate and observes at socket level (§7.2.3); the only place `_cc_to_responses` output (P13, P17) can be seen, and the only recorder on the refresh leg's stack |
-| botocore endpoint override | `bedrock` | Points the client at the local recorder rather than AWS; observes the Converse payload **after** the transport's `modelId`/`stream` pops (P18) |
+| botocore endpoint override | `bedrock` | Points the client at the local recorder rather than AWS; observes the Converse payload **after** `_bedrock_body`'s `modelId`/`stream` pops (P18) |
 
 Each records every request in full: method, scheme, host, path, **query**, **headers with
 original casing and order**, raw body bytes, arrival timestamp, and — for containment — **the
