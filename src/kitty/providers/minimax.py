@@ -26,14 +26,41 @@ class MiniMaxAdapter(ProviderAdapter):
         return _GLOBAL_URL
 
     def build_base_url(self, provider_config: dict | None = None) -> str:
-        """Return MiniMax base URL, honoring CN-region provider_config."""
+        """Return MiniMax base URL, honoring CN-region provider_config.
+
+        A configured ``base_url`` is normalised through
+        :meth:`ProviderAdapter._strip_endpoint_suffix`, so a user who pastes
+        the full documented endpoint (``https://api.minimax.io/v1/chat/completions``)
+        composes to that endpoint rather than to a doubled path (KBR-134,
+        KBR-157).  The strip runs **after** the ``region == "cn"`` switch and
+        the ``http(s)://`` scheme check — moving it in front would let a
+        region switch eat a pasted endpoint meant for the global URL, or turn
+        a malformed scheme into a ``urlsplit`` error inside the helper.
+
+        Args:
+            provider_config: The profile's provider configuration.  ``region
+                == "cn"`` wins over a configured ``base_url``; an absent or
+                empty ``base_url`` returns :attr:`default_base_url`; a
+                non-``http(s)://`` value raises.
+
+        Returns:
+            The MiniMax API root — the CN URL when ``region == "cn"`` is
+            set, the global URL by default, or the configured ``base_url``
+            with a redundant trailing ``/chat/completions`` stripped.
+
+        Raises:
+            ValueError: When the configured ``base_url`` is non-empty and
+                does not start with ``http://`` or ``https://``.
+        """
         if provider_config and provider_config.get("region") == "cn":
             return _CN_URL
         if provider_config and provider_config.get("base_url"):
             url = str(provider_config["base_url"]).strip().rstrip("/")
             if not url.startswith(("http://", "https://")):
                 raise ValueError("provider_config.base_url must be a non-empty http:// or https:// URL")
-            return url
+            # KBR-157: strip after the scheme check and after the region switch
+            # (ticket decision 1).
+            return self._strip_endpoint_suffix(url, self.upstream_path)
         return self.default_base_url
 
     def normalize_model_name(self, model: str) -> str:
