@@ -48,7 +48,7 @@ from kitty.auth.oauth_session import OAuthRefreshFailed, OAuthSession
 from kitty.auth.token_transport import CurlTokenTransport
 from kitty.cloudflare import get_cloudflare_signature, is_cloudflare_block
 from kitty.egress import get_egress
-from kitty.providers.base import ProviderError
+from kitty.providers.base import ProviderError, WireShape
 
 # Avoid circular import — only need the parent class methods
 from kitty.providers.openai import OpenAIAdapter
@@ -235,6 +235,36 @@ class OpenAISubscriptionAdapter(OpenAIAdapter):
     """
 
     provider_type = "openai_subscription"
+
+    @property
+    def upstream_wire_shape(self) -> WireShape:
+        """:attr:`WireShape.RESPONSES` — the Codex backend serves OpenAI Responses.
+
+        KBR-80 / T-G4 surfaces this.  The inherited default
+        (``CHAT_COMPLETIONS``) described ``translate_to_upstream``'s
+        output, which is never invoked on the request path —
+        ``_cc_to_responses`` (CC-origin) and ``_prepare_responses_body``
+        (Responses-origin) build the Responses body inside the curl_cffi
+        transport (P13–P17).  The shipped body is Responses for every
+        request, and the declaration now matches.
+
+        No consumer impact: all four ``server.py`` sites that read
+        ``upstream_wire_shape_for_model`` are unreachable for
+        custom-transport adapters.  The thinking round-trip repair
+        (``~5075``, inside ``_stream_messages``'s plain-transport
+        branch) and the pre-write thinking carrier in
+        ``_upstream_body_for`` (``9817``) both sit behind the
+        ``use_custom_transport`` dispatch (``4674`` / ``9973``);
+        ``_serves_messages_wire`` (``9777``) returns False for this
+        adapter under either value (``use_native_messages`` is False and
+        ``RESPONSES != MESSAGES``); and the streaming-converter
+        selection (``9849``) is consulted only from the three
+        plain-transport branches (``3784`` / ``6423`` / ``7716``) — under
+        RESPONSES it would return a converter if reached, but the
+        custom-transport branches (``3585`` / ``6272`` / ``7493``)
+        dispatch to ``stream_request`` without consulting it.
+        """
+        return WireShape.RESPONSES
 
     def __init__(self) -> None:
         self._curl_session_instance: curl_cffi.requests.AsyncSession | None = None
