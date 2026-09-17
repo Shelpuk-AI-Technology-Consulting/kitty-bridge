@@ -40,6 +40,7 @@ proves nothing about the dependency.
 
 from __future__ import annotations
 
+import sys
 from collections.abc import AsyncIterator, Callable
 
 import curl_cffi.aio as _curl_cffi_aio
@@ -313,17 +314,22 @@ class TestAmbientHttpProxy:
         assert (gateway.hits, ambient_rec.hits, direct.hits) == (1, 0, 0)
 
     @pytest.mark.asyncio
-    async def test_the_uppercase_http_proxy_is_not_read_for_an_http_target(
+    async def test_uppercase_http_proxy_for_an_http_target(
         self, target, proxy, ambient, monkeypatch
     ) -> None:
-        """Uppercase ``HTTP_PROXY`` is a deliberate no-op for ``http://`` targets.
+        """Uppercase ``HTTP_PROXY`` behaviour is platform-divergent.
 
-        libcurl's CGI-environment exception: uppercase ``HTTP_PROXY`` could
-        be set by a CGI wrapper around a victim's request, so libcurl honours
-        it for no scheme at all while honouring uppercase names everywhere
-        else. Pinned because a release that starts honouring it would change
-        which shell environments can steer kitty's traffic, and that change
-        must arrive as a red test rather than silently.
+        libcurl's documented CGI-environment exception ignores uppercase
+        ``HTTP_PROXY`` for ``http://`` requests (a CGI wrapper could set
+        it on a victim's behalf), and Linux/macOS honour that. The
+        curl_cffi 0.16.3 Windows build does not: it consults uppercase
+        ``HTTP_PROXY`` for ``http://`` like every other scheme. Pinned
+        per-platform so a release that flips either direction turns red
+        — a Windows regression is as loud as a Linux one.
+
+        The contract for kitty is the same either way: every shell the
+        test runner can find is one that can steer provider traffic, and
+        the adapter's ``proxies=``-wins rule already covers both.
         """
         url, direct = target
         proxy_url, gateway = proxy
@@ -332,7 +338,12 @@ class TestAmbientHttpProxy:
 
         await _session().post(url, data={"a": "b"}, timeout=_TIMEOUT)
 
-        assert (direct.hits, ambient_rec.hits, gateway.hits) == (1, 0, 0)
+        if sys.platform == "win32":
+            # Windows build honours uppercase HTTP_PROXY; ambient wins.
+            assert (ambient_rec.hits, gateway.hits, direct.hits) == (1, 0, 0)
+        else:
+            # Linux/macOS follow the CGI exception; direct wins.
+            assert (direct.hits, ambient_rec.hits, gateway.hits) == (1, 0, 0)
 
     @pytest.mark.asyncio
     async def test_an_ambient_https_proxy_is_not_consulted_for_an_http_target(
