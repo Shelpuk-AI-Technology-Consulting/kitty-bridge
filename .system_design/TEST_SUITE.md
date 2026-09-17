@@ -3950,10 +3950,10 @@ not a base-URL helper, is the interface.
 
 **`provider_config` arrives by two routes.** In balancing mode `_get_next_backend` passes
 `profile.provider_config`; in single-backend mode the same branch returns the constructor kwarg.
-`Profile.base_url` is **neither**: the resolver never reads it, and it is typed `HttpsUrl`, which
-a loopback recorder serving `http://` cannot satisfy. The fixture also encapsulates the
-constructor's `adapter=None` positional and its `# type: ignore[arg-type]`, which 38 modules
-currently repeat.
+`Profile.base_url` no longer exists (KBR-158: deleted; a profile that sets it is rejected with
+a message pointing at `provider_config["base_url"]`), so the fixture carries no such field.
+The fixture also encapsulates the constructor's `adapter=None` positional and its
+`# type: ignore[arg-type]`, which 38 modules currently repeat.
 
 **No pytest fixture, and not in `pytest_plugins`.** T-W5's proxy is published that way because
 a test asks for `connect_proxy` by name and cannot construct one. This module is different on

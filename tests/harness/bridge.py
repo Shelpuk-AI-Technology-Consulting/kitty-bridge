@@ -592,9 +592,9 @@ def profile_for(
     """Return a valid profile pointed at ``transport``.
 
     ``provider_config`` is the channel the bridge reads — ``profile`` in
-    balancing mode, the constructor keyword in single-backend mode.
-    ``Profile.base_url`` is neither: the resolver never reads it, and it is typed
-    ``HttpsUrl``, which a loopback recorder serving ``http://`` cannot satisfy.
+    balancing mode, the constructor keyword in single-backend mode. The base
+    URL, if any, lives in ``provider_config["base_url"]``; ``Profile.base_url``
+    was deleted in KBR-158 and a profile that sets it raises.
 
     Args:
         transport: A **started** transport; its binding is read here.
