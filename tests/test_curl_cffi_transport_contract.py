@@ -29,7 +29,8 @@ depends on it:
 
 The same precedence question now extends to ``HTTP_PROXY`` / ``HTTPS_PROXY`` /
 ``ALL_PROXY`` (KBR-85): the OAuth leg rides ``https://``, so any
-scheme-scoped ambient proxy that wins over ``proxies=`` would defeat the
+scheme-scoped ambient proxy (or the ``ALL_PROXY``/``all_proxy`` catch-all
+that applies to every scheme) that wins over ``proxies=`` would defeat the
 configured gateway on the leg that matters. libcurl documents explicit
 ``CURLOPT_PROXY`` above the environment; the curl_cffi probes below pin
 that order empirically, in both schemes.
@@ -553,13 +554,15 @@ class TestAmbientHttpsProxy:
     ) -> None:
         """**The falsification control**: curl_cffi reads the env var in question.
 
-        Parametrized over every scheme-scoped ambient variable the
-        precedence probes above also cover: a release that stops reading
-        one of them must turn red here. Without this falsification, a
-        release that ignored ``https_proxy`` (for example) would stay
-        green on its precedence probe — the mapping wins either way — so
-        the parametrized probe's failure is the only signal that *that*
-        variable went missing.
+        Parametrized over every ambient proxy variable the precedence
+        probes above also cover — the two scheme-scoped variables
+        (``HTTPS_PROXY``, ``https_proxy``) and the two scheme-agnostic
+        catch-all variables (``ALL_PROXY``, ``all_proxy``): a release
+        that stops reading any one of them must turn red here. Without
+        this falsification, a release that ignored ``https_proxy`` (for
+        example) would stay green on its precedence probe — the mapping
+        wins either way — so the parametrized probe's failure is the
+        only signal that *that* variable went missing.
         """
         monkeypatch.setenv(var, _DEAD_PROXY_URL)
 
