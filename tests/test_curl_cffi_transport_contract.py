@@ -289,7 +289,11 @@ class TestAmbientHttpProxy:
     The scheme-agnostic catch-all (``ALL_PROXY``/``all_proxy``) is pinned
     here too, at the bottom of the class — libcurl consults it for
     ``http://`` requests exactly as it does for ``https://``, so the
-    https leg's pin does not cover this scheme.
+    https leg's pin does not cover this scheme. The class also carries
+    the scoping negatives for this scheme: ``HTTPS_PROXY`` /
+    ``https_proxy`` must not steer an ``http://`` request, and (in
+    :class:`TestAmbientHttpsProxy`, on the other leg)
+    ``HTTP_PROXY`` / ``http_proxy`` must not steer an ``https://`` one.
     """
 
     @pytest.mark.asyncio
@@ -340,9 +344,13 @@ class TestAmbientHttpProxy:
         per-platform so a release that flips either direction turns red
         — a Windows regression is as loud as a Linux one.
 
-        The contract for kitty is the same either way: every shell the
-        test runner can find is one that can steer provider traffic, and
-        the adapter's ``proxies=``-wins rule already covers both.
+        Deliberately a no-mapping probe: on Linux/macOS the uppercase
+        name never reaches curl_cffi, so a mapping-vs-`HTTP_PROXY`
+        precedence cell would be trivially green there; the cell that
+        needs pinning is the no-mapping one, which is what pins the
+        reading itself. The mapping-wins rule for the lowercase form is
+        pinned one probe above; the adapter's ``proxies=``-wins rule is
+        the product-side guard, not part of this dependency contract.
         """
         url, direct = target
         proxy_url, gateway = proxy
@@ -450,6 +458,12 @@ class TestAmbientHttpsProxy:
     A dead ambient address is used so that *if* the ambient variable won
     the request would fail loudly with a connection refused against
     127.0.0.1:1, rather than silently arriving at an unrelated host.
+
+    The class also carries the scheme-scoping negative for the
+    ``http://`` variables on this leg (``HTTP_PROXY`` / ``http_proxy``
+    must not steer an ``https://`` request), mirroring
+    :class:`TestAmbientHttpProxy`'s ``HTTPS_PROXY`` / ``https_proxy``
+    negative on its own scheme.
     """
 
     @pytest.fixture(autouse=True)
