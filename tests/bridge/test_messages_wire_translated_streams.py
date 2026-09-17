@@ -738,6 +738,103 @@ async def test_an_empty_converted_stream_fires_the_empty_ladder_on_every_message
 
 
 @pytest.mark.asyncio
+async def test_an_empty_converted_go_responses_stream_fires_the_empty_ladder(monkeypatch):
+    """KBR-248 AC-1 (converter twin) — the OpenCodeGoResponses converter's route fires too.
+
+    The hold is converter-agnostic. ``_stream_converter_for`` returns an
+    ``OpenCodeGoResponsesCCStreamConverter`` for opencode_go's Go Responses
+    models (``_RESPONSES_MODELS`` — e.g. ``grok-4.6``) on a Chat Completions
+    ingress request, and its ``response.created`` role chunk would have set
+    ``has_content`` exactly like the Anthropic converter did. This test pins
+    the empty ladder on that converter path too: an opencode_go Grok-shaped
+    empty Go Responses stream → ladder → second attempt's content reaches
+    the client.
+
+    Args:
+        monkeypatch: Pytest fixture, collapses the retry backoff.
+    """
+    model = "grok-4.6"
+
+    def _go_responses_frame(payload: str) -> str:
+        """Return one OpenAI Responses SSE frame.
+
+        Args:
+            payload: The JSON payload text.
+
+        Returns:
+            The ``data: ``-prefixed frame with its blank-line terminator.
+        """
+        return f"data: {payload}\n\n"
+
+    empty = (
+        _go_responses_frame('{"type":"response.created","response":{"model":"' + model + '","id":"r"}}')
+        + _go_responses_frame(
+            '{"type":"response.completed","response":{"model":"' + model + '","id":"r",'
+            '"usage":{"input_tokens":1,"output_tokens":0,"total_tokens":1}}}'
+        )
+    )
+    good = (
+        _go_responses_frame('{"type":"response.created","response":{"model":"' + model + '","id":"r"}}')
+        + _go_responses_frame('{"type":"response.output_text.delta","delta":"hello"}')
+        + _go_responses_frame(
+            '{"type":"response.completed","response":{"model":"' + model + '","id":"r",'
+            '"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}'
+        )
+    )
+
+    _server, status, client_body, calls, _bodies = await _stream(
+        BridgeProtocol.CHAT_COMPLETIONS_API, OpenCodeGoAdapter(), model, [(200, empty), (200, good)], monkeypatch
+    )
+
+    assert status == 200
+    assert calls == 2
+    assert "hello" in client_body
+
+
+@pytest.mark.asyncio
+async def test_the_d5_byte_cap_releases_the_hold_against_an_empty_content_flood(monkeypatch):
+    """KBR-248 AC-6 — the D5 cap releases pre-emission when held bytes exceed MAX_HELD_BYTES.
+
+    The KBR-155 sibling has dedicated D5 tests; this CC hold's fail-open
+    branch (the cap-release path inside ``_hold_or_write``) had no direct
+    exercise. The test scripts an upstream that streams a run of empty
+    content deltas (each converted to ``{"content": ""}`` — non-content,
+    held) followed by a content-bearing delta. With ``MAX_HELD_BYTES``
+    monkeypatched to a small bound, the cap trips on the early empty deltas
+    and releases — has_content flips to True — so the empty ladder never
+    fires and the eventual content reaches the client on the first attempt.
+
+    Args:
+        monkeypatch: Pytest fixture, collapses the retry backoff.
+    """
+    # Tiny bound: ~200 bytes is enough to release on the second or third
+    # empty ``content_block_delta`` (each yields ~160 bytes translated).
+    monkeypatch.setattr(server_module, "MAX_HELD_BYTES", 200)
+    model = "claude-opus-4-6"
+    body = _render_sse([
+        _message_start(model),
+        {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}},
+        {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": ""}},
+        {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": ""}},
+        {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": ""}},
+        {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": ""}},
+        {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "hello"}},
+        {"type": "content_block_stop", "index": 0},
+        {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 1}},
+        {"type": "message_stop"},
+    ])
+
+    _server, status, client_body, calls, _bodies = await _stream(
+        BridgeProtocol.CHAT_COMPLETIONS_API, AnthropicAdapter(), model, [(200, body)], monkeypatch
+    )
+
+    assert status == 200
+    # Cap released pre-emission: no retry, content reached the client.
+    assert calls == 1
+    assert "hello" in client_body
+
+
+@pytest.mark.asyncio
 async def test_an_exhausted_empty_ladder_ends_in_the_d4_terminal_error(monkeypatch):
     """KBR-248 AC-5 — every attempt empty ends in the D4 error, not the empty stream.
 
