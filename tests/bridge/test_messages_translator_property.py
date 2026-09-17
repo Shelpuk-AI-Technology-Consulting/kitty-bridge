@@ -509,11 +509,22 @@ def test_property_catches_a_translator_that_swaps_a_text_only_user_role(body: di
 # in eight — so ~88% of raw examples are filtered by the `assume` below.
 # That is not a distortion: mixed turns are exactly the inputs where the
 # hoist could fire, and every filtered body was a vacuous run regardless.
-# The role-swap falsification above does NOT need the same suppression —
+#
+# `too_slow` is also suppressed here, and explicitly — not inherited from
+# the CI profile. A `@settings(suppress_health_check=...)` override
+# *replaces* the parent profile's list rather than extending it (round-7
+# review), so without this entry the CI profile's
+# `suppress_health_check=[HealthCheck.too_slow]` would be silently dropped
+# on exactly the test whose 88% filter rate makes that suppression
+# load-bearing (slow generation on Windows/macOS legs trips `too_slow`).
+# The role-swap falsification above does NOT need the same treatment —
 # text-only user turns are drawn at ~50% per user turn, comfortably inside
 # Hypothesis's default health-check budget.
 @given(t.messages_request())
-@settings(max_examples=200, suppress_health_check=[HealthCheck.filter_too_much])
+@settings(
+    max_examples=200,
+    suppress_health_check=[HealthCheck.filter_too_much, HealthCheck.too_slow],
+)
 def test_property_catches_a_translator_that_hoists_text_parts_first(body: dict) -> None:
     """The conversation arm fails loudly when the translator reorders mixed parts.
 
