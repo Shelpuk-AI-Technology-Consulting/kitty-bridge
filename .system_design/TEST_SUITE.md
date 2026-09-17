@@ -5765,7 +5765,21 @@ them — the handler holds the converter's non-content lines (role chunk, finish
 empty-response ladder there instead of reaching the client as a well-formed skeleton, and an
 exhausted ladder ends in the route's D4 terminal error (`type: "empty_response"`) like the
 siblings. The hold is converter-gated; raw Chat Completions upstreams keep their pre-KBR-248
-behaviour.
+behaviour. **Amended by KBR-276 (2026-09-17, paragraph below): the converter gate was
+removed; the hold now engages on every Chat Completions-wire upstream.**
+
+**Completed by KBR-276 (2026-09-17):** the converter gate was removed. The hold now engages
+unconditionally on `/v1/chat/completions` — every plain-POST Chat Completions upstream's
+non-content lines (role chunk, finish chunk, `[DONE]`) are withheld exactly the way the
+converter-emitted ones were. An empty OpenAI-shaped completion fires the same ladder as an
+empty converted completion and ends in the same D4 terminal; a content-bearing stream is
+byte-identical to today because the held preamble flushes ahead of the first content delta.
+The accepted cost is the ladder's retry latency on every content-less raw-CC completion
+(about 80 s on a single-backend pool), in exchange for the same well-formed-skeleton defect
+no longer reaching the client as a silent empty turn. Empty-response retries on raw-CC
+adapters now populate §4.3 C3(i) — T-I8's test obligation must be widened to name the
+raw-CC path alongside the native-passthrough one. Tests:
+`tests/bridge/test_raw_cc_empty_hold.py`.
 
 Four things the implementer needs that the question itself did not settle, decided here so KBR-155
 is writable:

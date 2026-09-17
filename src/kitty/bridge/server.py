@@ -1450,8 +1450,8 @@ def _cc_chunk_carries_content(chunk: dict) -> bool:
     # pragma: no mutate block
     """Decide whether one Chat Completions chunk carries client-visible content.
 
-    The KBR-248 hold releases on the first content-bearing converted line, so
-    a content-less completion stays pre-emission and the empty-response ladder
+    The KBR-248 hold releases on the first content-bearing line, so a
+    content-less completion stays pre-emission and the empty-response ladder
     can fire. Content is what the client would render: text, a tool-call
     delta, or reasoning. A role-only chunk, an empty ``content`` string (D6:
     a blank text reply is still empty), the finish chunk, and ``[DONE]``
@@ -7797,19 +7797,22 @@ class BridgeServer:
                     # per-line logic (KBR-232).  Re-created per attempt so a failover
                     # onto a Chat Completions-wire backend re-evaluates the gate.
                     stream_converter = self._stream_converter_for(cc_request)
-                    # KBR-248: pre-emission hold for the converted route. The
-                    # converter's ``message_start`` role chunk used to set
+                    # KBR-248: pre-emission hold, widened to the whole route by
+                    # KBR-276. A first chunk that carries no content — the
+                    # converter's ``message_start`` role chunk, or a raw
+                    # Chat Completions upstream's own role chunk — used to set
                     # ``has_content`` and permanently disarm the empty-response
                     # ladder below; this hold buffers the role chunk, the
                     # finish chunk, and ``[DONE]`` until a content-bearing delta
                     # arrives, mirroring KBR-155's ``PreambleHold`` for the
-                    # native Messages passthrough. A raw Chat Completions-wire
-                    # upstream keeps today's behaviour (the converter gate is
-                    # closed, ``has_content`` flips on the first write). Capped
-                    # at ``MAX_HELD_BYTES`` (D5): an upstream that trickles
-                    # empty-content deltas forever must not grow ``held``
-                    # without limit.
-                    release = stream_converter is not None
+                    # native Messages passthrough. KBR-248 gated the hold on
+                    # ``stream_converter is not None`` and deliberately left the
+                    # raw-CC upstreams' skeleton behaviour alone; KBR-276
+                    # removed the gate, so an empty completion from any
+                    # plain-POST provider is now pre-emission and the ladder
+                    # fires. Capped at ``MAX_HELD_BYTES`` (D5): an upstream
+                    # that trickles empty-content deltas forever must not grow
+                    # ``held`` without limit.
                     held: list[bytes] = []
                     held_bytes = 0
 
@@ -7823,13 +7826,14 @@ class BridgeServer:
                         non-JSON) share one rule. The non-JSON sites run
                         ``carries=True`` so the hold fails open (D5) and the
                         held preamble flushes ahead of unknowable content
-                        rather than being stranded. A raw Chat Completions
-                        upstream writes through and sets ``has_content``
-                        (today's behaviour); a converted upstream holds
-                        non-content lines until the first content-bearing
-                        line, flushing the held preamble ahead of it so a
-                        content-bearing stream is byte-identical to today.
-                        Write errors propagate to the enclosing disconnect
+                        rather than being stranded. KBR-276 removed the
+                        converter gate, so every upstream — a converted
+                        Messages-wire one and a raw Chat Completions one
+                        alike — holds non-content lines until the first
+                        content-bearing line, flushing the held preamble
+                        ahead of it so a content-bearing stream is
+                        byte-identical to the pre-hold wire output. Write
+                        errors propagate to the enclosing disconnect
                         handlers, as every write on this route does
                         (KBR-183/Q14(a): a write that reached the socket
                         ends the retry story).
@@ -7840,40 +7844,37 @@ class BridgeServer:
                             carries: ``True`` when the chunk carries content
                                 (text, tool_calls, or reasoning_content).
                         """
-                        # KBR-248: the closure binds ``release`` and ``held``
-                        # from the attempt-loop prologue so the per-attempt
-                        # state stays local to one attempt. The B023
-                        # silences below are load-bearing for the same
-                        # reason as the KBR-249 closures (``start_events``
-                        # and friends) — the closure is re-defined every
-                        # attempt, so it captures the current iteration's
-                        # state, not a stale one.
+                        # KBR-248: the closure binds ``held`` from the
+                        # attempt-loop prologue so the per-attempt state stays
+                        # local to one attempt. The B023 silences below are
+                        # load-bearing for the same reason as the KBR-249
+                        # closures (``start_events`` and friends) — the
+                        # closure is re-defined every attempt, so it captures
+                        # the current iteration's state, not a stale one.
                         nonlocal has_content, held_bytes
-                        # Post-emission or raw CC: write through (today).
-                        if has_content or not release:  # noqa: B023
+                        # Post-emission: write through.
+                        if has_content:  # noqa: B023
                             has_content = True
                             await sr.write(translated)
                             return
-                        # Converted, still pre-emission.
+                        # Pre-emission, content-bearing: flush the held
+                        # preamble ahead of it so wire order is preserved.
                         if carries:
-                            # First content line: flush the held preamble
-                            # ahead of it so wire order is preserved. (If the
-                            # D5 cap already released, ``has_content`` is set
-                            # and the first branch handled the write.)
                             for held_line in held:  # noqa: B023
                                 await sr.write(held_line)
                             held.clear()  # noqa: B023
                             has_content = True
                             await sr.write(translated)
                             return
-                        # Converted, non-content line: hold until first content.
+                        # Pre-emission, non-content line: hold until first
+                        # content.
                         held.append(translated)  # noqa: B023
                         held_bytes += len(translated)
                         # D5: bound the hold rather than grow it without limit.
                         # Note: unlike ``PreambleHold``, which caps the raw
                         # upstream bytes fed to ``feed()``, this cap bounds the
-                        # *translated* lines the converter emitted — same
-                        # constant, a related but not identical quantity.
+                        # *translated* lines the route wrote — same constant,
+                        # a related but not identical quantity.
                         if held_bytes > MAX_HELD_BYTES:
                             for held_line in held:  # noqa: B023
                                 await sr.write(held_line)
@@ -8090,7 +8091,7 @@ class BridgeServer:
                                             break
                                         _crossings += 1
                                         # Pass-through: no translator to reset. Per-attempt buffers
-                                        # (line_buffer/done/has_content/chunk_count/stream_converter/release/
+                                        # (line_buffer/done/has_content/chunk_count/stream_converter/
                                         # held/held_bytes)
                                         # are re-initialised by the attempt-loop prologue, so a fresh
                                         # raw_attempt=0 iteration is enough.
@@ -8214,12 +8215,12 @@ class BridgeServer:
                                         # Extract usage for logging
                                         if "usage" in chunk and chunk["usage"] is not None:
                                             last_usage = chunk["usage"]
-                                        # Forward non-error chunk. KBR-248 gates
-                                        # the hold on the converted route: only
-                                        # converted chunks defer their role/
-                                        # finish/``[DONE]`` lines; a raw Chat
-                                        # Completions upstream keeps today's
-                                        # write-through.
+                                        # Forward non-error chunk. KBR-276
+                                        # widened the hold to the whole route:
+                                        # a converted Messages-wire chunk and a
+                                        # raw Chat Completions chunk alike defer
+                                        # their role/finish/``[DONE]`` lines
+                                        # until the first content-bearing one.
                                         raw_line_bytes = f"{line}\n\n".encode()
                                         for translated in self._active_provider.translate_upstream_stream_event(
                                             raw_line_bytes
@@ -8340,7 +8341,7 @@ class BridgeServer:
                                         break
                                     _crossings += 1
                                     # Pass-through: no translator to reset. Per-attempt buffers
-                                    # (line_buffer/done/has_content/chunk_count/stream_converter/release/
+                                    # (line_buffer/done/has_content/chunk_count/stream_converter/
                                     # held/held_bytes)
                                     # are re-initialised by the attempt-loop prologue, so a fresh
                                     # raw_attempt=0 iteration is enough.
@@ -8396,7 +8397,7 @@ class BridgeServer:
                                             break
                                         _crossings += 1
                                         # Pass-through: no translator to reset. Per-attempt buffers
-                                        # (line_buffer/done/has_content/chunk_count/stream_converter/release/
+                                        # (line_buffer/done/has_content/chunk_count/stream_converter/
                                         # held/held_bytes)
                                         # are re-initialised by the attempt-loop prologue, so a fresh
                                         # raw_attempt=0 iteration is enough.
