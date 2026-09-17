@@ -132,13 +132,15 @@ async def proxy() -> AsyncIterator[tuple[str, _Recorder]]:
 
 @pytest.fixture()
 async def ambient() -> AsyncIterator[tuple[str, _Recorder]]:
-    """A stand-in for whatever proxy the user's shell names in ``HTTP_PROXY``.
+    """A stand-in for whichever ambient proxy variable a probe sets.
 
-    A third listener, distinct from the configured gateway, so a probe that
-    sets ``HTTP_PROXY`` can tell *which* proxy carried the request: the
-    mapping's gateway, the ambient variable's proxy, or neither. A dead
-    address would distinguish only "mapping won" from "something failed",
-    and an error is a weaker signal than a hit count.
+    A third listener, distinct from the configured gateway, so a probe
+    that sets ``HTTP_PROXY`` / ``http_proxy`` / ``HTTPS_PROXY`` /
+    ``https_proxy`` / ``ALL_PROXY`` / ``all_proxy`` can tell *which*
+    proxy carried the request: the mapping's gateway, the ambient
+    variable's proxy, or neither. A dead address would distinguish
+    only "mapping won" from "something failed", and an error is a
+    weaker signal than a hit count.
     """
     rec = _Recorder()
 
