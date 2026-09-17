@@ -526,6 +526,14 @@ class TestTheWholeSuiteIsCoherent:
             # per-request `proxy=None` cannot escape it -- the claim
             # `_session_for`'s containment design rests on.
             "tests/test_aiohttp_transport_contract.py",
+            # KBR-278. The step-graph validator's contract, exercised
+            # against constructed fixture step files rather than the
+            # committed tree -- a committed-tree check would couple CI to
+            # sibling PRs' step files (the REQUIREMENTS.md D2 in
+            # `.requirements/20260917T185215Z_step_index_validator/`).
+            # Same config-like-artifact posture as
+            # `tests/test_aggregate_mutation_baseline.py` above.
+            "tests/test_step_index.py",
         }
 
         actual = {
