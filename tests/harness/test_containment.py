@@ -38,12 +38,14 @@ activates the Subsystem job.
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import contextlib
 import socket
 import ssl
 from collections.abc import AsyncGenerator
 from pathlib import Path
+from typing import Any
 
 import aiohttp
 import pytest
@@ -273,8 +275,16 @@ class TestCapabilityReport:
         # wire T-E2..T-E5 record into and T-E9's gate reads.
         assert report_instance() is report
 
-    def test_require_completeness_raises_when_any_transport_pending(self, capability_report: CapabilityReport) -> None:
-        """``require_completeness`` is what the future T-E9 completeness gate calls."""
+    def test_require_completeness_raises_when_any_transport_unrecorded(
+        self, capability_report: CapabilityReport
+    ) -> None:
+        """``require_completeness`` is what the T-E9 completeness gate calls.
+
+        The strict interpretation (no ``landed_rows`` argument) checks every
+        registered transport and rejects both ``not_attempted`` and ``failed``
+        rows. The KBR-69 session-end gate passes a narrower ``landed_rows``
+        set; this test pins the broader, unfiltered contract that backs it.
+        """
         capability_report.record("bridge_aiohttp", Outcome.PROVEN)
         capability_report.record("curl_cffi", Outcome.PROVEN)
         capability_report.record("provider_aiohttp", Outcome.PROVEN)
@@ -290,7 +300,88 @@ class TestCapabilityReport:
         # diagnosable without a re-run.
         message = str(excinfo.value)
         for name in ("curl_cffi", "provider_aiohttp", "botocore"):
-            assert name in message, f"missing pending transport {name!r} in gate message"
+            assert name in message, f"missing unrecorded transport {name!r} in gate message"
+
+    def test_require_completeness_accepts_unsupported(self, capability_report: CapabilityReport) -> None:
+        """``unsupported`` is a permitted partial-delivery verdict (KBR-69 done-when)."""
+        capability_report.record("bridge_aiohttp", Outcome.UNSUPPORTED, reason="no direct route")
+        capability_report.record("curl_cffi", Outcome.PROVEN)
+        capability_report.record("provider_aiohttp", Outcome.PROVEN)
+        capability_report.record("botocore", Outcome.PROVEN)
+        # No raise: the one permitted verdict short of `proven`.
+        capability_report.require_completeness()
+
+    def test_require_completeness_rejects_failed_outcome(self, capability_report: CapabilityReport) -> None:
+        """``failed`` is a product defect the gate must surface, never a pass.
+
+        Falsification case (plan §1.4) for the gate's second half: KBR-69's
+        done-when is "``unsupported`` is permitted … ``failed`` is not" — a
+        gate that has never been shown to reject a ``failed`` row is
+        indistinguishable from one that cannot.
+        """
+        capability_report.record("bridge_aiohttp", Outcome.PROVEN)
+        capability_report.record("curl_cffi", Outcome.PROVEN)
+        capability_report.record("provider_aiohttp", Outcome.PROVEN)
+        capability_report.record("botocore", Outcome.FAILED)
+        with pytest.raises(AssertionError, match="botocore") as excinfo:
+            capability_report.require_completeness()
+        assert "failed" in str(excinfo.value)
+
+    def test_require_completeness_message_lists_every_offending_row(self, capability_report: CapabilityReport) -> None:
+        """One run, every defect named — a CI failure is diagnosable without a re-run."""
+        capability_report.record("curl_cffi", Outcome.FAILED)
+        with pytest.raises(AssertionError) as excinfo:
+            capability_report.require_completeness()
+        message = str(excinfo.value)
+        # Every row that is neither PROVEN nor UNSUPPORTED is named: the
+        # FAILED row, and the three rows still not_attempted.
+        for name in ("bridge_aiohttp", "curl_cffi", "provider_aiohttp", "botocore"):
+            assert name in message, f"missing offending transport {name!r} in gate message"
+        assert "not_attempted" in message
+        assert "failed" in message
+
+    def test_require_completeness_exempts_unlanded_rows(self, capability_report: CapabilityReport) -> None:
+        """``landed_rows`` is the registry of slices the gate checks (KBR-69 done-when).
+
+        A row that is still ``not_attempted`` because its slice has not
+        landed yet (no finaliser registered, no descriptor in the
+        ``_SLICES`` table) is *not* the gate's failure — the gate's job is
+        to surface incomplete containment for slices that have shipped, not
+        to demand slices that have not. The T-E9 session-end fixture passes
+        exactly this set; the unit test pins the property at the seam.
+        """
+        # `provider_aiohttp` and `botocore` are still not_attempted — KBR-64
+        # and KBR-65 are in flight. Without `landed_rows`, the gate raises.
+        with pytest.raises(AssertionError):
+            capability_report.require_completeness()
+
+        # The two landed slices (T-E2 bridge_aiohttp, T-E3 curl_cffi) record
+        # their verdicts. The gate passes when only those rows are checked:
+        # the unlanded rows remain `not_attempted`, but they are exempt.
+        capability_report.record("bridge_aiohttp", Outcome.PROVEN)
+        capability_report.record("curl_cffi", Outcome.PROVEN)
+        capability_report.require_completeness(
+            landed_rows=frozenset({"bridge_aiohttp", "curl_cffi"})
+        )
+
+    def test_require_completeness_with_landed_rows_omits_exempt_rows_from_message(
+        self, capability_report: CapabilityReport
+    ) -> None:
+        """The message names only the offending rows inside ``landed_rows``."""
+        capability_report.record("bridge_aiohttp", Outcome.FAILED)
+        with pytest.raises(AssertionError) as excinfo:
+            capability_report.require_completeness(
+                landed_rows=frozenset({"bridge_aiohttp", "curl_cffi"})
+            )
+        message = str(excinfo.value)
+        assert "bridge_aiohttp" in message
+        # curl_cffi is in `landed_rows` and is `not_attempted` → named.
+        assert "curl_cffi" in message
+        # provider_aiohttp and botocore are NOT in `landed_rows` → absent
+        # from the message by construction, so the diagnostic is scoped to
+        # what the caller asked for.
+        assert "provider_aiohttp" not in message
+        assert "botocore" not in message
 
     def test_reset_for_test_replaces_the_singleton_with_every_not_attempted(self) -> None:
         """``reset_for_test`` returns the singleton to its initial state.
@@ -316,6 +407,281 @@ class TestCapabilityReport:
             "provider_aiohttp",
             "botocore",
         }
+
+
+# ── R4: the session-end completeness gate ────────────────────────────────
+
+
+class TestCompletenessGate:
+    """The session-end gate the T-E9 fixture calls at finalisation.
+
+    The gate is pure over :func:`harness.conftest._run_completeness_gate`:
+    a unit test drives it directly with a synthetic singleton state, so the
+    landed-rows detection and the no-slice-ran skip are tested without
+    standing up a session-wide fixture.
+    """
+
+    def test_landed_verdict_rows_returns_descriptor_rows(
+        self,
+    ) -> None:
+        """``_landed_verdict_rows`` mirrors the verdict_row of every ``_SLICES`` entry."""
+        from harness.conftest import _SLICES, _landed_verdict_rows
+
+        expected = {descriptor[4] for descriptor in _SLICES}
+        assert _landed_verdict_rows() == frozenset(expected)
+
+    def test_run_completeness_gate_skips_when_no_slice_ran(self) -> None:
+        """An untouched singleton is not a defect — the gate is a no-op.
+
+        Without the skip, running :mod:`tests.harness.test_containment` in
+        isolation would fail every CI leg on the very gate the gate is
+        supposed to enable: the singleton's initial every-``not_attempted``
+        state would raise. Falsification: temporarily remove the ``any_recorded``
+        guard and this test starts failing.
+        """
+        from harness.conftest import _run_completeness_gate
+
+        # ``_isolate_singleton`` has reset to a fresh every-not_attempted
+        # state before this test; the gate must accept that as "no work".
+        _run_completeness_gate()  # no raise
+
+    def test_run_completeness_gate_raises_on_failed_landed_row(self) -> None:
+        """``failed`` on a landed row is a product defect the gate surfaces.
+
+        Falsification case (plan §1.4) for the session-end path: a gate
+        that has never been shown to fail on a real defect is
+        indistinguishable from one that cannot.
+        """
+        from harness.conftest import _run_completeness_gate
+
+        report_instance().record("bridge_aiohttp", Outcome.FAILED)
+        with pytest.raises(AssertionError, match="bridge_aiohttp") as excinfo:
+            _run_completeness_gate()
+        assert "failed" in str(excinfo.value)
+
+    def test_run_completeness_gate_accepts_unsupported_landed_row(self) -> None:
+        """``UNSUPPORTED`` is the partial-delivery verdict the design accepts."""
+        from harness.conftest import _run_completeness_gate
+
+        report_instance().record("bridge_aiohttp", Outcome.PROVEN)
+        report_instance().record("curl_cffi", Outcome.UNSUPPORTED, reason="no direct route")
+        report_instance().record("provider_aiohttp", Outcome.PROVEN)
+        # No raise: the only landed-but-not-PROVEN outcome the gate accepts.
+        _run_completeness_gate()
+
+    def test_run_completeness_gate_ignores_unlanded_rows(self) -> None:
+        """A row whose owning slice has not landed is exempt, regardless of outcome.
+
+        The auto-tightening property KBR-69 ships: today ``botocore`` has
+        no descriptor in ``_SLICES`` (KBR-64 still in flight), so it is
+        exempt even if a test leaves a verdict on it. ``provider_aiohttp``
+        landed with KBR-65 and is now an enforced row. When KBR-64 lands
+        and adds its descriptor, ``botocore`` joins the enforced set with
+        no edit to this fixture.
+        """
+        from harness.conftest import _run_completeness_gate
+
+        # All three landed rows PROVEN — gate passes.
+        report_instance().record("bridge_aiohttp", Outcome.PROVEN)
+        report_instance().record("curl_cffi", Outcome.PROVEN)
+        report_instance().record("provider_aiohttp", Outcome.PROVEN)
+        # The unlanded row in any state — gate still passes.
+        report_instance().record("botocore", Outcome.FAILED)
+        _run_completeness_gate()  # no raise
+
+    def test_all_landed_slice_phases_ran_is_true_when_every_dict_is_populated(self) -> None:
+        """Every landed slice's phase dict populated → the session was full → gate fires."""
+        from harness.conftest import _SLICES, _all_landed_slice_phases_ran, _PhaseOutcome
+
+        saved = [dict(outcomes) for _p, _n, outcomes, _t, _r in _SLICES]
+        try:
+            for _prefix, names, outcomes, _teardown, _row in _SLICES:
+                outcomes.update((name, _PhaseOutcome.PASSED) for name in sorted(names)[:1])
+            assert _all_landed_slice_phases_ran() is True
+        finally:
+            for descriptor, snapshot in zip(_SLICES, saved, strict=True):
+                descriptor[2].clear()
+                descriptor[2].update(snapshot)
+
+    def test_all_landed_slice_phases_ran_is_false_for_an_empty_dict(self) -> None:
+        """One empty outcomes dict — one slice that never ran — makes the check false.
+
+        Falsification case (plan §1.4) for the session-skip: a single
+        slice file selected alone (or a unit test writing a verdict into
+        the singleton without running any slice) leaves at least one
+        landed slice's dict empty; the gate must skip rather than enforce
+        on a partial session.
+        """
+        from harness.conftest import _SLICES, _all_landed_slice_phases_ran
+
+        saved = [dict(outcomes) for _p, _n, outcomes, _t, _r in _SLICES]
+        try:
+            # Clear exactly one landed slice's outcomes dict: that slice's
+            # phases never ran, so the session was partial.
+            for _prefix, _names, outcomes, _teardown, _row in _SLICES:
+                outcomes.clear()
+                break
+            assert _all_landed_slice_phases_ran() is False
+        finally:
+            for descriptor, snapshot in zip(_SLICES, saved, strict=True):
+                descriptor[2].clear()
+                descriptor[2].update(snapshot)
+
+
+# ── R5: descriptor-shape validation (rejection branches) ──────────────────
+
+
+class TestValidateSlices:
+    """``_validate_slices`` rejection branches — every ``raise`` has a test.
+
+    The function runs at conftest import, so a refactor that drops a guard
+    lands green on every CI leg without anything in the suite noticing.
+    Each branch gets its own test against a synthetic malformed
+    descriptor, parameterised over the function's ``descriptors``
+    argument so a malformed conftest never has to be imported to drive
+    the rejection paths.
+    """
+
+    @staticmethod
+    def _well_formed_descriptor(prefix: str = "tests/harness/test_x.py::", row: str = "x") -> tuple[Any, ...]:
+        """A descriptor that passes every branch when used alone."""
+        return (prefix, frozenset(), {}, {}, row)
+
+    def test_well_formed_descriptors_pass(self) -> None:
+        """The happy path: one descriptor, no duplicates, no errors."""
+        from harness.conftest import _validate_slices
+
+        # No raise.
+        _validate_slices([self._well_formed_descriptor(prefix="tests/a.py::", row="a")])
+
+    def test_wrong_arity_raises(self) -> None:
+        """A 4-tuple (forgetting ``verdict_row``) raises naming the descriptor."""
+        from harness.conftest import _validate_slices
+
+        with pytest.raises(ValueError, match="binds 4 fields, expected 5"):
+            _validate_slices([(  # noqa: COM818 — multi-line tuple literal for readability
+                "tests/a.py::", frozenset(), {}, {},
+            )])
+
+    def test_non_string_file_prefix_raises(self) -> None:
+        """``file_prefix`` is a nodeid prefix, not a regex — must be a string."""
+        from harness.conftest import _validate_slices
+
+        with pytest.raises(ValueError, match="non-string file_prefix"):
+            _validate_slices([(123, frozenset(), {}, {}, "x")])
+
+    def test_non_string_verdict_row_raises(self) -> None:
+        """``verdict_row`` is a registered transport name — must be a string."""
+        from harness.conftest import _validate_slices
+
+        with pytest.raises(ValueError, match="non-string verdict_row"):
+            _validate_slices([("tests/a.py::", frozenset(), {}, {}, 42)])
+
+    def test_duplicate_file_prefix_raises(self) -> None:
+        """Two descriptors with the same ``file_prefix`` would mis-dispatch outcomes."""
+        from harness.conftest import _validate_slices
+
+        descriptors = [
+            self._well_formed_descriptor(prefix="shared.py::", row="a"),
+            self._well_formed_descriptor(prefix="shared.py::", row="b"),
+        ]
+        with pytest.raises(ValueError, match="share file prefixes"):
+            _validate_slices(descriptors)
+
+    def test_duplicate_verdict_row_raises(self) -> None:
+        """Two descriptors with the same ``verdict_row`` would mis-record verdicts."""
+        from harness.conftest import _validate_slices
+
+        descriptors = [
+            self._well_formed_descriptor(prefix="tests/a.py::", row="shared"),
+            self._well_formed_descriptor(prefix="tests/b.py::", row="shared"),
+        ]
+        with pytest.raises(ValueError, match="share verdict rows"):
+            _validate_slices(descriptors)
+
+
+# ── R6: the gate fixture's definition order ────────────────────────────────
+
+
+class TestCompletenessGateFixtureOrder:
+    """The gate fixture must be defined **first** among the session-scope autouse.
+
+    Pytest finalises independent session-scope fixtures in reverse
+    definition order, so the gate's teardown runs **last**, after the
+    slice finalisers (defined further down) have written their verdicts.
+    Moving the fixture below the slice finalisers would either fail
+    every green session outright or, worse, hide the regression behind
+    the ``any_recorded`` skip and silently stop enforcing anything.
+
+    This is a structural test rather than a behavioural one because the
+    only signal that distinguishes the two orderings is the conftest's
+    source layout: at runtime, the fixtures are independent, and a
+    behavioural test would assert against whichever order happened to
+    ship. The same approach the repo uses elsewhere (T-E7's
+    AST-level domination) — parse, walk, compare positions.
+    """
+
+    @staticmethod
+    def _session_scope_autouse_fixture_lines(source: str) -> dict[str, int]:
+        """Return the line number of every session-scope autouse fixture in ``source``.
+
+        A fixture qualifies when it carries the decorator
+        ``@pytest.fixture(scope="session", autouse=True)`` (any keyword
+        order). The dict maps the fixture function's name to its
+        ``def`` line.
+        """
+        tree = ast.parse(source)
+        out: dict[str, int] = {}
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.FunctionDef):
+                continue
+            for decorator in node.decorator_list:
+                if not isinstance(decorator, ast.Call):
+                    continue
+                if not isinstance(decorator.func, ast.Attribute):
+                    continue
+                if decorator.func.attr != "fixture":
+                    continue
+                kwargs = {kw.arg: kw.value for kw in decorator.keywords if kw.arg is not None}
+                if not (
+                    isinstance(kwargs.get("scope"), ast.Constant)
+                    and kwargs["scope"].value == "session"
+                    and isinstance(kwargs.get("autouse"), ast.Constant)
+                    and kwargs["autouse"].value is True
+                ):
+                    continue
+                out[node.name] = node.lineno
+        return out
+
+    def test_gate_fixture_is_first_among_session_scope_autouse(self) -> None:
+        """``_enforce_containment_completeness`` is the topmost session-scope autouse.
+
+        The session-end gate's docstring names this ordering as the
+        invariant; a future edit that moves the fixture below the slice
+        finalisers would either fail every green session or hide behind
+        the ``any_recorded`` skip and silently stop enforcing anything.
+        This test fails on either move with a message naming both the
+        gate and the offending fixture.
+        """
+        from pathlib import Path
+
+        conftest_path = Path(__file__).parent.parent / "harness" / "conftest.py"
+        source = conftest_path.read_text(encoding="utf-8")
+        positions = self._session_scope_autouse_fixture_lines(source)
+
+        gate_line = positions.get("_enforce_containment_completeness")
+        assert gate_line is not None, (
+            "_enforce_containment_completeness fixture is missing from the conftest; the "
+            "completeness gate has been removed entirely"
+        )
+        for name, line in positions.items():
+            assert name == "_enforce_containment_completeness" or line > gate_line, (
+                f"session-scope autouse fixture {name!r} (line {line}) is defined before "
+                f"_enforce_containment_completeness (line {gate_line}): pytest reverses "
+                "finalisation order, so the gate would run before this fixture has had "
+                "a chance to write its verdict — the exact mistake the docstring warns "
+                "against"
+            )
 
 
 # ── R1: the sealed-network harness ─────────────────────────────────────────
