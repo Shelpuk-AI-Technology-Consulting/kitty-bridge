@@ -407,9 +407,10 @@ class TestTheWholeSuiteIsCoherent:
             # pairs the classification against the declaration; also covers
             # `provider_config`-constructed adapters and native-passthrough
             # requests. Closed a stale `CHAT_COMPLETIONS` declaration on
-            # `openai_subscription` (KBR-7 atomic pattern; the three
-            # declaration-readers are unreachable for custom transports,
-            # verified in `src/kitty/providers/openai_subscription.py`).
+            # `openai_subscription` (KBR-7 atomic pattern; all four
+            # server.py readers of the declaration are unreachable for
+            # custom transports — the full analysis lives in the
+            # adapter's `upstream_wire_shape` docstring).
             "tests/test_wire_shape_honesty_wire.py",
             # KBR-126. Both are docs-vs-code guards in the §6.2.3 sense: one
             # holds the OpenCode Go routing table against the provider's

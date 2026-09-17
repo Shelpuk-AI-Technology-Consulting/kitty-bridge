@@ -11,11 +11,16 @@ the hook is not the boundary that ships:
   (Responses-origin) build the Responses body inside the curl_cffi
   transport (P13–P17).  The inherited declaration (``CHAT_COMPLETIONS``)
   is stale: the shipped body is Responses, so the declaration is
-  corrected here to match — the KBR-7 atomic pattern.  The bridge's
-  own request path bypasses this hook, so the correction has no consumer
-  impact (``_make_upstream_request`` does the repair at server.py
-  ~5075; ``_get_streaming_converter`` at 9849 is on the bridge-SSE path;
-  ``_serves_messages_wire`` at 9777 returns False either way).
+  corrected here to match — the KBR-7 atomic pattern.  The correction
+  has no consumer impact: all four ``server.py`` readers of the
+  declaration are unreachable for custom transports — the thinking
+  repair (``~5075``, in ``_stream_messages``'s plain-transport branch)
+  and the pre-write carrier in ``_upstream_body_for`` (``9817``) sit
+  behind the ``use_custom_transport`` dispatch; ``_serves_messages_wire``
+  (``9777``) returns False under either value; ``_stream_converter_for``
+  (``9849``) is consulted only from the plain-transport branches.  The
+  production docstring on ``OpenAISubscriptionAdapter`` carries the full
+  analysis.
 * ``bedrock`` calls the hook and the transport then pops ``modelId`` and
   ``stream`` (P18).  The pops are scalar and do not change the shape
   family (Converse remains OTHER).
@@ -370,17 +375,19 @@ def _mock_curl_capture_session(captured: dict):
 
 
 async def test_openai_subscription_transport_passes_body_through_unchanged(fresh_codex_session):
-    """The transport ships the body builder's output, byte-for-byte.
+    """The transport ships the body builder's output unchanged.
 
     Structural pin for the §3.2.3 boundary: between the body builder
     and the curl_cffi ``post`` call, the transport must not mutate the
-    body.  A future transport-level body mutation — say, a retry
-    adding a ``previous_response_id`` — would fail here and force a
+    body — the captured ``json`` is compared to the builder output by
+    structural dict equality, so a key added, removed, or reordered
+    in between fails here.  A future transport-level body mutation —
+    say, a retry adding a ``previous_response_id`` — would force a
     re-derivation of the wire shape.
 
-    ``_cc_to_responses`` already emits ``stream=True`` internally
-    (line 1142) and ``make_request``'s forced ``stream=True`` is
-    idempotent; no overlay is needed.
+    ``_cc_to_responses`` already emits ``stream=True`` internally and
+    ``make_request``'s forced ``stream=True`` is idempotent; no overlay
+    is needed.
     """
     adapter = get_provider("openai_subscription")
     cc_request = {

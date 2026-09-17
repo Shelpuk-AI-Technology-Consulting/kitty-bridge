@@ -29,8 +29,10 @@ this is the first step file in the directory.
      (`_cc_to_responses` CC-origin, `_prepare_responses_body`
      Responses-origin), plus a structural pass-through pin that drives
      `make_request` with a stubbed curl_cffi session and a real
-     (fresh-token) OAuth session file and asserts the posted `json` equals
-     the builder output byte-for-byte. Declared `RESPONSES`.
+     (fresh-token) OAuth session file and asserts the posted `json`
+     equals the builder output exactly (structural dict equality — the
+     transport adds, removes, and reorders nothing).  Declared
+     `RESPONSES`.
    * Falsification per §1.4: one deliberate-defect case per capture, all
      defects introduced adapter-side (the guard's subject), each
      demonstrating the mismatch is visible.
