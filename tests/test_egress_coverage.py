@@ -179,8 +179,15 @@ class TestNoProxyEnvironmentVariables:
         assert not offenders, f"trust_env=True found at {offenders}"
 
 
-#: The class-definition file: every other `BridgeServer(` in ``src/kitty`` is a construction
-#: site whose enclosing function must hold a preceding `egress_block_reason(` call.
+#: The file that defines the ``BridgeServer`` class. Excluded from the
+#: construction scan: the ``class BridgeServer:`` declaration is an
+#: ``ast.ClassDef``, not an ``ast.Call``, so the class line itself is invisible
+#: to the walker and needs no exclusion — but the file-level skip also covers
+#: any ``BridgeServer(`` **call** the file might come to contain, and that
+#: skip is only sound because
+#: ``test_no_bridge_server_construction_in_definition_file`` asserts the file
+#: holds none. A future factory or test helper inside it must surface here
+#: rather than bypass the egress-guard check silently.
 _BRIDGE_SERVER_DEFINITION_FILE = "bridge/server.py"
 
 
@@ -389,6 +396,30 @@ class TestEveryStartPathIsGuarded:
             "these BridgeServer constructions are not dominated by an egress_block_reason call "
             "in the same function scope, so a provider that cannot be proxied would leak from "
             f"them: {offenders}"
+        )
+
+    def test_no_bridge_server_construction_in_definition_file(self):
+        """The class-definition file must hold no ``BridgeServer(`` calls.
+
+        The file-level skip in ``_iter_bridge_constructions`` excludes
+        ``bridge/server.py`` wholesale, so a ``BridgeServer(`` **call**
+        introduced there — a factory, a test helper, anything of that shape —
+        would be silently invisible to the domination guard. The class line
+        itself is not the reason (a ``class BridgeServer:`` declaration is an
+        ``ast.ClassDef``, not an ``ast.Call``, and the matcher never sees it);
+        this test is what makes the file-level skip sound. If it fails, the
+        new call is either a new start path that belongs outside this file or
+        a helper that needs an explicit decision here.
+        """
+        definition_file = SRC / _BRIDGE_SERVER_DEFINITION_FILE
+        tree = ast.parse(definition_file.read_text(encoding="utf-8"), filename=str(definition_file))
+        calls = _iter_constructions_in_tree(tree)
+
+        assert calls == [], (
+            f"a `BridgeServer(...)` call inside {_BRIDGE_SERVER_DEFINITION_FILE} would be "
+            "silently skipped by the file-level exclusion in `_iter_bridge_constructions`; "
+            f"either move it or handle it explicitly. Found at lines "
+            f"{[call.lineno for call in calls]}"
         )
 
     def test_the_scan_finds_the_known_start_paths(self):
