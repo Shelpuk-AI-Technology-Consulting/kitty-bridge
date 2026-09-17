@@ -163,8 +163,16 @@ class GeminiTranslator:
 
         cc_request: dict = {"messages": messages, "stream": True}
 
-        # generationConfig mapping
-        gen_config = gemini_request.get("generationConfig", {})
+        # generationConfig mapping. The schema names ``type: object``, so a
+        # real Gemini client always sends a mapping; the conformance fuzzer
+        # nevertheless occasionally generates scalars (``None``, ``int``),
+        # and the ``in`` tests below cannot iterate those. Tolerate the
+        # wrong-type case by treating anything not a dict as absent — the
+        # same shape ``.get(..., {})`` was meant to provide, but failed for
+        # present-but-null because ``None`` was kept as the value.
+        gen_config = gemini_request.get("generationConfig")
+        if not isinstance(gen_config, dict):
+            gen_config = {}
         if "temperature" in gen_config:
             cc_request["temperature"] = gen_config["temperature"]
         if "maxOutputTokens" in gen_config:

@@ -116,3 +116,28 @@ fixed in this task, per the plan's "no sibling leaves the suite red waiting".
   producing 404s on cases the conformance run flagged as `UndefinedStatusCode`.
   Tightened to a conservative positive pattern `[A-Za-z0-9._~-]+` covering
   every real model name we know of (`gpt-4o`, `claude-3-...`, etc.).
+* **CI round 1 — review-scripts:** adding `openapi/kitty-bridge.yaml` made the
+  review-scripts guard fail — the `docs` rule didn't match it. Added
+  `openapi/**` to the `docs` rule (the schema is a published contract,
+  parallel to README) and a corresponding sentence in `rules/docs.md`;
+  the review-scripts tests pin the heading text, so that pin moved too.
+* **CI round 2 — Python 3.13 and Windows:** the Gemini translator read
+  `gen_config = gemini_request.get("generationConfig", {})` and then
+  `"temperature" in gen_config`. Schemathesis's OpenAPI 3.1 fuzz generates
+  non-object values for fields whose schema says `type: object` (the
+  conformance run produced `generationConfig: 8364` and `null`), and
+  the `in` test on a non-iterable value crashes with `TypeError`. Replaced
+  the default with `if not isinstance(gen_config, dict): gen_config = {}` and
+  pinned the new tolerance with a regression test
+  (`TestGeminiToleratesScalarGenerationConfig`, four scalar cases;
+  falsified by reverting the fix).
+* **CI round 3 — Gemini path-parameter 404:** the same pattern fix didn't
+  fully contain schemathesis — the fuzzer still generated a model name
+  with a URL-encoded newline (`%0A`), which aiohttp's `{model:.*}`
+  regex-converter (which doesn't match newlines by default) refuses to
+  route → 404, which was undocumented → `UndefinedStatusCode` failure.
+  Schemathesis 4.x does not yet honour JSON-Schema `pattern` for path
+  parameters. Documented `404` for the two Gemini routes as the honest
+  answer for unroutable models; added `TestGeminiDocuments404ForUnroutableModel`
+  to pin it both ways (the Gemini routes document 404; no other route
+  does).

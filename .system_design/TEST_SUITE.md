@@ -2017,6 +2017,23 @@ is a non-empty string — Anthropic's tool shape is flat) and requires ``model``
 `_normalize_chat_completions_request` validates ``messages`` **only** — the CC
 route passes tools through to the upstream without iterating them (no measured
 CC tools 500), and a flat ``tool["name"]`` check would 400 every legitimate
+CC tool body whose contract nests ``name`` under ``function``.
+`_normalize_gemini_request` validates ``contents`` (list of objects).
+**No silent exemption** — every guard in this list gates normally.
+**Stream is bounded to ``false`` in the schema** because the recording
+upstream replies non-streaming, and ``stream: true`` bodies would spin the
+bridge's empty-response retry ladder; streaming is exercised by L3 bridge
+tests (`tests/bridge/`). **The Gemini routes document `404`** as the honest
+answer for unroutable model names — schemathesis 4.x does not yet honour
+JSON-Schema `pattern` for path parameters, so a small number of fuzzed
+values still slip past and hit aiohttp's `{model:.*}` regex converter.
+The Gemini translator also tolerates scalar `generationConfig` values
+(`None`, `int`, `str`, `bool`): a present-but-wrong-type field would crash
+the ``in`` check with `TypeError`, so the translator coerces to `{}`; this is
+pinned by `TestGeminiToleratesScalarGenerationConfig` (falsified).
+`_normalize_chat_completions_request` validates ``messages`` **only** — the CC
+route passes tools through to the upstream without iterating them (no measured
+CC tools 500), and a flat ``tool["name"]`` check would 400 every legitimate
 CC tool body whose contract nests ``name`` under ``function``. `_normalize_gemini_request`
 validates ``contents`` (list of objects). **No silent exemption** — every guard in
 this list gates normally. **Stream is bounded to ``false`` in the schema** because

@@ -94,6 +94,29 @@ class TestGeminiGenerateRefusesContentsNotList:
         assert "Traceback" not in text
 
 
+class TestGeminiToleratesScalarGenerationConfig:
+    """A scalar ``generationConfig`` reaches the translator without a 500.
+
+    Caught on CI (Python 3.13 and the Windows leg): the Gemini translator
+    read ``gen_config = gemini_request.get("generationConfig", {})`` and
+    then ``"temperature" in gen_config`` — a present-but-scalar value
+    (``None``, an ``int``) crashed with ``TypeError: argument of type 'X'
+    is not iterable``. The schema documents ``type: object`` so a real
+    Gemini client never sends this, but the conformance fuzzer does, and
+    §6.2.1 forbids a 500 on any malformed body.
+    """
+
+    @pytest.mark.parametrize("scalar", [None, 8364, "x", True])
+    async def test_a_scalar_generation_config_does_not_500(
+        self, cc_bridge: BridgeFixture, scalar: object
+    ) -> None:
+        status, text = await cc_bridge.post(
+            "/v1beta/models/harness-model:generateContent",
+            {"contents": [], "generationConfig": scalar},
+        )
+        assert status < 500, f"expected a non-5xx for generationConfig={scalar!r}, got {status}: {text}"
+
+
 class TestGeminiStreamRefusesContentsNotList:
     """``/v1beta/...:streamGenerateContent`` with ``contents: "x"`` answers 400."""
 

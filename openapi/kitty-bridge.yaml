@@ -198,8 +198,10 @@ paths:
         Gemini ``generateContent``. JSON-only — the URL suffix is the
         non-streaming variant. ``{model}`` is the model name as routed by
         the adapter; constrained to a path-safe character set so the
-        conformance fuzzer does not generate values the aiohttp route
-        cannot serve.
+        conformance fuzzer stays inside the routable set as much as
+        possible. (Schemathesis 4.x does not yet honour JSON-Schema
+        ``pattern`` for path parameters, so a small number of fuzzed
+        values still 404 — ``404`` is documented below.)
       operationId: geminiGenerate
       parameters:
         - name: model
@@ -233,6 +235,16 @@ paths:
           $ref: "#/components/responses/GeminiError"
         "401":
           $ref: "#/components/responses/GeminiUnauthorized"
+        "404":
+          description: |
+            The model name does not match a path this bridge can serve
+            (e.g. contains a character the aiohttp regex converter
+            rejects). This is the honest answer for fuzzed values that
+            slip past the path-parameter pattern.
+          content:
+            text/plain:
+              schema:
+                type: string
         "502":
           $ref: "#/components/responses/GeminiUpstreamError"
         "503":
@@ -245,7 +257,8 @@ paths:
       summary: Gemini streamGenerateContent (streaming)
       description: |
         Gemini ``streamGenerateContent``. SSE-only — the URL suffix hard-wires
-        the streaming response.
+        the streaming response. See the ``pattern`` note on ``generateContent``
+        for why ``404`` is documented here.
       operationId: geminiStreamGenerate
       parameters:
         - name: model
@@ -279,6 +292,12 @@ paths:
           $ref: "#/components/responses/GeminiError"
         "401":
           $ref: "#/components/responses/GeminiUnauthorized"
+        "404":
+          description: The model name does not match a path this bridge can serve.
+          content:
+            text/plain:
+              schema:
+                type: string
         "502":
           $ref: "#/components/responses/GeminiUpstreamError"
         "503":

@@ -185,3 +185,54 @@ class TestSchemaDoesNotDocument500:
                 f"{method.upper()} {path} documents a 500 — documenting it makes the "
                 "conformance run accept the exact failure mode not_a_server_error exists to catch"
             )
+
+
+class TestGeminiDocuments404ForUnroutableModel:
+    """Schemathesis 4.x does not yet honour JSON-Schema ``pattern`` for path parameters.
+
+    A small number of fuzzed model values (newlines, encoded bytes the
+    aiohttp ``{model:.*}`` converter rejects) still produce 404s. The
+    Gemini routes document 404 as the honest answer for those — every
+    other route documents 200/400/401/502/503/504 only, so the schema
+    stays a tight contract.
+    """
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "/v1beta/models/{model}:generateContent",
+            "/v1beta/models/{model}:streamGenerateContent",
+        ],
+    )
+    def test_gemini_documents_404(self, path: str) -> None:
+        schema = _schema_dict()
+        assert "404" in schema["paths"][path]["post"]["responses"], (
+            f"{path} must document 404 — see the ``pattern`` note in the "
+            "parameter schema"
+        )
+
+    @pytest.mark.parametrize(
+        "path",
+        sorted(BRIDGE_MODE_PATHS - {
+            "/v1beta/models/{model}:generateContent",
+            "/v1beta/models/{model}:streamGenerateContent",
+        }),
+    )
+    def test_no_other_route_documents_404(self, path: str) -> None:
+        """404 is not a documented response for any route other than the two Gemini ones.
+
+        Args:
+            path: One of the bridge-mode routes other than the two Gemini
+                ones.
+        """
+        schema = _schema_dict()
+        methods = schema["paths"].get(path, {})
+        for method in ("post", "get"):
+            operation = methods.get(method)
+            if operation is None:
+                continue
+            assert "404" not in operation["responses"], (
+                f"{method.upper()} {path} documents a 404 — only the Gemini "
+                "routes do, because their ``{model:.*}`` aiohttp path "
+                "converter rejects values the pattern can't bound"
+            )
