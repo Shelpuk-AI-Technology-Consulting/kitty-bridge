@@ -58,7 +58,8 @@ class LauncherAdapter(ABC):
         """Build the spawn configuration for the child process.
 
         Args:
-            profile: Resolved profile with provider, model, and base_url.
+            profile: Resolved profile with provider, model, and any
+                ``provider_config["base_url"]`` it carries.
             bridge_port: Port the local bridge is listening on.
             resolved_key: Raw API key string resolved from the credential store.
             context_tokens: Resolved model context window in tokens. Adapters

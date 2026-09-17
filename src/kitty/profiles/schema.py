@@ -8,8 +8,7 @@ import uuid
 from collections.abc import Callable
 from typing import Literal
 
-from pydantic import BaseModel, UrlConstraints, field_validator, model_validator
-from pydantic import HttpUrl as _HttpUrl
+from pydantic import BaseModel, field_validator, model_validator
 
 RESERVED_NAMES: frozenset[str] = frozenset(
     {"setup", "doctor", "codex", "claude", "gemini", "kilo", "profile", "profiles", "help", "default"}
@@ -115,12 +114,6 @@ PROVIDER_SECTIONS: list[tuple[str, list[str]]] = [
 ]
 
 
-class HttpsUrl(_HttpUrl):
-    """HTTP URL constrained to HTTPS scheme only."""
-
-    _constraints = UrlConstraints(max_length=2083, allowed_schemes=["https"])
-
-
 def _validate_profile_name(v: str) -> str:
     """Shared name validation for Profile and BalancingProfile."""
     if not _NAME_PATTERN.match(v):
@@ -150,7 +143,6 @@ class Profile(BaseModel):
     provider: _PROVIDER_TYPES
     model: str
     auth_ref: str
-    base_url: HttpsUrl | None = None
     provider_config: dict = {}
     is_default: bool = False
     backup: bool = False
@@ -174,6 +166,36 @@ class Profile(BaseModel):
         if parsed.version != 4:
             raise ValueError(f"auth_ref must be a UUIDv4, got version {parsed.version}")
         return v
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_top_level_base_url(cls, data: object) -> object:
+        """Reject a top-level ``base_url`` carrying a value: the field is gone.
+
+        The base URL lives in ``provider_config["base_url"]`` (KBR-158). The
+        check is value-aware, not key-presence, because ``store.py`` serialises
+        with ``model_dump(mode="json")`` and no ``exclude_none`` — every
+        existing ``profiles.json`` file carries ``"base_url": null`` for the
+        deleted optional field, and ``None`` must keep meaning "not set".
+
+        Args:
+            data: The raw model input, before per-field validation.
+
+        Returns:
+            The input unchanged.
+
+        Raises:
+            ValueError: If ``data`` is a mapping carrying a non-``None``
+                top-level ``base_url``.
+        """
+        # `mode='before'` also receives model instances (via
+        # ``Profile.model_validate(some_profile)``), on which the key test
+        # would silently fall through — hence the isinstance guard.
+        if isinstance(data, dict) and data.get("base_url") is not None:
+            raise ValueError(
+                'Profile.base_url is not read; set the base URL in provider_config["base_url"] instead'
+            )
+        return data
 
 
 class BalancingProfile(BaseModel):
