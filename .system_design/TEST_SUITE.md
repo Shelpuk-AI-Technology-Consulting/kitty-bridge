@@ -5740,9 +5740,15 @@ per attempt on `_serves_messages_wire` — tool calls stream under a per-block `
 index, thinking crosses as `reasoning_content`, the finish chunk carries accumulated Chat
 Completions usage, and the Responses and Gemini empty-response ladders became reachable
 (their finish events exist only since this conversion). M17's strip-and-retry covers these
-three streams too. What is still true: a converted `/v1/chat/completions` stream's role chunk
-sets `has_content`, so a content-less completion is a well-formed skeleton rather than an
-empty-retry there — as before this ticket.
+three streams too.
+
+**Completed by KBR-248 (2026-09-17):** the converted `/v1/chat/completions` route joined
+them — the handler holds the converter's non-content lines (role chunk, finish chunk,
+`[DONE]`) until the first content-bearing delta, so a content-less completion fires the
+empty-response ladder there instead of reaching the client as a well-formed skeleton, and an
+exhausted ladder ends in the route's D4 terminal error (`type: "empty_response"`) like the
+siblings. The hold is converter-gated; raw Chat Completions upstreams keep their pre-KBR-248
+behaviour.
 
 Four things the implementer needs that the question itself did not settle, decided here so KBR-155
 is writable:
