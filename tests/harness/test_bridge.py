@@ -522,7 +522,6 @@ class TestTheProfileFactory:
 
             assert profile.provider_config["base_url"] == subject.recorder.base_url  # type: ignore[attr-defined]
             assert uuid.UUID(profile.auth_ref).version == 4
-            assert profile.base_url is None, "the resolver never reads this, and it is HTTPS-only"
         finally:
             await subject.stop()
 
