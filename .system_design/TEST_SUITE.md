@@ -1747,8 +1747,12 @@ may have. **For `curl_cffi` this is now measured and closed** (KBR-161 + KBR-85)
 `proxies=` outright, and `_new_curl_session` now sets `CURLOPT_NOPROXY` so the mapping is the last
 word; the scheme-scoped variables (`HTTPS_PROXY`, `https_proxy`, `http_proxy`) and the scheme-agnostic catch-all
 (`ALL_PROXY`, `all_proxy`) were extended in KBR-85 to lose to the configured mapping as well, and the same file
-now pins all four directions plus both casings under
-`tests/test_curl_cffi_transport_contract.py::TestAmbientHttpProxy` and `::TestAmbientHttpsProxy`.
+now pins the precedence + scoping matrix — both casings × both directions — for every
+scheme on every supported platform: `TestAmbientHttpProxy` covers the http leg's
+`http_proxy` / `HTTP_PROXY` / `HTTPS_PROXY` / `https_proxy` / `ALL_PROXY` / `all_proxy` pins and the
+uppercase-`HTTP_PROXY` Windows divergence, and `TestAmbientHttpsProxy` covers the https leg's
+mirror for `HTTP_PROXY` / `http_proxy` (the cross-scheme scoping negative) plus the
+precedence + falsification pairs for `HTTPS_PROXY` / `https_proxy` / `ALL_PROXY` / `all_proxy`.
 One measured platform divergence is pinned per-platform: the curl_cffi Windows build consults
 uppercase `HTTP_PROXY` for `http://` where Linux/macOS honour libcurl's CGI exception and ignore it.
 **`botocore` is now measured and closed** ([KBR-64](https://shelpuk.atlassian.net/browse/KBR-64), PR #204):

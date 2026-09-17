@@ -357,25 +357,27 @@ class TestAmbientHttpProxy:
             assert (direct.hits, ambient_rec.hits, gateway.hits) == (1, 0, 0)
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("var", ["HTTPS_PROXY", "https_proxy"])
     async def test_an_ambient_https_proxy_is_not_consulted_for_an_http_target(
-        self, target, ambient, monkeypatch
+        self, target, ambient, monkeypatch, var: str
     ) -> None:
-        """``HTTPS_PROXY`` is scheme-scoped: it must not steer an ``http://`` request.
+        """``HTTPS_PROXY`` / ``https_proxy`` are scheme-scoped: must not steer an ``http://`` request.
 
         No ``proxies=`` mapping is set here — deliberately. With a mapping
         in place, ``CURLOPT_PROXY`` wins over the environment and the
-        request reaches the configured gateway whether or not
-        ``HTTPS_PROXY`` was consulted for the ``http://`` scheme, so the
+        request reaches the configured gateway whether or not the
+        ambient variable was consulted for the ``http://`` scheme, so the
         probe would pass vacuously. Without one, the ambient variable is
         the only proxy source: if a release ever treated ``HTTPS_PROXY``
-        as a catch-all for every scheme, this request would land on the
-        ambient listener and the probe would go red. The OAuth leg is
-        https-only, so what this pins is the scoping rule itself; the
-        https-direction precedence lives in :class:`TestAmbientHttpsProxy`.
+        or ``https_proxy`` as a catch-all for every scheme, this request
+        would land on the ambient listener and the probe would go red.
+        Both casings parametrized — libcurl reads both for ``https://``
+        URLs, and a release honouring only one would still be a
+        scheme-scoping regression.
         """
         url, direct = target
         ambient_url, ambient_rec = ambient
-        monkeypatch.setenv("HTTPS_PROXY", ambient_url)
+        monkeypatch.setenv(var, ambient_url)
 
         await _session().post(url, data={"a": "b"}, timeout=_TIMEOUT)
 
@@ -573,6 +575,41 @@ class TestAmbientHttpsProxy:
         # substring instead so the test is robust to small wording changes.
         assert "over proxy 127.0.0.1" in str(exc_info.value), (
             f"expected curl to attempt the dead proxy and fail; got: {exc_info.value}"
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("var", ["HTTP_PROXY", "http_proxy"])
+    async def test_an_ambient_http_proxy_is_not_consulted_for_an_https_target(
+        self,
+        connect_proxy: ConnectProxy,
+        tls_target: TlsTarget,
+        monkeypatch: pytest.MonkeyPatch,
+        var: str,
+    ) -> None:
+        """``HTTP_PROXY`` / ``http_proxy`` are scheme-scoped: must not steer an ``https://`` request.
+
+        The mirror of
+        :meth:`TestAmbientHttpProxy.test_an_ambient_https_proxy_is_not_consulted_for_an_https_target`-
+        shaped probes — without it, the scoping matrix is pinned in only
+        one of its two directions, and a release that started consulting
+        the ``http`` variable for ``https://`` requests would leave every
+        other probe green while §5.5's closure claim no longer held.
+        The ambient variable is set to a dead address with no
+        ``proxies=`` mapping in place: if the release ever consulted the
+        variable for the wrong scheme, the request dies loudly against
+        127.0.0.1:1 instead of silently redirecting; if scheme-scoping
+        holds, the request reaches the local TLS target directly.
+        """
+        monkeypatch.setenv(var, _DEAD_PROXY_URL)
+
+        # No proxies=, no pytest.raises: a successful 200 is the contract.
+        # If a release consults the variable for the wrong scheme, the
+        # await raises RequestsError and the test fails loudly.
+        response = await _session().post(self._https_target(tls_target), data={"a": "b"}, timeout=_TIMEOUT)
+
+        assert response.status_code == 200, (
+            f"ambient {var}={_DEAD_PROXY_URL} was consulted for an https:// request "
+            f"(scheme-scoping broken); got status {response.status_code}"
         )
 
 
