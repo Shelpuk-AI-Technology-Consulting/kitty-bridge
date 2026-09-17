@@ -1758,6 +1758,110 @@ class TestTheWindowsConsoleDetachment:
             raise RuntimeError("GetConsoleProcessList needs more room than the probe gave it")
         return set(buffer[:count])
 
+    @classmethod
+    def _launcher_script(
+        cls,
+        state_path: Path,
+        snapshot_path: Path,
+        control_path: Path,
+        go_path: Path,
+    ) -> str:
+        """Build the launcher child that owns the console-break broadcast.
+
+        The launcher runs in its own console — the test starts it with
+        ``CREATE_NEW_CONSOLE`` — so the group-0 break's blast radius is that
+        console alone. It starts the bridge through ``start_bridge``'s real
+        wiring (the ``Popen`` swap ``TestStartBridgeWithALoudChild`` uses,
+        replicated inside this interpreter), spawns a plainly-attached
+        control child, waits for that child to report readiness, publishes
+        this console's member snapshot for the parent to prove the blast
+        radius from, and only after the parent's go-file installs a
+        ``TRUE``-returning handler and broadcasts the break.
+
+        Args:
+            state_path: Where the bridge stand-in writes its state.
+            snapshot_path: Where the launcher publishes its console snapshot.
+            control_path: Where the control child writes its PID.
+            go_path: The file the parent writes to authorise the broadcast.
+
+        Returns:
+            Python source for ``python -c``.
+        """
+        control_script = (
+            "import os, time\n"
+            f"open({str(control_path)!r}, 'w').write(str(os.getpid()))\n"
+            "time.sleep(120)\n"
+        )
+        return (
+            "import ctypes, json, os, subprocess, sys, time\n"
+            "from unittest.mock import patch\n"
+            "from kitty.bridge.manage import start_bridge\n"
+            "real_popen = subprocess.Popen\n"
+            "def spawn(_cmd, **kwargs):\n"
+            f"    return real_popen([sys.executable, '-c', {cls._bridge_script(str(state_path))!r}], **kwargs)\n"
+            "with patch('kitty.bridge.manage.subprocess.Popen', side_effect=spawn):\n"
+            f"    start_bridge(state_path={str(state_path)!r}, host='127.0.0.1', port=0)\n"
+            f"control = subprocess.Popen([sys.executable, '-c', {control_script!r}],\n"
+            "    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
+            "# The control child writes its PID as its first statement: waiting\n"
+            "# for that file proves the child is fully started -- its console\n"
+            "# control machinery included -- before anything is broadcast to\n"
+            "# it. The first probe broadcast ~instantly after the spawn, and\n"
+            "# the Windows leg showed the control child alive 12 s later: an\n"
+            "# event delivered before the child could handle it is lost, not\n"
+            "# survived, and would void the whole proof.\n"
+            f"for _ in range({cls._CONTROL_START_SECONDS * 20}):\n"
+            f"    if os.path.exists({str(control_path)!r}):\n"
+            "        break\n"
+            "    time.sleep(0.05)\n"
+            "else:\n"
+            "    print('control child never reported its PID', file=sys.stderr)\n"
+            "    sys.exit(5)\n"
+            "# Publish this console's members and hold the broadcast until the\n"
+            "# test has proven the blast radius and written the go-file: the\n"
+            "# break must never fire before its isolation is a checked fact.\n"
+            "buf = (ctypes.c_uint * 1024)()\n"
+            "n = ctypes.windll.kernel32.GetConsoleProcessList(buf, len(buf))\n"
+            f"json.dump(dict(launcher=os.getpid(), console=list(buf[:n])),\n"
+            f"    open({str(snapshot_path)!r}, 'w'))\n"
+            f"for _ in range({cls._GO_FILE_SECONDS * 5}):\n"
+            f"    if os.path.exists({str(go_path)!r}):\n"
+            "        break\n"
+            "    time.sleep(0.2)\n"
+            "else:\n"
+            "    print('go file never arrived', file=sys.stderr)\n"
+            "    sys.exit(3)\n"
+            "# A handler that returns TRUE stops the dispatch: the launcher\n"
+            "# survives the console-wide break it is about to send. Installed\n"
+            "# only after both children exist.\n"
+            "HANDLER = ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.c_uint)(lambda event: 1)\n"
+            "ctypes.windll.kernel32.SetConsoleCtrlHandler(HANDLER, True)\n"
+            "# A failed broadcast must fail loudly: the first probe ignored\n"
+            "# this call's return value, so a broadcast that was never sent\n"
+            "# and a child that survived a sent one were indistinguishable\n"
+            "# in the recorded red run.\n"
+            "if not ctypes.windll.kernel32.GenerateConsoleCtrlEvent(1, 0):\n"
+            "    print('GenerateConsoleCtrlEvent failed', file=sys.stderr)\n"
+            "    sys.exit(4)\n"
+            "# Waiting on the control child, not on a clock: its exit is the\n"
+            "# observable that the broadcast reached the console's members. A\n"
+            "# child that outlives the wait is left running and reported: the\n"
+            "# launcher still exits 0, and the test's own poll names the\n"
+            "# broadcast as not lethal -- the failure path this test promises.\n"
+            "timed_out = False\n"
+            "try:\n"
+            f"    control.wait({cls._CONTROL_EXIT_SECONDS})\n"
+            "except subprocess.TimeoutExpired:\n"
+            "    timed_out = True\n"
+            "if timed_out:\n"
+            f"    print('control child still alive after "
+            f"{cls._CONTROL_EXIT_SECONDS}s', file=sys.stderr)\n"
+            "else:\n"
+            "    print('control child exit code', control.returncode,\n"
+            "        file=sys.stderr)\n"
+            "time.sleep(0.5)\n"
+        )
+
     @pytest.mark.skipif(sys.platform != "win32", reason="Windows console behaviour")
     def test_a_background_bridge_is_absent_from_the_launching_console(
         self, tmp_path: Path
@@ -1808,82 +1912,14 @@ class TestTheWindowsConsoleDetachment:
         bridge's survival, for the wrong reason.
         """
         control_path = tmp_path / "control.pid"
-        control_script = (
-            "import os, time\n"
-            f"open({str(control_path)!r}, 'w').write(str(os.getpid()))\n"
-            "time.sleep(120)\n"
-        )
         state_path = tmp_path / "state.json"
         snapshot_path = tmp_path / "launcher_console.json"
         go_path = tmp_path / "go"
-        launcher_script = (
-            "import ctypes, json, os, subprocess, sys, time\n"
-            "from unittest.mock import patch\n"
-            "from kitty.bridge.manage import start_bridge\n"
-            "real_popen = subprocess.Popen\n"
-            "def spawn(_cmd, **kwargs):\n"
-            f"    return real_popen([sys.executable, '-c', {self._bridge_script(str(state_path))!r}], **kwargs)\n"
-            "with patch('kitty.bridge.manage.subprocess.Popen', side_effect=spawn):\n"
-            f"    start_bridge(state_path={str(state_path)!r}, host='127.0.0.1', port=0)\n"
-            f"control = subprocess.Popen([sys.executable, '-c', {control_script!r}],\n"
-            "    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
-            "# The control child writes its PID as its first statement: waiting\n"
-            "# for that file proves the child is fully started -- its console\n"
-            "# control machinery included -- before anything is broadcast to\n"
-            "# it. The first probe broadcast ~instantly after the spawn, and\n"
-            "# the Windows leg showed the control child alive 12 s later: an\n"
-            "# event delivered before the child could handle it is lost, not\n"
-            "# survived, and would void the whole proof.\n"
-            f"for _ in range({self._CONTROL_START_SECONDS * 20}):\n"
-            f"    if os.path.exists({str(control_path)!r}):\n"
-            "        break\n"
-            "    time.sleep(0.05)\n"
-            "else:\n"
-            "    print('control child never reported its PID', file=sys.stderr)\n"
-            "    sys.exit(5)\n"
-            "# Publish this console's members and hold the broadcast until the\n"
-            "# test has proven the blast radius and written the go-file: the\n"
-            "# break must never fire before its isolation is a checked fact.\n"
-            "buf = (ctypes.c_uint * 1024)()\n"
-            "n = ctypes.windll.kernel32.GetConsoleProcessList(buf, len(buf))\n"
-            f"json.dump(dict(launcher=os.getpid(), console=list(buf[:n])),\n"
-            f"    open({str(snapshot_path)!r}, 'w'))\n"
-            f"for _ in range({self._GO_FILE_SECONDS * 5}):\n"
-            f"    if os.path.exists({str(go_path)!r}):\n"
-            "        break\n"
-            "    time.sleep(0.2)\n"
-            "else:\n"
-            "    print('go file never arrived', file=sys.stderr)\n"
-            "    sys.exit(3)\n"
-            "# A handler that returns TRUE stops the dispatch: the launcher\n"
-            "# survives the console-wide break it is about to send. Installed\n"
-            "# only after both children exist.\n"
-            "HANDLER = ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.c_uint)(lambda event: 1)\n"
-            "ctypes.windll.kernel32.SetConsoleCtrlHandler(HANDLER, True)\n"
-            "# A failed broadcast must fail loudly: the first probe ignored\n"
-            "# this call's return value, so a broadcast that was never sent\n"
-            "# and a child that survived a sent one were indistinguishable\n"
-            "# in the recorded red run.\n"
-            "if not ctypes.windll.kernel32.GenerateConsoleCtrlEvent(1, 0):\n"
-            "    print('GenerateConsoleCtrlEvent failed', file=sys.stderr)\n"
-            "    sys.exit(4)\n"
-            "# Waiting on the control child, not on a clock: its exit is the\n"
-            "# observable that the broadcast reached the console's members. A\n"
-            "# child that outlives the wait is left running and reported: the\n"
-            "# launcher still exits 0, and the test's own poll names the\n"
-            "# broadcast as not lethal -- the failure path this test promises.\n"
-            "timed_out = False\n"
-            "try:\n"
-            f"    control.wait({self._CONTROL_EXIT_SECONDS})\n"
-            "except subprocess.TimeoutExpired:\n"
-            "    timed_out = True\n"
-            "if timed_out:\n"
-            f"    print('control child still alive after "
-            f"{self._CONTROL_EXIT_SECONDS}s', file=sys.stderr)\n"
-            "else:\n"
-            "    print('control child exit code', control.returncode,\n"
-            "        file=sys.stderr)\n"
-            "time.sleep(0.5)\n"
+        launcher_script = self._launcher_script(
+            state_path=state_path,
+            snapshot_path=snapshot_path,
+            control_path=control_path,
+            go_path=go_path,
         )
         launcher = subprocess.Popen(
             [sys.executable, "-c", launcher_script],
