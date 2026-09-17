@@ -38,12 +38,14 @@ activates the Subsystem job.
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import contextlib
 import socket
 import ssl
 from collections.abc import AsyncGenerator
 from pathlib import Path
+from typing import Any
 
 import aiohttp
 import pytest
@@ -485,6 +487,162 @@ class TestCompletenessGate:
         report_instance().record("botocore", Outcome.FAILED)
         report_instance().record("provider_aiohttp", Outcome.NOT_ATTEMPTED)
         _run_completeness_gate()  # no raise
+
+
+# ── R5: descriptor-shape validation (rejection branches) ──────────────────
+
+
+class TestValidateSlices:
+    """``_validate_slices`` rejection branches — every ``raise`` has a test.
+
+    The function runs at conftest import, so a refactor that drops a guard
+    lands green on every CI leg without anything in the suite noticing.
+    Each branch gets its own test against a synthetic malformed
+    descriptor, parameterised over the function's ``descriptors``
+    argument so a malformed conftest never has to be imported to drive
+    the rejection paths.
+    """
+
+    @staticmethod
+    def _well_formed_descriptor(prefix: str = "tests/harness/test_x.py::", row: str = "x") -> tuple[Any, ...]:
+        """A descriptor that passes every branch when used alone."""
+        return (prefix, frozenset(), {}, {}, row)
+
+    def test_well_formed_descriptors_pass(self) -> None:
+        """The happy path: one descriptor, no duplicates, no errors."""
+        from harness.conftest import _validate_slices
+
+        # No raise.
+        _validate_slices([self._well_formed_descriptor(prefix="tests/a.py::", row="a")])
+
+    def test_wrong_arity_raises(self) -> None:
+        """A 4-tuple (forgetting ``verdict_row``) raises naming the descriptor."""
+        from harness.conftest import _validate_slices
+
+        with pytest.raises(ValueError, match="binds 4 fields, expected 5"):
+            _validate_slices([(  # noqa: COM818 — multi-line tuple literal for readability
+                "tests/a.py::", frozenset(), {}, {},
+            )])
+
+    def test_non_string_file_prefix_raises(self) -> None:
+        """``file_prefix`` is a nodeid prefix, not a regex — must be a string."""
+        from harness.conftest import _validate_slices
+
+        with pytest.raises(ValueError, match="non-string file_prefix"):
+            _validate_slices([(123, frozenset(), {}, {}, "x")])
+
+    def test_non_string_verdict_row_raises(self) -> None:
+        """``verdict_row`` is a registered transport name — must be a string."""
+        from harness.conftest import _validate_slices
+
+        with pytest.raises(ValueError, match="non-string verdict_row"):
+            _validate_slices([("tests/a.py::", frozenset(), {}, {}, 42)])
+
+    def test_duplicate_file_prefix_raises(self) -> None:
+        """Two descriptors with the same ``file_prefix`` would mis-dispatch outcomes."""
+        from harness.conftest import _validate_slices
+
+        descriptors = [
+            self._well_formed_descriptor(prefix="shared.py::", row="a"),
+            self._well_formed_descriptor(prefix="shared.py::", row="b"),
+        ]
+        with pytest.raises(ValueError, match="share file prefixes"):
+            _validate_slices(descriptors)
+
+    def test_duplicate_verdict_row_raises(self) -> None:
+        """Two descriptors with the same ``verdict_row`` would mis-record verdicts."""
+        from harness.conftest import _validate_slices
+
+        descriptors = [
+            self._well_formed_descriptor(prefix="tests/a.py::", row="shared"),
+            self._well_formed_descriptor(prefix="tests/b.py::", row="shared"),
+        ]
+        with pytest.raises(ValueError, match="share verdict rows"):
+            _validate_slices(descriptors)
+
+
+# ── R6: the gate fixture's definition order ────────────────────────────────
+
+
+class TestCompletenessGateFixtureOrder:
+    """The gate fixture must be defined **first** among the session-scope autouse.
+
+    Pytest finalises independent session-scope fixtures in reverse
+    definition order, so the gate's teardown runs **last**, after the
+    slice finalisers (defined further down) have written their verdicts.
+    Moving the fixture below the slice finalisers would either fail
+    every green session outright or, worse, hide the regression behind
+    the ``any_recorded`` skip and silently stop enforcing anything.
+
+    This is a structural test rather than a behavioural one because the
+    only signal that distinguishes the two orderings is the conftest's
+    source layout: at runtime, the fixtures are independent, and a
+    behavioural test would assert against whichever order happened to
+    ship. The same approach the repo uses elsewhere (T-E7's
+    AST-level domination) — parse, walk, compare positions.
+    """
+
+    @staticmethod
+    def _session_scope_autouse_fixture_lines(source: str) -> dict[str, int]:
+        """Return the line number of every session-scope autouse fixture in ``source``.
+
+        A fixture qualifies when it carries the decorator
+        ``@pytest.fixture(scope="session", autouse=True)`` (any keyword
+        order). The dict maps the fixture function's name to its
+        ``def`` line.
+        """
+        tree = ast.parse(source)
+        out: dict[str, int] = {}
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.FunctionDef):
+                continue
+            for decorator in node.decorator_list:
+                if not isinstance(decorator, ast.Call):
+                    continue
+                if not isinstance(decorator.func, ast.Attribute):
+                    continue
+                if decorator.func.attr != "fixture":
+                    continue
+                kwargs = {kw.arg: kw.value for kw in decorator.keywords if kw.arg is not None}
+                if not (
+                    isinstance(kwargs.get("scope"), ast.Constant)
+                    and kwargs["scope"].value == "session"
+                    and isinstance(kwargs.get("autouse"), ast.Constant)
+                    and kwargs["autouse"].value is True
+                ):
+                    continue
+                out[node.name] = node.lineno
+        return out
+
+    def test_gate_fixture_is_first_among_session_scope_autouse(self) -> None:
+        """``_enforce_containment_completeness`` is the topmost session-scope autouse.
+
+        The session-end gate's docstring names this ordering as the
+        invariant; a future edit that moves the fixture below the slice
+        finalisers would either fail every green session or hide behind
+        the ``any_recorded`` skip and silently stop enforcing anything.
+        This test fails on either move with a message naming both the
+        gate and the offending fixture.
+        """
+        from pathlib import Path
+
+        conftest_path = Path(__file__).parent.parent / "harness" / "conftest.py"
+        source = conftest_path.read_text(encoding="utf-8")
+        positions = self._session_scope_autouse_fixture_lines(source)
+
+        gate_line = positions.get("_enforce_containment_completeness")
+        assert gate_line is not None, (
+            "_enforce_containment_completeness fixture is missing from the conftest; the "
+            "completeness gate has been removed entirely"
+        )
+        for name, line in positions.items():
+            assert name == "_enforce_containment_completeness" or line > gate_line, (
+                f"session-scope autouse fixture {name!r} (line {line}) is defined before "
+                f"_enforce_containment_completeness (line {gate_line}): pytest reverses "
+                "finalisation order, so the gate would run before this fixture has had "
+                "a chance to write its verdict — the exact mistake the docstring warns "
+                "against"
+            )
 
 
 # ── R1: the sealed-network harness ─────────────────────────────────────────

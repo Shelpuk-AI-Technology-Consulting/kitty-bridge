@@ -63,7 +63,8 @@ from __future__ import annotations
 
 import enum
 import sys
-from collections.abc import Callable, Generator, Iterator
+from collections.abc import Callable, Generator, Iterator, Sequence
+from typing import Any
 
 import pytest
 
@@ -71,7 +72,7 @@ from harness.containment import Outcome
 from harness.containment import instance as report_instance
 
 
-def _validate_slices() -> None:
+def _validate_slices(descriptors: Sequence[tuple[Any, ...]] | None = None) -> None:
     """Raise at import when any :data:`_SLICES` descriptor is malformed.
 
     A descriptor with the wrong arity would otherwise surface as a generic
@@ -83,14 +84,22 @@ def _validate_slices() -> None:
     offending descriptor named, which is the only message a future T-E4 /
     T-E5 author can act on without re-deriving the shape.
 
+    Args:
+        descriptors: The descriptors to check. Defaults to
+            :data:`_SLICES`; parameterised so the unit tests can hand a
+            synthetic malformed descriptor to each rejection branch
+            without importing a broken conftest.
+
     Raises:
         ValueError: When a descriptor's arity is wrong, when its
             ``file_prefix`` or ``verdict_row`` is not a string, or when
             either value is duplicated across descriptors.
     """
+    if descriptors is None:
+        descriptors = _SLICES
     prefixes: list[str] = []
     rows: list[str] = []
-    for descriptor in _SLICES:
+    for descriptor in descriptors:
         if len(descriptor) != 5:
             raise ValueError(
                 f"_SLICES descriptor {descriptor!r} binds {len(descriptor)} fields, expected 5: "

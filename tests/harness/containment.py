@@ -61,7 +61,7 @@ import contextlib
 import socket
 import ssl
 import uuid
-from collections.abc import Callable, Iterable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING, Any, ClassVar, Protocol, runtime_checkable
@@ -80,6 +80,14 @@ from harness.contract import CapturedRequest, WireFormat
 from harness.recorder import ConnectionRecord, RecordingUpstream
 
 if TYPE_CHECKING:
+    # ``Set`` here is ``collections.abc.Set`` — the read-only set ABC that
+    # both ``set`` and ``frozenset`` satisfy. The gate's ``landed_rows``
+    # contract is membership (``name in landed_rows``), which only a
+    # set-like container honours reliably: a one-shot generator would be
+    # consumed by the first membership test and silently miss every row
+    # after it.
+    from collections.abc import Set as AbstractSet
+
     from kitty.egress import EgressConfig
 
 __all__ = [
@@ -278,7 +286,7 @@ class CapabilityReport:
     def require_completeness(
         self,
         *,
-        landed_rows: Iterable[str] | None = None,
+        landed_rows: AbstractSet[str] | None = None,
     ) -> None:
         """Raise when any **checked** transport is in an invalid recorded-outcome state.
 
@@ -317,7 +325,13 @@ class CapabilityReport:
                 and a name in the set that is not a registered transport is
                 silently ignored (the conftest's ``_SLICES`` is the source
                 of truth for both sets, so a mismatch there is a conftest
-                bug, not a report bug). Pass the conftest's
+                bug, not a report bug). The type is
+                :class:`collections.abc.Set` rather than
+                :class:`collections.abc.Iterable` because the body checks
+                membership (``name in landed_rows``) per row — a one-shot
+                iterable such as a generator would be consumed by the first
+                membership test and silently miss every row after it. Pass
+                the conftest's
                 :data:`harness.conftest._SLICES`-derived set when the call
                 site is the session-end gate. Unit tests that want the
                 strict interpretation omit the argument.
