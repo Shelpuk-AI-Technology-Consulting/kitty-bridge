@@ -49,30 +49,47 @@ locally with the property.
 
 ## Implementation notes
 
-- **Three properties, not one.** P1 is the ticket's claim on the resolvable
-  subset. P2 pins the stand-down: for any schema carrying a composition
-  keyword, the detector returns `None` even for a violating input — so the
-  stand-down is *unconditional*, not the side effect of validity. P3 is the
-  §1.4 falsification control: a constructed wrapped payload that the
-  detector's own rules must catch (asserted non-`None` with the envelope
-  wording), plus a negative control that the P1 predicate is not vacuous
-  — expressed by patching `describe_tool_input_anomaly` to return `None`
-  always and watching the property fail (the "the scan actually finds
-  something" pattern).
-- **Generator correctness by construction.** Every (schema, input) pair in P1
-  is drawn together: one `st.tuples(schema, input)` style composite emits both
-  sides from a single draw, so validity is a property of how the strategies
-  are *composed*, not of a separate post-hoc validator. Each strategy's
-  docstring names the rule it enforces (root-required ⊆ root-properties,
-  present-key-type-match, additionalProperties respected). The shape mirrors
-  the T-F1 substrate's "valid body" rule (transcripts.py §"What 'valid' means
-  here"), where validity is structural and reported by the substrate, not
-  bolted on by the consumer.
-- **Composition-keyword path is a `st.sampled_from` over the six keywords**
-  from `tool_audit._COMPOSITION_KEYWORDS`, each composited with a non-empty
-  resolvable reading so the violating input is meaningful (e.g. a required
-  field absent) — not a vacuous input that the detector would have ignored
-  anyway.
+- **Five properties plus a §1.4 falsification control** (the auto-reviewer's
+  warning on an earlier draft caught a stale paragraph here: the shipped
+  P3 does not duplicate the example-suite positive findings; see "Status"
+  at the bottom for the resolution). P1 is the ticket's no-false-positive
+  claim on the resolvable subset, with three arms — broad (P1a),
+  discriminator (P1b, always emits an undeclared permitted key so the
+  "drop `not missing`" mutation is visible), strict (P1c). P2 pins the
+  composition-keyword stand-down with a violating input so the `None` is
+  provably the stand-down's, not validity's. P4 is the both-conditions
+  rule example class — kitty-bridge#33's "must not later be relaxed into
+  an or" discipline, carried into this file. P5 is the generator
+  self-conformance audit against a hand-rolled draft-07 validator. P3 is
+  the §1.4 falsification control: a monkeypatched **report-happy**
+  ("report on any undeclared root key") detector makes P1's exact
+  assertion expression raise against a valid input that carries one extra
+  key — proving the no-false-positive predicate is live, not vacuous. The
+  miss class (always-`None`) is **deliberately omitted**: it is already
+  pinned by `tests/bridge/test_tool_use_audit.py`'s positive findings, and
+  per L1 rule A.10 ("Do not add an assertion another test already
+  covers") the property file does not duplicate it.
+- **Generator correctness by composition, audited separately.** Every
+  (schema, input) pair is drawn together in `_valid_pair` — one
+  ``@st.composite`` draw fixes the property names, their types, the
+  required set and the ``additionalProperties`` posture, then builds the
+  input from those same names. Validity is a property of how the
+  strategies are *composed*. P5 is the *audit* on that construction, kept
+  out of the property bodies: inlining it would re-derive the generator
+  inside the property and mask a shared bug. Same posture as
+  `tests/harness/test_transcripts.py` judging the T-F1 substrate's own
+  conformance.
+- **Draft-07 subtyping rules enforced at the value level.** Booleans are
+  not integers or numbers in JSON Schema (Python's ``bool`` is an ``int``
+  subclass — the trap); NaN/Infinity are not valid JSON at all (the same
+  JSON-strict rule the T-F1 substrate enforces via ``allow_nan=False``);
+  the validator's `_value_matches_declared_type` pins both.
+- **Composition-keyword path is a `parametrize` over the six keywords**
+  from `tool_audit._COMPOSITION_KEYWORDS` (imported, not hard-coded — a
+  keyword added to the source list auto-joins the property), each paired
+  with a non-empty resolvable reading and an input that violates the
+  resolvable reading (an unexpected root key + a missing required key) so
+  the `None` is provably the stand-down's, not validity's.
 - **Layer.** File lives under `tests/bridge/`; the path default assigns `l1`
   (same posture as `test_compaction_properties.py`, `test_pairing_truncation_properties.py`),
   so no `pytestmark` is added. The repo-wide l1 gate picks it up without
@@ -81,13 +98,19 @@ locally with the property.
   (matching T-F2's settings), CI profile from `tests/conftest.py` (derandomise
   + no deadline + suppress `HealthCheck.too_slow`), the local developer keeps
   the default randomized profile plus the example DB — neither is touched.
+- **Module-attribute call path so P3 can monkey-patch.** The test file
+  imports `from kitty.bridge import tool_audit` and calls
+  `tool_audit.describe_tool_input_anomaly(...)` — never a direct function
+  reference — so `monkeypatch.setattr(tool_audit, "describe_tool_input_anomaly", ...)`
+  takes effect at every call site. Same precedent in
+  `tests/bridge/test_tool_use_auditor.py`.
 - **No product-code changes.** `src/kitty` is not in the diff.
 
 ## Verification
 
 - `pytest -m l1 tests/bridge/test_tool_audit_properties.py -q` green
-  (18 tests: P1a/P1b/P1c × property + required-only example, P2 × 6
-  keywords, P4 × 4 shapes, P5 × 3 arms, P3 control).
+  (18 tests: P1a/P1b/P1c × property + required-only example = 4; P2 × 6
+  keywords = 6; P4 × 4 shapes = 4; P5 × 3 arms = 3; P3 control = 1).
 - Mutation spot-checks (both reverted; failure signatures recorded in the
   PR):
   - *Spot-check A* — drop the `not missing` precondition (fire on
@@ -99,11 +122,27 @@ locally with the property.
 - `ruff check` clean (B905 `zip(strict=True)` — sizes are drawn equal, so
   the strict form is a free invariant); `ruff format` applied;
   `mypy src/kitty` clean; `lint-imports` clean (5 kept, 0 broken).
+- Full fast-gate subset on Linux (`pytest -m "not agent_smoke and not
+  agent_live and not eval and not load"`): **8038 passed, 13 skipped, 37
+  deselected** in 26 min (2026-09-17). All six CI test-matrix legs pass
+  (3.10/3.11/3.12 ubuntu, 3.13 ubuntu, 3.12 macos, 3.12 windows), plus
+  review, CodeQL, Analyze (python/actions), review-scripts,
+  review_replies, update-metadata, ci-required.
 - `scripts/regenerate_step_index.py` does not exist in the repo (recorded
   in memory since the first step file, KBR-67/PR #197); the step was added
   without machine-validated `depends_on`.
 
 ## Status
 
-Implemented in `feat/kbr-74-t-f5-tool-input-anomaly-property`. PR open;
-watching reviewer + CI, then maintainer merge.
+Implemented in `feat/kbr-74-t-f5-tool-input-anomaly-property` (PR #213).
+**Auto-reviewer's warning (round 1) addressed in commit dac08d4**: the
+step file's earlier paragraph described P3 as patching the detector to
+return `None` always (a miss-class control) plus a wrapped-payload
+non-`None` assertion — the *pre-iteration* design. The shipped P3 does
+the opposite: it patches a **report-happy** naive reporter and asserts
+P1's exact expression raises. The miss class is intentionally omitted
+because the example suite covers positive findings, and per L1 rule A.10
+duplicating that here would add an assertion another test already
+covers. The test file's own docstring was correct; only this step file
+was stale. PR open; CI green; awaiting human reviewer + maintainer
+merge.
