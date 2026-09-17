@@ -381,22 +381,24 @@ class TestAmbientHttpProxy:
         assert (direct.hits, ambient_rec.hits) == (1, 0)
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("var", ["ALL_PROXY", "all_proxy"])
     async def test_the_ambient_all_proxy_is_read_when_the_mapping_is_absent(
-        self, target, ambient, monkeypatch
+        self, target, ambient, monkeypatch, var: str
     ) -> None:
         """**The falsification control** for the catch-all on the ``http://`` leg.
 
         Mirrors the lowercase-``http_proxy`` falsification at the top of
-        this class, with the scheme-agnostic variable: ``ALL_PROXY``
-        applies to every scheme, so a release that ignored it entirely
-        would leave every precedence probe in this file green while the
-        environment silently stopped steering anything. Without the
-        mapping, the catch-all is the only proxy source and the request
-        must land on the ambient listener.
+        this class, with the scheme-agnostic variable: ``ALL_PROXY`` /
+        ``all_proxy`` apply to every scheme, so a release that read one
+        casing but ignored the other would leave the parametrized
+        precedence row green vacuously (the mapping wins either way) and
+        the falsification must therefore cover both. The parametrization
+        mirrors the https leg's falsification shape so the two halves of
+        the catch-all pin look the same.
         """
         url, direct = target
         ambient_url, ambient_rec = ambient
-        monkeypatch.setenv("ALL_PROXY", ambient_url)
+        monkeypatch.setenv(var, ambient_url)
 
         await _session().post(url, data={"a": "b"}, timeout=_TIMEOUT)
 
