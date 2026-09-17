@@ -698,10 +698,11 @@ async def test_an_empty_converted_stream_fires_the_empty_ladder_on_every_message
 ):
     """KBR-248 AC-1 (sibling coverage) — the hold fires on every converted route.
 
-    The hold is gated on ``stream_converter is not None`` and reaches the
-    same ``_cc_chunk_carries_content`` predicate on every adapter the
-    converter covers. This test parametrises the AC-1 empty-ladder claim over
-    the five Messages-wire adapters so a sibling whose converter output shape
+    KBR-248 originally gated the hold on ``stream_converter is not None``;
+    KBR-276 (2026-09-17) removed that gate, so the hold now engages on every
+    Chat Completions-wire upstream. This test still parametrises the AC-1
+    empty-ladder claim over the five Messages-wire adapters so a sibling
+    whose converter output shape
     differs (thinking-only prefixes, ``OpenCodeGoResponses`` envelope) cannot
     silently regress the fix.
 
