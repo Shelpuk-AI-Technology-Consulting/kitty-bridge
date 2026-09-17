@@ -425,14 +425,22 @@ other non-Messages wire behaves byte-identically to the pre-KBR-232 code.
   authorise. The empty-response ladder and its D4 exhaustion terminal, by
   contrast, are route-wide: a raw Chat Completions ladder-exhausting stream
   (e.g. repeated empty 200 bodies) ends in the same `type: "empty_response"`
-  D4 event, conforming to Q14 bullet 4. **Known asymmetry, deliberate:** the
-  streaming hold treats a non-empty `reasoning_content` delta as content
-  (thinking-only replies succeed immediately), while the route's non-streaming
-  empty-detection (`_is_empty_cc_response`) does not read `reasoning_content`
-  and would retry a reasoning-only reply. Aligning the non-streaming detector
-  is a separate ticket; the asymmetry is pinned by
-  `test_a_reasoning_only_prefix_releases_the_hold_and_is_not_retried`.
-  The hold is byte-capped at `PreambleHold.MAX_HELD_BYTES` (D5 fail-open). An exhausted
+  D4 event, conforming to Q14 bullet 4. **KBR-277 closed the non-streaming half.**
+  `BridgeServer._is_empty_cc_response`'s Chat Completions-shaped arm now reads
+  `message.reasoning_content` with the same `isinstance(..., str) and ... != ""` rule
+  `_cc_chunk_carries_content` (`server.py:1483`) applies to `delta.reasoning_content`.
+  The two predicates agree on the `reasoning_content` axis — the property test in
+  `tests/bridge/test_empty_response_reasoning_properties.py` pins this. The
+  Messages-shaped arm is unchanged and continues to mirror
+  `PreambleHold._block_start_releases` (Q14 D1): a Messages thinking block does not
+  count as content, consistent with the streaming hold, which also does not release on
+  a thinking block. **Pre-existing drift on `content`, now documented here:** the
+  CC arm's `content` check uses `.strip()` (whitespace-only content is empty) while
+  the streaming predicate's `content` check uses `!= ""` (whitespace-only content is
+  content). `TEST_SUITE.md` D6 covers only the empty-string case; aligning the two
+  would change product behaviour outside KBR-277's scope (a whitespace-only `content`
+  would stop being treated as empty) and is left in place. The hold is byte-capped at
+  `PreambleHold.MAX_HELD_BYTES` (D5 fail-open). An exhausted
   ladder emits the route's D4 terminal error (`type: "empty_response"` + ``[DONE]``),
   matching Q14 bullet 4 and the KBR-235/KBR-250 siblings; the backend is not marked
   healthy on that path.
