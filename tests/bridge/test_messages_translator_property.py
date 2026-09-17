@@ -355,10 +355,13 @@ class _SwapsTextOnlyUserRoles(MessagesTranslator):
     carries ``role``; this falsification proves that defence is wired.
 
     The mutation is deliberately narrow — only messages whose ``content`` is
-    a plain string — because a broader swap (assistant → user on a body with
-    ``tool_calls``) produces a body the CC reader rejects with
-    ``UnreadableBodyError``, which fails the falsification with the wrong
-    signal rather than the property's assertion. A silent role flip on a
+    a plain string — so the falsification's failure signal is the property's
+    own role comparison. A broader swap (assistant → user on a message with
+    ``tool_calls``) never reaches that comparison: the CC reader's user
+    branch residualises ``tool_calls``, and the falsification dies earlier in
+    :func:`~harness.contract.verify_total` with ``ResidualFieldsError`` — a
+    reader-bookkeeping signal, not the role defence this test exists to
+    validate (verified empirically, round-3 review). A silent role flip on a
     plain text turn is still a real fidelity defect the projection must see.
     """
 
