@@ -16,6 +16,20 @@ This baseline is what [KBR-91](https://shelpuk.atlassian.net/browse/KBR-91)
 (T-H3, per-component thresholds + nightly reporting) builds its
 thresholds on. Until that ticket lands, no number here gates anything.
 
+## 2026-09-17 — KBR-73 (T-F4) note: egress-group tests strengthened, TOTAL not re-measured
+
+[KBR-73](https://shelpuk.atlassian.net/browse/KBR-73) added five property
+tests to the `egress` group's L1 selection (`tests/test_egress_properties.py`),
+which should raise the group's kill rate — the earlier baseline
+(75.8%, 30 survivors) predates them. The **numbers below are not
+re-measured** for this change: a full-group mutmut run costs more than
+this task's budget, and the consumer of the refreshed numbers is
+KBR-91 (T-H3), which will re-run the baseline when it derives the
+per-component thresholds. No claim is made that the score improved,
+only that the surviving-mutant list the next run produces will be
+judged against a stronger suite. `tests/mutmut_scope.py` is unchanged
+— `kitty.egress` and `kitty.egress_guard` were already targets.
+
 ## How to reproduce
 
 ```console
