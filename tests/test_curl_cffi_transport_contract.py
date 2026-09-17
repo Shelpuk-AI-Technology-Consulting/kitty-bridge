@@ -345,7 +345,7 @@ class TestAmbientHttpProxy:
         — a Windows regression is as loud as a Linux one.
 
         Deliberately a no-mapping probe: on Linux/macOS the uppercase
-        name never reaches curl_cffi, so a mapping-vs-`HTTP_PROXY`
+        name never reaches curl_cffi, so a mapping-vs-``HTTP_PROXY``
         precedence cell would be trivially green there; the cell that
         needs pinning is the no-mapping one, which is what pins the
         reading itself. The mapping-wins rule for the lowercase form is
