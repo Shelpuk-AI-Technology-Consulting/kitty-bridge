@@ -300,7 +300,11 @@ class GeminiTranslator:
                 args = json.loads(args_str)
             except json.JSONDecodeError:
                 args = {}
-            parts.append({"functionCall": {"name": tc["function"]["name"], "args": args}})
+            function_call: dict = {"name": tc["function"]["name"], "args": args}
+            # Echo the upstream wire id when present; omit when absent (KBR-257).
+            if tc.get("id") is not None:
+                function_call["id"] = tc["id"]
+            parts.append({"functionCall": function_call})
 
         if not parts:
             parts.append({"text": ""})
@@ -374,8 +378,8 @@ class GeminiTranslator:
             func = tc.get("function", {})
 
             if "name" in func and func.get("name"):
-                # New tool call starts
-                self._tool_call_meta[idx] = {"name": func["name"]}
+                # New tool call starts — carry the upstream wire id for the emit (KBR-257).
+                self._tool_call_meta[idx] = {"name": func["name"], "id": tc.get("id")}
                 self._tool_call_buffers[idx] = ToolCallBuffer()
 
             if "arguments" in func and idx in self._tool_call_buffers:
@@ -391,6 +395,10 @@ class GeminiTranslator:
                 except (ToolCallBufferError, json.JSONDecodeError):
                     args = {}
                 meta = self._tool_call_meta.get(idx, {"name": "unknown"})
+                function_call: dict = {"name": meta["name"], "args": args}
+                # Echo the upstream wire id when present; omit when absent (KBR-257).
+                if meta.get("id") is not None:
+                    function_call["id"] = meta["id"]
                 events.append(
                     format_gemini_sse(
                         {
@@ -398,7 +406,7 @@ class GeminiTranslator:
                                 {
                                     "content": {
                                         "role": "model",
-                                        "parts": [{"functionCall": {"name": meta["name"], "args": args}}],
+                                        "parts": [{"functionCall": function_call}],
                                     },
                                     "index": 0,
                                 }

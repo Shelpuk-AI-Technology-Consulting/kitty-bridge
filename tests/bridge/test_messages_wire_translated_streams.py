@@ -498,7 +498,7 @@ async def test_the_gemini_stream_carries_text_and_the_whole_function_call(provid
 
     assert "hello" in [p.get("text") for p in parts if "text" in p]
     calls = [p["functionCall"] for p in parts if "functionCall" in p]
-    assert calls == [{"name": "Read", "args": {"path": "a"}}]
+    assert calls == [{"name": "Read", "args": {"path": "a"}, "id": "toolu_1"}]
 
     # The finish event closes the stream: a finishReason, after everything else.
     assert "finishReason" in events[-1]["candidates"][0]
