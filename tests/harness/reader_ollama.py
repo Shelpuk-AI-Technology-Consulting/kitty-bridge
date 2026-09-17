@@ -1,7 +1,10 @@
 """The Ollama ``/api/chat`` reader — projects an Ollama chat body into the canonical form.
 
 ``.system_design/TEST_SUITE.md`` §3.3.1, §3.3.1a, §3.3.1b, §7.4, §7.4.1, §7.4.2 ·
-plan task **T-A6** ([KBR-38](https://shelpuk.atlassian.net/browse/KBR-38)).
+plan task **T-A6** ([KBR-38](https://shelpuk.atlassian.net/browse/KBR-38)) for the
+request direction and plan task **T-A7 follow-up**
+([KBR-267](https://shelpuk.atlassian.net/browse/KBR-267)) for the reply
+direction (:class:`OllamaChatReplyProjection`).
 
 This module **imports nothing from** ``src/kitty``, and must not — §3.3.1's
 independent-oracle rule: a reader validated against kitty's output inherits
@@ -40,14 +43,18 @@ and the oracle's name-and-position pairing rule reads the name from
 ``Request.source`` — the same convention ``reader_gemini.py:1473``
 establishes for ``functionResponse.name``.
 
-**Tool-call arguments are objects, not strings.** Ollama publishes
-``tool_calls[*].function.arguments`` as a JSON object (e.g.
-``{"city": "Tokyo"}``); Chat Completions and Responses use the JSON
-*string* form, which ``contract.decode_arguments`` (KBR-174) decodes.
-Ollama is not a caller of ``decode_arguments`` — the object form has
-no parse step, and ``decode_arguments``'s docstring
-(``contract.py:900-980``) names Gemini explicitly excluded for the same
-reason (``reader_gemini.py:1386-1388``).
+**Tool-call arguments are objects, not strings — both directions.** Ollama
+publishes ``tool_calls[*].function.arguments`` as a JSON object (e.g.
+``{"city": "Tokyo"}``, verified against ``docs/api.md``'s with-tools
+response examples at lines 631-639, 749-758 and 1088-1097, retrieved
+2026-09-17); Chat Completions and Responses use the JSON *string* form,
+which ``contract.decode_arguments`` (KBR-174) decodes. Ollama is not a
+caller of ``decode_arguments`` — the object form has no parse step, and
+``decode_arguments``'s docstring (``contract.py:900-980``) names Gemini
+explicitly excluded for the same reason (``reader_gemini.py:1386-1388``).
+KBR-267's task description said "arguments are JSON strings — decode
+through ``decode_arguments``"; that reading is wrong on the wire and was
+corrected against the published schema during that task's design review.
 
 **Totality is the load-bearing property.** Every key of the body, at
 every depth, is either mapped and named in
@@ -56,6 +63,17 @@ every depth, is either mapped and named in
 root (per ``contract.residual_key()``, KBR-193). Nothing is dropped
 silently — an unaccounted field is precisely where an unregistered
 mutation hides.
+
+**The reply direction has a streaming-boundary guard.** Every published
+``/api/chat`` response object carries ``done: true`` on the final object
+(the reassembly point, per ``contract.py:1493-1496``);
+:class:`OllamaChatReplyProjection` raises
+:class:`~harness.contract.UnreadableBodyError` when ``done`` is absent
+or not ``true``. A mid-stream chunk would otherwise project as a short
+legitimate reply and pass ``verify_total`` — every published chunk
+carries every key the reply accounting table handles, so without this
+guard the silent failure is unique to Ollama (CC rejects non-final chunk
+shapes on the ``delta`` key, Anthropic on non-array ``content``).
 """
 
 from __future__ import annotations
@@ -64,6 +82,7 @@ import base64
 import binascii
 import json
 from collections.abc import Mapping, Sequence
+from types import MappingProxyType
 from typing import Any
 
 from harness import contract as c
@@ -207,6 +226,256 @@ class OllamaChatProjection:
             return _project(body)
         except (KeyError, TypeError, AttributeError) as exc:
             raise c.UnreadableBodyError(f"unreadable Ollama chat body: {exc!r}") from exc
+
+
+class OllamaChatReplyProjection:
+    """Reads an Ollama ``/api/chat`` reply into :class:`~harness.contract.Reply`.
+
+    Implements :class:`~harness.contract.ReplyProjection` for
+    :attr:`~harness.contract.WireFormat.OLLAMA_CHAT`. Plan task **T-A7
+    follow-up** ([KBR-267](https://shelpuk.atlassian.net/browse/KBR-267)).
+    Written against Ollama's published ``/api/chat`` response schema
+    (``docs/api.md``, retrieved 2026-09-17 from
+    ``raw.githubusercontent.com/ollama/ollama/main/docs/api.md``); imports
+    nothing from ``src/kitty`` (§3.3.1's independent-oracle rule).
+
+    The companion L1 test module
+    ``tests/harness/test_reader_ollama_reply.py`` asserts every published
+    ``/api/chat`` response example projects with an empty residual under
+    :func:`~harness.contract.verify_total`, the ``done_reason`` mapping
+    covers the canonical values and escapes ``load`` / ``unload`` /
+    unknowns through ``other`` (with the wire string kept in
+    ``stop_reason_raw``), and the streaming-boundary guard rejects
+    ``done: false`` and absent ``done``.
+
+    **Streaming boundary.** The reader reads one complete response
+    object. The contract's :class:`~harness.contract.ReplyProjection`
+    docstring (``contract.py:1493-1496``) puts reassembly on the caller;
+    every published ``/api/chat`` final-response example carries
+    ``done: true``. A body with ``done`` absent or not exactly ``True``
+    raises :class:`~harness.contract.UnreadableBodyError` with a message
+    naming the cause — closes the silent failure unique to Ollama, where
+    a mid-stream chunk would otherwise project as a short legitimate
+    reply and pass :func:`~harness.contract.verify_total`.
+
+    **Reuse from the request reader.** :func:`_read_message_parts` does
+    the bulk of the message-side work (content convergence, ``thinking``,
+    :func:`_read_tool_calls`, :func:`_read_images`, fail-closed unknown-key
+    residualisation at ``message.<key>``, the ``Text → Thinking → ToolUse →
+    Image`` part ordering); the reply class calls it with
+    ``role="assistant"`` and ``path="message"``. Two small adaptations
+    pre- and post-process: a strict ``function.name`` pre-check raises on
+    absent or empty names (matching ``reader_chat_completions.py:464-467``,
+    per the losslessness argument in ``contract.py:935-941`` — Ollama's
+    request reader is more lenient on this point; this is the deliberate
+    divergence). The request reader's ``_read_tool_calls`` /
+    ``_read_images`` / ``_decode_arguments_object`` are reached
+    transitively and are exactly the wire shape on the reply side; see
+    the module docstring's "Tool-call arguments are objects, not strings"
+    section for the object-form rationale.
+
+    Attributes:
+        wire_format: Always :attr:`~harness.contract.WireFormat.OLLAMA_CHAT`.
+    """
+
+    wire_format = c.WireFormat.OLLAMA_CHAT
+
+    #: ``done_reason`` values that map straight onto a canonical member of
+    #: :data:`~harness.contract.STOP_REASONS`. Anything else escapes via
+    #: ``"other"`` with the wire string kept in
+    #: :attr:`~harness.contract.Reply.stop_reason_raw`.
+    _DONE_REASON_MAP: Mapping[str, str] = MappingProxyType(
+        {
+            "stop": "end_turn",
+            "length": "max_tokens",
+        }
+    )
+
+    #: Top-level usage/timing fields carried into
+    #: :attr:`~harness.contract.Reply.usage` verbatim. Provider-reported
+    #: and excluded from the T-D10 diff by design (§3.3.1). When none of
+    #: these are present (the load / unload final objects), ``usage``
+    #: becomes ``{}`` rather than a partial map.
+    _USAGE_KEYS: frozenset[str] = frozenset(
+        {
+            "total_duration",
+            "load_duration",
+            "prompt_eval_count",
+            "prompt_eval_duration",
+            "eval_count",
+            "eval_duration",
+        }
+    )
+
+    def read_reply(self, captured: c.CapturedReply) -> c.Reply:
+        """Project a captured Ollama chat reply.
+
+        Args:
+            captured: The reply as observed on the wire. SSE reassembly is
+                the caller's responsibility (§7.4 boundary); the reader
+                enforces the streaming-boundary guard below.
+
+        Returns:
+            The wire-independent projection, total over the body.
+
+        Raises:
+            UnreadableBodyError: When ``done`` is absent or not ``true``;
+                when the body is not JSON, not an object, or the ``message``
+                is malformed in a way the request reader's helpers did not
+                cover. ``ValueError`` is deliberately **not** caught: from
+                inside a reader it means the reader mis-routed a field,
+                which is a reader bug and must surface.
+        """
+        body = _parse_body(captured.body)
+
+        # Streaming-boundary guard. The check sits before any key accounting
+        # so a mid-stream chunk fails the *parse*, not the *totality* —
+        # the oracle's "dropped" verdict is the wrong defect to surface here.
+        done_value = body.get("done")
+        if done_value is not True:
+            raise c.UnreadableBodyError(
+                f"missing 'done: true' marker; expected a complete response, "
+                f"not a stream chunk (got done={done_value!r})"
+            )
+
+        # Top-level key accounting. Every key is consumed, mapped into
+        # `usage`, or residualised; nothing is dropped. `message` and
+        # `done_reason` are consumed here but their values are mapped
+        # outside this loop because the mapping needs the residual bucket.
+        residual: dict[str, Any] = {}
+        consumed: set[str] = set()
+        usage: dict[str, Any] = {}
+        stop_reason: str | None = None
+        stop_reason_raw: str | None = None
+
+        # Sentinel for "absent" message — distinct from "value is None".
+        message_seen = False
+        message_value: Any = None
+
+        for key, value in body.items():
+            if key in self._USAGE_KEYS:
+                usage[key] = value
+                consumed.add(key)
+                continue
+            if key in ("model", "created_at", "done"):
+                consumed.add(key)
+                continue
+            if key == "message":
+                message_seen = True
+                message_value = value
+                consumed.add(key)
+                continue
+            if key == "done_reason":
+                consumed.add(key)
+                mapped, raw = self._map_done_reason(value, residual)
+                stop_reason, stop_reason_raw = mapped, raw
+                continue
+            residual[c.residual_key(key)] = value
+
+        parts: tuple[c.Part, ...] = self._read_message(message_seen, message_value, residual)
+
+        return c.Reply(
+            parts=parts,
+            stop_reason=stop_reason,
+            stop_reason_raw=stop_reason_raw,
+            usage=usage,
+            residual=residual,
+            consumed=frozenset(consumed),
+            source=body,
+        )
+
+    @staticmethod
+    def _read_message(message_seen: bool, message_value: Any, residual: dict[str, Any]) -> tuple[c.Part, ...]:
+        """Project ``message`` into ordered parts.
+
+        Handles the absent and non-object cases fail-closed (§7.4.1): a
+        missing or wrong-typed ``message`` residualises at its bare name
+        and produces no parts. The request reader's
+        :func:`_read_message_parts` does the bulk of the work and is
+        called with ``role="assistant"`` and ``path="message"``.
+
+        Args:
+            message_seen: True when the body carried a ``message`` key,
+                False when the key was absent. Needed because a ``None``
+                value is semantically distinct from absence (the load /
+                unload examples carry ``"message": {"role": "assistant",
+                "content": ""}``; a body that explicitly sends
+                ``"message": null`` is malformed input, not absence).
+            message_value: The raw ``message`` value from the body.
+            residual: The residual mapping, extended in place when the
+                message is missing or wrong-typed.
+
+        Returns:
+            The ordered parts (``Text``, ``Thinking``, ``ToolUse``,
+            ``Image``), or an empty tuple on the fail-closed cases.
+        """
+        if not message_seen:
+            residual["message"] = None
+            return ()
+        if message_value is None or not isinstance(message_value, Mapping):
+            residual["message"] = message_value
+            return ()
+
+        # Strict name-required check before delegating to the request
+        # reader's helper. Ollama's published ``/api/chat`` responses with
+        # ``tool_calls`` always carry a non-empty ``function.name``
+        # (example at docs/api.md lines 631-639 and 749-758), so a missing
+        # or empty one is a schema violation rather than an honest empty
+        # call. The helper's lenient default (``ToolUse(name="")`` for an
+        # absent name) violates ``contract.decode_arguments``'s
+        # losslessness rule (contract.py:935-941) and is not inherited on
+        # the reply side.
+        tool_calls = message_value.get("tool_calls")
+        if isinstance(tool_calls, list):
+            for index, entry in enumerate(tool_calls):
+                if not isinstance(entry, Mapping):
+                    # Other malformation (non-Mapping entry) is left to
+                    # the request reader's helper, which residualises at
+                    # ``message.tool_calls[<i>]`` rather than raising.
+                    continue
+                function = entry.get("function")
+                if not isinstance(function, Mapping):
+                    continue
+                name = function.get("name")
+                if not isinstance(name, str) or not name:
+                    raise c.UnreadableBodyError(f"message.tool_calls[{index}].function.name must be a non-empty string")
+
+        try:
+            return _read_message_parts(message_value, "assistant", "message", residual)
+        except (KeyError, TypeError, AttributeError) as exc:
+            raise c.UnreadableBodyError(f"unreadable Ollama chat reply's message: {exc!r}") from exc
+
+    @classmethod
+    def _map_done_reason(cls, value: Any, residual: dict[str, Any]) -> tuple[str | None, str | None]:
+        """Map an Ollama ``done_reason`` onto :data:`~harness.contract.STOP_REASONS`.
+
+        Args:
+            value: The wire value (``str``, ``None``, or a non-string —
+                the latter residualises at ``done_reason``).
+            residual: The residual mapping, extended in place when the
+                value is a non-string.
+
+        Returns:
+            ``(stop_reason, stop_reason_raw)``. ``(None, None)`` for an
+            absent or non-string value. A canonical string maps to the
+            canonical member with raw unset; an unknown string escapes to
+            ``"other"`` with the wire string kept.
+
+        Raises:
+            ValueError: When the contract's pairing rule would be violated.
+                Delegated to :class:`~harness.contract.Reply.__post_init__`
+                at construction time — this helper only returns values
+                the constructor will then check.
+        """
+        if value is None:
+            return None, None
+        if not isinstance(value, str):
+            residual[c.residual_key("done_reason")] = value
+            return None, None
+        mapped = cls._DONE_REASON_MAP.get(value)
+        if mapped is not None:
+            return mapped, None
+        return "other", value
 
 
 # --------------------------------------------------------------------------
