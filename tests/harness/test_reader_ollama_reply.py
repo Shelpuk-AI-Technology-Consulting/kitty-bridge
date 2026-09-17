@@ -340,6 +340,24 @@ class TestDoneReasonMapping:
         assert projected.stop_reason == "other"
         assert projected.stop_reason_raw == "brand_new_reason"
 
+    def test_non_string_done_reason_residualises(self) -> None:
+        """R4 / AC4 — a non-string ``done_reason`` residualises at its bare name.
+
+        Pins the non-string row of the ``done_reason`` table: canonical
+        ``None``/``None``, the value lands in the residual at ``done_reason``,
+        and ``verify_total`` fails the run.
+        """
+        body = json.loads(json.dumps(PUBLISHED_NO_STREAMING))
+        body["done_reason"] = 42
+
+        projected = r.OllamaChatReplyProjection().read_reply(_reply(body))
+
+        assert projected.stop_reason is None
+        assert projected.stop_reason_raw is None
+        assert projected.residual == {"done_reason": 42}
+        with pytest.raises(c.ResidualFieldsError, match="done_reason"):
+            c.verify_total(projected)
+
     def test_pairing_rule_is_enforced_against_a_stale_raw(self) -> None:
         """R4 — a canonical stop reason beside ``stop_reason_raw`` is rejected.
 

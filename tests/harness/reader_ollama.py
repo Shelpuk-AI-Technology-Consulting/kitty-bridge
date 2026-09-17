@@ -445,8 +445,8 @@ class OllamaChatReplyProjection:
         except (KeyError, TypeError, AttributeError) as exc:
             raise c.UnreadableBodyError(f"unreadable Ollama chat reply's message: {exc!r}") from exc
 
-    @classmethod
-    def _map_done_reason(cls, value: Any, residual: dict[str, Any]) -> tuple[str | None, str | None]:
+    @staticmethod
+    def _map_done_reason(value: Any, residual: dict[str, Any]) -> tuple[str | None, str | None]:
         """Map an Ollama ``done_reason`` onto :data:`~harness.contract.STOP_REASONS`.
 
         Args:
@@ -472,7 +472,7 @@ class OllamaChatReplyProjection:
         if not isinstance(value, str):
             residual[c.residual_key("done_reason")] = value
             return None, None
-        mapped = cls._DONE_REASON_MAP.get(value)
+        mapped = OllamaChatReplyProjection._DONE_REASON_MAP.get(value)
         if mapped is not None:
             return mapped, None
         return "other", value
