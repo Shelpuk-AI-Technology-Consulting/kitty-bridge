@@ -1743,10 +1743,13 @@ Three consequences the rest of §5 must not paper over:
 **An untested interaction.** `kitty.egress`'s own docstring records that the three stacks
 disagree about `HTTP_PROXY`/`HTTPS_PROXY`: aiohttp ignores them unless `trust_env=True`, while
 curl_cffi and botocore honour them. Kitty never sets those variables — but the *user's shell*
-may have. **For `curl_cffi` this is now measured and closed** (KBR-161): a matching `NO_PROXY` beat
+may have. **For `curl_cffi` this is now measured and closed** (KBR-161 + KBR-85): a matching `NO_PROXY` beat
 `proxies=` outright, and `_new_curl_session` now sets `CURLOPT_NOPROXY` so the mapping is the last
-word; `tests/test_curl_cffi_transport_contract.py` pins both directions. **`botocore` is untouched and
-unmeasured.** §6.2.4's row expects `Config(proxies=)` to take precedence over the environment — but
+word; the scheme-scoped variables (`HTTPS_PROXY`, `https_proxy`, `ALL_PROXY`, `all_proxy`, and
+`http_proxy` — the only form libcurl reads for `http://`) were extended in KBR-85 to lose to the
+configured mapping as well, and the same file now pins all four directions plus both casings under
+`tests/test_curl_cffi_transport_contract.py::TestAmbientHttpProxy` and `::TestAmbientHttpsProxy`.
+**`botocore` is untouched and unmeasured.** §6.2.4's row expects `Config(proxies=)` to take precedence over the environment — but
 that is exactly the shape of expectation the `curl_cffi` row carried until KBR-161 measured it and
 found the reverse. Until someone probes it, the Bedrock path's behaviour under an ambient
 `NO_PROXY` is unknown, not known-good. **KBR-173.**
