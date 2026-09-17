@@ -396,6 +396,16 @@ class ResponsesProjection:
             consumed.add(key)
             if key == "tool_choice":
                 self._read_tool_choice(body[key], extra, residual)
+            elif key == "parallel_tool_calls":
+                # The four-way conditional matches the CC reader's
+                # branch in `reader_chat_completions.py`. The `extra`
+                # write inside the helper routes through
+                # `c.PARALLEL_TOOL_CALLS_KEY` (the same source-of-truth
+                # posture the CC reader takes on its `extra` write);
+                # the residual write uses the bare wire name so the
+                # cross-reader comparison sees the same spelling either
+                # side.
+                self._read_parallel_tool_calls(body[key], extra, residual)
             else:
                 extra[key] = body[key]
 
@@ -490,6 +500,47 @@ class ResponsesProjection:
             return f"tool:{kind}"
 
         return None
+
+    def _read_parallel_tool_calls(self, value: Any, extra: dict[str, Any], residual: dict[str, Any]) -> None:
+        """Map ``parallel_tool_calls`` onto the canonical address per §3.3.1b.
+
+        The Responses default is ``true`` (parallel calls allowed), the same
+        default the CC wire carries (KBR-205 / G36). An absent entry and an
+        explicit default are one request on both wires, so the reader writes
+        ``extra[parallel_tool_calls]`` only on a **non-default** value:
+        writing the default would invent a second field some providers reject
+        and every comparison would carry.
+
+        The four-way conditional mirrors the CC reader's analogous branch
+        (lines 615–651 of ``reader_chat_completions.py``):
+
+        - ``True`` — the documented default; consumed, **not** written.
+        - ``False`` — the non-default delta; written to
+          ``extra[parallel_tool_calls]``.
+        - ``None`` — the wire key carries no instruction (the
+          ``cache_control`` precedent); consumed, **not** written.
+        - anything else — a wrongly-typed leaf; residualised at the bare wire
+          name so the cross-reader comparison sees the same answer either
+          side.
+
+        Args:
+            value: The raw ``parallel_tool_calls`` value.
+            extra: The envelope's extra mapping, mutated here.
+            residual: Accumulator of unclassifiable values, mutated here.
+        """
+        if value is True:
+            # Default — not written. The caller has already added the key to
+            # `consumed`; the absence in `extra[parallel_tool_calls]` is the
+            # canonical form.
+            return
+        if value is False:
+            extra[c.PARALLEL_TOOL_CALLS_KEY] = False
+            return
+        if value is None:
+            # The wire key carries no instruction (the `cache_control`
+            # precedent); treated as no-op.
+            return
+        residual["parallel_tool_calls"] = value
 
     # ----------------------------------------------------------------
     # Conversation

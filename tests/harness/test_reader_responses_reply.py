@@ -157,6 +157,20 @@ class TestPublishedExample:
         assert isinstance(reader, c.ReplyProjection)
         assert reader.wire_format is c.WireFormat.OPENAI_RESPONSES
 
+    def test_parallel_tool_calls_is_consumed_without_an_extra_address(self) -> None:
+        """KBR-273 — the reply direction has no ``extra`` address to violate.
+
+        ``Reply`` carries no ``envelope.extra``, so every echoed request
+        control field — ``parallel_tool_calls`` among them — is consumed
+        silently. The §3.3.1b non-default rule binds the *request* readers'
+        ``extra`` writes; this assertion pins the asymmetry so a future
+        maintainer cannot mistake the absence for an oversight.
+        """
+        projected = rsp.ResponsesReplyProjection().read_reply(_reply(PUBLISHED_FULL_RESPONSE))
+
+        assert "parallel_tool_calls" in projected.consumed
+        assert projected.residual == {}
+
 
 # --------------------------------------------------------------------------
 # R2 — the format's content-shape vocabulary
