@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from kitty.bridge.gemini.translator import GeminiTranslator
 
 
@@ -548,3 +550,261 @@ class TestReset:
         assert len(events) == 1
         data = json.loads(events[0].removeprefix("data: ").removesuffix("\n\n"))
         assert data["candidates"][0]["content"]["parts"][0]["text"] == "New"
+
+
+class TestGeminiToolChoice:
+    """KBR-221: ``toolConfig.functionCallingConfig`` survives the Gemini -> CC hop.
+
+    Gemini's ``mode`` (case-insensitive AUTO / ANY / NONE) maps onto CC strings;
+    ``ANY`` plus a single ``allowedFunctionNames`` entry maps onto the CC named-function
+    form; irreducible shapes (multi-name, AUTO / NONE + names, VALIDATED,
+    MODE_UNSPECIFIED, non-list, empty) carry the mode only -- the restriction has no CC
+    home (D5). Gemini carries no parallel-tool-use knob (KBR-205 / G36).
+    """
+
+    def setup_method(self):
+        self.t = GeminiTranslator()
+
+    def _req(self, **extra):
+        """Build a minimal Gemini request with one tool, plus the case's fields."""
+        req = {
+            "contents": [{"role": "user", "parts": [{"text": "hi"}]}],
+            "tools": [{"functionDeclarations": [{"name": "get_weather", "parameters": {}}]}],
+        }
+        req.update(extra)
+        return req
+
+    @pytest.mark.parametrize(
+        ("mode", "cc"),
+        [("AUTO", "auto"), ("ANY", "required"), ("NONE", "none")],
+        ids=["auto", "any", "none"],
+    )
+    def test_mode_is_carried(self, mode, cc):
+        """AC-6: each published Gemini mode maps onto its CC spelling."""
+        result = self.t.translate_request(
+            self._req(toolConfig={"functionCallingConfig": {"mode": mode}})
+        )
+        assert result["tool_choice"] == cc
+
+    @pytest.mark.parametrize(
+        ("mode", "cc"),
+        [
+            ("auto", "auto"), ("Auto", "auto"), ("AUTO", "auto"), ("aUtO", "auto"),
+            ("any", "required"), ("Any", "required"), ("ANY", "required"), ("aNy", "required"),
+            ("none", "none"), ("NONE", "none"), ("NoNe", "none"),
+        ],
+        ids=[
+            "auto-lower", "auto-title", "auto-upper", "auto-mixed",
+            "any-lower", "any-title", "any-upper", "any-mixed",
+            "none-lower", "none-upper", "none-mixed",
+        ],
+    )
+    def test_mode_is_case_insensitive(self, mode, cc):
+        """AC-6: every published Gemini mode is matched case-insensitively."""
+        result = self.t.translate_request(
+            self._req(toolConfig={"functionCallingConfig": {"mode": mode}})
+        )
+        assert result["tool_choice"] == cc
+
+    def test_any_with_single_name_is_named_form(self):
+        """AC-7: ANY + one name maps onto the CC named-function form."""
+        result = self.t.translate_request(
+            self._req(
+                toolConfig={
+                    "functionCallingConfig": {
+                        "mode": "ANY",
+                        "allowedFunctionNames": ["get_weather"],
+                    }
+                }
+            )
+        )
+        assert result["tool_choice"] == {
+            "type": "function",
+            "function": {"name": "get_weather"},
+        }
+
+    def test_any_with_multi_names_carries_mode_only(self):
+        """AC-8: ANY + >1 names carries the mode only (no CC form for a forced set)."""
+        result = self.t.translate_request(
+            self._req(
+                toolConfig={
+                    "functionCallingConfig": {
+                        "mode": "ANY",
+                        "allowedFunctionNames": ["get_weather", "search"],
+                    }
+                }
+            )
+        )
+        assert result["tool_choice"] == "required"
+
+    def test_any_with_empty_names_carries_mode_only(self):
+        """AC-7b: ANY + empty names -> mode only (no specific name to carry)."""
+        result = self.t.translate_request(
+            self._req(
+                toolConfig={
+                    "functionCallingConfig": {
+                        "mode": "ANY",
+                        "allowedFunctionNames": [],
+                    }
+                }
+            )
+        )
+        assert result["tool_choice"] == "required"
+
+    @pytest.mark.parametrize(
+        "names",
+        ["get_weather", 7, {"name": "get_weather"}],
+        ids=["bare-string", "number", "object"],
+    )
+    def test_any_with_non_list_names_carries_mode_only(self, names):
+        """AC-7c: ANY + non-list names carries the mode only (D5; reader residualises non-list values)."""
+        result = self.t.translate_request(
+            self._req(
+                toolConfig={
+                    "functionCallingConfig": {
+                        "mode": "ANY",
+                        "allowedFunctionNames": names,
+                    }
+                }
+            )
+        )
+        assert result["tool_choice"] == "required"
+
+    def test_auto_with_names_carries_mode_only(self):
+        """AC-9: AUTO + any names carries the mode only."""
+        result = self.t.translate_request(
+            self._req(
+                toolConfig={
+                    "functionCallingConfig": {
+                        "mode": "AUTO",
+                        "allowedFunctionNames": ["get_weather", "search"],
+                    }
+                }
+            )
+        )
+        assert result["tool_choice"] == "auto"
+
+    def test_none_with_names_carries_mode_only(self):
+        """AC-9: NONE + names carries the mode only (defensive)."""
+        result = self.t.translate_request(
+            self._req(
+                toolConfig={
+                    "functionCallingConfig": {
+                        "mode": "NONE",
+                        "allowedFunctionNames": ["get_weather"],
+                    }
+                }
+            )
+        )
+        assert result["tool_choice"] == "none"
+
+    def test_any_with_mixed_type_names_carries_mode_only(self):
+        """AC-7c / AC-8 boundary: a names list with non-string members carries the mode only.
+
+        The CC named-function form requires a string name; the representable
+        half on this input is the mode, so the carrier mirrors the multi-name
+        and non-list dispositions and emits ``required``.
+        """
+        result = self.t.translate_request(
+            self._req(
+                toolConfig={
+                    "functionCallingConfig": {
+                        "mode": "ANY",
+                        "allowedFunctionNames": ["get_weather", 7],
+                    }
+                }
+            )
+        )
+        assert result["tool_choice"] == "required"
+
+    def test_any_with_single_non_string_name_carries_mode_only(self):
+        """AC-7c / D5: a single-element non-string name carries the mode only.
+
+        Kills a mutant that drops the ``isinstance(names[0], str)`` guard: with
+        ``[7]``, ``len == 1`` would still pass the ``len(names) == 1`` check but
+        ``names[0]`` is not a string, so the carrier must fall through to the
+        mode-only branch.
+        """
+        result = self.t.translate_request(
+            self._req(
+                toolConfig={
+                    "functionCallingConfig": {
+                        "mode": "ANY",
+                        "allowedFunctionNames": [7],
+                    }
+                }
+            )
+        )
+        assert result["tool_choice"] == "required"
+
+    @pytest.mark.parametrize(
+        "mode",
+        ["VALIDATED", "MODE_UNSPECIFIED"],
+        ids=["validated", "mode-unspecified"],
+    )
+    def test_validated_and_unspecified_are_omitted(self, mode):
+        """AC-10: VALIDATED / MODE_UNSPECIFIED have no canonical mapping and are omitted (D5)."""
+        result = self.t.translate_request(
+            self._req(toolConfig={"functionCallingConfig": {"mode": mode}})
+        )
+        assert "tool_choice" not in result
+
+    @pytest.mark.parametrize(
+        "mode",
+        [7, None, []],
+        ids=["int", "null", "list"],
+    )
+    def test_non_string_mode_is_omitted(self, mode):
+        """AC-10: a non-string mode has no canonical mapping and is omitted (D5)."""
+        result = self.t.translate_request(
+            self._req(toolConfig={"functionCallingConfig": {"mode": mode}})
+        )
+        assert "tool_choice" not in result
+
+    def test_absent_tool_config_invents_no_choice(self):
+        """R9: no ``toolConfig`` in the inbound body -> no entry."""
+        result = self.t.translate_request(self._req())
+        assert "tool_choice" not in result
+
+    @pytest.mark.parametrize(
+        "tool_config",
+        [None, {}, {"reasoning": "x"}],
+        ids=["null", "empty-object", "no-function-calling-config"],
+    )
+    def test_degenerate_tool_config_invents_no_choice(self, tool_config):
+        """AC-10 / R9: a ``toolConfig`` without a readable ``functionCallingConfig`` carries nothing."""
+        result = self.t.translate_request(self._req(toolConfig=tool_config))
+        assert "tool_choice" not in result
+
+    @pytest.mark.parametrize(
+        "tools_value",
+        [None, [], [{"functionDeclarations": []}]],
+        ids=["absent", "empty-list", "empty-declarations"],
+    )
+    def test_tool_choice_without_tools_is_omitted(self, tools_value):
+        """AC-11 / D9: choice over no tools -- the gate reads the CC list, not the inbound key."""
+        req = self._req(toolConfig={"functionCallingConfig": {"mode": "ANY"}})
+        if tools_value is None:
+            del req["tools"]
+        else:
+            req["tools"] = tools_value
+        result = self.t.translate_request(req)
+        assert "tool_choice" not in result
+
+    def test_full_composition_carries_tools_and_config(self):
+        """AC-14: tools + toolConfig reach the CC body together."""
+        result = self.t.translate_request(
+            self._req(
+                toolConfig={
+                    "functionCallingConfig": {
+                        "mode": "ANY",
+                        "allowedFunctionNames": ["get_weather"],
+                    }
+                }
+            )
+        )
+        assert [t["function"]["name"] for t in result["tools"]] == ["get_weather"]
+        assert result["tool_choice"] == {
+            "type": "function",
+            "function": {"name": "get_weather"},
+        }

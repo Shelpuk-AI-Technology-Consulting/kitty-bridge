@@ -496,6 +496,12 @@ class TestTheWholeSuiteIsCoherent:
             # the curl_cffi/botocore recorders), so this AST pin is their only
             # automated drift enforcement.
             "tests/bridge/test_kbr256_recovery_structure.py",
+            # KBR-73 (T-F4). A §6.2.3 structural guard: holds the four
+            # ``Upstream POST`` URL-dump sites and the two header-dump sites
+            # against the source text of `src/kitty/bridge/server.py` so a
+            # future handler that logs a credential-bearing URL or header
+            # dict without the redaction helper fails in CI.
+            "tests/test_egress_log_redaction.py",
             # KBR-64 (T-G11). A §6.2.4 dependency behaviour contract, the
             # botocore twin of `test_curl_cffi_transport_contract.py`: it
             # asserts what botocore does with `Config(proxies=)` against

@@ -7,11 +7,13 @@ two purposes, both narrow:
   dictionaries for each registered slice — :data:`_phase_outcomes` /
   :data:`_phase_teardown_outcomes` for the **T-E2** (aiohttp) slice,
   :data:`_curl_phase_outcomes` / :data:`_curl_phase_teardown_outcomes` for
-  the **T-E3** (curl_cffi) slice, and :data:`_botocore_phase_outcomes` /
+  the **T-E3** (curl_cffi) slice, :data:`_botocore_phase_outcomes` /
   :data:`_botocore_phase_teardown_outcomes` for the **T-E4** (botocore)
-  slice — dispatching by nodeid file prefix, which is what lets the
-  slices share method names without bleeding outcomes into each other's
-  gates;
+  slice, and :data:`_provider_phase_outcomes` /
+  :data:`_provider_phase_teardown_outcomes` for the **T-E5**
+  (provider-aiohttp) slice — dispatching by nodeid file prefix, which
+  is what lets the slices share method names without bleeding outcomes
+  into each other's gates;
 * the per-slice session-scope fixtures read their dictionaries at
   teardown, assert no foreign row was mutated, and write ``PROVEN`` iff
   their every phase is ``PASSED`` — or ``UNSUPPORTED`` (with the floor
@@ -32,7 +34,7 @@ Python <3.11 — where phases 2/2b/3 skip because of TLS-in-TLS — would record
 ``PROVEN`` after phase 1 alone. The hook is a falsifiable witness to "every
 phase ran" — the verdict cannot be written without that witness agreeing.
 
-**A note for sibling slices (T-E5).** The verdict recording is the
+**A note for sibling slices (T-E4..T-E5).** The verdict recording is the
 session-finaliser's job, and it runs **after** every test in the process,
 not per file — so an autouse ``reset_for_test()`` in a sibling's test
 module cannot erase a verdict that has not been written yet, and the
@@ -41,18 +43,29 @@ The reset seam is for *per-test isolation* (each test sees an untouched
 report), not for verdict erasure; sibling slices that follow this
 template should put their own finaliser in this conftest (or in their own
 scoped conftest) rather than calling ``record()`` from a test body, and add
-their slice to :data:`_SLICES` plus a ``(row, gate)`` pair to
-:data:`_SIBLINGS`. Each new finaliser extends the sibling-row exemption
-pattern: a row is exempt only when its owning slice's gate passed *and*
-the row currently reads ``PROVEN`` — the documented residual limit of
-this structural check.
+their slice to :data:`_SLICES`. Each new finaliser extends the sibling-row
+exemption pattern: a row is exempt when its owning slice's gate passed
+*and* the row currently reads ``PROVEN``, **or** when the row reads
+``UNSUPPORTED`` and the sibling's own outcomes dict is in the floor
+shape (the botocore slice has no 3.11 floor, so on Python <3.11 its
+``PROVEN`` write must coexist with the aiohttp/curl_cffi slices'
+legitimate ``UNSUPPORTED`` floor writes — the gate's length /
+all-passed / teardown-clean checks ensure a rogue ``UNSUPPORTED`` write
+is still caught). The check accepts a sequence of siblings — one per
+other registered slice — and stays order-independent (a not-yet-run
+sibling's row is ``NOT_ATTEMPTED`` and skips the untouched list via
+the existing branch). The documented residual limit narrows to the
+only row-foreign write that escapes the guard: a rogue ``PROVEN`` on a
+sibling whose gate did not pass (the ``PROVEN`` exemption is gated on
+the sibling's gate-passed predicate; the ``UNSUPPORTED`` exemption is
+gated on the sibling's own floor shape).
 """
 
 from __future__ import annotations
 
 import enum
 import sys
-from collections.abc import Callable, Generator, Iterator
+from collections.abc import Callable, Generator, Iterator, Sequence
 
 import pytest
 
@@ -162,6 +175,77 @@ _botocore_phase_outcomes: dict[str, _PhaseOutcome] = {}
 #: The teardown-phase outcome for each tracked T-E4 phase test.
 _botocore_phase_teardown_outcomes: dict[str, _PhaseOutcome] = {}
 
+# ── The T-E5 (provider-aiohttp) slice's gate ──────────────────────────────
+#
+# The T-E5 slice covers **both** aiohttp paths §5.5 names that bypass
+# `_session_for`: `ollama_cloud`'s own serving session and the
+# `openai_subscription` OAuth **login** leg. The gate therefore tracks nine
+# tests, not five — the five §5.2.2 phase tests on the serving leg (same
+# method names as T-E2/T-E3, disambiguated by the file prefix below) plus the
+# four OAuth-leg phases. Gating the OAuth tests is deliberate: the ticket's
+# done-when is one row for both paths, and an ungated OAuth test could be
+# deleted without moving the verdict — exactly the vacuity the gate exists
+# to prevent.
+
+#: The gated tests whose outcomes gate the provider-aiohttp slice verdict.
+_PROVIDER_AIOHTTP_PHASE_TEST_NAMES: frozenset[str] = frozenset(
+    {
+        # Serving leg — the §5.2.2 phases (same names as T-E2/T-E3).
+        "test_with_egress_disabled_the_recorder_records_the_connection_and_the_proxy_sees_nothing",
+        "test_proxy_down_leaves_the_recorder_with_zero_connections",
+        "test_proxy_up_every_peer_port_joins_a_tunnel",
+        "test_failed_tunnel_contributes_no_upstream_connection",
+        "test_injected_bypass_makes_the_harness_report_it",
+        # OAuth login leg — its own containment phases.
+        "test_the_oauth_login_leg_reaches_the_recorder_with_egress_disabled",
+        "test_the_oauth_login_leg_joins_every_connection_to_a_tunnel",
+        "test_the_oauth_login_leg_connects_nowhere_with_the_proxy_down",
+        "test_an_oauth_leg_bypass_makes_the_harness_report_it",
+    }
+)
+
+#: The nodeid prefix every T-E5 phase test starts with.
+_PROVIDER_AIOHTTP_SLICE_FILE_PREFIX = "tests/harness/test_provider_aiohttp_containment_slice.py::"
+
+#: The capability-report row the T-E5 slice is allowed to write.
+_PROVIDER_AIOHTTP_VERDICT_ROW = "provider_aiohttp"
+
+#: Populated by :func:`pytest_runtest_makereport` as the T-E5 phase tests
+#: complete. Same contract as :data:`_phase_outcomes`, provider slice's own dict.
+_provider_phase_outcomes: dict[str, _PhaseOutcome] = {}
+
+#: The teardown-phase outcome for each tracked T-E5 phase test.
+_provider_phase_teardown_outcomes: dict[str, _PhaseOutcome] = {}
+
+#: The T-E5 direct-leg phases — the gated tests whose ``PASSED`` call-and-
+#: teardown outcome is the floor's signal of real work on Python <3.11.
+#: Two of the nine gated tests: the serving leg's phase 1 and the OAuth
+#: login leg's direct phase. Both carry no ``skipif`` and run on every
+#: supported Python.
+_PROVIDER_AIOHTTP_DIRECT_PHASE_NAMES: frozenset[str] = frozenset(
+    {
+        "test_with_egress_disabled_the_recorder_records_the_connection_and_the_proxy_sees_nothing",
+        "test_the_oauth_login_leg_reaches_the_recorder_with_egress_disabled",
+    }
+)
+
+#: The T-E5 proxied phases — the gated tests whose **absence** from the
+#: outcomes dict (setup-skipped by their Python ≥3.11 ``skipif``) is the
+#: floor's signal of partial delivery. Seven of the nine gated tests.
+_PROVIDER_AIOHTTP_PROXIED_PHASE_NAMES: frozenset[str] = frozenset(
+    {
+        # Serving leg — the four §5.2.2 proxied phases.
+        "test_proxy_down_leaves_the_recorder_with_zero_connections",
+        "test_proxy_up_every_peer_port_joins_a_tunnel",
+        "test_failed_tunnel_contributes_no_upstream_connection",
+        "test_injected_bypass_makes_the_harness_report_it",
+        # OAuth login leg — the three proxied phases.
+        "test_the_oauth_login_leg_joins_every_connection_to_a_tunnel",
+        "test_the_oauth_login_leg_connects_nowhere_with_the_proxy_down",
+        "test_an_oauth_leg_bypass_makes_the_harness_report_it",
+    }
+)
+
 #: Populated by :func:`pytest_runtest_makereport` as phase tests complete.
 #: Read by the session-finaliser verdict gate below. Keyed on test method
 #: name; the value is the *call*-phase outcome. A phase test whose teardown
@@ -180,84 +264,28 @@ _phase_teardown_outcomes: dict[str, _PhaseOutcome] = {}
 #: Per-slice gate descriptors the hook iterates. Each tuple binds a
 #: ``(file_prefix, phase_names, outcomes, teardown_outcomes)`` so a test's
 #: phase outcome is dispatched to the right slice by its nodeid prefix —
-#: the only signal that lets the hook tell the T-E2, T-E3 and T-E4 slices
-#: apart, since the slices share method names by design.
+#: the only signal that lets the hook tell the four slices apart,
+#: since the T-E2 and T-E3 slices (and the T-E4 botocore slice) share
+#: method names by design.
 _SLICES: tuple[
     tuple[str, frozenset[str], dict[str, _PhaseOutcome], dict[str, _PhaseOutcome]],
     ...,
 ] = (
     (_SLICE_FILE_PREFIX, _PHASE_TEST_NAMES, _phase_outcomes, _phase_teardown_outcomes),
-    (
-        _CURL_CFFI_SLICE_FILE_PREFIX,
-        _CURL_CFFI_PHASE_TEST_NAMES,
-        _curl_phase_outcomes,
-        _curl_phase_teardown_outcomes,
-    ),
+    (_CURL_CFFI_SLICE_FILE_PREFIX, _CURL_CFFI_PHASE_TEST_NAMES, _curl_phase_outcomes, _curl_phase_teardown_outcomes),
     (
         _BOTOCORE_SLICE_FILE_PREFIX,
         _BOTOCORE_PHASE_TEST_NAMES,
         _botocore_phase_outcomes,
         _botocore_phase_teardown_outcomes,
     ),
+    (
+        _PROVIDER_AIOHTTP_SLICE_FILE_PREFIX,
+        _PROVIDER_AIOHTTP_PHASE_TEST_NAMES,
+        _provider_phase_outcomes,
+        _provider_phase_teardown_outcomes,
+    ),
 )
-
-#: Per-slice ``(sibling_row, gate_passed_fn, sibling_outcomes,
-#: sibling_teardowns)`` tuples the sibling-row guards iterate. Each
-#: finaliser's exemption covers every *other* slice's row, so three slices
-#: mean each guard carries two siblings; naming them once here keeps the
-#: three guards from drifting apart as T-E5 lands. The outcomes dicts are
-#: carried alongside the gate function so a sibling row reading
-#: ``UNSUPPORTED`` can be exempted when it is a *legitimate* floor-shape
-#: write (the sibling's phase 1 ran and its proxied phases are setup-
-#: skipped on Python <3.11) — see the rationale on
-#: :func:`_record_proven_with_sibling_guard`.
-_SIBLINGS: dict[
-    str,
-    tuple[tuple[str, Callable[[], bool], dict[str, _PhaseOutcome], dict[str, _PhaseOutcome]], ...],
-] = {
-    _VERDICT_ROW: (
-        (
-            _CURL_CFFI_VERDICT_ROW,
-            lambda: _curl_gate_passed(),
-            _curl_phase_outcomes,
-            _curl_phase_teardown_outcomes,
-        ),
-        (
-            _BOTOCORE_VERDICT_ROW,
-            lambda: _botocore_gate_passed(),
-            _botocore_phase_outcomes,
-            _botocore_phase_teardown_outcomes,
-        ),
-    ),
-    _CURL_CFFI_VERDICT_ROW: (
-        (
-            _VERDICT_ROW,
-            lambda: _aiohttp_gate_passed(),
-            _phase_outcomes,
-            _phase_teardown_outcomes,
-        ),
-        (
-            _BOTOCORE_VERDICT_ROW,
-            lambda: _botocore_gate_passed(),
-            _botocore_phase_outcomes,
-            _botocore_phase_teardown_outcomes,
-        ),
-    ),
-    _BOTOCORE_VERDICT_ROW: (
-        (
-            _VERDICT_ROW,
-            lambda: _aiohttp_gate_passed(),
-            _phase_outcomes,
-            _phase_teardown_outcomes,
-        ),
-        (
-            _CURL_CFFI_VERDICT_ROW,
-            lambda: _curl_gate_passed(),
-            _curl_phase_outcomes,
-            _curl_phase_teardown_outcomes,
-        ),
-    ),
-}
 
 
 def _gate_passed(
@@ -298,6 +326,15 @@ def _curl_gate_passed() -> bool:
     return _gate_passed(_curl_phase_outcomes, _curl_phase_teardown_outcomes, _CURL_CFFI_PHASE_TEST_NAMES)
 
 
+def _provider_gate_passed() -> bool:
+    """Whether T-E5's gate is in the all-passed state."""
+    return _gate_passed(
+        _provider_phase_outcomes,
+        _provider_phase_teardown_outcomes,
+        _PROVIDER_AIOHTTP_PHASE_TEST_NAMES,
+    )
+
+
 def _botocore_gate_passed() -> bool:
     """Whether T-E4's gate is in the all-passed state."""
     return _gate_passed(_botocore_phase_outcomes, _botocore_phase_teardown_outcomes, _BOTOCORE_PHASE_TEST_NAMES)
@@ -305,24 +342,31 @@ def _botocore_gate_passed() -> bool:
 
 # ── The Python <3.11 floor shape (plan §8's "an outcome is recorded") ──────
 
-#: Phase 1 — the direct leg — carries no ``skipif`` and runs on every
-#: supported Python; both slices use the same method name for it.
+#: The default direct-leg phase name — T-E2's and T-E3's phase 1, which
+#: carries no ``skipif`` and runs on every supported Python. The default
+#: for :func:`_floor_unsupported_shape`'s ``direct_leg_names`` parameter,
+#: which T-E5 overrides with a two-element set (the serving-leg phase 1
+#: plus the OAuth login leg's direct-leg phase).
 _PHASE_1_NAME = "test_with_egress_disabled_the_recorder_records_the_connection_and_the_proxy_sees_nothing"
 
 #: The four proxied phases — 2, 2b's two tests, and 3 — which carry the
-#: Python ≥3.11 ``skipif`` in both slices. Their **absence** from the
-#: outcomes dict (setup-skipped, never reaching the hook's ``call`` phase)
-#: is what distinguishes the floor shape from a deleted/renamed phase.
-_PROXIED_PHASE_NAMES: frozenset[str] = frozenset({
-    "test_proxy_down_leaves_the_recorder_with_zero_connections",
-    "test_proxy_up_every_peer_port_joins_a_tunnel",
-    "test_failed_tunnel_contributes_no_upstream_connection",
-    "test_injected_bypass_makes_the_harness_report_it",
-})
+#: Python ≥3.11 ``skipif`` in both T-E2 and T-E3 slices. Their
+#: **absence** from the outcomes dict (setup-skipped, never reaching the
+#: hook's ``call`` phase) is what distinguishes the floor shape from a
+#: deleted/renamed phase. T-E5 overrides this with a seven-element set
+#: covering its own proxied phases.
+_PROXIED_PHASE_NAMES: frozenset[str] = frozenset(
+    {
+        "test_proxy_down_leaves_the_recorder_with_zero_connections",
+        "test_proxy_up_every_peer_port_joins_a_tunnel",
+        "test_failed_tunnel_contributes_no_upstream_connection",
+        "test_injected_bypass_makes_the_harness_report_it",
+    }
+)
 
-#: The reason text both finalisers record under the floor shape. Shared by
-#: both slices (the floor is shared); references what a future maintainer
-#: needs to re-derive the decision.
+#: The reason text every finaliser records under the floor shape. Shared
+#: across all slices (the floor is shared); references what a future
+#: maintainer needs to re-derive the decision.
 _FLOOR_UNSUPPORTED_REASON = (
     "Python <3.11: a proxied §5.2.2 phase did not run on this interpreter "
     "(phase 1 ran and came back clean). Owner scope decision recorded on "
@@ -336,35 +380,40 @@ def _floor_unsupported_shape(
     outcomes: dict[str, _PhaseOutcome],
     teardown_outcomes: dict[str, _PhaseOutcome],
     *,
-    phase_1_name: str = _PHASE_1_NAME,
+    direct_leg_names: frozenset[str] = frozenset({_PHASE_1_NAME}),
     proxied_names: frozenset[str] = _PROXIED_PHASE_NAMES,
     version_info: tuple[int, ...] | None = None,
 ) -> bool:
     """Return whether the slice's run ended in the floor-skip shape.
 
     On Python <3.11 the proxied phases are setup-skipped by their
-    ``skipif``; phase 1 — which carries no ``skipif`` — runs and may pass.
-    That is the floor shape: the slice did real work (the direct leg
-    against the recorder) but the §5.2.2 proxied phases never ran. The
-    plan's T-E3 done-when ("an outcome is recorded") and T-E9's gate
-    semantics ("``unsupported`` is a permitted outcome for partial
-    delivery") are both honoured by recording ``UNSUPPORTED`` in this
-    shape rather than leaving the row ``not_attempted``.
+    ``skipif``; the direct-leg phases — which carry no ``skipif`` — run
+    and may pass. That is the floor shape: the slice did real work
+    (direct legs against the recorder) but the §5.2.2 proxied phases
+    never ran. The plan's T-E3 done-when ("an outcome is recorded") and
+    T-E9's gate semantics ("``unsupported`` is a permitted outcome for
+    partial delivery") are both honoured by recording ``UNSUPPORTED`` in
+    this shape rather than leaving the row ``not_attempted``.
 
-    **Phase 1 must have come back clean**, by the gate's own definition
-    (:func:`_gate_passed` requires the same of every phase): a call that
-    passed but a teardown that errored is "did not come back clean", not
-    "partial delivery" — recording ``UNSUPPORTED`` with the reason
-    "phase 1 passed" for such a run would be false. A phase-1 teardown
-    failure therefore disqualifies the floor shape, and the row stays
-    ``NOT_ATTEMPTED`` for T-E9 to surface as a real failure.
+    **Every direct-leg phase must have come back clean**, by the gate's
+    own definition (:func:`_gate_passed` requires the same of every
+    phase): a call that passed but a teardown that errored is "did not
+    come back clean", not "partial delivery" — recording ``UNSUPPORTED``
+    with the reason "phase 1 passed" for such a run would be false. A
+    direct-leg teardown failure therefore disqualifies the floor shape,
+    and the row stays ``NOT_ATTEMPTED`` for T-E9 to surface as a real
+    failure.
 
     Args:
         outcomes: The slice's call-phase outcomes dict.
-        teardown_outcomes: The slice's teardown-phase outcomes dict. Phase
-            1 must be present here and ``PASSED`` — the same standard
-            :func:`_gate_passed` applies to every phase on the ≥3.11 path.
-        phase_1_name: The direct-leg phase's name.
+        teardown_outcomes: The slice's teardown-phase outcomes dict.
+            Each direct-leg phase must be present here and ``PASSED`` —
+            the same standard :func:`_gate_passed` applies to every
+            phase on the ≥3.11 path.
+        direct_leg_names: The phases whose ``PASSED`` call-and-teardown
+            outcome is the floor's signal of real work. Default is
+            T-E2/T-E3's singleton phase 1; T-E5 passes its own set
+            (serving phase 1 + the OAuth login leg's direct phase).
         proxied_names: The proxied phases whose **absence** from
             ``outcomes`` is the floor signal — absent, not ``FAILED``
             (a failure is a real failure, not a floor) and not missing
@@ -375,22 +424,23 @@ def _floor_unsupported_shape(
             simulate the 3.10 matrix without patching ``sys``.
 
     Returns:
-        ``True`` iff the version is below the 3.11 floor AND phase 1 ran,
-        passed its call, and came back clean on teardown AND every
-        proxied phase is absent from ``outcomes``.
+        ``True`` iff the version is below the 3.11 floor AND every
+        direct-leg phase ran, passed its call, and came back clean on
+        teardown AND every proxied phase is absent from ``outcomes``.
     """
     if version_info is None:
         version_info = sys.version_info[:3]
     if version_info >= (3, 11):
         return False
-    if outcomes.get(phase_1_name) is not _PhaseOutcome.PASSED:
-        return False
     # Same standard the gate applies on ≥3.11: a phase that passed its
     # call but errored on teardown did not "come back clean". Recording
     # `UNSUPPORTED` with the reason "phase 1 passed" for such a run would
     # be false — the row stays `NOT_ATTEMPTED` and T-E9 surfaces it.
-    if teardown_outcomes.get(phase_1_name) is not _PhaseOutcome.PASSED:
-        return False
+    for name in direct_leg_names:
+        if outcomes.get(name) is not _PhaseOutcome.PASSED:
+            return False
+        if teardown_outcomes.get(name) is not _PhaseOutcome.PASSED:
+            return False
     return all(name not in outcomes for name in proxied_names)
 
 
@@ -399,6 +449,8 @@ def _record_unsupported_if_floor_shape(
     teardown_outcomes: dict[str, _PhaseOutcome],
     verdict_row: str,
     *,
+    direct_leg_names: frozenset[str] = frozenset({_PHASE_1_NAME}),
+    proxied_names: frozenset[str] = _PROXIED_PHASE_NAMES,
     version_info: tuple[int, ...] | None = None,
 ) -> bool:
     """Record ``UNSUPPORTED`` on ``verdict_row`` when the floor shape applies.
@@ -410,9 +462,11 @@ def _record_unsupported_if_floor_shape(
     Args:
         outcomes: The slice's call-phase outcomes dict.
         teardown_outcomes: The slice's teardown-phase outcomes dict —
-            forwarded to :func:`_floor_unsupported_shape` so a phase-1
-            teardown failure disqualifies the floor shape.
+            forwarded to :func:`_floor_unsupported_shape` so a
+            direct-leg teardown failure disqualifies the floor shape.
         verdict_row: The capability-report row this slice owns.
+        direct_leg_names: Forwarded to :func:`_floor_unsupported_shape`.
+        proxied_names: Forwarded to :func:`_floor_unsupported_shape`.
         version_info: Override for ``sys.version_info``; defaults to the
             current interpreter. Parameterised so tests can exercise the
             writer path on any interpreter matrix without patching ``sys``.
@@ -426,7 +480,13 @@ def _record_unsupported_if_floor_shape(
         the recorder's shape (a ``False`` return always means "no write
         happened", which the unit tests pin).
     """
-    if not _floor_unsupported_shape(outcomes, teardown_outcomes, version_info=version_info):
+    if not _floor_unsupported_shape(
+        outcomes,
+        teardown_outcomes,
+        direct_leg_names=direct_leg_names,
+        proxied_names=proxied_names,
+        version_info=version_info,
+    ):
         return False
     current = report_instance().entries().get(verdict_row)
     if current is None or current.outcome is Outcome.NOT_ATTEMPTED:
@@ -437,7 +497,7 @@ def _record_unsupported_if_floor_shape(
 
 @pytest.hookimpl(tryfirst=True, hookwrapper=True)
 def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo[None]) -> Generator[None, None, None]:
-    """Track phase test outcomes for every slice verdict gate.
+    """Track phase test outcomes for both slice verdict gates.
 
     Fires once per phase (setup / call / teardown) of every test in the
     process; the item's nodeid prefix selects the owning slice, and the
@@ -466,6 +526,22 @@ def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo[None]) ->
             target = outcomes if rep.when == "call" else teardown_outcomes
             target[item.name] = verdict
             return
+
+
+#: Lookup table the sibling-row guard reads to verify a sibling's
+#: ``UNSUPPORTED`` row is a legitimate floor-shape write (rather than a
+#: rogue or real-failure write). Each row maps to the pair of outcome
+#: dicts its own finaliser reads, so :func:`_floor_unsupported_shape` can
+#: apply the same predicate the sibling's own finaliser would have. T-E4
+#: (botocore) is included even though it has no floor — its dicts are
+#: always vacuously not-in-the-floor, so an ``UNSUPPORTED`` row against
+#: the botocore outcomes is correctly *not* exempted.
+_ROW_OUTCOMES: dict[str, tuple[dict[str, _PhaseOutcome], dict[str, _PhaseOutcome]]] = {
+    _VERDICT_ROW: (_phase_outcomes, _phase_teardown_outcomes),
+    _CURL_CFFI_VERDICT_ROW: (_curl_phase_outcomes, _curl_phase_teardown_outcomes),
+    _BOTOCORE_VERDICT_ROW: (_botocore_phase_outcomes, _botocore_phase_teardown_outcomes),
+    _PROVIDER_AIOHTTP_VERDICT_ROW: (_provider_phase_outcomes, _provider_phase_teardown_outcomes),
+}
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -499,12 +575,14 @@ def _record_slice_verdict_at_session_end() -> Iterator[None]:
     Before writing ``PROVEN``, the finaliser asserts the **other** rows are
     still ``not_attempted`` — the only rows the slice is allowed to mutate
     are its own verdict row and any sibling row whose **finaliser** has
-    legitimately written ``PROVEN`` or (under the floor) ``UNSUPPORTED``.
+    legitimately written ``PROVEN`` (or, under the floor, ``UNSUPPORTED``).
     The checkable ceiling of this structural check is a rogue ``PROVEN`` on
-    a sibling row, which the guard cannot distinguish from the legitimate
-    finaliser write; that is the documented residual limit. A rogue
-    ``FAILED``/``UNSUPPORTED`` write is still caught — only the ``PROVEN``
-    coincidence is accepted.
+    a sibling row whose owning gate did not pass, which the guard cannot
+    distinguish from the legitimate finaliser write — that is the documented
+    residual limit, narrowed by gating the exemption on the sibling's
+    gate-passed predicate. A rogue ``FAILED``/``UNSUPPORTED`` write is still
+    caught — only the ``PROVEN`` coincidence on a passing sibling is
+    accepted.
 
     Yields:
         ``None``, with the verdict recording in the finaliser.
@@ -516,6 +594,11 @@ def _record_slice_verdict_at_session_end() -> Iterator[None]:
             _phase_teardown_outcomes,
             _PHASE_TEST_NAMES,
             _VERDICT_ROW,
+            siblings=(
+                (_CURL_CFFI_VERDICT_ROW, _curl_gate_passed),
+                (_PROVIDER_AIOHTTP_VERDICT_ROW, _provider_gate_passed),
+                (_BOTOCORE_VERDICT_ROW, _botocore_gate_passed),
+            ),
         )
         return
     # Gate did not pass. The floor-skip shape — phase 1 ran and the proxied
@@ -531,6 +614,8 @@ def _record_proven_with_sibling_guard(
     teardown_outcomes: dict[str, _PhaseOutcome],
     names: frozenset[str],
     verdict_row: str,
+    *,
+    siblings: Sequence[tuple[str, Callable[[], bool]]],
 ) -> None:
     """Write the gate's ``PROVEN`` row, asserting no foreign row was mutated.
 
@@ -538,63 +623,60 @@ def _record_proven_with_sibling_guard(
     outcomes on a sibling row:
 
     * ``PROVEN`` when the sibling's gate also passed — written by that
-      sibling's own finaliser before this one runs (or after; order-
-      independent);
+      sibling's own finaliser before this one runs (or after;
+      order-independent);
     * ``UNSUPPORTED`` when the sibling's own outcomes dict is in the floor
       shape (phase 1 passed and the proxied phases were setup-skipped on
-      Python <3.11). This is what the botocore slice needs: T-E2 and T-E3
-      both have a 3.11 floor, T-E4 does not — so on Python <3.11 the aiohttp
-      and curl_cffi finalisers record ``UNSUPPORTED`` for partial delivery,
-      and the botocore finaliser's ``PROVEN`` write must accept those as
-      legitimate.
+      Python <3.11). This is what the botocore slice (T-E4) needs: it has
+      no 3.11 floor — every phase runs on every supported interpreter —
+      so on Python <3.11 the T-E2/T-E3/T-E5 finalisers legitimately
+      record ``UNSUPPORTED`` for partial delivery while the botocore
+      finaliser writes ``PROVEN``, and the guard must accept that
+      coexistence. A sibling ``UNSUPPORTED`` whose dict is *not* in the
+      floor shape (a rogue write, or a real failure) is still caught.
 
-    Order-independent: when the sibling's finaliser hasn't run yet, its
-    row is ``NOT_ATTEMPTED`` and never enters the untouched list. A rogue
-    ``UNSUPPORTED`` write — one this slice's gate *would* pass but the
-    sibling's dicts are not actually in the floor shape — is still caught:
-    the gate-passed-failed sibling cannot legitimately coexist with a
-    ``PROVEN`` write, regardless of outcome. A rogue ``FAILED`` is caught
-    outright.
+    Order-independent: when a sibling's finaliser hasn't run yet, its row
+    is ``NOT_ATTEMPTED`` and never enters the untouched list.
 
     Args:
         outcomes: The slice's call-phase outcomes.
         teardown_outcomes: The slice's teardown-phase outcomes.
         names: The slice's expected phase names.
         verdict_row: The capability-report row this slice writes.
+        siblings: Each sibling slice's ``(row, gate_passed_fn)`` pair. A
+            row is exempt from the untouched list when its gate predicate
+            returns ``True`` *and* its row reads ``PROVEN``, or when its
+            row reads ``UNSUPPORTED`` and its outcomes dict (looked up in
+            :data:`_ROW_OUTCOMES`) is in the floor shape. Every other
+            write to a foreign row is a defect the guard surfaces.
     """
     if not _gate_passed(outcomes, teardown_outcomes, names):
         # Caller guards the PROVEN path; this assertion is the
         # belt-and-braces check for an unexpected internal call.
         raise AssertionError(f"{verdict_row!r} PROVEN path entered without a passing gate")
     entries = report_instance().entries()
+    # Pre-resolve which sibling rows are legitimately exempt. Built once
+    # outside the loop so a write observed mid-iteration cannot
+    # retroactively exempt a later sibling. Two acceptance shapes: the
+    # sibling's gate passed AND its row reads PROVEN; or its row reads
+    # UNSUPPORTED AND its own outcomes dict is in the floor shape.
+    exempt_rows: set[str] = set()
+    for row, gate_passed_fn in siblings:
+        entry = entries.get(row)
+        if entry is None:
+            continue
+        if (gate_passed_fn() and entry.outcome is Outcome.PROVEN) or (
+            entry.outcome is Outcome.UNSUPPORTED
+            and _floor_unsupported_shape(*_ROW_OUTCOMES[row])
+        ):
+            exempt_rows.add(row)
     untouched: list[str] = []
-    siblings = {
-        row: (gate, sibling_outcomes, sibling_teardowns)
-        for row, gate, sibling_outcomes, sibling_teardowns in _SIBLINGS.get(verdict_row, ())
-    }
     for name, entry in entries.items():
         if name == verdict_row:
             continue
         if entry.outcome is Outcome.NOT_ATTEMPTED:
             continue
-        if name not in siblings:
-            untouched.append(name)
-            continue
-        sibling_gate, sibling_outcomes, sibling_teardowns = siblings[name]
-        # Legitimate PROVEN: the sibling's gate passed and the row
-        # already reads PROVEN. Order-independent: when the sibling
-        # finaliser hasn't run yet, its row is NOT_ATTEMPTED and falls
-        # out above.
-        if entry.outcome is Outcome.PROVEN and sibling_gate():
-            continue
-        # Legitimate UNSUPPORTED under the floor: the sibling's own
-        # outcomes dict is in the floor shape (phase 1 passed, proxied
-        # phases were setup-skipped). This is what happens on Python
-        # <3.11 for T-E2 and T-E3 alongside a passing T-E4.
-        if (
-            entry.outcome is Outcome.UNSUPPORTED
-            and _floor_unsupported_shape(sibling_outcomes, sibling_teardowns)
-        ):
+        if name in exempt_rows:
             continue
         untouched.append(name)
     if untouched:
@@ -612,10 +694,11 @@ def _record_curl_cffi_slice_verdict_at_session_end() -> Iterator[None]:
 
     The T-E2 verdict gate's sibling; same contract: the verdict is a
     consequence of the phases having run and passed, not something a test
-    writes on its own. The sibling-row guards on the finalisers co-operate
-    via the gate-passed and ``row == PROVEN`` exemption described on
-    :func:`_record_slice_verdict_at_session_end` — order-independent, so
-    any finaliser can run first without affecting the others.
+    writes on its own. The sibling-row guards on the three finalisers
+    co-operate via the gate-passed and ``row == PROVEN`` exemption
+    described on :func:`_record_slice_verdict_at_session_end` — order-
+    independent, so any finaliser can run first without affecting the
+    others.
 
     Yields:
         ``None``, with the verdict recording in the finaliser.
@@ -627,6 +710,11 @@ def _record_curl_cffi_slice_verdict_at_session_end() -> Iterator[None]:
             _curl_phase_teardown_outcomes,
             _CURL_CFFI_PHASE_TEST_NAMES,
             _CURL_CFFI_VERDICT_ROW,
+            siblings=(
+                (_VERDICT_ROW, _aiohttp_gate_passed),
+                (_PROVIDER_AIOHTTP_VERDICT_ROW, _provider_gate_passed),
+                (_BOTOCORE_VERDICT_ROW, _botocore_gate_passed),
+            ),
         )
         return
     # Floor path — symmetric to the aiohttp finaliser above.
@@ -634,18 +722,62 @@ def _record_curl_cffi_slice_verdict_at_session_end() -> Iterator[None]:
 
 
 @pytest.fixture(scope="session", autouse=True)
+def _record_provider_aiohttp_slice_verdict_at_session_end() -> Iterator[None]:
+    """Record the T-E5 (``provider_aiohttp``) slice's verdict at session teardown.
+
+    The third verdict gate; same contract as the T-E2 and T-E3 finalisers
+    — the verdict is a consequence of the gated tests having run and
+    passed, not something a test writes on its own. The sibling-row
+    guard, the gate's length / all-passed / teardown checks, and the
+    floor-skip path are all inherited; the only T-E5-specific seam is
+    the **two** direct-leg names passed to the floor helper (the serving
+    leg's phase 1 and the OAuth login leg's direct phase — both carry no
+    ``skipif`` and run on every supported Python).
+
+    Yields:
+        ``None``, with the verdict recording in the finaliser.
+    """
+    yield
+    if _provider_gate_passed():
+        _record_proven_with_sibling_guard(
+            _provider_phase_outcomes,
+            _provider_phase_teardown_outcomes,
+            _PROVIDER_AIOHTTP_PHASE_TEST_NAMES,
+            _PROVIDER_AIOHTTP_VERDICT_ROW,
+            siblings=(
+                (_VERDICT_ROW, _aiohttp_gate_passed),
+                (_CURL_CFFI_VERDICT_ROW, _curl_gate_passed),
+                (_BOTOCORE_VERDICT_ROW, _botocore_gate_passed),
+            ),
+        )
+        return
+    # Floor path — the two direct-leg phases ran and passed; the seven
+    # proxied phases are setup-skipped on Python <3.11. The T-E5
+    # proxied-name set differs from T-E2/T-E3's (it includes the four
+    # OAuth-leg phases) so the floor helper needs both pairs explicitly.
+    _record_unsupported_if_floor_shape(
+        _provider_phase_outcomes,
+        _provider_phase_teardown_outcomes,
+        _PROVIDER_AIOHTTP_VERDICT_ROW,
+        direct_leg_names=_PROVIDER_AIOHTTP_DIRECT_PHASE_NAMES,
+        proxied_names=_PROVIDER_AIOHTTP_PROXIED_PHASE_NAMES,
+    )
+
+
+@pytest.fixture(scope="session", autouse=True)
 def _record_botocore_slice_verdict_at_session_end() -> Iterator[None]:
     """Record ``Outcome.PROVEN`` for the T-E4 (``botocore``) slice at session teardown.
 
-    The T-E2/T-E3 verdict gates' sibling; same contract: the verdict is a
-    consequence of the phases having run and passed, not something a test
-    writes on its own. The sibling-row guard co-operates with the other
-    finalisers via the same gate-passed and ``row == PROVEN`` exemption.
+    The T-E2/T-E3/T-E5 verdict gates' sibling; same contract: the verdict
+    is a consequence of the gated tests having run and passed, not
+    something a test writes on its own. The sibling-row guard, the gate's
+    length / all-passed / teardown checks, and the floor-skip path are all
+    inherited.
 
     **No floor path.** The botocore slice's phases carry no ``skipif`` —
-    bpo-44011 is asyncio-specific and botocore's HTTP stack is synchronous
-    urllib3 (TLS-in-TLS via ``ssl.SSLContext.wrap_socket`` on the
-    ``run_in_executor`` worker thread), so every phase runs on every
+    bpo-44011 is asyncio-specific and botocore's HTTP stack is
+    synchronous urllib3 (TLS-in-TLS via ``ssl.SSLContext.wrap_socket()`` on
+    the ``run_in_executor`` worker thread), so every phase runs on every
     supported interpreter. When a phase fails, the row stays
     ``not_attempted`` and T-E9's completeness gate surfaces it as a real
     failure — never as a partial delivery.
@@ -660,6 +792,11 @@ def _record_botocore_slice_verdict_at_session_end() -> Iterator[None]:
             _botocore_phase_teardown_outcomes,
             _BOTOCORE_PHASE_TEST_NAMES,
             _BOTOCORE_VERDICT_ROW,
+            siblings=(
+                (_VERDICT_ROW, _aiohttp_gate_passed),
+                (_CURL_CFFI_VERDICT_ROW, _curl_gate_passed),
+                (_PROVIDER_AIOHTTP_VERDICT_ROW, _provider_gate_passed),
+            ),
         )
 
 
@@ -670,13 +807,23 @@ __all__ = [
     "_CURL_CFFI_PHASE_TEST_NAMES",
     "_CURL_CFFI_VERDICT_ROW",
     "_PHASE_TEST_NAMES",
-    "_SLICE_FILE_PREFIX",
-    "_VERDICT_ROW",
+    "_PROVIDER_AIOHTTP_DIRECT_PHASE_NAMES",
+    "_PROVIDER_AIOHTTP_PHASE_TEST_NAMES",
+    "_PROVIDER_AIOHTTP_PROXIED_PHASE_NAMES",
+    "_PROVIDER_AIOHTTP_SLICE_FILE_PREFIX",
+    "_PROVIDER_AIOHTTP_VERDICT_ROW",
     "_PhaseOutcome",
+    "_ROW_OUTCOMES",
+    "_VERDICT_ROW",
+    "_botocore_gate_passed",
     "_botocore_phase_outcomes",
     "_botocore_phase_teardown_outcomes",
+    "_curl_gate_passed",
     "_curl_phase_outcomes",
+    "_curl_phase_teardown_outcomes",
     "_floor_unsupported_shape",
     "_phase_outcomes",
     "_phase_teardown_outcomes",
+    "_provider_phase_outcomes",
+    "_provider_phase_teardown_outcomes",
 ]
