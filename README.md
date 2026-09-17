@@ -524,6 +524,7 @@ This works with self-hosted front-ends for Anthropic-format models and any other
 `https://api.anthropic.com`, not `https://api.anthropic.com/v1/messages`.
 
 Pasting the full endpoint works anyway: Kitty drops the duplicate `/v1/messages` instead of failing.
+That holds for an endpoint carrying a query string too, and the query is kept and sent with every request.
 
 ## Commands
 
