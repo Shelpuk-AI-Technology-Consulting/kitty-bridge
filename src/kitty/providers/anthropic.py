@@ -7,7 +7,7 @@ import logging
 import uuid
 from typing import cast
 
-from kitty.providers.base import ProviderAdapter, ProviderError
+from kitty.providers.base import ProviderAdapter, ProviderError, WireShape
 
 __all__ = ["AnthropicAdapter"]
 
@@ -369,8 +369,8 @@ class AnthropicAdapter(ProviderAdapter):
         return "/v1/messages"
 
     @property
-    def upstream_wire_is_messages_api(self) -> bool:
-        """True — this class's ``translate_to_upstream`` emits Messages API.
+    def upstream_wire_shape(self) -> WireShape:
+        """:attr:`WireShape.MESSAGES` — this class's ``translate_to_upstream`` emits the Anthropic Messages API.
 
         Holds for subclasses that do **not** route by model: they either
         forward a native Messages body unchanged or fall back to this class's
@@ -380,11 +380,12 @@ class AnthropicAdapter(ProviderAdapter):
         It does **not** hold for a subclass that routes by model.
         :class:`~kitty.providers.opencode.OpenCodeGoAdapter` emits Chat
         Completions for every model outside its ``_MESSAGES_MODELS``, and
-        inheriting this ``True`` was KBR-7.  Such a subclass must override
-        **both** this property, reporting its default route, and
-        ``upstream_wire_is_messages_api_for_model``, mirroring its own routing.
+        inheriting this ``WireShape.MESSAGES`` would be KBR-7 in a new
+        costume.  Such a subclass must override **both** this property,
+        reporting its default route, and
+        :meth:`upstream_wire_shape_for_model`, mirroring its own routing.
         """
-        return True
+        return WireShape.MESSAGES
 
     # ── Auth headers ─────────────────────────────────────────────────────
 

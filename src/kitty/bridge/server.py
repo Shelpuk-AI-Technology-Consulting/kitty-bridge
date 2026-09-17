@@ -17,6 +17,7 @@ import sys
 import time
 import traceback
 import uuid
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
 from types import TracebackType
@@ -55,7 +56,8 @@ from kitty.bridge.tool_audit import AUDIT_MARKER, ToolUseAuditor, collect_tool_s
 from kitty.cloudflare import is_cloudflare_block
 from kitty.egress import EgressConfig, should_bypass
 from kitty.providers.anthropic import AnthropicCCStreamConverter
-from kitty.providers.base import ProviderAdapter, ProviderError, UnsupportedModelError
+from kitty.providers.base import ProviderAdapter, ProviderError, UnsupportedModelError, WireShape
+from kitty.providers.opencode import OpenCodeGoResponsesCCStreamConverter
 
 if TYPE_CHECKING:
     # Type-only imports. The layering contract in pyproject.toml forbids
@@ -611,7 +613,7 @@ def _route_model(cc_request: dict) -> str:
     return model if isinstance(model, str) else ""
 
 
-def _repair_thinking_roundtrip(body: dict, *, native: bool) -> bool:
+def _repair_thinking_roundtrip(body: dict, *, wire_shape: WireShape) -> bool:
     # pragma: no mutate block
     """Give every assistant turn the thinking carrier its target requires.
 
@@ -633,13 +635,23 @@ def _repair_thinking_roundtrip(body: dict, *, native: bool) -> bool:
     retrying a byte-identical request.
 
     The dialect is passed in rather than inferred, because
-    ``{"role": "assistant", "content": "..."}`` is valid in both and guessing
-    would silently write the wrong carrier for one of them.  It must come from
-    :meth:`ProviderAdapter.upstream_wire_is_messages_api_for_model`, asked with
-    the model the body was serialized for — not from the bare property, which
-    on a model-routing adapter answers only for the default route (KBR-7), and
-    not from ``_native_messages_request`` — see
+    ``{"role": "assistant", "content": "..."}`` is valid in multiple dialects
+    and guessing would silently write the wrong carrier for one of them.  It
+    must come from :meth:`ProviderAdapter.upstream_wire_shape_for_model`,
+    asked with the model the body was serialized for — not from the bare
+    property, which on a model-routing adapter answers only for the default
+    route (KBR-7), and not from ``_native_messages_request`` — see
     :meth:`BridgeServer._upstream_body_for`.
+
+    KBR-137 widened the dialect from a boolean to :class:`WireShape`.  Only
+    the two dialects that already define a carrier are rewritten here:
+    :attr:`WireShape.MESSAGES` (an Anthropic ``thinking`` content block) and
+    :attr:`WireShape.CHAT_COMPLETIONS` (a ``reasoning_content`` field).  The
+    other two return ``False`` without touching the body — the carrier
+    semantics on an OpenAI Responses body (``reasoning`` items) or a
+    Converse body is a different operation this function does not implement,
+    and a caller must not add such a backend to
+    ``_thinking_repair_backends`` for want of a carrier it cannot write.
 
     Changed messages are **copied**, not edited in place, and ``messages`` is
     replaced with a new list.  ``translate_to_upstream`` returns a shallow copy
@@ -651,15 +663,26 @@ def _repair_thinking_roundtrip(body: dict, *, native: bool) -> bool:
     Args:
         body: The outgoing upstream body.  Its ``messages`` key is rebound when
             anything changes; the original list and its messages are untouched.
-        native: True when ``body`` is an Anthropic Messages body (the carrier
-            is a ``thinking`` content block), False when it is a Chat
-            Completions body (the carrier is a ``reasoning_content`` field).
+        wire_shape: The dialect ``body`` is written in —
+            :attr:`WireShape.MESSAGES` for an Anthropic Messages body,
+            :attr:`WireShape.CHAT_COMPLETIONS` for a Chat Completions body.
+            Any other value leaves ``body`` unchanged.
 
     Returns:
         True if at least one assistant message was changed.  The caller must
         only retry when this is True — a False means the transcript already
         satisfies the contract and the rejection has another cause.
     """
+    # The two dialects this function can write a carrier for.  Responses and
+    # Converse bodies return False below — the honest answer, since no carrier
+    # shape is defined for them.
+    if wire_shape is WireShape.MESSAGES:
+        native = True
+    elif wire_shape is WireShape.CHAT_COMPLETIONS:
+        native = False
+    else:
+        return False
+
     messages = body.get("messages")
     if not isinstance(messages, list):
         return False
@@ -1889,6 +1912,67 @@ class BridgeServer:
             True when the client can no longer read the eventual response.
         """
         return request.transport is None or request.transport.is_closing()
+
+    @staticmethod
+    def _debug_url(url: str) -> str:
+        # pragma: no mutate block
+        """Return the form of ``url`` safe to write to the debug log.
+
+        ``--debug`` attaches a FileHandler on ``~/.cache/kitty/bridge.log``,
+        the artifact a user attaches to a bug report, so a credential-bearing
+        query value or userinfo component must not reach it verbatim
+        (SYSTEM_DESIGN.md §9; KBR-156). Every DEBUG log line carrying a
+        composed upstream URL goes through this helper rather than logging
+        ``url`` raw — the redaction rule itself is
+        :meth:`ProviderAdapter.redact_url_for_display
+        <kitty.providers.base.ProviderAdapter.redact_url_for_display>`.
+
+        Args:
+            url: The upstream URL about to be logged.
+
+        Returns:
+            The redacted URL — userinfo dropped, query values and fragment
+            masked, parameter names kept.
+        """
+        return ProviderAdapter.redact_url_for_display(url)
+
+    #: Substrings that mark a header name as credential-bearing. Matched
+    #: case-insensitively against the lowercased name; a name containing any
+    #: of these has its value masked in the debug log.
+    _CREDENTIAL_NAME_STROKES = ("auth", "key", "token", "cookie", "secret", "signature")
+
+    @staticmethod
+    def _debug_headers(headers: Mapping[str, str]) -> dict[str, str]:
+        # pragma: no mutate block
+        """Return a header mapping safe to write to the debug log.
+
+        Headers cannot take the URL rule (mask every value) without
+        destroying the diagnostic — non-credential headers are most of what
+        a developer reads in a header dump. The rule is instead: a header
+        whose **name**, lowercased, contains any of
+        ``_CREDENTIAL_NAME_STROKES`` has its value replaced by the mask;
+        every other header passes verbatim (SYSTEM_DESIGN.md §9.2).
+
+        This deliberately diverges from KBR-143's "mask values
+        indiscriminately, never by name" principle, which is right for
+        query parameters — a guess that is wrong once leaks a key — but
+        cannot be applied to headers without redacting the whole dump. The
+        divergence is recorded in SYSTEM_DESIGN.md §9.2 so a future reader
+        does not "fix" one rule to match the other.
+
+        Args:
+            headers: The header mapping about to be logged (for example
+                ``dict(request.headers)``).
+
+        Returns:
+            A new dict with sensitive values replaced by the mask
+            (``****``) and everything else — names and non-sensitive
+            values — unchanged.
+        """
+        return {
+            name: ("****" if any(stroke in name.lower() for stroke in BridgeServer._CREDENTIAL_NAME_STROKES) else value)
+            for name, value in dict(headers).items()
+        }
 
     async def _select_backend_or_hold(self, request: web.Request) -> AllBackendsUnhealthyError | None:
         # pragma: no mutate block
@@ -3322,7 +3406,7 @@ class BridgeServer:
             )
 
         logger.debug("═══ RESPONSES API REQUEST ═══")
-        logger.debug("Request headers: %s", dict(request.headers))
+        logger.debug("Request headers: %s", BridgeServer._debug_headers(request.headers))
         logger.debug("Request body: %s", json.dumps(body, indent=2, ensure_ascii=False))
 
         # Before the body forks: `_original_body` below hands this dict to a custom transport (KBR-144).
@@ -3607,7 +3691,7 @@ class BridgeServer:
                 # serialization can refuse (KBR-126), and logging first would record
                 # a POST that never happens.
                 upstream_body = self._active_provider.translate_to_upstream(cc_request)
-                logger.debug("Upstream POST → %s", url)
+                logger.debug("Upstream POST → %s", BridgeServer._debug_url(url))
 
                 stream_timeout = aiohttp.ClientTimeout(total=None, sock_connect=30, sock_read=_STREAM_READ_TIMEOUT)
 
@@ -3660,14 +3744,14 @@ class BridgeServer:
                     # client can read: each line is converted to a Chat Completions
                     # chunk first (KBR-232).  Re-created per attempt so a failover onto
                     # a Chat Completions-wire backend re-evaluates the gate.
-                    stream_converter = AnthropicCCStreamConverter() if self._serves_messages_wire(cc_request) else None
+                    stream_converter = self._stream_converter_for(cc_request)
                     upstream = await self._open_upstream_stream(
                         url, upstream_body, headers, stream_timeout, transport_grace
                     )
                     async with upstream:
                         upstream_status = upstream.status
                         logger.debug("Upstream response status: %d", upstream.status)
-                        logger.debug("Upstream response headers: %s", dict(upstream.headers))
+                        logger.debug("Upstream response headers: %s", BridgeServer._debug_headers(upstream.headers))
 
                         if upstream.status not in (200, 201):
                             error_body = await upstream.text()
@@ -4777,7 +4861,7 @@ class BridgeServer:
                 url = self._build_upstream_url(cc_request)
                 headers = self._build_upstream_headers(cc_request)
                 upstream_body = self._upstream_body_for(cc_request)
-                logger.debug("Upstream POST → %s", url)
+                logger.debug("Upstream POST → %s", BridgeServer._debug_url(url))
 
                 stream_timeout = aiohttp.ClientTimeout(total=None, sock_connect=30, sock_read=_STREAM_READ_TIMEOUT)
 
@@ -4943,15 +5027,25 @@ class BridgeServer:
                                 # (issue #32): repair and retry the same backend.
                                 # A False repair means nothing changed, so retrying
                                 # would re-send identical bytes — fall through.
+                                #
+                                # KBR-137: the repair writes a carrier only for
+                                # MESSAGES and CHAT_COMPLETIONS bodies.  A Responses
+                                # or OTHER backend has no carrier semantics for this
+                                # function, so the branch is skipped entirely: a
+                                # flag added to ``_thinking_repair_backends`` there
+                                # would never produce a repair on a later turn, and
+                                # the retry would re-send identical bytes.
+                                wire_shape_for_repair = self._active_provider.upstream_wire_shape_for_model(
+                                    _route_model(cc_request)
+                                )
                                 if (
-                                    not (strip_body is upstream_body and strip_count)
+                                    wire_shape_for_repair in (WireShape.MESSAGES, WireShape.CHAT_COMPLETIONS)
+                                    and not (strip_body is upstream_body and strip_count)
                                     and attempt < max_attempts - 1
                                     and _is_thinking_roundtrip_error(upstream.status, error_body)
                                     and _repair_thinking_roundtrip(
                                         upstream_body,
-                                        native=self._active_provider.upstream_wire_is_messages_api_for_model(
-                                            _route_model(cc_request)
-                                        ),
+                                        wire_shape=wire_shape_for_repair,
                                     )
                                 ):
                                     self._thinking_repair_backends.add(self._current_backend_idx)
@@ -6243,7 +6337,7 @@ class BridgeServer:
                 url = self._build_upstream_url(cc_request)
                 headers = self._build_upstream_headers(cc_request)
                 upstream_body = self._active_provider.translate_to_upstream(cc_request)
-                logger.debug("Upstream POST → %s", url)
+                logger.debug("Upstream POST → %s", BridgeServer._debug_url(url))
 
                 stream_timeout = aiohttp.ClientTimeout(total=None, sock_connect=30, sock_read=_STREAM_READ_TIMEOUT)
 
@@ -6289,7 +6383,7 @@ class BridgeServer:
                     # client can read: each line is converted to a Chat Completions
                     # chunk first (KBR-232).  Re-created per attempt so a failover onto
                     # a Chat Completions-wire backend re-evaluates the gate.
-                    stream_converter = AnthropicCCStreamConverter() if self._serves_messages_wire(cc_request) else None
+                    stream_converter = self._stream_converter_for(cc_request)
                     upstream = await self._open_upstream_stream(
                         url, upstream_body, headers, stream_timeout, transport_grace
                     )
@@ -7530,7 +7624,7 @@ class BridgeServer:
                 url = self._build_upstream_url(cc_request)
                 headers = self._build_upstream_headers(cc_request)
                 upstream_body = self._active_provider.translate_to_upstream(cc_request)
-                logger.debug("Upstream POST → %s", url)
+                logger.debug("Upstream POST → %s", BridgeServer._debug_url(url))
 
                 stream_timeout = aiohttp.ClientTimeout(total=None, sock_connect=30, sock_read=_STREAM_READ_TIMEOUT)
 
@@ -7582,7 +7676,7 @@ class BridgeServer:
                     # Completions client can read: each line is converted before the
                     # per-line logic (KBR-232).  Re-created per attempt so a failover
                     # onto a Chat Completions-wire backend re-evaluates the gate.
-                    stream_converter = AnthropicCCStreamConverter() if self._serves_messages_wire(cc_request) else None
+                    stream_converter = self._stream_converter_for(cc_request)
                     upstream = await self._open_upstream_stream(
                         url, upstream_body, headers, stream_timeout, transport_grace
                     )
@@ -9506,9 +9600,9 @@ class BridgeServer:
             True when the upstream's reply is an Anthropic Messages stream.
         """
         provider = self._active_provider
-        return provider.use_native_messages or provider.upstream_wire_is_messages_api_for_model(
+        return provider.use_native_messages or provider.upstream_wire_shape_for_model(
             _route_model(cc_request)
-        )
+        ) is WireShape.MESSAGES
 
     def _upstream_body_for(self, cc_request: dict) -> dict:
         # pragma: no mutate block
@@ -9546,9 +9640,41 @@ class BridgeServer:
         if self._current_backend_idx in self._thinking_repair_backends:
             _repair_thinking_roundtrip(
                 upstream_body,
-                native=self._active_provider.upstream_wire_is_messages_api_for_model(_route_model(cc_request)),
+                wire_shape=self._active_provider.upstream_wire_shape_for_model(_route_model(cc_request)),
             )
         return upstream_body
+
+    def _stream_converter_for(
+        self, cc_request: dict
+    ) -> AnthropicCCStreamConverter | OpenCodeGoResponsesCCStreamConverter | None:
+        # pragma: no mutate block
+        """Return the stateful SSE→CC converter for this request, or None.
+
+        Each streaming handler creates one converter per attempt and feeds it
+        each ``data:`` line before its own per-line logic (KBR-232).  The
+        converter is needed when the upstream speaks a wire the per-byte
+        helper :meth:`ProviderAdapter.translate_upstream_stream_event` cannot
+        represent — which today is the two routed dialects,
+        :attr:`WireShape.MESSAGES` (anthropic's per-event stream) and
+        :attr:`WireShape.RESPONSES` (openai's per-event stream).  Other
+        dialects (CC, Ollama ``/api/chat``, Converse) pass through the bare
+        helper and need no converter.
+
+        Args:
+            cc_request: The request, normalized for the selected backend; its
+                model is read through :func:`_route_model`.
+
+        Returns:
+            An :class:`AnthropicCCStreamConverter` for a Messages upstream,
+            an :class:`OpenCodeGoResponsesCCStreamConverter` for an OpenCode
+            Go Responses upstream, else ``None``.
+        """
+        if self._serves_messages_wire(cc_request):
+            return AnthropicCCStreamConverter()
+        provider = self._active_provider
+        if provider.upstream_wire_shape_for_model(_route_model(cc_request)) is WireShape.RESPONSES:
+            return OpenCodeGoResponsesCCStreamConverter()
+        return None
 
     def _build_upstream_headers(self, cc_request: dict) -> dict[str, str]:
         # pragma: no mutate block

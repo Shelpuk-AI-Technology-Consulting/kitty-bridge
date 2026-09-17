@@ -3,6 +3,8 @@
 import json
 import uuid
 
+import pytest
+
 from kitty.bridge.responses.translator import ResponsesTranslator
 
 
@@ -1371,3 +1373,271 @@ class TestOutputItemIndices:
         call_events = self._feed({"tool_calls": [self._tool_call(0, "call_b")]})
         assert self._added(text_events) == [(0, "message")]
         assert self._added(call_events) == [(1, "function_call")]
+
+
+class TestResponsesToolChoice:
+    """KBR-221: ``tool_choice`` and ``parallel_tool_calls`` survive the Responses -> CC hop.
+
+    Responses and Chat Completions spell most values the same way; named choices move
+    across via a spelling shift (``function.name`` -> ``function.function.name``), and
+    ``allowed_tools`` / hosted / MCP / ``custom`` shapes that have no CC form are
+    omitted (D5 / D10). ``parallel_tool_calls`` is forwarded only when the wire
+    carries the explicit non-default ``false`` (D2) -- the rest of the request is
+    unaffected.
+    """
+
+    def setup_method(self):
+        self.t = ResponsesTranslator()
+
+    def _req(self, **extra):
+        """Build a minimal Responses request with one function tool, plus the case's fields."""
+        req = {
+            "model": "m",
+            "input": [{"type": "message", "role": "user", "content": "hi"}],
+            "tools": [{"type": "function", "name": "get_weather", "parameters": {}}],
+        }
+        req.update(extra)
+        return req
+
+    @pytest.mark.parametrize(
+        "choice",
+        ["auto", "none", "required"],
+        ids=["auto", "none", "required"],
+    )
+    def test_tool_choice_string_is_carried(self, choice):
+        """AC-1: each published string choice maps to the CC spelling (R1)."""
+        result = self.t.translate_request(self._req(tool_choice=choice))
+        assert result["tool_choice"] == choice
+
+    def test_tool_choice_function_is_carried(self):
+        """AC-1: named function choice moves ``name`` under ``function.function.name``."""
+        result = self.t.translate_request(
+            self._req(tool_choice={"type": "function", "name": "get_weather"})
+        )
+        assert result["tool_choice"] == {
+            "type": "function",
+            "function": {"name": "get_weather"},
+        }
+
+    def test_tool_choice_custom_is_omitted(self):
+        """AC-2 / D10: ``custom``-typed choice names a tool the hop degraded."""
+        result = self.t.translate_request(
+            self._req(tool_choice={"type": "custom", "name": "x"})
+        )
+        assert "tool_choice" not in result
+
+    @pytest.mark.parametrize(
+        "kind",
+        [
+            "file_search",
+            "web_search_preview",
+            "computer",
+            "computer_use_preview",
+            "computer_use",
+            "web_search_preview_2025_03_11",
+            "image_generation",
+            "code_interpreter",
+            "programmatic_tool_calling",
+            "apply_patch",
+            "shell",
+        ],
+        ids=[
+            "file_search",
+            "web_search_preview",
+            "computer",
+            "computer_use_preview",
+            "computer_use",
+            "web_search_preview_2025_03_11",
+            "image_generation",
+            "code_interpreter",
+            "programmatic_tool_calling",
+            "apply_patch",
+            "shell",
+        ],
+    )
+    def test_tool_choice_hosted_is_omitted(self, kind):
+        """AC-2: hosted built-in choices have no CC form and nothing downstream can run them (D5 / D10)."""
+        result = self.t.translate_request(self._req(tool_choice={"type": kind}))
+        assert "tool_choice" not in result
+
+    def test_tool_choice_mcp_is_omitted(self):
+        """AC-2: an MCP choice names a server tool the bridge does not proxy (D5 / D10)."""
+        result = self.t.translate_request(
+            self._req(tool_choice={"type": "mcp", "server_label": "srv", "name": "tool"})
+        )
+        assert "tool_choice" not in result
+
+    @pytest.mark.parametrize(
+        "malformed",
+        [7, 7.0, [], True],
+        ids=["int", "float", "list", "bool"],
+    )
+    def test_tool_choice_malformed_is_omitted(self, malformed):
+        """AC-2: a non-string non-dict shape has no CC home and is omitted (D5)."""
+        result = self.t.translate_request(self._req(tool_choice=malformed))
+        assert "tool_choice" not in result
+
+    @pytest.mark.parametrize(
+        ("mode", "cc"),
+        [("auto", "auto"), ("required", "required"), ("none", "none")],
+        ids=["auto", "required", "defensive-none"],
+    )
+    def test_allowed_tools_carries_mode_only(self, mode, cc):
+        """AC-3: only the mode has a canonical home; the tools list is dropped."""
+        result = self.t.translate_request(
+            self._req(
+                tool_choice={
+                    "type": "allowed_tools",
+                    "mode": mode,
+                    "tools": [{"type": "function", "name": "get_weather"}],
+                }
+            )
+        )
+        assert result["tool_choice"] == cc
+
+    @pytest.mark.parametrize(
+        "bad_mode",
+        ["bogus", None, 7],
+        ids=["unknown-string", "null", "int"],
+    )
+    def test_allowed_tools_unknown_mode_is_omitted(self, bad_mode):
+        """AC-3 / D5: a non-published or non-string mode inside ``allowed_tools`` has no canonical home."""
+        result = self.t.translate_request(
+            self._req(tool_choice={"type": "allowed_tools", "mode": bad_mode})
+        )
+        assert "tool_choice" not in result
+
+    def test_parallel_tool_calls_false_is_carried(self):
+        """AC-4: explicit non-default ``false`` is forwarded (R2)."""
+        result = self.t.translate_request(self._req(parallel_tool_calls=False))
+        assert result["parallel_tool_calls"] is False
+
+    def test_parallel_tool_calls_true_is_omitted(self):
+        """AC-5: explicit ``true`` matches the documented default on both wires (D2)."""
+        result = self.t.translate_request(self._req(parallel_tool_calls=True))
+        assert "parallel_tool_calls" not in result
+
+    def test_parallel_tool_calls_absent_is_omitted(self):
+        """AC-5: no instruction means no entry (R9)."""
+        assert "parallel_tool_calls" not in self.t.translate_request(self._req())
+
+    @pytest.mark.parametrize(
+        "value",
+        ["false", 0, None, []],
+        ids=["string", "zero", "null", "empty-list"],
+    )
+    def test_parallel_tool_calls_non_bool_is_omitted(self, value):
+        """AC-5b: a non-bool value would create an unclaimed residual delta (D5)."""
+        result = self.t.translate_request(self._req(parallel_tool_calls=value))
+        assert "parallel_tool_calls" not in result
+
+    def test_no_tool_choice_invents_none(self):
+        """R9: no inbound ``tool_choice`` and no inbound ``parallel_tool_calls`` -> no entries."""
+        result = self.t.translate_request(self._req())
+        assert "tool_choice" not in result
+        assert "parallel_tool_calls" not in result
+
+    def test_forced_call_to_custom_tool_is_omitted_beside_a_function(self):
+        """AC-12a / D10: a function-typed choice naming a custom-declared tool is omitted.
+
+        The declared function tool keeps the CC list non-empty, so the D9 gate
+        passes and this test is decided by the D10 named-tool lookup -- which
+        must walk the inbound list, the only place the degraded entry still
+        lives (the hop has filtered it out of the CC list).
+        """
+        req = self._req(
+            tools=[
+                {"type": "function", "name": "get_weather", "parameters": {}},
+                {"type": "custom", "name": "review", "format": {"type": "text"}},
+            ],
+            tool_choice={"type": "function", "name": "review"},
+        )
+        result = self.t.translate_request(req)
+        assert "tool_choice" not in result
+
+    def test_forced_call_to_hosted_tool_is_omitted_beside_a_function(self):
+        """AC-12a / D10: the hosted twin -- choice naming a hosted entry beside a function tool."""
+        req = self._req(
+            tools=[
+                {"type": "function", "name": "get_weather", "parameters": {}},
+                {"type": "web_search_preview", "name": "search"},
+            ],
+            tool_choice={"type": "function", "name": "search"},
+        )
+        result = self.t.translate_request(req)
+        assert "tool_choice" not in result
+
+    def test_forced_call_to_undeclared_tool_is_carried(self):
+        """AC-12b / D8: a choice naming no declared tool is the agent's mistake -- the provider's error names it."""
+        result = self.t.translate_request(
+            self._req(tool_choice={"type": "function", "name": "not_declared"})
+        )
+        assert result["tool_choice"] == {
+            "type": "function",
+            "function": {"name": "not_declared"},
+        }
+
+    @pytest.mark.parametrize(
+        "bad",
+        [
+            {"type": "function"},
+            {"type": "function", "name": 7},
+        ],
+        ids=["function-no-name", "function-non-string-name"],
+    )
+    def test_tool_choice_function_malformed_is_omitted(self, bad):
+        """AC-2 / D5: a function-typed choice without a string name has no CC home."""
+        result = self.t.translate_request(self._req(tool_choice=bad))
+        assert "tool_choice" not in result
+
+    @pytest.mark.parametrize(
+        "tools_value",
+        [None, []],
+        ids=["absent", "empty-list"],
+    )
+    def test_tool_choice_without_tools_is_omitted(self, tools_value):
+        """AC-11 / D9: choice over no tools (key absent or empty list) is legal Responses and a 400 on CC."""
+        req = self._req(tool_choice="required")
+        if tools_value is None:
+            del req["tools"]
+        else:
+            req["tools"] = tools_value
+        result = self.t.translate_request(req)
+        assert "tool_choice" not in result
+
+    def test_hosted_tools_only_omits_tool_choice(self):
+        """AC-11 / D9: an inbound list of only hosted tools -> CC list empty -> choice omitted (gate on CC list)."""
+        req = self._req(
+            tools=[{"type": "web_search_preview", "name": "search"}],
+            tool_choice="required",
+        )
+        result = self.t.translate_request(req)
+        assert "tool_choice" not in result
+
+    def test_parallel_tool_calls_carries_without_tools(self):
+        """AC-4 / D9 boundary: the knob is a standalone field and is not gated by D9.
+
+        ``tool_choice`` nests no parallel knob on this wire (unlike Anthropic's
+        ``disable_parallel_tool_use``), so an inbound ``false`` reaches the CC
+        body even when no tools are present -- R2's mapping is unconditional.
+        """
+        req = self._req(parallel_tool_calls=False)
+        del req["tools"]
+        result = self.t.translate_request(req)
+        assert result["parallel_tool_calls"] is False
+        assert "tool_choice" not in result
+
+    def test_full_composition_carries_all_three(self):
+        """AC-14: tools + tool_choice + parallel_tool_calls reach the CC body together."""
+        result = self.t.translate_request(
+            self._req(
+                tool_choice={"type": "function", "name": "get_weather"},
+                parallel_tool_calls=False,
+            )
+        )
+        assert [t["function"]["name"] for t in result["tools"]] == ["get_weather"]
+        assert result["tool_choice"] == {
+            "type": "function",
+            "function": {"name": "get_weather"},
+        }
+        assert result["parallel_tool_calls"] is False

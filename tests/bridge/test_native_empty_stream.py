@@ -27,7 +27,7 @@ from kitty.bridge import server as server_module
 from kitty.bridge.server import BridgeServer
 from kitty.launchers.base import LauncherAdapter, SpawnConfig
 from kitty.profiles.schema import Profile
-from kitty.providers.base import ProviderAdapter
+from kitty.providers.base import ProviderAdapter, WireShape
 from kitty.types import BridgeProtocol
 
 
@@ -90,9 +90,9 @@ class _NativeProvider(ProviderAdapter):
         return True
 
     @property
-    def upstream_wire_is_messages_api(self) -> bool:
-        """bool: Always ``True``."""
-        return True
+    def upstream_wire_shape(self) -> WireShape:
+        """WireShape: Always ``MESSAGES`` — the native Messages path under test."""
+        return WireShape.MESSAGES
 
     @property
     def upstream_path(self) -> str:

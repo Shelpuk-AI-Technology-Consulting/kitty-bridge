@@ -4,7 +4,7 @@ import inspect
 
 import pytest
 
-from kitty.providers.base import ProviderAdapter
+from kitty.providers.base import ProviderAdapter, WireShape
 
 
 def _stub_adapter() -> ProviderAdapter:
@@ -68,19 +68,22 @@ class TestUpstreamPathDefault:
         assert adapter.get_upstream_path("gpt-4o") == "/chat/completions"
 
 
-class TestUpstreamWireIsMessagesApiForModelDefault:
+class TestUpstreamWireShapeForModelDefault:
     """The per-model wire-shape declaration defaults to the bare property.
 
     Guards the delegation KBR-7 introduces: an adapter that does not route by
     model must not have to override anything for the bridge's per-model reads
     to keep working.
+
+    KBR-137 replaced the boolean ``upstream_wire_is_messages_api`` pair with
+    the four-valued :class:`WireShape` enum; the delegation shape is unchanged.
     """
 
     def test_default_follows_the_property_for_any_model(self):
         adapter = _stub_adapter()
-        assert adapter.upstream_wire_is_messages_api is False
-        assert adapter.upstream_wire_is_messages_api_for_model("gpt-4o") is False
-        assert adapter.upstream_wire_is_messages_api_for_model("") is False
+        assert adapter.upstream_wire_shape is WireShape.CHAT_COMPLETIONS
+        assert adapter.upstream_wire_shape_for_model("gpt-4o") is WireShape.CHAT_COMPLETIONS
+        assert adapter.upstream_wire_shape_for_model("") is WireShape.CHAT_COMPLETIONS
 
     def test_follows_a_subclass_property_override(self):
         """A subclass declaring only the property is still answered correctly.
@@ -94,11 +97,11 @@ class TestUpstreamWireIsMessagesApiForModelDefault:
 
         class _MessagesWireAdapter(type(_stub_adapter())):  # type: ignore[misc]  # concrete stub
             @property
-            def upstream_wire_is_messages_api(self) -> bool:
-                return True
+            def upstream_wire_shape(self) -> WireShape:
+                return WireShape.MESSAGES
 
         adapter = _MessagesWireAdapter()
-        assert adapter.upstream_wire_is_messages_api_for_model("claude-opus-5") is True
+        assert adapter.upstream_wire_shape_for_model("claude-opus-5") is WireShape.MESSAGES
 
 
 class TestBuildUpstreamHeadersDefault:

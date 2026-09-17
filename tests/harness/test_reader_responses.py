@@ -166,6 +166,72 @@ class TestEnvelope:
         assert "reasoning" not in projected.envelope.extra
 
 
+class TestParallelToolCalls:
+    """KBR-273 — the §3.3.1b non-default rule at the Responses address.
+
+    The CC reader (T-A2) settled the four-way conditional; this reader is the
+    second to *read* the address directly, and the tests mirror
+    :class:`test_reader_chat_completions.TestEnvelope.test_parallel_tool_calls_*`
+    one for one — the readers' agreement claim is only as good as its test.
+    """
+
+    def test_parallel_tool_calls_true_is_not_written_to_extra(self) -> None:
+        """AC-1 — §3.3.1b: the entry is written only on a **non-default** wire value.
+
+        The Responses default is ``true`` (parallel calls allowed), the same
+        default the CC wire carries. A body carrying ``parallel_tool_calls:
+        true`` writes nothing to ``extra[parallel_tool_calls]`` — the absence
+        is the canonical form, and an absent entry and an explicit default are
+        one request on both wires. The key is consumed for totality so a body
+        that explicitly sent ``true`` is accounted for, not silently dropped.
+        """
+        projected = project({"input": "hi", "parallel_tool_calls": True})
+
+        assert c.PARALLEL_TOOL_CALLS_KEY not in projected.envelope.extra
+        assert "parallel_tool_calls" in projected.consumed
+
+    def test_parallel_tool_calls_false_lands_at_the_canonical_address(self) -> None:
+        """AC-2 — the non-default delta the oracle names.
+
+        ``False`` is the only value Responses carries that does not match the
+        documented default, so it is the only one the reader writes onto
+        ``extra[parallel_tool_calls]``. Routes through
+        :data:`~harness.contract.PARALLEL_TOOL_CALLS_KEY` rather than the wire
+        key, so the two spellings cannot drift if either ever changes (the
+        same posture the CC reader takes at lines 602–605).
+        """
+        projected = project({"input": "hi", "parallel_tool_calls": False})
+
+        assert projected.envelope.extra[c.PARALLEL_TOOL_CALLS_KEY] is False
+
+    def test_parallel_tool_calls_null_is_treated_as_absent(self) -> None:
+        """AC-3 — ``null`` follows the ``cache_control`` precedent.
+
+        The wire key carries no instruction, and the bridge does not invent
+        one. The key is consumed for totality so a body that explicitly sent
+        ``null`` is accounted for, not silently dropped.
+        """
+        projected = project({"input": "hi", "parallel_tool_calls": None})
+
+        assert c.PARALLEL_TOOL_CALLS_KEY not in projected.envelope.extra
+        assert "parallel_tool_calls" in projected.consumed
+
+    def test_a_wrongly_typed_parallel_tool_calls_residualises(self) -> None:
+        """AC-4 — §7.4.1's wrongly-typed-leaf rule at the canonical address.
+
+        The fallback residualises at the bare wire name (not under the
+        contract key) so the cross-reader comparison sees the same answer
+        either side. ``verify_total`` fails closed on the residual.
+        """
+        body = {"input": "hi", "parallel_tool_calls": "yes"}
+        projected = r.ResponsesProjection().read_request(captured(body))
+
+        assert c.PARALLEL_TOOL_CALLS_KEY not in projected.envelope.extra
+        assert projected.residual == {"parallel_tool_calls": "yes"}
+        with pytest.raises(c.ResidualFieldsError):
+            c.verify_total(projected)
+
+
 class TestToolChoiceNormalisation:
     """All nine published `ToolChoiceParam` forms, onto the canonical vocabulary.
 
@@ -1835,7 +1901,7 @@ _TOP_LEVEL_EXPECTATIONS: tuple[tuple[str, Any, str], ...] = (
     ("max_tool_calls", 4, "envelope.extra[max_tool_calls]"),
     ("metadata", {"k": "v"}, "envelope.extra[metadata]"),
     ("moderation", {}, "envelope.extra[moderation]"),
-    ("parallel_tool_calls", True, "envelope.extra[parallel_tool_calls]"),
+    ("parallel_tool_calls", False, "envelope.extra[parallel_tool_calls]"),
     ("previous_response_id", "resp_1", "envelope.extra[previous_response_id]"),
     ("prompt", {"id": "p_1"}, "envelope.extra[prompt]"),
     ("prompt_cache_key", "ck", "envelope.extra[prompt_cache_key]"),

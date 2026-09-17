@@ -780,3 +780,99 @@ on the new spelling returns no error. The oracle lives in `tests/test_provider_b
   not change a register row and does not need a new one — a register row would be the right
   place for a *product decision* about whether to carry reasoning, not for a schema-typo
   fix.
+
+## 9. DEBUG-log redaction policy
+
+Traces to [KBR-156](https://shelpuk.atlassian.net/browse/KBR-156) (closed-as-folded into
+[KBR-73](https://shelpuk.atlassian.net/browse/KBR-73)); recorded before the code changes land,
+per the project's design-first discipline.
+
+### 9.1 The rule
+
+**DEBUG-level logs are held to the same redaction standard as user-facing messages.** Every log
+line the bridge emits through the `kitty.bridge` logger — the logger `--debug`'s FileHandler
+writes to `~/.cache/kitty/bridge.log` — must not contain a query value, a userinfo component,
+or a credential, verbatim. What this buys: a user attaching `bridge.log` to a bug report, the
+project's own troubleshooting guidance, cannot leak a gateway key by doing so. What it costs:
+a masked query value tells the developer "this parameter was sent" without telling them what it
+said — acceptable, because the URL's path and parameter names (the routing facts a debug log
+exists to answer) survive, and the credential is the one thing a user cannot afford to publish.
+
+This deliberately overrides the diagnostic-quality argument recorded on KBR-156: the log exists
+to answer "where did the request actually go", and the answer stays intact — scheme, host,
+port, path, parameter names. Only the values are masked.
+
+### 9.2 The two redactors, and the header rule
+
+Two redactors already exist, each owning one URL class:
+
+- `EgressConfig.masked()` — the **proxy** URL (userinfo present by design, password masked).
+- `ProviderAdapter.redact_url_for_display` — the **upstream** URL (userinfo dropped, every
+  query value masked, fragment masked whole).
+
+KBR-143's stated principle, in `providers/base.py`, is that *values are masked indiscriminately
+rather than by name, because telling a credential from a routing parameter means guessing, and
+a guess that is wrong once leaks a key.* Headers cannot take the URL rule (mask every value)
+without destroying the diagnostic — non-credential headers are most of what a developer reads
+in a header dump — so the header rule becomes: **mask a header's value when its name, lowercased,
+contains any of `auth`, `key`, `token`, `cookie`, `secret`, `signature`.** This is the same
+principle, applied to a surface where the credential signal lives in the *name* rather than the
+position: it catches `x-goog-api-key`, `x-auth-token`, `anthropic-api-key` and any future
+credential-bearing header without enumerating them, and it mirrors the
+`_CF_COOKIE_PREFIX` pattern already in `providers/openai_subscription.py`. The divergence from
+KBR-143's wording is deliberate and recorded here so a future reader does not "fix" one to
+match the other.
+
+### 9.3 The sweep, and what was cleared
+
+Swept every DEBUG/INFO site that logs a URL, a header dict, or a `provider_config`. Sites are
+described by symbol/regex, not line number, because line numbers drift and the structural guard
+(`tests/test_egress_log_redaction.py`, L2) keys on the log-call text.
+
+**Redacted by this task** — the six leaking sites, all on the `kitty.bridge` logger:
+
+- `logger.debug("Upstream POST → %s", url)` — four sites, one per protocol handler. Routed
+  through `BridgeServer._debug_url` (a `@staticmethod` wrapping `redact_url_for_display`).
+- `logger.debug("Request headers: %s", dict(request.headers))` — the inbound request's
+  `authorization` header carries the bridge's own API key. Header rule applied.
+- `logger.debug("Upstream response headers: %s", dict(upstream.headers))` — `set-cookie` and
+  friends. Header rule applied.
+
+**Cleared, with reasons** — reviewed and left as written:
+
+- `model_context_sync.py` — logs `REMOTE_OVERRIDES_URL`, a static public URL, no credential.
+- `logger.info("Bridge server started on ...")` — the bridge's own listen host and port.
+- `logger.debug("Capping single-backend cooldown ...")` and
+  `logger.debug("Selected backend: ...")` — cooldown numbers, profile/provider/model names,
+  health booleans, indices. No credential.
+- `Request body:` / `Translated CC request:` dumps — user conversation content. This is the
+  very thing the debug log exists to inspect; masking it would defeat the log's purpose, and a
+  secret a user pasted into their own conversation is not a credential kitty holds.
+- `model_context.py:400` warning — provider and model names only.
+- `providers/openai_subscription.py` `_log_cf_cookies` and the "Filtered N non-CF cookies" log
+  — already redacted by design (name allowlist + 8-char value truncation) and, decisively, on
+  the `kitty.providers.openai_subscription` logger, which `_setup_debug_logging` does **not**
+  attach the file handler to (it attaches to `kitty.bridge` and `kitty.providers.model_context`
+  only). These lines never reach `bridge.log`.
+- `providers/openai_subscription.py:352` — the TLS impersonation profile name, not a credential.
+
+### 9.4 Enforcement
+
+The redaction is enforced structurally, not just behaviourally, because "a new handler forgot
+to call the helper" is the failure mode this policy exists to prevent and a property test of
+the helper cannot see it. `tests/test_egress_log_redaction.py` (L2, following the
+`tests/test_egress_coverage.py` pattern) scans `bridge/server.py` for the two *literal* log
+shapes the six known sites use — `logger.debug("Upstream POST → %s", …)` and
+`logger.debug("… headers: %s", …)` — asserts each routes through the corresponding helper,
+and asserts its own scan finds the six known sites so it cannot rot into a no-op.
+
+**The deliberate limit, recorded so a future reader does not rely on the broader claim:** the
+guard's patterns are anchored on those two literal format strings. A future log call that
+carries a URL or header dict under a *different* format string — `logger.debug("POST %s",
+url)`, `logger.info("upstream_url: %s", url)` — does **not** match and would ship unredacted.
+The guard pins the shapes that exist today; a new shape needs its pattern added to
+`_REDACT_SITE_PATTERNS` in the same change that adds the call. Widening the regex to any
+`logger.debug(… %s, url)` shape was considered and rejected: it would sweep non-URL `%s`
+arguments (message ids, model names) into the redaction and force every call site to carry an
+exemption comment, which is the failure mode the design avoids.
+
