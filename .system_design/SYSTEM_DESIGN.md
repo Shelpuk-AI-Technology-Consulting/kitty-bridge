@@ -861,8 +861,18 @@ described by symbol/regex, not line number, because line numbers drift and the s
 The redaction is enforced structurally, not just behaviourally, because "a new handler forgot
 to call the helper" is the failure mode this policy exists to prevent and a property test of
 the helper cannot see it. `tests/test_egress_log_redaction.py` (L2, following the
-`tests/test_egress_coverage.py` pattern) scans `bridge/server.py` for URL-dump and header-dump
-DEBUG call sites, asserts each routes through the corresponding helper, and asserts its own
-scan finds the six known sites so it cannot rot into a no-op. A future log call that dumps a
-URL or headers without the helper fails this guard in CI.
+`tests/test_egress_coverage.py` pattern) scans `bridge/server.py` for the two *literal* log
+shapes the six known sites use — `logger.debug("Upstream POST → %s", …)` and
+`logger.debug("… headers: %s", …)` — asserts each routes through the corresponding helper,
+and asserts its own scan finds the six known sites so it cannot rot into a no-op.
+
+**The deliberate limit, recorded so a future reader does not rely on the broader claim:** the
+guard's patterns are anchored on those two literal format strings. A future log call that
+carries a URL or header dict under a *different* format string — `logger.debug("POST %s",
+url)`, `logger.info("upstream_url: %s", url)` — does **not** match and would ship unredacted.
+The guard pins the shapes that exist today; a new shape needs its pattern added to
+`_REDACT_SITE_PATTERNS` in the same change that adds the call. Widening the regex to any
+`logger.debug(… %s, url)` shape was considered and rejected: it would sweep non-URL `%s`
+arguments (message ids, model names) into the redaction and force every call site to carry an
+exemption comment, which is the failure mode the design avoids.
 

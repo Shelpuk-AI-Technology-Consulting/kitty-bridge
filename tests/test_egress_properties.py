@@ -352,14 +352,20 @@ def _drain_handler(buffer: StringIO, prior_level: int) -> str:
 
 
 @given(
-    egr.upstream_urls_with_credentials().map(lambda d: d.get("userinfo", "https://u:p@h.example/v1")),
+    egr.upstream_urls_with_credentials()
+    .filter(lambda d: "userinfo" in d)
+    .map(lambda d: d["userinfo"])
 )
 @settings(max_examples=200)
 def test_debug_url_helper_redacts_the_emitted_record(url: str) -> None:
     """``_debug_url`` produces a redacted record when the bridge logs through it.
 
     Args:
-        url: An upstream URL whose userinfo the helper must strip.
+        url: An upstream URL whose userinfo the helper must strip, drawn from
+            the strategy's userinfo-bearing shapes only — the other shapes
+            (query, fragment, unparseable, no_authority) belong to a
+            different code path and would collapse to the same fallback
+            here, turning the property into a constant-input soak.
     """
     from kitty.bridge.server import BridgeServer  # noqa: PLC0415 — import here to surface the helper's home
 
