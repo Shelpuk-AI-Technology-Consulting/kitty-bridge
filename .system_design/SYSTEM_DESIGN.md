@@ -368,7 +368,7 @@ components and the rule — the *upstream* seam that feeds §4's translators.
 
 | Component | Role |
 |---|---|
-| `BridgeServer._stream_messages` | The `/v1/messages` inbound stream. On a Messages-wire upstream it forwards the raw SSE (KBR-227); otherwise it translates CC chunks to Messages events. |
+| `BridgeServer._stream_messages` | The `/v1/messages` inbound stream. On a Messages-wire upstream it forwards the raw SSE (KBR-227); on a Responses-wire upstream it converts each line through `OpenCodeGoResponsesCCStreamConverter` first (KBR-274); otherwise it translates CC chunks to Messages events. |
 | `BridgeServer._stream_responses` / `_stream_chat_completions` / `_stream_gemini` | The Codex, Chat Completions and Gemini inbound streams. On a Messages-wire upstream they convert (KBR-232); otherwise they translate CC chunks to their protocol. |
 | `BridgeServer._serves_messages_wire` | The one answer to "does this request's upstream speak Anthropic Messages?". Every branch that decides how a Messages-wire stream is handled asks it — a change to the rule cannot reach one site and miss another. |
 | `AnthropicCCStreamConverter` (`kitty.providers.anthropic`) | The stateful Anthropic-SSE → Chat Completions-chunk converter. One instance per upstream attempt. |
@@ -383,13 +383,17 @@ already speaks the upstream's protocol, and conversion would drop thinking signa
 `AnthropicCCStreamConverter` and let the converted lines re-enter the same per-line body a
 Chat Completions upstream's would: finish buffering, the empty-response ladder, usage
 attribution and in-stream error detection are all the handler's existing, already-proven
-logic. A no means byte-identical to the pre-KBR-232 behaviour.
+logic. A no means the handler consults `_stream_converter_for`: a Responses-wire upstream
+(KBR-137) has its lines converted through `OpenCodeGoResponsesCCStreamConverter` and the
+converted lines re-enter the same per-line body (KBR-274 — before it, `/v1/messages` walked
+the six-step empty ladder on a healthy stream because no converter was wired there); any
+other non-Messages wire behaves byte-identically to the pre-KBR-232 code.
 
 ### 5.3 Decisions, and why
 
 | # | Decision | Why, and the rejected alternative |
 |---|---|---|
-| S1 | Convert on the three non-Messages protocols; forward only on `/v1/messages` | Only `/v1/messages` shares the upstream's wire. Conversion there would lose signatures (KBR-227); forwarding on the other three would hand clients Anthropic SSE they cannot read. |
+| S1 | Convert on the three non-Messages protocols; forward only on `/v1/messages` | Only `/v1/messages` shares the upstream's wire. Conversion there would lose signatures (KBR-227); forwarding on the other three would hand clients Anthropic SSE they cannot read. KBR-274 narrowed "forward only" to *Messages-wire* upstreams: `/v1/messages` on a Responses-wire upstream (the OpenCode Go route) now converts, because the alternative was handing the handler Responses events its CC translator silently ignored — six empty-ladder retries and a 502 on a healthy stream. |
 | S2 | A stateful converter class, not a stateless per-event map | A `tool_use` block's `input_json_delta` fragments have no meaning without the `content_block_start` that allocated the block's `tool_calls` index. The stateless map is precisely why every tool call was lost (KBR-232). |
 | S3 | Converted lines re-enter the handler's existing per-line body | The alternative — a parallel write path — forks the finish/empty/usage/error logic per protocol. The converter's `[DONE]` sentinel and malformed-line passthrough are byte-identical outputs, so the body's residual `translate_upstream_stream_event` call sites stay harmless; an L1 test pins that identity as a contract, not a coincidence. |
 | S4 | Gate and converter re-evaluated per attempt | A failover can land on a Chat Completions-wire backend mid-handler; a stale converter would mangle its Chat Completions stream. |
@@ -401,6 +405,12 @@ logic. A no means byte-identical to the pre-KBR-232 behaviour.
 
 ### 5.4 Known limits
 
+- On `/v1/messages` a converted Responses stream's role-only opening chunk
+  (`response.created`) translates to no events and starts no lifecycle, so the FI-8.3
+  truncation guard stays inactive until real content lands; a completed-but-content-less
+  Responses stream enters the empty-response ladder through the existing
+  `translator.response_was_empty` branch, exactly as a content-less CC stream does
+  (KBR-274).
 - **KBR-248 closed the converted-route gap on `/v1/chat/completions`.** A converted
   stream's role chunk used to set `has_content`, so a content-less completion reached the
   client as a well-formed skeleton and the empty-response ladder could not fire there — as
