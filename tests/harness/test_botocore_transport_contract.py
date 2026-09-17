@@ -8,7 +8,7 @@
 "``Config(proxies=)`` is honoured and takes precedence over the environment.
 It is botocore, not boto3, that implements this" — and an unverified
 expectation is a defect waiting to be exposed by the next botocore bump.
-Measured on botocore 1.34.46 (see
+Measured on the resolved botocore (1.43.93; see
 ``botocore/endpoint.py:412-413``'s ``if proxies is None: ...`` short-circuit):
 the explicit ``Config(proxies=...)`` reaches botocore's ``URLLib3Session``
 before the env fallback runs, so the mapping wins. AWS's

@@ -49,7 +49,7 @@ from typing import TYPE_CHECKING, ClassVar
 
 import aiohttp
 
-from harness.botocore_recorder import _SERVED_FORMAT, BedrockRecordingUpstream
+from harness.botocore_recorder import BedrockRecordingUpstream
 from harness.containment import (
     _DRIVE_TIMEOUT,
     Phase1Result,
@@ -57,6 +57,7 @@ from harness.containment import (
     monkeypatched_aiohttp_resolver,
     register_containment_transport,
 )
+from harness.contract import WireFormat
 
 if TYPE_CHECKING:
     import pytest
@@ -424,20 +425,20 @@ class _TlsBedrockRecordingUpstream(BedrockRecordingUpstream):
 
     ssl_context: ssl.SSLContext | None = None
 
-    def __init__(self, *, ssl_context: ssl.SSLContext, default_format: object = None) -> None:
+    def __init__(self, *, ssl_context: ssl.SSLContext, default_format: WireFormat) -> None:
         """Store ``ssl_context`` for later application at ``start()``.
 
         Args:
             ssl_context: The harness's TLS context; applied at start time.
-            default_format: Accepted for API symmetry with the other
-                factories, ignored — the parent class's ``__post_init__``
-                rejects any format this recorder does not serve, so the
-                value is fixed at construction and callers that pass
-                :attr:`WireFormat.BEDROCK_CONVERSE` keep their intent
-                explicit without the wrapper carrying a second copy of
-                the served-format set.
+            default_format: The served format, forwarded to the parent
+                constructor — which validates it against this recorder's
+                served set. The wrapper deliberately does not silently
+                override the caller's value: the parent's ``__post_init__``
+                rejects any format the bedrock recorder does not serve, so
+                a caller passing an unexpected format fails loudly here
+                rather than being quietly redirected.
         """
-        super().__init__(default_format=_SERVED_FORMAT)
+        super().__init__(default_format=default_format)
         self.ssl_context = ssl_context
 
     async def start(self, *args: object, **kwargs: object) -> None:
