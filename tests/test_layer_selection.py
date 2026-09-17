@@ -400,6 +400,17 @@ class TestTheWholeSuiteIsCoherent:
             "tests/test_internal_key_completeness.py",
             "tests/test_egress_coverage.py",
             "tests/test_wire_shape_honesty.py",
+            # KBR-80 (T-G4). The wire-form sibling of the hook-level guard
+            # above: §6.2.3's "Wire-shape honesty" row observed at the §3.2.3
+            # serialization boundary rather than at `translate_to_upstream`.
+            # Captures the body handed to each custom-transport client and
+            # pairs the classification against the declaration; also covers
+            # `provider_config`-constructed adapters and native-passthrough
+            # requests. Closed a stale `CHAT_COMPLETIONS` declaration on
+            # `openai_subscription` (KBR-7 atomic pattern; the three
+            # declaration-readers are unreachable for custom transports,
+            # verified in `src/kitty/providers/openai_subscription.py`).
+            "tests/test_wire_shape_honesty_wire.py",
             # KBR-126. Both are docs-vs-code guards in the §6.2.3 sense: one
             # holds the OpenCode Go routing table against the provider's
             # published endpoint table, the other holds every adapter's

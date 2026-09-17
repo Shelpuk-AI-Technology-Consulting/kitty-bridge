@@ -48,7 +48,7 @@ from kitty.auth.oauth_session import OAuthRefreshFailed, OAuthSession
 from kitty.auth.token_transport import CurlTokenTransport
 from kitty.cloudflare import get_cloudflare_signature, is_cloudflare_block
 from kitty.egress import get_egress
-from kitty.providers.base import ProviderError
+from kitty.providers.base import ProviderError, WireShape
 
 # Avoid circular import — only need the parent class methods
 from kitty.providers.openai import OpenAIAdapter
@@ -235,6 +235,28 @@ class OpenAISubscriptionAdapter(OpenAIAdapter):
     """
 
     provider_type = "openai_subscription"
+
+    @property
+    def upstream_wire_shape(self) -> WireShape:
+        """:attr:`WireShape.RESPONSES` — the Codex backend serves OpenAI Responses.
+
+        KBR-80 / T-G4 surfaces this.  The inherited default
+        (``CHAT_COMPLETIONS``) described ``translate_to_upstream``'s
+        output, which is never invoked on the request path —
+        ``_cc_to_responses`` (CC-origin) and ``_prepare_responses_body``
+        (Responses-origin) build the Responses body inside the curl_cffi
+        transport (P13–P17).  The shipped body is Responses for every
+        request, and the declaration now matches.
+
+        No consumer impact: the thinking round-trip repair at
+        ``server.py`` ~5075 lives on the bridge's own
+        ``_make_upstream_request`` path, which custom-transport adapters
+        bypass; the converter selection at ``server.py:9849`` is on the
+        bridge-SSE path; ``_serves_messages_wire`` at
+        ``server.py:9777`` returns False for this adapter either way
+        (``use_native_messages`` is False and ``RESPONSES != MESSAGES``).
+        """
+        return WireShape.RESPONSES
 
     def __init__(self) -> None:
         self._curl_session_instance: curl_cffi.requests.AsyncSession | None = None
