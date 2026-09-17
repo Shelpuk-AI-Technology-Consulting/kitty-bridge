@@ -61,8 +61,8 @@ _STEPS_DIR = _REPO_ROOT / ".system_design" / "steps"
 # A step id is lowercase ASCII, starting with a letter, then letters /
 # digits / underscores. Underscores rather than kebab-case dashes: the
 # KBR-278 ticket mandates the snake_case T-F1 id
-# `hypothesis_and_transcript_strategies`, and all four shipped step files
-# use underscores (REQUIREMENTS.md D1).
+# `hypothesis_and_transcript_strategies`, and all five shipped step
+# files use underscores (REQUIREMENTS.md D1).
 _ID_PATTERN = re.compile(r"[a-z][a-z0-9_]*")
 
 # Jira-key cross-reference exemption: an entry naming a Jira ticket

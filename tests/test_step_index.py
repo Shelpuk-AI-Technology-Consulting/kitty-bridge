@@ -319,17 +319,20 @@ def test_deep_chain_does_not_hit_recursion_limit(tmp_path: Path) -> None:
 
     The iterative DFS exists so the validator has no recursion-limit
     boundary: a deep *valid* chain succeeds where the recursive
-    equivalent would ``RecursionError`` past ~1000 steps. The test
-    writes 1500 one-line step files — deterministic, past the default
-    limit, and well under a second of validator work — and asserts
-    the whole chain parses and reports no cycle. Without this case, a
-    reversion to the recursive form passes every other test and only
-    resurfaces on a real ~1000-step chain.
+    equivalent would ``RecursionError`` past ~1000 steps. The fixture
+    is a **forward chain** — ``step_i`` depends on ``step_{i + 1}`` —
+    so the first sorted start (``step_0000``) descends the full
+    1500-level chain. A backward chain would stop at depth 1 because
+    every visited node's successors are already BLACK, and a fully
+    disconnected graph would never descend past depth 1 at all —
+    neither would catch a reversion to the recursive form, which is
+    the whole point of the case.
     """
     steps = _steps_dir(tmp_path)
     for i in range(1500):
+        deps = f"[step_{i + 1:04d}]" if i < 1499 else "[]"
         (steps / f"step_{i:04d}.md").write_text(
-            f"---\nid: step_{i:04d}\ndepends_on: []\n---\n\n# step {i}\n",
+            f"---\nid: step_{i:04d}\ndepends_on: {deps}\n---\n\n# step {i}\n",
             encoding="utf-8",
         )
     entries, parse_errors = rsi.collect_steps(tmp_path / "steps")
