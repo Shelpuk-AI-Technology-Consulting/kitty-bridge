@@ -135,7 +135,7 @@ locally with the property.
 ## Status
 
 Implemented in `feat/kbr-74-t-f5-tool-input-anomaly-property` (PR #213).
-**Auto-reviewer's warning (round 1) addressed in commit dac08d4**: the
+**Auto-reviewer's warning (round 1) addressed in this PR**: the
 step file's earlier paragraph described P3 as patching the detector to
 return `None` always (a miss-class control) plus a wrapped-payload
 non-`None` assertion — the *pre-iteration* design. The shipped P3 does
