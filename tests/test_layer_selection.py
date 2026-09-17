@@ -508,6 +508,12 @@ class TestTheWholeSuiteIsCoherent:
             # the ambient proxy environment -- an artifact upgraded
             # separately and by someone else entirely.
             "tests/harness/test_botocore_transport_contract.py",
+            # KBR-84 (T-G8). A §6.2.4 dependency behaviour contract, the
+            # aiohttp twin of the curl_cffi and botocore files: it pins that
+            # a session-level `proxy=`/`proxy_auth=` is honoured and that a
+            # per-request `proxy=None` cannot escape it -- the claim
+            # `_session_for`'s containment design rests on.
+            "tests/test_aiohttp_transport_contract.py",
         }
 
         actual = {
