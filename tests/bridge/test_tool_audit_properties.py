@@ -7,7 +7,7 @@ detector's whole value is that a warning means something (kitty-bridge#33),
 and the example-based suite (``tests/bridge/test_tool_use_audit.py``) pins
 only the cases the incident's author happened to think of.
 
-Five properties, plus a §1.4 falsification control:
+Four properties, plus a §1.4 falsification control:
 
 - **P1 — no false positive on the resolvable subset.** For every schema in
   the small JSON-Schema subset the detector actually resolves

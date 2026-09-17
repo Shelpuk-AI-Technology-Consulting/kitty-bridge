@@ -52,7 +52,7 @@ locally with the property.
 
 ## Implementation notes
 
-- **Five properties plus a §1.4 falsification control** (the auto-reviewer's
+- **Four properties plus a §1.4 falsification control** (the auto-reviewer's
   warning on an earlier draft caught a stale paragraph here: the shipped
   P3 does not duplicate the example-suite positive findings; see "Status"
   at the bottom for the resolution). P1 is the ticket's no-false-positive
