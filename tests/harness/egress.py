@@ -253,7 +253,7 @@ def _encoded_credential_text() -> st.SearchStrategy[str]:
     )
 
 
-def proxy_urls_with_credentials() -> st.SearchStrategy[tuple[str, str, str]]:
+def proxy_urls_with_credentials() -> st.SearchStrategy[tuple[str, str | None, str | None, str]]:
     """Return a strategy drawing proxy URLs with credentials, in all three forms.
 
     §6.1: "test percent-encoded and URL-embedded forms as separate cases."
@@ -305,7 +305,7 @@ def proxy_urls_with_credentials() -> st.SearchStrategy[tuple[str, str, str]]:
 _QUERY_NAMES = ("api-key", "sig", "code", "debug", "api-version")
 
 
-def upstream_urls_with_credentials() -> st.SearchStrategy[dict[str, str | None]]:
+def upstream_urls_with_credentials() -> st.SearchStrategy[dict[str, str | tuple[str, str]]]:
     """Return a strategy drawing upstream URLs exercising every redactor shape.
 
     Each example is a **record** — a dict mapping a shape name to the URL
@@ -404,21 +404,25 @@ def upstream_urls_with_credentials() -> st.SearchStrategy[dict[str, str | None]]
     )
     unparseable = unparseable_query | unparseable_userinfo
 
-    # Same sentinel strategy for the no-authority shape: credentials live
-    # in the path (out of reach of any netloc rule), and a sentinel
-    # witness lets the property assert the password is gone without
-    # depending on the helper's exact textual output.
+    # Same sentinel strategy for the no-authority shape: the credentials
+    # live in the path (out of reach of any netloc rule), and the **same**
+    # sentinel value is embedded as the password — so the assertion
+    # ``sentinel not in redacted`` is meaningful (the sentinel *was* in
+    # the input, and the helper must not return it verbatim). The
+    # earlier draft drew a separate ``_sentinel_text()`` for the witness
+    # field without embedding it in the URL, which made the assertion
+    # vacuous — the sentinel was never in the redacted output to begin
+    # with.
     no_authority = st.builds(
-        lambda scheme, u, p, h, pth, sentinel: {
-            "no_authority": f"{scheme}:{u}:{p}@{h}{pth}",
+        lambda scheme, u, sentinel, h, pth: {
+            "no_authority": f"{scheme}:{u}:{sentinel}@{h}{pth}",
             "expected_no_authority_password": sentinel,
         },
         st.sampled_from(("u", "x")),
         user,
-        password,
+        _sentinel_text(),
         host,
         path,
-        _sentinel_text(),
     )
 
     # Fragment is masked wholesale — the structural property asserts the
