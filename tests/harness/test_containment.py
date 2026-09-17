@@ -528,6 +528,7 @@ class TestSealedNetwork:
         factory's choice — the test asserts the recorder ends up with the
         factory's format.
         """
+
         class _FormatRecorder(RecordingUpstream):
             def __init__(self, ssl_context: ssl.SSLContext, **kwargs: object) -> None:
                 super().__init__(default_format=WireFormat.OPENAI_RESPONSES)
@@ -813,9 +814,7 @@ class TestVerdictFloorDetection:
 
         outcomes = {_PHASE_1_NAME: _PhaseOutcome.PASSED}
         teardown_failed = {_PHASE_1_NAME: _PhaseOutcome.FAILED}
-        recorded = _record_unsupported_if_floor_shape(
-            outcomes, teardown_failed, "curl_cffi", version_info=(3, 10, 0)
-        )
+        recorded = _record_unsupported_if_floor_shape(outcomes, teardown_failed, "curl_cffi", version_info=(3, 10, 0))
 
         assert recorded is False, (
             "the recorder must not claim UNSUPPORTED for a slice whose phase 1 teardown "
@@ -836,6 +835,230 @@ class TestVerdictFloorDetection:
         clean = {_PHASE_1_NAME: _PhaseOutcome.PASSED}
         assert _record_unsupported_if_floor_shape(outcomes, clean, "curl_cffi", version_info=(3, 11, 0)) is False
         assert report_instance().entry("curl_cffi").outcome is Outcome.NOT_ATTEMPTED
+
+
+class TestProviderGate:
+    """The T-E5 gate: nine names, two direct legs, three siblings.
+
+    The T-E5 slice covers **both** aiohttp paths §5.5 names that bypass
+    ``_session_for``, so its gate tracks nine tests and its floor shape
+    is signalled by **two** direct-leg names (the serving leg's phase 1
+    and the OAuth login leg's direct phase), not one. These tests pin
+    the generalised floor helper and the writer against that shape, and
+    the sibling guard against a third sibling row.
+    """
+
+    #: The T-E5 gate names, imported from the conftest so a rename in the
+    #: slice file fails here (and in the slice's own verdict test) rather
+    #: than drifting silently.
+    def _names(self) -> tuple[frozenset[str], frozenset[str], frozenset[str]]:
+        """Return the T-E5 gate, direct-leg, and proxied name sets.
+
+        Returns:
+            ``(gate_names, direct_names, proxied_names)`` from
+            :mod:`harness.conftest`.
+        """
+        from harness.conftest import (
+            _PROVIDER_AIOHTTP_DIRECT_PHASE_NAMES,
+            _PROVIDER_AIOHTTP_PHASE_TEST_NAMES,
+            _PROVIDER_AIOHTTP_PROXIED_PHASE_NAMES,
+        )
+
+        return (
+            _PROVIDER_AIOHTTP_PHASE_TEST_NAMES,
+            _PROVIDER_AIOHTTP_DIRECT_PHASE_NAMES,
+            _PROVIDER_AIOHTTP_PROXIED_PHASE_NAMES,
+        )
+
+    def test_floor_true_on_311_minus_with_both_direct_legs_passed(self) -> None:
+        """Both direct-leg names passed on <3.11, all proxied absent — the floor."""
+        from harness.conftest import _floor_unsupported_shape
+
+        gate, direct, proxied = self._names()
+        outcomes = {name: _PhaseOutcome.PASSED for name in direct}
+        clean = dict(outcomes)
+        assert (
+            _floor_unsupported_shape(
+                outcomes, clean, direct_leg_names=direct, proxied_names=proxied, version_info=(3, 10, 0)
+            )
+            is True
+        ), "both direct-leg names passed on <3.11 with all seven proxied phases absent must be the T-E5 floor shape"
+        assert len(gate) == 9 and len(direct) == 2 and len(proxied) == 7, (
+            f"the T-E5 name sets drifted: gate={len(gate)}, direct={len(direct)}, "
+            f"proxied={len(proxied)} — expected 9/2/7; a phase was added or "
+            "removed without updating the sets"
+        )
+
+    def test_floor_false_when_one_direct_leg_did_not_pass(self) -> None:
+        """One direct leg passed, the other absent — not the floor."""
+        from harness.conftest import _floor_unsupported_shape
+
+        _gate, direct, proxied = self._names()
+        serving_only = {sorted(direct)[0]: _PhaseOutcome.PASSED}
+        clean = dict(serving_only)
+        assert (
+            _floor_unsupported_shape(
+                serving_only, clean, direct_leg_names=direct, proxied_names=proxied, version_info=(3, 10, 0)
+            )
+            is False
+        ), (
+            "a missing direct-leg phase disqualifies the floor shape: the slice "
+            "did not run clean even on the legs that carry no skipif"
+        )
+
+    def test_floor_false_when_proxied_phase_present(self) -> None:
+        """A present proxied phase means real proxied work happened — not the floor."""
+        from harness.conftest import _floor_unsupported_shape
+
+        _gate, direct, proxied = self._names()
+        outcomes = {name: _PhaseOutcome.PASSED for name in direct}
+        outcomes["test_the_oauth_login_leg_connects_nowhere_with_the_proxy_down"] = _PhaseOutcome.FAILED
+        clean = {name: _PhaseOutcome.PASSED for name in direct}
+        assert (
+            _floor_unsupported_shape(
+                outcomes, clean, direct_leg_names=direct, proxied_names=proxied, version_info=(3, 10, 0)
+            )
+            is False
+        )
+
+    def test_writer_claims_provider_row_under_floor_shape(self) -> None:
+        """The floor writer records ``UNSUPPORTED`` on the ``provider_aiohttp`` row."""
+        from harness.conftest import _record_unsupported_if_floor_shape
+        from harness.containment import instance as report_instance
+
+        _gate, direct, proxied = self._names()
+        outcomes = {name: _PhaseOutcome.PASSED for name in direct}
+        clean = dict(outcomes)
+        recorded = _record_unsupported_if_floor_shape(
+            outcomes,
+            clean,
+            "provider_aiohttp",
+            direct_leg_names=direct,
+            proxied_names=proxied,
+            version_info=(3, 10, 0),
+        )
+
+        assert recorded is True
+        row = report_instance().entry("provider_aiohttp")
+        assert row.outcome is Outcome.UNSUPPORTED
+        assert row.reason is not None and "Python <3.11" in row.reason
+
+    def test_gate_passed_requires_every_nine_name_present_and_passed(self) -> None:
+        """The nine-name gate passes only with all nine PASSED call and teardown."""
+        from harness.conftest import _gate_passed
+
+        gate, _direct, _proxied = self._names()
+        all_passed = {name: _PhaseOutcome.PASSED for name in gate}
+        assert _gate_passed(all_passed, dict(all_passed), gate) is True
+        # One name short: the length check fails even though every entry passed.
+        short = {name: _PhaseOutcome.PASSED for name in sorted(gate)[:-1]}
+        assert _gate_passed(short, dict(short), gate) is False
+
+    def test_third_sibling_row_exempt_when_its_gate_passed_and_row_is_proven(self) -> None:
+        """A ``PROVEN`` third-sibling row is exempt; a non-passing gate is not."""
+        from harness.conftest import _PHASE_TEST_NAMES, _record_proven_with_sibling_guard
+        from harness.containment import instance as report_instance
+
+        # The T-E2 gate passes, and both sibling rows are legitimately
+        # PROVEN (their gates passed too). The guard must accept both
+        # exemptions and write the bridge_aiohttp row.
+        report_instance().record("curl_cffi", Outcome.PROVEN)
+        report_instance().record("provider_aiohttp", Outcome.PROVEN)
+        outcomes = {name: _PhaseOutcome.PASSED for name in _PHASE_TEST_NAMES}
+        _record_proven_with_sibling_guard(
+            outcomes,
+            dict(outcomes),
+            _PHASE_TEST_NAMES,
+            "bridge_aiohttp",
+            siblings=(
+                ("curl_cffi", lambda: True),
+                ("provider_aiohttp", lambda: True),
+            ),
+        )
+        assert report_instance().entry("bridge_aiohttp").outcome is Outcome.PROVEN
+
+    def test_third_sibling_row_not_exempt_when_its_gate_failed(self) -> None:
+        """A rogue ``PROVEN`` on a sibling whose gate failed is still caught."""
+        from harness.conftest import _PHASE_TEST_NAMES, _record_proven_with_sibling_guard
+
+        report_instance().record("curl_cffi", Outcome.PROVEN)
+        report_instance().record("provider_aiohttp", Outcome.PROVEN)
+        outcomes = {name: _PhaseOutcome.PASSED for name in _PHASE_TEST_NAMES}
+        with pytest.raises(AssertionError, match="provider_aiohttp"):
+            _record_proven_with_sibling_guard(
+                outcomes,
+                dict(outcomes),
+                _PHASE_TEST_NAMES,
+                "bridge_aiohttp",
+                siblings=(
+                    ("curl_cffi", lambda: True),
+                    # The provider gate did NOT pass — its PROVEN row is a
+                    # rogue write the guard must surface.
+                    ("provider_aiohttp", lambda: False),
+                ),
+            )
+
+    def test_finaliser_writes_proven_when_every_phase_actually_passed(self) -> None:
+        """End-to-end: the T-E5 finaliser writes ``PROVEN`` for ``provider_aiohttp``.
+
+        Manually invokes :func:`_record_proven_with_sibling_guard` with the
+        T-E5 names and a clean outcomes dict, exactly the shape the session
+        finaliser feeds it when every gated test ran and passed. The sibling
+        rows (``bridge_aiohttp``, ``curl_cffi``) are also ``PROVEN`` with
+        their gates passed — the exemptions the guard accepts. The test
+        proves the write happens, not that some test happened to record the
+        verdict by accident.
+        """
+        from harness.conftest import (  # noqa: I001 -- grouped for readability
+            _PROVIDER_AIOHTTP_PHASE_TEST_NAMES,
+            _record_proven_with_sibling_guard,
+        )
+        from harness.containment import instance as report_instance
+
+        report_instance().record("bridge_aiohttp", Outcome.PROVEN)
+        report_instance().record("curl_cffi", Outcome.PROVEN)
+        outcomes = {name: _PhaseOutcome.PASSED for name in _PROVIDER_AIOHTTP_PHASE_TEST_NAMES}
+        teardown = {name: _PhaseOutcome.PASSED for name in _PROVIDER_AIOHTTP_PHASE_TEST_NAMES}
+        _record_proven_with_sibling_guard(
+            outcomes,
+            teardown,
+            _PROVIDER_AIOHTTP_PHASE_TEST_NAMES,
+            "provider_aiohttp",
+            siblings=(
+                ("bridge_aiohttp", lambda: True),
+                ("curl_cffi", lambda: True),
+            ),
+        )
+        assert report_instance().entry("provider_aiohttp").outcome is Outcome.PROVEN
+
+    def test_finaliser_writes_unsupported_on_311_minus_with_two_direct_legs(self) -> None:
+        """End-to-end: the T-E5 finaliser writes ``UNSUPPORTED`` on the floor shape.
+
+        Both direct-leg names passed on <3.11 with every proxied phase
+        absent — the floor shape for T-E5. The writer records
+        ``UNSUPPORTED`` with the documented reason so the plan's "an outcome
+        is recorded" done-when holds on the floor interpreter.
+        """
+        from harness.conftest import (  # noqa: I001 -- grouped for readability
+            _PROVIDER_AIOHTTP_DIRECT_PHASE_NAMES,
+            _PROVIDER_AIOHTTP_PROXIED_PHASE_NAMES,
+            _record_unsupported_if_floor_shape,
+        )
+
+        outcomes = {name: _PhaseOutcome.PASSED for name in _PROVIDER_AIOHTTP_DIRECT_PHASE_NAMES}
+        clean = dict(outcomes)
+        recorded = _record_unsupported_if_floor_shape(
+            outcomes,
+            clean,
+            "provider_aiohttp",
+            direct_leg_names=_PROVIDER_AIOHTTP_DIRECT_PHASE_NAMES,
+            proxied_names=_PROVIDER_AIOHTTP_PROXIED_PHASE_NAMES,
+            version_info=(3, 10, 0),
+        )
+        assert recorded is True
+        row = report_instance().entry("provider_aiohttp")
+        assert row.outcome is Outcome.UNSUPPORTED
+        assert row.reason is not None and "Python <3.11" in row.reason
 
 
 # ── Helpers (private) ─────────────────────────────────────────────────────
