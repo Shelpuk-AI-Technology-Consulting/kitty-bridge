@@ -352,6 +352,16 @@ class OllamaCloudAdapter(ProviderAdapter):
         going through ``BridgeServer._build_upstream_url``.  It shares the one
         composition rule all the same (KBR-143).
 
+        A configured ``base_url`` is normalised through
+        :meth:`ProviderAdapter._strip_endpoint_suffix`, so a user who pastes
+        the full documented endpoint (``https://ollama.com/api/chat``)
+        composes to that endpoint rather than to a doubled path (KBR-134,
+        KBR-157).  The strip is applied here rather than in a
+        ``build_base_url`` override — this adapter sets
+        ``use_custom_transport = True`` and ``_build_url`` is its sole
+        composition site, so an override would be single-use dead code today
+        (ticket decision 2).
+
         Args:
             provider_config: The profile's provider configuration, optionally
                 carrying ``base_url``.
@@ -360,6 +370,11 @@ class OllamaCloudAdapter(ProviderAdapter):
             The full URL to request.
         """
         base = provider_config.get("base_url") or self.default_base_url
+        # KBR-157: a pasted full endpoint would otherwise be composed into a
+        # doubled path and rejected upstream as a missing model.  Normalised
+        # inline here rather than in a build_base_url override (asymmetry
+        # accepted per ticket decision 2).
+        base = self._strip_endpoint_suffix(str(base), self.upstream_path)
         return self.compose_upstream_url(base, self.upstream_path)
 
     def parse_stream_to_cc_response(self, raw: bytes) -> dict:
