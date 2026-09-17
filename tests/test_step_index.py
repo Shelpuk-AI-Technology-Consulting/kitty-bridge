@@ -230,7 +230,7 @@ def test_acyclic_diamond_produces_no_cycle_error(tmp_path: Path) -> None:
         ("Not-Valid", "uppercase anywhere is rejected"),
         ("123_underscores", "a leading digit is rejected"),
         ("has-dash", "kebab-case dashes are rejected"),
-        ("", "an empty id is rejected"),
+        ("''", "a literal empty-string id is rejected by the pattern check"),
     ],
 )
 def test_id_outside_the_pattern_is_reported(tmp_path: Path, id_: str, why: str) -> None:
