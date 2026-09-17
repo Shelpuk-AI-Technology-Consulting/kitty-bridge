@@ -676,6 +676,27 @@ class SealedNetwork:
         return f"https://{self.upstream_host}:{self.upstream_port}"
 
     @property
+    def ca_path(self) -> str:
+        """Return the path of the throwaway CA certificate the harness uses.
+
+        The recorder and the proxy present leaves signed by this CA, so a
+        client whose own trust store does not carry it — botocore's urllib3
+        in particular, whose ``AWS_CA_BUNDLE`` channel is environment-bound —
+        reads this property to point its trust at the harness CA.
+
+        Returns:
+            The CA certificate path.
+
+        Raises:
+            RuntimeError: When the harness has not been started, for the
+                same half-started-state reason
+                :attr:`upstream_port` raises.
+        """
+        if self._recorder is None:
+            raise RuntimeError("sealed network is not running; call start() first")
+        return str(self._certs.ca)
+
+    @property
     def proxy_url(self) -> str:
         """Return the URL the bridge's proxy kwargs point at.
 

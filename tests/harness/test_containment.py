@@ -460,34 +460,80 @@ class TestCompletenessGate:
         assert "failed" in str(excinfo.value)
 
     def test_run_completeness_gate_accepts_unsupported_landed_row(self) -> None:
-        """``UNSUPPORTED`` is the partial-delivery verdict the design accepts."""
+        """``UNSUPPORTED`` is the partial-delivery verdict the design accepts.
+
+        With KBR-64 landed, ``botocore`` is now an enforced row too: every
+        landed slice must record either ``PROVEN`` or (for the slices with
+        a 3.11 floor) ``UNSUPPORTED``. Recording ``UNSUPPORTED`` for
+        ``curl_cffi`` while every other landed row reads ``PROVEN`` still
+        passes — the design accepts partial delivery.
+        """
         from harness.conftest import _run_completeness_gate
 
         report_instance().record("bridge_aiohttp", Outcome.PROVEN)
         report_instance().record("curl_cffi", Outcome.UNSUPPORTED, reason="no direct route")
         report_instance().record("provider_aiohttp", Outcome.PROVEN)
+        report_instance().record("botocore", Outcome.PROVEN)
         # No raise: the only landed-but-not-PROVEN outcome the gate accepts.
         _run_completeness_gate()
 
     def test_run_completeness_gate_ignores_unlanded_rows(self) -> None:
         """A row whose owning slice has not landed is exempt, regardless of outcome.
 
-        The auto-tightening property KBR-69 ships: today ``botocore`` has
-        no descriptor in ``_SLICES`` (KBR-64 still in flight), so it is
-        exempt even if a test leaves a verdict on it. ``provider_aiohttp``
-        landed with KBR-65 and is now an enforced row. When KBR-64 lands
-        and adds its descriptor, ``botocore`` joins the enforced set with
-        no edit to this fixture.
+        The auto-tightening property KBR-69 ships: only rows whose owning
+        slice has a descriptor in :data:`_SLICES` are enforced. After
+        KBR-64, all four §5.5 transports are landed, so no real verdict
+        row is unlanded today — but a synthetic row whose name does not
+        match any descriptor still proves the property: it can read
+        ``FAILED`` and the gate ignores it.
+
+        This replaces the older test that wrote a verdict on ``botocore``
+        while it was still unlanded (KBR-64 pre-landing). That test's
+        docstring named the auto-tightening as the reason; the day
+        KBR-64 landed, ``botocore`` joined the enforced set, and the test
+        had to be rewritten to keep asserting the unlanded property in
+        the now-all-landed world.
+
+        The synthetic unlanded row bypasses ``record()`` (which validates
+        names against the registered transports) and writes directly to
+        the singleton's internal entry map — the same seam the gate's
+        exemption iterates, so the test exercises the production code
+        path with an unlanded-name injection rather than a separate
+        recording channel.
+        """
+        from harness.conftest import _run_completeness_gate
+        from harness.containment import ReportEntry
+
+        # All four landed rows PROVEN — gate passes.
+        report_instance().record("bridge_aiohttp", Outcome.PROVEN)
+        report_instance().record("curl_cffi", Outcome.PROVEN)
+        report_instance().record("botocore", Outcome.PROVEN)
+        report_instance().record("provider_aiohttp", Outcome.PROVEN)
+        # The unlanded row in any state — gate still passes because the
+        # gate only iterates rows in ``_landed_verdict_rows()``, and this
+        # synthetic name has no descriptor.
+        report_instance()._entries["future_provider_x"] = ReportEntry(outcome=Outcome.FAILED)
+        _run_completeness_gate()  # no raise
+
+    def test_run_completeness_gate_enforces_botocore_after_landing(self) -> None:
+        """KBR-64 closed the botocore descriptor — the gate enforces it now.
+
+        Counterpart to ``test_run_completeness_gate_ignores_unlanded_rows``:
+        ``botocore`` is no longer exempt, so a ``FAILED`` (or
+        ``NOT_ATTEMPTED``) verdict on its row raises the gate. The test's
+        purpose is to lock the auto-tightening at the now-landed state so
+        future slices observe the same tightening when they ship.
         """
         from harness.conftest import _run_completeness_gate
 
-        # All three landed rows PROVEN — gate passes.
+        # All three sibling slices PROVEN — only botocore is FAILED.
         report_instance().record("bridge_aiohttp", Outcome.PROVEN)
         report_instance().record("curl_cffi", Outcome.PROVEN)
         report_instance().record("provider_aiohttp", Outcome.PROVEN)
-        # The unlanded row in any state — gate still passes.
         report_instance().record("botocore", Outcome.FAILED)
-        _run_completeness_gate()  # no raise
+        with pytest.raises(AssertionError, match="botocore") as excinfo:
+            _run_completeness_gate()
+        assert "failed" in str(excinfo.value)
 
     def test_all_landed_slice_phases_ran_is_true_when_every_dict_is_populated(self) -> None:
         """Every landed slice's phase dict populated → the session was full → gate fires."""

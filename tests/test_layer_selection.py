@@ -502,6 +502,12 @@ class TestTheWholeSuiteIsCoherent:
             # future handler that logs a credential-bearing URL or header
             # dict without the redaction helper fails in CI.
             "tests/test_egress_log_redaction.py",
+            # KBR-64 (T-G11). A §6.2.4 dependency behaviour contract, the
+            # botocore twin of `test_curl_cffi_transport_contract.py`: it
+            # asserts what botocore does with `Config(proxies=)` against
+            # the ambient proxy environment -- an artifact upgraded
+            # separately and by someone else entirely.
+            "tests/harness/test_botocore_transport_contract.py",
         }
 
         actual = {

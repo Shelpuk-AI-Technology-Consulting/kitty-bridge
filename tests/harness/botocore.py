@@ -12,6 +12,18 @@ passes as ``endpoint_url=`` to ``session.client(...)`` — and ``bind()`` is
 what supplies it, which is why the extension interface is ``bind()`` and not
 a base-URL helper (§7.5.2).
 
+**Proxy precedence, measured.** (KBR-64's T-G11 probe; see
+:mod:`harness.test_botocore_transport_contract` for the pinned contract.)
+``BedrockAdapter._get_boto3_client`` reads the process-wide egress from
+``kitty.egress.get_egress()`` and passes
+``botocore.config.Config(proxies=egress.proxies_dict())`` to
+``session.client``. Measured on the resolved botocore (1.43.93): the explicit
+``Config(proxies=...)`` overrides ambient ``NO_PROXY`` matching the
+destination and ambient ``HTTP_PROXY`` / ``HTTPS_PROXY`` / ``ALL_PROXY`` in
+both letter cases — the documented precedence AWS publishes
+(https://docs.aws.amazon.com/boto3/latest/guide/configuration.html), pinned
+as tests rather than assumed.
+
 **Why the transport keeps one adapter, like T-B1's.** The adapter is
 stateless (``_get_boto3_client`` builds a client per call and caches nothing,
 KBR-190), so a fresh adapter per ``bind()`` would be legitimate — but every
