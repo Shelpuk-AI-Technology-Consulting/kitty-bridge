@@ -24,14 +24,17 @@ What the script does:
 3. On a valid graph, writes the gitignored ``.system_design/INDEX.md``
    with one line per step (sorted by id, carrying the step's
    ``depends_on`` entries verbatim).
-4. On any validation failure, writes nothing, prints one human-readable
-   error per problem to stderr, and exits 1 — so a pre-existing index
+4. On any validation failure — including a steps directory that does
+   not exist or holds no ``*.md`` files (a vacuous pass would lie about
+   the tree being honest) — writes nothing, prints one human-readable
+   error per problem to stderr, and exits 1, so a pre-existing index
    from a previous successful run is never clobbered by a bad graph.
 
 The non-obvious calls — the Jira-key exemption, the id syntax (lowercase
 identifiers with underscores, not kebab-case dashes), why the tests use
-fixtures rather than the committed tree, and why the write happens only
-after validation — are recorded in the same REQUIREMENTS.md.
+fixtures rather than the committed tree, why the write happens only
+after validation, and why an empty steps directory fails loud rather
+than validating vacuously — are recorded in the same REQUIREMENTS.md.
 
 Usage::
 
@@ -200,7 +203,16 @@ def collect_steps(steps_dir: Path) -> tuple[list[StepEntry], list[str]]:
     entries: list[StepEntry] = []
     errors: list[str] = []
     for path in sorted(steps_dir.glob("*.md")):
-        text = path.read_text(encoding="utf-8")
+        # A step file saved with a non-UTF-8 encoding would otherwise
+        # raise UnicodeDecodeError with a raw traceback — same defect
+        # class the typed-shape contract (D8) guards against for bare
+        # YAML scalars, and it must surface as a file-naming error
+        # instead.
+        try:
+            text = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError as exc:
+            errors.append(f"{path.name}: file is not valid UTF-8: {exc}")
+            continue
         entry, parse_errors = _parse_entry(path, text)
         errors.extend(parse_errors)
         if entry is not None:
@@ -246,34 +258,42 @@ def graph_errors(entries: Sequence[StepEntry]) -> list[str]:
             if dep not in by_id:
                 errors.append(f"{entry.path.name}: depends_on entry '{dep}' does not resolve to an existing step id")
 
-    # Cycle detection: iterative-free DFS with the classic three colours.
-    # A GRAY node on the stack meeting a GRAY dependency is a back edge —
-    # the cycle is the stack slice from that dependency to the current
-    # node, plus the dependency again to close the loop.
+    # Cycle detection: depth-first search over resolved (non-Jira)
+    # edges, written iteratively so a dependency chain longer than
+    # Python's recursion limit (~1000) surfaces as a named error rather
+    # than a RecursionError traceback. Same three-colour algorithm — a
+    # GRAY node on the stack meeting a GRAY dependency is a back edge,
+    # and the cycle is the stack slice from that dependency to the
+    # current node plus the dependency again to close the loop.
     _WHITE, _GRAY, _BLACK = 0, 1, 2
     colour: dict[str, int] = {entry.id: _WHITE for entry in entries}
     stack: list[str] = []
     position: dict[str, int] = {}
-
-    def visit(node: str) -> None:
-        colour[node] = _GRAY
-        stack.append(node)
-        position[node] = len(stack) - 1
-        for dep in by_id[node].depends_on:
-            if _JIRA_KEY_PATTERN.fullmatch(dep) or dep not in colour:
-                continue
-            if colour[dep] == _GRAY:
-                cycle = stack[position[dep] :] + [dep]
-                errors.append("dependency cycle: " + " -> ".join(cycle))
-            elif colour[dep] == _WHITE:
-                visit(dep)
-        stack.pop()
-        del position[node]
-        colour[node] = _BLACK
-
-    for node in sorted(colour):
-        if colour[node] == _WHITE:
-            visit(node)
+    for start in sorted(colour):
+        if colour[start] != _WHITE:
+            continue
+        colour[start] = _GRAY
+        stack.append(start)
+        position[start] = len(stack) - 1
+        while stack:
+            node = stack[-1]
+            descended = False
+            for dep in by_id[node].depends_on:
+                if _JIRA_KEY_PATTERN.fullmatch(dep) or dep not in colour:
+                    continue
+                if colour[dep] == _GRAY:
+                    cycle = stack[position[dep] :] + [dep]
+                    errors.append("dependency cycle: " + " -> ".join(cycle))
+                elif colour[dep] == _WHITE:
+                    colour[dep] = _GRAY
+                    stack.append(dep)
+                    position[dep] = len(stack) - 1
+                    descended = True
+                    break
+            if not descended:
+                stack.pop()
+                del position[node]
+                colour[node] = _BLACK
 
     return errors
 
@@ -317,6 +337,15 @@ def main(steps_dir: Path = _STEPS_DIR) -> int:
         (nothing written; one error line per problem on stderr).
     """
     entries, parse_errors = collect_steps(steps_dir)
+    if not entries and not parse_errors:
+        # A missing or emptied steps directory would otherwise validate
+        # vacuously: no entries, no errors, an index with only a header,
+        # and exit 0 — the exact "silently validate" failure the
+        # validator exists to prevent. Fail loud instead, the same
+        # contract the egress coverage self-guard applies to its own
+        # structural scans (TEST_SUITE.md §6.2.3).
+        print(f"{steps_dir}: no step files found", file=sys.stderr)
+        return 1
     errors = [*parse_errors, *graph_errors(entries)]
     if errors:
         for line in errors:

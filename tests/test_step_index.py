@@ -258,6 +258,21 @@ def test_file_without_a_frontmatter_fence_is_reported(tmp_path: Path) -> None:
     assert any("a.md" in e for e in errors), errors
 
 
+def test_non_utf8_step_file_is_reported_not_crashed(tmp_path: Path) -> None:
+    """A step file saved with a non-UTF-8 encoding surfaces as a named error.
+
+    The bare ``read_text`` would raise ``UnicodeDecodeError`` for any
+    step file saved with a different encoding — same defect class the
+    typed-shape contract (D8) guards against for bare YAML scalars,
+    and it must surface as a file-naming error rather than a traceback.
+    """
+    path = _steps_dir(tmp_path) / "bad.md"
+    # 0xC0 0xC1 are not legal UTF-8 start sequences.
+    path.write_bytes(b"\xc0\xc1bad bytes\n")
+    _entries, errors = rsi.collect_steps(tmp_path / "steps")
+    assert any("bad.md" in e and "UTF-8" in e for e in errors), errors
+
+
 def test_unknown_frontmatter_keys_are_tolerated(tmp_path: Path) -> None:
     """Extra keys such as ``title`` and ``jira`` pass validation.
 
@@ -353,3 +368,28 @@ def test_valid_run_overwrites_a_stale_index(tmp_path: Path) -> None:
     text = index_path.read_text(encoding="utf-8")
     assert "stale content" not in text
     assert "alpha_step" in text
+
+
+def test_missing_steps_directory_fails_loud(tmp_path: Path) -> None:
+    """A steps directory that does not exist is an error, not a vacuous pass.
+
+    Without this floor, ``glob("*.md")`` returns nothing, no entries and
+    no errors are found, the script writes an index with only a header,
+    and exits 0 — the exact "silently validate" failure the validator
+    exists to prevent (TEST_SUITE.md §6.2.3 self-guard posture).
+    """
+    index_path = tmp_path / "INDEX.md"
+    assert rsi.main(tmp_path / "no-such-steps-dir") == 1
+    assert not index_path.exists()
+
+
+def test_empty_steps_directory_fails_loud(tmp_path: Path) -> None:
+    """A steps directory holding no ``*.md`` files is the same vacuous pass.
+
+    A repo whose step files were all deleted (or renamed away) must
+    fail the validator rather than generate a header-only index with
+    exit 0.
+    """
+    index_path = tmp_path / "INDEX.md"
+    assert rsi.main(_steps_dir(tmp_path)) == 1
+    assert not index_path.exists()
