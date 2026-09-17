@@ -201,22 +201,61 @@ _SLICES: tuple[
     ),
 )
 
-#: Per-slice ``(verdict_row, gate_passed_fn)`` pairs the sibling-row guards
-#: iterate. Each finaliser's exemption covers every *other* slice's row, so
-#: three slices mean each guard carries two siblings; naming them once here
-#: keeps the three guards from drifting apart as T-E5 lands.
-_SIBLINGS: dict[str, tuple[tuple[str, Callable[[], bool]], ...]] = {
+#: Per-slice ``(sibling_row, gate_passed_fn, sibling_outcomes,
+#: sibling_teardowns)`` tuples the sibling-row guards iterate. Each
+#: finaliser's exemption covers every *other* slice's row, so three slices
+#: mean each guard carries two siblings; naming them once here keeps the
+#: three guards from drifting apart as T-E5 lands. The outcomes dicts are
+#: carried alongside the gate function so a sibling row reading
+#: ``UNSUPPORTED`` can be exempted when it is a *legitimate* floor-shape
+#: write (the sibling's phase 1 ran and its proxied phases are setup-
+#: skipped on Python <3.11) — see the rationale on
+#: :func:`_record_proven_with_sibling_guard`.
+_SIBLINGS: dict[
+    str,
+    tuple[tuple[str, Callable[[], bool], dict[str, _PhaseOutcome], dict[str, _PhaseOutcome]], ...],
+] = {
     _VERDICT_ROW: (
-        (_CURL_CFFI_VERDICT_ROW, lambda: _curl_gate_passed()),
-        (_BOTOCORE_VERDICT_ROW, lambda: _botocore_gate_passed()),
+        (
+            _CURL_CFFI_VERDICT_ROW,
+            lambda: _curl_gate_passed(),
+            _curl_phase_outcomes,
+            _curl_phase_teardown_outcomes,
+        ),
+        (
+            _BOTOCORE_VERDICT_ROW,
+            lambda: _botocore_gate_passed(),
+            _botocore_phase_outcomes,
+            _botocore_phase_teardown_outcomes,
+        ),
     ),
     _CURL_CFFI_VERDICT_ROW: (
-        (_VERDICT_ROW, lambda: _aiohttp_gate_passed()),
-        (_BOTOCORE_VERDICT_ROW, lambda: _botocore_gate_passed()),
+        (
+            _VERDICT_ROW,
+            lambda: _aiohttp_gate_passed(),
+            _phase_outcomes,
+            _phase_teardown_outcomes,
+        ),
+        (
+            _BOTOCORE_VERDICT_ROW,
+            lambda: _botocore_gate_passed(),
+            _botocore_phase_outcomes,
+            _botocore_phase_teardown_outcomes,
+        ),
     ),
     _BOTOCORE_VERDICT_ROW: (
-        (_VERDICT_ROW, lambda: _aiohttp_gate_passed()),
-        (_CURL_CFFI_VERDICT_ROW, lambda: _curl_gate_passed()),
+        (
+            _VERDICT_ROW,
+            lambda: _aiohttp_gate_passed(),
+            _phase_outcomes,
+            _phase_teardown_outcomes,
+        ),
+        (
+            _CURL_CFFI_VERDICT_ROW,
+            lambda: _curl_gate_passed(),
+            _curl_phase_outcomes,
+            _curl_phase_teardown_outcomes,
+        ),
     ),
 }
 
@@ -495,19 +534,27 @@ def _record_proven_with_sibling_guard(
 ) -> None:
     """Write the gate's ``PROVEN`` row, asserting no foreign row was mutated.
 
-    The sibling-row exemption accepts ``PROVEN`` — and only ``PROVEN`` —
-    when the sibling's gate also passed; the sibling set is read from
-    :data:`_SIBLINGS` under this slice's row. A sibling row reading
-    ``UNSUPPORTED`` never needs exempting here: this function is reached
-    only through a passing gate, which on the reachable paths means the
-    interpreter is ≥3.11 (below it the proxied phases are setup-skipped
-    and the gate cannot pass), and the sibling's floor recorder no-ops on
-    ≥3.11 — so a sibling ``UNSUPPORTED`` row cannot legitimately coexist
-    with this ``PROVEN`` write, and if one is observed it is a defect the
-    guard is right to surface.
+    The sibling-row exemption accepts two legitimate non-``NOT_ATTEMPTED``
+    outcomes on a sibling row:
+
+    * ``PROVEN`` when the sibling's gate also passed — written by that
+      sibling's own finaliser before this one runs (or after; order-
+      independent);
+    * ``UNSUPPORTED`` when the sibling's own outcomes dict is in the floor
+      shape (phase 1 passed and the proxied phases were setup-skipped on
+      Python <3.11). This is what the botocore slice needs: T-E2 and T-E3
+      both have a 3.11 floor, T-E4 does not — so on Python <3.11 the aiohttp
+      and curl_cffi finalisers record ``UNSUPPORTED`` for partial delivery,
+      and the botocore finaliser's ``PROVEN`` write must accept those as
+      legitimate.
 
     Order-independent: when the sibling's finaliser hasn't run yet, its
-    row is ``NOT_ATTEMPTED`` and never enters the untouched list.
+    row is ``NOT_ATTEMPTED`` and never enters the untouched list. A rogue
+    ``UNSUPPORTED`` write — one this slice's gate *would* pass but the
+    sibling's dicts are not actually in the floor shape — is still caught:
+    the gate-passed-failed sibling cannot legitimately coexist with a
+    ``PROVEN`` write, regardless of outcome. A rogue ``FAILED`` is caught
+    outright.
 
     Args:
         outcomes: The slice's call-phase outcomes.
@@ -521,18 +568,33 @@ def _record_proven_with_sibling_guard(
         raise AssertionError(f"{verdict_row!r} PROVEN path entered without a passing gate")
     entries = report_instance().entries()
     untouched: list[str] = []
+    siblings = {
+        row: (gate, sibling_outcomes, sibling_teardowns)
+        for row, gate, sibling_outcomes, sibling_teardowns in _SIBLINGS.get(verdict_row, ())
+    }
     for name, entry in entries.items():
         if name == verdict_row:
             continue
         if entry.outcome is Outcome.NOT_ATTEMPTED:
             continue
-        # Every sibling row whose owning slice's gate passed and whose
-        # row already reads PROVEN was written by that sibling's own
-        # finaliser — a legitimate write this guard exempts. Only a
-        # PROVEN coincidence is accepted; FAILED and UNSUPPORTED are
-        # never exempted.
-        siblings = {row: gate for row, gate in _SIBLINGS.get(verdict_row, ())}
-        if name in siblings and siblings[name]() and entry.outcome is Outcome.PROVEN:
+        if name not in siblings:
+            untouched.append(name)
+            continue
+        sibling_gate, sibling_outcomes, sibling_teardowns = siblings[name]
+        # Legitimate PROVEN: the sibling's gate passed and the row
+        # already reads PROVEN. Order-independent: when the sibling
+        # finaliser hasn't run yet, its row is NOT_ATTEMPTED and falls
+        # out above.
+        if entry.outcome is Outcome.PROVEN and sibling_gate():
+            continue
+        # Legitimate UNSUPPORTED under the floor: the sibling's own
+        # outcomes dict is in the floor shape (phase 1 passed, proxied
+        # phases were setup-skipped). This is what happens on Python
+        # <3.11 for T-E2 and T-E3 alongside a passing T-E4.
+        if (
+            entry.outcome is Outcome.UNSUPPORTED
+            and _floor_unsupported_shape(sibling_outcomes, sibling_teardowns)
+        ):
             continue
         untouched.append(name)
     if untouched:
