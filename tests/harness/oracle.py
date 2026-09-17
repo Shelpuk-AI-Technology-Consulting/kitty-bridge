@@ -1,0 +1,845 @@
+"""The transparency oracle — makes Invariant I1 (message fidelity) testable.
+
+`.system_design/TEST_SUITE.md` §3.3, §3.3.1, §3.3.2, §3.3.4, §4.3 C2, §7.4,
+§10 · plan task **T-D1** (KBR-51).
+
+§3.3 of the test-suite design names the oracle as "the single piece of new
+infrastructure that makes I1 testable". Two assertions run on it; together they
+are the test of I1:
+
+* **§3.3.2 assertion 1** — every difference between the inbound projection and
+  the captured upstream projection maps to a register row whose trigger the
+  input met.
+* **§3.3.2 assertion 2** — for each conditional row, an input that does not
+  meet the trigger must show that row's mutation *absent*.
+
+§4.3 C2 adds a third obligation the oracle owns: the **byte-level key-order
+assertion** on the native passthrough path. JSON key order is exactly what a
+provider fingerprints, so where kitty claims to be forwarding rather than
+translating, key order is part of the contract (§3.3.5 names the route as the
+property that decides this).
+
+**The oracle imports nothing from ``src/kitty``, and must not.** §3.3.1's
+independent-oracle rule: a projection that asked kitty how to read a body
+would inherit kitty's bugs. The oracle's readers, the contract, the register,
+the corpus and the bridge fixture all live in :mod:`tests.harness`, and the
+oracle reads only those.
+
+**The signature matches §7.4.** ``inbound_format`` and ``captured_format``
+are supplied by the harness caller from the *observed* wire shape (§3.3.4) —
+not from a caller-supplied declaration from the adapter, and not derived
+inside the oracle. The oracle's job is to use the selection, not to make it.
+
+**The route signal is the trigger vocabulary, not the captured bytes.**
+Native passthrough means :attr:`Trigger.NON_NATIVE_UPSTREAM_WIRE` is **not**
+in ``triggers_met``. Under that condition the captured body must equal the
+inbound body byte-for-byte (§4.3 C2). Using a non-existent
+``NATIVE_UPSTREAM_WIRE`` enum member would silently miss every native route —
+this is a known trip and is enforced by the assertion's own wording.
+
+**The first working version ships with one falsification case (plan §1.4).**
+A mutated ``envelope.model`` with ``PROFILE_SETS_MODEL`` deliberately omitted
+from ``triggers_met``, so M1 (whose pattern is ``envelope.model`` and whose
+trigger is that trigger) does not claim the delta. The delta is unclaimed,
+assertion 1 fails, and the oracle names ``envelope.model``. This proves the
+diff *sees* the model field — §10 names "a projection that could not see the
+model name" as one of the four harnesses that would have passed while
+proving nothing. §9.2 G21 records the symmetric lever: a corpus entry that
+*over*-declares makes assertion 1 claim every delta; this falsification uses
+the same lever from the *under*-declaring direction.
+
+**Layer.** No ``pytestmark``; tests default to ``l1`` per ``tests/layers.py``
+and ``tests/harness/test_vertical_slice.py``'s precedent. ``l3`` activation
+is T-K6's job.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Iterable, Sequence
+from dataclasses import dataclass
+from typing import Any
+
+from harness import contract as c
+from harness import register as r
+from harness.contract import (
+    CapturedRequest,
+    Conversation,
+    Projection,
+    Request,
+    WireFormat,
+    verify_total,
+)
+
+# --------------------------------------------------------------------------
+# Public exception
+# --------------------------------------------------------------------------
+
+
+class OracleError(AssertionError):
+    """An I1 breach detected by the oracle.
+
+    Derives from ``AssertionError`` because it reports a failed check rather
+    than a broken program: it reads as a test failure, not as a crash. The
+    exception's :attr:`paths` lists the concrete delta paths the oracle found
+    that violate the assertions; subclasses carry the additional context each
+    failure mode requires.
+
+    Attributes:
+        paths: The concrete delta paths this failure names.
+    """
+
+    def __init__(self, message: str, *, paths: tuple[str, ...] = ()) -> None:
+        """Store the paths alongside the assertion message.
+
+        Args:
+            message: The human-readable failure text, as ``AssertionError``.
+            paths: The concrete delta paths this failure names.
+        """
+        super().__init__(message)
+        self.paths = paths
+
+
+class UnclaimedMutationError(OracleError):
+    """§3.3.2 assertion 1 failed — at least one delta was unclaimed.
+
+    Attributes:
+        paths: The concrete delta paths no register row (whose trigger the
+            input met) matched.
+    """
+
+
+class ConditionalRowFiredWithoutTriggerError(OracleError):
+    """§3.3.2 assertion 2 failed — a conditional row's mutation appeared
+    under a trigger that was not met.
+
+    Attributes:
+        paths: The concrete delta paths each violation landed at.
+        row_id: The conditional register row id that fired without its trigger.
+    """
+
+    def __init__(
+        self, message: str, *, paths: tuple[str, ...] = (), row_id: str = ""
+    ) -> None:
+        """Store the row id alongside the paths.
+
+        Args:
+            message: The human-readable failure text, as ``AssertionError``.
+            paths: The concrete delta paths this failure names.
+            row_id: The conditional register row id that fired.
+        """
+        super().__init__(message, paths=paths)
+        self.row_id = row_id
+
+
+class NativePassthroughKeyOrderError(OracleError):
+    """§4.3 C2 failed — a native passthrough route's captured body differs
+    byte-for-byte from the inbound body.
+
+    Attributes:
+        paths: The concrete delta paths this failure names.
+        inbound_preview: The first 200 bytes of the inbound body, for diff.
+        captured_preview: The first 200 bytes of the captured body, for diff.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        paths: tuple[str, ...] = (),
+        inbound_preview: bytes = b"",
+        captured_preview: bytes = b"",
+    ) -> None:
+        """Store the two body previews.
+
+        Args:
+            message: The human-readable failure text, as ``AssertionError``.
+            paths: The concrete delta paths this failure names.
+            inbound_preview: The first 200 bytes of the inbound body.
+            captured_preview: The first 200 bytes of the captured body.
+        """
+        super().__init__(message, paths=paths)
+        self.inbound_preview = inbound_preview
+        self.captured_preview = captured_preview
+
+
+# --------------------------------------------------------------------------
+# Reader registry
+# --------------------------------------------------------------------------
+
+
+#: The reader registry, populated from the six landed readers. Importing this
+#: module before the readers would leave the registry incomplete; the
+#: :data:`_REGISTRY_GUARD` raises at import time if any :class:`WireFormat`
+#: member is missing.
+_REQUEST_PROJECTIONS: dict[WireFormat, Projection] = {}
+
+
+def _register_projection(projection: Projection) -> None:
+    """Insert one ``Projection`` into :data:`_REQUEST_PROJECTIONS`.
+
+    Called once per reader at module import time. Re-registration is silent
+    (no-op) so a test fixture that re-imports a reader does not warn.
+
+    Args:
+        projection: An instance of any class implementing
+            :class:`~harness.contract.Projection`.
+    """
+    _REQUEST_PROJECTIONS[projection.wire_format] = projection
+
+
+def _reader_for(fmt: WireFormat) -> Projection:
+    """Return the registered reader for ``fmt``.
+
+    Args:
+        fmt: The wire format to read.
+
+    Returns:
+        The registered :class:`Projection`.
+
+    Raises:
+        ValueError: When no reader is registered for ``fmt`` — a missing
+            reader is caught at module import time (see ``_REGISTRY_GUARD``),
+            so reaching this branch indicates the caller supplied a format the
+            suite does not yet cover.
+    """
+    try:
+        return _REQUEST_PROJECTIONS[fmt]
+    except KeyError as exc:
+        raise ValueError(
+            f"no Projection registered for {fmt!r}; "
+            "every WireFormat member must have a reader (see harness/oracle.py)"
+        ) from exc
+
+
+def _REGISTRY_GUARD() -> None:
+    """Assert every :class:`WireFormat` member has a registered reader.
+
+    Called from the bottom of this module so a missing reader fails at
+    import time, not at oracle call time. A reader that lands in a separate
+    PR adds itself here by calling :func:`_register_projection` from its
+    own module — a single source of truth that the missing-reader shape
+    never silently passes.
+
+    Raises:
+        RuntimeError: When any :class:`WireFormat` member has no reader.
+    """
+    missing = [fmt for fmt in WireFormat if fmt not in _REQUEST_PROJECTIONS]
+    if missing:
+        raise RuntimeError(
+            f"harness/oracle.py: missing Projection for {missing}; "
+            "the landed reader must call _register_projection at import time"
+        )
+
+
+# --------------------------------------------------------------------------
+# Public report object
+# --------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class OracleReport:
+    """A small report the oracle attaches to the end of a successful run.
+
+    T-D2 reads :attr:`expected_route` to assert on routing. For T-D1 the
+    field is recorded without assertion; the test surface is "the oracle
+    accepts an ``expected_route`` parameter and surfaces it". The report
+    also records the projections and the diff so a future T-I8 cross-attempt
+    comparison can read it without re-running the bridge.
+
+    Attributes:
+        expected_route: The caller-supplied routing expectation, or ``None``.
+        inbound_projection: The wire-independent form of the inbound capture.
+        captured_projection: The wire-independent form of the captured body.
+        deltas: The concrete delta paths the structural diff found, in walk
+            order. Empty on a run with byte-identical projections.
+    """
+
+    expected_route: object | None
+    inbound_projection: Request
+    captured_projection: Request
+    deltas: tuple[str, ...]
+
+
+# --------------------------------------------------------------------------
+# Public oracle
+# --------------------------------------------------------------------------
+
+
+def assert_no_unclaimed_mutation(
+    inbound: CapturedRequest,
+    inbound_format: WireFormat,
+    captured: CapturedRequest,
+    captured_format: WireFormat,
+    register: tuple[r.MutationRow, ...],
+    triggers_met: frozenset[r.Trigger],
+    *,
+    expected_route: object | None = None,
+) -> OracleReport:
+    """Assert that every difference between the two projections is registered.
+
+    Runs the three obligations the oracle owns, in order:
+
+    1. **Totality gate** (§3.3.1, §7.4). Both projections pass through
+       :func:`~harness.contract.verify_total`. A non-empty residual or a
+       dropped field fails the run, naming the field. The structural diff is
+       skipped — a key that residualises identically on both sides would
+       otherwise produce zero deltas and the run would go green on a defect
+       §3.3.1 calls out by name.
+    2. **§3.3.2 assertion 1 + assertion 2** (§3.3.2). Every concrete delta
+       path is classified against the register rows whose trigger is in
+       ``triggers_met``. Unclaimed deltas fail assertion 1. Conditional
+       rows whose trigger is *not* in ``triggers_met`` but whose anchor has
+       an unclaimed delta fail assertion 2 — phrased so a coarser-anchor
+       row (e.g. M3) does not false-fail when an M5 drop beneath it is
+       legitimately claimed by M5's own trigger.
+    3. **§4.3 C2 native passthrough key-order assertion.** When
+       :attr:`~harness.register.Trigger.NON_NATIVE_UPSTREAM_WIRE` is *not* in
+       ``triggers_met``, the captured body must equal the inbound body
+       byte-for-byte. (The native route is the *absence* of the
+       non-native trigger — there is no ``NATIVE_UPSTREAM_WIRE`` enum
+       member, and using one would silently miss every native route.)
+
+    Args:
+        inbound: The agent's inbound request as observed on the wire.
+        inbound_format: The format of ``inbound``, supplied by the harness
+            from the observed wire shape (§3.3.4).
+        captured: The request that reached the upstream, as observed on
+            the recording upstream.
+        captured_format: The format of ``captured``, supplied by the
+            harness from the recorder's declared format.
+        register: The Permitted-Mutation Register rows the oracle
+            classifies against. Typically :data:`~harness.register.REGISTER`.
+        triggers_met: The trigger vocabulary the input met. §9.2 G21: a
+            corpus entry that over-declares here makes assertion 1 claim
+            every delta; under-declaring is the symmetric lever and is the
+            one T-D1's falsification uses.
+        expected_route: An optional routing expectation T-D2 will assert
+            on. T-D1 records the value on the returned :class:`OracleReport`
+            without asserting.
+
+    Returns:
+        An :class:`OracleReport` recording the projections, the deltas, and
+        the routing expectation. The report is what T-D2 / T-I8 read on a
+        successful run.
+
+    Raises:
+        UnreadableBodyError: When a reader cannot read a body. Bubbles from
+            the contract unchanged.
+        ProjectionTotalityError: When :func:`verify_total` rejects a
+            projection. Bubbles from the contract unchanged.
+        UnclaimedMutationError: When §3.3.2 assertion 1 fails. The
+            exception's ``paths`` are the unclaimed concrete delta paths.
+        ConditionalRowFiredWithoutTriggerError: When §3.3.2 assertion 2
+            fails. The exception's ``row_id`` is the conditional row that
+            fired without its trigger; ``paths`` are the offending deltas.
+        NativePassthroughKeyOrderError: When §4.3 C2 fails. The exception
+            surfaces both bodies' first 200 bytes for diff.
+    """
+    # Step 1 — project both captures through the registered readers.
+    inbound_projection = _reader_for(inbound_format).read_request(inbound)
+    captured_projection = _reader_for(captured_format).read_request(captured)
+
+    # Step 2 — totality gate. verify_total raises on non-empty residual or
+    # dropped field; that raise is the oracle's first failure mode and
+    # skips the structural diff.
+    verify_total(inbound_projection)
+    verify_total(captured_projection)
+
+    # Step 3–5 — diff, claim matching, assertion 1, assertion 2.
+    _run_assertions(inbound_projection, captured_projection, register, triggers_met)
+
+    # Step 6 — §4.3 C2 native passthrough byte-level check. Route is the
+    # *absence* of NON_NATIVE_UPSTREAM_WIRE in triggers_met.
+    if r.Trigger.NON_NATIVE_UPSTREAM_WIRE not in triggers_met:
+        _native_passthrough_check(inbound, captured)
+
+    return OracleReport(
+        expected_route=expected_route,
+        inbound_projection=inbound_projection,
+        captured_projection=captured_projection,
+        deltas=_structural_diff(inbound_projection, captured_projection),
+    )
+
+
+def _run_assertions(
+    inbound_projection: Request,
+    captured_projection: Request,
+    register: tuple[r.MutationRow, ...],
+    triggers_met: frozenset[r.Trigger],
+) -> list[str]:
+    """Run §3.3.2 assertions 1 and 2 over two already-projected requests.
+
+    Extracted from :func:`assert_no_unclaimed_mutation` so unit tests can
+    drive the assertions against synthesised :class:`Request` objects
+    without paying for a body, a reader, or a bridge — the T-W9 precedent
+    for attribution: a failing test must name the layer that failed.
+
+    Args:
+        inbound_projection: The inbound request's projection.
+        captured_projection: The captured request's projection.
+        register: The Permitted-Mutation Register rows.
+        triggers_met: The trigger vocabulary the input met.
+
+    Returns:
+        The concrete delta paths the structural diff found (also the input
+        to claim matching), in walk order.
+
+    Raises:
+        UnclaimedMutationError: When assertion 1 fails.
+        ConditionalRowFiredWithoutTriggerError: When assertion 2 fails.
+    """
+    deltas = _structural_diff(inbound_projection, captured_projection)
+
+    # Claim matching. For each delta, the rows whose trigger is met and
+    # whose pattern matches are the claimers; rows whose trigger is not
+    # met do not contribute.
+    claimers: dict[str, tuple[str, ...]] = _claim_matching(deltas, register, triggers_met)
+    unclaimed = [path for path in deltas if not claimers[path]]
+
+    if unclaimed:
+        raise UnclaimedMutationError(
+            f"§3.3.2 assertion 1: {len(unclaimed)} unclaimed delta path(s); "
+            f"first: {unclaimed[0]!r}; triggers_met={sorted(t.name for t in triggers_met)}",
+            paths=tuple(unclaimed),
+        )
+
+    # Assertion 2: conditional rows whose trigger was *not* met, whose
+    # anchored paths have an unclaimed delta, are violations.
+    conditional_violations = _conditional_violations(register, triggers_met, deltas)
+    if conditional_violations:
+        # Surface one row at a time so the failure message names a specific
+        # row id; the report keeps the full list.
+        first_row_id, first_paths = conditional_violations[0]
+        raise ConditionalRowFiredWithoutTriggerError(
+            f"§3.3.2 assertion 2: conditional row {first_row_id!r} fired "
+            f"without its trigger; first path: {first_paths[0]!r}",
+            paths=tuple(first_paths),
+            row_id=first_row_id,
+        )
+
+    return deltas
+
+
+def _native_passthrough_check(inbound: CapturedRequest, captured: CapturedRequest) -> None:
+    """Assert the native passthrough route's body is byte-for-byte equal.
+
+    §4.3 C2: JSON key order is exactly what a provider fingerprints, so on
+    the route that claims to be forwarding rather than translating, the
+    captured body must equal the inbound body byte-for-byte.
+
+    Args:
+        inbound: The inbound capture.
+        captured: The captured capture.
+
+    Raises:
+        NativePassthroughKeyOrderError: When the two bodies differ.
+    """
+    if inbound.body != captured.body:
+        raise NativePassthroughKeyOrderError(
+            f"§4.3 C2: native passthrough route produced a body that "
+            f"differs from the inbound byte-for-byte; "
+            f"inbound={len(inbound.body)}B, captured={len(captured.body)}B",
+            paths=(route_path("body"),),
+            inbound_preview=inbound.body[:200],
+            captured_preview=captured.body[:200],
+        )
+
+
+def route_path(component: str) -> str:
+    """Return a route-component delta path in the §3.3.1a vocabulary.
+
+    Defined here (not in :mod:`harness.contract`) so the oracle's own
+    error message can name a route delta without depending on the
+    contract module's exposed surface. The string form matches
+    ``contract.route_path(component)``.
+
+    Args:
+        component: The route component (``"body"``, ``"host"``, etc.).
+
+    Returns:
+        The concrete path ``route.<component>``.
+    """
+    return f"route.{component}"
+
+
+# --------------------------------------------------------------------------
+# Structural diff
+# --------------------------------------------------------------------------
+
+
+def _structural_diff(inbound: Request, captured: Request) -> tuple[str, ...]:
+    """Emit concrete delta paths between two :class:`Request` projections.
+
+    Walks the envelope, the conversation and the residual. The residual
+    side is non-empty by construction (the totality gate ran first), but
+    the diff still includes any residual delta — a belt-and-braces against
+    a future change that loosens the gate.
+
+    Address forms:
+
+    * Envelope fields use ``envelope.<field>`` and ``envelope.extra[<key>]``
+      (§3.3.1a — ``extra`` is compared one wire key at a time, whole value).
+    * Conversation turns use ``conversation.turns[<i>].role`` and
+      ``conversation.turns[<i>].parts[<j>].<field>`` — index-based,
+      per §7.4.1 rule 2 (residual keys are indexed).
+    * Conversation tools use ``conversation.tools[<name>].<field>`` —
+      by-name, per §3.3.1a (translators reorder; positional addressing
+      would report a delta on every reorder).
+    * Sampling uses ``conversation.sampling[<key>]``.
+    * System uses ``conversation.system[<i>].<field>``.
+
+    Args:
+        inbound: The inbound projection.
+        captured: The captured projection.
+
+    Returns:
+        A tuple of concrete delta paths in walk order. Empty on byte-equal
+        projections.
+    """
+    deltas: list[str] = []
+
+    # Envelope — leaf scalars compared directly; extra is one wire key at
+    # a time, whole value (§3.3.1a).
+    if inbound.envelope.model != captured.envelope.model:
+        deltas.append(c.ENVELOPE_MODEL)
+    if inbound.envelope.stream != captured.envelope.stream:
+        deltas.append(c.ENVELOPE_STREAM)
+    if inbound.envelope.store != captured.envelope.store:
+        deltas.append(c.ENVELOPE_STORE)
+    for key in sorted(set(inbound.envelope.extra) | set(captured.envelope.extra)):
+        if inbound.envelope.extra.get(key) != captured.envelope.extra.get(key):
+            deltas.append(c.extra_path(key))
+
+    # Conversation — system, turns, tools, sampling.
+    deltas.extend(_diff_system(inbound.conversation, captured.conversation))
+    deltas.extend(_diff_turns(inbound.conversation, captured.conversation))
+    deltas.extend(_diff_tools(inbound.conversation, captured.conversation))
+    for key in sorted(set(inbound.conversation.sampling) | set(captured.conversation.sampling)):
+        if inbound.conversation.sampling.get(key) != captured.conversation.sampling.get(key):
+            deltas.append(c.sampling_path(key))
+
+    return tuple(deltas)
+
+
+def _diff_system(inbound: Conversation, captured: Conversation) -> Iterable[str]:
+    """Diff the system blocks.
+
+    Args:
+        inbound: The inbound projection's conversation.
+        captured: The captured projection's conversation.
+
+    Yields:
+        Concrete delta paths.
+    """
+    n = max(len(inbound.system), len(captured.system))
+    for i in range(n):
+        path = c.system_path(i)
+        a = inbound.system[i] if i < len(inbound.system) else None
+        b = captured.system[i] if i < len(captured.system) else None
+        if a is None or b is None:
+            yield path
+            continue
+        if a.text != b.text:
+            yield c.system_path(i, "text")
+        if a.cache_control != b.cache_control:
+            yield c.system_path(i, "cache_control")
+
+
+def _diff_turns(inbound: Conversation, captured: Conversation) -> Iterable[str]:
+    """Diff the turns by index, walking each turn's parts.
+
+    Args:
+        inbound: The inbound projection's conversation.
+        captured: The captured projection's conversation.
+
+    Yields:
+        Concrete delta paths.
+    """
+    n = max(len(inbound.turns), len(captured.turns))
+    for i in range(n):
+        turn_path = c.turn_path(i)
+        a = inbound.turns[i] if i < len(inbound.turns) else None
+        b = captured.turns[i] if i < len(captured.turns) else None
+        if a is None or b is None:
+            yield turn_path
+            continue
+        if a.role != b.role:
+            yield c.turn_path(i, "role")
+        # Walk parts — index-based, per §7.4.1 rule 2.
+        yield from _diff_parts(i, a.parts, b.parts)
+
+
+def _diff_parts(turn_index: int, a_parts: Sequence[Any], b_parts: Sequence[Any]) -> Iterable[str]:
+    """Diff two ordered part lists, emitting paths for every differing field.
+
+    Address form: ``conversation.turns[<i>].parts[<j>].<field>``.
+
+    Args:
+        turn_index: The turn index, used in the emitted path.
+        a_parts: The inbound parts.
+        b_parts: The captured parts.
+
+    Yields:
+        Concrete delta paths.
+    """
+    n = max(len(a_parts), len(b_parts))
+    for j in range(n):
+        path = c.part_path(turn_index, j)
+        a = a_parts[j] if j < len(a_parts) else None
+        b = b_parts[j] if j < len(b_parts) else None
+        if a is None or b is None:
+            yield path
+            continue
+        if type(a) is not type(b):
+            yield path
+            continue
+        if isinstance(a, c.Text):
+            if a.text != b.text:
+                yield c.part_path(turn_index, j, "text")
+            if a.cache_control != b.cache_control:
+                yield c.part_path(turn_index, j, "cache_control")
+            if a.video_metadata != b.video_metadata:
+                yield c.part_path(turn_index, j, "video_metadata")
+        elif isinstance(a, c.ToolUse):
+            if a.name != b.name:
+                yield c.part_path(turn_index, j, "name")
+            if a.id != b.id:
+                yield c.part_path(turn_index, j, "id")
+            if a.arguments != b.arguments:
+                yield c.part_path(turn_index, j, "arguments")
+            if a.cache_control != b.cache_control:
+                yield c.part_path(turn_index, j, "cache_control")
+            if a.signature != b.signature:
+                yield c.part_path(turn_index, j, "signature")
+        elif isinstance(a, c.Thinking):
+            if a.text != b.text:
+                yield c.part_path(turn_index, j, "text")
+            if a.signature != b.signature:
+                yield c.part_path(turn_index, j, "signature")
+        elif isinstance(a, c.Json):
+            if a.value != b.value:
+                yield c.part_path(turn_index, j, "value")
+        elif isinstance(a, c.ToolResult):
+            if a.tool_use_id != b.tool_use_id:
+                yield c.part_path(turn_index, j, "tool_use_id")
+            if a.is_error != b.is_error:
+                yield c.part_path(turn_index, j, "is_error")
+            if a.scheduling != b.scheduling:
+                yield c.part_path(turn_index, j, "scheduling")
+            if a.cache_control != b.cache_control:
+                yield c.part_path(turn_index, j, "cache_control")
+            yield from _diff_part_content(turn_index, j, a.content, b.content)
+        elif isinstance(a, c.Opaque):
+            if a.kind != b.kind:
+                yield c.part_path(turn_index, j, "kind")
+            if a.digest != b.digest:
+                yield c.part_path(turn_index, j, "digest")
+            if a.cache_control != b.cache_control:
+                yield c.part_path(turn_index, j, "cache_control")
+        elif isinstance(a, c.Image):
+            if a.digest != b.digest:
+                yield c.part_path(turn_index, j, "digest")
+            if a.media_type != b.media_type:
+                yield c.part_path(turn_index, j, "media_type")
+            if a.ref != b.ref:
+                yield c.part_path(turn_index, j, "ref")
+            if a.cache_control != b.cache_control:
+                yield c.part_path(turn_index, j, "cache_control")
+        else:
+            # Defensive: a Part variant the diff does not know about.
+            # Future variants fail closed by emitting the part path; the
+            # register can claim it.
+            yield path
+
+
+def _diff_part_content(
+    turn_index: int, part_index: int, a: Sequence[Any], b: Sequence[Any]
+) -> Iterable[str]:
+    """Diff a ToolResult's content list (Text/Image/Json/Opaque).
+
+    The content is compared as a sequence; per-content-element fields are
+    compared by element index.
+
+    Args:
+        turn_index: The enclosing turn index.
+        part_index: The enclosing part index.
+        a: The inbound content.
+        b: The captured content.
+
+    Yields:
+        Concrete delta paths.
+    """
+    n = max(len(a), len(b))
+    for k in range(n):
+        path = c.part_path(turn_index, part_index, f"content[{k}]")
+        x = a[k] if k < len(a) else None
+        y = b[k] if k < len(b) else None
+        if x is None or y is None:
+            yield path
+            continue
+        if type(x) is not type(y):
+            yield path
+            continue
+        if isinstance(x, c.Text):
+            if x.text != y.text:
+                yield path + ".text"
+        elif isinstance(x, c.Image):
+            if x.digest != y.digest:
+                yield path + ".digest"
+        elif isinstance(x, c.Json):
+            if x.value != y.value:
+                yield path + ".value"
+        elif isinstance(x, c.Opaque) and x.digest != y.digest:
+            yield path + ".digest"
+
+
+def _diff_tools(inbound: Conversation, captured: Conversation) -> Iterable[str]:
+    """Diff the tool declarations by name (§3.3.1a — translators reorder).
+
+    Args:
+        inbound: The inbound projection's conversation.
+        captured: The captured projection's conversation.
+
+    Yields:
+        Concrete delta paths.
+    """
+    by_name_in: dict[str, c.ToolDecl] = {t.name: t for t in inbound.tools}
+    by_name_out: dict[str, c.ToolDecl] = {t.name: t for t in captured.tools}
+    names = sorted(set(by_name_in) | set(by_name_out))
+    for name in names:
+        a = by_name_in.get(name)
+        b = by_name_out.get(name)
+        if a is None or b is None:
+            yield c.tool_path(name)
+            continue
+        if a.description != b.description:
+            yield c.tool_path(name, "description")
+        if a.schema != b.schema:
+            yield c.tool_path(name, "schema")
+        if a.strict != b.strict:
+            yield c.tool_path(name, "strict")
+        if a.behavior != b.behavior:
+            yield c.tool_path(name, "behavior")
+        if a.type != b.type:
+            yield c.tool_path(name, "type")
+        if a.cache_control != b.cache_control:
+            yield c.tool_path(name, "cache_control")
+
+
+# --------------------------------------------------------------------------
+# Claim matching + assertion 2
+# --------------------------------------------------------------------------
+
+
+def _claim_matching(
+    deltas: Sequence[str], register: tuple[r.MutationRow, ...], triggers_met: frozenset[r.Trigger]
+) -> dict[str, tuple[str, ...]]:
+    """Return, per delta, the register row ids whose trigger is met and whose
+    pattern matches.
+
+    Args:
+        deltas: The concrete delta paths to classify.
+        register: The register rows.
+        triggers_met: The trigger vocabulary the input met.
+
+    Returns:
+        A mapping from delta path to the tuple of claiming row ids. Empty
+        tuple means unclaimed.
+    """
+    claimers: dict[str, tuple[str, ...]] = {delta: () for delta in deltas}
+    active_rows = [row for row in register if row.trigger in triggers_met]
+    for row in active_rows:
+        if not row.is_projectable:
+            continue
+        for delta in deltas:
+            if claimers[delta]:
+                continue  # already claimed; record-only on later rows
+            for pattern in row.paths:
+                if c.path_matches(pattern, delta):
+                    claimers[delta] = claimers[delta] + (row.id,)
+                    break
+    return claimers
+
+
+def _conditional_violations(
+    register: tuple[r.MutationRow, ...],
+    triggers_met: frozenset[r.Trigger],
+    deltas: Sequence[str],
+) -> list[tuple[str, list[str]]]:
+    """Find conditional rows that fired without their trigger being met.
+
+    A conditional row whose trigger is *not* in ``triggers_met`` but whose
+    anchored paths have a delta *unclaimed by any triggered row* is a
+    violation. Phrased so a coarser-anchor row whose trigger *is* met
+    legitimately claims deltas beneath it — §3.3.1a's "a pattern is a
+    prefix" rule makes anchored paths overlap (M3/M4/M5/M6 around the
+    parts; M16's four ``.cache_control`` anchors).
+
+    Args:
+        register: The register rows.
+        triggers_met: The trigger vocabulary the input met.
+        deltas: The concrete delta paths the structural diff found.
+
+    Returns:
+        A list of ``(row_id, [paths, ...])`` pairs, one per violation. Each
+        violation's path list is the subset of ``deltas`` that land at the
+        row's anchors and are unclaimed by any triggered row.
+    """
+    active = [row for row in register if row.trigger in triggers_met]
+    triggered_patterns = [p for row in active if row.is_projectable for p in row.paths]
+
+    violations: list[tuple[str, list[str]]] = []
+    for row in register:
+        if row.conditional or row.trigger in triggers_met:
+            continue
+        if not row.is_projectable:
+            continue
+        offending: list[str] = []
+        for pattern in row.paths:
+            for delta in deltas:
+                if c.path_matches(pattern, delta) and not any(
+                    c.path_matches(tp, delta) for tp in triggered_patterns
+                ):
+                    offending.append(delta)
+        if offending:
+            violations.append((row.id, offending))
+    return violations
+
+
+# --------------------------------------------------------------------------
+# Reader registration
+# --------------------------------------------------------------------------
+
+
+# Importing the readers here would couple the oracle to every reader at
+# import time, which is fine for T-D1's delivery but couples this module
+# to the reader set. The registration is explicit so adding a reader is
+# one line at the reader's own import site, mirroring the §7.4.1 reader
+# contract.
+
+from harness.reader_anthropic_messages import AnthropicMessagesProjection  # noqa: E402
+from harness.reader_bedrock_converse import BedrockConverseProjection  # noqa: E402
+from harness.reader_chat_completions import ChatCompletionsProjection  # noqa: E402
+from harness.reader_gemini import GeminiProjection  # noqa: E402
+from harness.reader_ollama import OllamaChatProjection as OllamaProjection  # noqa: E402
+from harness.reader_responses import ResponsesProjection  # noqa: E402
+
+_register_projection(AnthropicMessagesProjection())
+_register_projection(BedrockConverseProjection())
+_register_projection(ChatCompletionsProjection())
+_register_projection(GeminiProjection())
+_register_projection(OllamaProjection())
+_register_projection(ResponsesProjection())
+
+_REGISTRY_GUARD()
+
+
+__all__ = [
+    "ConditionalRowFiredWithoutTriggerError",
+    "NativePassthroughKeyOrderError",
+    "OracleError",
+    "OracleReport",
+    "UnclaimedMutationError",
+    "assert_no_unclaimed_mutation",
+    "route_path",
+]
