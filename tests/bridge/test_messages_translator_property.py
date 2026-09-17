@@ -355,14 +355,26 @@ class _SwapsTextOnlyUserRoles(MessagesTranslator):
     carries ``role``; this falsification proves that defence is wired.
 
     The mutation is deliberately narrow — only messages whose ``content`` is
-    a plain string — so the falsification's failure signal is the property's
-    own role comparison. A broader swap (assistant → user on a message with
-    ``tool_calls``) never reaches that comparison: the CC reader's user
-    branch residualises ``tool_calls``, and the falsification dies earlier in
-    :func:`~harness.contract.verify_total` with ``ResidualFieldsError`` — a
-    reader-bookkeeping signal, not the role defence this test exists to
-    validate (verified empirically, round-3 review). A silent role flip on a
-    plain text turn is still a real fidelity defect the projection must see.
+    a plain string — to keep the falsification's failure signal consistently
+    pointed at the role comparison. Probe-verified (round-4 review):
+
+    - A broader swap that flips every user → assistant regardless of content
+      causes the CC reader to raise ``UnreadableBodyError`` on body shapes
+      that include an ``image`` part — the assistant branch's
+      ``_ASSISTANT_PART_TYPES`` is ``{text, refusal}``, so an ``image_url``
+      part in the (now) assistant message is rejected at the reader. The
+      role defence never fires — the falsification dies on a reader error,
+      not on the comparison it exists to validate.
+    - A broader swap on body shapes with a tool_use assistant message
+      produces a non-empty residual (``tool_calls`` is residualised by the
+      user branch's ``_residualise`` set ``{role, content, name}``), but
+      this falsification does not call ``verify_total`` — the comparison
+      runs and the role defence catches the swap. So the narrow mutation
+      is not required for the tool_use case; the image case is the one
+      that forces it.
+
+    A silent role flip on a plain text turn is still a real fidelity
+    defect the projection must see.
     """
 
     def translate_request(self, messages_request: dict) -> dict:
