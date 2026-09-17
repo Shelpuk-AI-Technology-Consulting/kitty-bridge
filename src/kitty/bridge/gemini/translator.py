@@ -275,7 +275,28 @@ class GeminiTranslator:
     # ── Response translation ─────────────────────────────────────────────────
 
     def translate_response(self, cc_response: dict, *, context: dict | None = None) -> dict:
-        """Convert a Chat Completions response to Gemini generateContent format."""
+        """Convert a Chat Completions response to Gemini generateContent format.
+
+        Each upstream ``tool_calls[].id`` is carried onto the emitted
+        ``functionCall`` part when present and omitted when absent (KBR-257,
+        the response-direction mirror of KBR-195). Gemini
+        ``FunctionCall.id`` is optional per ``v1beta`` so synthesis stays on
+        the request side. See ``SYSTEM_DESIGN.md`` §4 X4 for the rule and
+        its round-trip rationale.
+
+        Args:
+            cc_response: The Chat Completions response body, with
+                ``choices[0].message.tool_calls`` carrying one entry per
+                upstream tool call.
+            context: Optional correlation context (unused; kept for the
+                server's signature compatibility).
+
+        Returns:
+            A ``candidates[0].content.parts[]`` body where each
+            ``functionCall`` part carries the upstream ``name`` and parsed
+            ``args`` and, when the upstream sent one, the upstream ``id``.
+            Empty responses emit a single ``{"text": ""}`` part.
+        """
         choice = cc_response.get("choices", [{}])[0]
         message = choice.get("message", {})
         finish_reason = choice.get("finish_reason")
@@ -300,7 +321,11 @@ class GeminiTranslator:
                 args = json.loads(args_str)
             except json.JSONDecodeError:
                 args = {}
-            parts.append({"functionCall": {"name": tc["function"]["name"], "args": args}})
+            function_call: dict = {"name": tc["function"]["name"], "args": args}
+            # Echo the upstream wire id when present; omit when absent (KBR-257).
+            if tc.get("id") is not None:
+                function_call["id"] = tc["id"]
+            parts.append({"functionCall": function_call})
 
         if not parts:
             parts.append({"text": ""})
@@ -326,7 +351,20 @@ class GeminiTranslator:
     def translate_stream_chunk(self, chunk: dict) -> list[str]:
         """Convert one Chat Completions streaming chunk to Gemini SSE events.
 
-        Returns a list of SSE event strings (``data: {json}\\n\\n``).
+        Tool-call arguments are buffered per CC ``tool_calls[].index`` and
+        emitted once, at the finish chunk. The ``id`` riding the opening
+        (name-bearing) delta is carried into ``_tool_call_meta`` and onto
+        the emitted ``functionCall`` part; ids on later deltas and absent
+        ids are omitted, not synthesised (KBR-257, §4 X4). The open is
+        name-keyed per §4.2's allocate-at-open contract.
+
+        Args:
+            chunk: One Chat Completions streaming chunk.
+
+        Returns:
+            A list of SSE event strings (``data: {json}\\n\\n``) — buffered
+            ``functionCall`` parts first, then the finish event. Empty
+            until the finish chunk when nothing else streamed.
         """
         events: list[str] = []
         choice = (chunk.get("choices") or [{}])[0]
@@ -374,8 +412,8 @@ class GeminiTranslator:
             func = tc.get("function", {})
 
             if "name" in func and func.get("name"):
-                # New tool call starts
-                self._tool_call_meta[idx] = {"name": func["name"]}
+                # New tool call starts — carry the upstream wire id for the emit (KBR-257).
+                self._tool_call_meta[idx] = {"name": func["name"], "id": tc.get("id")}
                 self._tool_call_buffers[idx] = ToolCallBuffer()
 
             if "arguments" in func and idx in self._tool_call_buffers:
@@ -391,6 +429,10 @@ class GeminiTranslator:
                 except (ToolCallBufferError, json.JSONDecodeError):
                     args = {}
                 meta = self._tool_call_meta.get(idx, {"name": "unknown"})
+                function_call: dict = {"name": meta["name"], "args": args}
+                # Echo the upstream wire id when present; omit when absent (KBR-257).
+                if meta.get("id") is not None:
+                    function_call["id"] = meta["id"]
                 events.append(
                     format_gemini_sse(
                         {
@@ -398,7 +440,7 @@ class GeminiTranslator:
                                 {
                                     "content": {
                                         "role": "model",
-                                        "parts": [{"functionCall": {"name": meta["name"], "args": args}}],
+                                        "parts": [{"functionCall": function_call}],
                                     },
                                     "index": 0,
                                 }
