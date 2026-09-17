@@ -354,24 +354,17 @@ class _SwapsTextOnlyUserRoles(MessagesTranslator):
     so a translator that flipped a turn's role would pass. The signature now
     carries ``role``; this falsification proves that defence is wired.
 
-    The mutation is deliberately narrow — only messages whose ``content`` is
-    a plain string — to keep the falsification's failure signal consistently
-    pointed at the role comparison. Probe-verified (round-4 review):
-
-    - A broader swap that flips every user → assistant regardless of content
-      causes the CC reader to raise ``UnreadableBodyError`` on body shapes
-      that include an ``image`` part — the assistant branch's
-      ``_ASSISTANT_PART_TYPES`` is ``{text, refusal}``, so an ``image_url``
-      part in the (now) assistant message is rejected at the reader. The
-      role defence never fires — the falsification dies on a reader error,
-      not on the comparison it exists to validate.
-    - A broader swap on body shapes with a tool_use assistant message
-      produces a non-empty residual (``tool_calls`` is residualised by the
-      user branch's ``_residualise`` set ``{role, content, name}``), but
-      this falsification does not call ``verify_total`` — the comparison
-      runs and the role defence catches the swap. So the narrow mutation
-      is not required for the tool_use case; the image case is the one
-      that forces it.
+    The mutation is deliberately narrow — only messages whose ``content``
+    is a plain string — because the one broader swap that matters here,
+    flipping every ``user`` → ``assistant`` regardless of content, fails
+    with a reader error rather than the role defence: an ``image_url`` part
+    in the (now) assistant message is rejected by ``_ASSISTANT_PART_TYPES``
+    (``{text, refusal}``), so the falsification would die with
+    ``UnreadableBodyError`` before the comparison could fire
+    (probe-verified, round-4 review). The narrow mutation keeps every
+    flipped message inside the assistant branch's accepted shape, so the
+    failure signal is consistently the role comparison this test exists to
+    validate.
 
     A silent role flip on a plain text turn is still a real fidelity
     defect the projection must see.
