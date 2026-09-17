@@ -32,7 +32,12 @@ from kitty.bridge.responses.events import (
     format_response_in_progress_event,
 )
 
-__all__ = ["InvalidResponsesRequest", "ResponsesTranslator", "normalize_responses_request"]
+__all__ = [
+    "InvalidResponsesRequest",
+    "ResponsesTranslator",
+    "carry_responses_tool_choice",
+    "normalize_responses_request",
+]
 
 # MiniMax interleaved thinking tags: <اخل>...</اخل>
 _THINKING_TAG_RE = re.compile(r"<\u0627\u062e\u0644>.*?</\u0627\u062e\u0644>", re.DOTALL)
@@ -40,6 +45,145 @@ _EMPTY_ASSISTANT_FALLBACK_TEXT = (
     "Upstream model returned an empty response. Please retry. "
     "If the context is full, use /clear to reset the conversation."
 )
+
+#: Chat Completions ``tool_choice`` string values the Responses wire publishes
+#: with the same spelling (KBR-221 R1).
+_RESPONSES_SIMPLE_TOOL_CHOICES: frozenset[str] = frozenset({"auto", "none", "required"})
+
+
+def _names_degraded_responses_tool(tools: object, name: str) -> bool:
+    """Report whether the inbound Responses ``tools`` list declares ``name`` as a tool the hop degraded.
+
+    A function-typed ``tool_choice`` is only forceable onto a tool the route
+    still declares as a function.  ``type: "custom"`` freeform tools and the
+    hosted ``ToolChoiceTypes`` built-ins (``web_search_preview`` and the rest,
+    enumerated in :mod:`kitty.bridge.responses.translator` prose and in the
+    ``TestResponsesToolChoice.test_tool_choice_hosted_is_omitted`` parametrize)
+    carry no Chat Completions form on this hop -- forcing a call to one would
+    force a call nothing on the route can execute (KBR-221 D10).  This helper
+    tests the simple property ``type != "function"`` because it catches every
+    non-function declaration -- hosted types, ``custom``, anything malformed
+    the wire may yet publish -- without enumerating the closed set in two
+    places that would have to stay in sync.
+
+    A name the list does not declare is **not** reported: that body is the
+    agent's mistake, and the provider's error says so better than a silent
+    omission would (KBR-221 D8 -- the KBR-214 precedent carries undeclared
+    names so the provider's 400 names the mistake).
+
+    Args:
+        tools: The inbound Responses ``tools`` list.  A non-list value is
+            treated as empty.
+        name: The tool name a ``tool_choice`` of type ``function`` selects.
+
+    Returns:
+        True when a declaration with that name is present and carries a
+        non-function ``type``; False otherwise.
+    """
+    if not isinstance(tools, list):
+        return False
+    return any(
+        isinstance(tool, dict) and tool.get("name") == name and tool.get("type") != "function"
+        for tool in tools
+    )
+
+
+def carry_responses_tool_choice(responses_request: dict, cc_request: dict) -> None:
+    """Carry a Responses ``tool_choice`` and ``parallel_tool_calls`` onto a Chat Completions body.
+
+    Called from :meth:`ResponsesTranslator.translate_request`, the way KBR-214's
+    :func:`kitty.bridge.messages.translator.carry_tool_choice_and_metadata` is
+    called from the Messages converter.  ``tool_choice`` is a constraint, not a
+    hint: dropping ``"required"`` lets the model answer in prose where the agent
+    demanded a tool call, and dropping ``"none"`` lets it call a tool the agent
+    forbade (KBR-221).
+
+    Most Responses choices share the Chat Completions spelling.  The named
+    function form moves ``name`` under ``function``; ``allowed_tools`` carries
+    by its ``mode`` because the mode is the only part the canonical vocabulary
+    models.  The omissions mirror the KBR-214 decisions:
+
+    * **No tools, no choice** (D9).  The gate reads the *Chat Completions*
+      tool list this body will ship, not the inbound list: a Responses
+      ``tools`` list of only hosted entries filters to an empty CC list, and
+      OpenAI rejects a choice beside no tools ("'tool_choice' is only allowed
+      when 'tools' are specified").  The gate scopes to the ``tool_choice``
+      carry alone -- the parallel knob is a standalone wire field and ships
+      regardless.
+    * **A forced call to a degraded tool is not carried** (D10).  Hosted,
+      MCP and ``custom`` tools are flattened away on this hop; forcing one
+      would force a call nothing on the route can execute.  The named-tool
+      lookup walks the inbound ``tools`` list, the only place the degraded
+      entries still live.  A choice naming an **undeclared** tool is carried
+      -- the agent's mistake, and the provider's error names it (D8).
+    * **Values with no Chat Completions form are omitted, not repaired**
+      (D5).  The eleven hosted types, ``mcp``, and any shape that is neither
+      a published string nor a published object are left out; kitty has no
+      authority to invent a reading.
+
+    ``parallel_tool_calls`` is forwarded only when the wire carries an
+    explicit ``False`` (D2).  ``True`` is the documented default on both wires,
+    so writing it would add a field whose behaviour it does not change; a
+    non-boolean value would residualise upstream and manufacture an unclaimed
+    delta (D5).  Unlike the Anthropic Messages knob -- which nests inside
+    ``tool_choice.disable_parallel_tool_use`` and so is structurally tied to
+    the choice -- Responses carries ``parallel_tool_calls`` as a standalone
+    top-level boolean, and the carry is **independent of the D9 gate**: an
+    inbound ``false`` is forwarded even when no tools are present, so an agent
+    that sends the knob without tools reaches the backbone with the
+    instruction intact.  This matches R2's unconditional mapping table.
+
+    Args:
+        responses_request: The inbound OpenAI Responses body.  Not modified.
+        cc_request: The Chat Completions body being built, mutated in place.
+
+    Returns:
+        None.  ``cc_request`` gains ``tool_choice`` and ``parallel_tool_calls``
+        only where the inbound body carries a representable value for them.
+    """
+    # The two carries are independent: D9 gates only ``tool_choice``; the
+    # parallel knob ships even when no tools are present.
+
+    # D2 / D5: forward only the explicit non-default ``False``; ``True`` is the
+    # default on both wires and a non-bool value would residualise upstream.
+    # Done before the D9 gate -- a Responses ``false`` is the wire's
+    # standalone instruction, not a child of the choice.
+    if responses_request.get("parallel_tool_calls") is False:
+        cc_request["parallel_tool_calls"] = False
+
+    # D9: the gate reads the CC list the body will ship.  An inbound list of
+    # only hosted entries filters to an empty CC list, and an absent key means
+    # no tools at all -- both cases omit the choice.  Applied only to the
+    # ``tool_choice`` carry; the parallel knob was already handled above.
+    cc_tools = cc_request.get("tools")
+    if not isinstance(cc_tools, list) or not cc_tools:
+        return
+
+    choice = responses_request.get("tool_choice")
+    if isinstance(choice, str):
+        if choice in _RESPONSES_SIMPLE_TOOL_CHOICES:
+            cc_request["tool_choice"] = choice
+    elif isinstance(choice, dict):
+        kind = choice.get("type")
+        name = choice.get("name")
+        if kind == "function":
+            # D10: a function-typed choice naming a tool the hop degraded is
+            # omitted.  The lookup walks the inbound list, the only place the
+            # degraded entry still lives -- the CC list has already filtered
+            # it out.  Undeclared names fall through to the carry (D8).
+            if isinstance(name, str) and not _names_degraded_responses_tool(
+                responses_request.get("tools"), name
+            ):
+                cc_request["tool_choice"] = {"type": "function", "function": {"name": name}}
+        elif kind == "allowed_tools":
+            mode = choice.get("mode")
+            # Only the mode has a canonical home (the reader projects just the
+            # mode); non-published or non-string modes are omitted (D5).
+            if isinstance(mode, str) and mode in _RESPONSES_SIMPLE_TOOL_CHOICES:
+                cc_request["tool_choice"] = mode
+        # Hosted types, ``mcp`` and ``custom`` fall through -- no CC form
+        # (D5), and the degraded-tool rule (D10) keeps a named reference to
+        # them from riding along either.
 
 
 def _empty_assistant_fallback_text(context: dict | None = None) -> str:
@@ -340,6 +484,9 @@ class ResponsesTranslator:
             effort = reasoning["effort"]
             result["_reasoning_effort"] = effort
             result["_thinking_enabled"] = effort != "none"
+
+        # KBR-221: carry the agent's tool_choice and parallel_tool_calls.
+        carry_responses_tool_choice(responses_request, result)
 
         return result
 

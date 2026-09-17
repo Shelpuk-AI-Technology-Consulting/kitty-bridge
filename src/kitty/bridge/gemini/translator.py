@@ -16,7 +16,84 @@ import uuid
 from kitty.bridge.engine import ToolCallBuffer, ToolCallBufferError
 from kitty.bridge.gemini.events import format_gemini_sse
 
-__all__ = ["GeminiTranslator"]
+__all__ = ["GeminiTranslator", "carry_gemini_tool_choice"]
+
+#: Gemini ``functionCallingConfig.mode`` values that map onto a Chat Completions
+#: string.  ``VALIDATED`` and ``MODE_UNSPECIFIED`` have no canonical form and
+#: are omitted (KBR-221 D5) -- the harness reader residualises them, so neither
+#: side writes the entry.
+_GEMINI_MODE_TO_CC: dict[str, str] = {"AUTO": "auto", "ANY": "required", "NONE": "none"}
+
+
+def carry_gemini_tool_choice(gemini_request: dict, cc_request: dict) -> None:
+    """Carry a Gemini ``toolConfig.functionCallingConfig`` onto a Chat Completions body.
+
+    Called from :meth:`GeminiTranslator.translate_request`, the way KBR-214's
+    :func:`kitty.bridge.messages.translator.carry_tool_choice_and_metadata` is
+    called from the Messages converter.  ``functionCallingConfig.mode`` is a
+    constraint, not a hint: dropping ``ANY`` lets the model answer in prose
+    where the agent demanded a function call, and dropping ``NONE`` lets it
+    call a function the agent forbade (KBR-221).
+
+    The published ``mode`` enum is ``AUTO``/``ANY``/``NONE`` and is matched
+    case-insensitively (Google's own examples send lower case).  ``ANY`` beside
+    exactly one ``allowedFunctionNames`` entry maps onto the Chat Completions
+    named-function form.  The omissions mirror the KBR-214 decisions:
+
+    * **No tools, no choice** (D9).  A choice beside no tools is rejected by
+      Chat Completions backends ("'tool_choice' is only allowed when 'tools'
+      are specified").  The gate reads the *Chat Completions* tool list the
+      body will ship, not the inbound Gemini ``tools`` key.
+    * **Restrictions with no Chat Completions form ride the mode only**
+      (D5).  Multi-name ``ANY``, ``AUTO`` or ``NONE`` beside any names, an
+      empty ``allowedFunctionNames``, a non-list value, and a names list with
+      non-string members all carry the mode; the name restriction itself has
+      no CC home on any destination wire.  Recorded as prose under
+      ``TEST_SUITE.md §3.3.2`` (KBR-139); a register row becomes due with the
+      first corpus entry that carries one of these shapes.
+    * **Modes with no canonical mapping are omitted** (D5).  ``VALIDATED`` and
+      ``MODE_UNSPECIFIED`` have no Chat Completions reading, and the harness
+      reader residualises them, so neither side writes the entry and no
+      delta is manufactured.
+
+    Args:
+        gemini_request: The inbound Gemini ``generateContent`` body.  Not
+            modified.
+        cc_request: The Chat Completions body being built, mutated in place.
+
+    Returns:
+        None.  ``cc_request`` gains ``tool_choice`` only where the inbound
+        body carries a mode with a canonical mapping.
+    """
+    # D9: the gate reads the CC list the body will ship.  The Gemini
+    # translator writes ``tools`` only when non-empty, so an absent key means
+    # no tools at all and the choice must not ride along.
+    if not cc_request.get("tools"):
+        return
+
+    tool_config = gemini_request.get("toolConfig")
+    if not isinstance(tool_config, dict):
+        return
+    config = tool_config.get("functionCallingConfig")
+    if not isinstance(config, dict):
+        return
+
+    # The published enumeration is upper case; CaseInSensitiveEnum accepts
+    # lower case on the wire (Google's own examples send ``"auto"``).
+    mode = config.get("mode")
+    choice = _GEMINI_MODE_TO_CC.get(mode.upper()) if isinstance(mode, str) else None
+    if choice is None:
+        return
+
+    names = config.get("allowedFunctionNames")
+    # The CC named-function form requires a single string name.  A multi-name
+    # set, AUTO/NONE + names, an empty list, a non-list value, and a list with
+    # a non-string member all share the same disposition: the mode still
+    # projects; the restriction has no canonical home.  Carry the mode.
+    if choice == "required" and isinstance(names, list) and len(names) == 1 and isinstance(names[0], str):
+        cc_request["tool_choice"] = {"type": "function", "function": {"name": names[0]}}
+    else:
+        cc_request["tool_choice"] = choice
 
 # ── Finish-reason mappings ───────────────────────────────────────────────────
 
@@ -99,6 +176,9 @@ class GeminiTranslator:
         tools = self._translate_tools(gemini_request.get("tools", []))
         if tools:
             cc_request["tools"] = tools
+
+        # KBR-221: carry the agent's functionCallingConfig.
+        carry_gemini_tool_choice(gemini_request, cc_request)
 
         return cc_request
 

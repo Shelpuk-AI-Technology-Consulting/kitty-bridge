@@ -1009,6 +1009,27 @@ usage)`) over the response direction. It is a different claim and it gets a diff
    the trigger must show that row's mutation **absent**. This is what stops M3/M5 quietly
    becoming unconditional, and it is why §3.3.4 insists on trigger complements.
 
+**Prose-claimed omissions on the Responses and Gemini tool-choice carriers (KBR-221,
+KBR-139 precedent).** Since KBR-221 the Responses and Gemini ingress translators carry
+`tool_choice` onto the CC body, but neither destination wire can express every shape the
+source wires publish. The carriers keep the representable half and omit the rest; until a
+corpus entry carries one of these shapes, prose claims the omission and **a register row
+becomes due for each shape with the first corpus entry that carries it**:
+
+- *Responses* — the eleven hosted choice types (the `ToolChoiceTypes` union, of
+  which three are `Specific*` singletons — nothing on a translated route can
+  execute them — D10's shape), `type: "custom"`
+  and `type: "mcp"` choices (the hop degrades or does not proxy those tools), `function`
+  choices without a string name, `allowed_tools` modes outside the published enum, non-dict
+  non-string `tool_choice` values, and `parallel_tool_calls` values that are not booleans
+  (the CC reader would residualise them).
+- *Gemini* — `mode: VALIDATED` and `MODE_UNSPECIFIED` (no canonical mapping; the readers
+  residualise them, so neither side writes the address), and the restriction half of
+  `allowedFunctionNames`: multi-name `ANY`, `AUTO`/`NONE` beside names, an empty list, a
+  non-list value, and lists with non-string members all carry the mode only — the name
+  restriction has no CC home on any destination wire (the owner's decision: carry the
+  mode, record the loss).
+
 #### 3.3.3 Bridge-introduced content is what gets the vendor-token check
 
 The projection also settles a problem a naive I2 check cannot (§4.3 C2). "The upstream body must
