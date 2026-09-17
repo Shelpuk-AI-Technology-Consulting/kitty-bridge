@@ -27,9 +27,9 @@ This module also extends the sweep to adapters constructed with
 ``provider_config`` and to native-passthrough requests — both were
 explicitly out of the hook sweep's coverage.
 
-The classifier, fixture bodies, ``REPRESENTATIVE_MODELS``, and
-``CUSTOM_TRANSPORT_ADAPTERS`` are imported from the hook module so the
-two files stay in lockstep on what "shape" means.
+The classifier, the fixture bodies, and ``CUSTOM_TRANSPORT_ADAPTERS``
+are imported from the hook module so the two files stay in lockstep on
+what "shape" means.
 """
 
 from __future__ import annotations
@@ -43,10 +43,9 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
 import pytest
-from test_wire_shape_honesty import (  # noqa: F401  — sibling via pytest prepend
+from test_wire_shape_honesty import (  # sibling module via pytest prepend
     _MESSAGES_BODY,
     CUSTOM_TRANSPORT_ADAPTERS,
-    REPRESENTATIVE_MODELS,
     _probe_request,
     classify_wire_shape,
 )
@@ -57,9 +56,9 @@ from kitty.providers.openai_subscription import OpenAISubscriptionAdapter
 from kitty.providers.registry import get_provider
 
 # Contract guard.  The L2 default for ``tests/*.py`` is L1 (mutation
-# testing) per ``tests/layers.py:60-64``; without this marker the file
-# lands in the L1 set and the hook module's own comment on lines 96-99
-# of ``tests/test_wire_shape_honesty.py`` names the consequence.
+# testing) per ``tests/layers.py``'s ``_FALLBACK_LAYER``; without this
+# marker the file lands in the L1 set, and the hook module's comment
+# above its own ``pytestmark`` names the consequence.
 pytestmark = pytest.mark.l2
 
 # Adapters this file captures the wire body for.  Maintained by hand and

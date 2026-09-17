@@ -248,13 +248,21 @@ class OpenAISubscriptionAdapter(OpenAIAdapter):
         transport (P13–P17).  The shipped body is Responses for every
         request, and the declaration now matches.
 
-        No consumer impact: the thinking round-trip repair at
-        ``server.py`` ~5075 lives on the bridge's own
-        ``_make_upstream_request`` path, which custom-transport adapters
-        bypass; the converter selection at ``server.py:9849`` is on the
-        bridge-SSE path; ``_serves_messages_wire`` at
-        ``server.py:9777`` returns False for this adapter either way
-        (``use_native_messages`` is False and ``RESPONSES != MESSAGES``).
+        No consumer impact: all four ``server.py`` sites that read
+        ``upstream_wire_shape_for_model`` are unreachable for
+        custom-transport adapters.  The thinking round-trip repair
+        (``~5075``, inside ``_stream_messages``'s plain-transport
+        branch) and the pre-write thinking carrier in
+        ``_upstream_body_for`` (``9817``) both sit behind the
+        ``use_custom_transport`` dispatch (``4674`` / ``9973``);
+        ``_serves_messages_wire`` (``9777``) returns False for this
+        adapter under either value (``use_native_messages`` is False and
+        ``RESPONSES != MESSAGES``); and the streaming-converter
+        selection (``9849``) is consulted only from the three
+        plain-transport branches (``3784`` / ``6423`` / ``7716``) — under
+        RESPONSES it would return a converter if reached, but the
+        custom-transport branches (``3585`` / ``4674`` / ``7493``)
+        dispatch to ``stream_request`` without consulting it.
         """
         return WireShape.RESPONSES
 

@@ -51,11 +51,17 @@ this is the first step file in the directory.
    body it ships is OpenAI Responses (both builders). Fixed to
    `RESPONSES`, KBR-7's atomic pattern (fix + guard together, red evidence
    in the PR — three tests failed pre-fix, green post-fix). No consumer
-   impact: all three declaration-readers are unreachable for custom
-   transports — the thinking round-trip repair (server.py ~5075) lives on
-   the bridge's own `_make_upstream_request` path; the streaming-converter
-   selection (9849) is on the bridge-SSE path; `_serves_messages_wire`
-   (9777) returns False for this adapter under either value.
+   impact: all four `server.py` readers of the declaration are
+   unreachable for custom transports — the thinking round-trip repair
+   (~5075, inside `_stream_messages`'s plain-transport branch) and the
+   pre-write thinking carrier in `_upstream_body_for` (9817) both sit
+   behind the `use_custom_transport` dispatch (4674 / 9973);
+   `_serves_messages_wire` (9777) returns False for this adapter under
+   either value; and the streaming-converter selection (9849) is
+   consulted only from the three plain-transport branches (3784 /
+   6423 / 7716) — under RESPONSES it would return a converter if
+   reached, but the custom-transport branches (3585 / 4674 / 7493)
+   dispatch to `stream_request` without consulting it.
 
 3. **`tests/test_wire_shape_honesty.py`** — the hook sweep now names its
    exemption: `HOOK_DEAD_ON_REQUEST_PATH = {"openai_subscription"}` (the
