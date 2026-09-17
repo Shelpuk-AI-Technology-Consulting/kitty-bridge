@@ -46,9 +46,10 @@ Five properties, plus a §1.4 falsification control:
   expression must be live: a detector regressed to the pre-precision
   "report on any undeclared root key" shape makes P1's exact assertion
   fail against a valid input that carries one extra key. The *miss*
-  class (an always-``None`` detector) is already pinned by the example
-  suite's positive findings — per L1 rule A.10, an assertion another
-  test already covers is not duplicated here.
+  class is already pinned by the example suite's positive findings —
+  per the test-development skill's Part A.10 ("Do not add an assertion
+  another test already covers"), an assertion another test already
+  covers is not duplicated here.
 
 **Scope decision — hand-rolled generator, not ``hypothesis-jsonschema``**
 (decision recorded in ``TEST_SUITE.md`` §6.1, ticket KBR-74's "Added

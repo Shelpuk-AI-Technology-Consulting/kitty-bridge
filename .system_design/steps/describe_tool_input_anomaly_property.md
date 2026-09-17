@@ -10,8 +10,11 @@ T-F5 of the test-suite implementation plan (`TEST_SUITE_IMPLEMENTATION_PLAN.md`
 example-based coverage of the tool-input anomaly detector with one property test
 that proves the no-false-positive guarantee across the detector's resolvable
 JSON-Schema subset, plus a stand-down-respected property for the composition-
-keyword path, plus a falsification control that pins the property's bite
-against an always-`None` stub (the §1.4 harness rule).
+keyword path, plus a §1.4 falsification control that pins the property's bite
+against a **report-happy** regression (the "naive reporter" — patches the
+detector with "report on any undeclared root key" and watches P1's exact
+assertion expression raise). The miss-class is intentionally omitted: the
+example suite already covers positive findings.
 
 ## Why
 
@@ -65,10 +68,10 @@ locally with the property.
   ("report on any undeclared root key") detector makes P1's exact
   assertion expression raise against a valid input that carries one extra
   key — proving the no-false-positive predicate is live, not vacuous. The
-  miss class (always-`None`) is **deliberately omitted**: it is already
+  miss class is **deliberately omitted**: it is already
   pinned by `tests/bridge/test_tool_use_audit.py`'s positive findings, and
-  per L1 rule A.10 ("Do not add an assertion another test already
-  covers") the property file does not duplicate it.
+  per the test-development skill's Part A.10 ("Do not add an assertion
+  another test already covers") the property file does not duplicate it.
 - **Generator correctness by composition, audited separately.** Every
   (schema, input) pair is drawn together in `_valid_pair` — one
   ``@st.composite`` draw fixes the property names, their types, the
@@ -135,14 +138,17 @@ locally with the property.
 ## Status
 
 Implemented in `feat/kbr-74-t-f5-tool-input-anomaly-property` (PR #213).
-**Auto-reviewer's warning (round 1) addressed in this PR**: the
-step file's earlier paragraph described P3 as patching the detector to
-return `None` always (a miss-class control) plus a wrapped-payload
-non-`None` assertion — the *pre-iteration* design. The shipped P3 does
-the opposite: it patches a **report-happy** naive reporter and asserts
-P1's exact expression raises. The miss class is intentionally omitted
-because the example suite covers positive findings, and per L1 rule A.10
-duplicating that here would add an assertion another test already
-covers. The test file's own docstring was correct; only this step file
-was stale. PR open; CI green; awaiting human reviewer + maintainer
+**Auto-reviewer's round-1 and round-2 warnings addressed in this PR** —
+both flagged the same root cause: a *concept iteration* changed P3's
+mechanism (from a miss-class control to a report-happy-regression
+control), but the descriptive artifacts were not all swept in the same
+pass. The test file's docstring, REQUIREMENTS.md, and the PR body were
+updated; the step file lagged. Two commits (`badcb52`, `c3059a3`)
+corrected the step file's Implementation notes, and a third round-2 fix
+corrected the opening summary paragraph (which still described the
+pre-iteration design). The miss class is omitted in
+the shipped P3 because the example suite already covers positive
+findings, and per the test-development skill's Part A.10 ("Do not add
+an assertion another test already covers") the property file does not
+duplicate it. PR open; CI green; awaiting human reviewer + maintainer
 merge.
