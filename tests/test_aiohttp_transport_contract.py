@@ -333,11 +333,17 @@ class TestTheAdapterAppliesTheContract:
 def test_the_module_finds_known_positives() -> None:
     """Self-guard: the module cannot rot into a no-op.
 
-    Counts the coroutine test methods across every test class so a silent
-    deletion of a behavioural case shows up even if a class disappears
-    entirely. The count is a floor, not a spec — adding cases raises it,
-    deleting them breaches it. The floor is the current count (7), so a
-    silent deletion of any one case is a red, not a slow rot.
+    Two assertions cover the two ways a behavioural case can silently
+    disappear — a method can vanish, or a parametrize arm can shrink:
+
+    1. The coroutine-test-method count stays above a floor, so deleting an
+       entire test method is a red. (The count guards method deletion, not
+       parametrize-arm deletion — that is the second assertion's job.)
+    2. The R5 ``test_ambient_http_proxy_is_ignored_by_default`` parametrize
+       set is pinned exactly, so dropping one ambient variable name is a red
+       too. The repo's dominant self-guard shape (``test_upstream_url_single_rule.py``,
+       ``test_answered_questions_are_settled.py``) pins a known set for the
+       same reason.
 
     The module's own namespace is walked via ``sys.modules`` rather than
     re-imported through ``import tests.…``: ``tests/`` is a pytest rootdir,
@@ -356,3 +362,9 @@ def test_the_module_finds_known_positives() -> None:
             name for name, obj in inspect.getmembers(cls, inspect.iscoroutinefunction) if name.startswith("test_")
         )
     assert len(behavioural) >= 7, f"contract module lost its behavioural coverage; only {behavioural} remain"
+
+    r5_method = vars(sys.modules[__name__])["TestAmbientEnvIgnored"].test_ambient_http_proxy_is_ignored_by_default
+    r5_cases = sorted(arg for mark in r5_method.pytestmark if mark.name == "parametrize" for arg in mark.args[1])
+    assert r5_cases == ["HTTP_PROXY", "http_proxy"], (
+        f"R5 parametrize arms shrunk; expected HTTP_PROXY and http_proxy, got {r5_cases}"
+    )
