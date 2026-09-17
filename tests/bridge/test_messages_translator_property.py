@@ -55,9 +55,9 @@ and nowhere else:
 with a falsification case it must detect. Two are provided, one per arm of the
 semantic claim — a translator that drops ``stream`` must fail the envelope arm
 (§3.3.1's worked example of what projection totality exists for), one that
-drops ``max_tokens`` must fail the conversation arm — plus a negative control
-(``_DropsNothing``) that keeps either falsification from rotting into a
-decorative assertion.
+drops ``max_tokens`` must fail the conversation arm. Each falsification test
+also asserts the healthy translator passes its arm, so a green falsification
+test is unambiguously detection and not a stray regression.
 
 **Layer.** No ``pytestmark`` — ``tests/bridge/`` takes the ``l1`` path default,
 so ``pytest -m l1`` selects every test here.
@@ -243,33 +243,50 @@ def test_messages_translator_semantic_round_trip_via_projections(body: dict) -> 
     assert _conversations_equivalent(p_in.conversation, p_cc.conversation)
 
 
-# ── Strip derivation stability (T5) ─────────────────────────────────────────
+# ── Strip snapshot (T5) ──────────────────────────────────────────────────────
 
 
 def test_request_level_internal_keys_match_the_provider_registry() -> None:
-    """The strip constant equals the registry's request-level set minus the two named exceptions.
+    """The strip set is the registry's request-level entries, hand-pinned here.
 
-    AC-2: ``_REQUEST_LEVEL_INTERNAL_KEYS`` is *defined* by subtraction, so this
-    assertion is the definition's guard, not a duplicate fact. A rename or a
-    re-shape of ``ProviderAdapter._INTERNAL_KEYS`` fails here with both sides
-    spelled out, before the property can mis-diagnose the drift as a residual.
+    AC-2: the expected set is written out literally on purpose — a re-derived
+    comparison would be a tautology (the same expression on both sides can
+    never fail) and would detect nothing. A pinned snapshot makes every
+    ``ProviderAdapter._INTERNAL_KEYS`` change fail here first, so the
+    contributor confirms the strip still mirrors the wire-time one before the
+    property can mis-diagnose the drift as a residual. When this test fails,
+    the fix is either (a) the registry grew a request-level key the translator
+    can emit — add it to the strip by extending the subtraction's exclusion
+    set only if the new key is genuinely not a translator output — or (b) the
+    registry re-shaped and the two exclusions below need re-deriving.
+
+    The two exclusions: ``base_url`` is F15 defence-in-depth and never a
+    translator output; ``_thinking_blocks`` rides on *message* dicts under
+    ``ProviderAdapter._INTERNAL_MESSAGE_KEYS``, which the top-level strip
+    never sees.
     """
-    expected = ProviderAdapter._INTERNAL_KEYS - {"base_url", "_thinking_blocks"}
-    assert expected == _REQUEST_LEVEL_INTERNAL_KEYS
+    assert frozenset(
+        {
+            "_anthropic_system",
+            "_documents",
+            "_effort",
+            "_metadata",
+            "_native_messages_request",
+            "_original_body",
+            "_output_config",
+            "_provider_config",
+            "_reasoning_effort",
+            "_resolved_key",
+            "_thinking_adaptive",
+            "_thinking_budget_tokens",
+            "_thinking_display",
+            "_thinking_enabled",
+            "_top_k",
+        }
+    ) == _REQUEST_LEVEL_INTERNAL_KEYS
 
 
 # ── Falsification subclasses (§1.4) ─────────────────────────────────────────
-
-
-class _DropsNothing(MessagesTranslator):
-    """Negative-control translator: translates verbatim.
-
-    Driven by each falsification test through the same assertion the defective
-    translator must fail. If a falsification's equality check is ever loosened
-    to something a defect-free translator could also fail (the decorative-
-    assertion trap §1.4 warns about), the negative control breaks first and
-    names the rot.
-    """
 
 
 class _DropsStream(MessagesTranslator):
@@ -313,20 +330,15 @@ def test_property_catches_a_translator_that_drops_stream(body: dict) -> None:
     """The envelope arm fails loudly when the translator drops ``stream``.
 
     Falsification (T-F6 / §1.4): a translator that drops a top-level envelope
-    field must not pass the projection-equality property. The healthy and
-    negative-control translators pass; the defective one fails on a delta the
-    projection names (``envelope.stream == ""`` vs the inbound ``bool``).
+    field must not pass the projection-equality property. The healthy
+    translator passes; the defective one fails on a delta the projection
+    names — the absent ``stream`` key defaults to ``None`` through
+    ``_typed_leaf``, against the inbound ``bool``, so the two ``Envelope``
+    values differ.
     """
     p_in = _project_messages(body)
     healthy_envelope = _project_chat_completions(MessagesTranslator().translate_request(body)).envelope
     assert p_in.envelope == healthy_envelope
-
-    control_envelope = _project_chat_completions(_DropsNothing().translate_request(body)).envelope
-    assert p_in.envelope == control_envelope, (
-        "_DropsNothing failed the envelope arm — the falsification's equality "
-        "check has rotted into a decorative assertion and no longer detects "
-        "the defect it exists to detect"
-    )
 
     dropped_envelope = _project_chat_completions(_DropsStream().translate_request(body)).envelope
     assert p_in.envelope != dropped_envelope, (
@@ -344,22 +356,15 @@ def test_property_catches_a_translator_that_drops_max_tokens(body: dict) -> None
     """The conversation arm fails loudly when the translator drops ``max_tokens``.
 
     Falsification (T-F6 / §1.4): symmetric with :func:`test_property_catches_a_translator_that_drops_stream`
-    for the conversation arm. The healthy and negative-control translators
-    pass; the defective one fails on a delta the projection names
-    (``max_tokens`` lives in ``conversation.sampling``).
+    for the conversation arm. The healthy translator passes; the defective one
+    fails on a delta the projection names (``max_tokens`` lives in
+    ``conversation.sampling``).
     """
     p_in = _project_messages(body)
     healthy_conversation = _project_chat_completions(
         MessagesTranslator().translate_request(body)
     ).conversation
     assert _conversations_equivalent(p_in.conversation, healthy_conversation)
-
-    control_conversation = _project_chat_completions(_DropsNothing().translate_request(body)).conversation
-    assert _conversations_equivalent(p_in.conversation, control_conversation), (
-        "_DropsNothing failed the conversation arm — the falsification's "
-        "equality check has rotted into a decorative assertion and no longer "
-        "detects the defect it exists to detect"
-    )
 
     dropped_conversation = _project_chat_completions(_DropsMaxTokens().translate_request(body)).conversation
     assert not _conversations_equivalent(p_in.conversation, dropped_conversation), (
