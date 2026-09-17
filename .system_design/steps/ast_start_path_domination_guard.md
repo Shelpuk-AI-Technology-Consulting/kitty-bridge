@@ -54,4 +54,4 @@ gap 3 and the fix is specified in §6.2.3 (Start-path domination row).
 
 ## Status
 
-Implemented in `feat/kbr-67-ast-start-path-domination`. PR pending.
+Implemented in `feat/kbr-67-ast-start-path-domination` (PR #197). Local CI green across all six test-matrix legs and the review/review-scripts/review-replies/CodeQL/Analyze/update-metadata jobs. Awaiting maintainer merge.
