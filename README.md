@@ -733,7 +733,7 @@ converts to Chat Completions. On the Anthropic-format side kitty holds back the 
 carries text or a tool call, so a reply with nothing in it — or only thinking, up to 10 MiB of it — can be retried
 before your agent sees it; on the translated side — Chat Completions, Responses, and Gemini clients over a
 Messages-wire upstream — a streamed reply that carries no text, tool call, or reasoning takes the same ladder —
-whether or not it ends with a completion marker — with the same release rule on the first content-bearing delta. Both streaming and non-streaming routes treat a reasoning-only reply as a successful turn: the streamed hold releases on the first `reasoning_content` delta (KBR-248), and the non-streaming detector counts `message.reasoning_content` as content (KBR-277). A reasoning-only Chat Completions reply succeeds on the first attempt on either route. The exhaustion terminal itself is
+whether or not it ends with a completion marker — with the same release rule on the first content-bearing delta. Both streaming and non-streaming routes treat a reasoning-only reply as a successful turn: the streamed hold releases on the first `reasoning_content` delta, and the non-streaming detector counts `message.reasoning_content` as content. A reasoning-only Chat Completions reply succeeds on the first attempt on either route. The exhaustion terminal itself is
 route-wide: a plain-POST Chat Completions-wire provider (OpenAI, OpenRouter, DeepSeek, or any other Chat Completions
 backend) whose every attempt comes back content-less lands on the same `type: "empty_response"` D4 event, because
 the empty ladder is what the terminal serves. This error means every attempt kitty made came back empty. Nothing
