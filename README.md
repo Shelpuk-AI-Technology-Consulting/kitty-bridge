@@ -333,14 +333,16 @@ Point your tool at `http://localhost:<port>` and it just works.
 
 **Available endpoints:**
 
-| Endpoint                          | Protocol           | Used by         |
-|-----------------------------------|--------------------|-----------------|
-| `POST /v1/chat/completions`       | Chat Completions   | General purpose |
-| `POST /v1/messages`               | Anthropic Messages | Claude Code     |
-| `POST /v1/responses`              | OpenAI Responses   | Codex           |
-| `POST /v1/gemini/generateContent` | Gemini             | Gemini CLI      |
-| `GET /healthz`                    | Health check       | Monitoring      |
-| `GET /stats`                      | Session record     | Attribution     |
+| Endpoint                                               | Protocol           | Used by          |
+|--------------------------------------------------------|--------------------|------------------|
+| `POST /v1/chat/completions`                            | Chat Completions   | General purpose  |
+| `POST /v1/messages`                                    | Anthropic Messages | Claude Code      |
+| `POST /v1/responses`                                   | OpenAI Responses   | Codex            |
+| `POST /v1beta/models/{model:.*}:generateContent`       | Gemini             | Gemini CLI       |
+| `POST /v1beta/models/{model:.*}:streamGenerateContent` | Gemini             | Gemini CLI       |
+| `GET /v1/models`                                       | OpenAI Models      | Tool integration |
+| `GET /healthz`                                         | Health check       | Monitoring       |
+| `GET /stats`                                           | Session record     | Attribution      |
 
 **Background bridges:** `kitty bridge start`, `stop`, `restart`, and `status` manage a bridge running in the background,
 tracked in `bridge_state.json`.
@@ -463,9 +465,10 @@ is always `0` because there is nowhere to fail over to — check `mode` first.
 
 **Generic:**
 
-| Provider                     | Type ID         | Notes                                                          |
-|------------------------------|-----------------|----------------------------------------------------------------|
-| **Custom OpenAI-Compatible** | `custom_openai` | Any service with a `/v1/chat/completions` endpoint — see below |
+| Provider                        | Type ID            | Notes                                                          |
+|---------------------------------|--------------------|----------------------------------------------------------------|
+| **Custom OpenAI-Compatible**    | `custom_openai`    | Any service with a `/v1/chat/completions` endpoint — see below |
+| **Custom Anthropic-Compatible** | `custom_anthropic` | Any service with an `/v1/messages` endpoint — see below        |
 
 ### Custom OpenAI-Compatible Provider
 
@@ -510,6 +513,17 @@ $ kitty claude
 | LM Studio    | `http://localhost:1234/v1`              |
 
 Both HTTPS and HTTP (local) endpoints are supported.
+
+### Custom Anthropic-Compatible Provider
+
+Use the `custom_anthropic` provider to connect to **any** service that exposes an Anthropic-compatible Messages API.
+This works with self-hosted front-ends for Anthropic-format models and any other service that accepts
+`POST /v1/messages` with `x-api-key` auth and SSE streaming.
+
+**The base URL ends at the API root** — Kitty appends `/v1/messages` itself. Give it
+`https://api.anthropic.com`, not `https://api.anthropic.com/v1/messages`.
+
+Pasting the full endpoint works anyway: Kitty drops the duplicate `/v1/messages` instead of failing.
 
 ## Commands
 

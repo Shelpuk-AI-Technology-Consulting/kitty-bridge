@@ -28,26 +28,13 @@ The four guards one at a time:
   debug, and the per-instance ``_usage_log_path`` default (derived from
   ``_DEBUG_LOG_DIR``) for usage.
 
-**The one exemption.** KBR-9 documents the endpoint table's drift: the
-README names ``POST /v1/gemini/generateContent`` (no such route) and
-omits the two real Gemini routes plus ``GET /v1/models``. The endpoint
-guard is wrapped in ``ratchet("t-g1-endpoint-table")`` so it can land
-while the defect is open; when KBR-9's README correction lands, the
-row fails the suite via ``UnexpectedExemptionPass`` and must be
-deleted — the T-W7 mechanism for the day debt is paid. The other three
-arms have no known drift and gate normally; if any guard surfaces drift
-in the future, the smallest possible follow-up ticket is filed and the
-corresponding exemption row added, rather than fix the README in this
-PR.
-
 **Verdict mechanism.** Every primary assertion uses
 ``assert not problems, "..." + "\n  ".join(problems)`` — matching
 ``tests/test_opencode_endpoint_table.py:151``. Only ``AssertionError``
 is amnestied by ``ratchet(...)`` per
 ``tests/exemptions.py::outcome_for``; ``pytest.fail(...)`` raises
 ``Failed``, which ``ratchet`` lets propagate, silently defeating the
-exemption. ``pytest.fail`` is fine outside a ``ratchet`` block; this
-guard happens to live inside one.
+exemption. ``pytest.fail`` is fine outside a ``ratchet`` block.
 
 **Scanning style.** Mirrors ``tests/test_egress_coverage.py``: a
 source-text scan or a parser introspection over ``src/kitty``, not a
@@ -73,7 +60,6 @@ from collections.abc import Iterable
 from pathlib import Path
 
 import pytest
-from exemptions import ratchet
 
 from kitty.bridge.server import _DEBUG_LOG_PATH, BridgeServer
 from kitty.cli.main import _build_parser
@@ -732,16 +718,13 @@ class TestEndpointTable:
         assert len(code) >= 6
 
     def test_the_readme_endpoint_table_matches_the_registered_routes(self):
-        """The README's documented endpoints are exactly the registered ones (KBR-9 drift exempted)."""
+        """The README's documented endpoints are exactly the registered ones."""
         readme = endpoint_pairs(readme_table_rows(readme_text(), "Protocol"))
         code = bridge_routes_from_source(_SERVER_PY.read_text(encoding="utf-8"))
 
         problems = check_endpoint_agreement(readme, code)
 
-        # The exempt assertion: when KBR-9's README correction lands, this
-        # row fails the suite via UnexpectedExemptionPass and must be deleted.
-        with ratchet("t-g1-endpoint-table"):
-            assert not problems, "README endpoint table disagrees with bridge mode:\n  " + "\n  ".join(problems)
+        assert not problems, "README endpoint table disagrees with bridge mode:\n  " + "\n  ".join(problems)
 
     @pytest.mark.parametrize(
         "readme_set, code_set, expected_substring",
