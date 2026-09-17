@@ -25,6 +25,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -145,6 +146,43 @@ def _minimal(**overrides: Any) -> dict[str, Any]:
     body = dict(PUBLISHED_BASIC)
     body.update(overrides)
     return body
+
+
+# --------------------------------------------------------------------------
+# R1 — module and protocol
+# --------------------------------------------------------------------------
+
+
+class TestProtocolConformance:
+    """R1 — the reader is a `Projection`, and it is independent of kitty.
+
+    Mirrors ``test_reader_anthropic_messages.py``'s class of the same name:
+    T-F6's property and the §3.3 oracle both consume this reader as the
+    Chat-Completions half of a cross-wire comparison, so the §3.3.1
+    independent-oracle rule has to be enforced here, not just stated in a
+    docstring.
+    """
+
+    def test_the_reader_satisfies_the_projection_protocol(self) -> None:
+        """R1.2 — T-D1 selects a reader by protocol, not by duck-typing at the call site."""
+        assert isinstance(cc.ChatCompletionsProjection(), c.Projection)
+
+    def test_the_reader_declares_the_chat_completions_wire_format(self) -> None:
+        """R1.2 — the format-keyed lookup in the oracle is only as good as this member."""
+        assert cc.ChatCompletionsProjection().wire_format is c.WireFormat.CHAT_COMPLETIONS
+
+    def test_the_reader_imports_nothing_from_kitty(self) -> None:
+        """R1.3 — §3.3.1's independent-oracle rule, the structural half.
+
+        Reuses ``test_contract.py``'s regex rather than an AST walk: that pattern
+        deliberately also catches ``from src.kitty ...`` and both dynamic import
+        forms, which an import-node walk would miss.
+        """
+        from harness.test_contract import _KITTY_IMPORT
+
+        source = Path(cc.__file__).read_text(encoding="utf-8")
+
+        assert _KITTY_IMPORT.search(source) is None
 
 
 # --------------------------------------------------------------------------

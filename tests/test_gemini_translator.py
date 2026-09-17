@@ -386,6 +386,176 @@ class TestTranslateResponseToolCalls:
         assert parts[0]["functionCall"]["args"] == {"location": "NYC"}
 
 
+class TestTranslateResponseToolCallIdEcho:
+    """Echo the upstream CC ``tool_calls[].id``; omit when absent.
+
+    KBR-257 — the response-direction mirror of KBR-195. The production
+    translator was reading only ``tc["function"]["name"]`` and
+    ``tc["function"]["arguments"]`` on the sync path and storing only
+    ``{"name": ...}`` in ``_tool_call_meta`` on the streaming path, so the
+    upstream ``tool_calls[].id`` never reached the emitted ``functionCall``
+    part. The Gemini client therefore had no id to echo back, and KBR-195's
+    request-side ``or``-echo never activated for clients whose only id source
+    is the bridge's response.
+    """
+
+    def test_function_call_id_is_echoed_when_present(self):
+        """Upstream CC ``tool_calls[].id`` must reach the emitted ``functionCall.id``."""
+        t = GeminiTranslator()
+        cc_resp = {
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": "call_up1",
+                                "type": "function",
+                                "function": {"name": "get_weather", "arguments": '{"location":"NYC"}'},
+                            }
+                        ],
+                    },
+                    "finish_reason": "tool_calls",
+                }
+            ],
+            "usage": {},
+        }
+        gemini_resp = t.translate_response(cc_resp)
+        function_call = gemini_resp["candidates"][0]["content"]["parts"][0]["functionCall"]
+        assert function_call.get("id") == "call_up1"
+
+    def test_function_call_id_is_omitted_when_absent(self):
+        """No upstream ``id`` → emit a ``functionCall`` with no ``id`` key.
+
+        Regression guard: KBR-195 synthesises on the request side because CC
+        requires a tool-call id; the response side has no such requirement
+        (Gemini ``FunctionCall.id`` is optional per v1beta). Absence stays
+        absence — synthesising here would defeat KBR-195's request-side
+        echo by minting a value the upstream never sent.
+        """
+        t = GeminiTranslator()
+        cc_resp = {
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "type": "function",
+                                "function": {"name": "get_weather", "arguments": '{"location":"NYC"}'},
+                            }
+                        ],
+                    },
+                    "finish_reason": "tool_calls",
+                }
+            ],
+            "usage": {},
+        }
+        gemini_resp = t.translate_response(cc_resp)
+        function_call = gemini_resp["candidates"][0]["content"]["parts"][0]["functionCall"]
+        assert "id" not in function_call
+
+    def test_function_call_id_is_carried_across_streamed_chunks(self):
+        """The id from the opening delta must survive into the finish emit."""
+        t = GeminiTranslator()
+
+        # Opening delta: id + name open the slot, no arguments yet.
+        chunk1 = {
+            "choices": [
+                {
+                    "delta": {
+                        "tool_calls": [
+                            {"index": 0, "id": "call_1", "function": {"name": "get_weather", "arguments": ""}}
+                        ]
+                    },
+                    "finish_reason": None,
+                }
+            ],
+        }
+        assert t.translate_stream_chunk(chunk1) == []
+
+        # Argument deltas only — id must NOT be re-read or overwritten.
+        chunk2 = {
+            "choices": [
+                {"delta": {"tool_calls": [{"index": 0, "function": {"arguments": '{"loc'}}]}, "finish_reason": None}
+            ],
+        }
+        assert t.translate_stream_chunk(chunk2) == []
+
+        chunk3 = {
+            "choices": [
+                {
+                    "delta": {"tool_calls": [{"index": 0, "function": {"arguments": 'ation":"NYC"}'}}]},
+                    "finish_reason": None,
+                }
+            ],
+        }
+        assert t.translate_stream_chunk(chunk3) == []
+
+        # Finish chunk — emits the buffered functionCall then the finish event.
+        chunk4 = {
+            "choices": [{"delta": {}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 5, "completion_tokens": 10, "total_tokens": 15},
+        }
+        events4 = t.translate_stream_chunk(chunk4)
+        function_call_event = json.loads(events4[0].removeprefix("data: ").removesuffix("\n\n"))
+        function_call = function_call_event["candidates"][0]["content"]["parts"][0]["functionCall"]
+        assert function_call.get("id") == "call_1"
+        assert function_call["name"] == "get_weather"
+        assert function_call["args"] == {"location": "NYC"}
+
+    def test_multiple_indices_carry_their_own_ids(self):
+        """Each tool-call index must carry its own id, not the previous index's."""
+        t = GeminiTranslator()
+
+        # Both tools open on the same delta.
+        open_chunk = {
+            "choices": [
+                {
+                    "delta": {
+                        "tool_calls": [
+                            {"index": 0, "id": "call_A", "function": {"name": "f_a", "arguments": ""}},
+                            {"index": 1, "id": "call_B", "function": {"name": "f_b", "arguments": ""}},
+                        ]
+                    },
+                    "finish_reason": None,
+                }
+            ],
+        }
+        assert t.translate_stream_chunk(open_chunk) == []
+
+        args_chunk = {
+            "choices": [
+                {
+                    "delta": {"tool_calls": [
+                        {"index": 0, "function": {"arguments": '{"x":1}'}},
+                        {"index": 1, "function": {"arguments": '{"y":2}'}},
+                    ]},
+                    "finish_reason": None,
+                }
+            ],
+        }
+        assert t.translate_stream_chunk(args_chunk) == []
+
+        events = t.translate_stream_chunk(
+            {"choices": [{"delta": {}, "finish_reason": "stop"}]}
+        )
+        function_calls = []
+        for event in events:
+            data = json.loads(event.removeprefix("data: ").removesuffix("\n\n"))
+            for part in data["candidates"][0]["content"]["parts"]:
+                if "functionCall" in part:
+                    function_calls.append(part["functionCall"])
+
+        assert len(function_calls) == 2
+        assert function_calls[0].get("id") == "call_A"
+        assert function_calls[0]["args"] == {"x": 1}
+        assert function_calls[1].get("id") == "call_B"
+        assert function_calls[1]["args"] == {"y": 2}
+
+
 class TestTranslateResponseFinishReasons:
     """finish_reason → Gemini finishReason mapping."""
 

@@ -52,6 +52,7 @@ import pytest
 from kitty.egress import EgressConfig
 
 __all__ = [
+    "AMBIENT_PROXY_ENV_VARS",
     "EXPECTED_PROXY_AUTH",
     "HARNESS_UPSTREAM_HOST",
     "PROXY_PASSWORD",
@@ -68,6 +69,26 @@ __all__ = [
 
 PROXY_USER = "testuser"
 PROXY_PASSWORD = "testpass"
+
+#: Every ambient proxy environment variable the clients the harness drives
+#: may read — ``HTTP_PROXY``, ``HTTPS_PROXY``, ``NO_PROXY``, ``ALL_PROXY``
+#: and their lowercase forms. T-E4's botocore containment slice and its
+#: T-G11 contract probes share this set: the slice's autouse fixture clears
+#: all of them before every phase test (a developer's shell must not
+#: silently defeat phase 1 or the falsification control), while the
+#: contract probes set a *named* subset so the precedence question
+#: isolates to one variable. The two callers' needs are one fact about the
+#: environment, so the constant lives here rather than duplicated.
+AMBIENT_PROXY_ENV_VARS: frozenset[str] = frozenset({
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "NO_PROXY",
+    "ALL_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "no_proxy",
+    "all_proxy",
+})
 
 #: The name a sealed-network harness addresses its upstream by (§5.3).  It must
 #: sit outside the ``localhost`` family or ``egress.should_bypass()`` sends the

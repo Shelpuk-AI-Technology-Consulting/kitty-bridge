@@ -334,6 +334,7 @@ the EOF-without-finish fallback: `finalize_interrupted_stream` /
 | X1 | A shared per-translator counter allocated at open, not a slot derived from upstream numbers | Deriving the Responses `output_index` from CC's tool-call index (the pre-fix behaviour) collides the moment two item kinds are live: text and reasoning were pinned to 0 and the first call took CC's 0, so any pair of the three item kinds claimed one slot and two `output_item.done` events closed it. The downstream slot positions *our* items; anchoring it to an upstream authorial number leaves it undefined whenever an item opens outside the anchor's frame. Mirrors KBR-226's Messages fix — one mechanism per wire, not one per defect. |
 | X2 | `output_index` added to the arguments events rather than left omitted | The vendor grammar requires the field on both events (verified against the generated SDK types). A client positioning by `output_index` — the client class the defect is about — needs it there as much as on `output_item.*`. Additive: existing clients tolerate the extra field. |
 | X3 | `response.completed`'s `output` sorted by slot, not by emission order | Opening order and slot order diverge once text can open before reasoning (or a call before text). The completed array is the client's canonical final view; positional clients read it by position. Two lines; removes the last positional surprise. |
+| X4 | On the response direction, carry the upstream CC `tool_calls[].id` to the emitted `functionCall` part; do **not** synthesise | Mirror of KBR-195 (request-side): the response direction used to read only `tc["function"]["name"]` and `tc["function"]["arguments"]`, dropping the upstream id by omission. KBR-195's request-side `or`-echo only works if the client received an id to echo back, which the response direction never gave it. Rule is **emit when present, omit when absent** (Gemini `FunctionCall.id` is optional per `v1beta`); synthesis stays on the request side, where Chat Completions requires an id. **Presence tests differ on purpose and the asymmetry is load-bearing:** the response side uses `is not None` (the contract is `Optional[str]` — emit the wire value verbatim), the request side uses `or` (an empty string is no usable id, synthesise). Emitting `id: ""` verbatim would round-trip into the request-side `or` and synthesise, mis-pairing the loop this rule closes. The streaming open branch is **name-keyed** per §4.2 — the id riding the opening (name-bearing) delta is stored; an id on a later delta is deliberately ignored. The Gemini reader already reads `functionCall.id` faithfully (KBR-36), so the fix is translator-only and no reader change is owed. The register row that would claim `reply.parts[*].id` waits on T-D10's response-direction Reply projection ([KBR-59](https://shelpuk.atlassian.net/browse/KBR-59), To Do) — the row to add there is the response-direction mirror of M18/M19, conditional on the upstream chunk carrying an id; a `NOT_PROJECTABLE` row is not an option (KBR-195 §8: the reader projects `ToolUse.id` on the request side, and the response side is symmetric). |
 
 ### 4.4 Verification
 
@@ -341,6 +342,10 @@ the EOF-without-finish fallback: `finalize_interrupted_stream` /
   `tests/bridge/test_responses_translator.py`): distinct increasing slots, interleaved
   argument routing by per-call meta, one close per slot at its own slot, a later item at
   the next free slot, EOF fallback, reset.
+- **L1** (`tests/test_gemini_translator.py::TestTranslateResponseToolCallIdEcho`,
+  KBR-257): sync present/absent echo and the streaming carry from the opening delta
+  to the finish emit. Two of three tests red at the base revision before the fix
+  (KBR-221 plan §16 discipline); the absent case is the regression guard.
 - **Server-level** (`tests/bridge/test_parallel_tool_use_stream.py`,
   `tests/bridge/test_responses_output_index_stream.py`): the client-visible byte stream
   walked end to end against the decided shape.
@@ -363,7 +368,7 @@ components and the rule — the *upstream* seam that feeds §4's translators.
 
 | Component | Role |
 |---|---|
-| `BridgeServer._stream_messages` | The `/v1/messages` inbound stream. On a Messages-wire upstream it forwards the raw SSE (KBR-227); otherwise it translates CC chunks to Messages events. |
+| `BridgeServer._stream_messages` | The `/v1/messages` inbound stream. On a Messages-wire upstream it forwards the raw SSE (KBR-227); on a Responses-wire upstream it converts each line through `OpenCodeGoResponsesCCStreamConverter` first (KBR-274); otherwise it translates CC chunks to Messages events. |
 | `BridgeServer._stream_responses` / `_stream_chat_completions` / `_stream_gemini` | The Codex, Chat Completions and Gemini inbound streams. On a Messages-wire upstream they convert (KBR-232); otherwise they translate CC chunks to their protocol. |
 | `BridgeServer._serves_messages_wire` | The one answer to "does this request's upstream speak Anthropic Messages?". Every branch that decides how a Messages-wire stream is handled asks it — a change to the rule cannot reach one site and miss another. |
 | `AnthropicCCStreamConverter` (`kitty.providers.anthropic`) | The stateful Anthropic-SSE → Chat Completions-chunk converter. One instance per upstream attempt. |
@@ -378,13 +383,17 @@ already speaks the upstream's protocol, and conversion would drop thinking signa
 `AnthropicCCStreamConverter` and let the converted lines re-enter the same per-line body a
 Chat Completions upstream's would: finish buffering, the empty-response ladder, usage
 attribution and in-stream error detection are all the handler's existing, already-proven
-logic. A no means byte-identical to the pre-KBR-232 behaviour.
+logic. A no means the handler consults `_stream_converter_for`: a Responses-wire upstream
+(KBR-137) has its lines converted through `OpenCodeGoResponsesCCStreamConverter` and the
+converted lines re-enter the same per-line body (KBR-274 — before it, `/v1/messages` walked
+the six-step empty ladder on a healthy stream because no converter was wired there); any
+other non-Messages wire behaves byte-identically to the pre-KBR-232 code.
 
 ### 5.3 Decisions, and why
 
 | # | Decision | Why, and the rejected alternative |
 |---|---|---|
-| S1 | Convert on the three non-Messages protocols; forward only on `/v1/messages` | Only `/v1/messages` shares the upstream's wire. Conversion there would lose signatures (KBR-227); forwarding on the other three would hand clients Anthropic SSE they cannot read. |
+| S1 | Convert on the three non-Messages protocols; forward only on `/v1/messages` | Only `/v1/messages` shares the upstream's wire. Conversion there would lose signatures (KBR-227); forwarding on the other three would hand clients Anthropic SSE they cannot read. KBR-274 narrowed "forward only" to *Messages-wire* upstreams: `/v1/messages` on a Responses-wire upstream (the OpenCode Go route) now converts, because the alternative was handing the handler Responses events its CC translator silently ignored — six empty-ladder retries and a 502 on a healthy stream. |
 | S2 | A stateful converter class, not a stateless per-event map | A `tool_use` block's `input_json_delta` fragments have no meaning without the `content_block_start` that allocated the block's `tool_calls` index. The stateless map is precisely why every tool call was lost (KBR-232). |
 | S3 | Converted lines re-enter the handler's existing per-line body | The alternative — a parallel write path — forks the finish/empty/usage/error logic per protocol. The converter's `[DONE]` sentinel and malformed-line passthrough are byte-identical outputs, so the body's residual `translate_upstream_stream_event` call sites stay harmless; an L1 test pins that identity as a contract, not a coincidence. |
 | S4 | Gate and converter re-evaluated per attempt | A failover can land on a Chat Completions-wire backend mid-handler; a stale converter would mangle its Chat Completions stream. |
@@ -396,10 +405,37 @@ logic. A no means byte-identical to the pre-KBR-232 behaviour.
 
 ### 5.4 Known limits
 
-- On `/v1/chat/completions` a converted stream's role chunk sets `has_content`, so a
-  content-less completion reaches the client as a well-formed skeleton rather than triggering
-  the empty-response ladder — as before KBR-232. A CC-side preamble hold would be the
-  KBR-155 counterpart and is not built.
+- On `/v1/messages` a converted Responses stream's role-only opening chunk
+  (`response.created`) translates to no events and starts no lifecycle, so the FI-8.3
+  truncation guard stays inactive until real content lands; a completed-but-content-less
+  Responses stream enters the empty-response ladder through the existing
+  `translator.response_was_empty` branch, exactly as a content-less CC stream does
+  (KBR-274).
+- **KBR-248 closed the converted-route gap on `/v1/chat/completions`.** A converted
+  stream's role chunk used to set `has_content`, so a content-less completion reached the
+  client as a well-formed skeleton and the empty-response ladder could not fire there — as
+  before KBR-232. The handler now runs a converter-gated pre-emission hold (the CC-side
+  KBR-155 counterpart): non-content converted lines (the role chunk, the finish chunk,
+  ``[DONE]``) are withheld until the first content-bearing delta (non-empty `content`,
+  `tool_calls`, or `reasoning_content`), so an empty attempt stays pre-emission and the
+  existing ladder fires. The hold is gated on `stream_converter is not None` — the **hold** only applies to
+  the converted route; raw Chat Completions-wire upstreams still write through
+  every line, because the ticket's scope is the converted route and widening the
+  hold to every plain-POST CC provider is a product decision KBR-248 does not
+  authorise. The empty-response ladder and its D4 exhaustion terminal, by
+  contrast, are route-wide: a raw Chat Completions ladder-exhausting stream
+  (e.g. repeated empty 200 bodies) ends in the same `type: "empty_response"`
+  D4 event, conforming to Q14 bullet 4. **Known asymmetry, deliberate:** the
+  streaming hold treats a non-empty `reasoning_content` delta as content
+  (thinking-only replies succeed immediately), while the route's non-streaming
+  empty-detection (`_is_empty_cc_response`) does not read `reasoning_content`
+  and would retry a reasoning-only reply. Aligning the non-streaming detector
+  is a separate ticket; the asymmetry is pinned by
+  `test_a_reasoning_only_prefix_releases_the_hold_and_is_not_retried`.
+  The hold is byte-capped at `PreambleHold.MAX_HELD_BYTES` (D5 fail-open). An exhausted
+  ladder emits the route's D4 terminal error (`type: "empty_response"` + ``[DONE]``),
+  matching Q14 bullet 4 and the KBR-235/KBR-250 siblings; the backend is not marked
+  healthy on that path.
 - In-stream error failover on `/v1/chat/completions` needs a backend pool; pool-less the
   error surfaces to the client (which is still the fix: the per-event translator used to
   swallow the error and deliver a truncated success).
@@ -875,4 +911,78 @@ The guard pins the shapes that exist today; a new shape needs its pattern added 
 `logger.debug(… %s, url)` shape was considered and rejected: it would sweep non-URL `%s`
 arguments (message ids, model names) into the redaction and force every call site to carry an
 exemption comment, which is the failure mode the design avoids.
+
+## 10. Profile schema: one base-URL channel
+
+### 10.1 The rule
+
+A profile carries its base URL in **`provider_config["base_url"]`**, and nowhere else. The
+wizards (`src/kitty/cli/profile_cmd.py:171-176`, `src/kitty/cli/setup_cmd.py:79-84`) write
+the channel the user types into; pre-flight (`src/kitty/validation.py:60`) and the five
+provider adapters that honour it (`custom_openai`, `custom_anthropic`, `minimax`, `ollama`,
+`ollama_cloud`) read it from there. `Profile.base_url` — once a typed field on the schema —
+is gone. A profile whose raw input carries a non-`None` top-level `base_url` raises
+`ValidationError` with a message naming `provider_config["base_url"]`; a `None` or absent
+key is unchanged behaviour.
+
+### 10.2 Decisions, and why
+
+**D9** (KBR-158): `provider_config["base_url"]` is the only channel. *Product owner,
+2026-09-17.*
+
+- The alternative channels were: (a) **make `Profile.base_url` authoritative and migrate**
+  — inverts the channel TEST_SUITE §7.5.2 already names authoritative, requires relaxing the
+  HTTPS-only / 2083-char / normalisation constraints (local vLLM/LM Studio/Ollama endpoints
+  use `http://`), changes all five reader sites plus both wizards, and needs a profile
+  migration. The wizards can validate the URL at write time; a typed channel buys little
+  over the value-aware rejection the schema already runs. (b) **type `provider_config`
+  instead** — a per-provider discriminated-union design (Vertex reads `project_id/
+  location`; Azure reads `resource`/`api-version`; etc.), far larger than a Low-priority
+  bug ticket should carry, and duplicates per-adapter checks such as minimax's
+  `provider_config.base_url must be a non-empty http:// or https:// URL`. (c) **silent
+  deletion** — the field was never read, so deleting it without a rejection changes
+  nothing behaviourally. Rejected: the ticket's own acceptance clause ("never silently
+  ignored") requires the rejection; the cost is one `@model_validator(mode='before')` that
+  fires only on a non-`None` value, and the pointed message is the *safer* outcome for any
+  user who hand-edited top-level `base_url` (today's silent ignore routes their request to
+  the provider's default endpoint, which is the wrong place to be wrong).
+- **The rejection is value-aware, not key-presence.** `store.py` serialises profiles with
+  `model_dump(mode="json")` and no `exclude_none`; every existing `profiles.json` file on
+  disk carries `"base_url": null` for the deleted optional field. A key-presence check
+  would raise on load for every legacy profile, and `store._deserialize_entry`'s broad
+  `except Exception` (F44 invalid-entry precedent) would silently drop every user's
+  profile list — the never-silently-ignored failure mode aimed at every user at once. A
+  serialized `null` means "not set" (the field was `Optional` with default `None`), so the
+  check is `data.get("base_url") is not None`; only a typed value — the user who actually
+  set a URL — gets the pointed message. The validator guards with `isinstance(data, dict)`
+  because `mode='before'` also receives model instances, on which the key test would
+  silently fall through.
+
+### 10.3 Where the message reaches whom — and where it does not
+
+The rejection fires where a `Profile` is constructed in code (`Profile(...)`,
+`Profile.model_validate(dict)`). A hand-edited *store file* carrying a non-`null`
+top-level `base_url` is dropped by `store._deserialize_entry`'s existing invalid-entry
+handling (`logger.warning("Skipping invalid profile entry in store")` + skipped entry) —
+the F44 contract the store already applies to any invalid entry. Surfacing per-entry
+validation messages from the store would mean changing that contract and is out of
+scope here; the canonical decision record in `.system_design/steps/
+kbr158_delete_dead_profile_base_url.md` carries the same note for the next reader.
+
+### 10.4 Verification
+
+- `grep -rn "base_url" src/kitty/profiles/schema.py` returns only the validator's
+  message/docstring lines.
+- `python -c "from kitty.profiles.schema import Profile; assert 'base_url' not in
+  Profile.model_fields"` exits 0.
+- `pytest tests/test_profile_schema.py` is the single L1 home for the claims; no L2/L3/L4
+  test is added (the "one channel carries the base URL" half of the acceptance clause is
+  pinned by field absence — no resolver can read what does not exist — so no resolver-side
+  test is needed).
+- Cross-references: `TEST_SUITE.md §7.5.2` records `provider_config["base_url"]` as
+  "the product's own channel" and now no longer cites the deleted field; the harness
+  fixture docstring at `tests/harness/bridge.py:profile_for` and the
+  `src/kitty/launchers/base.py:build_spawn_config` docstring are updated to the same
+  post-deletion state.
+
 

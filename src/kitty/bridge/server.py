@@ -43,7 +43,7 @@ from kitty.bridge.messages.translator import (
     build_user_content_message,
     carry_tool_choice_and_metadata,
 )
-from kitty.bridge.preamble_hold import PreambleHold
+from kitty.bridge.preamble_hold import MAX_HELD_BYTES, PreambleHold
 from kitty.bridge.responses.events import (
     format_error_event as responses_format_error,
 )
@@ -1622,6 +1622,43 @@ def _append_sse_chunk(
         lines.append(raw_line.decode("utf-8", errors="replace"))
 
     return lines  # unreachable, kept for type-checkers
+
+
+def _cc_chunk_carries_content(chunk: dict) -> bool:
+    # pragma: no mutate block
+    """Decide whether one Chat Completions chunk carries client-visible content.
+
+    The KBR-248 hold releases on the first content-bearing converted line, so
+    a content-less completion stays pre-emission and the empty-response ladder
+    can fire. Content is what the client would render: text, a tool-call
+    delta, or reasoning. A role-only chunk, an empty ``content`` string (D6:
+    a blank text reply is still empty), the finish chunk, and ``[DONE]``
+    carry none.
+
+    Robust to arbitrary parsed upstream JSON: absent or empty ``choices``, an
+    absent or non-dict ``delta``, or a non-string/non-list content field all
+    return ``False`` rather than raise.
+
+    Args:
+        chunk: One parsed Chat Completions chunk payload.
+
+    Returns:
+        ``True`` when the chunk's first choice delta carries content.
+    """
+    choices = chunk.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return False
+    first = choices[0]
+    if not isinstance(first, dict):
+        return False
+    delta = first.get("delta")
+    if not isinstance(delta, dict):
+        return False
+    if isinstance(delta.get("content"), str) and delta["content"] != "":
+        return True
+    if isinstance(delta.get("tool_calls"), list) and delta["tool_calls"]:
+        return True
+    return isinstance(delta.get("reasoning_content"), str) and delta["reasoning_content"] != ""
 
 
 class CompactionFailedError(Exception):
@@ -4704,10 +4741,13 @@ class BridgeServer:
         # pragma: no mutate block
         """Stream an Anthropic Messages response to the client from one upstream request.
 
-        Three upstream shapes share this handler and its retry loop: a custom
+        Four upstream shapes share this handler and its retry loop: a custom
         transport (collected, then translated), a Chat Completions stream
         (translated event by event, finish events buffered so an empty reply is
-        judged before it is written), and the native Messages passthrough
+        judged before it is written), a Responses-wire stream (each SSE line
+        converted to a Chat Completions chunk first through the per-attempt wire
+        converter, KBR-274, then translated exactly like a Chat Completions
+        stream), and the native Messages passthrough
         (forwarded verbatim behind a :class:`~kitty.bridge.preamble_hold.PreambleHold`,
         so an empty reply is likewise judged before any byte is written —
         KBR-155). Once a byte has reached the client, failures close the stream
@@ -5621,6 +5661,14 @@ class BridgeServer:
                                     }
                                 return _make_error_response(exhaustion_error, status=502)
 
+                            # KBR-274: a wire the per-byte helper cannot represent (today
+                            # the OpenCode Go Responses route) has each SSE line converted
+                            # to a Chat Completions chunk first, mirroring
+                            # `_stream_responses`'s KBR-232 gate.  Allocated after the
+                            # Messages-wire dispatch so the passthrough branch never
+                            # creates a converter it cannot feed; re-created per attempt
+                            # so a failover onto another wire re-evaluates the gate.
+                            stream_converter = self._stream_converter_for(cc_request)
                             line_buffer = bytearray()  # F23+F24: byte-based buffering
                             done = False
                             stream_error = False
@@ -5650,57 +5698,52 @@ class BridgeServer:
                                     if not line:
                                         continue
                                     if line.startswith("data: "):
-                                        data_str = line[6:]
-                                        if data_str.strip() == "[DONE]":
-                                            done = True
-                                            break
-                                        try:
-                                            chunk = json.loads(data_str)
-                                        except json.JSONDecodeError:
-                                            logger.warning("Failed to parse upstream SSE data: %s", data_str[:200])
-                                            continue
-                                        # In balancing mode: detect in-stream errors and failover
-                                        if self._is_upstream_stream_error(chunk):
-                                            logger.warning(
-                                                "Upstream sent error in stream chunk: %s", json.dumps(chunk)[:500]
-                                            )
-                                            if self._backends and self._current_backend_idx >= 0:
-                                                cooldown = self._get_stream_error_cooldown(self._current_backend_idx)
-                                                self._mark_backend_unhealthy(
-                                                    self._current_backend_idx, cooldown=cooldown
+                                        # KBR-274: on a Responses-wire upstream the line is a
+                                        # Responses event; the converter's output lines re-enter
+                                        # the same body below and are never re-fed to it.
+                                        upstream_lines = (
+                                            [
+                                                converted.decode("utf-8").removesuffix("\n\n")
+                                                for converted in stream_converter.feed(f"{line}\n\n".encode())
+                                            ]
+                                            if stream_converter is not None
+                                            else [line]
+                                        )
+                                        for line in upstream_lines:
+                                            data_str = line[6:]
+                                            if data_str.strip() == "[DONE]":
+                                                done = True
+                                                break
+                                            try:
+                                                chunk = json.loads(data_str)
+                                            except json.JSONDecodeError:
+                                                logger.warning(
+                                                    "Failed to parse upstream SSE data: %s", data_str[:200]
+                                                )
+                                                continue
+                                            # In balancing mode: detect in-stream errors and failover
+                                            if self._is_upstream_stream_error(chunk):
+                                                logger.warning(
+                                                    "Upstream sent error in stream chunk: %s",
+                                                    json.dumps(chunk)[:500],
+                                                )
+                                                if self._backends and self._current_backend_idx >= 0:
+                                                    cooldown = self._get_stream_error_cooldown(
+                                                        self._current_backend_idx
                                                     )
-                                                if self._any_healthy_backend():
-                                                    stream_error = True
-                                                    done = True
-                                                    break
-                                            # No healthy backends — skip the error chunk; let terminal error handle it
-                                            stream_error = True
-                                            done = True
-                                            break
-                                        events = translator.translate_stream_chunk(message_id, model, chunk)
-                                        # Buffer finish events to detect empty responses before writing
-                                        if self._chunk_has_finish_reason(chunk):
-                                            last_usage = chunk.get("usage")
-                                            finish_events.extend(events)
-                                        else:
-                                            for event in events:
-                                                s = await _ensure_prepared()
-                                                encoded = event.encode()
-                                                await _write_client(s, encoded)
-                                                auditor.feed(encoded)
-                                                events_emitted = True
-
-                            logger.debug("Upstream stream ended. chunks=%d done=%s", chunk_count, done)
-
-                            # Flush remaining buffer (last chunk without trailing \n)
-                            if not done and line_buffer:
-                                line = line_buffer.decode("utf-8", errors="replace").strip()
-                                if line.startswith("data: "):
-                                    data_str = line[6:]
-                                    if data_str.strip() != "[DONE]":
-                                        try:
-                                            chunk = json.loads(data_str)
+                                                    self._mark_backend_unhealthy(
+                                                        self._current_backend_idx, cooldown=cooldown
+                                                    )
+                                                    if self._any_healthy_backend():
+                                                        stream_error = True
+                                                        done = True
+                                                        break
+                                                # No healthy backends — let the terminal error handle it
+                                                stream_error = True
+                                                done = True
+                                                break
                                             events = translator.translate_stream_chunk(message_id, model, chunk)
+                                            # Buffer finish events to detect empty responses before writing
                                             if self._chunk_has_finish_reason(chunk):
                                                 last_usage = chunk.get("usage")
                                                 finish_events.extend(events)
@@ -5710,12 +5753,50 @@ class BridgeServer:
                                                     encoded = event.encode()
                                                     await _write_client(s, encoded)
                                                     auditor.feed(encoded)
-                                                    # A flushed event is as client-visible as a
-                                                    # loop-written one: the emptiness gate and the
-                                                    # FI-8.3 truncation guard both read this flag.
                                                     events_emitted = True
-                                        except json.JSONDecodeError:
-                                            logger.warning("Failed to parse flushed SSE data: %s", data_str[:200])
+                                        if done:
+                                            break
+
+                            logger.debug("Upstream stream ended. chunks=%d done=%s", chunk_count, done)
+
+                            # Flush remaining buffer (last chunk without trailing \n)
+                            if not done and line_buffer:
+                                line = line_buffer.decode("utf-8", errors="replace").strip()
+                                if line.startswith("data: "):
+                                    # KBR-274: same conversion as the main loop above.
+                                    upstream_lines = (
+                                        [
+                                            converted.decode("utf-8").removesuffix("\n\n")
+                                            for converted in stream_converter.feed(f"{line}\n\n".encode())
+                                        ]
+                                        if stream_converter is not None
+                                        else [line]
+                                    )
+                                    for line in upstream_lines:
+                                        data_str = line[6:]
+                                        if data_str.strip() != "[DONE]":
+                                            try:
+                                                chunk = json.loads(data_str)
+                                                events = translator.translate_stream_chunk(
+                                                    message_id, model, chunk
+                                                )
+                                                if self._chunk_has_finish_reason(chunk):
+                                                    last_usage = chunk.get("usage")
+                                                    finish_events.extend(events)
+                                                else:
+                                                    for event in events:
+                                                        s = await _ensure_prepared()
+                                                        encoded = event.encode()
+                                                        await _write_client(s, encoded)
+                                                        auditor.feed(encoded)
+                                                        # A flushed event is as client-visible as a
+                                                        # loop-written one: the emptiness gate and the
+                                                        # FI-8.3 truncation guard both read this flag.
+                                                        events_emitted = True
+                                            except json.JSONDecodeError:
+                                                logger.warning(
+                                                    "Failed to parse flushed SSE data: %s", data_str[:200]
+                                                )
 
                             # Handle in-stream error failover
                             # FI-8.3: clean upstream truncation (done=False, no error chunk)
@@ -7882,6 +7963,89 @@ class BridgeServer:
                     # per-line logic (KBR-232).  Re-created per attempt so a failover
                     # onto a Chat Completions-wire backend re-evaluates the gate.
                     stream_converter = self._stream_converter_for(cc_request)
+                    # KBR-248: pre-emission hold for the converted route. The
+                    # converter's ``message_start`` role chunk used to set
+                    # ``has_content`` and permanently disarm the empty-response
+                    # ladder below; this hold buffers the role chunk, the
+                    # finish chunk, and ``[DONE]`` until a content-bearing delta
+                    # arrives, mirroring KBR-155's ``PreambleHold`` for the
+                    # native Messages passthrough. A raw Chat Completions-wire
+                    # upstream keeps today's behaviour (the converter gate is
+                    # closed, ``has_content`` flips on the first write). Capped
+                    # at ``MAX_HELD_BYTES`` (D5): an upstream that trickles
+                    # empty-content deltas forever must not grow ``held``
+                    # without limit.
+                    release = stream_converter is not None
+                    held: list[bytes] = []
+                    held_bytes = 0
+
+                    async def _hold_or_write(
+                        translated: bytes, *, carries: bool
+                    ) -> None:
+                        """KBR-248: write, hold, or release one translated SSE line.
+
+                        Closes over the per-attempt state so all six write
+                        sites (main and flush twin × ``[DONE]``/forward/
+                        non-JSON) share one rule. The non-JSON sites run
+                        ``carries=True`` so the hold fails open (D5) and the
+                        held preamble flushes ahead of unknowable content
+                        rather than being stranded. A raw Chat Completions
+                        upstream writes through and sets ``has_content``
+                        (today's behaviour); a converted upstream holds
+                        non-content lines until the first content-bearing
+                        line, flushing the held preamble ahead of it so a
+                        content-bearing stream is byte-identical to today.
+                        Write errors propagate to the enclosing disconnect
+                        handlers, as every write on this route does
+                        (KBR-183/Q14(a): a write that reached the socket
+                        ends the retry story).
+
+                        Args:
+                            translated: One line the per-event translator
+                                yielded for this raw line, already encoded.
+                            carries: ``True`` when the chunk carries content
+                                (text, tool_calls, or reasoning_content).
+                        """
+                        # KBR-248: the closure binds ``release`` and ``held``
+                        # from the attempt-loop prologue so the per-attempt
+                        # state stays local to one attempt. The B023
+                        # silences below are load-bearing for the same
+                        # reason as the KBR-249 closures (``start_events``
+                        # and friends) — the closure is re-defined every
+                        # attempt, so it captures the current iteration's
+                        # state, not a stale one.
+                        nonlocal has_content, held_bytes
+                        # Post-emission or raw CC: write through (today).
+                        if has_content or not release:  # noqa: B023
+                            has_content = True
+                            await sr.write(translated)
+                            return
+                        # Converted, still pre-emission.
+                        if carries:
+                            # First content line: flush the held preamble
+                            # ahead of it so wire order is preserved. (If the
+                            # D5 cap already released, ``has_content`` is set
+                            # and the first branch handled the write.)
+                            for held_line in held:  # noqa: B023
+                                await sr.write(held_line)
+                            held.clear()  # noqa: B023
+                            has_content = True
+                            await sr.write(translated)
+                            return
+                        # Converted, non-content line: hold until first content.
+                        held.append(translated)  # noqa: B023
+                        held_bytes += len(translated)
+                        # D5: bound the hold rather than grow it without limit.
+                        # Note: unlike ``PreambleHold``, which caps the raw
+                        # upstream bytes fed to ``feed()``, this cap bounds the
+                        # *translated* lines the converter emitted — same
+                        # constant, a related but not identical quantity.
+                        if held_bytes > MAX_HELD_BYTES:
+                            for held_line in held:  # noqa: B023
+                                await sr.write(held_line)
+                            held.clear()  # noqa: B023
+                            held_bytes = 0
+                            has_content = True
                     upstream = await self._open_upstream_stream(
                         url, upstream_body, headers, stream_timeout, transport_grace
                     )
@@ -8092,7 +8256,8 @@ class BridgeServer:
                                             break
                                         _crossings += 1
                                         # Pass-through: no translator to reset. Per-attempt buffers
-                                        # (line_buffer/done/has_content/chunk_count/stream_converter)
+                                        # (line_buffer/done/has_content/chunk_count/stream_converter/release/
+                                        # held/held_bytes)
                                         # are re-initialised by the attempt-loop prologue, so a fresh
                                         # raw_attempt=0 iteration is enough.
                                         logger.info(
@@ -8179,20 +8344,27 @@ class BridgeServer:
                                             for translated in self._active_provider.translate_upstream_stream_event(
                                                 raw_line_bytes
                                             ):
-                                                has_content = True
-                                                await sr.write(translated)
+                                                await _hold_or_write(
+                                                    translated,
+                                                    carries=False,
+                                                )
                                             done = True
                                             break
                                         try:
                                             chunk = json.loads(data_str)
                                         except json.JSONDecodeError:
-                                            # Non-JSON data line — pass through
+                                            # Non-JSON data line — pass through; the
+                                            # content is unknowable, so the hold
+                                            # fails open (D5): release any held
+                                            # preamble and count the line as content.
                                             raw_line_bytes = f"{line}\n\n".encode()
                                             for translated in self._active_provider.translate_upstream_stream_event(
                                                 raw_line_bytes
                                             ):
-                                                has_content = True
-                                                await sr.write(translated)
+                                                await _hold_or_write(
+                                                    translated,
+                                                    carries=True,
+                                                )
                                             continue
                                         # Detect in-stream errors
                                         if self._is_upstream_stream_error(chunk):
@@ -8208,13 +8380,20 @@ class BridgeServer:
                                         # Extract usage for logging
                                         if "usage" in chunk and chunk["usage"] is not None:
                                             last_usage = chunk["usage"]
-                                        # Forward non-error chunk
+                                        # Forward non-error chunk. KBR-248 gates
+                                        # the hold on the converted route: only
+                                        # converted chunks defer their role/
+                                        # finish/``[DONE]`` lines; a raw Chat
+                                        # Completions upstream keeps today's
+                                        # write-through.
                                         raw_line_bytes = f"{line}\n\n".encode()
                                         for translated in self._active_provider.translate_upstream_stream_event(
                                             raw_line_bytes
                                         ):
-                                            has_content = True
-                                            await sr.write(translated)
+                                            await _hold_or_write(
+                                                translated,
+                                                carries=_cc_chunk_carries_content(chunk),
+                                            )
                                     if done:
                                         break
                             except (ConnectionResetError, BrokenPipeError, OSError):
@@ -8243,8 +8422,10 @@ class BridgeServer:
                                         for translated in self._active_provider.translate_upstream_stream_event(
                                             raw_line_bytes
                                         ):
-                                            has_content = True
-                                            await sr.write(translated)
+                                            await _hold_or_write(
+                                                translated,
+                                                carries=False,
+                                            )
                                     else:
                                         try:
                                             chunk = json.loads(data_str)
@@ -8255,15 +8436,22 @@ class BridgeServer:
                                                 for translated in self._active_provider.translate_upstream_stream_event(
                                                     raw_line_bytes
                                                 ):
-                                                    has_content = True
-                                                    await sr.write(translated)
+                                                    await _hold_or_write(
+                                                        translated,
+                                                        carries=_cc_chunk_carries_content(chunk),
+                                                    )
                                         except json.JSONDecodeError:
+                                            # Non-JSON in the flush twin — same
+                                            # D5 fail-open as the main loop:
+                                            # release held and write through.
                                             raw_line_bytes = f"{line}\n\n".encode()
                                             for translated in self._active_provider.translate_upstream_stream_event(
                                                 raw_line_bytes
                                             ):
-                                                has_content = True
-                                                await sr.write(translated)
+                                                await _hold_or_write(
+                                                    translated,
+                                                    carries=True,
+                                                )
                             line_buffer.clear()  # Buffer consumed
 
                         # Handle in-stream error failover
@@ -8318,7 +8506,8 @@ class BridgeServer:
                                         break
                                     _crossings += 1
                                     # Pass-through: no translator to reset. Per-attempt buffers
-                                    # (line_buffer/done/has_content/chunk_count/stream_converter)
+                                    # (line_buffer/done/has_content/chunk_count/stream_converter/release/
+                                    # held/held_bytes)
                                     # are re-initialised by the attempt-loop prologue, so a fresh
                                     # raw_attempt=0 iteration is enough.
                                     logger.info(
@@ -8373,7 +8562,8 @@ class BridgeServer:
                                             break
                                         _crossings += 1
                                         # Pass-through: no translator to reset. Per-attempt buffers
-                                        # (line_buffer/done/has_content/chunk_count/stream_converter)
+                                        # (line_buffer/done/has_content/chunk_count/stream_converter/release/
+                                        # held/held_bytes)
                                         # are re-initialised by the attempt-loop prologue, so a fresh
                                         # raw_attempt=0 iteration is enough.
                                         logger.info(
@@ -8402,6 +8592,34 @@ class BridgeServer:
                                 )
                                 await asyncio.sleep(delay)
                                 continue
+                            # KBR-248: the ladder ran dry with nothing on the
+                            # wire — every attempt came back content-less and
+                            # the hold kept the converted preamble off the
+                            # client. Q14 bullet 4 and the sibling routes
+                            # (KBR-235/KBR-250) end exhaustion in a terminal
+                            # error, not the empty stream; this route's D4
+                            # discriminator is ``type`` alone (§5.4, KBR-254).
+                            # The held preamble stays discarded and the backend
+                            # is not marked healthy: an empty completion is the
+                            # failure signal, not a clean one.
+                            logger.warning(
+                                "CC stream empty response after %d attempts, emitting terminal error",
+                                max_attempts,
+                            )
+                            error_payload = {
+                                "error": {
+                                    "message": _NATIVE_EMPTY_REPLY_MESSAGE,
+                                    "type": "empty_response",
+                                }
+                            }
+                            try:
+                                await sr.write(f"data: {json.dumps(error_payload)}\n\n".encode())
+                                await sr.write(b"data: [DONE]\n\n")
+                            except (ConnectionResetError, BrokenPipeError, OSError):
+                                logger.debug(
+                                    "Client disconnected before empty-response exhaustion error could be sent"
+                                )
+                            break
                         self._log_usage(last_usage)
                         # Mark backend healthy on clean stream completion
                         if self._backends and self._current_backend_idx >= 0:

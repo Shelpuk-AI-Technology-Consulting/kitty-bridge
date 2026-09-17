@@ -41,23 +41,37 @@ is not over-read:
    * ``openai_subscription`` — never calls the hook on the request path at all
      (``_cc_to_responses`` builds the Responses body inside the transport).
      The sweep checks its declaration against a body this adapter never sends,
-     so here the exemption is **load-bearing**.
+     so it is skipped here via ``HOOK_DEAD_ON_REQUEST_PATH`` — the exemption
+     is **load-bearing**, and the wire form observes the bytes that ship.
    * ``bedrock`` — calls the hook, then pops ``modelId`` and ``stream`` and
      reshapes into boto3 kwargs.
    * ``ollama_cloud`` — calls the hook, then overwrites ``stream``.
 
    For the latter two the mutation is scalar and does not change the body's
    **shape family**, so the exemption is precautionary rather than load-bearing
-   — but a guard must observe the shipped bytes, not infer them.  Extending it
-   to the wire needs the per-transport recorders and is **KBR-80 / T-G4**.
+   — but a guard must observe the shipped bytes, not infer them.  The wire
+   form is **delivered by KBR-80 / T-G4** as
+   ``tests/test_wire_shape_honesty_wire.py``: it drives each custom
+   transport with a stubbed client, captures the bytes handed to it, and
+   asserts the same honesty discipline at the §3.2.3 boundary.  It also
+   covers adapters constructed with ``provider_config`` and
+   native-passthrough requests, which this module's non-claims 2 and 3
+   defer to it.
    :func:`test_custom_transport_adapters_are_the_known_exempt_set` pins the set
    so a fourth such adapter forces a decision rather than quietly inheriting a
    clean bill of health.
 2. **Adapters constructed with ``provider_config``.**  ``get_provider`` forwards
    it to adapters that accept it, and at least one branches on it.  Default
-   construction only, here.
+   construction only, here — the wire form in
+   ``tests/test_wire_shape_honesty_wire.py`` (KBR-80) exercises
+   ``provider_config``-constructed adapters on the §3.2.3 boundary.
 3. **Native-passthrough requests.**  The probe is a Chat Completions request
-   with no ``_native_messages_request`` flag.
+   with no ``_native_messages_request`` flag, so the per-model check cannot
+   exercise a native adapter's passthrough branch.  The wire form in
+   ``tests/test_wire_shape_honesty_wire.py`` (KBR-80) covers it: for each
+   native adapter it drives ``translate_to_upstream`` with a Messages-shaped
+   ``_native_messages_request=True`` body and asserts both the wire shape and
+   the body-preservation property the bridge's forward path relies on.
 4. **That the routing table matches the provider.**  This guard proves the
    declaration matches the *emitted body*.  It cannot prove that the models
    kitty routes to the Messages endpoint are the models the provider serves
@@ -245,6 +259,16 @@ REPRESENTATIVE_MODELS: dict[str, _Representation] = {
 # asserted rather than narrated so a fourth one forces a decision.
 CUSTOM_TRANSPORT_ADAPTERS = frozenset({"openai_subscription", "bedrock", "ollama_cloud"})
 
+# The subset whose hook is never the shipped body: on these the per-model
+# assertion below would check a `translate_to_upstream` return value the
+# adapter never sends, so it is skipped and the wire form
+# (`tests/test_wire_shape_honesty_wire.py`, KBR-80) owns the check instead.
+# The other two custom transports (`bedrock`, `ollama_cloud`) DO invoke the
+# hook on the request path and mutate its output with a scalar change that
+# does not alter the shape family, so the hook sweep stays meaningful for
+# them — and the wire form still observes their shipped bytes.
+HOOK_DEAD_ON_REQUEST_PATH = frozenset({"openai_subscription"})
+
 
 def _probe_request(model: str) -> dict:
     """Build the request every adapter is asked to translate.
@@ -289,6 +313,13 @@ def test_declared_wire_shape_matches_the_emitted_body(provider_type: str, model:
     This is the assertion that fails on the unfixed revision for
     ``opencode_go``'s Chat-Completions models.
     """
+    if provider_type in HOOK_DEAD_ON_REQUEST_PATH:
+        pytest.skip(
+            "the hook is never the shipped body for this adapter on the "
+            "request path — the wire form in "
+            "tests/test_wire_shape_honesty_wire.py (KBR-80) owns the check"
+        )
+
     adapter = get_provider(provider_type)
     rep = REPRESENTATIVE_MODELS[provider_type]
 
@@ -426,6 +457,23 @@ def test_custom_transport_adapters_are_the_known_exempt_set():
     """
     observed = {name for name in _registry if get_provider(name).use_custom_transport}
     assert observed == CUSTOM_TRANSPORT_ADAPTERS
+
+
+def test_hook_dead_on_request_path_is_a_named_subset_of_custom_transport_adapters():
+    """R7d′ — the hook-sweep exemption is asserted, not narrated.
+
+    ``HOOK_DEAD_ON_REQUEST_PATH`` is what the hook sweep skips; every
+    such adapter must already be a custom-transport adapter (you cannot
+    be "dead on the request path" if the hook runs), and the set must
+    be non-empty — otherwise the skip in
+    ``test_declared_wire_shape_matches_the_emitted_body`` would be a
+    no-op and rot silently.
+    """
+    assert HOOK_DEAD_ON_REQUEST_PATH <= CUSTOM_TRANSPORT_ADAPTERS
+    assert HOOK_DEAD_ON_REQUEST_PATH, (
+        "the hook-sweep exemption is empty — the skip is a no-op and the wire "
+        "form's coverage overlaps the hook form without a named reason"
+    )
 
 
 def test_bedrock_is_the_only_custom_transport_adapter_inheriting_the_no_op_aclose():
