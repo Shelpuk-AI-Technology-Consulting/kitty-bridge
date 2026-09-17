@@ -4552,10 +4552,13 @@ class BridgeServer:
         # pragma: no mutate block
         """Stream an Anthropic Messages response to the client from one upstream request.
 
-        Three upstream shapes share this handler and its retry loop: a custom
+        Four upstream shapes share this handler and its retry loop: a custom
         transport (collected, then translated), a Chat Completions stream
         (translated event by event, finish events buffered so an empty reply is
-        judged before it is written), and the native Messages passthrough
+        judged before it is written), a Responses-wire stream (each SSE line
+        converted to a Chat Completions chunk first through the per-attempt wire
+        converter, KBR-274, then translated exactly like a Chat Completions
+        stream), and the native Messages passthrough
         (forwarded verbatim behind a :class:`~kitty.bridge.preamble_hold.PreambleHold`,
         so an empty reply is likewise judged before any byte is written —
         KBR-155). Once a byte has reached the client, failures close the stream
@@ -5541,7 +5544,7 @@ class BridgeServer:
                                                     )
                                                     self._mark_backend_unhealthy(
                                                         self._current_backend_idx, cooldown=cooldown
-                                                        )
+                                                    )
                                                     if self._any_healthy_backend():
                                                         stream_error = True
                                                         done = True
