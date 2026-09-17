@@ -537,6 +537,7 @@ async def test_a_retryable_upstream_failure_still_ends_in_content(protocol, monk
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("protocol",), [
+    pytest.param(BridgeProtocol.CHAT_COMPLETIONS_API, id="cc"),
     pytest.param(BridgeProtocol.RESPONSES_API, id="responses"),
     pytest.param(BridgeProtocol.GEMINI_API, id="gemini"),
 ])
@@ -544,7 +545,10 @@ async def test_an_empty_converted_stream_fires_the_empty_ladder(protocol, monkey
     """AC-2 — a content-less Anthropic stream retries instead of ending the turn.
 
     Before the converter, such a stream produced no finish events at all, so
-    ``response_was_empty`` was never even evaluated on these routes.
+    ``response_was_empty`` was never even evaluated on these routes.  The CC
+    leg is KBR-248: the converter's ``message_start`` role chunk used to set
+    ``has_content``, so the route answered a content-less completion with a
+    well-formed skeleton and the ladder could not fire there.
 
     Args:
         protocol: The inbound protocol under test.
@@ -575,6 +579,299 @@ async def test_an_empty_converted_stream_fires_the_empty_ladder(protocol, monkey
     assert status == 200
     assert calls == 2
     assert "hello" in client_body
+
+
+def _message_start(model: str) -> dict:
+    """Return the ``message_start`` event the empty-stream tests share.
+
+    Args:
+        model: The model the upstream reports.
+
+    Returns:
+        The event payload.
+    """
+    return {
+        "type": "message_start",
+        "message": {
+            "id": "m",
+            "type": "message",
+            "role": "assistant",
+            "model": model,
+            "content": [],
+            "usage": {"input_tokens": 1, "output_tokens": 0},
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_a_parallel_tool_call_stream_releases_the_hold_and_is_not_retried(monkeypatch):
+    """KBR-248 AC-3 — two parallel tool calls release the hold on the first delta.
+
+    The converter's role chunk precedes every tool-call delta, so before the
+    hold these streams could not be retried; the claim here is that the hold
+    releases on the first ``tool_calls`` delta — one upstream call, both calls
+    on the wire with their arguments whole.
+
+    Args:
+        monkeypatch: Pytest fixture, collapses the retry backoff.
+    """
+    model = "claude-opus-4-6"
+    body = _render_sse([
+        _message_start(model),
+        {
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {"type": "tool_use", "id": "toolu_1", "name": "Read", "input": {}},
+        },
+        {"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": '{"path": '}},
+        {"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": '"a"}'}},
+        {"type": "content_block_stop", "index": 0},
+        {
+            "type": "content_block_start",
+            "index": 1,
+            "content_block": {"type": "tool_use", "id": "toolu_2", "name": "Write", "input": {}},
+        },
+        {
+            "type": "content_block_delta",
+            "index": 1,
+            "delta": {"type": "input_json_delta", "partial_json": '{"path": "b"}'},
+        },
+        {"type": "content_block_stop", "index": 1},
+        {"type": "message_delta", "delta": {"stop_reason": "tool_use"}, "usage": {"output_tokens": 3}},
+        {"type": "message_stop"},
+    ])
+
+    _server, status, client_body, calls, _bodies = await _stream(
+        BridgeProtocol.CHAT_COMPLETIONS_API, AnthropicAdapter(), model, [(200, body)], monkeypatch
+    )
+
+    assert status == 200
+    assert calls == 1
+    events = _parse_data_lines(client_body)
+    tool_deltas = _cc_tool_call_fragments(events)
+    opened = [tc for tc in tool_deltas if "id" in tc]
+    assert [tc["id"] for tc in opened] == ["toolu_1", "toolu_2"]
+    arguments: dict[int, str] = {}
+    for tc in tool_deltas:
+        arguments[tc["index"]] = arguments.get(tc["index"], "") + tc["function"]["arguments"]
+    assert json.loads(arguments[0]) == {"path": "a"}
+    assert json.loads(arguments[1]) == {"path": "b"}
+
+
+@pytest.mark.asyncio
+async def test_a_reasoning_only_prefix_releases_the_hold_and_is_not_retried(monkeypatch):
+    """KBR-248 AC-3 — a stream whose only content is thinking is not treated as empty.
+
+    ``reasoning_content`` is client-visible content: the hold releases on the
+    first thinking delta, the upstream is hit once, and the reasoning reaches
+    the client.
+
+    Args:
+        monkeypatch: Pytest fixture, collapses the retry backoff.
+    """
+    model = "claude-opus-4-6"
+    body = _render_sse([
+        _message_start(model),
+        {"type": "content_block_start", "index": 0, "content_block": {"type": "thinking"}},
+        {"type": "content_block_delta", "index": 0, "delta": {"type": "thinking_delta", "thinking": "only reasoning"}},
+        {"type": "content_block_stop", "index": 0},
+        {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 1}},
+        {"type": "message_stop"},
+    ])
+
+    _server, status, client_body, calls, _bodies = await _stream(
+        BridgeProtocol.CHAT_COMPLETIONS_API, AnthropicAdapter(), model, [(200, body)], monkeypatch
+    )
+
+    assert status == 200
+    assert calls == 1
+    events = _parse_data_lines(client_body)
+    deltas = [e["choices"][0]["delta"] for e in events if e.get("choices")]
+    assert "".join(d.get("reasoning_content", "") for d in deltas) == "only reasoning"
+    assert "".join(d.get("content", "") for d in deltas) == ""
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("provider_factory", "model"), _MESSAGES_WIRE)
+async def test_an_empty_converted_stream_fires_the_empty_ladder_on_every_messages_wire_adapter(
+    provider_factory, model, monkeypatch
+):
+    """KBR-248 AC-1 (sibling coverage) — the hold fires on every converted route.
+
+    The hold is gated on ``stream_converter is not None`` and reaches the
+    same ``_cc_chunk_carries_content`` predicate on every adapter the
+    converter covers. This test parametrises the AC-1 empty-ladder claim over
+    the five Messages-wire adapters so a sibling whose converter output shape
+    differs (thinking-only prefixes, ``OpenCodeGoResponses`` envelope) cannot
+    silently regress the fix.
+
+    Args:
+        provider_factory: Builds a Messages-wire adapter.
+        model: A model that adapter serves on its Messages wire.
+        monkeypatch: Pytest fixture, collapses the retry backoff.
+    """
+    provider = provider_factory()
+    empty = _render_sse([
+        {
+            "type": "message_start",
+            "message": {
+                "id": "m",
+                "type": "message",
+                "role": "assistant",
+                "model": model,
+                "content": [],
+                "usage": {"input_tokens": 1, "output_tokens": 0},
+            },
+        },
+        {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 0}},
+        {"type": "message_stop"},
+    ])
+    good = _render_sse(_anthropic_events())
+
+    _server, status, client_body, calls, _bodies = await _stream(
+        BridgeProtocol.CHAT_COMPLETIONS_API, provider, model, [(200, empty), (200, good)], monkeypatch
+    )
+
+    assert status == 200
+    assert calls == 2
+    assert "hello" in client_body
+
+
+@pytest.mark.asyncio
+async def test_an_empty_converted_go_responses_stream_fires_the_empty_ladder(monkeypatch):
+    """KBR-248 AC-1 (converter twin) — the OpenCodeGoResponses converter's route fires too.
+
+    The hold is converter-agnostic. ``_stream_converter_for`` returns an
+    ``OpenCodeGoResponsesCCStreamConverter`` for opencode_go's Go Responses
+    models (``_RESPONSES_MODELS`` — e.g. ``grok-4.6``) on a Chat Completions
+    ingress request, and its ``response.created`` role chunk would have set
+    ``has_content`` exactly like the Anthropic converter did. This test pins
+    the empty ladder on that converter path too: an opencode_go Grok-shaped
+    empty Go Responses stream → ladder → second attempt's content reaches
+    the client.
+
+    Args:
+        monkeypatch: Pytest fixture, collapses the retry backoff.
+    """
+    model = "grok-4.6"
+
+    def _go_responses_frame(payload: str) -> str:
+        """Return one OpenAI Responses SSE frame.
+
+        Args:
+            payload: The JSON payload text.
+
+        Returns:
+            The ``data: ``-prefixed frame with its blank-line terminator.
+        """
+        return f"data: {payload}\n\n"
+
+    empty = (
+        _go_responses_frame('{"type":"response.created","response":{"model":"' + model + '","id":"r"}}')
+        + _go_responses_frame(
+            '{"type":"response.completed","response":{"model":"' + model + '","id":"r",'
+            '"usage":{"input_tokens":1,"output_tokens":0,"total_tokens":1}}}'
+        )
+    )
+    good = (
+        _go_responses_frame('{"type":"response.created","response":{"model":"' + model + '","id":"r"}}')
+        + _go_responses_frame('{"type":"response.output_text.delta","delta":"hello"}')
+        + _go_responses_frame(
+            '{"type":"response.completed","response":{"model":"' + model + '","id":"r",'
+            '"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}'
+        )
+    )
+
+    _server, status, client_body, calls, _bodies = await _stream(
+        BridgeProtocol.CHAT_COMPLETIONS_API, OpenCodeGoAdapter(), model, [(200, empty), (200, good)], monkeypatch
+    )
+
+    assert status == 200
+    assert calls == 2
+    assert "hello" in client_body
+
+
+@pytest.mark.asyncio
+async def test_the_d5_byte_cap_releases_the_hold_against_an_empty_content_flood(monkeypatch):
+    """KBR-248 AC-6 — the D5 cap releases pre-emission when held bytes exceed MAX_HELD_BYTES.
+
+    The KBR-155 sibling has dedicated D5 tests; this CC hold's fail-open
+    branch (the cap-release path inside ``_hold_or_write``) had no direct
+    exercise. The test scripts an upstream that streams a run of empty
+    content deltas (each converted to ``{"content": ""}`` — non-content,
+    held) followed by a content-bearing delta. With ``MAX_HELD_BYTES``
+    monkeypatched to a small bound, the cap trips on the early empty deltas
+    and releases — has_content flips to True — so the empty ladder never
+    fires and the eventual content reaches the client on the first attempt.
+
+    Args:
+        monkeypatch: Pytest fixture, collapses the retry backoff.
+    """
+    # Tiny bound: ~200 bytes is enough to release on the second or third
+    # empty ``content_block_delta`` (each yields ~160 bytes translated).
+    monkeypatch.setattr(server_module, "MAX_HELD_BYTES", 200)
+    model = "claude-opus-4-6"
+    body = _render_sse([
+        _message_start(model),
+        {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}},
+        {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": ""}},
+        {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": ""}},
+        {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": ""}},
+        {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": ""}},
+        {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "hello"}},
+        {"type": "content_block_stop", "index": 0},
+        {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 1}},
+        {"type": "message_stop"},
+    ])
+
+    _server, status, client_body, calls, _bodies = await _stream(
+        BridgeProtocol.CHAT_COMPLETIONS_API, AnthropicAdapter(), model, [(200, body)], monkeypatch
+    )
+
+    assert status == 200
+    # Cap released pre-emission: no retry, content reached the client.
+    assert calls == 1
+    assert "hello" in client_body
+
+
+@pytest.mark.asyncio
+async def test_an_exhausted_empty_ladder_ends_in_the_d4_terminal_error(monkeypatch):
+    """KBR-248 AC-5 — every attempt empty ends in the D4 error, not the empty stream.
+
+    Q14 bullet 4 (and KBR-235/KBR-250 on the sibling routes): an exhausted
+    empty ladder delivers a terminal error.  The CC twin carries it as
+    ``type: "empty_response"`` — this route's D4 discriminator is ``type``
+    alone — followed by ``[DONE]``, and the held preamble (role chunk, finish
+    chunk) never reaches the wire.
+
+    Args:
+        monkeypatch: Pytest fixture, collapses the retry backoff and pins the
+            ladder to exactly three attempts so the harness's three mock
+            callbacks suffice.
+    """
+    # The harness registers ``len(upstream_bodies) + 2`` mock callbacks —
+    # three, for a single scripted body.  Trim the ladder so the third (final)
+    # attempt is the one that exhausts.
+    monkeypatch.setattr(server_module, "_MAX_RETRIES", 0)
+    monkeypatch.setattr(server_module, "_EMPTY_FINAL_DELAYS", [0.01])
+    model = "claude-opus-4-6"
+    empty = _render_sse([
+        _message_start(model),
+        {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 0}},
+        {"type": "message_stop"},
+    ])
+
+    _server, status, client_body, calls, _bodies = await _stream(
+        BridgeProtocol.CHAT_COMPLETIONS_API, AnthropicAdapter(), model, [(200, empty)], monkeypatch
+    )
+
+    assert status == 200
+    assert calls > 1
+    assert "empty_response" in client_body
+    assert "Kitty Bridge received an empty reply from the upstream provider on every attempt" in client_body
+    assert client_body.rstrip().endswith("data: [DONE]")
+    # The held preamble was discarded, not flushed: no role chunk on the wire.
+    assert '"role": "assistant"' not in client_body
 
 
 @pytest.mark.asyncio
