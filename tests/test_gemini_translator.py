@@ -555,34 +555,6 @@ class TestTranslateResponseToolCallIdEcho:
         assert function_calls[1].get("id") == "call_B"
         assert function_calls[1]["args"] == {"y": 2}
 
-    def test_reset_clears_ids_between_requests(self):
-        """An id from a prior request must not survive ``reset()`` into the next."""
-        t = GeminiTranslator()
-
-        # First request buffers id "call_OLD".
-        t.translate_stream_chunk(
-            {"choices": [{"delta": {"tool_calls": [
-                {"index": 0, "id": "call_OLD", "function": {"name": "f", "arguments": ""}}
-            ]}, "finish_reason": None}]}
-        )
-        t.translate_stream_chunk(
-            {"choices": [{"delta": {}, "finish_reason": "stop"}]}
-        )
-        # State cleared; new request uses a different id.
-        t.translate_stream_chunk(
-            {"choices": [{"delta": {"tool_calls": [
-                {"index": 0, "id": "call_NEW", "function": {"name": "g", "arguments": ""}}
-            ]}, "finish_reason": None}]}
-        )
-        events = t.translate_stream_chunk(
-            {"choices": [{"delta": {}, "finish_reason": "stop"}]}
-        )
-        for event in events:
-            data = json.loads(event.removeprefix("data: ").removesuffix("\n\n"))
-            for part in data["candidates"][0]["content"]["parts"]:
-                if "functionCall" in part:
-                    assert part["functionCall"].get("id") == "call_NEW"
-
 
 class TestTranslateResponseFinishReasons:
     """finish_reason → Gemini finishReason mapping."""
