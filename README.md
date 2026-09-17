@@ -720,9 +720,11 @@ before your agent sees it; on the translated side — Chat Completions, Response
 Messages-wire upstream — a streamed reply that carries no text, tool call, or reasoning takes the same ladder —
 whether or not it ends with a completion marker — with the same release rule on the first content-bearing delta. One asymmetry to note: on the
 Chat Completions route, that reasoning-counts-as-content release is streamed-only — a non-streaming Chat Completions
-request with a reasoning-only reply is still treated as empty and retried. This error means every attempt kitty
-made came back empty. Nothing reached the agent, so simply
-resend; if it persists, the provider or model is misbehaving.
+request with a reasoning-only reply is still treated as empty and retried. The exhaustion terminal itself is
+route-wide: a plain-POST Chat Completions-wire provider (OpenAI, OpenRouter, DeepSeek, or any other Chat Completions
+backend) whose every attempt comes back content-less lands on the same `type: "empty_response"` D4 event, because
+the empty ladder is what the terminal serves. This error means every attempt kitty made came back empty. Nothing
+reached the agent, so simply resend; if it persists, the provider or model is misbehaving.
 
 The response is a `502` carrying `"reason": "empty_response"` for clients that expect JSON
 (`/v1/messages` non-stream and streamed). For streaming clients that expect SSE
