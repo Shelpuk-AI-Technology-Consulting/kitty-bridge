@@ -162,12 +162,18 @@ def _conversations_equivalent(inbound: c.Conversation, cc: c.Conversation) -> bo
       ``type`` leaf — ``None`` whenever absent. The inbound side maps
       ``None → "function"`` before comparison; every other spelling passes
       through untouched.
-    * **Text-block joining** (M2 / KBR-222): adjacent text blocks in a
-      turn collapse to one ``"\n"``-joined string on the CC wire — the
-      projection cannot preserve per-block presence. Each turn is reduced
-      to ``(non-text parts, "\n".join(text of Text parts))`` and the two
-      sides compare on that reduction, symmetrically — so the join character
-      itself is not hard-coded by the property.
+    * **Text-block joining on text-only turns** (M2 / KBR-222): a turn
+      whose parts are all ``Text`` blocks collapses to one ``"\n"``-joined
+      string on the CC wire — the projection cannot preserve per-block
+      presence. The per-turn reduction is ``(role, joined_text)`` on
+      **both** sides, so the join character is the property's variable,
+      not its constant. ``Turn.role`` rides on the signature because a
+      role swap is a real fidelity defect the M2 / KBR-222 join clause
+      does not cover. Mixed turns (any non-``Text`` part beside a
+      ``Text`` part) compare the full part tuple in wire order instead —
+      neither translator nor reader reorders parts, so per-part equality
+      catches any wire-order mutation (``[Image, Text]`` → ``[Text, Image]``
+      upstream is visible, not silent).
 
     Args:
         inbound: The Anthropic projection's conversation.
