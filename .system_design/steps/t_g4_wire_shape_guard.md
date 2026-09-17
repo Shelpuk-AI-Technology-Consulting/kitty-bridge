@@ -30,9 +30,12 @@ this is the first step file in the directory.
      Responses-origin), plus a structural pass-through pin that drives
      `make_request` with a stubbed curl_cffi session and a real
      (fresh-token) OAuth session file and asserts the posted `json`
-     equals the builder output exactly (structural dict equality — the
-     transport adds, removes, and reorders nothing).  Declared
-     `RESPONSES`.
+     equals the builder output exactly.  The comparison is plain
+     dict equality, which catches value changes for present keys,
+     additions/removals, and list-element reorders — but not
+     top-level dict-key reorders (Python `dict.__eq__` is order-
+     insensitive), so the docstring states the gap rather than
+     overclaiming.  Declared `RESPONSES`.
    * Falsification per §1.4: one deliberate-defect case per capture, all
      defects introduced adapter-side (the guard's subject), each
      demonstrating the mismatch is visible.
@@ -62,7 +65,7 @@ this is the first step file in the directory.
    either value; and the streaming-converter selection (9849) is
    consulted only from the three plain-transport branches (3784 /
    6423 / 7716) — under RESPONSES it would return a converter if
-   reached, but the custom-transport branches (3585 / 4674 / 7493)
+   reached, but the custom-transport branches (3585 / 6272 / 7493)
    dispatch to `stream_request` without consulting it.
 
 3. **`tests/test_wire_shape_honesty.py`** — the hook sweep now names its

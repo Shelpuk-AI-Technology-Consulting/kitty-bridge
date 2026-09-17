@@ -58,7 +58,7 @@ from test_wire_shape_honesty import (  # sibling module via pytest prepend
 from kitty.auth.oauth_session import OAuthSession
 from kitty.providers.base import ProviderAdapter, WireShape
 from kitty.providers.openai_subscription import OpenAISubscriptionAdapter
-from kitty.providers.registry import get_provider
+from kitty.providers.registry import _registry, get_provider
 
 # Contract guard.  The L2 default for ``tests/*.py`` is L1 (mutation
 # testing) per ``tests/layers.py``'s ``_FALLBACK_LAYER``; without this
@@ -126,7 +126,7 @@ async def test_bedrock_wire_body_classifies_as_other():
 
     assert "modelId" not in wire_body  # P18 pin: the transport popped it
     assert "stream" not in wire_body  # P18 pin: the transport popped it
-    assert classify_wire_shape(wire_body) is adapter.upstream_wire_shape  # OTHER
+    assert classify_wire_shape(wire_body) is adapter.upstream_wire_shape_for_model("kitty-test-model")  # OTHER
 
 
 async def test_bedrock_falsification_catches_a_dishonest_body():
@@ -162,7 +162,7 @@ async def test_bedrock_falsification_catches_a_dishonest_body():
     observed = classify_wire_shape(wire_body)
 
     assert observed is WireShape.MESSAGES
-    assert observed is not adapter.upstream_wire_shape
+    assert observed is not adapter.upstream_wire_shape_for_model("kitty-test-model")
 
 
 # ── Ollama Cloud (P19: transport overwrites stream) ──────────────────────────
@@ -196,7 +196,7 @@ async def test_ollama_cloud_wire_body_classifies_as_chat_completions():
     wire_body = mock_session.post.call_args.kwargs["json"]
 
     assert wire_body["stream"] is False  # P19 pin: the transport overwrote it
-    assert classify_wire_shape(wire_body) is adapter.upstream_wire_shape  # CHAT_COMPLETIONS
+    assert classify_wire_shape(wire_body) is adapter.upstream_wire_shape_for_model("kitty-test-model")
 
 
 async def test_ollama_cloud_falsification_catches_a_responses_body():
@@ -235,7 +235,7 @@ async def test_ollama_cloud_falsification_catches_a_responses_body():
     observed = classify_wire_shape(wire_body)
 
     assert observed is WireShape.RESPONSES
-    assert observed is not adapter.upstream_wire_shape
+    assert observed is not adapter.upstream_wire_shape_for_model("kitty-test-model")
 
 
 # ── OpenAI Subscription (P13–P17: body built inside transport) ──────────────
@@ -259,7 +259,7 @@ def test_openai_subscription_responses_origin_body_classifies_as_responses():
 
     body = adapter._prepare_responses_body(cc_request, original_body)
 
-    assert classify_wire_shape(body) is adapter.upstream_wire_shape  # RESPONSES
+    assert classify_wire_shape(body) is adapter.upstream_wire_shape_for_model("kitty-test-model")  # RESPONSES
 
 
 def test_openai_subscription_cc_origin_body_classifies_as_responses():
@@ -273,7 +273,7 @@ def test_openai_subscription_cc_origin_body_classifies_as_responses():
 
     body = adapter._cc_to_responses(copy.deepcopy(_probe_request("kitty-test-model")))
 
-    assert classify_wire_shape(body) is adapter.upstream_wire_shape  # RESPONSES
+    assert classify_wire_shape(body) is adapter.upstream_wire_shape_for_model("kitty-test-model")  # RESPONSES
 
 
 def test_openai_subscription_falsification_catches_a_non_responses_body():
@@ -298,7 +298,7 @@ def test_openai_subscription_falsification_catches_a_non_responses_body():
 
     observed = classify_wire_shape(body)
     assert observed is WireShape.CHAT_COMPLETIONS
-    assert observed is not adapter.upstream_wire_shape  # declared RESPONSES
+    assert observed is not adapter.upstream_wire_shape_for_model("kitty-test-model")  # declared RESPONSES
 
 
 def _make_codex_id_token(account_id: str | None = None) -> str:
@@ -378,12 +378,15 @@ async def test_openai_subscription_transport_passes_body_through_unchanged(fresh
     """The transport ships the body builder's output unchanged.
 
     Structural pin for the §3.2.3 boundary: between the body builder
-    and the curl_cffi ``post`` call, the transport must not mutate the
-    body — the captured ``json`` is compared to the builder output by
-    structural dict equality, so a key added, removed, or reordered
-    in between fails here.  A future transport-level body mutation —
-    say, a retry adding a ``previous_response_id`` — would force a
-    re-derivation of the wire shape.
+    and the curl_cffi ``post`` call, the transport must not add or
+    remove top-level keys, change values for present keys, or reorder
+    list elements — the captured ``json`` is compared to the builder
+    output by ``==``, which catches all of those.  Top-level dict-key
+    reordering is not caught (Python ``dict.__eq__`` is order-
+    insensitive); a future transport-level body mutation that adds,
+    removes, or value-changes a key — say, a retry adding a
+    ``previous_response_id`` — would force a re-derivation of the
+    wire shape.
 
     ``_cc_to_responses`` already emits ``stream=True`` internally and
     ``make_request``'s forced ``stream=True`` is idempotent; no overlay
@@ -477,6 +480,30 @@ def _native_probe() -> dict:
     probe = copy.deepcopy(_MESSAGES_BODY)
     probe["_native_messages_request"] = True
     return probe
+
+
+# The native-passthrough sweep's provider set — the analogue of
+# ``_WIRE_CAPTURED_ADAPTERS`` for the R3 sweep.  A fourth adapter that
+# overrides ``use_native_messages`` must be added here and to the
+# parametrize below, or the tripwire under it goes red.
+_NATIVE_SWEEP_ADAPTERS = frozenset({"custom_anthropic", "minimax_token", "zai_coding"})
+
+
+def test_every_native_messages_adapter_is_in_the_r3_sweep():
+    """A fourth ``use_native_messages`` override forces a decision here too.
+
+    Mirrors ``_WIRE_CAPTURED_ADAPTERS``'s tripwire for the custom-transport
+    sweep.  Detection is by property descriptor, not instance value:
+    ``minimax_token`` overrides the property (returning the constructor
+    flag), so the override is visible even at default construction where
+    ``use_native_messages`` evaluates False.
+    """
+    overriding = {
+        name
+        for name in _registry
+        if type(get_provider(name)).use_native_messages is not ProviderAdapter.use_native_messages
+    }
+    assert overriding == _NATIVE_SWEEP_ADAPTERS
 
 
 @pytest.mark.parametrize("provider_type", ["custom_anthropic", "minimax_token", "zai_coding"])

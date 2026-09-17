@@ -261,7 +261,7 @@ class OpenAISubscriptionAdapter(OpenAIAdapter):
         selection (``9849``) is consulted only from the three
         plain-transport branches (``3784`` / ``6423`` / ``7716``) — under
         RESPONSES it would return a converter if reached, but the
-        custom-transport branches (``3585`` / ``4674`` / ``7493``)
+        custom-transport branches (``3585`` / ``6272`` / ``7493``)
         dispatch to ``stream_request`` without consulting it.
         """
         return WireShape.RESPONSES
