@@ -180,6 +180,29 @@ def test_self_cycle_is_reported(tmp_path: Path) -> None:
     assert any("alpha_step" in e for e in errors), errors
 
 
+def test_each_cycle_is_reported_exactly_once(tmp_path: Path) -> None:
+    """A cycle produced by multiple back-edges appears once in stderr.
+
+    The reproducer: ``m -> n``, ``n -> z``, ``z -> [m, p, q]``, with
+    ``p`` and ``q`` leaves. The iterative DFS re-scans ``z``'s dep
+    list from the start every time a child subtree completes, so the
+    back-edge to ``m`` is re-encountered after ``p`` completes and
+    after ``q`` completes — two spurious duplications of the same
+    cycle string. The one-report-per-cycle contract requires deduping
+    by the full cycle string.
+    """
+    _step(tmp_path, "m", id_="m_step", depends_on="[n_step]")
+    _step(tmp_path, "n", id_="n_step", depends_on="[z_step]")
+    _step(tmp_path, "z", id_="z_step", depends_on="[m_step, p_step, q_step]")
+    _step(tmp_path, "p", id_="p_step")
+    _step(tmp_path, "q", id_="q_step")
+    entries, parse_errors = rsi.collect_steps(tmp_path / "steps")
+    assert parse_errors == []
+    errors = rsi.graph_errors(entries)
+    cycle_lines = [e for e in errors if e.startswith("dependency cycle:")]
+    assert len(cycle_lines) == 1, cycle_lines
+
+
 def test_acyclic_diamond_produces_no_cycle_error(tmp_path: Path) -> None:
     """A diamond (two steps sharing a dependency) is not a cycle.
 
@@ -271,6 +294,48 @@ def test_non_utf8_step_file_is_reported_not_crashed(tmp_path: Path) -> None:
     path.write_bytes(b"\xc0\xc1bad bytes\n")
     _entries, errors = rsi.collect_steps(tmp_path / "steps")
     assert any("bad.md" in e and "UTF-8" in e for e in errors), errors
+
+
+def test_directory_in_place_of_step_file_surfaces_named_error(
+    tmp_path: Path,
+) -> None:
+    """A ``steps/<name>.md/`` directory surfaces as a named error, not a traceback.
+
+    ``Path.glob("*.md")`` matches directories whose name ends in
+    ``.md``; reading one as text raises ``IsADirectoryError`` on POSIX
+    (or ``PermissionError`` on Windows). Without the ``OSError`` catch
+    a stray ``steps/archive.md/`` directory would surface as a Python
+    traceback instead of the file-naming error the contract promises.
+    """
+    stray = _steps_dir(tmp_path) / "archive.md"
+    stray.mkdir()
+    _step(tmp_path, "a", id_="alpha_step")
+    _entries, errors = rsi.collect_steps(tmp_path / "steps")
+    assert any("archive.md" in e and "not readable" in e for e in errors), errors
+
+
+def test_deep_chain_does_not_hit_recursion_limit(tmp_path: Path) -> None:
+    """A dependency chain well past Python's recursion limit validates.
+
+    The iterative DFS exists so the validator has no recursion-limit
+    boundary: a deep *valid* chain succeeds where the recursive
+    equivalent would ``RecursionError`` past ~1000 steps. The test
+    writes 1500 one-line step files — deterministic, past the default
+    limit, and well under a second of validator work — and asserts
+    the whole chain parses and reports no cycle. Without this case, a
+    reversion to the recursive form passes every other test and only
+    resurfaces on a real ~1000-step chain.
+    """
+    steps = _steps_dir(tmp_path)
+    for i in range(1500):
+        (steps / f"step_{i:04d}.md").write_text(
+            f"---\nid: step_{i:04d}\ndepends_on: []\n---\n\n# step {i}\n",
+            encoding="utf-8",
+        )
+    entries, parse_errors = rsi.collect_steps(tmp_path / "steps")
+    assert parse_errors == []
+    assert len(entries) == 1500
+    assert rsi.graph_errors(entries) == []
 
 
 def test_unknown_frontmatter_keys_are_tolerated(tmp_path: Path) -> None:

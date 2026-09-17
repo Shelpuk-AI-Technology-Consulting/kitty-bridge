@@ -213,6 +213,14 @@ def collect_steps(steps_dir: Path) -> tuple[list[StepEntry], list[str]]:
         except UnicodeDecodeError as exc:
             errors.append(f"{path.name}: file is not valid UTF-8: {exc}")
             continue
+        except OSError as exc:
+            # `glob("*.md")` matches directories too, so a stray
+            # `steps/archive.md/` directory — or an unreadable file on a
+            # locked-down Windows checkout — would otherwise surface as
+            # an `IsADirectoryError` / `PermissionError` traceback
+            # instead of the named error the contract promises.
+            errors.append(f"{path.name}: file is not readable: {exc}")
+            continue
         entry, parse_errors = _parse_entry(path, text)
         errors.extend(parse_errors)
         if entry is not None:
@@ -259,12 +267,15 @@ def graph_errors(entries: Sequence[StepEntry]) -> list[str]:
                 errors.append(f"{entry.path.name}: depends_on entry '{dep}' does not resolve to an existing step id")
 
     # Cycle detection: depth-first search over resolved (non-Jira)
-    # edges, written iteratively so a dependency chain longer than
-    # Python's recursion limit (~1000) surfaces as a named error rather
-    # than a RecursionError traceback. Same three-colour algorithm — a
-    # GRAY node on the stack meeting a GRAY dependency is a back edge,
-    # and the cycle is the stack slice from that dependency to the
-    # current node plus the dependency again to close the loop.
+    # edges, written iteratively so a dependency chain of any depth
+    # does not hit Python's recursion limit (~1000). The recursive
+    # equivalent would `RecursionError` past ~1000 steps; the
+    # iterative form has no such boundary — a deep *valid* chain
+    # simply succeeds, and a deep cycle surfaces as a named error.
+    # Same three-colour algorithm: a GRAY node on the stack meeting a
+    # GRAY dependency is a back edge, and the cycle is the stack
+    # slice from that dependency to the current node plus the
+    # dependency again to close the loop.
     _WHITE, _GRAY, _BLACK = 0, 1, 2
     colour: dict[str, int] = {entry.id: _WHITE for entry in entries}
     stack: list[str] = []
@@ -282,8 +293,17 @@ def graph_errors(entries: Sequence[StepEntry]) -> list[str]:
                 if _JIRA_KEY_PATTERN.fullmatch(dep) or dep not in colour:
                     continue
                 if colour[dep] == _GRAY:
-                    cycle = stack[position[dep] :] + [dep]
-                    errors.append("dependency cycle: " + " -> ".join(cycle))
+                    # The iterative form re-scans a node's dependency list
+                    # from the start every time a child subtree completes,
+                    # so a GRAY ancestor sitting earlier in the list is
+                    # re-encountered once per completed sibling — the
+                    # identical cycle would land in stderr once per
+                    # re-entry. The one-report-per-cycle contract is the
+                    # whole point of the message, so dedupe by the full
+                    # cycle string.
+                    cycle = "dependency cycle: " + " -> ".join(stack[position[dep] :] + [dep])
+                    if cycle not in errors:
+                        errors.append(cycle)
                 elif colour[dep] == _WHITE:
                     colour[dep] = _GRAY
                     stack.append(dep)
