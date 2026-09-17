@@ -1782,6 +1782,17 @@ cannot be the L1 selection (§8).
 | `describe_tool_input_anomaly` | Never reports an anomaly for input that validates against the declared schema |
 | Wire projections (§3.3.1) | Each reads its format correctly, tested against published format examples — never against kitty's own output |
 
+**The anomaly property's input strategies are hand-rolled (decided KBR-74, 2026-09-17).**
+The ticket offered two routes: a generator over the small JSON-Schema subset the detector
+actually resolves, or `hypothesis-jsonschema`. The hand-rolled route was taken. The detector
+reads only root `properties`, root `required` and the composition-keyword stand-down, so a
+generator over exactly that subset produces inputs whose validity is provable by construction;
+`hypothesis-jsonschema` generates against the full language, and any draw against a
+composition-keyword schema hits the stand-down path without exercising the resolve-and-compare
+half — the extra coverage is wasted, at the price of a new dev dependency. Same posture as
+T-F4's local egress strategies: the T-F1 substrate's own docstring carves this task out, so the
+strategies ship locally with the property.
+
 **The compaction budget property, stated honestly.** "Output ≤ budget" is false, and the
 exception is wider than an earlier draft claimed. The guaranteed-fit loop drops head blocks, then
 tail blocks, and `break`s while still over budget once it can shrink no further — when only the
