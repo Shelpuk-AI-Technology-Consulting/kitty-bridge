@@ -526,6 +526,11 @@ class TestTheWholeSuiteIsCoherent:
             # per-request `proxy=None` cannot escape it -- the claim
             # `_session_for`'s containment design rests on.
             "tests/test_aiohttp_transport_contract.py",
+            # KBR-280. A §6.2.3 structural guard over the suite's own tree: no
+            # test module may import the `tests` package, which bare `pytest`
+            # (the fast-gate invocation) cannot resolve but `python -m pytest`
+            # can -- the trap KBR-84 paid a full CI round for.
+            "tests/test_no_tests_package_imports.py",
             # KBR-83 (T-G7). A §6.2.2 contract guard: the downstream SSE
             # grammar state machine driven over a real BridgeFixture — every
             # stream the bridge writes must classify as one of the five

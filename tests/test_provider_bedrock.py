@@ -415,6 +415,259 @@ class TestBedrockTranslateToUpstream:
         assert result["modelId"] == "us.anthropic.claude-sonnet-4-20250514"
 
 
+# ── Bedrock Converse body builder (KBR-89 / T-H2) ─────────────────────────
+
+
+class TestBedrockBody:
+    """L1 — ``BedrockAdapter._bedrock_body`` is the pure payload builder (P18).
+
+    Register row P18 ("Remove ``modelId`` and ``stream`` from the Converse
+    payload") lives inside ``make_request`` / ``stream_request`` today, so
+    ``mutmut`` cannot reach it from the L1 selection. ``_bedrock_body``
+    extracts the body's translation plus the ``modelId`` / ``stream`` pops
+    into a pure function; this class is what makes P18 a mutation-testable
+    surface. The wire-capture characterisation of P18 itself is shipped at
+    L3 by T-B3 (`tests/harness/test_botocore.py`).
+    """
+
+    def setup_method(self):
+        self.adapter = BedrockAdapter()
+
+    # ── R1: pure builder ──
+
+    def test_returns_model_id_and_body(self) -> None:
+        """R1 / AC1 — the return is a ``(model_id, body)`` tuple."""
+        cc = {
+            "model": "us.anthropic.claude-sonnet-4-20250514",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream": False,
+        }
+        result = self.adapter._bedrock_body(cc)
+        # isinstance check first to keep the failure message legible.
+        assert isinstance(result, tuple)
+        assert len(result) == 2
+        model_id, body = result
+        assert model_id == "us.anthropic.claude-sonnet-4-20250514"
+        assert isinstance(body, dict)
+
+    def test_body_lacks_modelid_and_stream(self) -> None:
+        """R5 / AC8 (partial) — P18's ``modelId`` pop is observable on the body.
+
+        A mutation that drops ``bedrock_request.pop("modelId")`` (or rewrites
+        it as something other than a pop) leaves ``modelId`` in the body and
+        this test fails.
+
+        The ``stream`` assertion is a load-bearing guard for a different test
+        — see :meth:`test_pops_stream_even_when_translate_emits_it`. It is
+        kept here for the **defensive** case: today
+        :meth:`translate_to_upstream` never emits ``stream`` (the body it
+        builds cannot contain the key regardless of whether the pop runs), so
+        this assertion is vacuously true against current code. The sibling
+        test proves the pop is real by injecting the key.
+        """
+        cc = {
+            "model": "us.anthropic.claude-sonnet-4-20250514",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream": False,
+        }
+        _, body = self.adapter._bedrock_body(cc)
+        assert "modelId" not in body
+        # Vacuously true today (see docstring); covered by the sibling test.
+        assert "stream" not in body
+
+    def test_pops_stream_even_when_translate_emits_it(self) -> None:
+        """R5 / AC8 (full) — the ``stream`` pop runs when the body carries it.
+
+        Today :meth:`translate_to_upstream` does not emit ``stream``, so the
+        pop is defensive against a future translator change. To prove the pop
+        is real and not dead code, this test injects ``stream`` into the body
+        before :meth:`_bedrock_body` sees it and asserts the pop strips it.
+        """
+        # Build an oversized body that includes ``stream`` — translate never
+        # produces this shape today, so the pop's only observable effect comes
+        # through this injected body.
+        injected = {
+            "messages": [{"role": "user", "content": [{"text": "Hello"}]}],
+            "inferenceConfig": {"maxTokens": 4096},
+            "stream": True,
+            "modelId": "sentinel-model-x",
+        }
+        with patch.object(self.adapter, "translate_to_upstream", return_value=injected):
+            _model_id, body = self.adapter._bedrock_body(
+                {
+                    "model": "irrelevant",
+                    "messages": [{"role": "user", "content": "Hello"}],
+                }
+            )
+        assert "modelId" not in body, "the load-bearing modelId pop ran"
+        assert "stream" not in body, "the defensive stream pop ran against an injected body"
+
+    def test_does_not_build_a_boto3_client(self) -> None:
+        """R1 / AC2 — the builder stays pure (no IO, no boto3)."""
+        cc = {
+            "model": "us.anthropic.claude-sonnet-4-20250514",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream": False,
+        }
+        with patch.object(
+            self.adapter,
+            "_get_boto3_client",
+            side_effect=AssertionError(
+                "_bedrock_body must stay pure; it must not construct a boto3 client"
+            ),
+        ):
+            self.adapter._bedrock_body(cc)  # call must not raise
+
+    # ── R2: body matches translate_to_upstream minus modelId / stream ──
+
+    @pytest.mark.parametrize(
+        "cc",
+        [
+            pytest.param(
+                {
+                    "model": "anthropic.claude-sonnet-4-20250514",
+                    "messages": [
+                        {"role": "system", "content": "You are helpful."},
+                        {"role": "user", "content": "Hello"},
+                    ],
+                    "max_tokens": 256,
+                    "temperature": 0.5,
+                },
+                id="system-and-user",
+            ),
+            pytest.param(
+                {
+                    "model": "anthropic.claude-sonnet-4-20250514",
+                    "messages": [
+                        {"role": "user", "content": "What's the weather?"},
+                        {
+                            "role": "assistant",
+                            "content": None,
+                            "reasoning_content": "I should check the weather tool first.",
+                            "tool_calls": [
+                                {
+                                    "id": "call_abc",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "get_weather",
+                                        "arguments": '{"city": "London"}',
+                                    },
+                                }
+                            ],
+                        },
+                        {
+                            "role": "tool",
+                            "tool_call_id": "call_abc",
+                            "content": "15°C",
+                        },
+                    ],
+                    "tools": [
+                        {
+                            "type": "function",
+                            "function": {
+                                "name": "get_weather",
+                                "description": "Get weather",
+                                "parameters": {
+                                    "type": "object",
+                                    "properties": {"city": {"type": "string"}},
+                                },
+                            },
+                        }
+                    ],
+                },
+                id="tools-and-reasoning",
+            ),
+            pytest.param(
+                {
+                    "model": "us.anthropic.claude-sonnet-4-20250514",
+                    "messages": [{"role": "user", "content": "Hello"}],
+                    "stream": False,
+                },
+                id="minimal",
+            ),
+        ],
+    )
+    def test_body_matches_translate_to_upstream_minus_p18_keys(self, cc: dict) -> None:
+        """R2 / AC3 — body keys equal ``translate_to_upstream(cc)`` minus
+        ``modelId`` and ``stream``. The hook API is unchanged; the builder
+        is just the same body with P18 applied.
+        """
+        translated = self.adapter.translate_to_upstream(cc)
+        model_id, body = self.adapter._bedrock_body(cc)
+
+        translated_minus_p18 = {k: v for k, v in translated.items() if k not in ("modelId", "stream")}
+        assert body == translated_minus_p18
+        assert model_id == translated["modelId"]
+
+    # ── R3: transports consume the builder's output ──
+
+    @pytest.mark.asyncio
+    async def test_make_request_sends_builder_model_id_to_converse(self) -> None:
+        """R3 / AC4 — ``converse`` receives ``modelId=...`` from the builder."""
+        adapter = self.adapter
+        cc = {
+            "model": "us.anthropic.claude-sonnet-4-20250514",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream": False,
+        }
+        sentinel_model = "model-marker-x"
+        sentinel_body = {
+            "messages": [{"role": "user", "content": [{"text": "Hello"}]}],
+            "inferenceConfig": {"maxTokens": 4096},
+        }
+        mock_client = MagicMock()
+        mock_client.converse.return_value = BEDROCK_RESPONSE_TEXT
+        with (
+            patch.object(adapter, "_bedrock_body", return_value=(sentinel_model, sentinel_body)),
+            patch.object(adapter, "_get_boto3_client", return_value=mock_client),
+        ):
+            await adapter.make_request(cc)
+        kwargs = mock_client.converse.call_args[1]
+        assert kwargs["modelId"] == sentinel_model
+        # The builder body splats verbatim — no in-transport re-translation.
+        for key, value in sentinel_body.items():
+            assert kwargs[key] == value
+        # No stray P18 keys leaked into the kwarg call: the kwarg set is
+        # exactly the sentinel body with ``modelId`` added.
+        assert set(kwargs) == {"modelId"} | set(sentinel_body)
+        assert "stream" not in kwargs
+
+    @pytest.mark.asyncio
+    async def test_stream_request_sends_builder_model_id_to_converse_stream(self) -> None:
+        """R3 / AC5 — ``converse_stream`` receives ``modelId=...`` from the builder."""
+        adapter = self.adapter
+        cc = {
+            "model": "us.anthropic.claude-sonnet-4-20250514",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream": True,
+        }
+        sentinel_model = "model-marker-y"
+        sentinel_body = {
+            "messages": [{"role": "user", "content": [{"text": "Hello"}]}],
+            "inferenceConfig": {"maxTokens": 4096},
+        }
+        mock_client = MagicMock()
+        mock_client.converse_stream.return_value = {"stream": iter([])}
+
+        async def noop(data: bytes) -> None:
+            pass
+
+        with (
+            patch.object(adapter, "_bedrock_body", return_value=(sentinel_model, sentinel_body)),
+            patch.object(adapter, "_get_boto3_client", return_value=mock_client),
+        ):
+            await adapter.stream_request(cc, noop)
+        kwargs = mock_client.converse_stream.call_args[1]
+        assert kwargs["modelId"] == sentinel_model
+        for key, value in sentinel_body.items():
+            assert kwargs[key] == value
+        # Same shape check as the non-streaming sibling — no in-transport
+        # mutation; the kwarg set equals the sentinel body with ``modelId``
+        # added.
+        assert set(kwargs) == {"modelId"} | set(sentinel_body)
+        assert "stream" not in kwargs
+
+
 # ── Bedrock → CC response translation ────────────────────────────────────
 
 
@@ -882,6 +1135,67 @@ class TestBedrockStreamRequest:
 
         call_kwargs = mock_client.converse_stream.call_args
         assert call_kwargs[1]["modelId"] == "us.anthropic.claude-sonnet-4-20250514"
+
+    @pytest.mark.asyncio
+    async def test_streaming_error_wraps_provider_error(self) -> None:
+        """R7 / AC10 — the streaming ``ProviderError`` wrap is preserved.
+
+        The bridge's retry ladder (``server.py``) branches on
+        ``isinstance(exc, ProviderError)`` and reads ``exc.http_status`` to
+        classify the failure; dropping the ``try/except`` wrap would
+        silently change the HTTP status / retry classification. The
+        existing ``test_bedrock_error_raises`` only checks the message
+        substring — which passes regardless of whether the wrap is in
+        place — so this test pins the wrapping explicitly.
+        """
+        adapter = BedrockAdapter()
+        cc_request = {
+            "model": "us.anthropic.claude-sonnet-4-20250514",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream": True,
+        }
+        mock_client = MagicMock()
+        mock_client.converse_stream.side_effect = Exception("ThrottlingException")
+
+        async def noop(data: bytes) -> None:
+            pass
+
+        with (
+            patch.object(adapter, "_get_boto3_client", return_value=mock_client),
+            pytest.raises(ProviderError) as exc_info,
+        ):
+            await adapter.stream_request(cc_request, noop)
+        assert "Bedrock streaming request failed" in str(exc_info.value)
+        assert "ThrottlingException" in str(exc_info.value)
+
+    @pytest.mark.asyncio
+    async def test_non_streaming_error_wraps_provider_error(self) -> None:
+        """R7 / AC10 (sibling) — the non-streaming wrap has the same shape.
+
+        ``make_request`` carries the same ``try/except Exception →
+        ProviderError(...)`` wrap as ``stream_request`` and the same
+        dependency on the retry ladder's ``isinstance(exc, ProviderError)``
+        branch in ``server.py``. The existing ``test_bedrock_error_raises``
+        uses ``pytest.raises(Exception, match="ThrottlingException")``, which
+        passes regardless of whether the wrap is in place — exactly the
+        failure mode the streaming sibling test exists to rule out. This
+        test pins the non-streaming wrap with the same shape.
+        """
+        adapter = BedrockAdapter()
+        cc_request = {
+            "model": "us.anthropic.claude-sonnet-4-20250514",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream": False,
+        }
+        mock_client = MagicMock()
+        mock_client.converse.side_effect = Exception("ThrottlingException")
+        with (
+            patch.object(adapter, "_get_boto3_client", return_value=mock_client),
+            pytest.raises(ProviderError) as exc_info,
+        ):
+            await adapter.make_request(cc_request)
+        assert "Bedrock request failed" in str(exc_info.value)
+        assert "ThrottlingException" in str(exc_info.value)
 
 
 class TestThinkingEnabledToolCallGap:

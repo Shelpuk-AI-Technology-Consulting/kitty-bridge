@@ -412,17 +412,52 @@ class BedrockAdapter(ProviderAdapter):
 
     # ── Custom transport: non-streaming ──────────────────────────────────
 
-    async def make_request(self, cc_request: dict) -> dict:
-        """Perform a non-streaming Bedrock Converse call via boto3."""
+    def _bedrock_body(self, cc_request: dict) -> tuple[str, dict]:
+        """Build the ``(model_id, body_kwargs)`` pair the Converse calls take.
+
+        Applies register row P18 to the hook's output: boto3 takes the model
+        id as a ``modelId`` call argument and selects streaming by choosing
+        ``converse`` vs ``converse_stream``, so neither key rides in
+        the body.
+
+        Pure — no IO, no boto3 client. Extracted from the two transport
+        methods so the pops are reachable from an L1 selection (KBR-89 /
+        T-H2: a mutation of either pop now fails
+        ``TestBedrockBody::test_body_lacks_modelid_and_stream`` instead of
+        living untested inside a network method).
+
+        The ``stream`` pop is defensive: ``translate_to_upstream`` does not
+        emit ``stream`` today, but if a future translator change starts to,
+        this pop catches it at L1 rather than letting AWS reject the call at
+        runtime.
+
+        Args:
+            cc_request: CC-format request, identical to what
+                :meth:`translate_to_upstream` accepts.
+
+        Returns:
+            A ``(model_id, body)`` tuple; ``body`` is the kwargs dict to
+            splat into ``client.converse(modelId=model_id, **body)`` or
+            ``client.converse_stream(modelId=model_id, **body)``.
+
+        Raises:
+            KeyError: If ``cc_request`` lacks the required ``"model"`` key
+                — propagated from :meth:`translate_to_upstream`.
+        """
         bedrock_request = self.translate_to_upstream(cc_request)
         model_id = bedrock_request.pop("modelId")
+        bedrock_request.pop("stream", None)
+        return model_id, bedrock_request
+
+    async def make_request(self, cc_request: dict) -> dict:
+        """Perform a non-streaming Bedrock Converse call via boto3."""
+        model_id, bedrock_request = self._bedrock_body(cc_request)
 
         # Extract provider_config for credential resolution
         provider_config = cc_request.get("_provider_config", {})
         resolved_key = cc_request.get("_resolved_key", "")
 
         client = self._get_boto3_client(resolved_key, provider_config)
-        bedrock_request.pop("stream", None)
 
         # Run boto3 call in thread pool (it's synchronous)
         loop = asyncio.get_event_loop()
@@ -444,14 +479,12 @@ class BedrockAdapter(ProviderAdapter):
         write: Callable[[bytes], Awaitable[None]],
     ) -> None:
         """Perform a streaming Bedrock ConverseStream call via boto3."""
-        bedrock_request = self.translate_to_upstream(cc_request)
-        model_id = bedrock_request.pop("modelId")
+        model_id, bedrock_request = self._bedrock_body(cc_request)
 
         provider_config = cc_request.get("_provider_config", {})
         resolved_key = cc_request.get("_resolved_key", "")
 
         client = self._get_boto3_client(resolved_key, provider_config)
-        bedrock_request.pop("stream", None)
 
         # Run boto3 call in thread pool
         loop = asyncio.get_event_loop()

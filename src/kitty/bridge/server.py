@@ -2443,9 +2443,43 @@ class BridgeServer:
     @staticmethod
     def _is_empty_cc_response(cc_response: dict) -> bool:
         # pragma: no mutate block
-        """Return True if a Chat Completions response has no content and no tool calls.
+        """Return True if a Chat Completions response has no content, tool calls, or reasoning.
 
-        Used to detect empty upstream responses (HTTP 200 but no meaningful output).
+        Used to detect empty upstream responses (HTTP 200 but no meaningful
+        output). Two arms by upstream wire shape:
+
+        * **Messages-shaped** (``type == "message"``) — mirrors
+          :meth:`PreambleHold._block_start_releases` (Q14 D1). A block whose
+          type is not ``text``, ``thinking``, or ``redacted_thinking`` is
+          content; a ``text`` block counts when its text is non-empty
+          (whitespace included). Thinking blocks do **not** count, so a
+          Messages thinking-only reply is judged empty and the ladder
+          retries — consistent with the streaming hold, which also does not
+          release on a thinking block.
+
+        * **Chat-Completions-shaped** (default arm, KBR-277) — extends the
+          previous ``content`` + ``tool_calls`` check with a ``reasoning_content``
+          clause that is the **literal mirror** of the streaming predicate's
+          last clause (:func:`_cc_chunk_carries_content` at
+          ``server.py:1483``): ``isinstance(..., str) and ... != ""``. The
+          mirror is deliberate so mutation testing side-by-side catches any
+          divergence. A reasoning-only Chat Completions reply therefore
+          succeeds on the first attempt on both routes (KBR-248 streaming,
+          KBR-277 non-streaming).
+
+        The ``content`` clause keeps ``.strip()`` (whitespace-only content
+        is empty) while ``reasoning_content`` uses ``!= ""`` (whitespace-only
+        thinking still occupies a thinking block). This asymmetry is
+        pre-existing drift, not a recorded decision; ``TEST_SUITE.md`` D6
+        covers only the empty-string case. Aligning the two is not KBR-277's
+        scope.
+
+        Args:
+            cc_response: The upstream response dict, in whatever shape the
+                upstream speaks.
+
+        Returns:
+            True when the reply carries no content the user would render.
         """
         if cc_response.get("type") == "message":
             content_blocks = cc_response.get("content", [])
@@ -2470,8 +2504,13 @@ class BridgeServer:
         message = choices[0].get("message", {})
         content = message.get("content")
         tool_calls = message.get("tool_calls", [])
+        reasoning_content = message.get("reasoning_content")
         has_text = isinstance(content, str) and content.strip()
-        return not has_text and not tool_calls
+        # KBR-277: literal mirror of _cc_chunk_carries_content's last clause (server.py:1483).
+        # Mirror byte-for-byte so mutation testing on the two predicates side-by-side catches
+        # any divergence.
+        has_reasoning = isinstance(reasoning_content, str) and reasoning_content != ""
+        return not has_text and not tool_calls and not has_reasoning
 
     @staticmethod
     def _is_non_retryable_reply(cc_response: dict) -> bool:

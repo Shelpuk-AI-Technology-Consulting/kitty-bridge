@@ -112,6 +112,19 @@ TARGET_GROUPS: dict[str, list[Target]] = {
             "_build_user_agent",
         ),
     ],
+    # Register row P18 — the Converse body's modelId/stream pops. KBR-89
+    # (T-H2) extracted them out of the bedrock transport's network methods,
+    # where mutmut could not reach them, into this pure builder. Not a
+    # provider hook: the sibling group above is the pattern (one adapter's
+    # body builders in their own row), so the bedrock builder gets the same
+    # shape rather than diluting the hooks' cross-adapter claim.
+    "bedrock_transport": [
+        Target(
+            "kitty.providers.bedrock",
+            "BedrockAdapter",
+            "_bedrock_body",
+        ),
+    ],
     # Egress containment — I3.
     "egress": [
         Target("kitty.egress", None, None),

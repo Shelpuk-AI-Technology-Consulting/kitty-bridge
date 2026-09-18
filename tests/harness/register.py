@@ -1395,8 +1395,12 @@ _PROVIDER_ROWS: tuple[MutationRow, ...] = (
     MutationRow(
         id="P18",
         site=(
-            "kitty/providers/bedrock.py:BedrockAdapter.make_request",
-            "kitty/providers/bedrock.py:BedrockAdapter.stream_request",
+            # KBR-89 (T-H2) extracted the body's modelId/stream pops from
+            # the two transport methods into this pure builder. Both
+            # transports now call `_bedrock_body`, so the pops' load-bearing
+            # site is here — `make_request` and `stream_request` splat the
+            # returned body verbatim and add no further mutations.
+            "kitty/providers/bedrock.py:BedrockAdapter._bedrock_body",
         ),
         trigger=_ALWAYS,
         # §3.3.1b normalises Converse's `modelId` onto `envelope.model`, so the
