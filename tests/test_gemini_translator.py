@@ -61,6 +61,29 @@ class TestTranslateRequestSystemInstruction:
         assert cc["messages"][0] == {"role": "system", "content": "You are a helper."}
         assert cc["messages"][1] == {"role": "user", "content": "Hello"}
 
+    def test_non_dict_system_instruction_does_not_crash_the_server(self):
+        """A truthy non-dict ``systemInstruction`` is treated as absent.
+
+        Gemini's published schema types ``systemInstruction`` as a
+        ``Content`` object, but the wire accepts whatever JSON the client
+        sends — the schemathesis conformance suite (KBR-82) generated
+        ``"systemInstruction": true`` and the translator crashed with
+        ``AttributeError: 'bool' object has no attribute 'get'`` inside
+        ``_extract_text``, answering 500 where the schema documents 200.
+        A malformed shape is the client's mistake and the request should
+        proceed without a system message, not take the server down.
+        """
+        t = GeminiTranslator()
+        for bad in (True, "text", 42, [1, 2]):
+            gemini_req = {
+                "contents": [{"role": "user", "parts": [{"text": "Hello"}]}],
+                "systemInstruction": bad,
+            }
+            cc = t.translate_request(gemini_req)
+            assert cc["messages"][0] == {"role": "user", "content": "Hello"}, (
+                f"systemInstruction={bad!r} must be ignored, not crash"
+            )
+
 
 class TestTranslateRequestTools:
     """functionDeclarations → tools in Chat Completions format."""
