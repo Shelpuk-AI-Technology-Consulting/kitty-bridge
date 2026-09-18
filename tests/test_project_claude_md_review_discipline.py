@@ -8,7 +8,10 @@ itself and git's view of it (tracked, not ignored). The guard fails loudly
 when the file is missing, untracked, re-ignored, or rewritten without one of
 the four mandated review-resolution behaviours (PR-level summary comment,
 optional in-thread replies, enumerate-then-resolve fixed conversations, and
-the declined-conversation disposition).
+the declined-conversation disposition). The ignore-status check needs
+``git check-ignore --no-index``: git's default short-circuits tracked files
+out of the ignore consultation, so a plain check-ignore could not detect the
+re-ignore scenario this guard exists for.
 
 The anchors name the behaviours themselves, and are asserted inside the
 review-resolution section only, so copy edits around them do not churn CI and
@@ -94,9 +97,12 @@ class TestProjectClaudeMdShips:
 
     The ``.gitignore`` once carried a bare ``/CLAUDE.md`` line (commit
     ``b201181``, 2026-04-27, added without rationale in an unrelated
-    change), which made the KBR-286 instruction unshippable; ``git
-    check-ignore`` is the authoritative check because it evaluates every
-    ignore pattern form, not just a literal line match.
+    change), which made the KBR-286 instruction unshippable. ``git
+    check-ignore`` is the authoritative check — but only with ``--no-index``,
+    because git's default short-circuits tracked files out of the ignore
+    consultation entirely (so a tracked file with ``/CLAUDE.md`` re-added
+    to ``.gitignore`` would pass a plain ``check-ignore`` and silently
+    fail to ship on the next commit that drops the file from the index).
     """
 
     def test_the_file_exists_at_the_repo_root(self) -> None:
@@ -121,18 +127,24 @@ class TestProjectClaudeMdShips:
 
     def test_the_file_is_not_gitignored(self) -> None:
         """No ignore pattern matches the project CLAUDE.md."""
+        # --no-index is load-bearing: git's default short-circuits tracked
+        # files out of the ignore consultation, so a plain check-ignore on
+        # the tracked CLAUDE.md would exit 1 even with /CLAUDE.md re-added
+        # to .gitignore — the re-ignore scenario is exactly the one the
+        # guard exists to detect (KBR-286 review round 2).
         result = subprocess.run(
-            ["git", "check-ignore", "CLAUDE.md"],
+            ["git", "check-ignore", "--no-index", "CLAUDE.md"],
             cwd=_ROOT,
             capture_output=True,
             text=True,
         )
-        # Exit 0 means "ignored", 1 means "not ignored", 128 means git
-        # itself failed — only the middle state is acceptable.
+        # Exit 0 means "matched an ignore pattern", 1 means "matched
+        # nothing", 128 means git itself failed — only the middle state is
+        # acceptable.
         assert result.returncode == 1, (
             "CLAUDE.md is matched by .gitignore "
-            f"(git check-ignore exited {result.returncode}); the KBR-286 "
-            "instruction would silently stop shipping"
+            f"(git check-ignore --no-index exited {result.returncode}); "
+            "the KBR-286 instruction would silently stop shipping"
         )
 
 
