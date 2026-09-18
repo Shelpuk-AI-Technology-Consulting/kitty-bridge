@@ -64,6 +64,15 @@ anything. The complete discussion, with nothing omitted, is written to
 something it also prints an **index** of what went, one line per contribution
 with its kind, author, file and timestamp.
 
+**The span opens with a `# Snapshot` header: the instant the fetch began, and
+what it holds.** That instant is a strict lower bound on what this review can
+have seen — anything posted at or after it, **including replies written while
+this review runs**, is not in the span, not in the complete copy, and not
+anywhere you can read. **Never assert absence about the pull request**: "no
+author prose", "no answer", "nothing stands" are claims about the snapshot,
+and they must be written that way — as of the snapshot at its timestamp —
+with anything later treated as unknown, not silence.
+
 Use them together rather than reading the file whole: it runs to 160 kB on a
 long pull request, which is more than the specification you are already asked to
 read. **Before you re-raise a finding from an earlier round, `Grep` the complete
