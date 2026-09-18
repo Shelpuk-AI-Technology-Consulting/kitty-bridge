@@ -151,6 +151,75 @@ shell ─► kitty.cli.main.main
   opt-out from claude.ai MCP connectors, which suppresses the banner Claude Code prints when
   `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` shadow the user's claude.ai OAuth login.
 
+### 2.1 Launcher lifecycle and crash recovery (KBR-93, KBR-268)
+
+`launch_async` calls `adapter.prepare_launch(...)` before spawning and
+`adapter.cleanup_launch(...)` from both a `finally` block and an `atexit`
+handler (`cli/launcher.py:241-347`). `SIGKILL`, OOM, and power loss bypass
+both, which is what the crash-recovery tier below repairs; a `SIGTERM` landing
+in the pre-handler window has the same outcome and is accepted
+(`TEST_SUITE.md` §6.3.2). The two adapters patch different surfaces:
+
+- **Claude** (KBR-93) no longer patches any user-owned file: it writes a
+  per-session settings file passed as `--settings`, so the user-global
+  `~/.claude/settings.json` is only read (stale-value warning) and concurrent
+  sessions cannot disturb each other. Its backup trio
+  (`save/load/delete_settings_backup`) and `kitty cleanup`'s phase-1 exact
+  restore serve damage written by pre-per-session versions.
+- **Kilo** (KBR-268) must patch in place: Kilo CLI reads one global config,
+  `~/.config/kilo/kilo.json`, and has no per-session settings flag. kitty
+  injects a `provider.kitty` block (loopback bridge URL + session API key)
+  and overwrites the top-level `model` key with `kitty/<model>`.
+
+The Kilo crash-recovery contract, all of it marker-gated by
+`_kilo_kitty_values_present` (loopback `provider.kitty.baseURL`, or a
+top-level `model` prefixed `kitty/`; a remote-URL `provider.kitty` alone does
+**not** count — a user who named their own provider `kitty` must not have
+their config auto-restored):
+
+1. **Clean-capture backup.** `prepare_launch` writes the byte-exact original
+   to `~/.config/kitty/kilo-config-backup.json` before patching — but only
+   when the captured original carries no kitty markers. *Why:* without this
+   rule, the crash → relaunch sequence captures the *patched* file as the
+   "original" and silently destroys the only good backup
+   (system-design review blocker, 2026-09-18). The invariant this preserves:
+   **the backup file never contains kitty markers.** A malformed original
+   parses as `{}` and counts as clean — the user's bytes are still the honest
+   original.
+2. **Ownership-checked restore.** `cleanup_launch` restores (and deletes the
+   backup) only when the captured original is clean **and** the current
+   `kilo.json` is readable and marker-bearing. Polluted captured original
+   (a concurrent session's patch), clean current file (user hand-edit),
+   missing file, unreadable file → file and backup left alone. *Why
+   marker-presence rather than Claude's per-session injected values:* the
+   whole region kitty touches is kitty-owned, and the one case per-session
+   precision would add — restoring over a same-config sibling's patch — is
+   bounded (that patch is equally dead; the true original wins either way).
+   *Why not a `str`-subclass prepare contract like Claude's `_SessionSnapshot`:*
+   Kilo's adapter is new; carrying the injected values on the returned string
+   would buy precision this analysis shows is unobservable.
+3. **`kitty cleanup` Kilo arm.** `run_kilo_cleanup` (in `cleanup_cmd.py`,
+   called alongside `run_cleanup` from `_run_cleanup`; the worse exit code
+   wins): backup present → exact byte restore (`newline=""` on both legs, the
+   KBR-262 contract) when the current config carries markers or is
+   missing/unreadable; readable config without markers → the backup is stale,
+   delete it, config untouched; no backup → no-op. Restore I/O failures print
+   one `Error:` line and exit 1 — there is no heuristic phase to fall
+   through to. *Why the unreadable-config verdict is the deliberate opposite
+   of `cleanup_launch`'s:* a live session must never guess, so it leaves an
+   unreadable file alone; `kitty cleanup` is an explicit repair request, so
+   the exact backup wins.
+
+**Accepted residuals** (both documented, both the same class Claude accepts):
+a crash of a from-scratch session (no pre-existing `kilo.json`) leaves the
+kitty-only file behind — cleanup cannot distinguish it from user-authored
+content without a backup; and damage from pre-fix kitty versions (or after a
+hand-deleted backup) needs a manual fix. **Rejected alternative** (product
+owner, 2026-09-18): a heuristic strip arm for backupless damage — rejected
+because a backupless heuristic could remove `provider.kitty` but could never
+restore the overwritten `model` key, i.e. it can only half-repair (minimal-fix
+precedent KBR-260).
+
 ## 3. Surviving an SSH disconnect: `--tmux` on the Claude Code agent
 
 ### 3.1 What Claude Code's own `--tmux` does (read from the v2.1.269 binary, checked against live sessions)

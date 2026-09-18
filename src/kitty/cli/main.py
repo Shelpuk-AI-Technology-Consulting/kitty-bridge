@@ -485,9 +485,14 @@ def _run_doctor(profile_store: object) -> None:
 
 
 def _run_cleanup() -> None:
-    from kitty.cli.cleanup_cmd import run_cleanup
+    """Run both cleanup arms (Claude, then Kilo) and exit with the worse code.
 
-    exit_code = run_cleanup()
+    Both arms always run so one arm's failure cannot suppress the other's
+    repair (KBR-268); the exit code is the nonzero one when either arm fails.
+    """
+    from kitty.cli.cleanup_cmd import run_cleanup, run_kilo_cleanup
+
+    exit_code = max(run_cleanup(), run_kilo_cleanup())
     sys.exit(exit_code)
 
 

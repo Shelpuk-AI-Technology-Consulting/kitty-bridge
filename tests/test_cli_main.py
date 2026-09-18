@@ -122,13 +122,21 @@ class TestCLIIntegrationPassthrough:
 
 
 @contextlib.contextmanager
-def _cli_run(argv: list[str], *, backends: list[object], egress: object, cleanup_exit: int = 0):
+def _cli_run(
+    argv: list[str],
+    *,
+    backends: list[object],
+    egress: object,
+    cleanup_exit: int = 0,
+    kilo_exit: int = 0,
+):
     """Drive ``kitty.cli.main.main`` with substituted stores and a fixed egress result.
 
     ``main`` imports its collaborators inside the function body, so patching
     them on their source modules takes effect at call time. The profile store is
     substituted as well, so a test never reads the developer's real
-    ``profiles.json``.
+    ``profiles.json``. Both cleanup arms (Claude and Kilo, KBR-268) are patched,
+    so no test reaches the developer's real ``kilo.json`` either.
 
     Args:
         argv: Full ``sys.argv`` for the run, including the program name.
@@ -137,9 +145,10 @@ def _cli_run(argv: list[str], *, backends: list[object], egress: object, cleanup
         egress: An ``Exception`` instance to raise from ``resolve_egress``, or
             the value it should return.
         cleanup_exit: Exit code the patched ``run_cleanup`` returns.
+        kilo_exit: Exit code the patched ``run_kilo_cleanup`` returns.
 
     Yields:
-        The patched ``cleanup_cmd.run_cleanup`` mock.
+        The patched ``(run_cleanup, run_kilo_cleanup)`` mocks.
     """
     from unittest.mock import MagicMock, patch
 
@@ -161,14 +170,16 @@ def _cli_run(argv: list[str], *, backends: list[object], egress: object, cleanup
     store.get_all_backends.return_value = backends
     resolve = MagicMock(side_effect=egress) if isinstance(egress, Exception) else MagicMock(return_value=egress)
     run_cleanup = MagicMock(return_value=cleanup_exit)
+    run_kilo_cleanup = MagicMock(return_value=kilo_exit)
 
     with (
         patch("sys.argv", argv),
         patch("kitty.profiles.store.ProfileStore", return_value=store),
         patch("kitty.egress_store.resolve_egress", resolve),
         patch("kitty.cli.cleanup_cmd.run_cleanup", run_cleanup),
+        patch("kitty.cli.cleanup_cmd.run_kilo_cleanup", run_kilo_cleanup),
     ):
-        yield run_cleanup
+        yield run_cleanup, run_kilo_cleanup
 
 
 class TestRecoveryCommandReachability:
@@ -186,13 +197,14 @@ class TestRecoveryCommandReachability:
 
         broken = ValueError("stored gateway no longer resolves")
         with (
-            _cli_run(["kitty", "cleanup"], backends=[], egress=broken) as run,
+            _cli_run(["kitty", "cleanup"], backends=[], egress=broken) as (run, run_kilo),
             pytest.raises(SystemExit) as exc_info,
         ):
             main()
 
         assert exc_info.value.code == 0
         run.assert_called_once_with()
+        run_kilo.assert_called_once_with()
         assert "stored gateway no longer resolves" not in capsys.readouterr().err
         # The exemption skips the exit, not the install: no stale route leaks in.
         assert get_egress() is None
@@ -207,13 +219,17 @@ class TestRecoveryCommandReachability:
 
         Without ``egress`` here, narrowing ``main()``'s check back to
         ``== "cleanup"`` would keep the whole suite green.
+
+        For ``cleanup``, the test asserts both cleanup arms (Claude and Kilo,
+        KBR-268) fire — narrow wins on the guard would otherwise keep the
+        whole suite green by only firing one arm.
         """
         from unittest.mock import patch
 
         from kitty.cli.main import main
 
         with (
-            _cli_run(["kitty", command], backends=[], egress=ValueError("gateway gone")) as run,
+            _cli_run(["kitty", command], backends=[], egress=ValueError("gateway gone")) as (run, run_kilo),
             patch("kitty.cli.egress_cmd.run_egress_menu") as menu,
             contextlib.suppress(SystemExit),
         ):
@@ -222,6 +238,10 @@ class TestRecoveryCommandReachability:
         # Reaching the command at all is the claim; only `cleanup` exits.
         reached = run if command == "cleanup" else menu
         reached.assert_called_once()
+        if command == "cleanup":
+            run_kilo.assert_called_once_with()
+        else:
+            run_kilo.assert_not_called()
         assert "gateway gone" not in capsys.readouterr().err
 
     def test_cleanup_exit_code_comes_from_run_cleanup(self) -> None:
@@ -236,6 +256,29 @@ class TestRecoveryCommandReachability:
 
         assert exc_info.value.code == 3
 
+    def test_cleanup_exit_code_is_the_worst_of_both_arms(self) -> None:
+        """The process exit code is nonzero when either cleanup arm fails.
+
+        With the Kilo arm (KBR-268) added, the exit code is the worse of the
+        two arm exit codes — a Claude failure must not hide a Kilo failure,
+        nor vice versa.
+        """
+        from kitty.cli.main import main
+
+        with (
+            _cli_run(
+                ["kitty", "cleanup"],
+                backends=[],
+                egress=ValueError("boom"),
+                cleanup_exit=2,
+                kilo_exit=5,
+            ),
+            pytest.raises(SystemExit) as exc_info,
+        ):
+            main()
+
+        assert exc_info.value.code == 5
+
     def test_cleanup_runs_when_egress_resolves_normally(self) -> None:
         """The exemption must not skip installing a healthy egress route."""
         from unittest.mock import MagicMock
@@ -245,12 +288,13 @@ class TestRecoveryCommandReachability:
 
         sentinel = MagicMock(name="egress-config")
         with (
-            _cli_run(["kitty", "cleanup"], backends=[], egress=sentinel) as run,
+            _cli_run(["kitty", "cleanup"], backends=[], egress=sentinel) as (run, run_kilo),
             pytest.raises(SystemExit),
         ):
             main()
 
         run.assert_called_once_with()
+        run_kilo.assert_called_once_with()
         assert get_egress() is sentinel
 
     def test_non_recovery_command_still_fails_closed(self, capsys: pytest.CaptureFixture[str]) -> None:
@@ -258,7 +302,7 @@ class TestRecoveryCommandReachability:
         from kitty.cli.main import main
 
         with (
-            _cli_run(["kitty", "doctor"], backends=[object()], egress=ValueError("bad proxy URL")) as run,
+            _cli_run(["kitty", "doctor"], backends=[object()], egress=ValueError("bad proxy URL")) as (run, run_kilo),
             pytest.raises(SystemExit) as exc_info,
         ):
             main()
@@ -266,6 +310,7 @@ class TestRecoveryCommandReachability:
         assert exc_info.value.code == 1
         assert "bad proxy URL" in capsys.readouterr().err
         run.assert_not_called()
+        run_kilo.assert_not_called()
 
 
 class TestNonTTYExit:
