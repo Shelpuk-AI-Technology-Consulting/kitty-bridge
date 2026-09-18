@@ -15,7 +15,9 @@ bridge + recorder is the L2 contract test, per TEST_SUITE.md §6.2.2.
 **Why the gap between scenarios and the falsification suite.** The
 falsification module feeds hand-built bytes; this one drives a real
 ``BridgeFixture`` and reads what reached the client. A bridge regression that
-changed the close-out sequence (server.py:5909-5975) would only show here;
+changed the close-out sequence (the transport-drop branch of
+``BridgeServer._stream_messages``; search server.py — line numbers drift)
+would only show here;
 a regression in the grammar's rules would only show in the falsification
 suite. Both must stay green.
 """
