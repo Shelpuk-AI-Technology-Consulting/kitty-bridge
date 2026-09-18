@@ -447,7 +447,22 @@ other non-Messages wire behaves byte-identically to the pre-KBR-232 code.
   logs no completion); pre-existing behaviour shared with the converted
   route. The reasoning asymmetry the KBR-248 record called deliberate is
   closed by KBR-277 below; pinned streaming-side by
-  `test_a_reasoning_only_raw_cc_prefix_releases_the_hold`. Tests:
+  `test_a_reasoning_only_raw_cc_prefix_releases_the_hold`. **Known limit,
+  deliberate for this ticket (KBR-285 owns the widening):** the widened hold
+  makes `_cc_chunk_carries_content`'s three-shape content set binding for
+  raw-CC chunks, and the set counts only non-empty string `content`, a
+  non-empty `tool_calls` list, and non-empty string `reasoning_content`. An
+  OpenAI **refusal-only** completion (`delta.refusal` carrying text,
+  `content` null) — a normal shape on the provider this ticket names first —
+  is therefore held as non-content, takes the ladder, and ends in the D4
+  terminal after the retry schedule, where pre-KBR-276 the refusal text
+  reached the client verbatim; legacy dict `function_call` deltas and
+  list-typed multimodal `content` deltas misclassify the same way. The
+  non-streaming detector `_is_empty_cc_response` shares the narrow set, so
+  the gap is consistent across the route rather than a new asymmetry —
+  widening the classifier is a product decision on what "content" means for
+  every Chat Completions route, the same class of trade KBR-248 deferred,
+  and is filed as KBR-285. Tests:
   `tests/bridge/test_raw_cc_empty_hold.py` (raw-CC mirror of the KBR-248
   suite).
 - **KBR-277 closed the non-streaming half.**

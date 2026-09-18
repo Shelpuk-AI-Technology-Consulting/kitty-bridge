@@ -216,7 +216,7 @@ async def _stream(
     model: str,
     upstream_bodies: list[tuple[int, str]],
     monkeypatch=None,
-) -> tuple[BridgeServer, int, str, int]:
+) -> tuple[BridgeServer, int, str, int, list[dict]]:
     """POST a streaming request through a real bridge against scripted upstream responses.
 
     Args:
@@ -452,15 +452,16 @@ async def test_an_exhausted_raw_cc_empty_ladder_ends_in_the_d4_terminal(monkeypa
     alone — followed by ``[DONE]``, and the held preamble never reaches it.
 
     Args:
-        monkeypatch: Pytest fixture, collapses the retry backoff and pins the
-            ladder to exactly two attempts so the harness's three mock
-            callbacks suffice.
+        monkeypatch: Pytest fixture, collapses the retry backoff and pins
+            ``_MAX_RETRIES = 0`` so the ladder runs three attempts against
+            the harness's three mock callbacks (the last attempt exhausts).
     """
-    # The harness registers ``len(upstream_bodies) + 2`` mock callbacks —
-    # three, for a single scripted body. Trim the ladder so the second (final)
-    # attempt is the one that exhausts.
+    # Trim ``_MAX_RETRIES`` to 0 so ``_original_max_attempts = 1``; with the
+    # harness's collapsed ``_EMPTY_FINAL_DELAYS = [0.01, 0.01]`` the ladder
+    # then runs three attempts (``max_attempts = 1 + 2``) against the three
+    # callbacks the harness registers, and the last attempt exhausts into
+    # the D4 terminal.
     monkeypatch.setattr(server_module, "_MAX_RETRIES", 0)
-    monkeypatch.setattr(server_module, "_EMPTY_FINAL_DELAYS", [0.01])
     _server, status, client_body, calls, _bodies = await _stream(
         OpenAIAdapter, "gpt-5.2", [(200, _empty_stream())], monkeypatch
     )

@@ -68,9 +68,11 @@ branch over; its own ticket.
   byte equality holds because the raw path's translator is identity and the
   handler re-emits `f"{line}\n\n"` verbatim) and AC-3 pin the no-regression
   surface.
-- The D4-exhaustion test pins `_MAX_RETRIES = 0` +
-  `_EMPTY_FINAL_DELAYS = [0.01]` → `max_attempts = 2` against the harness's
-  `len(bodies) + 2 = 3` registered aioresponses callbacks.
+- The D4-exhaustion test pins `_MAX_RETRIES = 0` (the
+  `_EMPTY_FINAL_DELAYS` pin the test's first draft carried was dead — the
+  harness's `_stream` overwrites it with `[0.01, 0.01]`, so the ladder
+  runs three attempts against the harness's three mock callbacks; the last
+  attempt exhausts into the D4 terminal).
 - Reviewers (system-design-reviewer, then code-reviewer APPROVE) surfaced:
   the custom-transport scope-out (now recorded in §5.4), the stale
   `_cc_chunk_carries_content` docstring (fixed), the usage-note clause

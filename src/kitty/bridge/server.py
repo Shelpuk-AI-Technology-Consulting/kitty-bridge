@@ -7808,9 +7808,13 @@ class BridgeServer:
                     # native Messages passthrough. KBR-248 gated the hold on
                     # ``stream_converter is not None`` and deliberately left the
                     # raw-CC upstreams' skeleton behaviour alone; KBR-276
-                    # removed the gate, so an empty completion from any
+                    # removed the gate, so a completion the classifier judges
+                    # content-free (``_cc_chunk_carries_content``) from any
                     # plain-POST provider is now pre-emission and the ladder
-                    # fires. Capped at ``MAX_HELD_BYTES`` (D5): an upstream
+                    # fires. The classifier's set is the KBR-285 follow-up's
+                    # scope: ``refusal``/legacy ``function_call``/list
+                    # ``content`` deltas do not count today (§5.4 known
+                    # limit). Capped at ``MAX_HELD_BYTES`` (D5): an upstream
                     # that trickles empty-content deltas forever must not grow
                     # ``held`` without limit.
                     held: list[bytes] = []
