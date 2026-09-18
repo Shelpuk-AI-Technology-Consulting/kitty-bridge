@@ -106,6 +106,14 @@ Gates: review-script suite 738/738 OK · `ruff check .` — zero new errors
 drift; this PR's files clean) · `lint-imports` 5 kept, 0 broken ·
 `mypy src/kitty` 94 files, no issues.
 
+Upstreaming consideration (review round 1, PR #228): the snapshot header
+closes the same stale-snapshot failure class in `kindly-web-search-mcp-server`'s
+own reviewer, which `rules/ci.md` names as the origin of the verbatim-carried
+scripts — `fetch_conversation.py` began as one of those carries and has since
+grown local extensions (this header among them). Filing the header patch
+upstream is worthwhile and deliberately **not** done here: it is a separate
+act with its own review cycle, out of scope for this ticket.
+
 ## Cross-references
 
 * `.github/review/scripts/fetch_conversation.py` — `render`, `main`.
