@@ -362,6 +362,9 @@ def test_main_exits_zero_when_a_group_is_fully_tested(
             # (KBR-266 lifted this group out of DEFERRED_GROUPS once
             # server.py's other defs/classes were pragma-marked).
             "kitty.bridge.server.xǁBridgeServerǁ_compact_messages__mutmut_1": 1,
+            # bedrock_transport: the KBR-89 (T-H2) P18 builder, a specific
+            # method on BedrockAdapter (added after KBR-89 landed).
+            "kitty.providers.bedrock.xǁBedrockAdapterǁ_bedrock_body__mutmut_1": 1,
         },
     )
     rc = agg.main()
@@ -406,6 +409,9 @@ def test_render_markdown_table_renders_but_does_not_fail_on_unmatched(
             # (KBR-266 lifted this group out of DEFERRED_GROUPS once
             # server.py's other defs/classes were pragma-marked).
             "kitty.bridge.server.xǁBridgeServerǁ_compact_messages__mutmut_1": 1,
+            # bedrock_transport: the KBR-89 (T-H2) P18 builder, a specific
+            # method on BedrockAdapter.
+            "kitty.providers.bedrock.xǁBedrockAdapterǁ_bedrock_body__mutmut_1": 1,
             # Plus one unscoped mutant — its module is not in the
             # registry, so it lands in __unmatched__ with no_tests=1
             # (a finished run, just outside scope).

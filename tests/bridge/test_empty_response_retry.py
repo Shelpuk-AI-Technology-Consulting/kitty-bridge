@@ -288,6 +288,98 @@ class TestEmptyResponseDetection:
         server = _make_server(1)
         assert server._is_empty_cc_response({"type": "message"}) is True
 
+    # KBR-277: the Chat Completions arm reads `message.reasoning_content` the
+    # same way the streaming hold's `_cc_chunk_carries_content` reads
+    # `delta.reasoning_content` — the two paths must agree on what a
+    # reasoning-only reply is, so a reasoning-only non-streaming POST is not
+    # retried.
+
+    def test_reasoning_content_only_is_not_empty(self):
+        """KBR-277: a reply whose only content is `reasoning_content` is not empty."""
+        server = _make_server(1)
+        assert (
+            server._is_empty_cc_response(
+                {
+                    "choices": [{"message": {"content": None, "reasoning_content": "thinking hard"}}],
+                }
+            )
+            is False
+        )
+
+    def test_empty_reasoning_content_string_is_empty(self):
+        """An empty `reasoning_content` string is not content (mirrors streaming `!= ""`)."""
+        server = _make_server(1)
+        assert (
+            server._is_empty_cc_response(
+                {
+                    "choices": [{"message": {"content": None, "reasoning_content": ""}}],
+                }
+            )
+            is True
+        )
+
+    def test_whitespace_reasoning_content_is_not_empty(self):
+        """Whitespace-only thinking still occupies a thinking block (mirrors streaming `!= ""`, NOT a `.strip()`)."""
+        server = _make_server(1)
+        assert (
+            server._is_empty_cc_response(
+                {
+                    "choices": [{"message": {"content": None, "reasoning_content": "   "}}],
+                }
+            )
+            is False
+        )
+
+    def test_non_string_reasoning_content_is_empty(self):
+        """A non-string `reasoning_content` value carries no content (mirrors streaming `isinstance(..., str)`)."""
+        server = _make_server(1)
+        assert (
+            server._is_empty_cc_response(
+                {
+                    "choices": [{"message": {"content": None, "reasoning_content": 42}}],
+                }
+            )
+            is True
+        )
+
+    def test_reasoning_content_alongside_text_content_is_not_empty(self):
+        """Content already wins on its own; reasoning adds nothing (no regression)."""
+        server = _make_server(1)
+        assert (
+            server._is_empty_cc_response(
+                {
+                    "choices": [{"message": {"content": "hi", "reasoning_content": "thinking"}}],
+                }
+            )
+            is False
+        )
+
+    def test_reasoning_content_alongside_tool_calls_is_not_empty(self):
+        """Tool calls already win on their own; reasoning adds nothing (no regression)."""
+        server = _make_server(1)
+        assert (
+            server._is_empty_cc_response(
+                {
+                    "choices": [
+                        {"message": {"content": None, "tool_calls": [{"id": "t1"}], "reasoning_content": "thinking"}}
+                    ],
+                }
+            )
+            is False
+        )
+
+    def test_missing_reasoning_content_key_is_empty(self):
+        """A reply with no `reasoning_content` key is unchanged by the fix (empty content → empty)."""
+        server = _make_server(1)
+        assert (
+            server._is_empty_cc_response(
+                {
+                    "choices": [{"message": {"content": None}}],
+                }
+            )
+            is True
+        )
+
 
 class TestEmptyResponseNonBalancing:
     """Retry logic for single-profile setup (no balancing)."""
@@ -314,6 +406,58 @@ class TestEmptyResponseNonBalancing:
                 assert resp.status == 200
                 body = await resp.json()
                 assert "Hello!" in body["content"][0]["text"]
+
+        await server.stop_async()
+
+    @pytest.mark.asyncio
+    async def test_non_streaming_reasoning_only_response_succeeds_first_attempt(self, monkeypatch):
+        """KBR-277 AC-1 — non-streaming mirror of KBR-248 AC-3.
+
+        The streaming pin this test mirrors is
+        ``tests/bridge/test_messages_wire_translated_streams.py::
+        test_a_reasoning_only_prefix_releases_the_hold_and_is_not_retried``.
+        A non-streaming Chat Completions POST whose only content is
+        ``message.reasoning_content`` returns the model reply on the first
+        attempt — the ladder does not retry it. Pre-fix the detector judged
+        such a reply empty, so this request burned the whole retry schedule.
+
+        Args:
+            monkeypatch: Pytest fixture, collapses the retry backoff.
+        """
+        monkeypatch.setattr(_server_module, "_EMPTY_RETRY_DELAYS", [0.0, 0.0])
+        monkeypatch.setattr(_server_module, "_EMPTY_FINAL_DELAYS", [0.0, 0.0])
+
+        server = _make_server(1)
+        port = await server.start_async()
+        url = f"http://127.0.0.1:{port}/v1/chat/completions"
+
+        request_body = {
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": False,
+        }
+        reasoning_only = {
+            "id": "chatcmpl-reasoning",
+            "model": "test-model",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {"role": "assistant", "content": None, "reasoning_content": "thinking hard"},
+                    "finish_reason": "stop",
+                }
+            ],
+        }
+
+        with aioresponses(passthrough=["http://127.0.0.1"]) as m:
+            m.post("https://api.example.com/v1/chat/completions", payload=reasoning_only)
+
+            async with aiohttp.ClientSession() as session, session.post(url, json=request_body) as resp:
+                assert resp.status == 200
+                body = await resp.json()
+                assert body["choices"][0]["message"]["reasoning_content"] == "thinking hard"
+            # One registered response consumed by exactly one upstream call —
+            # a retry would have hit an unregistered request and raised.
+            assert list(m.requests.values())[0] and len(list(m.requests.values())[0]) == 1
 
         await server.stop_async()
 
