@@ -12,7 +12,6 @@
 *.whl
 *.tar.gz
 /.research/
-/CLAUDE.md
 /.references/
 *.pyc
 **/__pycache__/
