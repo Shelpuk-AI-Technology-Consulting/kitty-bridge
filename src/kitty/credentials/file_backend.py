@@ -15,7 +15,7 @@ from typing import Any
 import filelock
 from platformdirs import user_config_dir
 
-from kitty.credentials.store import CredentialBackend
+from kitty.credentials.store import CredentialBackend, CredentialError
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +38,19 @@ class FileBackend(CredentialBackend):
         self._lock = filelock.FileLock(str(path) + ".lock", timeout=5)
 
     def get(self, ref: str) -> str | None:
+        """Retrieve a credential by reference.
+
+        Returns:
+            The credential value, or ``None`` when the reference is absent.
+            ``None`` is reserved for "no such credential": a stored value that no
+            longer decodes raises :class:`CredentialError` (KBR-87), so store
+            damage is distinguishable from a missing key at this boundary.
+
+        Raises:
+            CredentialError: When the reference exists but its stored value is
+                undecodable — not valid base64, not decodable as UTF-8, or not a
+                string.
+        """
         try:
             with self._lock:
                 data = self._read_raw()
@@ -47,10 +60,18 @@ class FileBackend(CredentialBackend):
         encoded = data.get(ref)
         if encoded is None:
             return None
+        # Corruption is store damage, not absence (KBR-87): b64decode(validate=True)
+        # rejects non-alphabet bytes that validate=False would silently truncate,
+        # and (ValueError, TypeError) covers every measured shape — binascii.Error
+        # and UnicodeDecodeError both subclass ValueError; TypeError covers a
+        # hand-edited non-string value.
         try:
-            return base64.b64decode(encoded).decode("utf-8")
-        except Exception:
-            return None
+            return base64.b64decode(encoded, validate=True).decode("utf-8")
+        except (ValueError, TypeError) as exc:
+            raise CredentialError(
+                f"Credential for ref {ref!r} is corrupt ({type(exc).__name__}): "
+                "restore it from a backup or re-enter the credential."
+            ) from exc
 
     def set(self, ref: str, value: str) -> None:
         with self._lock:

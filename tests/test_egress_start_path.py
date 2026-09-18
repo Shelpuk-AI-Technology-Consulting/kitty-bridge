@@ -213,3 +213,57 @@ class TestReturnDiscardedFalsification:
             "the SSO-mode supports_egress check must still return False — the patch is "
             "on bridge_runner's *use*, not on BedrockAdapter"
         )
+
+
+# ── KBR-87 — corruption receiver on this start path ────────────────────────
+
+
+class TestCorruptStoredCredential:
+    """KBR-87: a corrupt stored value exits cleanly on this start path, not a traceback.
+
+    The single-profile branch of ``bridge_runner.main`` reads the credential through
+    ``cred_store.get``; under the corruption contract (SYSTEM_DESIGN.md §11.2) a
+    present-but-undecodable value raises ``CredentialError``. The receiver must turn
+    that into the same clean stderr message + exit as the missing-key branch: on the
+    service-managed paths the child's output lands in the service journal, where a
+    raw traceback is exactly the KBR-154 diagnostic family this ticket closes.
+    """
+
+    def test_corrupt_value_exits_non_zero_with_clean_stderr_and_no_socket(
+        self,
+        start_path: dict,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """``CredentialError`` from the store becomes ``Error: …`` + exit, no bridge."""
+        from kitty import bridge_runner
+        from kitty.credentials.store import CredentialError
+
+        class _CorruptCredentialStore:
+            def __init__(self, backends: object = None) -> None:
+                pass
+
+            def get(self, ref: str) -> str:
+                raise CredentialError(
+                    f"Credential for ref {ref!r} is corrupt (binascii.Error): "
+                    "restore it from a backup or re-enter the credential."
+                )
+
+        # `main()` imports the store lazily from its source module, so patch there
+        # (the same binding the fixture patches for the control flow above).
+        start_path["monkeypatch"].setattr(
+            "kitty.credentials.store.CredentialStore", _CorruptCredentialStore
+        )
+
+        with pytest.raises(SystemExit) as exc_info:
+            bridge_runner.main()
+
+        assert exc_info.value.code != 0, "a corrupt credential must not start the bridge"
+
+        err = capsys.readouterr().err
+        assert "corrupt" in err, f"stderr must name the corruption, got {err!r}"
+        assert "dummy-ref" in err, f"the corruption message names the ref, got {err!r}"
+
+        assert start_path["captured"]["bridge_server_init_calls"] == 0, (
+            "BridgeServer.__init__ was reached under a corrupt credential: a listening "
+            "socket would have been bound"
+        )

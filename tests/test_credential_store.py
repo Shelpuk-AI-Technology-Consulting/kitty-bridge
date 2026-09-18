@@ -1,12 +1,14 @@
 """Tests for credentials/store.py, keyring_backend.py, file_backend.py."""
 
+import base64
+import json
 import uuid
 from unittest.mock import MagicMock
 
 import pytest
 
 from kitty.credentials.file_backend import FileBackend
-from kitty.credentials.store import CredentialBackend, CredentialNotFoundError, CredentialStore
+from kitty.credentials.store import CredentialBackend, CredentialError, CredentialNotFoundError, CredentialStore
 from kitty.profiles.schema import Profile
 
 VALID_UUID = str(uuid.uuid4())
@@ -102,6 +104,62 @@ class TestFileBackend:
         path.write_text("{invalid")
         backend = FileBackend(path=path)
         assert backend.get("any-ref") is None
+
+    def test_absent_ref_returns_none_when_other_refs_exist(self, tmp_path):
+        """An absent ref reads as ``None`` even beside stored ones — the "no credential" half."""
+        backend = FileBackend(path=tmp_path / "creds.json")
+        backend.set("ref1", "my-secret-key")
+        assert backend.get("missing-ref") is None
+
+    def test_explicit_json_null_reads_as_absent(self, tmp_path):
+        """A hand-written ``null`` value is the absent spelling, not corruption.
+
+        ``set()`` never writes null and ``data.get(ref)`` returns ``None`` for it,
+        so it takes the absent branch by construction. Pinned so a future refactor
+        of the absent-check cannot silently reclassify it (KBR-87 review round 1).
+        """
+        path = tmp_path / "creds.json"
+        path.write_text(json.dumps({"ref1": None}), encoding="utf-8")
+        backend = FileBackend(path=path)
+        assert backend.get("ref1") is None
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            "@@@ not base64 @@@",  # not valid base64 (validate=True rejects the alphabet)
+            "mötley-key",  # a non-ASCII string — rejected before any alphabet check
+            base64.b64encode(b"\xff\xfe\xfa").decode("ascii"),  # valid base64, invalid UTF-8
+            123,  # a hand-edited non-string value
+        ],
+    )
+    def test_corrupt_stored_value_raises_credential_error(self, tmp_path, raw):
+        """A present-but-undecodable value raises ``CredentialError`` naming the ref.
+
+        The KBR-87 contract (SYSTEM_DESIGN.md §11.2): ``None`` means absent;
+        ``CredentialError`` means present-but-undecodable. Before the contract,
+        every one of these shapes silently read as ``None`` and surfaced to the
+        user as "no API key for profile X" — store damage disguised as a missing
+        key (KBR-154 diagnostic family).
+        """
+        path = tmp_path / "creds.json"
+        path.write_text(json.dumps({"ref1": raw}), encoding="utf-8")
+        backend = FileBackend(path=path)
+
+        with pytest.raises(CredentialError, match="ref1"):
+            backend.get("ref1")
+
+    def test_corrupt_ref_does_not_disturb_other_refs(self, tmp_path):
+        """Corruption is per-ref: a damaged ref1 leaves a valid ref2 readable."""
+        path = tmp_path / "creds.json"
+        path.write_text(
+            json.dumps({"ref1": "@@@ not base64 @@@", "ref2": base64.b64encode(b"fine").decode("ascii")}),
+            encoding="utf-8",
+        )
+        backend = FileBackend(path=path)
+
+        assert backend.get("ref2") == "fine"
+        with pytest.raises(CredentialError, match="ref1"):
+            backend.get("ref1")
 
 
 class TestKeyringBackend:

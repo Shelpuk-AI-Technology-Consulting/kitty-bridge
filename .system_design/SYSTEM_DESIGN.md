@@ -1030,3 +1030,137 @@ kbr158_delete_dead_profile_base_url.md` carries the same note for the next reade
   post-deletion state.
 
 
+
+## 11. Credential store
+
+Traces to [KBR-87](https://shelpuk.atlassian.net/browse/KBR-87) (T-G12, §6.2.4's `keyring`
+row + the KBR-154 scope addition). This section is the To Be state of
+`src/kitty/credentials/`; TEST_SUITE.md §6.2.4 owns the dependency-contract test for
+`keyring`.
+
+### 11.1 Components
+
+- **`store.py`** — `CredentialBackend` (abstract `get`/`set`/`delete`), `CredentialError`,
+  `CredentialNotFoundError`, and `CredentialStore`: a fallback chain; `get` returns the
+  first non-`None` result (`.strip()`ped); `resolve` raises `CredentialNotFoundError` when
+  every backend returns `None`. **A backend error is a stop, not a miss:**
+  `CredentialStore.get` catches nothing, so `None` advances the fallback chain while a
+  raised `CredentialError` aborts it. With today's single-backend chains the difference is
+  unobservable; the invariant is recorded so the ticket that wires a second backend
+  inherits it rather than rediscovers it.
+- **`file_backend.py`** — `FileBackend`: JSON `{ref: base64}` under
+  `platformdirs.user_config_dir("kitty")/credentials.json` (or an explicit path), guarded
+  by a `filelock` (5 s timeout, F38), written atomically (`mkstemp` + `os.replace`) with
+  POSIX `0600`/`0700`. F37: a file that is not valid **JSON** is backed up
+  (`*.corrupt.<ts>.<pid>`) and the store restarts empty behind a CRITICAL log. **The F37
+  guarantee is narrower than "file corruption":** a valid-JSON-non-dict file is silently
+  treated as `{}` (no backup, no log) and an invalid-UTF-8 file raises `UnicodeDecodeError`
+  out of `read_text`, which no handler catches. Both are pre-existing KBR-154 residuals,
+  recorded here rather than silently absorbed into this ticket's contract.
+- **`keyring_backend.py`** — `KeyringBackend`: delegates to the `keyring` package with
+  service name `"kitty"`. `get` swallows every exception to `None`; `set` wraps failures in
+  `CredentialError` (F39 — headless Linux without D-Bus raises `NoKeyringError`); `delete`
+  suppresses `keyring.errors.PasswordDeleteError` only. **Dormant by construction:** no
+  production site wires it into a `CredentialStore` — every construction site uses
+  `CredentialStore(backends=[FileBackend(...)])`. It is the exported OS-native option; the
+  §6.2.4 contract pins what it would get from `keyring` the day it is wired.
+
+### 11.2 The corruption contract (KBR-87)
+
+`FileBackend.get` distinguishes **absent** from **corrupt**:
+
+- ref not in the store → `None` ("no credential");
+- ref present but the stored value is not decodable → `CredentialError` naming the ref,
+  chained (`raise ... from`) from the cause. Undecodable means one of the four measured
+  shapes: not valid base64 (`binascii.Error`), a non-ASCII string (`ValueError` —
+  `b64decode(validate=True)` rejects it before any alphabet check), decoded bytes not
+  valid UTF-8 (`UnicodeDecodeError`), or a non-string stored value (`TypeError` — the file
+  is user-editable JSON). An explicit JSON `null` value is the **absent** spelling, not
+  corruption: `set()` never writes it and `data.get(ref)` returns `None` for it, so it
+  takes the absent branch by construction — pinned by test. `binascii.Error` and `UnicodeDecodeError` both subclass
+  `ValueError`, so the handler is `except (ValueError, TypeError)` — exactly as narrow as
+  naming the subtypes, and complete over every measured shape.
+
+**Where the signal lands — per call site.** The raise is only half the contract; a signal
+nobody receives is a traceback on every startup path:
+
+- **`egress_store.resolve_egress`** — catches `CredentialError` around the stored-gateway
+  password read and re-raises its existing `ValueError` (chained, cause text included).
+  This is load-bearing: `cli/main.py` wraps `resolve_egress` in `except ValueError` with a
+  deliberate carve-out keeping `kitty egress` / `kitty cleanup` reachable when the stored
+  gateway is broken — without this receiver, `kitty egress`, the very command the message
+  tells the user to run, would die at startup.
+- **`bridge_runner.py`** (both branches — single profile and balancing members) — the
+  same `Error: …` + exit treatment as `cli/main.py`; this is the background-bridge
+  startup path, where the child's output lands in the service journal and a raw
+  traceback is precisely the diagnostic failure the contract exists to prevent.
+  (Added in review round 1 — the first receiver survey grepped `cli/` only and missed
+  these two sites; the omission was an oversight, not a scoping decision.)
+- **`cli/launcher.py`** — the launch path's `except CredentialNotFoundError` widens to
+  include `CredentialError`: same clean `Error: …` + exit 1.
+- **`cli/main.py`** (three profile-resolution sites) — `cred_store.get` is wrapped so the
+  corruption message replaces what would otherwise be a raw traceback where today a clean
+  `No API key found for profile X` + exit fires.
+- **`cli/profile_cmd._find_reusable_auth_ref`** — a corrupt profile is skipped (treated as
+  not reusable) so the setup wizard stays reachable; re-entry *is* the recovery.
+- **`cli/doctor_cmd.py`** (both credential checks) — corruption is reported as a failed
+  check with the corruption message; the diagnostic tool must not crash on the condition it
+  exists to diagnose.
+
+**Why fail-loud rather than warn-and-return-None.** Collapsing "damaged" into "absent"
+surfaces both as `CredentialNotFoundError` ("no API key for profile X"), which sends the
+user to re-enter a key they already have — the KBR-134/KBR-154 diagnostic family, where the
+misleading message costs more than the underlying fault. A CRITICAL-log precedent already
+exists for file-level corruption (F37); per-ref corruption now raises through the same
+exception hierarchy `KeyringBackend.set` already uses (F39). *Product owner decision,
+2026-09-19 (raise `CredentialError`; warn-and-None and a sentinel result type were the
+rejected alternatives — the former is indistinguishable at the boundary, the latter breaks
+the `str | None` interface at five call sites).*
+
+**Why `validate=True`.** `set` writes pure base64 alphabet, so `validate=True` accepts
+everything the store itself writes and rejects hand-edited or damaged values that the
+default silently truncates into plausible garbage.
+
+### 11.3 The keyring dependency contract
+
+§6.2.4's rule for a dependency whose behaviour varies by platform **by design** ("where no
+stable neighbour exists") is to record which mechanism was chosen. For `keyring` the
+chosen mechanism is: the declared floor `>=23.0` **plus a contract on the resolution
+mechanics**, not on live native services. `tests/test_keyring_backend_contract.py` (L2)
+pins, all measured against the installed release:
+
+1. the module-level API (`get_password`/`set_password`/`delete_password`) delegates to
+   `keyring.get_keyring()` — so pinning `get_keyring()` pins where credentials go;
+2. `PYTHON_KEYRING_BACKEND` selects the backend (`keyring.core.load_env()` — a public
+   module function — is pinned, not the private `_detect_backend` ordering);
+3. resolution always lands on a `keyring.backends.*` class — on every platform, including
+   headless Linux where it is the `fail.Keyring` fallback;
+4. per-platform native class where the native service is reachable: macOS Keychain
+   (developer machines only unless pyobjc is installed — the bare `keyring>=23.0`
+   dependency does not carry it, so on the macOS CI leg this arm skips with a stated
+   reason rather than pretending coverage), Windows Credential Manager (pywin32-ctypes is
+   a base dependency, so the Windows leg genuinely asserts);
+5. `keyring.errors.PasswordDeleteError` ⊂ `KeyringError` — the exception family
+   `KeyringBackend.delete` suppresses.
+
+**Deliberately not asserted:** a specific native class on Linux unconditionally. On a
+D-Bus-equipped developer box the SecretService backend classifies and resolution lands on
+the chainer, not `fail.Keyring`; asserting the fallback unconditionally would be red for
+environmental, not contract, reasons — the mirrored form of the trap the ipaddress
+contract's docstring records. The fallback is asserted only behind a SecretService-
+unavailable guard.
+
+### 11.4 Verification
+
+- `tests/test_keyring_backend_contract.py` (L2) — the five §6.2.4 pins above plus the
+  no-op self-guard (sync-test count floor; the aiohttp twin's guard counts coroutine
+  methods and does not transfer verbatim).
+- `tests/test_credential_store.py::TestFileBackend` — the corruption arms (parametrised:
+  invalid base64, non-ASCII string, invalid UTF-8, non-string), absent-vs-corrupt, and
+  per-ref isolation; the F37 backup tests in
+  `tests/credentials/test_stage7_credentials.py` are unchanged and stay green.
+- `tests/test_egress_store.py` — the corrupt stored gateway password raises the documented
+  `ValueError` (chained, naming `kitty egress`), the twin of the existing
+  missing-credential test.
+- `tests/test_doctor_cmd.py` / the profile-wizard reuse scan — corruption reported, flow
+  stays reachable.

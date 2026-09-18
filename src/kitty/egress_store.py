@@ -22,6 +22,7 @@ from typing import Any
 import filelock
 from platformdirs import user_config_dir
 
+from kitty.credentials.store import CredentialError
 from kitty.egress import ENV_PROXY, EgressConfig, parse_proxy_url
 
 logger = logging.getLogger(__name__)
@@ -211,7 +212,8 @@ def resolve_egress(
 
     Raises:
         ValueError: If a configured proxy URL is malformed, or a stored gateway
-            references a password that can no longer be resolved.
+            references a password that can no longer be resolved — including one
+            whose stored value is corrupt (KBR-87).
     """
     # 1. Explicit flag wins over everything.
     if cli_proxy and cli_proxy.strip():
@@ -229,7 +231,18 @@ def resolve_egress(
 
     password: str | None = None
     if record.auth_ref:
-        password = cred_store.get(record.auth_ref) if cred_store is not None else None
+        # A corrupt stored password must surface as this same ValueError, not as a
+        # raw CredentialError: cli/main.py wraps resolve_egress in `except
+        # ValueError` with a carve-out keeping `kitty egress` / `kitty cleanup`
+        # reachable — `kitty egress` is the very command the message tells the
+        # user to run, so it cannot be the one that crashes (KBR-87).
+        try:
+            password = cred_store.get(record.auth_ref) if cred_store is not None else None
+        except CredentialError as exc:
+            raise ValueError(
+                f"Egress gateway {record.proxy_url} needs a password but its stored credential "
+                f"({record.auth_ref}) could not be resolved ({exc}). Run 'kitty egress' to reconfigure it."
+            ) from exc
         if not password:
             raise ValueError(
                 f"Egress gateway {record.proxy_url} needs a password but its stored credential "

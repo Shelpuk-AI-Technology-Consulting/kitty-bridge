@@ -526,6 +526,18 @@ class TestTheWholeSuiteIsCoherent:
             # per-request `proxy=None` cannot escape it -- the claim
             # `_session_for`'s containment design rests on.
             "tests/test_aiohttp_transport_contract.py",
+            # KBR-87 (T-G12). A §6.2.4 dependency behaviour contract, the
+            # keyring sibling of the curl_cffi/botocore/aiohttp files: it pins
+            # the resolution mechanics -- the public API delegates to the
+            # resolved backend; `PYTHON_KEYRING_BACKEND` selects via
+            # `keyring.core.load_env()`; resolution always lands on a
+            # `keyring.backends.*` class; the per-platform native class where
+            # the native service is reachable; the
+            # `PasswordDeleteError ⊂ KeyringError` errors surface.
+            # Deliberately does not assert an unconditional native class on
+            # Linux (D-Bus box → chainer, not fail.Keyring) -- the
+            # no-stable-neighbour rule from the ipaddress contract's row.
+            "tests/test_keyring_backend_contract.py",
             # KBR-278. The step-graph validator's contract, exercised
             # against constructed fixture step files rather than the
             # committed tree -- a committed-tree check would couple CI to
