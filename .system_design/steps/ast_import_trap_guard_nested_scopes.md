@@ -66,8 +66,13 @@ boundary instead of rediscovering it.
   function-in-function, class-in-class.
 - The runtime-guard exemption is now pinned at function depth by a
   parameterised negative control over all four base shapes (`try`/`except`,
-  `if False:`, `with`, `while False:`) — so a regression deleting any one
-  from the skip set turns the boundary red instead of moving silently.
+  `if False:`, `with contextlib.suppress(ModuleNotFoundError)`,
+  `while False:`) — so a regression deleting any one from the skip set
+  turns the boundary red instead of moving silently. All four spellings
+  genuinely avoid the runtime failure; a plain `with` whose manager does
+  not suppress is skipped by the same leaf rule but is an executable
+  position the walker does not visit (documented limit, same category as
+  `for`/`match` bodies).
   `from .tests import x` is likewise pinned at function depth.
 - Live-guard test renamed
   `test_no_test_module_imports_the_tests_package_at_top_level` →

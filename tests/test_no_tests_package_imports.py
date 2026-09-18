@@ -25,13 +25,17 @@ deliberately out of scope:
 
 * (a) ``if TYPE_CHECKING:``-guarded imports, which never execute at runtime
   under either invocation style and would be a false positive;
-* (b) runtime-guarded wrappers around ``import tests.X`` --
-  ``try``/``except``, ``if False:``, ``with``, ``while False:`` and their
-  ``async`` / ``*Star`` siblings -- where the author has explicitly handled
-  the failure mode and the guard would be wrong to refuse. The KBR-280
-  contract pinned this exemption at top level; KBR-282 extends it to
-  function depth (the matcher's allowlist skips these nodes at every
-  nesting level);
+* (b) runtime-guarded wrappers around ``import tests.X`` -- the
+  failure-avoiding spellings ``try``/``except``, ``if False:``,
+  ``while False:`` and ``with contextlib.suppress(ModuleNotFoundError):``,
+  with their ``async`` / ``*Star`` siblings -- where the author has
+  explicitly handled the failure mode and the guard would be wrong to
+  refuse. The KBR-280 contract pinned this exemption at top level; KBR-282
+  extends it to function depth (the matcher's allowlist skips these nodes
+  at every nesting level). A plain ``with`` whose manager does not
+  suppress the failure is skipped by the same leaf rule but is not itself
+  failure handling -- it is an executable position the walker does not
+  visit, in the same category as stated limit 2;
 * (c) dynamic ``importlib.import_module("tests.X")``, which an
   import-statement matcher cannot see at all.
 
@@ -420,7 +424,8 @@ class TestTheMatcherSpellsTheScopeBoundary:
         [
             "def f():\n    try:\n        import tests.helper\n    except ModuleNotFoundError:\n        pass\n",
             "def f():\n    if False:\n        import tests.helper\n",
-            "def f():\n    with open('x'):\n        import tests.helper\n",
+            "import contextlib\n"
+            "def f():\n    with contextlib.suppress(ModuleNotFoundError):\n        import tests.helper\n",
             "def f():\n    while False:\n        import tests.helper\n",
         ],
         ids=["try", "if_false", "with", "while_false"],
@@ -429,11 +434,13 @@ class TestTheMatcherSpellsTheScopeBoundary:
         """A runtime-guarded ``tests`` import at function depth is not reported.
 
         Pinned for all four base guard shapes (``try``/``except``,
-        ``if False:``, ``with``, ``while False:``) at function depth so a
-        regression deleting any one from the skip set turns this
-        boundary red and forces the decision into the open. KBR-280
-        pinned the ``try`` shape at top level and documented the other
-        three; KBR-282 extends the contract to function depth.
+        ``if False:``, ``with contextlib.suppress(ModuleNotFoundError):``,
+        ``while False:``) at function depth so a regression deleting any
+        one from the skip set turns this boundary red and forces the
+        decision into the open. All four spellings genuinely avoid the
+        runtime failure, so the guard framing holds for every param.
+        KBR-280 pinned the ``try`` shape at top level and documented the
+        other three; KBR-282 extends the contract to function depth.
         """
         tree = ast.parse(source)
 
