@@ -531,7 +531,7 @@ def _diff_system(inbound: Conversation, captured: Conversation) -> Iterable[str]
         Concrete delta paths.
     """
     if inbound.system_role != captured.system_role:
-        yield "conversation.system_role"
+        yield c.SYSTEM_ROLE_PATH
 
     n = max(len(inbound.system), len(captured.system))
     for i in range(n):

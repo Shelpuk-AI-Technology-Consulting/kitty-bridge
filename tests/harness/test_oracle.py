@@ -295,7 +295,7 @@ class TestStructuralDiff:
         captured = Request(envelope=Envelope(), conversation=Conversation())
 
         deltas = oracle._structural_diff(inbound, captured)
-        assert deltas == ("conversation.system_role",)
+        assert deltas == (c.SYSTEM_ROLE_PATH,)
 
     def test_changed_image_display_name_yields_the_m25_path(self) -> None:
         """A differing Image ``display_name`` names the M25 anchor field."""
@@ -499,15 +499,17 @@ def _conditional_row() -> r.MutationRow:
 class TestAssertion2:
     """A conditional row whose trigger is not met must not produce a delta."""
 
-    def test_conditional_row_fires_without_trigger_raises_unclaimed(self) -> None:
-        """A conditional row whose anchor has an unclaimed delta surfaces as
-        an assertion-1 violation (the delta is unclaimed by any triggered row).
+    def test_untriggered_conditional_anchor_surfaces_as_unclaimed_first(self) -> None:
+        """A delta at an untriggered conditional row's anchor with no
+        triggered rows surfaces as §3.3.2 **assertion 1** (unclaimed), not
+        assertion 2.
 
-        With no triggered rows in the register, a delta at the conditional
-        row's anchor is unclaimed, and §3.3.2 assertion 1 fires first. The
-        conditional row's presence is what makes the delta *named* in the
-        register's vocabulary — the failure message still references the
-        path the row would have claimed.
+        With no triggered rows in the register, the delta is unclaimed and
+        assertion 1 fires before assertion 2 gets a chance to run. The
+        assertion-2 sentence — a conditional row firing without its trigger
+        while other rows explain the deltas — is
+        :meth:`test_conditional_row_raises_when_only_a_broader_row_claims_its_anchor`
+        below.
         """
         row = _conditional_row()
 

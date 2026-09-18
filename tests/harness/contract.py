@@ -1522,6 +1522,12 @@ CONVERSATION_TURNS = "conversation.turns"
 CONVERSATION_TOOLS = "conversation.tools"
 CONVERSATION_SAMPLING = "conversation.sampling"
 
+#: The role a Gemini ``systemInstruction`` Content published (KBR-194) — the
+#: first path form at conversation scope, and M20's anchor. Named beside the
+#: other anchors so the oracle's diff and the register's row cannot drift
+#: apart on spelling; the literal existed in two places before this constant.
+SYSTEM_ROLE_PATH = "conversation.system_role"
+
 #: Response-direction anchors, for M12 and T-D10.
 REPLY_STOP_REASON = "reply.stop_reason"
 REPLY_USAGE = "reply.usage"
