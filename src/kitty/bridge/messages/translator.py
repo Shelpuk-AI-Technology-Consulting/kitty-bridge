@@ -830,7 +830,10 @@ class MessagesTranslator:
         # Text delta. KBR-285: a raw-CC upstream may deliver content as a list of
         # multimodal parts — coerce it to the string the Messages wire carries —
         # and a refusal-only delta carries the model's user-facing reply on
-        # ``refusal`` with ``content`` null, which becomes text too.
+        # ``refusal`` with ``content`` null, which becomes text too. A parts
+        # list with no text element coerces to "" and emits no delta: the
+        # Messages wire has no image-delta equivalent (a raw-CC client still
+        # receives the parts verbatim).
         text_content = delta.get("content")
         if isinstance(text_content, list):
             text_content = self._extract_text_content(text_content)
@@ -868,7 +871,11 @@ class MessagesTranslator:
         # Tool call delta. KBR-285: the deprecated single-dict ``function_call``
         # maps onto the same machinery — the opening delta synthesises the
         # id/index and carries the name, later deltas argument-append. The
-        # existing ``tool_calls`` branch handles both shapes unchanged.
+        # existing ``tool_calls`` branch handles both shapes unchanged. No
+        # real upstream carries both fields; if one did, a ``tool_calls``
+        # list wins and a later legacy delta appends to the index-0 buffer
+        # that call opened — the least-bad merge, recorded here so the
+        # precondition is explicit.
         tool_calls = delta.get("tool_calls")
         if not tool_calls:
             legacy_call = delta.get("function_call")
