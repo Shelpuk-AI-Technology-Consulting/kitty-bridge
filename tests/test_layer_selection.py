@@ -452,8 +452,8 @@ class TestTheWholeSuiteIsCoherent:
             # from this one and by someone else entirely.
             "tests/test_ipaddress_contract.py",
             # KBR-161. Two dependency-and-agreement guards: what curl_cffi
-            # promises the OpenAI subscription legs (§6.2.4, an unbounded
-            # pin), and that both legs present one identity from one source.
+            # promises the OpenAI subscription legs (§6.2.4, a pin bounded by
+            # KBR-283), and that both legs present one identity from one source.
             "tests/test_curl_cffi_transport_contract.py",
             "tests/test_oauth_leg_identity.py",
             # T-W6 (KBR-29). The corpus's *lint* reads three real artifacts --

@@ -1212,7 +1212,14 @@ class TestTools:
         tool = projected.conversation.tools[0]
         assert tool.name == "get_weather"
         assert tool.description == "Get the current weather for a given city."
-        assert tool.type == "function"
+        # KBR-75: the CC reader reads the inner ``function.type`` leaf with
+        # ``None``-when-absent semantics, matching the Anthropic reader. The
+        # ``PUBLISHED_FUNCTION_TOOL`` fixture has no ``function.type`` leaf
+        # (the wire carries the discriminator on the *outer* object only), so
+        # ``type`` is ``None`` — which is the value both readers agree on for
+        # an untyped client tool and the value that closes the asymmetry
+        # described in KBR-75.
+        assert tool.type is None
         assert tool.schema == {
             "type": "object",
             "properties": {"city": {"type": "string", "description": "City name."}},
