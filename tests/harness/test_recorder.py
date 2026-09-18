@@ -53,7 +53,6 @@ from harness.recorder_conformance import (
 )
 from harness.test_contract import _KITTY_IMPORT
 
-
 # KBR-272: bounded by the §8.2 registry (tests/test_socket_binding_l1_timeout_marks.py).
 pytestmark = pytest.mark.timeout(120)
 

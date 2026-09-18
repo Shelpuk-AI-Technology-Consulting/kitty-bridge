@@ -59,7 +59,6 @@ from kitty.providers.base import ProviderAdapter
 from kitty.providers.minimax_token import MiniMaxTokenAnthropicAdapter
 from kitty.providers.vertex import VertexAIAdapter
 
-
 # KBR-272: bounded by the §8.2 registry (tests/test_socket_binding_l1_timeout_marks.py).
 pytestmark = pytest.mark.timeout(120)
 
