@@ -85,6 +85,7 @@ from harness.contract import (
     Projection,
     Request,
     WireFormat,
+    _redact_query,
     verify_total,
 )
 
@@ -632,9 +633,11 @@ def _routing_check(captured: CapturedRequest, expected: ExpectedRoute) -> None:
 
     Raises:
         RoutingMismatchError: When any component disagrees. Every failing
-            component is named — the first in the message, all of them in
-            ``paths`` — so a misderived expectation and a misrouted request
-            are distinguishable at a glance.
+            component is named in both places — the message carries each
+            component's expected and captured values (the query redacted,
+            the rest verbatim), and ``paths`` carries the matching
+            ``route.<component>`` constants — so a misderived expectation
+            and a misrouted request are distinguishable at a glance.
     """
     # Collect every disagreement before raising: one failure that names all
     # five components is worth more than five runs that each name one.
@@ -647,8 +650,15 @@ def _routing_check(captured: CapturedRequest, expected: ExpectedRoute) -> None:
     if not mismatches:
         return
     paths = tuple(c.route_path(component) for component, _, _ in mismatches)
+    # The ``query`` component carries wire-visible credentials when a profile's
+    # ``base_url`` does (the KBR-143 merge brings them into the composed query).
+    # Route them through the contract's redaction so a routing mismatch on
+    # such a profile does not surface the credential into the pytest failure
+    # message — the same redaction ``CapturedRequest.__repr__`` and the
+    # diagnostic helper apply, now closing the last unmasked surface on the
+    # oracle's output. Other components carry no secret and stay verbatim.
     detail = "; ".join(
-        f"{component}: expected {wanted!r}, captured {actual!r}"
+        f"{component}: expected {_render(component, wanted)!r}, captured {_render(component, actual)!r}"
         for component, wanted, actual in mismatches
     )
     raise RoutingMismatchError(
@@ -656,6 +666,26 @@ def _routing_check(captured: CapturedRequest, expected: ExpectedRoute) -> None:
         f"differ from the derived expectation — {detail}",
         paths=paths,
     )
+
+
+def _render(component: str, value: str) -> str:
+    """Render one route component's value for the routing-failure message.
+
+    The ``query`` component may carry credentials; the other components carry
+    none. The split matches the contract's redaction in
+    :meth:`~tests.harness.contract.CapturedRequest.__repr__`, so the oracle's
+    own failure surface honours the same masking.
+
+    Args:
+        component: The route component whose value is being rendered.
+        value: The raw value as captured or expected.
+
+    Returns:
+        A display string safe for a log or an assertion diff.
+    """
+    if component == "query":
+        return _redact_query(value)
+    return value
 
 
 def _first_key_order_divergence(a: Any, b: Any, at: str) -> str | None:
@@ -1148,9 +1178,11 @@ _REGISTRY_GUARD()
 
 __all__ = [
     "ConditionalRowFiredWithoutTriggerError",
+    "ExpectedRoute",
     "NativePassthroughKeyOrderError",
     "OracleError",
     "OracleReport",
+    "RoutingMismatchError",
     "UnclaimedMutationError",
     "assert_no_unclaimed_mutation",
 ]

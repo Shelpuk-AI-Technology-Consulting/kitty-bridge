@@ -14,10 +14,14 @@ the captured request, component by component.
 bodies. :func:`_expected_azure_route` computes the route from the configured
 profile using Azure's *published* URL shape: asking the code under test where
 it meant to go and confirming it went there proves nothing. The derivation
-helpers reference no ``src/kitty`` symbol — the module's one ``src/kitty``
-import is the binding's adapter below, test infrastructure and not part of
-the derivation. Two behaviours are reimplemented rather than observed,
-because §3.3.5 names both as the derivation's obligation:
+helpers reference no ``src/kitty`` symbol, and the only occurrence of the
+imported adapter symbol in this module is inside the binding's ``bind()``
+override — a helper calling ``AzureOpenAIAdapter().get_upstream_path(...)``
+would evade a naive import-line grep and is forbidden by construction. The
+module's one ``src/kitty`` import is the binding's adapter below, test
+infrastructure and not part of the derivation. Two behaviours are reimplemented
+rather than observed, because §3.3.5 names both as the derivation's
+obligation:
 
 * the cut of a pasted full endpoint at the ``/openai/deployments/`` marker
   (Azure's ``_cut_deployment_segment`` rule — the Azure-specific operation
@@ -517,6 +521,52 @@ class TestTheRoutingComparison:
                 raise AssertionError(
                     f"a changed {component!r} must fail the routing assertion"
                 )
+
+    def test_a_credential_in_query_is_redacted_in_the_failure_message(self) -> None:
+        """§4.3 C2-adjacent: a query mismatch must not leak the credential.
+
+        ``CapturedRequest.__repr__`` routes the ``query`` component through
+        :func:`~harness.contract._redact_query`, which masks values whose key
+        is in :data:`~harness.contract.REDACTED_QUERY_KEYS` (``key``,
+        ``api_key``, ``access_token``). The routing failure message has to
+        apply the same redaction — a profile whose ``base_url`` carries
+        ``?api_key=SECRET`` would otherwise print the secret into the pytest
+        failure message and CI log when a routing mismatch fires. KBR-143's
+        merge is the path that brings the credential into the composed
+        upstream query; this test pins the unmasked surface as closed.
+        """
+        # The credential key spelling is the contract's own
+        # (:data:`~harness.contract.REDACTED_QUERY_KEYS` = ``key``,
+        # ``api_key``, ``access_token``) — the test uses one the contract
+        # recognises, since redacting an unrecognised key is not the contract.
+        captured = CapturedRequest(
+            method="POST", scheme="http", host="127.0.0.1:1",
+            path="/v1", query="api_key=SECRET&api-version=2024-10-21", body=_BODY_CC,
+        )
+        expected = oracle.ExpectedRoute(
+            method="POST", scheme="http", host="127.0.0.1:1",
+            path="/v2", query="api_key=OTHER&api-version=2024-10-21",
+        )
+        try:
+            oracle.assert_no_unclaimed_mutation(
+                inbound=captured,
+                inbound_format=WireFormat.CHAT_COMPLETIONS,
+                captured=captured,
+                captured_format=WireFormat.CHAT_COMPLETIONS,
+                register=r.REGISTER,
+                triggers_met=frozenset(),
+                expected_route=expected,
+            )
+        except oracle.RoutingMismatchError as exc:
+            assert "SECRET" not in str(exc), (
+                "credential must not appear in the routing failure message"
+            )
+            assert "OTHER" not in str(exc), (
+                "expected-side credential must not appear either — both sides "
+                "are masked, not just the captured"
+            )
+        else:
+            raise AssertionError("a mismatching query must fail the routing assertion")
 
     def test_none_disables_the_routing_check(self) -> None:
         """``expected_route=None`` keeps T-D1's behaviour: no routing claim."""
