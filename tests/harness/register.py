@@ -802,7 +802,7 @@ _BRIDGE_ROWS: tuple[MutationRow, ...] = (
         # path-table cell used to name M2 as the claiming row; it names
         # this row since KBR-195 — M2 takes the escape and is never
         # path-matched.
-        paths=("conversation.system_role",),
+        paths=(c.SYSTEM_ROLE_PATH,),
         conditional=False,
         design_ref="§3.2.1 · §3.3.1a",
     ),

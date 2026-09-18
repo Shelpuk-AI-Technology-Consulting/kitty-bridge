@@ -145,9 +145,16 @@ class GeminiTranslator:
         """
         messages: list[dict] = []
 
-        # System instruction → system message
+        # System instruction → system message. Gemini's published schema
+        # types ``systemInstruction`` as a Content object, but the wire
+        # accepts whatever JSON the client sends: the schemathesis
+        # conformance suite (KBR-82) generated ``true`` here and the
+        # extraction below crashed with AttributeError, answering 500
+        # where the schema documents 200. A malformed shape is the
+        # client's mistake — treat it as absent and let the request
+        # proceed, rather than taking the server down.
         system_instruction = gemini_request.get("systemInstruction")
-        if system_instruction:
+        if isinstance(system_instruction, dict):
             text = self._extract_text(system_instruction)
             if text:
                 messages.append({"role": "system", "content": text})

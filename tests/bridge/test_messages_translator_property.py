@@ -35,19 +35,19 @@ and nowhere else:
    adapters to restore at the provider hop (P1). Their fidelity claim
    lives at the provider layer
    (``tests/providers/test_anthropic_image_document_restore.py``), not here.
-2. **``ToolDecl.type`` (translated-route asymmetry).** The Anthropic reader
-   fills ``type`` from the wire (absent here → ``None``); the CC reader
-   hardcodes ``type="function"`` for every function-wrapped tool, and the
-   translator wraps unconditionally. The comparison maps ``None →
-   "function"`` on the inbound side and leaves every other spelling
-   untouched. Closing the asymmetry in either reader is a reader-contract
-   decision, not this test's.
-3. **Text-block joining on text-only turns (M2 / KBR-222).** A turn whose
+2. **Text-block joining on text-only turns (M2 / KBR-222).** A turn whose
    parts are all ``Text`` blocks collapses to one ``"\n"``-joined string on
    the CC wire — the projection cannot preserve per-block presence, so the
    comparison reduces both sides to ``(role, joined_text)``. The same
    reduction applies to both sides, so the join character itself is the
    property's variable, not its constant.
+
+The third asymmetry the prior draft named — ``ToolDecl.type`` — was
+**withdrawn** by KBR-75 / KBR-51: the CC reader now reads the wire's
+``function.type`` leaf with the same ``None``-when-absent semantics the
+Anthropic reader uses, so the comparison is direct. A regression that
+re-introduces the asymmetry fails this property on **both** sides — which
+is the right place to catch it.
 
 **What the signature deliberately does NOT exempt.** ``Turn.role`` rides on
 every turn's signature — a translator that flips a turn's role is a real
@@ -147,9 +147,9 @@ def _project_chat_completions(cc_body: Mapping[str, Any]) -> c.Request:
 
 
 def _conversations_equivalent(inbound: c.Conversation, cc: c.Conversation) -> bool:
-    """Compare two projected conversations under the property's three named exemptions.
+    """Compare two projected conversations under the property's two named exemptions.
 
-    Every field must compare equal except the three deliberate asymmetries the
+    Every field must compare equal except the two deliberate asymmetries the
     module docstring records:
 
     * **Documents** (M2 / KBR-222 → P1): ``Opaque(kind="document", …)`` parts
@@ -157,11 +157,6 @@ def _conversations_equivalent(inbound: c.Conversation, cc: c.Conversation) -> bo
       ``_documents`` internal key this property strips, and their restore is
       asserted at the provider layer
       (``tests/providers/test_anthropic_image_document_restore.py``).
-    * **``ToolDecl.type``** (translated-route asymmetry): the CC reader
-      hardcodes ``"function"`` where the Anthropic reader reads the wire's
-      ``type`` leaf — ``None`` whenever absent. The inbound side maps
-      ``None → "function"`` before comparison; every other spelling passes
-      through untouched.
     * **Text-block joining on text-only turns** (M2 / KBR-222): a turn
       whose parts are all ``Text`` blocks collapses to one ``"\n"``-joined
       string on the CC wire — the projection cannot preserve per-block
@@ -174,6 +169,17 @@ def _conversations_equivalent(inbound: c.Conversation, cc: c.Conversation) -> bo
       neither translator nor reader reorders parts, so per-part equality
       catches any wire-order mutation (``[Image, Text]`` → ``[Text, Image]``
       upstream is visible, not silent).
+
+    **The third exemption the prior draft named is withdrawn.** A
+    normalised ``ToolDecl.type`` (inbound ``None → "function"``) existed
+    because the two readers disagreed: the Anthropic reader read the wire's
+    ``type`` leaf, the CC reader hardcoded ``"function"`` on the wrap.
+    KBR-75 / KBR-51 closed that asymmetry in the CC reader — it now reads
+    the wire's ``function.type`` leaf with the same ``None``-when-absent
+    semantics — so ``ToolDecl.type`` compares directly, with no
+    normalisation. A regression that re-introduces the asymmetry now
+    surfaces as a property failure on both sides, which is the right
+    place to catch it.
 
     Args:
         inbound: The Anthropic projection's conversation.
@@ -196,20 +202,7 @@ def _conversations_equivalent(inbound: c.Conversation, cc: c.Conversation) -> bo
         for turn in inbound.turns
     )
 
-    # Exemption 2: ToolDecl.type — normalise None -> "function" on inbound only.
-    inbound_tools = tuple(
-        c.ToolDecl(
-            name=tool.name,
-            description=tool.description,
-            schema=tool.schema,
-            strict=tool.strict,
-            cache_control=tool.cache_control,
-            type="function" if tool.type is None else tool.type,
-        )
-        for tool in inbound.tools
-    )
-
-    # Exemption 3: text-block joining — and the per-shape handling. The
+    # Exemption 2: text-block joining — and the per-shape handling. The
     # strategy's text-only turns (one or two ``Text`` blocks) collapse to one
     # CC ``Text("\n".join(...))`` per M2 / KBR-222; the projection cannot
     # preserve per-block presence, so the comparison reduces both sides to
@@ -242,7 +235,7 @@ def _conversations_equivalent(inbound: c.Conversation, cc: c.Conversation) -> bo
     return (
         inbound.system == cc.system
         and inbound.sampling == cc.sampling
-        and inbound_tools == cc.tools
+        and inbound.tools == cc.tools
         and in_signatures == cc_signatures
     )
 

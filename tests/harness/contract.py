@@ -1522,6 +1522,12 @@ CONVERSATION_TURNS = "conversation.turns"
 CONVERSATION_TOOLS = "conversation.tools"
 CONVERSATION_SAMPLING = "conversation.sampling"
 
+#: The role a Gemini ``systemInstruction`` Content published (KBR-194) — the
+#: first path form at conversation scope, and M20's anchor. Named beside the
+#: other anchors so the oracle's diff and the register's row cannot drift
+#: apart on spelling; the literal existed in two places before this constant.
+SYSTEM_ROLE_PATH = "conversation.system_role"
+
 #: Response-direction anchors, for M12 and T-D10.
 REPLY_STOP_REASON = "reply.stop_reason"
 REPLY_USAGE = "reply.usage"
@@ -2326,5 +2332,60 @@ def path_matches(pattern: str, concrete: str) -> bool:
         if not _segment_matches(pattern_segment, concrete_segment):
             return False
 
+    return True
+
+
+def pattern_is_proper_prefix_of(shallow: str, deep: str) -> bool:
+    """Return whether one *pattern* is a strictly coarser anchor than another.
+
+    Two register rows can match the same concrete delta (§3.3.1a's prefix
+    rule), and when they do, attribution matters: the row whose anchor is a
+    **strict prefix** of the other's is the coarser one —
+    ``conversation.turns`` is a proper prefix of
+    ``conversation.turns[*].parts[*]``, which is a proper prefix of
+    ``conversation.turns[*].parts[*].cache_control``. The oracle's §3.3.2
+    assertion 2 uses this to defer a co-anchor row to a triggered row with
+    an equally-or-more specific anchor: a delta a narrow triggered row
+    explains is not evidence that the broad untriggered row fired.
+
+    Equal patterns are **not** a proper prefix in either direction, so two
+    rows sharing an anchor co-claim — neither defers to the other, and a
+    triggered row sharing an untriggered row's exact anchor *does* exempt
+    that row (the M8/M3 case: both anchor the bare part path, and M8's
+    carrier repair explains a part delta M3's trigger absence cannot).
+
+    Args:
+        shallow: The candidate coarser pattern.
+        deep: The candidate finer pattern.
+
+    Returns:
+        ``True`` when ``shallow``'s segments are a proper prefix of
+        ``deep``'s — strictly shorter, and equal element-for-element up to
+        that length.
+
+    Raises:
+        ValueError: When either pattern has unbalanced brackets.
+    """
+    shallow_segments = _segments(shallow)
+    deep_segments = _segments(deep)
+    if len(shallow_segments) >= len(deep_segments):
+        return False
+
+    # The same segment rules :func:`path_matches` applies, so the two
+    # predicates cannot drift: the bare-collection rule (a bracket-free
+    # shallow segment matches the deep segment's bracketed member of
+    # itself — `turns` prefixes `turns[*].parts[*].id`) and
+    # :func:`_segment_matches`' wildcard equivalence, including the
+    # legacy `[]` spelling of `[*]` (§3.3.1a keeps `[]` legal precisely
+    # so an old row "must not silently match nothing" — a prefix helper
+    # that treated `[]` and `[*]` as different would exempt an
+    # untriggered row from assertion 2 the moment a legacy-spelled row
+    # landed).
+    for index, shallow_segment in enumerate(shallow_segments):
+        deep_segment = deep_segments[index]
+        if "[" not in shallow_segment and deep_segment.startswith(f"{shallow_segment}["):
+            continue
+        if not _segment_matches(shallow_segment, deep_segment):
+            return False
     return True
 

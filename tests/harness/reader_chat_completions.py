@@ -1293,7 +1293,15 @@ def _read_tools(value: Any, residual: dict[str, Any]) -> tuple[c.ToolDecl, ...]:
                 # leaf the way Anthropic's does — the discriminator is the
                 # outer object's `type`, which is `"function"`. Carried as
                 # such, so the two readers' `ToolDecl.type` agree.
-                type="function",
+                # KBR-75: read the inner ``function`` member's ``type`` leaf, with
+                # ``None``-when-absent semantics matching the Anthropic reader.
+                # Carrying the outer wrapper's discriminator (``"function"``)
+                # would have produced an unclaimed ``ToolDecl.type`` delta on
+                # every translated-route corpus entry that declares tools
+                # (inbound ``None`` vs upstream ``"function"``); reading the
+                # wire leaf closes the asymmetry for every downstream consumer,
+                # not just the oracle.
+                type=_typed_leaf(function, "type", str, f"{path}.function", residual, default=None),
                 cache_control=_read_cache_control(function, f"{path}.function", residual),
             )
         )
