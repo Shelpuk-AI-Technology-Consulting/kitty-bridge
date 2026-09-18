@@ -82,9 +82,11 @@ This is the case a body-only oracle cannot see.
 
 ## Status
 
-Implemented (2026-09-18); PR #238 draft on `feat/kbr-52-routing-expectation` off
-`origin/main`. Code review round 2 APPROVED (requirements coverage complete,
-falsification proven by exception type); design review on the R3 rewording
-APPROVED with a mechanically-checkable tightening applied to the requirement
-and the test module docstring. Awaiting CI (6-leg matrix) and the repository's
-own reviewer (skipped while the PR is draft).
+Implemented (2026-09-18); PR #238 ready-for-review on
+`feat/kbr-52-routing-expectation` off `origin/main`. Code review round 2
+APPROVED (requirements coverage complete, falsification proven by exception
+type); design review on the R3 rewording APPROVED with a
+mechanically-checkable tightening applied to the requirement and the test
+module docstring. CI fully green (6/6 legs incl. Windows/macOS,
+`ci-required` pass); the repository's own reviewer job passed with no
+findings. Awaiting human review; not merged.
