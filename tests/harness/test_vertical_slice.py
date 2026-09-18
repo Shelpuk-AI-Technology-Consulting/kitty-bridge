@@ -50,7 +50,8 @@ at **import time** on module-global state — so a stray ``register_transport``
 here would leave this module green on its own and the full suite red, which is
 an order-dependent failure and a direct hit on plan §1.3(5).
 
-**Layer.** No ``pytestmark``, so these take the ``l1`` path default, following
+**Layer.** The only ``pytestmark`` is the KBR-272 timeout bound (below); no
+layer marker, so these take the ``l1`` path default, following
 T-W4 and T-W8. The reason is §8.2's and only §8.2's: ``l3`` is in
 ``PENDING_ACTIVATION_LAYERS``, so an ``l3`` marker today would leave the slice
 checked by no job at all. §8.2 names this module so T-K6 inherits a list.
@@ -135,6 +136,9 @@ from harness.recorder import RecordingUpstream, Reply
 #: pinned Windows and macOS legs (§8.4) — and a platform- or version-dependent
 #: failure means raising it, never skipping the case. The healthy margin is
 #: ~200×, so a slower runner has a great deal of room before it matters.
+# KBR-272: bounded by the §8.2 registry (tests/test_socket_binding_l1_timeout_marks.py).
+pytestmark = pytest.mark.timeout(120)
+
 _SLICE_BUDGET_SECONDS = 4.0
 
 #: The query the driven request carries upstream. Both properties are load-bearing

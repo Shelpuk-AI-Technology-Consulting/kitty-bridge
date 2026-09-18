@@ -1,0 +1,112 @@
+name: Mutation re-measure
+
+# A measurement tool, not a gate (TEST_SUITE.md §8, "The arrangement, made
+# explicit"). KBR-272 added it because the mutation baseline's recording needs
+# an idle workstation — the shared dev box is contended by sibling sessions,
+# which is exactly what hung KBR-266's per-mutant phase in CLOSE_WAIT — and a
+# GitHub-hosted runner is the idle guarantee the ticket names.
+#
+# Run it by hand when a group's score must be recorded or re-measured:
+#
+#   gh workflow run mutation-remeasure.yml -f group=compaction_and_pairing
+#
+# `group` must be a key of TARGET_GROUPS in `tests/mutmut_scope.py`; anything
+# else fails the pattern-resolution step loudly rather than measuring nothing.
+#
+# The `mutants/` tree this run produces is uploaded as an artifact. ⚠️ It is a
+# SINGLE-GROUP tree: mutmut generates mutants for the whole configured scope
+# but only tests the group passed on the command line, so every other group's
+# mutants carry `not_checked`. Do NOT overwrite a workstation tree that holds
+# recorded groups with this artifact — overlay the artifact's new-group files
+# onto the recorded tree instead, or the six recorded groups' per-mutant
+# results are destroyed (the reproducibility contract MUTATION_BASELINE.md
+# records). For the same reason the aggregator step below tolerates its own
+# exit code: it asserts `not_checked == 0` per group, which a single-group
+# run trivially violates for the six unmeasured groups.
+#
+# The nightly schedule and the per-group thresholds are T-H3 (KBR-91) scope;
+# this file is the tool that job extends, not a second definition of it. It
+# invokes no pytest directly, so it claims no layer.
+
+on:
+  workflow_dispatch:
+    inputs:
+      group:
+        description: Target group from tests/mutmut_scope.py TARGET_GROUPS
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  remeasure:
+    runs-on: ubuntu-latest
+    # A cap, not a budget, sized from the recorded run's numbers (KBR-266):
+    # generation ~1 min, stats ~20 min, per-mutant phase 5–30 min on an 8-CPU
+    # workstation; 648 mutants each associated with 532–596 L1 tests on a
+    # 4-vCPU hosted runner is the slowest expected shape. 180 minutes clears
+    # that with margin under the platform's 360-minute ceiling. A run killed
+    # here still uploads its partial tree (the upload step is `if: always()`),
+    # and mutmut resumes from a cached tree — re-dispatch to continue.
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -e ".[dev]"
+
+      # The scope registry is the machine-readable form of TEST_SUITE.md §6.1;
+      # the patterns come from it rather than being copied here, so the
+      # registry and the measured run cannot drift apart. The input reaches
+      # the step through an env var, not direct ${{ }} interpolation into the
+      # shell/Python source: workflow_dispatch inputs are caller-controlled
+      # text, and the direct form is both an injection vector and a functional
+      # break on any value containing a quote.
+      - name: Resolve the group's mutmut patterns
+        env:
+          GROUP: ${{ inputs.group }}
+        run: |
+          set -euo pipefail
+          # An unknown group raises KeyError; swallowing it here (printing
+          # nothing) lets the guard below emit the actionable ::error instead
+          # of a bare Python traceback.
+          PATTERNS="$(python -c "import os, sys; sys.path.insert(0, 'tests'); from mutmut_scope import patterns_for; print(' '.join(patterns_for(os.environ['GROUP'])))" 2>/dev/null || true)"
+          if [ -z "$PATTERNS" ]; then
+            echo "::error::Unknown group '$GROUP' -- must be a key of TARGET_GROUPS in tests/mutmut_scope.py"
+            exit 1
+          fi
+          echo "PATTERNS=$PATTERNS" >> "$GITHUB_ENV"
+          echo "Patterns: $PATTERNS"
+
+      - name: Run mutmut for the group
+        run: mutmut run $PATTERNS
+
+      # 🔴 `|| true`, deliberately, and why: the aggregator asserts
+      # `not_checked == 0` per group and exits 1 when a group has unmeasured
+      # mutants. This run tests ONE group by design, so the other six groups
+      # read `not_checked` and the check fires even on a fully successful
+      # measurement. The table on stdout is still printed and lands in the
+      # log; failing the job over it would make every single-group run red.
+      # A run whose MEASURED group is incomplete is still caught: that shows
+      # up in the table itself, which the operator reads before recording.
+      - name: Aggregate per-group scores
+        if: always()
+        run: python scripts/aggregate_mutation_baseline.py || true
+
+      # `if: always()`: a run killed at the timeout (or failed mid-phase) is
+      # exactly the run whose partial tree is worth keeping -- mutmut resumes
+      # from a cached tree, and the operator overlays it onto the recorded
+      # baseline rather than paying the ~20-minute stats phase again.
+      - name: Upload the mutants tree
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutants-${{ inputs.group }}
+          path: mutants/
+          retention-days: 14
