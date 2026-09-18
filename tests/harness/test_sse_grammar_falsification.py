@@ -532,6 +532,38 @@ class TestOpenAIResponsesMalformed:
         assert verdict is Classification.MALFORMED
         assert field in grammar.diagnostic
 
+    def test_unhashable_output_index_through_open_item_is_malformed(self) -> None:
+        """A delta whose ``output_index`` is a list must be ``malformed``, not ``TypeError``.
+
+        The round-5 fix validated the index at ``output_item.added``/``done``
+        but missed ``_open_item`` — the first touch for five event kinds. A
+        well-formed frame whose ``output_index`` is ``[]`` goes through
+        ``self._items.get(_index_key(...))`` there, which raised
+        ``TypeError: unhashable type`` instead of classifying.
+        """
+        grammar = OpenAIResponsesGrammar()
+        verdict = _drain(
+            grammar,
+            b"".join(
+                [
+                    _responses_created(0),
+                    _responses_frame(
+                        "response.output_text.delta",
+                        {
+                            "type": "response.output_text.delta",
+                            "sequence_number": 1,
+                            "item_id": "item_0",
+                            "output_index": [],
+                            "content_index": 0,
+                            "delta": "x",
+                        },
+                    ),
+                ]
+            ),
+        )
+        assert verdict is Classification.MALFORMED
+        assert "output_index" in grammar.diagnostic
+
     def test_content_part_done_with_unhashable_content_index_is_malformed(self) -> None:
         grammar = OpenAIResponsesGrammar()
         verdict = _drain(

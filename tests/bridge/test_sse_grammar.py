@@ -329,13 +329,18 @@ class TestMessagesTranslatedPath:
 class TestMessagesNativePath:
     """The path the Anthropic-upstream Messages passthrough takes.
 
-    The bridge forwards Anthropic SSE bytes verbatim; ``drop_at`` post-emission
-    produces the fallback ``messages_format_error`` event (the native path's
-    transport-drop branch in ``BridgeServer._stream_messages``; search
-    ``server.py`` for the ``or [messages_format_error(...)]`` fallback —
-    line numbers drift), which leaves the client's open content block
-    unclosed. Native is the path where ``truncated`` is the honest
-    classification; the translated path produces ``complete_sentence``.
+    The bridge forwards Anthropic SSE bytes verbatim; ``drop_at``
+    post-emission appends the fallback ``messages_format_error`` event (the
+    native path's transport-drop branch in ``BridgeServer._stream_messages``;
+    search ``server.py`` for the ``or [messages_format_error(...)]`` fallback
+    — line numbers drift) to whatever the injected frames already wrote. The
+    classification is therefore **per cell**: what the injected frames left
+    open decides it. AFTER_TEXT and BEFORE_TERMINAL close the block (the
+    failure library writes ``content_block_stop`` there), so those two are
+    ``error_terminal``; only MID_TOOL_ARGUMENTS leaves the tool block open,
+    making it the one honest ``truncated`` this path produces. The translated
+    path, by contrast, closes blocks itself via
+    ``finalize_interrupted_stream`` and produces ``complete_sentence``.
     """
 
     async def test_success_stream_is_a_complete_sentence(self) -> None:

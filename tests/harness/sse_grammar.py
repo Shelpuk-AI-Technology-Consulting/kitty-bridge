@@ -710,10 +710,14 @@ class OpenAIResponsesGrammar(SseGrammar):
             ``(item, key)`` when an open item matches, else ``(None, None)``
             with the stream marked malformed.
         """
-        key = _index_key(parsed.get("output_index"))
+        output_index = parsed.get("output_index")
+        if not _hashable_scalar(output_index):
+            self._fail(f"{kind} with a non-scalar output_index {output_index!r}")
+            return None, None
+        key = _index_key(output_index)
         item = self._items.get(key)
         if item is None:
-            self._fail(f"{kind} for unknown output_index {parsed.get('output_index')!r}")
+            self._fail(f"{kind} for unknown output_index {output_index!r}")
             return None, None
         if not item["open"]:
             self._fail(f"{kind} against closed output_index {key!r}")
