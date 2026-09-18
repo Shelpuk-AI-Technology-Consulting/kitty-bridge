@@ -568,6 +568,14 @@ class TestTheWholeSuiteIsCoherent:
             # json_error / truncated / malformed). The grammar module itself
             # stays at the l1 default; only this bridge-driven half claims l2.
             "tests/bridge/test_sse_grammar.py",
+            # KBR-286. A §6.2.3 docs-vs-git guard: the project `CLAUDE.md` is
+            # the instruction every Claude Code session acts on, yet nothing
+            # imports it, so its presence, tracking, ignore-status, and the
+            # four mandated review-resolution behaviours would otherwise
+            # drift silently. The same shape as the docs-vs-code guards
+            # above, with two read artifacts (`CLAUDE.md` and git's view of
+            # it) held against each other in both directions.
+            "tests/test_project_claude_md_review_discipline.py",
         }
 
         actual = {
