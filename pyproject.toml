@@ -69,6 +69,9 @@ dev = [
     "twine>=4.0",
     "hypothesis>=6.100",
     "mutmut>=3.0,<4",
+    # Schemathesis drives the OpenAPI conformance run (T-G6 / KBR-82).
+    # v4 supports OpenAPI 3.1 natively; <5 keeps a major bump a decision.
+    "schemathesis>=4.9,<5",
     # tomllib landed in 3.11; tests/test_mutmut_scope.py reads
     # pyproject.toml's [tool.mutmut] on every supported interpreter.
     "tomli>=2.0; python_version < '3.11'",

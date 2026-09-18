@@ -539,6 +539,16 @@ class TestTheWholeSuiteIsCoherent:
             # (the fast-gate invocation) cannot resolve but `python -m pytest`
             # can -- the trap KBR-84 paid a full CI round for.
             "tests/test_no_tests_package_imports.py",
+            # KBR-82 (T-G6). The OpenAPI 3.1 document + schemathesis
+            # conformance, the per-protocol registration matrix, the
+            # per-route ingress guards, and the four-measured-bodies
+            # regression each read two artifacts (the published schema
+            # vs. the live source) and gate normally.
+            "tests/test_openapi_schema.py",
+            "tests/test_openapi_conformance.py",
+            "tests/test_route_registration_matrix.py",
+            "tests/test_responses_normalizer.py",
+            "tests/test_route_preflight.py",
         }
 
         actual = {

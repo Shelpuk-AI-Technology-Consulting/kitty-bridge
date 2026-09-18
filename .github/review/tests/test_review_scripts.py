@@ -15097,7 +15097,7 @@ class ReviewerIsPointedAtTheDesignDocumentsTests(unittest.TestCase):
         ),
         (
             REVIEW_DIR / "rules" / "docs.md",
-            "# Rule: documentation (`README.md`, `assets/**`, and the design documents)",
+            "# Rule: documentation (`README.md`, `openapi/**`, `assets/**`, and the design documents)",
             "the heading no longer qualifies the documents with a condition",
         ),
         (

@@ -279,6 +279,12 @@ RULE_SPECS: tuple[RuleSpec, ...] = (
             ".system_design/**/*.md",
             "**/.system_design/**/*.md",
             ".requirements/**/*.md",
+            # The published OpenAPI contract (KBR-82). README is the external
+            # specification in prose; this is the machine-readable half of the
+            # same job — the artifact the agents integrate against and the
+            # fuzzer drives. A drifted schema is a contract defect, and no
+            # other rule speaks for a YAML file under `openapi/`.
+            "openapi/**",
             # The images README renders. A broken or replaced asset is a
             # documentation defect and nothing else selects it.
             "assets/**",
