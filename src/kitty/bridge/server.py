@@ -7784,7 +7784,30 @@ class BridgeServer:
                 self._log_backend_selection()
 
                 n_backends = len(self._backends) if self._backends else 1
-                for attempt in range(n_backends):
+                # KBR-287: widen the attempt loop from `range(n_backends)` to
+                # cover the empty ladder (the plain-POST twin's bound is
+                # `(_MAX_RETRIES + 1) * n_backends + len(_EMPTY_FINAL_DELAYS)`
+                # because that branch's transport-error ladder bakes its
+                # retries into the bound; this branch's transport errors
+                # ladder within `n_backends` via the exception path, so its
+                # "original" budget is the failover walk and only the empty
+                # ladder extends it).
+                max_attempts = n_backends + len(_EMPTY_FINAL_DELAYS)
+                for attempt in range(max_attempts):
+                    # Final-delay prologue mirrors the plain-POST loop's
+                    # (grep anchor: "Empty upstream response: final retry
+                    # in"): attempts past the original `n_backends` walk
+                    # sleep the route's empty-ladder tail before their
+                    # upstream call.
+                    if attempt >= n_backends:
+                        delay = _EMPTY_FINAL_DELAYS[attempt - n_backends]
+                        logger.warning(
+                            "Empty upstream response on custom transport: final retry in %.1fs (%d/%d)",
+                            delay,
+                            attempt + 1,
+                            max_attempts,
+                        )
+                        await asyncio.sleep(delay)
                     raw_chunks: list[bytes] = []
 
                     async def _collect(chunk: bytes, _raw_chunks: list[bytes] = raw_chunks) -> None:
@@ -7865,7 +7888,26 @@ class BridgeServer:
                         created = cc_response.get("created", 0)
                         model = cc_response.get("model", "")
 
-                        def _cc_chunk(
+                        # KBR-287: judge-first hold. The branch parses the
+                        # whole upstream response before any write, so the
+                        # plain-POST hold's incremental state has no unknown
+                        # future to buffer against; a single up-front verdict
+                        # through the shared predicate produces the same wire
+                        # bytes the plain-POST hold walk does (order preserved
+                        # because the branch only writes if the verdict is
+                        # True). The D5 ``MAX_HELD_BYTES`` cap and the
+                        # non-JSON fail-open are satisfied by construction:
+                        # no synthesised line is withheld across writes, and
+                        # the only held class (role/finish/``[DONE]``) is
+                        # bounded by the synthesised line size — well under
+                        # the 10 MiB cap. The classifier widening KBR-285
+                        # owns is consumed here at the same predicate the
+                        # plain-POST twin uses, so both branches move in
+                        # lockstep at one call site.
+                        payloads: list[dict | None] = []
+                        lines: list[bytes] = []
+
+                        def _cc_record(
                             delta: dict,
                             fin: str | None = None,
                             usage: dict | None = None,
@@ -7873,6 +7915,25 @@ class BridgeServer:
                             _created: int = created,
                             _model: str = model,
                         ) -> bytes:
+                            """Record one synthesised chunk (payload + line).
+
+                            Args:
+                                delta: The chunk's ``choices[0].delta``.
+                                fin: The chunk's ``finish_reason``.
+                                usage: The chunk's ``usage`` block, when
+                                    the branch carries one.
+                                _response_id: The response id captured
+                                    from the parsed ``cc_response``.
+                                _created: The created timestamp captured
+                                    from the parsed ``cc_response``.
+                                _model: The model name captured from the
+                                    parsed ``cc_response``.
+
+                            Returns:
+                                The encoded ``data:`` line — the same
+                                bytes the previous unconditional-write path
+                                emitted.
+                            """
                             payload: dict = {
                                 "id": _response_id,
                                 "object": "chat.completion.chunk",
@@ -7882,7 +7943,10 @@ class BridgeServer:
                             }
                             if usage is not None:
                                 payload["usage"] = usage
-                            return f"data: {json.dumps(payload)}\n\n".encode()
+                            line = f"data: {json.dumps(payload)}\n\n".encode()
+                            payloads.append(payload)  # noqa: B023
+                            lines.append(line)  # noqa: B023
+                            return line
 
                         choice = (cc_response.get("choices") or [{}])[0]
                         msg = choice.get("message", {})
@@ -7902,31 +7966,109 @@ class BridgeServer:
                                 }
                                 for i, tc in enumerate(msg["tool_calls"])
                             ]
-                        try:
-                            await sr.write(_cc_chunk(first_delta))
+                        _cc_record(first_delta)
+                        if msg.get("content"):
+                            _cc_record({"content": msg["content"]})
+                        for i, tc in enumerate(msg.get("tool_calls", [])):
+                            args = tc.get("function", {}).get("arguments", "")
+                            if args:
+                                _cc_record(
+                                    {"tool_calls": [{"index": i, "function": {"arguments": args}}]},
+                                )
+                        _cc_record({}, fin=finish_reason, usage=cc_response.get("usage"))
+                        payloads.append(None)
+                        lines.append(b"data: [DONE]\n\n")
 
-                            # Content delta
-                            if msg.get("content"):
-                                await sr.write(_cc_chunk({"content": msg["content"]}))
-
-                            # Tool call argument deltas
-                            for i, tc in enumerate(msg.get("tool_calls", [])):
-                                args = tc.get("function", {}).get("arguments", "")
-                                if args:
-                                    await sr.write(
-                                        _cc_chunk(
-                                            {"tool_calls": [{"index": i, "function": {"arguments": args}}]},
-                                        )
+                        carries = any(
+                            payload is not None and _cc_chunk_carries_content(payload) for payload in payloads
+                        )
+                        if carries:
+                            try:
+                                for line in lines:
+                                    await sr.write(line)
+                            except (ConnectionResetError, BrokenPipeError, OSError):
+                                logger.debug("Client disconnected during custom-transport emit")
+                            # Usage log-on-release: the branch parses
+                            # atomically, so usage is fully known regardless
+                            # of client state — and the plain-POST
+                            # never-log-on-disconnect is a structural
+                            # consequence of incremental arrival there, not
+                            # a policy to copy.
+                            self._log_usage(cc_response.get("usage"))
+                            break
+                        # Empty attempt: ladder. Mirrors the plain-POST
+                        # empty arm (grep anchor: "Check for empty response
+                        # (pass-through: no content bytes written)") — one
+                        # class-agnostic
+                        # ``_select_backend()``; if it lands custom, stay in
+                        # this branch and re-attempt; if plain, fall through
+                        # to the standard streaming path below (the
+                        # custom→plain crossing is uncapped like the
+                        # exception path's arm and bounded by the reverse
+                        # direction's ``(2 * n_backends) + 1`` cap on
+                        # plain→custom crossings). Pool-less mode falls
+                        # straight to the exponential backoff retry; ladder
+                        # exhaustion emits the route's ``empty_response``
+                        # D4 terminal, uniform with the plain twin (the
+                        # ticket's ``cross_class_exhaustion`` wording is
+                        # deliberately corrected here — see SYSTEM_DESIGN §5.4
+                        # for the discriminator-contract reasoning).
+                        if self._backends and self._current_backend_idx >= 0:
+                            if self._any_healthy_backend() and attempt < max_attempts - 1:
+                                self._select_backend()
+                                self._normalize_model(cc_request)
+                                self._active_provider.normalize_request(cc_request)
+                                if self._active_provider.use_custom_transport:
+                                    # Stay custom: refresh the custom keys
+                                    # so the next attempt's stream_request
+                                    # finds them.
+                                    cc_request["_resolved_key"] = self._active_key
+                                    cc_request["_provider_config"] = self._active_provider_config
+                                    logger.info(
+                                        "CC stream empty response on custom transport: "
+                                        "re-selecting custom backend, attempt %d/%d",
+                                        attempt + 1,
+                                        max_attempts,
                                     )
-
-                            # Finish
-                            await sr.write(
-                                _cc_chunk({}, fin=finish_reason, usage=cc_response.get("usage")),
+                                    continue
+                                # Cross to plain: the branch's fall-through
+                                # idiom (the check at the bottom of this
+                                # while-pass routes the plain provider into
+                                # the standard streaming path).
+                                cc_request.pop("_resolved_key", None)
+                                cc_request.pop("_provider_config", None)
+                                cc_request.pop("_original_body", None)
+                                logger.info(
+                                    "CC stream empty response: crossing custom → plain, attempt %d/%d",
+                                    attempt + 1,
+                                    max_attempts,
+                                )
+                                break
+                        elif attempt < max_attempts - 1:
+                            delay = _BACKOFF_BASE * (2 ** (attempt % (_MAX_RETRIES + 1)))
+                            logger.warning(
+                                "CC stream empty response on custom transport: retrying in %.1fs (%d/%d)",
+                                delay,
+                                attempt + 1,
+                                max_attempts,
                             )
+                            await asyncio.sleep(delay)
+                            continue
+                        logger.warning(
+                            "CC stream empty response after %d attempts on custom transport, emitting terminal error",
+                            max_attempts,
+                        )
+                        error_payload = {
+                            "error": {
+                                "message": _NATIVE_EMPTY_REPLY_MESSAGE,
+                                "type": "empty_response",
+                            }
+                        }
+                        try:
+                            await sr.write(f"data: {json.dumps(error_payload)}\n\n".encode())
                             await sr.write(b"data: [DONE]\n\n")
                         except (ConnectionResetError, BrokenPipeError, OSError):
-                            logger.debug("Client disconnected during custom-transport emit")
-                        self._log_usage(cc_response.get("usage"))
+                            logger.debug("Client disconnected before empty-response exhaustion error could be sent")
                         break
 
                 cc_request.pop("_resolved_key", None)

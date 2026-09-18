@@ -437,12 +437,14 @@ other non-Messages wire behaves byte-identically to the pre-KBR-232 code.
   `error` chunk on a raw-CC upstream now takes the in-stream failover arm
   (pre-emission) rather than the "error after content" arm — the same
   semantics the converted route has had since KBR-248. **Scope-out,
-  deliberate:** the hold lives in the plain-POST branch only; the
-  custom-transport branch this route re-dispatches into on cross-class
-  failover (KBR-254) synthesises its own CC stream and has no hold, so an
-  empty completion from a `use_custom_transport` failover target still
-  delivers the skeleton within the crossing bound — the same defect one
-  branch over, owned by its own ticket. **Usage note:** usage a discarded
+  deliberate (KBR-248 → KBR-276); closed by KBR-287:** the plain-POST
+  branch's hold covered the converted route and every raw Chat Completions
+  upstream; the `use_custom_transport` segment the KBR-254 cross-class
+  re-dispatch routes into synthesised its own CC stream and had no hold,
+  so an empty completion from a `use_custom_transport` failover target
+  still delivered the skeleton within the crossing bound. KBR-287 retired
+  that scope-out (the fix is recorded below). **Usage note:** usage a
+  discarded
   empty attempt carried is never attributed (the D4 exhaustion terminal
   logs no completion); pre-existing behaviour shared with the converted
   route. The reasoning asymmetry the KBR-248 record called deliberate is
@@ -465,6 +467,91 @@ other non-Messages wire behaves byte-identically to the pre-KBR-232 code.
   and is filed as KBR-285. Tests:
   `tests/bridge/test_raw_cc_empty_hold.py` (raw-CC mirror of the KBR-248
   suite).
+- **KBR-287 closed the last leg — the `use_custom_transport` segment of
+  `_stream_chat_completions`** (grep anchor: `# Custom-transport providers
+  return Responses API SSE but CC clients`). A content-less completion from
+  Bedrock, Ollama Cloud, the Codex subscription — any adapter resolving
+  `use_custom_transport = True`, reached as the initial draw or through a
+  KBR-254 cross-class re-dispatch — had synthesised its own CC chunk
+  sequence and written it unconditionally: role chunk → finish → `[DONE]`,
+  the ladder unable to fire, the backend staying healthy while a balancing
+  pool kept routing to it. The branch now records its synthesised
+  payloads/lines and applies one up-front verdict through the shared
+  `_cc_chunk_carries_content` before any write: content-bearing → write
+  every line in synthesis order (byte-identical wire output); content-free →
+  write nothing and take the ladder. Four decisions the review settled,
+  each against a plausible alternative:
+  - *Judge-first, not an incremental hold-walk.* The plain-POST hold
+    buffers because a streaming branch does not know the future when its
+    first line arrives; this branch parses the entire upstream response
+    before emitting, so there is no unknown future to buffer against. A
+    `held` buffer here would be write-deferral with extra state, and the D5
+    `MAX_HELD_BYTES` cap could never fire (the only holdable lines are the
+    synthesised role/finish/`[DONE]`, tiny against 10 MiB) — the cap and
+    the non-JSON fail-open are satisfied **by construction**. This
+    deliberately simplifies the ticket's mechanism wording, which assumed
+    the plain-POST line-arrival shape.
+  - *The ladder ends in `empty_response`, not the ticket's
+    `cross_class_exhaustion`.* The ticket's acceptance named the cap-hit
+    terminal; reusing it would break §5.3 S8's promise that a client
+    branching on this route's `type` can tell the crossing-cap hit (a
+    pathological ping-pong — a configuration problem) apart from
+    `empty_response` (the upstream returned nothing — transient), and
+    would make the same all-attempts-empty failure carry different
+    discriminators depending on pool composition. The branch emits
+    `_NATIVE_EMPTY_REPLY_MESSAGE` + `type: "empty_response"` + `[DONE]`,
+    uniform with the plain-POST twin; the backend is not marked healthy
+    and no usage is logged (a discarded empty attempt is not a
+    completion).
+  - *The empty arm's backend selection is class-agnostic, mirroring the
+    plain-POST idiom* (grep anchor: `Check for empty response
+    (pass-through: no content bytes written)`). A custom-first tier pair
+    was rejected: empties never mark a backend unhealthy, so a mixed pool
+    [custom-empty, plain-good] would have spent every attempt re-selecting
+    among customs and never tried the plain backend — worst exactly in the
+    cross-class scenario this ticket exists for. The selected provider's
+    class decides: custom → re-normalise + refresh the
+    `_resolved_key`/`_provider_config` keys + next attempt; plain → pop
+    the three custom keys + the branch's fall-through (grep anchor:
+    `Cross-mode failover: entering standard streaming path`). The
+    custom→plain crossing is uncapped like the exception path's arm;
+    termination is bounded by the reverse direction — only plain→custom
+    crossings `continue` the dispatch loop, capped at `(2 * n_backends) +
+    1`, and a custom→plain fall-through happens at most once per pass.
+  - *The attempt bound is `n_backends + len(_EMPTY_FINAL_DELAYS)`, not the
+    plain-POST `(_MAX_RETRIES + 1) * n_backends + len(...)`.* The
+    plain-POST bound bakes in that branch's transport-error ladder (6
+    attempts on a single-backend pool with `_MAX_RETRIES = 3`); the custom
+    branch's transport errors ladder within `n_backends` via its own
+    exception path (grep anchor: `Custom-transport failover: attempt`),
+    so its "original" budget is the failover walk and only the empty
+    ladder extends it (3 attempts single-backend, all against the same
+    provider — empties never mark a backend unhealthy). The
+    final-delay prologue mirrors the plain-POST loop's (grep anchor:
+    `Empty upstream response: final retry in`); the exception path's
+    `attempt < n_backends - 1` gate keeps its meaning.
+  Two structural facts the next reader needs: the synthesis projects only
+  `content` and `tool_calls` — neither parser surfaces
+  `reasoning_content`, so a reasoning-only completion from a custom
+  transport synthesises the empty shape and ladders (the reasoning was
+  never delivered pre-fix either; the projection gap is not this ticket's
+  to close); and of KBR-285's widening set only the **list-content**
+  clause is reachable here (refusal and legacy dict `function_call` are
+  never projected), consumed at the same predicate the plain-POST branch
+  uses — one classifier, both branches, lockstep by construction. Usage
+  logging is log-on-release: the content path logs exactly as today,
+  including on client disconnect (the branch parses atomically, so usage
+  is fully known regardless of client state; the plain-POST
+  never-log-on-disconnect is a structural consequence of incremental
+  arrival, not a policy to copy). Known limit accepted with the same
+  trade KBR-276 made: until KBR-285 lands, a list-content multimodal
+  completion from a custom transport judges as empty and takes the
+  ladder. Tests: `tests/bridge/test_custom_transport_empty_hold.py`
+  (the KBR-276 harness shape, canned bytes through the branch's real
+  parse step, parametrised over `BedrockAdapter` / `OllamaCloudAdapter` /
+  `OpenAISubscriptionAdapter`; the ticket's `vertex` mention is a ticket
+  correction — `VertexAIAdapter` is a plain-POST OpenAI-compatible
+  passthrough on this tree and was already held by KBR-276).
 - **KBR-277 closed the non-streaming half.**
   `BridgeServer._is_empty_cc_response`'s Chat Completions-shaped arm now reads
   `message.reasoning_content` with the same `isinstance(..., str) and ... != ""` rule

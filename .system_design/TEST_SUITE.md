@@ -5851,6 +5851,23 @@ adapters now populate §4.3 C3(i) — T-I8's test obligation must be widened to 
 raw-CC path alongside the native-passthrough one. Tests:
 `tests/bridge/test_raw_cc_empty_hold.py`.
 
+**Completed by KBR-287 (2026-09-19):** the hold's last leg — the `use_custom_transport`
+segment of `_stream_chat_completions` (grep anchor: `# Custom-transport providers return
+Responses API SSE but CC clients`), the branch the KBR-254 cross-class re-dispatch routes
+into. That branch parses the provider's whole response before any write, so the hold
+degenerates to a judge-first verdict: the synthesised chunk list is judged through the
+shared `_cc_chunk_carries_content` and a content-free completion writes nothing — the
+empty ladder fires instead of the skeleton, ending in the route's `empty_response` D4
+terminal (the ticket's `cross_class_exhaustion` wording was deliberately corrected — see
+SYSTEM_DESIGN §5.4 for the §5.3 S8 discriminator-contract reasoning). A content-bearing
+synthesis is byte-identical to the pre-change wire output. The suite is the KBR-276
+harness shape with canned bytes fed through the branch's real parse step
+(`parse_stream_to_cc_response` for Ollama Cloud, the Responses-SSE fallback for Bedrock
+and the OpenAI subscription), parametrised over the three adapters that actually resolve
+`use_custom_transport = True` — the ticket's `vertex` mention is a ticket correction
+(`VertexAIAdapter` is plain-POST passthrough, already held by KBR-276). Tests:
+`tests/bridge/test_custom_transport_empty_hold.py`.
+
 Four things the implementer needs that the question itself did not settle, decided here so KBR-155
 is writable:
 
