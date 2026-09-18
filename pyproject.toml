@@ -26,7 +26,17 @@ classifiers = [
 ]
 dependencies = [
     "aiohttp>=3.11,<3.14",
-    "curl_cffi>=0.7",
+    # Bounded by decision (KBR-283, 2026-09-18): the only unbounded HTTP
+    # transport the code drove directly carried the OAuth refresh leg,
+    # and curl_cffi 0.16.3 already showed same-release platform drift
+    # (the Windows build honours uppercase HTTP_PROXY; Linux/macOS apply
+    # libcurl's CGI-security no-op). Bounded below the next minor; the
+    # floor is the oldest minor the product owner selected to support.
+    # The gate for a bump is tests/test_curl_cffi_transport_contract.py
+    # plus this file's pin guard in TestVersionConsistency, which fails
+    # until both move together; uv.lock is gitignored so this is the
+    # only durable pin.
+    "curl_cffi>=0.15,<0.17",
     "pydantic>=2.0",
     "keyring>=23.0",
     "rich>=13.0",
