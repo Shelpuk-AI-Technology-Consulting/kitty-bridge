@@ -399,4 +399,11 @@ only_mutate = [
     "src/kitty/profiles/*",
     "src/kitty/validation.py",
 ]
-also_copy = ["README.md", "scripts"]
+# `openapi` rides along for the same reason as `scripts`: inside the
+# generated tree, `tests/test_openapi_conformance.py` resolves its
+# schema relative to the test file (`mutants/openapi/kitty-bridge.yaml`),
+# and a missing file is a collection error that kills the clean-test
+# phase before it starts (found by the first CI-hosted mutmut run,
+# KBR-272). Directory form: mutmut 3.8.0's file branch does not create
+# the destination's parent directory; the directory branch does.
+also_copy = ["README.md", "scripts", "openapi"]
