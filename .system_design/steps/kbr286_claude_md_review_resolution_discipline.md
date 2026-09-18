@@ -86,6 +86,33 @@ remains the pre-existing `t_g6 → t_w8` dangling dep on `main`, tracked in
 KBR-278's open follow-up; this step adds no dangling dep) · `ruff check` on
 touched files clean.
 
+### Review rounds (PR #230)
+
+* **Internal code review round 1** (REQUEST_CHANGES): (a) clause-(b) anchor
+  `("in-thread",)` also matched rule 4's wording, so removing rule 3 did
+  not trip the guard — re-anchored to rule-3-unique wording and verified
+  with a whole-rule deletion probe (each of rules 1–4 removed in turn →
+  every removal detected); (b) the `.gitignore` edit had flipped 9
+  content-unchanged lines LF→CRLF — rewritten byte-exact to the merge-base
+  content minus the removed line; (c) the §6.2.3 register row was missing —
+  added, per the KBR-216/KBR-280 precedent.
+* **Internal code review round 2** (APPROVE): all three round-1 fixes
+  independently re-verified; one documentary nit in a commit message
+  deferred as not worth rewriting pushed history.
+* **Automated reviewer round** (1 warning, addressed in commit `ee4e217`):
+  plain `git check-ignore` short-circuits tracked files out of the ignore
+  consultation, so the guard was green in exactly the re-ignore scenario it
+  exists to detect. Verified empirically (with `/CLAUDE.md` re-added:
+  plain form exits 1, `--no-index` form exits 0); fixed with `--no-index`;
+  the same false claim corrected in the module docstring, the class
+  docstring, the method comment, and the §6.2.3 row; a re-ignore probe
+  confirms the corrected guard fails with the line re-added. The inline
+  thread was replied to and resolved; the PR-level round comment states
+  one finding addressed, nothing deferred.
+* **CI**: all 14 checks pass on the final commit (test matrix
+  3.10–3.13 × Linux/macOS/Windows, `review`, `ci-required`, CodeQL,
+  Analyze, review-scripts, review_replies, update-metadata).
+
 ## Cross-references
 
 * `CLAUDE.md` — "Resolving GitHub code reviews".
@@ -96,5 +123,7 @@ touched files clean.
 
 ## Status
 
-Implemented; code review pending (the PR carries decisions D1–D4 flagged for
-the reporter).
+Implemented; three review rounds closed (two internal, one automated), all
+14 CI checks pass on the final commit, one inline thread resolved. PR #230
+remains open awaiting the reporter's confirmation of decisions D1–D4 plus
+any further review before merge.
