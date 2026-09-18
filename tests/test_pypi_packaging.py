@@ -243,7 +243,13 @@ class TestBuildArtifacts:
 
 
 class TestVersionConsistency:
-    """Verify version is consistent across files."""
+    """Verify cross-file consistency the build and resolvers depend on.
+
+    Two responsibilities: the shipped version agrees between
+    ``src/kitty/__init__.py`` and ``pyproject.toml``, and the declared
+    curl_cffi range matches the pin policy recorded in TEST_SUITE.md
+    section 6.2.4 (KBR-283).
+    """
 
     def test_version_in_init_matches_pyproject(self):
         # Read version from source file to avoid importing stale installed package

@@ -63,7 +63,7 @@ The change:
    gitignored. Environment note: the worktree venv then needed
    `uv sync --extra dev` (a bare `uv sync` strips the dev extra, and KBR-82's
    schemathesis test files collect-fail without it).
-4. Prose sweep (all six sites): TEST_SUITE.md section 6.2.4 row (records the
+4. Prose sweep (all seven sites): TEST_SUITE.md section 6.2.4 row (records the
    bound + the both-mechanisms choice), the #675 lifecycle passage, G11
    (curl_cffi out of still-open; keyring + interpreter remain), the
    contract-test module docstring, the `_curl_session` docstring, the
