@@ -551,7 +551,20 @@ other non-Messages wire behaves byte-identically to the pre-KBR-232 code.
   parse step, parametrised over `BedrockAdapter` / `OllamaCloudAdapter` /
   `OpenAISubscriptionAdapter`; the ticket's `vertex` mention is a ticket
   correction — `VertexAIAdapter` is a plain-POST OpenAI-compatible
-  passthrough on this tree and was already held by KBR-276).
+  passthrough on this tree and was already held by KBR-276). **Exposed
+  pre-existing gap, not this ticket's to fix:** the botocore harness's
+  bridge-driven converse_stream test
+  (`test_a_streamed_request_via_the_bridge_yields_a_defined_terminal`,
+  renamed from `..._yields_finish_reason`) pinned the skeleton — Bedrock's
+  `stream_request` emits translated CC-SSE bytes, the branch parses them
+  with the Responses-SSE fallback that cannot read them, the parsed
+  response comes back content-free, and pre-KBR-287 the branch still
+  synthesised a skeleton whose finish chunk carried the test's
+  `finish_reason` oracle. Post-KBR-287 that shape takes the ladder and
+  ends in the `empty_response` terminal, which the renamed test now pins
+  with the ladder collapsed. The parse-path gap itself (CC-SSE bytes
+  meeting a Responses-SSE parser) is pre-existing and a candidate
+  follow-up ticket.
 - **KBR-277 closed the non-streaming half.**
   `BridgeServer._is_empty_cc_response`'s Chat Completions-shaped arm now reads
   `message.reasoning_content` with the same `isinstance(..., str) and ... != ""` rule
