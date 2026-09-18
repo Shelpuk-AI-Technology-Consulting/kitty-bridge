@@ -1625,19 +1625,29 @@ def _append_sse_chunk(
 
 
 def _cc_chunk_carries_content(chunk: dict) -> bool:
-    # pragma: no mutate block
     """Decide whether one Chat Completions chunk carries client-visible content.
 
     The KBR-248 hold releases on the first content-bearing line, so a
     content-less completion stays pre-emission and the empty-response ladder
-    can fire. Content is what the client would render: text, a tool-call
-    delta, or reasoning. A role-only chunk, an empty ``content`` string (D6:
-    a blank text reply is still empty), the finish chunk, and ``[DONE]``
-    carry none.
+    can fire. Content is what the client would render. The six shapes the
+    predicate counts (KBR-285 widens KBR-248's three-shape set):
+
+    1. non-empty string ``content`` — the ordinary text reply
+    2. non-empty list ``content`` — multimodal parts (vLLM / OpenRouter
+       image-capable backends)
+    3. non-empty ``tool_calls`` list — parallel tool-call deltas
+    4. truthy dict legacy ``function_call`` — the deprecated single-dict
+       pre-``tool_calls`` shape (OpenAI still documents it)
+    5. non-empty string ``refusal`` — the moderation path's refusal-only
+       completion (content null, refusal text)
+    6. non-empty string ``reasoning_content`` — thinking text
+
+    A role-only chunk, an empty ``content`` string (D6: a blank text reply is
+    still empty), the finish chunk, and ``[DONE]`` carry none.
 
     Robust to arbitrary parsed upstream JSON: absent or empty ``choices``, an
-    absent or non-dict ``delta``, or a non-string/non-list content field all
-    return ``False`` rather than raise.
+    absent or non-dict ``delta``, or a non-string/non-list/non-dict value on
+    any of the content fields returns ``False`` rather than raise.
 
     Args:
         chunk: One parsed Chat Completions chunk payload.
@@ -1656,7 +1666,14 @@ def _cc_chunk_carries_content(chunk: dict) -> bool:
         return False
     if isinstance(delta.get("content"), str) and delta["content"] != "":
         return True
+    if isinstance(delta.get("content"), list) and delta["content"]:
+        return True
     if isinstance(delta.get("tool_calls"), list) and delta["tool_calls"]:
+        return True
+    function_call = delta.get("function_call")
+    if isinstance(function_call, dict) and function_call:
+        return True
+    if isinstance(delta.get("refusal"), str) and delta["refusal"] != "":
         return True
     return isinstance(delta.get("reasoning_content"), str) and delta["reasoning_content"] != ""
 
@@ -2620,7 +2637,6 @@ class BridgeServer:
 
     @staticmethod
     def _is_empty_cc_response(cc_response: dict) -> bool:
-        # pragma: no mutate block
         """Return True if a Chat Completions response has no content, tool calls, or reasoning.
 
         Used to detect empty upstream responses (HTTP 200 but no meaningful
@@ -2635,15 +2651,21 @@ class BridgeServer:
           retries — consistent with the streaming hold, which also does not
           release on a thinking block.
 
-        * **Chat-Completions-shaped** (default arm, KBR-277) — extends the
-          previous ``content`` + ``tool_calls`` check with a ``reasoning_content``
-          clause that is the **literal mirror** of the streaming predicate's
-          last clause (:func:`_cc_chunk_carries_content` at
-          ``server.py:1483``): ``isinstance(..., str) and ... != ""``. The
-          mirror is deliberate so mutation testing side-by-side catches any
-          divergence. A reasoning-only Chat Completions reply therefore
-          succeeds on the first attempt on both routes (KBR-248 streaming,
-          KBR-277 non-streaming).
+        * **Chat-Completions-shaped** (default arm, KBR-277; widened by KBR-285) — counts
+          the same six shapes the streaming predicate
+          (:func:`_cc_chunk_carries_content` at ``server.py:1679``) counts, in
+          the streaming predicate's clause order: non-empty string ``content``,
+          non-empty list ``content`` (multimodal parts), non-empty ``tool_calls``
+          list, truthy dict legacy ``function_call``, non-empty string ``refusal``,
+          non-empty string ``reasoning_content``. The ``reasoning_content``
+          clause is the **literal mirror** of the streaming predicate's last
+          clause (``isinstance(..., str) and ... != ""``); the four new clauses
+          carry no ``.strip()`` drift and take the streaming-side spelling on both
+          sides. The mirror is deliberate so mutation testing side-by-side catches
+          any divergence. A reply that carries only ``refusal``, only
+          ``function_call``, or only a list of content parts therefore succeeds
+          on the first attempt on both routes (KBR-248 + KBR-276 streaming,
+          KBR-277 + KBR-285 non-streaming).
 
         The ``content`` clause keeps ``.strip()`` (whitespace-only content
         is empty) while ``reasoning_content`` uses ``!= ""`` (whitespace-only
@@ -2682,13 +2704,29 @@ class BridgeServer:
         message = choices[0].get("message", {})
         content = message.get("content")
         tool_calls = message.get("tool_calls", [])
+        function_call = message.get("function_call")
+        refusal = message.get("refusal")
         reasoning_content = message.get("reasoning_content")
         has_text = isinstance(content, str) and content.strip()
-        # KBR-277: literal mirror of _cc_chunk_carries_content's last clause (server.py:1483).
+        # KBR-285: the four clauses below mirror _cc_chunk_carries_content's
+        # widened set in its clause order (server.py:1665-1679). They take the
+        # streaming-side spelling on both sides — only the string-``content``
+        # clause above keeps the documented ``.strip()`` drift.
+        has_multimodal = isinstance(content, list) and bool(content)
+        has_function_call = isinstance(function_call, dict) and bool(function_call)
+        has_refusal = isinstance(refusal, str) and refusal != ""
+        # KBR-277: literal mirror of _cc_chunk_carries_content's last clause (server.py:1679).
         # Mirror byte-for-byte so mutation testing on the two predicates side-by-side catches
         # any divergence.
         has_reasoning = isinstance(reasoning_content, str) and reasoning_content != ""
-        return not has_text and not tool_calls and not has_reasoning
+        return not (
+            has_text
+            or has_multimodal
+            or tool_calls
+            or has_function_call
+            or has_refusal
+            or has_reasoning
+        )
 
     @staticmethod
     def _is_non_retryable_reply(cc_response: dict) -> bool:
@@ -8013,13 +8051,15 @@ class BridgeServer:
                     # native Messages passthrough. KBR-248 gated the hold on
                     # ``stream_converter is not None`` and deliberately left the
                     # raw-CC upstreams' skeleton behaviour alone; KBR-276
-                    # removed the gate, so a completion the classifier judges
-                    # content-free (``_cc_chunk_carries_content``) from any
-                    # plain-POST provider is now pre-emission and the ladder
-                    # fires. The classifier's set is the KBR-285 follow-up's
-                    # scope: ``refusal``/legacy ``function_call``/list
-                    # ``content`` deltas do not count today (§5.4 known
-                    # limit). Capped at ``MAX_HELD_BYTES`` (D5): an upstream
+                    # removed the gate, so a content-less completion — one the
+                    # classifier judges content-free
+                    # (``_cc_chunk_carries_content``) — from any plain-POST
+                    # provider is pre-emission and the ladder fires. KBR-285
+                    # widened the classifier's set to six shapes (text,
+                    # multimodal list, tool calls, legacy ``function_call``,
+                    # ``refusal``, reasoning); the translated routes'
+                    # MessagesTranslator carries the widened set too.
+                    # Capped at ``MAX_HELD_BYTES`` (D5): an upstream
                     # that trickles empty-content deltas forever must not grow
                     # ``held`` without limit.
                     held: list[bytes] = []

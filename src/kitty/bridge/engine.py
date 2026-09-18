@@ -17,6 +17,9 @@ __all__ = ["ToolCallBuffer", "ToolCallBufferError", "TranslationEngine"]
 _FINISH_REASON_MAP: dict[str | None, str] = {
     "stop": "end_turn",
     "tool_calls": "tool_use",
+    # KBR-285: the legacy single-function wire finishes with
+    # ``function_call``; it carries a tool call the same way ``tool_calls`` does.
+    "function_call": "tool_use",
     "length": "max_tokens",
     None: "end_turn",
 }

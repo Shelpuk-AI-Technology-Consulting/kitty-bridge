@@ -325,7 +325,11 @@ forbidden_modules = [
 # `scripts/aggregate_mutation_baseline.py` by filesystem path at module
 # level (added in KBR-88 review round 7, after the recorded b680edd run;
 # every mutmut run on main needs this copy or test collection fails
-# before the clean run starts). The whole directory is copied, not the
+# before the clean run starts). `openapi` is the third: the L2 schemathesis
+# conformance test (KBR-82) loads `openapi/kitty-bridge.yaml` at module
+# import, which happens at collection even under `-m l1`, so every mutmut
+# run needs the copy since that file landed (after the KBR-266 run). The
+# whole directory is copied, not the
 # single file, because mutmut 3.8.0's file branch (`shutil.copy2`) does
 # not create the destination's parent directory and dies on a fresh
 # `mutants/` tree; the directory branch (`copytree(dirs_exist_ok=True)`)
@@ -387,4 +391,4 @@ only_mutate = [
     "src/kitty/profiles/*",
     "src/kitty/validation.py",
 ]
-also_copy = ["README.md", "scripts"]
+also_copy = ["README.md", "scripts", "openapi"]
