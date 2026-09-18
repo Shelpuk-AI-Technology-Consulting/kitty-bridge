@@ -620,14 +620,13 @@ class GeminiReplyProjection:
             call = part["functionCall"]
             if not isinstance(call, dict):
                 raise c.UnreadableBodyError(f"{prefix}.functionCall must be an object")
-            if not isinstance(call.get("name"), str):
-                raise c.UnreadableBodyError(f"{prefix}.functionCall.name must be a string")
+            name = _require_tool_call_name(call.get("name"), f"{prefix}.functionCall.name")
             args = call.get("args") or {}
             if not isinstance(args, Mapping):
                 args = {}
             return (
                 c.ToolUse(
-                    name=call["name"],
+                    name=name,
                     arguments=dict(args),
                     id=call.get("id") if isinstance(call.get("id"), str) else None,
                 ),
@@ -1288,7 +1287,7 @@ def _read_function_declarations(
 
 
 def _read_required_name(view: Mapping[str, tuple[str, Any]], path: str, residual: dict[str, Any]) -> str:
-    """Return a required ``name``, residualising it when the wire carried none.
+    """Return a required declaration ``name``, residualising it when the wire carried none.
 
     §3.3.1b settles this and the answer is **not** the wrongly-typed-leaf rule's
     usual one: "an absent ``name`` *does* residualise … ``ToolUse.name`` is a
@@ -1298,14 +1297,13 @@ def _read_required_name(view: Mapping[str, tuple[str, Any]], path: str, residual
     because dropping or raising on it would blind the oracle to the rest of a
     request it could otherwise diff. T-A3 takes the same branch.
 
-    **Two call sites, and they are only interchangeable by coincidence.** This is
-    reached from a ``FunctionDeclaration`` view and from a ``FunctionCall`` view,
-    which today publish ``name`` alike. A future schema that gave one of them a
-    second name-shaped key would silently mis-route here, because the helper
-    takes the aliased view rather than the schema it came from. Named so that a
-    change to one call site is not made on the assumption that the other
-    followed; each has its own wrongly-typed case in
-    ``TestEveryOptionalLeafFailsClosed``.
+    **One call site since KBR-281: ``FunctionDeclaration`` names.** The
+    ``FunctionCall`` site used to route through here too; it now uses
+    :func:`_require_tool_call_name`, whose raise-on-absent/empty/non-string
+    rule is the settled tool-call posture (§7.4.2 rule 7 row 2, four strict
+    readers). A future schema that gave declarations a second name-shaped key
+    would silently mis-route here, because the helper takes the aliased view
+    rather than the schema it came from.
 
     Args:
         view: The aliased view of the object carrying the name.
@@ -1326,6 +1324,36 @@ def _read_required_name(view: Mapping[str, tuple[str, Any]], path: str, residual
         )
         return ""
 
+    return name
+
+
+def _require_tool_call_name(name: Any, path: str) -> str:
+    """Validate and return a ``functionCall``'s ``name``; raise on absent / empty / wrong type.
+
+    The strict name-required rule shared by the reply ``_read_part`` site and
+    the request ``_read_function_call`` site — one spelling of the rule for
+    both directions, per §7.4.1's within-module anti-drift rule, mirroring
+    Ollama's ``_require_tool_call_name`` (``reader_ollama.py:1007``) so the
+    readers' strict-name helpers grep together. ``""`` for a name is not a
+    lossless projection (``contract.py:935-941``): it claims a tool *named*
+    empty-string, and a call nobody can name cannot be paired with its result
+    or addressed by a register row (KBR-281). Declaration names keep the
+    residualise posture of :func:`_read_required_name` — that slot's
+    prescription is §3.3.1b's general one, deliberately.
+
+    Args:
+        name: The ``functionCall``'s raw ``name`` value.
+        path: The name's path from the body root, used as the error-message
+            prefix.
+
+    Returns:
+        The validated, non-empty name.
+
+    Raises:
+        UnreadableBodyError: When ``name`` is absent, empty, or not a string.
+    """
+    if not isinstance(name, str) or not name:
+        raise c.UnreadableBodyError(f"{path} must be a non-empty string name")
     return name
 
 
@@ -1758,8 +1786,10 @@ def _read_function_call(view: Mapping[str, tuple[str, Any]], path: str, residual
         The tool use.
 
     Raises:
-        UnreadableBodyError: When the call is not an object. A call with no
-            usable name residualises instead — see :func:`_read_required_name`.
+        UnreadableBodyError: When the call is not an object, or when its
+            ``name`` is absent, empty, or not a string — via
+            :func:`_require_tool_call_name` (KBR-281; the strict tool-call
+            posture, not the declaration path's residualise rule).
     """
     wire_key, value = view["functionCall"]
     item = c.residual_key(path, wire_key)
@@ -1767,7 +1797,11 @@ def _read_function_call(view: Mapping[str, tuple[str, Any]], path: str, residual
         raise c.UnreadableBodyError(f"{item} must be an object, got {type(value).__name__}")
 
     call = _aliased(value, PUBLISHED_FUNCTION_CALL_KEYS, item, residual)
-    name = _read_required_name(call, item, residual)
+    # The aliased view maps published name -> (wire key, value); the helper
+    # takes the raw value, so unwrap it here. A colliding alias would have
+    # residualised inside `_aliased` before reaching this line.
+    raw_name = call["name"][1] if "name" in call else None
+    name = _require_tool_call_name(raw_name, f"{item}.name")
     projected = c.ToolUse(
         name=name,
         arguments=_typed_leaf(call, "args", (dict,), item, residual, default={}),

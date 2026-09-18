@@ -1773,3 +1773,66 @@ class TestFailures:
         """R8.5 — ``role`` is required on every message."""
         with pytest.raises(c.UnreadableBodyError):
             _read({"model": "gpt-6-astra", "messages": [{"content": "hi"}]})
+
+
+class TestNameRequired:
+    """A tool_call with a missing, empty, or non-string ``function.name`` raises.
+
+    ``contract.decode_arguments`` (``contract.py:935-941``) is explicit: ``""``
+    for a name is **not** lossless — a call nobody can name cannot be paired
+    with its result or addressed by a register row. KBR-279 landed the rule
+    for the Ollama request reader; KBR-281 aligns Chat Completions on it (the
+    reply direction's ``tool_calls`` and legacy ``function_call`` sites are
+    pinned in ``test_reader_chat_completions_reply.py``).
+    """
+
+    @staticmethod
+    def _body_with_tool_call(function: dict[str, Any]) -> dict[str, Any]:
+        """Return a CC request body whose one ``tool_call`` carries ``function``."""
+        return {
+            "model": "gpt-6-astra",
+            "messages": [
+                {"role": "user", "content": "weather?"},
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {"id": "call_abc123", "type": "function", "function": function}
+                    ],
+                },
+            ],
+        }
+
+    def test_missing_function_name_raises(self) -> None:
+        """A tool_call with no ``function.name`` raises."""
+        body = self._body_with_tool_call({"arguments": "{}"})
+
+        with pytest.raises(c.UnreadableBodyError, match="function"):
+            _read(body)
+
+    def test_empty_function_name_raises(self) -> None:
+        """A tool_call with an empty ``function.name`` raises (KBR-281)."""
+        body = self._body_with_tool_call({"name": "", "arguments": "{}"})
+
+        with pytest.raises(c.UnreadableBodyError, match="function"):
+            _read(body)
+
+    def test_non_string_function_name_raises(self) -> None:
+        """A tool_call with a non-string ``function.name`` raises."""
+        body = self._body_with_tool_call({"name": 42, "arguments": "{}"})
+
+        with pytest.raises(c.UnreadableBodyError, match="function"):
+            _read(body)
+
+    def test_named_function_control_is_clean(self) -> None:
+        """Control — the published body's named tool_call is accepted cleanly."""
+        body = self._body_with_tool_call(
+            {"name": "get_weather", "arguments": '{"city": "San Francisco"}'}
+        )
+
+        projected = _read(body)
+        assert projected.residual == {}
+        tool_use = projected.conversation.turns[1].parts[0]
+        assert isinstance(tool_use, c.ToolUse)
+        assert tool_use.name == "get_weather"
+        assert tool_use.arguments == {"city": "San Francisco"}

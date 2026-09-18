@@ -928,11 +928,17 @@ def decode_arguments(raw: Any, path: str, residual: dict[str, Any]) -> Mapping[s
 
     **Only an absent or blank value is silently empty.**  An absent ``arguments``
     honestly means *no arguments*, which is why it does not residualise the way
-    an absent tool ``name`` does even though the schema requires both.  The test
-    generalises to every required field: *can the projection represent the
-    absence losslessly?*  ``{}`` is a true statement about a call — seen and
-    classified, the same ground on which :data:`STOP_REASONS` gives ``other`` its
-    escape instead of the residual.  ``""`` for a name is not: it claims a tool
+    an absent tool ``name`` does even though the schema requires both — except
+    where the tool-call readers do not follow that contrast.  The four strict
+    readers (Chat Completions, Gemini, Anthropic, Ollama) raise on absent /
+    empty / non-string tool names via ``_require_tool_call_name`` (the settled
+    §7.4.2 rule 7 row 2 posture, KBR-281); Bedrock Converse request, Responses
+    request, and Gemini declarations still residualise a missing-name leaf on
+    the field's own path, with the part projected.  The test generalises to
+    every required field: *can the projection represent the absence
+    losslessly?*  ``{}`` is a true statement about a call — seen and classified,
+    the same ground on which :data:`STOP_REASONS` gives ``other`` its escape
+    instead of the residual.  ``""`` for a name is not: it claims a tool
     *named* empty-string, and a call nobody can name cannot be paired with its
     result or addressed by a register row.
 

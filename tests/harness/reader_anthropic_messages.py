@@ -747,8 +747,13 @@ def _read_block(block: Any, path: str, residual: dict[str, Any], *, nested: bool
         return _read_image(block, path, residual, nested=nested)
 
     if kind == "tool_use":
-        if not isinstance(block.get("name"), str):
-            raise c.UnreadableBodyError(f"{path} tool_use carries no name")
+        # KBR-281: `""` for a name is not a lossless projection
+        # (`contract.py:935-941`) — a call nobody can name cannot be paired
+        # with its result or addressed by a register row. Same rule the Ollama
+        # readers landed in KBR-267/KBR-279.
+        name = block.get("name")
+        if not isinstance(name, str) or not name:
+            raise c.UnreadableBodyError(f"{path} tool_use must carry a non-empty string name")
 
         # As for `input_schema`: Chat Completions encodes arguments as a JSON
         # *string*, so an upstream body that failed to parse one back lands here
