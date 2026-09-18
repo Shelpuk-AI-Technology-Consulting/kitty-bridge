@@ -24,7 +24,8 @@ connections and the bridge answers an error — and the green assertion
 fulfils §1.4 and is *not* T-E2's own phase-3 obligation, which injects a
 bypass into the product.
 
-**Layer.** No ``pytestmark``, so these take the ``l1`` path default, following
+**Layer.** The only ``pytestmark`` is the KBR-272 timeout bound (below); no
+layer marker, so these take the ``l1`` path default, following
 ``test_bridge.py`` and ``test_vertical_slice.py``. The reason is §8.2's and
 only §8.2's: ``l3`` is in ``PENDING_ACTIVATION_LAYERS``, so an ``l3`` marker
 today would leave the containment harness's correctness checked by no job at
@@ -73,6 +74,9 @@ from harness.recorder import RecordingUpstream
 
 # ── Fixtures ───────────────────────────────────────────────────────────────
 
+
+# KBR-272: bounded by the §8.2 registry (tests/test_socket_binding_l1_timeout_marks.py).
+pytestmark = pytest.mark.timeout(120)
 
 @pytest.fixture
 def capability_report() -> CapabilityReport:

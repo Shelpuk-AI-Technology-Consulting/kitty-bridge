@@ -41,6 +41,9 @@ from kitty.providers.base import ProviderAdapter
 
 # ── Fixtures of shape, not of value ──────────────────────────────────────────
 
+# KBR-272: bounded by the §8.2 registry (tests/test_socket_binding_l1_timeout_marks.py).
+pytestmark = pytest.mark.timeout(120)
+
 _TEXT = "hi"
 _MODEL = "test-model"
 

@@ -51,6 +51,9 @@ from harness.connect_proxy import (
 
 from kitty.cli import egress_cmd
 
+# KBR-272: bounded by the §8.2 registry (tests/test_socket_binding_l1_timeout_marks.py).
+pytestmark = pytest.mark.timeout(120)
+
 _AIOHTTP_NEEDS_311 = sys.version_info < (3, 11)
 _AIOHTTP_SKIP_REASON = "aiohttp requires Python 3.11 for TLS-in-TLS over stdlib asyncio (bpo-44011)"
 

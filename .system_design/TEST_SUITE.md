@@ -4580,25 +4580,33 @@ standing amnesty:
   its reason.
 
 A consequence worth stating: **a test may not be moved to `l3` before the Subsystem job exists.**
-Twelve modules under `tests/` bind real sockets or spawn processes and are `l1` by default
-today — `test_egress_https_proxy.py` foremost among them (an earlier draft said "roughly six";
-the count has grown as Epic B, E and the KBR-132/144/176/220 fixes each landed a socket-binding
-module, and the bullet list below is now the authoritative enumeration). Since T-W5 that file's
-shared fixture plus `tests/harness/test_connect_proxy.py` must move **with** it: an
-extraction and its own regression evidence landing in two different jobs would leave one proving
-the other in a run that no longer includes it. Reclassifying them is correct and is T-K6's
-business, together with the job that runs them; doing it earlier would remove them from every
-gate. T-H1 must take that reclassification into account before it measures a mutation
-baseline, because it selects on `l1`.
+Fifteen modules under `tests/` bind real sockets or spawn processes and are `l1` by default
+today (an earlier draft said "roughly six"; the count has grown as Epic B, E and the
+KBR-132/144/176/220 fixes each landed a socket-binding module, and the bullet list below is now
+the authoritative enumeration). Since T-W5 the egress shared fixture plus
+`tests/harness/test_connect_proxy.py` must move **with** it: an extraction and its own
+regression evidence landing in two different jobs would leave one proving the other in a run
+that no longer includes it. Reclassifying them is correct and is T-K6's business, together with
+the job that runs them; doing it earlier would remove them from every gate. T-H1 must take that
+reclassification into account before it measures a mutation baseline, because it selects on
+`l1`.
 
-**Eleven modules are bulleted below — in nine bullets, since the T-W4 and T-W8 rows name two
-modules each — and `tests/cli/test_stream_encoding.py` (KBR-10) is described after them, twelve in
-all, named here so T-K6 inherits a list rather than a search** — the count
-is what T-K6 and T-H1 plan against. (The bullet count and the KBR-10 paragraph were already
-drifting apart before T-W8 added two; spelling out both is what stops the next addition
-guessing which set it joins. T-W9 joins the **bulleted** set, not the paragraph above it, which
-still names `tests/test_egress_https_proxy.py` and `tests/harness/test_connect_proxy.py`
-separately.)
+**Fourteen modules are bulleted below — in eleven bullets, since the T-W4, T-W8 and KBR-272-egress
+rows each name two modules — and `tests/cli/test_stream_encoding.py`
+(KBR-10) is described after them, fifteen in all, named here so T-K6 inherits a list rather than a
+search** — the count is what T-K6 and T-H1 plan against. (The bullet count and the KBR-10 paragraph
+were already drifting apart before T-W8 added two; spelling out both is what stops the next
+addition guessing which set it joins. T-W9 joins the **bulleted** set, not the paragraph above it.)
+
+**KBR-272 reconciliation (2026-09-18).** Three socket-binding modules — `tests/test_egress_https_proxy.py`,
+`tests/harness/test_connect_proxy.py`, and `tests/bridge/test_crash_resilience.py` — were
+unenumerated before this commit despite binding real sockets (the first two were named only in the
+prose above; the third was the convention KBR-144 cited when adding `test_responses_string_input.py`).
+All three are bound by the `pytest.mark.timeout(120)` mark whose registry is
+`tests/test_socket_binding_l1_timeout_marks.py`, which mirrors this enumeration; the timeout mark
+is what bounds mutmut's clean-test phase (KBR-266 hung indefinitely without it). The iteration-
+artifact-sweep rule applies: the enumeration concept changed, so the doc, the
+`tests/test_layer_selection.py` l2 set, and the baseline doc all change in this same pull request.
 
 - **KBR-132:** `tests/bridge/test_tls_certs.py` spawns a real `openssl` in one of its five cases.
   KBR-132 deliberately did **not** move it — the rule above applies to a test fixing a skip defect
@@ -4670,10 +4678,25 @@ separately.)
   plain `LOCALAPPDATA` does not redirect Windows. A child reports where kitty will look, and the
   fixture refuses before writing anything unless that is the temporary directory. Its three cases
   take **~6.5 seconds** on Linux, measured. They passed unskipped on the Windows and macOS legs of
-  the first PR run (2026-09-13, run 34766656090), but the gate prints no per-test durations, so those
-  legs have a result and no figure yet. One cost to know about: a bridge that misses the 5 s window fails the case
+  the first PR run (2026-09-13, run 34766656090), which printed no per-test durations — the gate
+  gained `--durations=25` with KBR-272, so every leg now reports its slowest tests and that figure
+  can be filled in from any recent run. One cost to know about: a bridge that misses the 5 s window fails the case
   with *"did not report ready"* rather than slowing it, so a slow runner shows up as a red leg,
   never as a quiet delay.
+- **KBR-272 (egress + CONNECT proxy, T-W5):** `tests/test_egress_https_proxy.py` performs real
+  TLS handshakes through a local TLS CONNECT proxy — every other egress test is mocked at the
+  socket layer, this module proves the unmocked path. Since T-W5 its shared fixture
+  (`tests/harness/test_connect_proxy.py`) must move **with** it; the two are one module's worth of
+  evidence, not two. Run **on demand** by the CI matrix today; the §8.3 honest-gap registry
+  acknowledges this is one of the modules the eventual Subsystem job (T-K6) will reclassify, and
+  T-H1's mutation baseline must include it (it is in this enumeration precisely because mutmut's
+  clean-test phase exercises it).
+- **KBR-272 (crash resilience):** `tests/bridge/test_crash_resilience.py` binds real
+  `BridgeServer`s on ephemeral ports across its cases, following the convention KBR-144 cited when
+  adding `tests/bridge/test_responses_string_input.py` (no bullet of its own then — the
+  crash-resilience tests predate the convention's articulation). Its socket-binding reality was
+  unenumerated before KBR-272 surfaced the drift; it now joins the bullets so the §8.2 set the
+  timeout registry pins matches the set the doc claims.
 
 **One cross-cutting cost, added by KBR-188's fix.** Every conformance probe now begins by waiting
 for the clock to report a new instant (§8.3). Measured at **80 calls** across the harness suite:
@@ -4713,6 +4736,13 @@ The arrangement, made explicit:
   scheduled nightly caller of the same reusable workflow gives early warning; it does not
   substitute for the release call, because a nightly result belongs to a different commit.
 - Nightly Deep, Agent-live and Eval workflows stand alone and gate nothing.
+- `mutation-remeasure.yml` — **manual tool**, not a gate (KBR-272). `workflow_dispatch` with a
+  scope-group input; runs `mutmut run` for that one group on a GitHub-hosted runner — the
+  idle-workstation guarantee the mutation baseline's recording needs (the shared dev workstation
+  is contended by sibling sessions, which is what hung KBR-266's run) — and uploads the `mutants/`
+  tree as an artifact for the recorded baseline. It invokes no pytest directly, so it claims no
+  layer. The nightly schedule and the per-group thresholds remain T-H3's (KBR-91) scope; this
+  file is the tool that job extends, not a second definition of it.
 
 That keeps the property the existing setup gets right — a release runs exactly the checks a PR
 ran, from one definition — while extending it to the one gate that runs only at release time.
