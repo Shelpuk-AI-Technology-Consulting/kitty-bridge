@@ -272,8 +272,27 @@ class GeminiTranslator:
 
     @staticmethod
     def _extract_text(content: dict) -> str:
-        """Extract concatenated text from a Gemini Content object."""
-        return "\n".join(p.get("text", "") for p in content.get("parts", []) if "text" in p)
+        """Extract concatenated text from a Gemini Content object.
+
+        Calls ``parts[i].text`` for each entry of ``parts``. Schemathesis
+        fuzzing (KBR-82's conformance run) found that a malformed
+        ``systemInstruction`` can be any JSON value at all -- an integer, a
+        list -- and its ``parts`` can hold entries that are not ``dict``
+        instances; the unguarded ``.get`` raised ``AttributeError`` into the
+        request handler, which answered with a 500. Per the Gemini schema a
+        Content is always ``{parts: [{text: ...}, ...]}``; the fuzzer's job
+        is to find bodies that violate the schema, the translator's job is
+        to return no text from the ones that do. The 400 the rest of the
+        bridge returns for a malformed body is the right outcome, not a 500.
+        """
+        if not isinstance(content, dict):
+            return ""
+        parts = content.get("parts", [])
+        if not isinstance(parts, list):
+            return ""
+        return "\n".join(
+            p.get("text", "") for p in parts if isinstance(p, dict) and "text" in p
+        )
 
     @staticmethod
     def _make_tool_call_id(name: str) -> str:

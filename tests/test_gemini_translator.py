@@ -61,6 +61,35 @@ class TestTranslateRequestSystemInstruction:
         assert cc["messages"][0] == {"role": "system", "content": "You are a helper."}
         assert cc["messages"][1] == {"role": "user", "content": "Hello"}
 
+    @pytest.mark.parametrize(
+        "garbage",
+        [
+            3,  # an integer Content — the shape schemathesis found (KBR-82's run)
+            "text",
+            [1, 2],
+            None,
+            {"parts": 7},
+            {"parts": [1, "x", None]},
+        ],
+        ids=["int", "str", "list", "none", "parts-not-a-list", "part-entries-not-dicts"],
+    )
+    def test_malformed_system_instruction_yields_no_system_message(self, garbage):
+        """A malformed systemInstruction must yield no system message, never a crash.
+
+        Schemathesis fuzzing (KBR-82's conformance run, Windows leg) found that
+        ``_extract_text`` raised ``AttributeError`` on a fuzzed body whose
+        ``systemInstruction`` was an arbitrary JSON value, and the request
+        handler answered 500. A body that violates the Gemini schema is a
+        400-shaped input, not a server error; the translator ignores it.
+        """
+        t = GeminiTranslator()
+        gemini_req = {
+            "contents": [{"role": "user", "parts": [{"text": "Hello"}]}],
+            "systemInstruction": garbage,
+        }
+        cc = t.translate_request(gemini_req)
+        assert [m["role"] for m in cc["messages"]] == ["user"]
+
 
 class TestTranslateRequestTools:
     """functionDeclarations → tools in Chat Completions format."""
