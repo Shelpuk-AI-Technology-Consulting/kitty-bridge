@@ -1007,3 +1007,83 @@ class TestGeminiToolChoice:
             "type": "function",
             "function": {"name": "get_weather"},
         }
+
+
+class TestMalformedRequestShapes:
+    """Schemathesis-shaped garbage must translate to nothing, never crash.
+
+    KBR-82's conformance run (Windows leg of PR #219) found the first of
+    these: ``_extract_text`` raised ``AttributeError`` on a fuzzed body whose
+    ``systemInstruction`` was an integer, and the request handler answered
+    500 — an undocumented status for the route. The same class was live in
+    every sibling: non-dict ``contents`` entries, non-dict ``parts`` entries,
+    ``functionResponse`` / ``functionCall`` without a ``name``, a non-list
+    ``tools``, and declarations without a ``name``. The translator's job for
+    every one is the same: skip the shape, let the bridge's normal
+    (200-or-400) handling proceed.
+    """
+
+    def test_non_dict_contents_is_ignored(self):
+        t = GeminiTranslator()
+        cc = t.translate_request({"contents": 7})
+        assert cc["messages"] == []
+
+    def test_non_dict_content_entries_are_skipped(self):
+        t = GeminiTranslator()
+        cc = t.translate_request(
+            {"contents": [7, "x", None, {"role": "user", "parts": [{"text": "Hi"}]}]}
+        )
+        assert [m["content"] for m in cc["messages"]] == ["Hi"]
+
+    def test_non_dict_parts_entries_are_skipped_in_user_content(self):
+        t = GeminiTranslator()
+        cc = t.translate_request({"contents": [{"role": "user", "parts": [1, None, {"text": "Hi"}]}]})
+        assert cc["messages"] == [{"role": "user", "content": "Hi"}]
+
+    def test_parts_not_a_list_is_ignored(self):
+        t = GeminiTranslator()
+        cc = t.translate_request({"contents": [{"role": "user", "parts": 7}]})
+        assert cc["messages"] == []
+
+    def test_function_response_without_name_is_skipped(self):
+        t = GeminiTranslator()
+        cc = t.translate_request(
+            {"contents": [{"role": "user", "parts": [{"functionResponse": {"response": {}}}]}]}
+        )
+        assert cc["messages"] == []
+
+    def test_function_call_without_name_is_skipped(self):
+        t = GeminiTranslator()
+        cc = t.translate_request(
+            {"contents": [{"role": "assistant", "parts": [{"functionCall": {"args": {}}}]}]}
+        )
+        assert cc["messages"] == [{"role": "assistant", "content": None}]
+
+    def test_non_dict_function_response_and_call_are_skipped(self):
+        t = GeminiTranslator()
+        cc = t.translate_request(
+            {"contents": [{"role": "user", "parts": [{"functionResponse": 7}]}]}
+        )
+        assert cc["messages"] == []
+        cc = t.translate_request(
+            {"contents": [{"role": "assistant", "parts": [{"functionCall": 7}]}]}
+        )
+        assert cc["messages"] == [{"role": "assistant", "content": None}]
+
+    def test_non_list_tools_is_ignored(self):
+        t = GeminiTranslator()
+        cc = t.translate_request({"contents": [], "tools": 7})
+        assert "tools" not in cc
+
+    def test_tool_declarations_without_name_are_skipped(self):
+        t = GeminiTranslator()
+        cc = t.translate_request(
+            {
+                "contents": [],
+                "tools": [
+                    7,
+                    {"functionDeclarations": [7, {"description": "no name"}, {"name": "ok"}]},
+                ],
+            }
+        )
+        assert [t2["function"]["name"] for t2 in cc["tools"]] == ["ok"]

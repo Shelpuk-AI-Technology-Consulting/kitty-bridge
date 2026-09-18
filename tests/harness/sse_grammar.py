@@ -143,6 +143,13 @@ class SseGrammar:
         self._terminal_event: str | None = None
         self._last_kind: str | None = None
         self._finished: Classification | None = None
+        #: Whether :meth:`feed` ran at least once. A zero-byte feed counts:
+        #: the RuntimeError below is a caller-bug detector, not a stream
+        #: property, and the documented ``feed(b"")`` escape hatch must
+        #: actually disarm it (it did not in the first draft — an empty
+        #: decode appends nothing, so position and buffer both stayed at
+        #: zero and the same error re-fired).
+        self._fed = False
 
     # -- public API --------------------------------------------------------
 
@@ -151,13 +158,17 @@ class SseGrammar:
 
         Args:
             chunk: Raw response bytes, in any framing — complete frames, partial
-                frames, or several frames per chunk are all accepted.
+                frames, or several frames per chunk are all accepted. A
+                zero-byte chunk is legal and marks the stream as fed, so a
+                genuinely empty response classifies (``truncated``) instead
+                of raising.
 
         Raises:
             RuntimeError: When called after :meth:`finish`.
         """
         if self._finished is not None:
             raise RuntimeError("feed() after finish(); the stream is already classified")
+        self._fed = True
         self._buffer += self._decoder.decode(chunk)
         # Frames terminate at a blank line. Whatever remains after the last
         # blank line is a partial frame and stays buffered until more bytes
@@ -179,12 +190,13 @@ class SseGrammar:
             The classification, memoized; calling twice returns the same one.
 
         Raises:
-            RuntimeError: When :meth:`feed` was never called *and* no bytes
-                arrived at all — a caller bug, not a stream property. An empty
-                stream fed zero-byte chunks classifies normally.
+            RuntimeError: When :meth:`feed` was never called — a caller bug,
+                not a stream property. Call ``feed(b"")`` for a genuinely
+                empty stream; it disarms this and the stream classifies
+                ``truncated`` normally.
         """
         if self._finished is None:
-            if self._position == 0 and not self._buffer:
+            if not self._fed:
                 raise RuntimeError("finish() on a grammar that was never fed; feed(b\"\") for a genuinely empty stream")
             self._finished = self._classify_finish()
         return self._finished
@@ -214,16 +226,6 @@ class SseGrammar:
             data: The raw ``data:`` payload, or ``None`` when the frame carried
                 none.
         """
-
-    def _is_legal(self, kind: str, data: dict[str, Any] | None) -> bool:
-        """Return whether ``kind`` with ``data`` would be legal right now.
-
-        Args:
-            kind: A member of :attr:`KNOWN_EVENTS`.
-            data: The parsed payload, or ``None``. Enumeration probes pass
-                permissive payloads.
-        """
-        return True
 
     def _classify_finish(self) -> Classification:
         """Return the end-of-stream verdict. Called once, from :meth:`finish`."""
@@ -348,10 +350,20 @@ class AnthropicMessagesGrammar(SseGrammar):
     its start, carries no delta outside its window, and closes may be out of
     order — blocks may overlap.
 
-    The pre-content verbatim-forward error shape of the original KBR-155
-    comment is deliberately not part of this grammar: KBR-241 removed it (the
-    hold records the error and the ladder answers JSON), so a stream containing
-    it would be a regression the guard must catch, not a shape to accept.
+    **Why a ``message_start`` followed by a bare ``error`` (no content blocks)
+    classifies ``error_terminal`` here, even though KBR-241 removed the
+    verbatim-forward pre-content error shape.** The two shapes are byte-
+    identical at the client's view: when the upstream sends ``message_start``
+    and then aborts on the native passthrough, the close-out (``server.py``
+    transport-drop branch's fallback) writes exactly one ``messages_format_error``
+    event, and the content blocks never opened. The grammar cannot tell this
+    bridge-originated shape from the KBR-155 verbatim-forward shape at the
+    byte level — both are ``[message_start, error]`` — so it accepts both. The
+    guard that catches a KBR-241 regression is the KBR-241 conformance tests
+    on the bridge's error path, not the grammar's grammar. A bridge that
+    returns a *content-bearing* stream followed by ``error`` continues to
+    classify ``error_terminal``; a stream that never wrote ``message_start``
+    at all is ``malformed``.
     """
 
     KNOWN_EVENTS = frozenset(
@@ -450,42 +462,26 @@ class AnthropicMessagesGrammar(SseGrammar):
             self._terminal_event = kind
             return
         if kind == "error":
-            # Legal only as the last event. Whether the stream then classifies
-            # as error_terminal or truncated is finish()'s call: an open block
-            # at finish() wins (precedence rule 2), because the native
-            # Messages-wire close-out writes exactly this shape — one error
-            # event with the forwarded blocks left open.
+            # Legal only as the last event, and only after the message began.
+            # Whether the stream then classifies as error_terminal or truncated
+            # is finish()'s call: an open block at finish() wins (precedence
+            # rule 2), because the native Messages-wire close-out writes
+            # exactly this shape — one error event with the forwarded blocks
+            # left open. An ``error`` with no ``message_start`` before it is
+            # the KBR-155 verbatim-forward shape KBR-241 removed: the
+            # bridge's own fallback only ever fires after ``message_start``
+            # is on the wire (it requires ``sr is not None``, and the first
+            # written byte is always ``message_start``), so a bare leading
+            # ``error`` is a shape the bridge does not produce.
+            if not self._message_started:
+                self._fail("error event before message_start")
+                return
             if "error" not in parsed:
                 self._fail("error event without an error member")
                 return
             self._terminal_event = kind
             return
         raise AssertionError(f"unhandled known kind {kind!r}")  # pragma: no cover
-
-    def _is_legal(self, kind: str, data: dict[str, Any] | None) -> bool:
-        """Return whether ``kind`` would be legal as the next frame.
-
-        Args:
-            kind: A known Messages event kind.
-            data: The probe payload.
-        """
-        if self._terminal_event is not None or self._malformed_reason is not None:
-            return False
-        if kind == "message_start":
-            return not self._message_started and not self._saw_content
-        if kind == "ping":
-            return True
-        if kind == "content_block_start":
-            return self._message_started
-        if kind == "content_block_delta":
-            return bool(self._open)
-        if kind == "content_block_stop":
-            return bool(self._open)
-        if kind == "message_delta":
-            return self._message_started and not self._open
-        if kind == "message_stop":
-            return self._message_started and not self._open
-        return kind == "error"
 
     def _classify_finish(self) -> Classification:
         """Apply the classification precedence to the end state."""
@@ -509,6 +505,18 @@ class AnthropicMessagesGrammar(SseGrammar):
 #: bridge capability the grammar has not been taught — drift the guard exists
 #: to surface, not to accept silently.
 _ITEM_KINDS = frozenset({"message", "function_call"})
+
+
+def _hashable_scalar(value: Any) -> bool:
+    """Return whether ``value`` is a hashable scalar (int or str, never bool).
+
+    Used to validate the ``output_index`` / ``content_index`` fields before
+    using them as a dict key or a set member. Schemathesis fuzzing reaches
+    this grammar with arbitrary JSON, and a list-or-dict value raised
+    ``TypeError`` from inside the set/dict lookup — a crash, not the
+    malformed classification the contract promises.
+    """
+    return isinstance(value, str) or (isinstance(value, int) and not isinstance(value, bool))
 
 
 class OpenAIResponsesGrammar(SseGrammar):
@@ -598,6 +606,9 @@ class OpenAIResponsesGrammar(SseGrammar):
             if item_kind not in _ITEM_KINDS:
                 self._fail(f"output_item.added with unknown item type {item_kind!r}")
                 return
+            if not _hashable_scalar(output_index):
+                self._fail(f"output_item.added with a non-scalar output_index {output_index!r}")
+                return
             key = _index_key(output_index)
             if key in self._items:
                 self._fail(f"output_item.added reopens output_index {output_index!r}")
@@ -610,8 +621,8 @@ class OpenAIResponsesGrammar(SseGrammar):
             if item is None:
                 return
             content_index = parsed.get("content_index")
-            if not isinstance(content_index, int) or isinstance(content_index, bool):
-                self._fail(f"content_part.added with a non-integer content_index {content_index!r}")
+            if not _hashable_scalar(content_index):
+                self._fail(f"content_part.added with a non-scalar content_index {content_index!r}")
                 return
             item["parts"].add(content_index)
             return
@@ -620,6 +631,9 @@ class OpenAIResponsesGrammar(SseGrammar):
             if item is None:
                 return
             content_index = parsed.get("content_index")
+            if not _hashable_scalar(content_index):
+                self._fail(f"{kind} with a non-scalar content_index {content_index!r}")
+                return
             if content_index not in item["parts"]:
                 self._fail(f"{kind} outside any open content part (content_index {content_index!r})")
                 return
@@ -629,6 +643,9 @@ class OpenAIResponsesGrammar(SseGrammar):
             if item is None:
                 return
             content_index = parsed.get("content_index")
+            if not _hashable_scalar(content_index):
+                self._fail(f"content_part.done with a non-scalar content_index {content_index!r}")
+                return
             if content_index not in item["parts"]:
                 self._fail(f"content_part.done outside any open content part (content_index {content_index!r})")
                 return
@@ -643,7 +660,11 @@ class OpenAIResponsesGrammar(SseGrammar):
                 return
             return
         if kind == "response.output_item.done":
-            key = _index_key(parsed.get("output_index"))
+            output_index = parsed.get("output_index")
+            if not _hashable_scalar(output_index):
+                self._fail(f"output_item.done with a non-scalar output_index {output_index!r}")
+                return
+            key = _index_key(output_index)
             item = self._items.get(key)
             if item is None:
                 self._fail(f"output_item.done for unknown output_index {parsed.get('output_index')!r}")
@@ -721,40 +742,6 @@ class OpenAIResponsesGrammar(SseGrammar):
                     return kind
         return None
 
-    def _is_legal(self, kind: str, data: dict[str, Any] | None) -> bool:
-        """Return whether ``kind`` would be legal as the next frame.
-
-        Args:
-            kind: A known Responses event kind.
-            data: The probe payload.
-        """
-        if self._malformed_reason is not None:
-            return False
-        if self._terminal_event == "response.completed" or self._terminal_event == "response.failed":
-            return False
-        if kind == "response.created":
-            return not self._created and not self._saw_item
-        if kind == "response.in_progress":
-            return self._created
-        if kind == "response.output_item.added":
-            return True
-        if kind in (
-            "response.content_part.added",
-            "response.output_text.delta",
-            "response.output_text.done",
-            "response.content_part.done",
-        ):
-            return any(item["open"] and item["kind"] == "message" for item in self._items.values())
-        if kind in ("response.function_call_arguments.delta", "response.function_call_arguments.done"):
-            return any(item["open"] and item["kind"] == "function_call" for item in self._items.values())
-        if kind == "response.output_item.done":
-            return bool(self._items)
-        if kind == "response.completed":
-            return all(not item["open"] for item in self._items.values())
-        if kind == "response.failed":
-            return True
-        return kind == "error"
-
     def _classify_finish(self) -> Classification:
         """Apply the classification precedence to the end state."""
         if self._malformed_reason is not None:
@@ -775,12 +762,15 @@ class OpenAIResponsesGrammar(SseGrammar):
 
 
 def _index_key(value: Any) -> Any:
-    """Normalise an output_index to a hashable dict key.
+    """Normalise a validated ``output_index`` to a hashable dict key.
 
     The bridge writes integers; the vendor's own examples sometimes carry
     strings. Coercing through ``str`` would merge ``"0"`` and ``0`` into one
     item, which is precisely the kind of leniency a grammar must not have — so
-    the raw value is the key and mixed spellings stay distinct items.
+    the raw value is the key and mixed spellings stay distinct items. Callers
+    must have passed the value through :func:`_hashable_scalar` first: this
+    function performs no validation, and an unvalidated list-or-dict value
+    would raise ``TypeError`` from the set/dict lookup it feeds.
 
     Args:
         value: The ``output_index`` field as received.
@@ -874,15 +864,6 @@ class ChatCompletionsGrammar(SseGrammar):
             return
         self._saw_chunk = True
 
-    def _is_legal(self, kind: str, data: dict[str, Any] | None) -> bool:
-        """Return whether ``kind`` would be legal as the next frame.
-
-        Args:
-            kind: A known CC kind.
-            data: Unused; CC legality is kind-only.
-        """
-        return self._malformed_reason is None and self._terminal_event is None
-
     def _classify_finish(self) -> Classification:
         """Apply the classification precedence to the end state."""
         if self._malformed_reason is not None:
@@ -971,15 +952,6 @@ class GeminiGrammar(SseGrammar):
             return
         self._saw_chunk = True
 
-    def _is_legal(self, kind: str, data: dict[str, Any] | None) -> bool:
-        """Return whether ``kind`` would be legal as the next frame.
-
-        Args:
-            kind: A known Gemini kind.
-            data: Unused; Gemini legality is kind-only.
-        """
-        return self._malformed_reason is None and self._terminal_event is None
-
     def _classify_finish(self) -> Classification:
         """Apply the classification precedence to the end state."""
         if self._malformed_reason is not None:
@@ -1037,9 +1009,14 @@ def classify_response(protocol: StreamProtocol, status: int, body: str) -> Class
 
     Returns:
         The classification. A body that carries SSE frames is parsed as a
-        stream; a JSON body with an error envelope (or a non-2xx status) is
-        ``json_error``; an empty body is ``truncated`` (a stream with no
-        bytes); anything else is ``malformed``.
+        stream. A JSON body with an error envelope — or any JSON body on a
+        non-2xx status — is ``json_error``. An **empty** body splits on the
+        status, and both halves are deliberate: with no bytes there is
+        nothing to parse, so the status is the only evidence — an error
+        status means the bridge meant an error envelope it never wrote
+        (``json_error``), a success status means a stream cut before its
+        first frame (``truncated``). Anything else (non-stream, non-JSON
+        text; a JSON body with no error member on a 2xx) is ``malformed``.
     """
     stripped = body.lstrip()
     if stripped.startswith("event:") or stripped.startswith("data:"):

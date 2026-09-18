@@ -182,8 +182,9 @@ class TestMessagesTranslatedPath:
 
     The recorder serves CC; the bridge translates the CC stream into the
     Anthropic Messages SSE the agent expects. ``drop_at`` shapes close out via
-    ``finalize_interrupted_stream`` (``server.py:5909-5933``), which produces a
-    complete sentence.
+    ``finalize_interrupted_stream`` (the transport-drop branch of
+    ``BridgeServer._stream_messages``; search ``server.py`` for the call —
+    line numbers drift), which produces a complete sentence.
     """
 
     async def test_success_stream_is_a_complete_sentence(self) -> None:
@@ -327,10 +328,12 @@ class TestMessagesNativePath:
     """The path the Anthropic-upstream Messages passthrough takes.
 
     The bridge forwards Anthropic SSE bytes verbatim; ``drop_at`` post-emission
-    produces the fallback ``messages_format_error`` event (``server.py:5916``),
-    which leaves the client's open content block unclosed. Native is the path
-    where ``truncated`` is the honest classification; the translated path
-    produces ``complete_sentence``.
+    produces the fallback ``messages_format_error`` event (the native path's
+    transport-drop branch in ``BridgeServer._stream_messages``; search
+    ``server.py`` for the ``or [messages_format_error(...)]`` fallback —
+    line numbers drift), which leaves the client's open content block
+    unclosed. Native is the path where ``truncated`` is the honest
+    classification; the translated path produces ``complete_sentence``.
     """
 
     async def test_success_stream_is_a_complete_sentence(self) -> None:

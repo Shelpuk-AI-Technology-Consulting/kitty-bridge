@@ -54,7 +54,9 @@ task's grammar.
   paths. l1 by path (harness default).
 - `tests/bridge/test_sse_grammar.py` — real `BridgeFixture` drives each §4
   row: both Messages paths (translated CC-upstream, native Anthropic-upstream),
-  Responses over CC, CC passthrough, Gemini over CC. `pytest.mark.l2`.
+  Responses over CC, CC passthrough, Gemini over CC. 22 parametrised cases
+  (1 enum-agreement + 9 translated + 8 native + 2 Responses + 1 CC +
+  1 Gemini). `pytest.mark.l2`.
   A `fast_stall` fixture patches `_STREAM_READ_TIMEOUT`, `_BACKOFF_BASE`,
   `_EMPTY_FINAL_DELAYS`, `_TRANSPORT_GRACE_PERIOD` and `_TRANSPORT_GRACE_DELAYS`
   — without it the empty-response ladder (20 s + 40 s final delays) and the
@@ -76,7 +78,7 @@ task's grammar.
 
 ## Verification
 
-- `pytest tests/harness/test_sse_grammar_falsification.py -q` green (36 cases).
-- `pytest tests/bridge/test_sse_grammar.py -q` green (~17 cases, l2).
+- `pytest tests/harness/test_sse_grammar_falsification.py -q` green (45 cases).
+- `pytest tests/bridge/test_sse_grammar.py -q` green (22 cases, l2).
 - `ruff check` clean on the three new files.
 - Broader harness+bridge tiers green (no regressions).

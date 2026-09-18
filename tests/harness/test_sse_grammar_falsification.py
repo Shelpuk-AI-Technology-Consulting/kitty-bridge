@@ -214,6 +214,25 @@ class TestAnthropicMessagesMalformed:
         assert verdict is Classification.MALFORMED
         assert "ping" in grammar.diagnostic
 
+    def test_error_before_message_start_is_malformed(self) -> None:
+        """A bare leading ``error`` is the KBR-241-amended-out shape.
+
+        The bridge's own fallback never fires before ``message_start`` is on
+        the wire (it requires ``sr is not None`` and the first byte is
+        always ``message_start``), so a stream that begins with ``error`` is a
+        KBR-241 regression the guard must catch.
+        """
+        grammar = AnthropicMessagesGrammar()
+        verdict = _drain(
+            grammar,
+            _anthropic_frame(
+                "error",
+                {"type": "error", "error": {"type": "api_error", "message": "x"}},
+            ),
+        )
+        assert verdict is Classification.MALFORMED
+        assert "error" in grammar.diagnostic
+
 
 # ---------------------------------------------------------------------------
 # Anthropic Messages — positive controls for the amended shapes.
@@ -308,7 +327,7 @@ class TestAnthropicMessagesPositive:
         assert verdict is Classification.TRUNCATED, grammar.diagnostic
 
     def test_empty_after_emission_shape_is_error_terminal(self) -> None:
-        """KBR-155 shape: blocks closed + one trailing error → error_terminal."""
+        """KBR-236 shape: blocks closed + one trailing error → error_terminal."""
         grammar = AnthropicMessagesGrammar()
         verdict = _drain(
             grammar,
@@ -463,6 +482,90 @@ class TestOpenAIResponsesMalformed:
         verdict = _drain(grammar, _responses_text_delta(0))
         assert verdict is Classification.MALFORMED
         assert "response.output_text.delta" in grammar.diagnostic
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("output_index", [0]),
+            ("output_index", {"k": 0}),
+            ("content_index", [0]),
+            ("content_index", {"k": 0}),
+        ],
+    )
+    def test_unhashable_index_values_classify_malformed_not_typeerror(
+        self, field: str, value: object
+    ) -> None:
+        """A list-or-dict index must be ``malformed``, never a ``TypeError``.
+
+        The grammar's contract is to classify hostile sequences; the first
+        draft used these payload fields raw as dict keys / set members, and a
+        schemathesis-shaped body raised ``TypeError`` (unhashable) from the
+        lookup instead.
+        """
+        grammar = OpenAIResponsesGrammar()
+        if field == "output_index":
+            payload: dict = {
+                "type": "response.output_item.added",
+                "sequence_number": 1,
+                "item": {"type": "message", "id": "item_0", "status": "in_progress"},
+                field: value,
+            }
+            frames = [_responses_frame("response.output_item.added", payload)]
+        else:
+            # content_index rides content_part.added, which requires an open
+            # item — the item frames must come first so the failure lands on
+            # the index validation, not the unknown-item one.
+            payload = {
+                "type": "response.content_part.added",
+                "sequence_number": 3,
+                "item_id": "item_0",
+                "output_index": 0,
+                "content_index": value,
+                "part": {"type": "output_text", "text": ""},
+            }
+            frames = [
+                _responses_created(0),
+                _responses_item_added(0, item_type="message"),
+                _responses_frame("response.content_part.added", payload),
+            ]
+        verdict = _drain(grammar, b"".join(frames))
+        assert verdict is Classification.MALFORMED
+        assert field in grammar.diagnostic
+
+    def test_content_part_done_with_unhashable_content_index_is_malformed(self) -> None:
+        grammar = OpenAIResponsesGrammar()
+        verdict = _drain(
+            grammar,
+            b"".join(
+                [
+                    _responses_created(0),
+                    _responses_item_added(0, item_type="message"),
+                    _responses_frame(
+                        "response.content_part.added",
+                        {
+                            "type": "response.content_part.added",
+                            "sequence_number": 1,
+                            "item_id": "item_0",
+                            "output_index": 0,
+                            "content_index": 0,
+                            "part": {"type": "output_text", "text": ""},
+                        },
+                    ),
+                    _responses_frame(
+                        "response.content_part.done",
+                        {
+                            "type": "response.content_part.done",
+                            "sequence_number": 2,
+                            "item_id": "item_0",
+                            "output_index": 0,
+                            "content_index": {"bad": "shape"},
+                        },
+                    ),
+                ]
+            ),
+        )
+        assert verdict is Classification.MALFORMED
+        assert "content_index" in grammar.diagnostic
 
     def test_unknown_response_kind_is_malformed(self) -> None:
         """An event the bridge does not emit — drift the guard must catch."""
@@ -776,6 +879,45 @@ class TestClassifyResponse:
         verdict = classify_response(StreamProtocol.MESSAGES, 500, "")
         assert verdict is Classification.JSON_ERROR
 
+    def test_empty_body_with_2xx_is_truncated(self) -> None:
+        """The other half of the empty-body split: no bytes on a 2xx is a stream cut before its first frame.
+
+        Both halves are deliberate: an empty body alone cannot say whether the
+        bridge meant an error envelope it never wrote (4xx → ``json_error``)
+        or a stream that was cut before its first frame (2xx →
+        ``truncated``). The status decides, and this test pins the 2xx side
+        so a refactor that collapses the split is visible.
+        """
+        verdict = classify_response(StreamProtocol.MESSAGES, 200, "")
+        assert verdict is Classification.TRUNCATED
+
+
+class TestFinishEscapeHatch:
+    """``feed(b"")`` must disarm finish()'s never-fed RuntimeError.
+
+    The first draft's escape hatch was broken: an empty decode appends
+    nothing, so position and buffer both stayed at zero and the same
+    RuntimeError re-fired — the message prescribed a remedy that did
+    nothing.
+    """
+
+    def test_feed_empty_bytes_then_finish_classifies_truncated(self) -> None:
+        grammar = AnthropicMessagesGrammar()
+        grammar.feed(b"")
+        assert grammar.finish() is Classification.TRUNCATED
+
+    def test_finish_without_any_feed_raises(self) -> None:
+        grammar = AnthropicMessagesGrammar()
+        with pytest.raises(RuntimeError, match="never fed"):
+            grammar.finish()
+
+    def test_feed_after_finish_raises(self) -> None:
+        grammar = AnthropicMessagesGrammar()
+        grammar.feed(b"")
+        grammar.finish()
+        with pytest.raises(RuntimeError, match="after finish"):
+            grammar.feed(b"")
+
 
 # ---------------------------------------------------------------------------
 # grammar_for dispatch + the StreamProtocol/InboundProtocol contract.
@@ -803,33 +945,39 @@ class TestGrammarFor:
 #: Modules whose source must contain no ``from kitty`` / ``import kitty`` line.
 #: Named once at module top per the review's S5: a third harness module is one
 #: entry, not a third guard.
+#: Modules whose source must contain no ``from kitty`` / ``import kitty`` line.
+#: Named once at module top per the review's S5: a third harness module is one
+#: entry, not a third guard. This test module itself is deliberately NOT in
+#: the set — its positive control below must carry literal kitty-import
+#: strings to prove the regex fires, so scanning it would flag the control as
+#: an offence. The scan iterates this set, so an entry added here is scanned,
+#: not merely declared.
 _HARNESS_MODULES_UNDER_GUARD: frozenset[str] = frozenset(
-    {"tests/harness/sse_grammar.py", "tests/harness/test_sse_grammar_falsification.py"}
+    {"tests/harness/sse_grammar.py"}
 )
 
 
 class TestImportDiscipline:
     """The grammar suite must not import ``src/kitty``."""
 
-    def test_sse_grammar_module_imports_nothing_from_kitty(self) -> None:
-        """Read the module's source and assert no kitty import line."""
-        path = Path(__file__).parent / "sse_grammar.py"
-        source = path.read_text(encoding="utf-8")
-        # Self-check: a guard that passes on empty input is the house rule
-        # ``tests/test_egress_coverage.py`` warns about.
-        assert len(source) > 1000, "the module was empty; the guard would pass vacuously"
+    def test_every_module_under_guard_imports_nothing_from_kitty(self) -> None:
+        """Scan every file the registry names, not one hardcoded path.
 
-        offending = [line.strip() for line in source.splitlines() if _KITTY_IMPORT.search(line)]
-        assert offending == [], f"sse_grammar.py must not import kitty: {offending}"
+        The first draft declared a two-module frozenset and then hardcoded a
+        single ``sse_grammar.py`` path in the scan — the registry was
+        consulted only by the existence self-check, so a module added to the
+        set was guarded in name only.
+        """
+        repo_root = Path(__file__).resolve().parents[2]
+        for name in sorted(_HARNESS_MODULES_UNDER_GUARD):
+            path = repo_root / name
+            source = path.read_text(encoding="utf-8")
+            # Self-check: a guard that passes on empty input is the house
+            # rule ``tests/test_egress_coverage.py`` warns about.
+            assert len(source) > 1000, f"{name} was empty; the guard would pass vacuously"
 
-    def test_the_under_guard_set_names_files_that_exist(self) -> None:
-        """Self-check on the registry: every entry must resolve on disk."""
-        missing = [
-            name
-            for name in _HARNESS_MODULES_UNDER_GUARD
-            if not (Path(__file__).resolve().parents[2] / name).exists()
-        ]
-        assert not missing, f"under-guard modules that don't exist on disk: {missing}"
+            offending = [line.strip() for line in source.splitlines() if _KITTY_IMPORT.search(line)]
+            assert offending == [], f"{name} must not import kitty: {offending}"
 
     def test_the_import_guard_actually_fires_on_every_form_it_claims(self) -> None:
         """Positive control: the regex catches every form its docstring claims.
