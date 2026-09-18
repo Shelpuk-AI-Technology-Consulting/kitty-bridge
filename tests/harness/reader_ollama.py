@@ -265,10 +265,11 @@ class OllamaChatReplyProjection:
     Image`` part ordering); the reply class calls it with
     ``role="assistant"`` and ``path="message"``. Two small adaptations
     pre- and post-process: a strict ``function.name`` pre-check raises on
-    absent or empty names (matching ``reader_chat_completions.py:464-467``,
-    per the losslessness argument in ``contract.py:935-941`` — Ollama's
-    request reader is more lenient on this point; this is the deliberate
-    divergence). The request reader's ``_read_tool_calls`` /
+    absent, empty, or non-string names through the shared
+    :func:`_require_tool_call_name` helper the request reader uses too —
+    one spelling of the rule for both directions (§7.4.1), per the
+    losslessness argument in ``contract.py:935-941``. KBR-279 aligned the
+    request side, which had been the lenient outlier. The request reader's ``_read_tool_calls`` /
     ``_read_images`` / ``_decode_arguments_object`` are reached
     transitively and are exactly the wire shape on the reply side; see
     the module docstring's "Tool-call arguments are objects, not strings"
@@ -392,7 +393,10 @@ class OllamaChatReplyProjection:
         missing or wrong-typed ``message`` residualises at its bare name
         and produces no parts. The request reader's
         :func:`_read_message_parts` does the bulk of the work and is
-        called with ``role="assistant"`` and ``path="message"``.
+        called with ``role="assistant"`` and ``path="message"``. A
+        strict ``function.name`` pre-check on ``message.tool_calls`` runs
+        through the shared :func:`_require_tool_call_name` helper before
+        the delegation (KBR-267/KBR-279).
 
         Args:
             message_seen: True when the body carried a ``message`` key,
@@ -417,14 +421,17 @@ class OllamaChatReplyProjection:
             return ()
 
         # Strict name-required check before delegating to the request
-        # reader's helper. Ollama's published ``/api/chat`` responses with
+        # reader's helper, through the shared
+        # :func:`_require_tool_call_name` (§7.4.1's within-module
+        # anti-drift rule: one spelling of the rule for both
+        # directions). Ollama's published ``/api/chat`` responses with
         # ``tool_calls`` always carry a non-empty ``function.name``
-        # (example at docs/api.md lines 631-639 and 749-758), so a missing
-        # or empty one is a schema violation rather than an honest empty
-        # call. The helper's lenient default (``ToolUse(name="")`` for an
-        # absent name) violates ``contract.decode_arguments``'s
-        # losslessness rule (contract.py:935-941) and is not inherited on
-        # the reply side.
+        # (example at docs/api.md lines 631-639 and 749-758), so a
+        # missing or empty one is a schema violation rather than an
+        # honest empty call. The strict rule is grounded in
+        # ``contract.decode_arguments``'s losslessness rule at
+        # ``contract.py:935-941`` (a nameless call cannot be paired or
+        # addressed); KBR-279 aligned the request side on the same rule.
         tool_calls = message_value.get("tool_calls")
         if isinstance(tool_calls, list):
             for index, entry in enumerate(tool_calls):
@@ -436,9 +443,7 @@ class OllamaChatReplyProjection:
                 function = entry.get("function")
                 if not isinstance(function, Mapping):
                     continue
-                name = function.get("name")
-                if not isinstance(name, str) or not name:
-                    raise c.UnreadableBodyError(f"message.tool_calls[{index}].function.name must be a non-empty string")
+                _require_tool_call_name(function, f"message.tool_calls[{index}].function")
 
         try:
             return _read_message_parts(message_value, "assistant", "message", residual)
@@ -999,6 +1004,54 @@ def _read_tool_result_parts(
     )
 
 
+def _require_tool_call_name(
+    function: Mapping[str, Any],
+    fn_path: str,
+) -> str:
+    """Validate and return a tool_call's ``function.name``.
+
+    The strict name-required rule shared by the request reader's
+    :func:`_read_tool_calls` and the reply projection's pre-check — one
+    spelling of the rule for both directions, per §7.4.1's within-module
+    anti-drift rule (KBR-279). ``""`` for a name is not a lossless
+    projection (``contract.py:935-941``): it claims a tool *named*
+    empty-string, and a call nobody can name cannot be paired with its
+    result or addressed by a register row.
+
+    Two invariants the callers rely on:
+
+    * **Ordering.** The helper is called only when ``function`` is a
+      ``Mapping``. A non-``Mapping`` ``function`` is the outer guard on
+      the request side (raises "must be an object" before the helper is
+      reached) and is delegated to :func:`_read_message_parts` on the
+      reply side, so a body with both malformations raises "must be an
+      object", never the name error.
+    * **Cross-reader residual delta.** A wrongly-typed name used to
+      residualise at ``<fn_path>.name`` and project
+      ``ToolUse(name="")``; it now raises, so this reader no longer
+      writes that residual key — matching Chat Completions and Gemini,
+      which raise on a non-string name and never wrote it either
+      (recorded so T-D8's cross-reader residual-set diff does not read
+      the absence as drift).
+
+    Args:
+        function: The ``tool_calls[*].function`` object.
+        fn_path: The function object's path from the body root, used as
+            the error-message prefix.
+
+    Returns:
+        The validated, non-empty name.
+
+    Raises:
+        UnreadableBodyError: When ``name`` is absent, empty, or not a
+            string.
+    """
+    name = function.get("name")
+    if not isinstance(name, str) or not name:
+        raise c.UnreadableBodyError(f"{fn_path}.name must be a non-empty string")
+    return name
+
+
 def _read_tool_calls(
     value: Any,
     path: str,
@@ -1030,8 +1083,12 @@ def _read_tool_calls(
 
     Raises:
         UnreadableBodyError: When ``tool_calls`` is not a list, when an
-            entry is not an object, or when ``tool_calls[*].function``
-            is missing / not an object. (A non-object ``function``
+            entry is not an object, when ``tool_calls[*].function``
+            is missing / not an object, or when
+            ``tool_calls[*].function.name`` is absent, empty, or not a
+            string (via :func:`_require_tool_call_name`; a non-empty
+            string is required per ``contract.py:935-941``'s losslessness
+            argument). (A non-object ``function``
             container raises per §7.4.2 rule 7 table last row: a member
             that is the schema-declared object cannot be a scalar.)
     """
@@ -1054,7 +1111,7 @@ def _read_tool_calls(
             # a continue here would shift every later part's index and
             # invent deltas on content nobody touched.
             raise c.UnreadableBodyError(f"{fn_path} must be an object, got {type(function).__name__}")
-        name = _typed_leaf(function, "name", (str,), fn_path, residual) or ""
+        name = _require_tool_call_name(function, fn_path)
         raw_args = function.get("arguments")
         arguments = _decode_arguments_object(raw_args, fn_path, residual)
 

@@ -657,6 +657,110 @@ class TestToolCalls:
         assert req.residual == {"messages[0].tool_calls[0]": "not a dict"}
 
 
+class TestNameRequired:
+    """A tool_call with a missing, empty, or non-string ``function.name`` raises.
+
+    ``contract.decode_arguments`` (``contract.py:935-941``) is explicit: ``""``
+    for a name is **not** lossless — a call nobody can name cannot be paired
+    with its result or addressed by a register row. The reply reader has
+    raised on this since KBR-267 (``test_reader_ollama_reply.py``'s
+    ``TestNameRequired``); the request reader aligns here (KBR-279), so the
+    rule lives in the shared ``_require_tool_call_name`` helper rather than
+    diverging within the module (§7.4.1). Chat Completions and Gemini raise
+    on a non-string name but accept ``""`` — the Ollama rule is the stricter
+    non-empty-string form.
+    """
+
+    #: The published no-streaming with-tools multi-turn request (the
+    #: ``test_with_history_with_tools`` body): the only published request
+    #: example that exercises the request reader's ``_read_tool_calls``
+    #: path. Deep-copied per test; only the tool_call's ``function`` is
+    #: mutated.
+    PUBLISHED_WITH_HISTORY_WITH_TOOLS: dict[str, Any] = {
+        "model": "llama3.2",
+        "messages": [
+            {"role": "user", "content": "what is the weather in Toronto?"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "function": {
+                            "name": "get_weather",
+                            "arguments": {"city": "Toronto"},
+                        }
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "content": "11 degrees celsius",
+                "tool_name": "get_weather",
+            },
+        ],
+        "stream": False,
+        "tools": [
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "description": "Get the weather in a given city",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "city": {
+                                "type": "string",
+                                "description": "The city",
+                            }
+                        },
+                        "required": ["city"],
+                    },
+                },
+            }
+        ],
+    }
+
+    @staticmethod
+    def _body_with_tool_call(function: dict[str, Any]) -> dict[str, Any]:
+        """Return the published multi-turn body with one tool_call's ``function`` swapped in."""
+        body = json.loads(json.dumps(TestNameRequired.PUBLISHED_WITH_HISTORY_WITH_TOOLS))
+        body["messages"][1]["tool_calls"] = [{"function": function}]
+        return body
+
+    def test_missing_function_name_raises(self) -> None:
+        """A tool_call with no ``function.name`` raises."""
+        body = self._body_with_tool_call({"arguments": {"city": "Toronto"}})
+
+        with pytest.raises(c.UnreadableBodyError, match="function.name"):
+            _project(body)
+
+    def test_empty_function_name_raises(self) -> None:
+        """A tool_call with an empty ``function.name`` raises."""
+        body = self._body_with_tool_call({"name": "", "arguments": {"city": "Toronto"}})
+
+        with pytest.raises(c.UnreadableBodyError, match="function.name"):
+            _project(body)
+
+    def test_non_string_function_name_raises(self) -> None:
+        """A tool_call with a non-string ``function.name`` raises."""
+        body = self._body_with_tool_call({"name": 42, "arguments": {}})
+
+        with pytest.raises(c.UnreadableBodyError, match="function.name"):
+            _project(body)
+
+    def test_named_function_control_is_clean(self) -> None:
+        """Control — the published body's named tool_call is accepted cleanly."""
+        body = self._body_with_tool_call(
+            {"name": "get_weather", "arguments": {"city": "Toronto"}}
+        )
+
+        req = _project(body)
+        assert req.residual == {}
+        tool_use = req.conversation.turns[1].parts[0]
+        assert tool_use.name == "get_weather"
+        assert tool_use.arguments == {"city": "Toronto"}
+
+
 class TestToolDeclarations:
     """``tools`` entries fail closed on every unmodelled field (review round 1)."""
 
