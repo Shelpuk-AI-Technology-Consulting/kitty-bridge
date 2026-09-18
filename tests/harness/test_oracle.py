@@ -473,6 +473,26 @@ class TestPathMatching:
         # M16's trigger is met → the cache_control delta is claimed.
         assert any("cache_control" in p for p in deltas)
 
+    def test_pattern_prefix_honours_the_legacy_empty_bracket_spelling(self) -> None:
+        """``pattern_is_proper_prefix_of`` applies ``_segment_matches``' rules,
+        including the legacy ``[]`` wildcard spelling §3.3.1a keeps legal.
+
+        A ``[]``-anchored triggered row must count as finer than a
+        bare-collection untriggered row — the two predicates
+        §3.3.1a says must agree cannot drift on the legacy spelling.
+        """
+        assert c.pattern_is_proper_prefix_of(
+            "conversation.turns", "conversation.turns[].parts[].id"
+        )
+        # And the identity case: `[]` and `[*]` spell the same anchor, so
+        # neither is a proper prefix of the other.
+        assert not c.pattern_is_proper_prefix_of(
+            "conversation.turns[]", "conversation.turns[*]"
+        )
+        assert not c.pattern_is_proper_prefix_of(
+            "conversation.turns[*]", "conversation.turns[]"
+        )
+
 
 # --------------------------------------------------------------------------
 # §3.3.2 assertion 2 — no conditional row firing without trigger
@@ -723,16 +743,18 @@ class TestAssertion2:
 
 
 class TestNativePassthrough:
-    """The captured body must equal the inbound body byte-for-byte on a
-    native passthrough route."""
+    """The captured body's JSON key order must equal the inbound body's on
+    a native passthrough route — key order, not bytes: the native branch
+    rewrites ``model`` through M1, a registered mutation a byte check
+    would fail."""
 
     def test_native_passthrough_key_order_match_passes(self) -> None:
         """Identical bodies on a native route → no raise."""
         body = b'{"messages":[{"role":"user","content":"hi"}]}'
         oracle._native_passthrough_check(_capture(body=body), _capture(body=body))
 
-    def test_native_passthrough_key_order_byte_level(self) -> None:
-        """A reordered body on a native route fails the byte-level check."""
+    def test_native_passthrough_reordered_keys_fail(self) -> None:
+        """A reordered body on a native route fails the key-order check."""
         inbound_body = b'{"a":1,"b":2}'
         captured_body = b'{"b":2,"a":1}'
 
@@ -741,14 +763,65 @@ class TestNativePassthrough:
                 _capture(body=inbound_body), _capture(body=captured_body)
             )
 
+    def test_native_passthrough_same_keys_different_values_pass(self) -> None:
+        """M1's model rewrite preserves key order → the check passes.
+
+        This is the case the earlier byte-equality implementation got
+        wrong: the native branch rewrites ``model`` through
+        ``_normalize_model``, so a run whose profile model differs from
+        the agent's model differs in bytes while preserving key order —
+        a legitimate, registered mutation C2 must not fail.
+        """
+        inbound_body = b'{"model":"agent-model","messages":[]}'
+        captured_body = b'{"model":"profile-model","messages":[]}'
+
+        oracle._native_passthrough_check(
+            _capture(body=inbound_body), _capture(body=captured_body)
+        )
+
+    def test_native_passthrough_nested_reorder_fails(self) -> None:
+        """A reorder at a nested object level fails the check."""
+        inbound_body = b'{"outer":{"x":1,"y":2}}'
+        captured_body = b'{"outer":{"y":2,"x":1}}'
+
+        with pytest.raises(NativePassthroughKeyOrderError):
+            oracle._native_passthrough_check(
+                _capture(body=inbound_body), _capture(body=captured_body)
+            )
+
+    def test_native_passthrough_structural_divergence_does_not_trip_c2(self) -> None:
+        """A content difference (a key one side lacks) is not an ordering
+        fingerprint — the walk stops and C2 does not fire.
+
+        Assertion 1 owns content differences, through the projections;
+        C2 owns only the ordering a serialiser fingerprint reads.
+        """
+        inbound_body = b'{"a":1,"b":2}'
+        captured_body = b'{"a":1}'
+
+        oracle._native_passthrough_check(
+            _capture(body=inbound_body), _capture(body=captured_body)
+        )
+
+    def test_native_passthrough_unparseable_differing_bytes_fall_back_strict(self) -> None:
+        """Bodies that are not JSON cannot be walked for key order; byte
+        equality is the only ordering claim left, applied strictly."""
+        inbound_body = b"not json at all"
+        captured_body = b"not the same bytes"
+
+        with pytest.raises(NativePassthroughKeyOrderError):
+            oracle._native_passthrough_check(
+                _capture(body=inbound_body), _capture(body=captured_body)
+            )
+
     def test_gated_by_trigger_vocabulary_not_byte_equality(self) -> None:
-        """The public oracle skips the byte-level check on a translation route.
+        """The public oracle skips the key-order check on a translation route.
 
         Two bodies with the same keys in a different order project
         identically — JSON key order is serialisation noise in the projected
         diff (§3.3.4) — and with ``NON_NATIVE_UPSTREAM_WIRE`` in
-        ``triggers_met`` the byte-level check is skipped, so the run passes
-        despite the byte-level difference.
+        ``triggers_met`` the key-order check is skipped, so the run passes
+        despite the ordering difference.
         """
         body_in = b'{"model":"m","messages":[{"role":"user","content":"hi"}],"max_tokens":8}'
         body_out = b'{"max_tokens":8,"messages":[{"role":"user","content":"hi"}],"model":"m"}'

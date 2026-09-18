@@ -32,10 +32,13 @@ inside the oracle. The oracle's job is to use the selection, not to make it.
 
 **The route signal is the trigger vocabulary, not the captured bytes.**
 Native passthrough means :attr:`Trigger.NON_NATIVE_UPSTREAM_WIRE` is **not**
-in ``triggers_met``. Under that condition the captured body must equal the
-inbound body byte-for-byte (§4.3 C2). Using a non-existent
-``NATIVE_UPSTREAM_WIRE`` enum member would silently miss every native route —
-this is a known trip and is enforced by the assertion's own wording.
+in ``triggers_met``. Under that condition the captured body's JSON key
+order must equal the inbound body's, at every object level (§4.3 C2) —
+key order, not bytes: the native branch rewrites ``model`` through M1,
+a registered mutation, so a byte check would fail a body the design calls
+correct. Using a non-existent ``NATIVE_UPSTREAM_WIRE`` enum member would
+silently miss every native route — this is a known trip and is enforced
+by the assertion's own wording.
 
 **The first working version ships with one falsification case (plan §1.4).**
 A mutated ``envelope.model`` with ``PROFILE_SETS_MODEL`` deliberately omitted
@@ -55,6 +58,7 @@ is T-K6's job.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -132,8 +136,8 @@ class ConditionalRowFiredWithoutTriggerError(OracleError):
 
 
 class NativePassthroughKeyOrderError(OracleError):
-    """§4.3 C2 failed — a native passthrough route's captured body differs
-    byte-for-byte from the inbound body.
+    """§4.3 C2 failed — a native passthrough route's captured body reorders
+    JSON keys relative to the inbound body.
 
     Attributes:
         paths: The concrete delta paths this failure names.
@@ -423,33 +427,122 @@ def _run_assertions(
 
 
 def _native_passthrough_check(inbound: CapturedRequest, captured: CapturedRequest) -> None:
-    """Assert the native passthrough route's body is byte-for-byte equal.
+    """Assert the native passthrough route preserves JSON key order.
 
-    §4.3 C2: JSON key order is exactly what a provider fingerprints, so on
-    the route that claims to be forwarding rather than translating, the
-    captured body must equal the inbound body byte-for-byte.
+    §4.3 C2: a provider can fingerprint the JSON serialiser from key
+    ordering alone, so on the route that claims to be forwarding rather
+    than translating, the captured body's key order must equal the
+    inbound body's — at every object level, at every aligned position.
+
+    **Key order, not bytes.** An earlier draft compared the raw bytes.
+    That is too strong for the route's own registered mutations: the
+    native branch shallow-copies the inbound body and rewrites ``model``
+    through ``_normalize_model`` (register row M1, unconditional), so a
+    run whose profile model differs from the agent's model differs in
+    bytes while preserving key order exactly — and a byte check fails a
+    body the design calls correct. §3.3.4 warns of precisely this: "a
+    byte diff would fail constantly and teach people to ignore it".
+    Values are assertion 1's business, through the projections; C2 owns
+    only the ordering a serialiser fingerprint reads.
+
+    **Structural divergence stops the walk.** Where the two bodies'
+    shapes diverge (a key present on one side only, a list whose lengths
+    differ, a type mismatch), there is no aligned position left to
+    compare, and the divergence itself is a *content* difference —
+    assertion 1's business through the projections, not an ordering
+    fingerprint. The walk compares order while the shapes align and
+    stops at the first place they do not.
+
+    **Unparseable bodies fall back to bytes.** A native body that is not
+    JSON cannot be walked for key order; byte equality is the only
+    ordering claim left, and it is applied strictly.
 
     Args:
         inbound: The inbound capture.
         captured: The captured capture.
 
     Raises:
-        NativePassthroughKeyOrderError: When the two bodies differ.
+        NativePassthroughKeyOrderError: When the key order diverges (or,
+            for unparseable bodies, when the bytes differ).
     """
-    if inbound.body != captured.body:
+    try:
+        inbound_json = json.loads(inbound.body)
+        captured_json = json.loads(captured.body)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        # Not walkable — the byte comparison is the only ordering claim
+        # available, and it is strict.
+        if inbound.body != captured.body:
+            raise NativePassthroughKeyOrderError(
+                f"§4.3 C2: native passthrough route's bodies are not JSON and "
+                f"differ byte-for-byte; inbound={len(inbound.body)}B, "
+                f"captured={len(captured.body)}B",
+                paths=(),
+                inbound_preview=inbound.body[:200],
+                captured_preview=captured.body[:200],
+            ) from None
+        return
+
+    diverged_at = _first_key_order_divergence(inbound_json, captured_json, "$")
+    if diverged_at is not None:
         raise NativePassthroughKeyOrderError(
-            f"§4.3 C2: native passthrough route produced a body that "
-            f"differs from the inbound byte-for-byte; "
-            f"inbound={len(inbound.body)}B, captured={len(captured.body)}B",
+            f"§4.3 C2: native passthrough route reordered JSON keys; "
+            f"first divergence at {diverged_at}",
             # No ``paths`` entry: the C2 failure is a raw-body observation,
             # not a projection delta, and §3.3.1a's route vocabulary
             # (``ROUTE_COMPONENTS``) names method/scheme/host/path/query —
-            # no ``body`` component exists to anchor. The two body previews
-            # on this exception are the evidence.
+            # no ``body`` component exists to anchor. The diverged-at JSON
+            # path and the two body previews are the evidence.
             paths=(),
             inbound_preview=inbound.body[:200],
             captured_preview=captured.body[:200],
         )
+
+
+def _first_key_order_divergence(a: Any, b: Any, at: str) -> str | None:
+    """Return the JSON path of the first key-order divergence, or ``None``.
+
+    Walks two parsed JSON values in parallel. Objects compare their key
+    sequences (``list(keys)`` — insertion order is parse order on both
+    sides) and recurse per key; lists walk element-wise at the same
+    index; scalars carry no ordering and compare as aligned. The walk
+    stops at structural divergence — different key sets, different
+    lengths, different types — returning ``None`` there: a content
+    difference is assertion 1's business, not an ordering fingerprint.
+
+    Args:
+        a: The inbound value.
+        b: The captured value.
+        at: The JSON path of this position, for the failure message.
+
+    Returns:
+        The JSON path of the first key-order divergence, or ``None`` when
+        the orders agree everywhere the shapes align.
+    """
+    if isinstance(a, dict) and isinstance(b, dict):
+        # A key-SET difference is a content difference (a field the bridge
+        # added or dropped — M1/M2-family business, assertion 1's, through
+        # the projections). Only an equal set with a different SEQUENCE is
+        # an ordering fingerprint.
+        if set(a.keys()) == set(b.keys()) and list(a.keys()) != list(b.keys()):
+            return at
+        for key, a_value in a.items():
+            if key not in b:
+                continue  # content difference; nothing aligned to walk
+            diverged = _first_key_order_divergence(a_value, b[key], f"{at}.{key}")
+            if diverged is not None:
+                return diverged
+        return None
+    if isinstance(a, list) and isinstance(b, list):
+        # Element-wise at the same index; a length difference is a
+        # content difference, not an ordering one, so the walk stops at
+        # the shorter list (strict=False is the semantics, spelled out).
+        for index, (a_item, b_item) in enumerate(zip(a, b, strict=False)):
+            diverged = _first_key_order_divergence(a_item, b_item, f"{at}[{index}]")
+            if diverged is not None:
+                return diverged
+        return None
+    # Scalars, or structurally mismatched types: nothing to compare.
+    return None
 
 
 # --------------------------------------------------------------------------

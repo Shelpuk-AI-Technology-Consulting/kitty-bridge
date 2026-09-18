@@ -2371,16 +2371,21 @@ def pattern_is_proper_prefix_of(shallow: str, deep: str) -> bool:
     if len(shallow_segments) >= len(deep_segments):
         return False
 
-    # Same bare-collection rule :func:`path_matches` applies: a bracket-free
-    # shallow segment matches the deep segment's bracketed member of itself
-    # (`turns` is a proper prefix of `turns[*].parts[*].id`). Without it, a
-    # bare collection anchor and its wildcard member would compare unequal
-    # at the very segment that makes the prefix relation.
+    # The same segment rules :func:`path_matches` applies, so the two
+    # predicates cannot drift: the bare-collection rule (a bracket-free
+    # shallow segment matches the deep segment's bracketed member of
+    # itself — `turns` prefixes `turns[*].parts[*].id`) and
+    # :func:`_segment_matches`' wildcard equivalence, including the
+    # legacy `[]` spelling of `[*]` (§3.3.1a keeps `[]` legal precisely
+    # so an old row "must not silently match nothing" — a prefix helper
+    # that treated `[]` and `[*]` as different would exempt an
+    # untriggered row from assertion 2 the moment a legacy-spelled row
+    # landed).
     for index, shallow_segment in enumerate(shallow_segments):
         deep_segment = deep_segments[index]
         if "[" not in shallow_segment and deep_segment.startswith(f"{shallow_segment}["):
             continue
-        if shallow_segment != deep_segment:
+        if not _segment_matches(shallow_segment, deep_segment):
             return False
     return True
 

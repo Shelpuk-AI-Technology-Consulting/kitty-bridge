@@ -175,13 +175,14 @@ class TestDrivenDefaultRun:
                 )
 
     async def test_native_passthrough_rejects_reordered_body(self) -> None:
-        """§4.3 C2: native passthrough's byte-level key-order check fails on reorder.
+        """§4.3 C2: native passthrough's key-order check fails on reorder.
 
         With ``NON_NATIVE_UPSTREAM_WIRE`` *not* in ``triggers_met`` (the
-        route is native passthrough) and the two bodies byte-different,
-        the oracle's C2 byte-level check fires. The KBR-75 fix does not
-        apply here — the test exercises the *fourth* obligation the
-        oracle owns (§4.3 C2), separately from claim matching.
+        route is native passthrough) and the captured body's keys
+        reordered relative to the inbound's, the oracle's C2 key-order
+        check fires. The KBR-75 fix does not apply here — the test
+        exercises the *third* obligation the oracle owns (§4.3 C2),
+        separately from claim matching.
         """
         import pytest
 
@@ -233,18 +234,18 @@ class TestDrivenDefaultRun:
                     triggers_met=frozenset(),  # native passthrough
                 )
 
-    async def test_native_passthrough_preserves_bytes_end_to_end(self) -> None:
-        """§4.3 C2, positive: the real bridge's native passthrough is byte-preserving.
+    async def test_native_passthrough_preserves_key_order_end_to_end(self) -> None:
+        """§4.3 C2, positive: the real bridge's native passthrough preserves
+        JSON key order end to end.
 
-        The negative test above manufactures the byte difference by hand on
-        the captured body; this one asserts the *unmanufactured* case — the
-        body that actually reaches the recorder equals the body the agent
-        sent, byte for byte, and the oracle passes over it. Without this
-        test a bridge defect that re-serialises the body (compact
-        separators, a reordered key, a rebuilt envelope) would pass the
+        The negative test above manufactures the ordering difference by
+        hand on the captured body; this one asserts the *unmanufactured*
+        case — the oracle accepts the body that actually reaches the
+        recorder, on a native route, with the real bridge between. Without
+        this test a bridge defect that reordered JSON keys would pass the
         negative test (which constructs its own difference) and the unit
-        tests (which fabricate their own equality) — green either way, for
-        the exact bridge behaviour this obligation names.
+        tests (which fabricate their own equality) — green either way,
+        for the exact bridge behaviour this obligation names.
 
         Scope note: this is the ``custom_anthropic`` route, the one
         native-passthrough adapter T-D1's one-adapter scope covers. Other
@@ -257,20 +258,13 @@ class TestDrivenDefaultRun:
             assert status == 200
             captured = list(fixture.captures)[0]
 
-            inbound_body = json.dumps(body).encode("utf-8")
-            assert captured.body == inbound_body, (
-                "the bridge's native passthrough must ship the agent's body "
-                "byte-for-byte; a re-serialisation is exactly the serialiser "
-                "fingerprint §4.3 C2 exists to catch"
-            )
-
             inbound = CapturedRequest(
                 method="POST",
                 scheme="http",
                 host="127.0.0.1",
                 path=inbound_path(InboundProtocol.MESSAGES),
                 query="",
-                body=inbound_body,
+                body=json.dumps(body).encode("utf-8"),
             )
 
             report = oracle.assert_no_unclaimed_mutation(
@@ -282,3 +276,64 @@ class TestDrivenDefaultRun:
                 triggers_met=frozenset(),  # native passthrough
             )
             assert report.deltas == ()
+
+    async def test_native_model_rewrite_does_not_trip_the_c2_check(self) -> None:
+        """The M1 model rewrite on the native route preserves key order.
+
+        The native branch runs ``_normalize_model`` whenever the profile
+        pins a model, rewriting the inbound ``model`` to the profile's.
+        That is a registered, permitted mutation (register row M1) and
+        changes the bytes — but it preserves key order exactly, which is
+        §4.3 C2's actual claim. An earlier byte-equality implementation
+        false-failed this case; the key-order check accepts it.
+
+        The test is informative: it asserts the captured body's model is
+        the profile's (proving M1 fired), then runs the oracle and asserts
+        it passes (proving C2 does not false-fail on registered
+        mutations).
+        """
+        body = minimal_inbound_body(InboundProtocol.MESSAGES, _SENTINEL)
+        # Distinct profile model so the bridge actually rewrites the
+        # inbound model — without a difference, the diff has nothing to
+        # find and the test is uninformative.
+        profile_model = "profile-model-not-inbound-model"
+        async with BridgeFixture(
+            transport("aiohttp", WireFormat.ANTHROPIC_MESSAGES),
+            model=profile_model,
+        ) as fixture:
+            status, _ = await fixture.post(inbound_path(InboundProtocol.MESSAGES), body)
+            assert status == 200
+            captured = list(fixture.captures)[0]
+
+            # M1 fired: the captured body carries the profile model.
+            captured_body = json.loads(captured.body)
+            assert captured_body["model"] == profile_model, (
+                "the native route's M1 rewrite must have changed the model; "
+                "without it the test would be uninformative"
+            )
+
+            inbound = CapturedRequest(
+                method="POST",
+                scheme="http",
+                host="127.0.0.1",
+                path=inbound_path(InboundProtocol.MESSAGES),
+                query="",
+                body=json.dumps(body).encode("utf-8"),
+            )
+
+            # C2 compares key order, not values — M1's model rewrite
+            # preserves the key sequence, so the oracle's C2 check passes.
+            # M1's own trigger (PROFILE_SETS_MODEL) is met — the profile
+            # pins a model — so M1 claims the envelope.model delta and
+            # assertion 1 passes too. The oracle call returning is the
+            # proof; ``report.deltas`` carries the (claimed) envelope.model
+            # delta because it is the structural diff output, not the
+            # unclaimed list.
+            oracle.assert_no_unclaimed_mutation(
+                inbound=inbound,
+                inbound_format=WireFormat.ANTHROPIC_MESSAGES,
+                captured=captured,
+                captured_format=WireFormat.ANTHROPIC_MESSAGES,
+                register=r.REGISTER,
+                triggers_met=frozenset({r.Trigger.PROFILE_SETS_MODEL}),
+            )
