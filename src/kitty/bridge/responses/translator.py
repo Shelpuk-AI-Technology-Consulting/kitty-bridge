@@ -249,6 +249,24 @@ def normalize_responses_request(body: object) -> dict:
     omitted because the rewrite is real bytes on the ``curl_cffi`` boundary, and
     it binds the future OpenAI-Responses reader to read the two forms alike.
 
+    The shape checks below are **scoped to the fields the translator actually
+    reads containers and members off**.  Each one exists because a measured
+    body reached the translator and crashed inside it (KBR-159): every
+    unguarded container here is an unhandled-exception 500 the
+    ``.system_design/TEST_SUITE.md`` §6.2.1 ``not_a_server_error`` check
+    forbids.  Fields the translator *tolerates* are deliberately **not**
+    validated -- ``instructions`` as an object, ``reasoning`` as a string and
+    a bare-number message ``content`` all pass through today, and rejecting
+    them would refuse bodies real clients legitimately send (KBR-82's
+    "why publish a schema" paragraph).
+
+    The ``function_call_output`` shape with missing ``call_id`` is **not**
+    validated here -- KBR-169's orphan-drop pass (``_drop_orphan_response_outputs``
+    at ``src/kitty/bridge/server.py:388``) handles that shape by silently
+    dropping the unpaired item and answering 200.  Validating it here would
+    duplicate KBR-169's job and break its contract -- KBR-169 deliberately
+    treats a missing ``call_id`` as "undeclared" (its docstring).
+
     Args:
         body: The decoded inbound request body.  Typed ``object`` rather than
             ``dict`` because this is a trust boundary: the caller has decoded
@@ -261,12 +279,33 @@ def normalize_responses_request(body: object) -> dict:
         unchanged, so calling this twice is safe.
 
     Raises:
-        InvalidResponsesRequest: The body is not a JSON object, or ``input`` is
-            neither a string nor an array of objects.
+        InvalidResponsesRequest: The body is not a JSON object; or ``input`` is
+            neither a string nor an array of objects; or one of the containers
+            the translator iterates (``tools``, a reasoning item's ``summary``)
+            carries the wrong shape.
     """
     # A field can only be read off an object; valid JSON is a weaker claim.
     if not isinstance(body, dict):
         raise InvalidResponsesRequest(f"Request body must be a JSON object, got {type(body).__name__}")
+
+    # `tools` is iterated and its members have `.get` called on them in the
+    # translator; a non-list here iterates its keys (a dict) or its characters
+    # (a string) and crashes.  Function tools must carry a name and a
+    # parameters object; every other tool kind (`web_search`, `custom`, MCP,
+    # ...) is skipped by the translator on purpose and must stay unvalidated.
+    if "tools" in body:
+        tools = body["tools"]
+        if not isinstance(tools, list):
+            raise InvalidResponsesRequest(f"'tools' must be an array, got {type(tools).__name__}")
+        for index, tool in enumerate(tools):
+            if not isinstance(tool, dict):
+                raise InvalidResponsesRequest(f"'tools[{index}]' must be an object, got {type(tool).__name__}")
+            if tool.get("type") == "function":
+                name = tool.get("name")
+                if not isinstance(name, str) or not name:
+                    raise InvalidResponsesRequest(f"'tools[{index}].name' must be a non-empty string")
+                if not isinstance(tool.get("parameters"), dict):
+                    raise InvalidResponsesRequest(f"'tools[{index}].parameters' must be an object")
 
     if "input" not in body:
         return body
@@ -280,12 +319,48 @@ def normalize_responses_request(body: object) -> dict:
     if not isinstance(value, list):
         raise InvalidResponsesRequest(f"'input' must be a string or an array, got {type(value).__name__}")
 
-    # Reported by index, because a client sending a long transcript needs to know which item.
+    _validate_input_items(value)
+    return body
+
+
+def _validate_input_items(value: list) -> None:
+    """Validate the shapes inside ``input`` that the translator reads members off.
+
+    A reasoning item's ``summary`` must be a list of objects carrying a string
+    ``text``: the translator iterates it and joins the texts, so both a string
+    ``summary`` and a non-string ``text`` crash it. The
+    ``function_call_output`` shape is **not** validated here -- see the
+    docstring of :func:`normalize_responses_request` for the KBR-169 boundary.
+
+    Args:
+        value: The ``input`` field's array form, after the string form has
+            been rewritten.
+
+    Raises:
+        InvalidResponsesRequest: One of the container shapes above is wrong.
+            Items are reported by index, because a client sending a long
+            transcript needs to know which one.
+    """
     for index, element in enumerate(value):
         if not isinstance(element, dict):
             raise InvalidResponsesRequest(f"'input[{index}]' must be an object, got {type(element).__name__}")
 
-    return body
+        if element.get("type") == "reasoning":
+            summary = element.get("summary", [])
+            if not isinstance(summary, list):
+                raise InvalidResponsesRequest(
+                    f"'input[{index}].summary' must be an array, got {type(summary).__name__}"
+                )
+            for position, entry in enumerate(summary):
+                if not isinstance(entry, dict):
+                    raise InvalidResponsesRequest(
+                        f"'input[{index}].summary[{position}]' must be an object, "
+                        f"got {type(entry).__name__}"
+                    )
+                if not isinstance(entry.get("text"), str):
+                    raise InvalidResponsesRequest(
+                        f"'input[{index}].summary[{position}].text' must be a string"
+                    )
 
 
 class ResponsesTranslator:

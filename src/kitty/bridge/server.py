@@ -163,6 +163,184 @@ def _setup_crash_handlers(log_path: Path, *, state_path: str | None = None) -> N
 # ── Native passthrough format fallback ────────────────────────────────────
 
 
+class InvalidMessagesRequest(ValueError):
+    # pragma: no mutate block
+    """Raised when an Anthropic-Messages request carries a shape the dialect does not permit.
+
+    Carried out of :func:`_normalize_messages_request` so
+    :meth:`BridgeServer._handle_messages` can answer with the endpoint's 400
+    envelope.  Without a distinct type the handler's catch-all renders every
+    one of these as a 500, which ``.system_design/TEST_SUITE.md`` §6.2.1
+    forbids: the bridge must never return a server error for a client's
+    malformed body.  Mirrors the ``InvalidResponsesRequest`` pattern at
+    ``src/kitty/bridge/responses/translator.py``.
+    """
+
+
+class InvalidChatCompletionsRequest(ValueError):
+    # pragma: no mutate block
+    """Raised when a Chat-Completions request carries a shape the dialect does not permit.
+
+    Same rationale as :class:`InvalidMessagesRequest`, for the
+    ``/v1/chat/completions`` route.
+    """
+
+
+class InvalidGeminiRequest(ValueError):
+    # pragma: no mutate block
+    """Raised when a Gemini ``generateContent`` request carries a shape the dialect does not permit.
+
+    Same rationale as :class:`InvalidMessagesRequest`, for the two Gemini
+    routes (``/v1beta/...:generateContent`` and
+    ``/v1beta/...:streamGenerateContent``).
+    """
+
+
+def _normalize_messages_request(body: object) -> dict:
+    # pragma: no mutate block
+    """Validate an Anthropic-Messages body shape at the trust boundary.
+
+    The translator (and several helpers under
+    :mod:`kitty.bridge.messages.translator`) iterate ``body["messages"]``
+    and call ``.get(...)`` on each member. A string ``"messages"`` (or any
+    non-list value) reaches those loops and the per-character ``.get``
+    raises ``AttributeError`` -- a 500 the handler's catch-all renders.
+
+    The same pattern applies to ``tools``: the translator iterates each
+    tool and calls ``t["name"]``; a list (instead of dict) crashes with
+    ``TypeError``. This guard mirrors :func:`kitty.bridge.responses.translator.normalize_responses_request`
+    and runs **before** any translation, so the same body validates for both
+    upstream bodies the bridge may build from it (§3.2.3).
+
+    Args:
+        body: The decoded inbound request body. Typed ``object`` because this
+            is a trust boundary: the caller has decoded arbitrary JSON, and
+            annotating ``dict`` would make the guard look unreachable to a
+            type checker.
+
+    Returns:
+        The body, unchanged, so callers can pass the result straight to the
+        translator.
+
+    Raises:
+        InvalidMessagesRequest: ``body`` is not a JSON object, or ``messages``
+            is present and is not a list of objects, or ``tools`` is present
+            and is not a list of objects.
+    """
+    if not isinstance(body, dict):
+        raise InvalidMessagesRequest(f"Request body must be a JSON object, got {type(body).__name__}")
+    # Both fields are required by the Anthropic Messages API contract; the
+    # translator subscripts ``messages_request["model"]`` unguarded, so a
+    # missing ``model`` would KeyError inside the handler's catch-all (500).
+    if "model" not in body:
+        raise InvalidMessagesRequest("'model' is required")
+    if "messages" not in body:
+        raise InvalidMessagesRequest("'messages' is required")
+    if "messages" in body:
+        messages = body["messages"]
+        if not isinstance(messages, list):
+            raise InvalidMessagesRequest(f"'messages' must be an array, got {type(messages).__name__}")
+        for index, element in enumerate(messages):
+            if not isinstance(element, dict):
+                raise InvalidMessagesRequest(
+                    f"'messages[{index}]' must be an object, got {type(element).__name__}"
+                )
+    if "tools" in body:
+        tools = body["tools"]
+        if not isinstance(tools, list):
+            raise InvalidMessagesRequest(f"'tools' must be an array, got {type(tools).__name__}")
+        for index, tool in enumerate(tools):
+            if not isinstance(tool, dict):
+                raise InvalidMessagesRequest(
+                    f"'tools[{index}]' must be an object, got {type(tool).__name__}"
+                )
+            # The translator subscripts ``t["name"]`` unguarded; a tool
+            # object without ``name`` would KeyError inside the handler's
+            # catch-all (500).
+            if not isinstance(tool.get("name"), str) or not tool.get("name"):
+                raise InvalidMessagesRequest(f"'tools[{index}].name' must be a non-empty string")
+    return body
+
+
+def _normalize_chat_completions_request(body: object) -> dict:
+    # pragma: no mutate block
+    """Validate a Chat-Completions body shape at the trust boundary.
+
+    The CC compaction path iterates ``body["messages"]`` unguarded; a string
+    here crashes inside ``_apply_compaction``. The guard runs before any
+    bridge-side work that reads ``messages``.
+
+    ``tools`` is deliberately **not** validated: the CC route passes tool
+    definitions through to the upstream without iterating them (measured —
+    non-array and non-object tool bodies answer 200 today), and the CC
+    tool contract nests ``name`` under ``function``
+    (``{"type": "function", "function": {"name": ...}}``), so a flat
+    ``tool["name"]`` check of the kind ``_normalize_messages_request``
+    performs would 400 every legitimate CC tool body. There is no measured
+    CC tools 500 for a guard to prevent.
+
+    Args:
+        body: The decoded inbound request body. Typed ``object`` because
+            arbitrary JSON.
+
+    Returns:
+        The body, unchanged.
+
+    Raises:
+        InvalidChatCompletionsRequest: ``body`` is not a JSON object, or
+            ``messages`` is present and is not a list of objects.
+    """
+    if not isinstance(body, dict):
+        raise InvalidChatCompletionsRequest(
+            f"Request body must be a JSON object, got {type(body).__name__}"
+        )
+    if "messages" in body:
+        messages = body["messages"]
+        if not isinstance(messages, list):
+            raise InvalidChatCompletionsRequest(
+                f"'messages' must be an array, got {type(messages).__name__}"
+            )
+        for index, element in enumerate(messages):
+            if not isinstance(element, dict):
+                raise InvalidChatCompletionsRequest(
+                    f"'messages[{index}]' must be an object, got {type(element).__name__}"
+                )
+    return body
+
+
+def _normalize_gemini_request(body: object) -> dict:
+    # pragma: no mutate block
+    """Validate a Gemini ``generateContent`` body shape at the trust boundary.
+
+    The Gemini translator iterates ``body["contents"]`` and calls
+    ``.get(...)`` on each member; a string here iterates characters and the
+    ``.get`` raises. The guard runs before the translator sees the body.
+
+    Args:
+        body: The decoded inbound request body. Typed ``object`` because
+            arbitrary JSON.
+
+    Returns:
+        The body, unchanged.
+
+    Raises:
+        InvalidGeminiRequest: ``body`` is not a JSON object, or ``contents``
+            is present and is not a list of objects.
+    """
+    if not isinstance(body, dict):
+        raise InvalidGeminiRequest(f"Request body must be a JSON object, got {type(body).__name__}")
+    if "contents" in body:
+        contents = body["contents"]
+        if not isinstance(contents, list):
+            raise InvalidGeminiRequest(f"'contents' must be an array, got {type(contents).__name__}")
+        for index, element in enumerate(contents):
+            if not isinstance(element, dict):
+                raise InvalidGeminiRequest(
+                    f"'contents[{index}]' must be an object, got {type(element).__name__}"
+                )
+    return body
+
+
 def _has_tool_use_blocks(body: dict) -> bool:
     # pragma: no mutate block
     """Return True if any message in *body* uses Anthropic-format ``tool_use`` content blocks.
@@ -4497,6 +4675,17 @@ class BridgeServer:
         logger.debug("Request body: %s", json.dumps(body, indent=2, ensure_ascii=False))
 
         try:
+            _normalize_messages_request(body)
+        except InvalidMessagesRequest as exc:
+            logger.warning("Malformed Messages API request body: %s", exc)
+            return self._error_response(
+                {
+                    "type": "error",
+                    "error": {"type": "invalid_request_error", "message": str(exc)},
+                },
+            )
+
+        try:
             translator = MessagesTranslator(thinking_warned=self._thinking_warned)
             if self._active_provider.use_native_messages:
                 cc_request = dict(body)
@@ -6257,6 +6446,14 @@ class BridgeServer:
         logger.debug("═══ GEMINI API REQUEST ═══ model=%s", model_from_path)
         logger.debug("Request body: %s", json.dumps(body, indent=2, ensure_ascii=False))
 
+        try:
+            _normalize_gemini_request(body)
+        except InvalidGeminiRequest as exc:
+            logger.warning("Malformed Gemini API request body: %s", exc)
+            return self._error_response(
+                {"error": {"code": 400, "message": str(exc), "status": "INVALID_ARGUMENT"}},
+            )
+
         translator = GeminiTranslator()
         cc_request = translator.translate_request(body)
         # Inject model from URL path so _normalize_model can override it
@@ -7480,6 +7677,14 @@ class BridgeServer:
 
         logger.debug("═══ CHAT COMPLETIONS PASS-THROUGH REQUEST ═══")
         logger.debug("Request body: %s", json.dumps(body, indent=2, ensure_ascii=False))
+
+        try:
+            _normalize_chat_completions_request(body)
+        except InvalidChatCompletionsRequest as exc:
+            logger.warning("Malformed Chat Completions API request body: %s", exc)
+            return self._error_response(
+                {"error": {"code": "invalid_request", "message": str(exc)}},
+            )
 
         cc_request = body
         _normalize_cc_stop(cc_request)

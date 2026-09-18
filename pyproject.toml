@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "kitty-bridge"
-version = "1.14.0"
+version = "1.15.0"
 description = "Kitty Bridge — launch coding agents through a local API bridge"
 readme = "README.md"
 license = "MIT"
@@ -69,6 +69,9 @@ dev = [
     "twine>=4.0",
     "hypothesis>=6.100",
     "mutmut>=3.0,<4",
+    # Schemathesis drives the OpenAPI conformance run (T-G6 / KBR-82).
+    # v4 supports OpenAPI 3.1 natively; <5 keeps a major bump a decision.
+    "schemathesis>=4.9,<5",
     # tomllib landed in 3.11; tests/test_mutmut_scope.py reads
     # pyproject.toml's [tool.mutmut] on every supported interpreter.
     "tomli>=2.0; python_version < '3.11'",
@@ -140,7 +143,7 @@ target-version = "py310"
 # next carried-across fix would arrive as a conflict. `.github/review/rules/ci.md`
 # records the same rule for anyone reviewing a change there.
 #
-# NOTE: this is not "that code is unchecked". `ci.yml` runs its 729-case suite
+# NOTE: this is not "that code is unchecked". `ci.yml` runs its 738-case suite
 # on every pull request, and that suite carries guards this linter could not
 # express - the private-reference sweep, the runner-ceiling pairing, the
 # aggregate's dependency set.

@@ -1,0 +1,791 @@
+openapi: 3.1.0
+info:
+  title: Kitty Bridge
+  version: "1.14.0"
+  description: |
+    The local API bridge between Claude Code / Codex / Gemini CLI agents and
+    upstream LLM providers. Published so the agents — third parties on their
+    own release cycle — have a stable contract to integrate against, and so
+    ``schemathesis`` has a fuzz target that catches malformed-body 500s
+    before users see them.
+
+    Conformance test: ``tests/test_openapi_conformance.py`` (L2).
+    Per-protocol route guard: ``tests/test_route_registration_matrix.py``.
+    Routes are those ``BridgeServer._register_routes`` registers when
+    ``self._adapter is None`` (bridge mode). Agent-launch mode registers a
+    strict subset; that is checked statically by the same guard.
+  contact:
+    name: Shelpuk AI Technology Consulting
+    url: https://github.com/Shelpuk-AI-Technology-Consulting/kitty-bridge
+
+paths:
+  /healthz:
+    get:
+      summary: Health check
+      description: |
+        Whether the bridge can serve the next request. Returns 200 when at
+        least one backend is healthy or the cooldown has elapsed, 503 when
+        every backend is in cooldown.
+      operationId: healthz
+      responses:
+        "200":
+          description: Bridge is ready.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthzOK"
+        "503":
+          description: All backends are in cooldown.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthzDegraded"
+
+  /stats:
+    get:
+      summary: Session statistics
+      description: |
+        The session document behind the bridge's live record of which backend
+        served which request. Sibling of ``/healthz``.
+      operationId: stats
+      responses:
+        "200":
+          description: Session document.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+
+  /v1/models:
+    get:
+      summary: List available models
+      description: OpenAI-compatible model listing for the bridge's backend(s).
+      operationId: listModels
+      responses:
+        "200":
+          description: Model list.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ModelList"
+
+  /v1/chat/completions:
+    post:
+      summary: Chat Completions
+      description: |
+        OpenAI Chat Completions. Dual-mode: returns ``application/json`` when
+        the request body's ``stream`` is false (or absent), and
+        ``text/event-stream`` when ``stream`` is true. The SSE 200 schema is
+        documented for human readers; the L2 conformance gate bounds
+        ``stream`` to ``false`` (see ChatCompletionsRequest.stream), so it
+        drives only the JSON path — streaming end-to-end is covered by the
+        L3 bridge tests in ``tests/bridge/``.
+      operationId: chatCompletions
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ChatCompletionsRequest"
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+            text/event-stream:
+              schema:
+                type: object
+                additionalProperties: true
+        "400":
+          $ref: "#/components/responses/ChatCompletionsError"
+        "401":
+          $ref: "#/components/responses/ChatCompletionsUnauthorized"
+        "502":
+          $ref: "#/components/responses/ChatCompletionsUpstreamError"
+        "503":
+          $ref: "#/components/responses/ChatCompletionsAllUnhealthy"
+        "504":
+          $ref: "#/components/responses/ChatCompletionsUpstreamError"
+
+  /v1/messages:
+    post:
+      summary: Anthropic Messages
+      description: |
+        Anthropic Messages. Dual-mode: returns ``application/json`` for
+        non-streaming requests, ``text/event-stream`` when ``stream`` is true.
+        The SSE 200 schema is documented for human readers; the L2 gate
+        bounds ``stream`` to ``false`` and drives only the JSON path.
+      operationId: messages
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MessagesRequest"
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+            text/event-stream:
+              schema:
+                type: object
+                additionalProperties: true
+        "400":
+          $ref: "#/components/responses/MessagesError"
+        "401":
+          $ref: "#/components/responses/MessagesUnauthorized"
+        "502":
+          $ref: "#/components/responses/MessagesUpstreamError"
+        "503":
+          $ref: "#/components/responses/MessagesAllUnhealthy"
+        "504":
+          $ref: "#/components/responses/MessagesUpstreamError"
+
+  /v1/responses:
+    post:
+      summary: OpenAI Responses
+      description: |
+        OpenAI Responses API. Dual-mode: returns ``application/json`` for
+        non-streaming requests, ``text/event-stream`` when ``stream`` is true.
+        The endpoint documents four same-shaped 400 envelopes, distinguished
+        by the optional ``error.reason`` field
+        (``invalid_input`` / ``compaction_failed`` / absent for the JSON- or
+        size-failure variants). The SSE 200 schema is documented for
+        human readers; the L2 gate bounds ``stream`` to ``false`` and
+        drives only the JSON path.
+      operationId: responses
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ResponsesRequest"
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+            text/event-stream:
+              schema:
+                type: object
+                additionalProperties: true
+        "400":
+          $ref: "#/components/responses/ResponsesError"
+        "401":
+          $ref: "#/components/responses/ResponsesUnauthorized"
+        "502":
+          $ref: "#/components/responses/ResponsesUpstreamError"
+        "503":
+          $ref: "#/components/responses/ResponsesAllUnhealthy"
+        "504":
+          $ref: "#/components/responses/ResponsesUpstreamError"
+
+  /v1beta/models/{model}:generateContent:
+    post:
+      summary: Gemini generateContent (non-streaming)
+      description: |
+        Gemini ``generateContent``. JSON-only — the URL suffix is the
+        non-streaming variant. ``{model}`` is the model name as routed by
+        the adapter; constrained to a path-safe character set so the
+        conformance fuzzer stays inside the routable set as much as
+        possible. (Schemathesis 4.x does not yet honour JSON-Schema
+        ``pattern`` for path parameters, so a small number of fuzzed
+        values still 404 — ``404`` is documented below.)
+      operationId: geminiGenerate
+      parameters:
+        - name: model
+          in: path
+          required: true
+          description: The model identifier.
+          schema:
+            type: string
+            # Conservative positive pattern: real model names are
+            # `[A-Za-z0-9._~-]` runs. The earlier negated pattern
+            # (`[^/:?#]+`) admitted newlines and other characters aiohttp
+            # will not route (404 — an undocumented status the gate then
+            # flags), so the fuzzer stayed inside the routable set only
+            # by luck.
+            pattern: "[A-Za-z0-9._~-]+"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GeminiRequest"
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "400":
+          $ref: "#/components/responses/GeminiError"
+        "401":
+          $ref: "#/components/responses/GeminiUnauthorized"
+        "404":
+          description: |
+            The model name does not match a path this bridge can serve
+            (e.g. contains a character the aiohttp regex converter
+            rejects). This is the honest answer for fuzzed values that
+            slip past the path-parameter pattern.
+          content:
+            text/plain:
+              schema:
+                type: string
+        "502":
+          $ref: "#/components/responses/GeminiUpstreamError"
+        "503":
+          $ref: "#/components/responses/GeminiAllUnhealthy"
+        "504":
+          $ref: "#/components/responses/GeminiUpstreamError"
+
+  /v1beta/models/{model}:streamGenerateContent:
+    post:
+      summary: Gemini streamGenerateContent (streaming)
+      description: |
+        Gemini ``streamGenerateContent``. SSE-only — the URL suffix hard-wires
+        the streaming response. See the ``pattern`` note on ``generateContent``
+        for why ``404`` is documented here.
+      operationId: geminiStreamGenerate
+      parameters:
+        - name: model
+          in: path
+          required: true
+          description: The model identifier.
+          schema:
+            type: string
+            # Conservative positive pattern: real model names are
+            # `[A-Za-z0-9._~-]` runs. The earlier negated pattern
+            # (`[^/:?#]+`) admitted newlines and other characters aiohttp
+            # will not route (404 — an undocumented status the gate then
+            # flags), so the fuzzer stayed inside the routable set only
+            # by luck.
+            pattern: "[A-Za-z0-9._~-]+"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GeminiRequest"
+      responses:
+        "200":
+          description: Success.
+          content:
+            text/event-stream:
+              schema:
+                type: object
+                additionalProperties: true
+        "400":
+          $ref: "#/components/responses/GeminiError"
+        "401":
+          $ref: "#/components/responses/GeminiUnauthorized"
+        "404":
+          description: The model name does not match a path this bridge can serve.
+          content:
+            text/plain:
+              schema:
+                type: string
+        "502":
+          $ref: "#/components/responses/GeminiUpstreamError"
+        "503":
+          $ref: "#/components/responses/GeminiAllUnhealthy"
+        "504":
+          $ref: "#/components/responses/GeminiUpstreamError"
+
+components:
+  responses:
+    ChatCompletionsError:
+      description: Client-side request error (Anthropic-style envelope).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ChatCompletionsError"
+    ChatCompletionsUnauthorized:
+      description: Missing or unknown API key.
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error:
+                type: string
+            required: [error]
+            additionalProperties: true
+    ChatCompletionsUpstreamError:
+      description: Upstream rejected the request.
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error:
+                type: object
+                additionalProperties: true
+            additionalProperties: true
+    ChatCompletionsAllUnhealthy:
+      description: All backends are in cooldown; ``Retry-After`` is set.
+      headers:
+        Retry-After:
+          schema:
+            type: integer
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error:
+                type: object
+                properties:
+                  code:
+                    type: integer
+                  message:
+                    type: string
+                  status:
+                    type: string
+                  backends:
+                    type: array
+                    items:
+                      type: object
+                      additionalProperties: true
+                required: [code, message, status]
+                additionalProperties: true
+            additionalProperties: true
+
+    MessagesError:
+      description: Client-side request error (Anthropic envelope).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/MessagesError"
+    MessagesUnauthorized:
+      description: Missing or unknown API key.
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error:
+                type: string
+            additionalProperties: true
+    MessagesUpstreamError:
+      description: Upstream rejected the request.
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error:
+                type: object
+                additionalProperties: true
+            additionalProperties: true
+    MessagesAllUnhealthy:
+      description: All backends are in cooldown; ``Retry-After`` is set.
+      headers:
+        Retry-After:
+          schema:
+            type: integer
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              type:
+                type: string
+                enum: [error]
+              error:
+                type: object
+                properties:
+                  type:
+                    type: string
+                    enum: [api_error]
+                  message:
+                    type: string
+                  retry_after:
+                    type: integer
+                  backends:
+                    type: array
+                    items:
+                      type: object
+                      additionalProperties: true
+                required: [type, message]
+                additionalProperties: true
+            required: [type, error]
+            additionalProperties: true
+
+    ResponsesError:
+      description: |
+        Client-side request error. ``error.reason`` is documented as
+        *optional* — the normaliser-caught path returns
+        ``reason: "invalid_input"`` (KBR-144 / KBR-82) or
+        ``reason: "compaction_failed"`` (KBR-86); the JSON- or size-failure
+        paths return no ``reason``. The schema accepts both shapes.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ResponsesError"
+    ResponsesUnauthorized:
+      description: Missing or unknown API key.
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error:
+                type: string
+            additionalProperties: true
+    ResponsesUpstreamError:
+      description: Upstream rejected the request.
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error:
+                type: object
+                additionalProperties: true
+            additionalProperties: true
+    ResponsesAllUnhealthy:
+      description: All backends are in cooldown; ``Retry-After`` is set.
+      headers:
+        Retry-After:
+          schema:
+            type: integer
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error:
+                type: object
+                properties:
+                  code:
+                    type: integer
+                  message:
+                    type: string
+                  status:
+                    type: string
+                  backends:
+                    type: array
+                    items:
+                      type: object
+                      additionalProperties: true
+                required: [code, message, status]
+                additionalProperties: true
+            additionalProperties: true
+
+    GeminiError:
+      description: Client-side request error (Gemini envelope).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/GeminiError"
+    GeminiUnauthorized:
+      description: Missing or unknown API key.
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error:
+                type: object
+                additionalProperties: true
+            additionalProperties: true
+    GeminiUpstreamError:
+      description: Upstream rejected the request.
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error:
+                type: object
+                additionalProperties: true
+            additionalProperties: true
+    GeminiAllUnhealthy:
+      description: All backends are in cooldown; ``Retry-After`` is set.
+      headers:
+        Retry-After:
+          schema:
+            type: integer
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error:
+                type: object
+                properties:
+                  code:
+                    type: integer
+                  message:
+                    type: string
+                  status:
+                    type: string
+                  backends:
+                    type: array
+                    items:
+                      type: object
+                      additionalProperties: true
+                required: [code, message, status]
+                additionalProperties: true
+            additionalProperties: true
+
+  schemas:
+    HealthzOK:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [ok]
+        backends:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+      additionalProperties: true
+
+    HealthzDegraded:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [degraded]
+        backends:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+      additionalProperties: true
+
+    ModelList:
+      type: object
+      properties:
+        object:
+          type: string
+          enum: [list]
+        data:
+          type: array
+          items:
+            type: object
+            properties:
+              id:
+                type: string
+              object:
+                type: string
+                enum: [model]
+              created:
+                type: integer
+              owned_by:
+                type: string
+                enum: [kitty-bridge]
+            required: [id, object, created, owned_by]
+            additionalProperties: true
+      required: [object, data]
+      additionalProperties: true
+
+    ChatCompletionsRequest:
+      type: object
+      properties:
+        model:
+          type: string
+        messages:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        stream:
+          description: |
+            Bounded to ``false`` in the schema because the recording
+            upstream the conformance run drives replies non-streaming; a
+            ``stream: true`` case would spin the bridge's empty-response
+            retry ladder against it. Streaming is exercised by the L3
+            bridge tests, not by this gate.
+          type: boolean
+          enum: [false]
+        tools:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        tool_choice:
+        temperature:
+          type: number
+        top_p:
+          type: number
+      additionalProperties: true
+
+    MessagesRequest:
+      type: object
+      properties:
+        model:
+          type: string
+        messages:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        max_tokens:
+          type: integer
+        system:
+        stream:
+          description: Same as ChatCompletionsRequest.stream — bounded to false for the gate.
+          type: boolean
+          enum: [false]
+        tools:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        tool_choice:
+        temperature:
+          type: number
+        top_p:
+          type: number
+      additionalProperties: true
+
+    ResponsesRequest:
+      type: object
+      properties:
+        model:
+          type: string
+        input:
+          oneOf:
+            - type: string
+            - type: array
+              items:
+                type: object
+                additionalProperties: true
+        instructions:
+        stream:
+          description: Same as ChatCompletionsRequest.stream — bounded to false for the gate.
+          type: boolean
+          enum: [false]
+        tools:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        tool_choice:
+        parallel_tool_calls:
+          type: boolean
+        reasoning:
+        temperature:
+          type: number
+        top_p:
+          type: number
+        max_output_tokens:
+          type: integer
+      additionalProperties: true
+
+    GeminiRequest:
+      type: object
+      properties:
+        contents:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        systemInstruction:
+          type: object
+          additionalProperties: true
+        generationConfig:
+          type: object
+          additionalProperties: true
+      additionalProperties: true
+
+    ChatCompletionsError:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+            message:
+              type: string
+            type:
+              type: string
+          required: [message]
+          additionalProperties: true
+      required: [error]
+      additionalProperties: true
+
+    MessagesError:
+      type: object
+      properties:
+        type:
+          type: string
+          enum: [error]
+        error:
+          type: object
+          properties:
+            type:
+              type: string
+            message:
+              type: string
+          required: [type, message]
+          additionalProperties: true
+      required: [type, error]
+      additionalProperties: true
+
+    ResponsesError:
+      description: |
+        The four same-shaped 400 envelopes ``/v1/responses`` deliberately
+        returns. ``error.reason`` is **optional** — present on the
+        normaliser / compaction-failure paths, absent on the JSON- and
+        size-failure paths. ``additionalProperties: true`` on both halves
+        keeps the schema loose enough to admit each variant without
+        breaking on legitimate additions.
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+            message:
+              type: string
+            reason:
+              type: string
+              enum:
+                - invalid_input
+                - compaction_failed
+          required: [message]
+          additionalProperties: true
+      required: [error]
+      additionalProperties: true
+
+    GeminiError:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code:
+              type: integer
+            message:
+              type: string
+            status:
+              description: |
+                Present on the shape-validation 400s the ingress normaliser
+                returns; absent on the JSON-/size-failure 400s, which is
+                why this field is optional.
+              type: string
+              enum: [INVALID_ARGUMENT]
+          required: [code, message]
+          additionalProperties: true
+      required: [error]
+      additionalProperties: true

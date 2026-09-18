@@ -2018,6 +2018,57 @@ written form of "what Claude Code may send us," and the artifact against which a
 update can be checked. It also gives the fuzzer a target, which is how the malformed-input paths
 get exercised at all.
 
+**Delivered with KBR-82 (T-G6).** Schema: `openapi/kitty-bridge.yaml`. Conformance run:
+`tests/test_openapi_conformance.py` (schemathesis 4.x; ``max_examples=5``,
+``no_shrink=True``, ``asyncio.to_thread(case.call_and_validate, base_url=…, checks=[…])``).
+Per-protocol registration matrix: `tests/test_route_registration_matrix.py` (AST-walks
+`_register_routes`; locates each ``if protocol == BridgeProtocol.X:`` branch in the
+launch dispatch and asserts the *exact* set of `add_post`/`add_get` calls per branch —
+a leaked route fails the guard, falsified). aiohttp regex converters `{name:regex}`
+are normalised to `{name}` before the schema↔routes set-equality check, mirroring
+the KBR-9 endpoint-table guard's character-exact-match trap. Schema document:
+`tests/test_openapi_schema.py` (loads via `schemathesis.openapi.from_dict`,
+asserts the OpenAPI version and `paths` agreement). Known-positive regression:
+`tests/test_responses_normalizer.py` pins the four KBR-159 shapes (KBR-169 owns
+the fifth, the orphan `function_call_output`); the three confirmed-clean shapes
+are pinned with positive-control assertions (the body reaches the recorder and
+answers 200 — not the permissive "neither 400 nor 500"). Pre-flight:
+`tests/test_route_preflight.py` measures the same `messages: "x"` /
+`contents: "x"` 500 on the four other POST routes and asserts they each answer 400
+after the per-route ingress normalisers in `src/kitty/bridge/server.py`
+(`_normalize_messages_request`, `_normalize_chat_completions_request`,
+`_normalize_gemini_request`) are wired. `_normalize_messages_request` validates
+``messages`` (list of objects), ``tools`` (list of dicts whose ``name``
+is a non-empty string — Anthropic's tool shape is flat) and requires ``model``
+(the translator subscripts both unguarded at
+`src/kitty/bridge/messages/translator.py:364` and `:391`).
+`_normalize_chat_completions_request` validates ``messages`` **only** — the CC
+route passes tools through to the upstream without iterating them (no measured
+CC tools 500), and a flat ``tool["name"]`` check would 400 every legitimate
+CC tool body whose contract nests ``name`` under ``function``.
+`_normalize_gemini_request` validates ``contents`` (list of objects).
+**No silent exemption** — every guard in this list gates normally.
+**Stream is bounded to ``false`` in the schema** because the recording
+upstream replies non-streaming, and ``stream: true`` bodies would spin the
+bridge's empty-response retry ladder; streaming is exercised by L3 bridge
+tests (`tests/bridge/`). **The Gemini routes document `404`** as the honest
+answer for unroutable model names — schemathesis 4.x does not yet honour
+JSON-Schema `pattern` for path parameters, so a small number of fuzzed
+values still slip past and hit aiohttp's `{model:.*}` regex converter.
+The Gemini translator also tolerates scalar `generationConfig` values
+(`None`, `int`, `str`, `bool`): a present-but-wrong-type field would crash
+the ``in`` check with `TypeError`, so the translator coerces to `{}`; this is
+pinned by `TestGeminiToleratesScalarGenerationConfig` (falsified).
+`_normalize_chat_completions_request` validates ``messages`` **only** — the CC
+route passes tools through to the upstream without iterating them (no measured
+CC tools 500), and a flat ``tool["name"]`` check would 400 every legitimate
+CC tool body whose contract nests ``name`` under ``function``. `_normalize_gemini_request`
+validates ``contents`` (list of objects). **No silent exemption** — every guard in
+this list gates normally. **Stream is bounded to ``false`` in the schema** because
+the recording upstream replies non-streaming, and ``stream: true`` bodies would
+spin the bridge's empty-response retry ladder; streaming is exercised by L3
+bridge tests (`tests/bridge/`).
+
 #### 6.2.2 SSE event grammar
 
 The Anthropic streaming format is a grammar, not a schema: `message_start` …

@@ -103,10 +103,12 @@ landing; CI is the authority for the Windows/macOS legs (plan §1.3).
 
 ## Notes
 
-* `scripts/regenerate_step_index.py` does not exist in the repo (recorded
-  gap — see the step-index memory), so the INDEX regeneration step of the
-  workflow could not be run; the dependency graph above is validated by
-  inspection.
+* `scripts/regenerate_step_index.py` shipped after this step (KBR-278) —
+  the validator now exists and runs on every step-file change. The `depends_on`
+  above is validated under the D7 Jira-key exemption (the four `KBR-nn`
+  entries match `^KBR-\d+$` and are accepted as cross-references without
+  resolution). Before the validator existed, the dependency graph above was
+  validated by inspection.
 * The `stream_request` (streaming) half of each custom transport was not
   driven: the body builders are shared with `make_request`, and the only
   transport-side difference is the `stream` flag (P18 pops it in both; P19

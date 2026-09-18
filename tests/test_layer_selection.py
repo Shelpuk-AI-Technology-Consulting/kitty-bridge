@@ -526,11 +526,29 @@ class TestTheWholeSuiteIsCoherent:
             # per-request `proxy=None` cannot escape it -- the claim
             # `_session_for`'s containment design rests on.
             "tests/test_aiohttp_transport_contract.py",
+            # KBR-278. The step-graph validator's contract, exercised
+            # against constructed fixture step files rather than the
+            # committed tree -- a committed-tree check would couple CI to
+            # sibling PRs' step files (the REQUIREMENTS.md D2 in
+            # `.requirements/20260917T185215Z_step_index_validator/`).
+            # Same config-like-artifact posture as
+            # `tests/test_aggregate_mutation_baseline.py` above.
+            "tests/test_step_index.py",
             # KBR-280. A §6.2.3 structural guard over the suite's own tree: no
             # test module may import the `tests` package, which bare `pytest`
             # (the fast-gate invocation) cannot resolve but `python -m pytest`
             # can -- the trap KBR-84 paid a full CI round for.
             "tests/test_no_tests_package_imports.py",
+            # KBR-82 (T-G6). The OpenAPI 3.1 document + schemathesis
+            # conformance, the per-protocol registration matrix, the
+            # per-route ingress guards, and the four-measured-bodies
+            # regression each read two artifacts (the published schema
+            # vs. the live source) and gate normally.
+            "tests/test_openapi_schema.py",
+            "tests/test_openapi_conformance.py",
+            "tests/test_route_registration_matrix.py",
+            "tests/test_responses_normalizer.py",
+            "tests/test_route_preflight.py",
             # KBR-83 (T-G7). A §6.2.2 contract guard: the downstream SSE
             # grammar state machine driven over a real BridgeFixture — every
             # stream the bridge writes must classify as one of the five
