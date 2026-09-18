@@ -42,7 +42,7 @@ _CLAUSES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ),
     (
         "the optional in-thread replies with further detail",
-        ("in-thread",),
+        ("Reply in thread where detail helps", "not only in the summary comment"),
     ),
     (
         "enumerate every open conversation and inline review thread, then "
