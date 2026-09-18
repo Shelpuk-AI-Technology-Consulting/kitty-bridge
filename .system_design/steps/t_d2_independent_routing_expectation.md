@@ -82,4 +82,9 @@ This is the case a body-only oracle cannot see.
 
 ## Status
 
-In progress.
+Implemented (2026-09-18); PR #238 draft on `feat/kbr-52-routing-expectation` off
+`origin/main`. Code review round 2 APPROVED (requirements coverage complete,
+falsification proven by exception type); design review on the R3 rewording
+APPROVED with a mechanically-checkable tightening applied to the requirement
+and the test module docstring. Awaiting CI (6-leg matrix) and the repository's
+own reviewer (skipped while the PR is draft).
