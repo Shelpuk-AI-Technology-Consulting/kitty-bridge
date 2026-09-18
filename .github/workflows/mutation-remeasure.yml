@@ -78,10 +78,13 @@ jobs:
       # the step through an env var, not direct ${{ }} interpolation into the
       # shell/Python source: workflow_dispatch inputs are caller-controlled
       # text, and the direct form is both an injection vector and a functional
-      # break on any value containing a quote.
+      # break on any value containing a quote. The `||` fallback is what makes
+      # the push bootstrap work: on a push event `inputs.group` is EMPTY (the
+      # dispatch default does not apply to push), which is how the first
+      # bootstrap run failed with "Unknown group ''".
       - name: Resolve the group's mutmut patterns
         env:
-          GROUP: ${{ inputs.group }}
+          GROUP: ${{ inputs.group || 'compaction_and_pairing' }}
         run: |
           set -euo pipefail
           # An unknown group raises KeyError; swallowing it here (printing

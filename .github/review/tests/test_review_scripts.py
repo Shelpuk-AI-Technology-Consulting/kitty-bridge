@@ -166,6 +166,10 @@ EXPECTED_JOBS = {
     # The live `--tmux` disconnect proof (SYSTEM_DESIGN.md §3.4). A kitty-bridge
     # addition with no upstream counterpart: upstream has no kitty to test.
     ("tmux-disconnect.yml", "live"),
+    # The mutation re-measure tool (KBR-272, TEST_SUITE.md §8): a manual,
+    # dispatch-triggered `mutmut run` for one scope group, deliberately NOT a
+    # merge gate. Its 180-minute cap is sized in the workflow's own comment.
+    ("mutation-remeasure.yml", "remeasure"),
 }
 
 #: The workflow files themselves, pinned for the same reason one level up: the
@@ -178,6 +182,7 @@ EXPECTED_WORKFLOW_FILES = {
     "publish.yml",
     "tests.yml",
     "tmux-disconnect.yml",
+    "mutation-remeasure.yml",
 }
 
 
