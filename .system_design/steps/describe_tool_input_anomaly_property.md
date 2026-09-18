@@ -1,6 +1,6 @@
 ---
 id: describe_tool_input_anomaly_property
-depends_on: []
+depends_on: [hypothesis_and_transcript_strategies]
 ---
 
 # `describe_tool_input_anomaly` property test (T-F5)
@@ -131,9 +131,12 @@ locally with the property.
   (3.10/3.11/3.12 ubuntu, 3.13 ubuntu, 3.12 macos, 3.12 windows), plus
   review, CodeQL, Analyze (python/actions), review-scripts,
   review_replies, update-metadata, ci-required.
-- `scripts/regenerate_step_index.py` does not exist in the repo (recorded
-  in memory since the first step file, KBR-67/PR #197); the step was added
-  without machine-validated `depends_on`.
+- `scripts/regenerate_step_index.py` did not exist when this step shipped
+  (recorded in memory since the first step file, KBR-67/PR #197), so the
+  step was added without machine-validated `depends_on`. KBR-278 landed
+  the validator and backfilled the `depends_on` to
+  `[hypothesis_and_transcript_strategies]`, converting the body-text
+  rationale into an actually-honest YAML edge.
 
 ## Status
 
