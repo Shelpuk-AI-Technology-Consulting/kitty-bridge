@@ -7984,8 +7984,13 @@ class BridgeServer:
                         )
                         if carries:
                             try:
-                                for line in lines:
-                                    await sr.write(line)
+                                # ``synth_line``, not ``line``: the name
+                                # ``line`` is a *str* in the plain-POST
+                                # branch's SSE loops below (same function
+                                # scope), and rebinding it as bytes here
+                                # breaks mypy's inference for those loops.
+                                for synth_line in lines:
+                                    await sr.write(synth_line)
                             except (ConnectionResetError, BrokenPipeError, OSError):
                                 logger.debug("Client disconnected during custom-transport emit")
                             # Usage log-on-release: the branch parses
