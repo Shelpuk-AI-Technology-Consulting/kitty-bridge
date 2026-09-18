@@ -3173,7 +3173,7 @@ source — so the harness ships its own encoder following the spec every AWS
 SDK implements, with CRC32 per the pinned `binascii.crc32(data) & 0xFFFFFFFF`.
 The encoder is validated by round-trip through the pinned parser, by a
 bad-CRC falsification case (`test_a_streaming_reply_with_a_bad_message_crc_fails_to_decode`),
-and by a bridge-driven end-to-end path (`test_a_streamed_request_via_the_bridge_yields_finish_reason`).
+and by a bridge-driven end-to-end path (`test_a_streamed_request_via_the_bridge_yields_a_defined_terminal`; KBR-287 changed the contract from "finish_reason on the wire" to "route's D4 terminal" because the branch's parse step cannot read the Converse stream the Bedrock transport emits, and pre-KBR-287 the bridge delivered a content-free skeleton whose finish chunk was satisfying this oracle).
 
 **The harness rule (§1.4) requires a falsification case against the
 recorder's own overrides** — the conformance suite runs unchanged over the

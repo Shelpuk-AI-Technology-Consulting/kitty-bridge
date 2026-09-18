@@ -77,6 +77,7 @@ from harness.recorder_conformance import (
     recording_of,
     send,
 )
+from kitty.bridge import server as bridge_server_module
 
 #: The format this transport serves, named once so a case differs from its
 #: neighbours only in the thing it is about.
@@ -443,7 +444,7 @@ class TestThroughARealBridge:
         the non-streaming reply is otherwise judged only by the fixture
         ``status == 200``, which cannot tell a correct translation from a
         plausible-but-empty one (the streaming path has this in
-        :meth:`test_a_streamed_request_via_the_bridge_yields_finish_reason`
+        :meth:`test_a_streamed_request_via_the_bridge_yields_a_defined_terminal`
         — this test carries the non-streaming half, so a regression in
         ``translate_from_upstream`` that returned a contentless CC body
         would be caught at the boundary the client sees).
@@ -524,8 +525,25 @@ class TestThroughARealBridge:
         # supplies the proxy that makes the list empty.
         assert unattributable_peer_ports([c.peer_port for c in connections], []) == [captures[0].peer_port]
 
-    async def test_a_streamed_request_via_the_bridge_yields_finish_reason(self) -> None:
-        """The converse_stream path end-to-end produces a finish_reason."""
+    async def test_a_streamed_request_via_the_bridge_yields_a_defined_terminal(self, monkeypatch) -> None:
+        """The converse_stream path end-to-end produces a defined terminal.
+
+        KBR-287 changed this contract. Pre-KBR-287 the custom-transport
+        branch synthesised a skeleton (role chunk → finish chunk with
+        ``finish_reason: "stop"`` → ``[DONE]``) for whatever the parse step
+        could not read, so this test's finish_reason oracle was satisfied
+        by the very skeleton-with-no-content defect KBR-287 removes: the
+        branch's parse step reads Bedrock's translated CC-SSE bytes with
+        the Responses-SSE fallback, which cannot read them, so the parsed
+        response is content-free and the branch now takes the empty ladder
+        instead of delivering the skeleton. Post-KBR-287 the contract for
+        this canned shape is the route's ``empty_response`` D4 terminal +
+        ``[DONE]``, with the ladder collapsed so it arrives inside the
+        harness timeout. (The Bedrock parse-path gap itself is pre-existing
+        and out of KBR-287's scope — a candidate follow-up.)
+        """
+        monkeypatch.setattr(bridge_server_module, "_BACKOFF_BASE", 0.01)
+        monkeypatch.setattr(bridge_server_module, "_EMPTY_FINAL_DELAYS", [0.01, 0.01])
         subject = BotocoreTransport(FORMAT)
         sent = marker()
 
@@ -537,11 +555,11 @@ class TestThroughARealBridge:
 
         assert status == 200
         assert "data: [DONE]" in text
-        # The finish reason comes from the messageStop event's stopReason.
-        # Without it the stream's last chunk could be malformed and the test
-        # would still pass on the content chunk alone -- measured, not
-        # supposed.
-        assert '"finish_reason": "stop"' in text or '"finish_reason":"stop"' in text
+        # The judged-empty attempt ladder ends in the route's D4 terminal
+        # (uniform with the plain-POST twin) — no content-free skeleton
+        # reaches the client, and no ``finish_reason`` is claimed for a
+        # completion the branch could not read.
+        assert "empty_response" in text
         # **The path suffix is what signals streaming, not the body.** The
         # Bedrock transport pops ``stream`` from the Converse payload
         # before the HTTP request is built (register row **P18**); the
