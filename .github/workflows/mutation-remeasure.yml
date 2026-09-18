@@ -33,8 +33,19 @@ on:
     inputs:
       group:
         description: Target group from tests/mutmut_scope.py TARGET_GROUPS
-        required: true
+        required: false
+        default: compaction_and_pairing
         type: string
+  # Branch bootstrap, and why it is here: GitHub indexes workflow_dispatch
+  # from the DEFAULT branch only, so a dispatch on this file is a 404 until
+  # the file merges. The push trigger below (scoped to exactly this branch)
+  # runs the measurement on every push to the branch that carries it -- the
+  # mechanism KBR-272's PR used to produce its recorded numbers. The moment
+  # the branch is deleted at merge, the clause is dead; drop it in the next
+  # edit of this file if it still lingers.
+  push:
+    branches:
+      - "feat/kbr-272-record-compaction-mutation-score"
 
 permissions:
   contents: read
