@@ -183,6 +183,8 @@ class TestDrivenDefaultRun:
         apply here — the test exercises the *fourth* obligation the
         oracle owns (§4.3 C2), separately from claim matching.
         """
+        import pytest
+
         body = minimal_inbound_body(InboundProtocol.MESSAGES, _SENTINEL)
 
         async with BridgeFixture(transport("aiohttp", WireFormat.ANTHROPIC_MESSAGES)) as fixture:
@@ -221,7 +223,7 @@ class TestDrivenDefaultRun:
                 body=reordered,
             )
 
-            with __import__("pytest").raises(oracle.NativePassthroughKeyOrderError):
+            with pytest.raises(oracle.NativePassthroughKeyOrderError):
                 oracle.assert_no_unclaimed_mutation(
                     inbound=inbound,
                     inbound_format=WireFormat.ANTHROPIC_MESSAGES,
@@ -230,3 +232,53 @@ class TestDrivenDefaultRun:
                     register=r.REGISTER,
                     triggers_met=frozenset(),  # native passthrough
                 )
+
+    async def test_native_passthrough_preserves_bytes_end_to_end(self) -> None:
+        """§4.3 C2, positive: the real bridge's native passthrough is byte-preserving.
+
+        The negative test above manufactures the byte difference by hand on
+        the captured body; this one asserts the *unmanufactured* case — the
+        body that actually reaches the recorder equals the body the agent
+        sent, byte for byte, and the oracle passes over it. Without this
+        test a bridge defect that re-serialises the body (compact
+        separators, a reordered key, a rebuilt envelope) would pass the
+        negative test (which constructs its own difference) and the unit
+        tests (which fabricate their own equality) — green either way, for
+        the exact bridge behaviour this obligation names.
+
+        Scope note: this is the ``custom_anthropic`` route, the one
+        native-passthrough adapter T-D1's one-adapter scope covers. Other
+        native adapters are T-D4/T-D9's matrix.
+        """
+        body = minimal_inbound_body(InboundProtocol.MESSAGES, _SENTINEL)
+
+        async with BridgeFixture(transport("aiohttp", WireFormat.ANTHROPIC_MESSAGES)) as fixture:
+            status, _ = await fixture.post(inbound_path(InboundProtocol.MESSAGES), body)
+            assert status == 200
+            captured = list(fixture.captures)[0]
+
+            inbound_body = json.dumps(body).encode("utf-8")
+            assert captured.body == inbound_body, (
+                "the bridge's native passthrough must ship the agent's body "
+                "byte-for-byte; a re-serialisation is exactly the serialiser "
+                "fingerprint §4.3 C2 exists to catch"
+            )
+
+            inbound = CapturedRequest(
+                method="POST",
+                scheme="http",
+                host="127.0.0.1",
+                path=inbound_path(InboundProtocol.MESSAGES),
+                query="",
+                body=inbound_body,
+            )
+
+            report = oracle.assert_no_unclaimed_mutation(
+                inbound=inbound,
+                inbound_format=WireFormat.ANTHROPIC_MESSAGES,
+                captured=captured,
+                captured_format=WireFormat.ANTHROPIC_MESSAGES,
+                register=r.REGISTER,
+                triggers_met=frozenset(),  # native passthrough
+            )
+            assert report.deltas == ()

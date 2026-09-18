@@ -197,17 +197,19 @@ def _reader_for(fmt: WireFormat) -> Projection:
         The registered :class:`Projection`.
 
     Raises:
-        ValueError: When no reader is registered for ``fmt`` — a missing
+        RuntimeError: When no reader is registered for ``fmt`` — a missing
             reader is caught at module import time (see ``_REGISTRY_GUARD``),
-            so reaching this branch indicates the caller supplied a format the
-            suite does not yet cover.
+            so reaching this branch indicates the caller supplied a format
+            the suite does not yet cover. The exception type matches the
+            guard's so a downstream caller that catches one catches both.
     """
     try:
         return _REQUEST_PROJECTIONS[fmt]
     except KeyError as exc:
-        raise ValueError(
-            f"no Projection registered for {fmt!r}; "
-            "every WireFormat member must have a reader (see harness/oracle.py)"
+        raise RuntimeError(
+            f"harness/oracle.py: no Projection registered for {fmt!r}; "
+            "every WireFormat member must have a reader — _REGISTRY_GUARD "
+            "should have caught this at import time"
         ) from exc
 
 
@@ -346,7 +348,7 @@ def assert_no_unclaimed_mutation(
     verify_total(captured_projection)
 
     # Step 3–5 — diff, claim matching, assertion 1, assertion 2.
-    _run_assertions(inbound_projection, captured_projection, register, triggers_met)
+    deltas = _run_assertions(inbound_projection, captured_projection, register, triggers_met)
 
     # Step 6 — §4.3 C2 native passthrough byte-level check. Route is the
     # *absence* of NON_NATIVE_UPSTREAM_WIRE in triggers_met.
@@ -357,7 +359,7 @@ def assert_no_unclaimed_mutation(
         expected_route=expected_route,
         inbound_projection=inbound_projection,
         captured_projection=captured_projection,
-        deltas=_structural_diff(inbound_projection, captured_projection),
+        deltas=tuple(deltas),
     )
 
 
@@ -439,27 +441,15 @@ def _native_passthrough_check(inbound: CapturedRequest, captured: CapturedReques
             f"§4.3 C2: native passthrough route produced a body that "
             f"differs from the inbound byte-for-byte; "
             f"inbound={len(inbound.body)}B, captured={len(captured.body)}B",
-            paths=(route_path("body"),),
+            # No ``paths`` entry: the C2 failure is a raw-body observation,
+            # not a projection delta, and §3.3.1a's route vocabulary
+            # (``ROUTE_COMPONENTS``) names method/scheme/host/path/query —
+            # no ``body`` component exists to anchor. The two body previews
+            # on this exception are the evidence.
+            paths=(),
             inbound_preview=inbound.body[:200],
             captured_preview=captured.body[:200],
         )
-
-
-def route_path(component: str) -> str:
-    """Return a route-component delta path in the §3.3.1a vocabulary.
-
-    Defined here (not in :mod:`harness.contract`) so the oracle's own
-    error message can name a route delta without depending on the
-    contract module's exposed surface. The string form matches
-    ``contract.route_path(component)``.
-
-    Args:
-        component: The route component (``"body"``, ``"host"``, etc.).
-
-    Returns:
-        The concrete path ``route.<component>``.
-    """
-    return f"route.{component}"
 
 
 # --------------------------------------------------------------------------
@@ -470,10 +460,13 @@ def route_path(component: str) -> str:
 def _structural_diff(inbound: Request, captured: Request) -> tuple[str, ...]:
     """Emit concrete delta paths between two :class:`Request` projections.
 
-    Walks the envelope, the conversation and the residual. The residual
-    side is non-empty by construction (the totality gate ran first), but
-    the diff still includes any residual delta — a belt-and-braces against
-    a future change that loosens the gate.
+    Walks the envelope and the conversation. **The residual is not walked**,
+    and needs no belt-and-braces: the totality gate (:func:`verify_total`)
+    has already rejected any non-empty residual on either side before this
+    function runs, so a residual delta is unreachable here by construction.
+    A future change that loosens the gate would have to delete that check
+    in this module — in one place, visibly — rather than quietly relying on
+    a comment.
 
     Address forms:
 
@@ -522,7 +515,13 @@ def _structural_diff(inbound: Request, captured: Request) -> tuple[str, ...]:
 
 
 def _diff_system(inbound: Conversation, captured: Conversation) -> Iterable[str]:
-    """Diff the system blocks.
+    """Diff the system blocks and the system role.
+
+    ``system_role`` is compared first because M20 anchors it directly
+    (``conversation.system_role`` — the Gemini ``systemInstruction`` role
+    KBR-194 gave the grammar a slot for): a translated route that drops the
+    role must surface as a positive delta at that path, not as a silent
+    equivalence on the blocks.
 
     Args:
         inbound: The inbound projection's conversation.
@@ -531,6 +530,9 @@ def _diff_system(inbound: Conversation, captured: Conversation) -> Iterable[str]
     Yields:
         Concrete delta paths.
     """
+    if inbound.system_role != captured.system_role:
+        yield "conversation.system_role"
+
     n = max(len(inbound.system), len(captured.system))
     for i in range(n):
         path = c.system_path(i)
@@ -637,12 +639,21 @@ def _diff_parts(turn_index: int, a_parts: Sequence[Any], b_parts: Sequence[Any])
             if a.cache_control != b.cache_control:
                 yield c.part_path(turn_index, j, "cache_control")
         elif isinstance(a, c.Image):
+            # M24 (``conversation.turns[*].parts[*].video_metadata``) and M25
+            # (``conversation.turns[*].parts[*].display_name``) anchor
+            # fields the Gemini reader populates; the diff has to compare
+            # them so a translation that drops either is a claimed delta,
+            # not a silent equivalence.
             if a.digest != b.digest:
                 yield c.part_path(turn_index, j, "digest")
             if a.media_type != b.media_type:
                 yield c.part_path(turn_index, j, "media_type")
             if a.ref != b.ref:
                 yield c.part_path(turn_index, j, "ref")
+            if a.display_name != b.display_name:
+                yield c.part_path(turn_index, j, "display_name")
+            if a.video_metadata != b.video_metadata:
+                yield c.part_path(turn_index, j, "video_metadata")
             if a.cache_control != b.cache_control:
                 yield c.part_path(turn_index, j, "cache_control")
         else:
@@ -686,11 +697,22 @@ def _diff_part_content(
         elif isinstance(x, c.Image):
             if x.digest != y.digest:
                 yield path + ".digest"
+            if x.media_type != y.media_type:
+                yield path + ".media_type"
+            if x.ref != y.ref:
+                yield path + ".ref"
+            if x.display_name != y.display_name:
+                yield path + ".display_name"
+            if x.video_metadata != y.video_metadata:
+                yield path + ".video_metadata"
         elif isinstance(x, c.Json):
             if x.value != y.value:
                 yield path + ".value"
-        elif isinstance(x, c.Opaque) and x.digest != y.digest:
-            yield path + ".digest"
+        elif isinstance(x, c.Opaque):
+            if x.kind != y.kind:
+                yield path + ".kind"
+            if x.digest != y.digest:
+                yield path + ".digest"
 
 
 def _diff_tools(inbound: Conversation, captured: Conversation) -> Iterable[str]:
@@ -734,8 +756,17 @@ def _diff_tools(inbound: Conversation, captured: Conversation) -> Iterable[str]:
 def _claim_matching(
     deltas: Sequence[str], register: tuple[r.MutationRow, ...], triggers_met: frozenset[r.Trigger]
 ) -> dict[str, tuple[str, ...]]:
-    """Return, per delta, the register row ids whose trigger is met and whose
-    pattern matches.
+    """Return, per delta, every register row id whose trigger is met and
+    whose pattern matches.
+
+    All claimers are recorded — not just the first one to match. A delta
+    can match several rows simultaneously (§3.3.1a's prefix rule means
+    coarse-anchor rows like M5 ``conversation.turns`` and narrow-anchor
+    rows like M3 ``conversation.turns[*].parts[*]`` both match a
+    part-level delta), and the assertion that consumes this map only
+    needs the empty / non-empty distinction. The full list is what a
+    reviewer reaches for when the run reports an unclaimed delta on a
+    path they expected to be claimed.
 
     Args:
         deltas: The concrete delta paths to classify.
@@ -746,19 +777,16 @@ def _claim_matching(
         A mapping from delta path to the tuple of claiming row ids. Empty
         tuple means unclaimed.
     """
-    claimers: dict[str, tuple[str, ...]] = {delta: () for delta in deltas}
+    claimers: dict[str, list[str]] = {delta: [] for delta in deltas}
     active_rows = [row for row in register if row.trigger in triggers_met]
     for row in active_rows:
         if not row.is_projectable:
             continue
-        for delta in deltas:
-            if claimers[delta]:
-                continue  # already claimed; record-only on later rows
-            for pattern in row.paths:
+        for pattern in row.paths:
+            for delta in deltas:
                 if c.path_matches(pattern, delta):
-                    claimers[delta] = claimers[delta] + (row.id,)
-                    break
-    return claimers
+                    claimers[delta].append(row.id)
+    return {delta: tuple(rows) for delta, rows in claimers.items()}
 
 
 def _conditional_violations(
@@ -766,14 +794,40 @@ def _conditional_violations(
     triggers_met: frozenset[r.Trigger],
     deltas: Sequence[str],
 ) -> list[tuple[str, list[str]]]:
-    """Find conditional rows that fired without their trigger being met.
+    """Find conditional rows whose anchor carries a delta on an input that
+    did not meet their trigger, under **specificity attribution**.
 
-    A conditional row whose trigger is *not* in ``triggers_met`` but whose
-    anchored paths have a delta *unclaimed by any triggered row* is a
-    violation. Phrased so a coarser-anchor row whose trigger *is* met
-    legitimately claims deltas beneath it — §3.3.1a's "a pattern is a
-    prefix" rule makes anchored paths overlap (M3/M4/M5/M6 around the
-    parts; M16's four ``.cache_control`` anchors).
+    For each conditional register row R whose trigger is *not* in
+    ``triggers_met``, a delta matching one of R's anchored paths is a
+    violation **unless a triggered row specifically claims it** — a
+    triggered row whose pattern matches the delta and is *not a proper
+    prefix* of one of R's matching patterns
+    (:func:`~harness.contract.pattern_is_proper_prefix_of`). Three cases
+    show the rule:
+
+    * M16 (``…parts[*].cache_control``, triggered) and M3
+      (``…parts[*]``, untriggered) both match a cache-breakpoint delta.
+      M16's anchor is *finer* (M3's is a proper prefix of it), so M16
+      specifically claims and M3 is exempt — a cache breakpoint the
+      bridge legitimately stripped is not evidence that M3 fired.
+    * M8 and M3 share the identical bare-part anchor. A part delta M8
+      (triggered) explains is therefore exempt for M3 too: equal anchors
+      co-claim, and neither defers to the other.
+    * M5 (``conversation.turns``, triggered) and M3 (``parts[*]``,
+      untriggered) both match a part-level delta — but M5's anchor *is*
+      a proper prefix of M3's, so M5 does **not** specifically claim.
+      The delta is a violation for M3. This is the case that keeps
+      assertion 2 alive: assertion 1's claim matching cannot see it,
+      because M5's broad anchor legitimately claims everything beneath
+      it.
+
+    **What this means for the caller.** The third case is why a
+    complement input for conditional row R (§3.3.4, T-D8) must avoid
+    co-triggering a *broader*-anchored conditional row on R's paths: on
+    such an input the oracle reports R as fired whenever a delta lands
+    at R's anchor, which is the observation the complement test exists
+    to make. The oracle reports raw presence subject to the specificity
+    rule; the corpus construction owns arranging the rest.
 
     Args:
         register: The register rows.
@@ -783,24 +837,29 @@ def _conditional_violations(
     Returns:
         A list of ``(row_id, [paths, ...])`` pairs, one per violation. Each
         violation's path list is the subset of ``deltas`` that land at the
-        row's anchors and are unclaimed by any triggered row.
+        row's anchors without a specifically-claiming triggered row.
     """
-    active = [row for row in register if row.trigger in triggers_met]
-    triggered_patterns = [p for row in active if row.is_projectable for p in row.paths]
+    active = [row for row in register if row.trigger in triggers_met and row.is_projectable]
 
     violations: list[tuple[str, list[str]]] = []
     for row in register:
-        if row.conditional or row.trigger in triggers_met:
+        if not row.conditional or row.trigger in triggers_met:
             continue
         if not row.is_projectable:
             continue
         offending: list[str] = []
-        for pattern in row.paths:
-            for delta in deltas:
-                if c.path_matches(pattern, delta) and not any(
-                    c.path_matches(tp, delta) for tp in triggered_patterns
-                ):
-                    offending.append(delta)
+        for delta in deltas:
+            matching_own = [p for p in row.paths if c.path_matches(p, delta)]
+            if not matching_own:
+                continue
+            specifically_claimed = any(
+                c.path_matches(tp, delta)
+                and not any(c.pattern_is_proper_prefix_of(tp, rp) for rp in matching_own)
+                for trow in active
+                for tp in trow.paths
+            )
+            if not specifically_claimed:
+                offending.append(delta)
         if offending:
             violations.append((row.id, offending))
     return violations
@@ -841,5 +900,4 @@ __all__ = [
     "OracleReport",
     "UnclaimedMutationError",
     "assert_no_unclaimed_mutation",
-    "route_path",
 ]

@@ -31,6 +31,7 @@ from harness.contract import (
     CapturedRequest,
     Conversation,
     Envelope,
+    Image,
     Request,
     Text,
     ToolDecl,
@@ -40,6 +41,7 @@ from harness.contract import (
     WireFormat,
 )
 from harness.oracle import (
+    ConditionalRowFiredWithoutTriggerError,
     NativePassthroughKeyOrderError,
     OracleReport,
     UnclaimedMutationError,
@@ -116,13 +118,17 @@ class TestSignature:
         for fmt in WireFormat:
             assert oracle._reader_for(fmt).wire_format == fmt
 
-    def test_reader_for_unknown_format_raises_value_error(self) -> None:
-        """A missing reader raises :class:`ValueError` at call time."""
+    def test_reader_for_unknown_format_raises_runtime_error(self) -> None:
+        """A missing reader raises :class:`RuntimeError` at call time.
+
+        Same exception type as the import-time ``_REGISTRY_GUARD`` so a
+        downstream caller that catches one catches both.
+        """
         # Use a wire format not in the closed enum by mocking the dict.
         saved = oracle._REQUEST_PROJECTIONS.copy()
         try:
             oracle._REQUEST_PROJECTIONS.pop(WireFormat.ANTHROPIC_MESSAGES, None)
-            with pytest.raises(ValueError):
+            with pytest.raises(RuntimeError):
                 oracle._reader_for(WireFormat.ANTHROPIC_MESSAGES)
         finally:
             oracle._REQUEST_PROJECTIONS.update(saved)
@@ -279,6 +285,79 @@ class TestStructuralDiff:
 
         deltas = oracle._structural_diff(inbound, captured)
         assert deltas == (c.part_path(0, 0, "tool_use_id"),)
+
+    def test_changed_system_role_yields_the_m20_path(self) -> None:
+        """A dropped ``system_role`` is a positive delta at M20's anchor."""
+        inbound = Request(
+            envelope=Envelope(),
+            conversation=Conversation(system_role="user"),
+        )
+        captured = Request(envelope=Envelope(), conversation=Conversation())
+
+        deltas = oracle._structural_diff(inbound, captured)
+        assert deltas == ("conversation.system_role",)
+
+    def test_changed_image_display_name_yields_the_m25_path(self) -> None:
+        """A differing Image ``display_name`` names the M25 anchor field."""
+        inbound = Request(
+            envelope=Envelope(),
+            conversation=Conversation(
+                turns=(Turn(role="user", parts=(Image(digest="d", display_name="a"),)),),
+            ),
+        )
+        captured = Request(
+            envelope=Envelope(),
+            conversation=Conversation(
+                turns=(Turn(role="user", parts=(Image(digest="d", display_name="b"),)),),
+            ),
+        )
+
+        deltas = oracle._structural_diff(inbound, captured)
+        assert deltas == (c.part_path(0, 0, "display_name"),)
+
+    def test_changed_image_video_metadata_yields_the_m24_path(self) -> None:
+        """A differing Image ``video_metadata`` names the M24 anchor field."""
+        inbound = Request(
+            envelope=Envelope(),
+            conversation=Conversation(
+                turns=(
+                    Turn(role="user", parts=(Image(digest="d", video_metadata={"fps": 24}),)),
+                ),
+            ),
+        )
+        captured = Request(
+            envelope=Envelope(),
+            conversation=Conversation(turns=(Turn(role="user", parts=(Image(digest="d"),)),)),
+        )
+
+        deltas = oracle._structural_diff(inbound, captured)
+        assert deltas == (c.part_path(0, 0, "video_metadata"),)
+
+    def test_claim_matching_records_every_claimer(self) -> None:
+        """A delta claimed by two triggered rows records both ids."""
+        broad = r.MutationRow(
+            id="Z-BROAD",
+            site=("tests/harness/test_oracle.py:Z-BROAD",),
+            trigger=r.Trigger.ALWAYS,
+            paths=(c.CONVERSATION_TURNS,),
+            conditional=False,
+            design_ref="test",
+        )
+        narrow = r.MutationRow(
+            id="Z-NARROW",
+            site=("tests/harness/test_oracle.py:Z-NARROW",),
+            trigger=r.Trigger.ALWAYS,
+            paths=(c.part_path(c.WILDCARD, c.WILDCARD, "id"),),
+            conditional=False,
+            design_ref="test",
+        )
+
+        claimers = oracle._claim_matching(
+            (c.part_path(0, 0, "id"),),
+            (broad, narrow),
+            frozenset({r.Trigger.ALWAYS}),
+        )
+        assert claimers[c.part_path(0, 0, "id")] == ("Z-BROAD", "Z-NARROW")
 
 
 class TestAssertion1:
@@ -467,9 +546,94 @@ class TestAssertion2:
         )
         assert deltas == ()
 
-    def test_anchored_paths_overlap_no_false_violation(self) -> None:
-        """A coarser-anchor triggered row claims deltas beneath an untriggered
-        conditional row's anchor without false-failing assertion 2."""
+    def test_conditional_row_raises_when_only_a_broader_row_claims_its_anchor(self) -> None:
+        """The load-bearing assertion-2 case: a delta at an untriggered
+        conditional row's anchor claimed *only* by a broader triggered row.
+
+        The broader row's anchor is a proper prefix of the conditional
+        row's, so it does not *specifically* claim the delta — a
+        collection-level rewrite legitimately produces part-level deltas,
+        and the conditional row could equally have produced this one.
+        Assertion 1 passes (the broad row claims); assertion 2 fires.
+        This is the "quietly becoming unconditional" scenario §3.3.2
+        assertion 2 exists for, and it is invisible to assertion 1
+        because the delta is claimed.
+        """
+        # The conditional row under test — narrow anchor.
+        conditional = _conditional_row()
+        # A triggered row with the BROADER anchor: conversation.turns is a
+        # proper prefix of conversation.turns[*].parts[*].id.
+        broader = r.MutationRow(
+            id="Z-BROAD",
+            site=("tests/harness/test_oracle.py:Z-BROAD",),
+            trigger=r.Trigger.ALWAYS,
+            paths=(c.CONVERSATION_TURNS,),
+            conditional=False,
+            design_ref="test",
+        )
+
+        inbound = Request(
+            envelope=Envelope(),
+            conversation=Conversation(
+                turns=(Turn(role="assistant", parts=(ToolUse(name="f", arguments={}, id="a"),)),),
+            ),
+        )
+        captured = Request(
+            envelope=Envelope(),
+            conversation=Conversation(
+                turns=(Turn(role="assistant", parts=(ToolUse(name="f", arguments={}, id="b"),)),),
+            ),
+        )
+
+        with pytest.raises(ConditionalRowFiredWithoutTriggerError) as info:
+            oracle._run_assertions(
+                inbound,
+                captured,
+                register=(conditional, broader),
+                triggers_met=frozenset({r.Trigger.ALWAYS}),
+            )
+        assert info.value.row_id == "Z-TEST"
+        assert info.value.paths == (c.part_path(0, 0, "id"),)
+
+    def test_equal_anchor_triggered_row_exempts_the_conditional_row(self) -> None:
+        """Equal anchors co-claim: a triggered row sharing the conditional
+        row's exact anchor exempts it (the M8/M3 shape)."""
+        conditional = _conditional_row()
+        equal = r.MutationRow(
+            id="Z-EQUAL",
+            site=("tests/harness/test_oracle.py:Z-EQUAL",),
+            trigger=r.Trigger.ALWAYS,
+            paths=(c.part_path(c.WILDCARD, c.WILDCARD, "id"),),
+            conditional=False,
+            design_ref="test",
+        )
+
+        inbound = Request(
+            envelope=Envelope(),
+            conversation=Conversation(
+                turns=(Turn(role="assistant", parts=(ToolUse(name="f", arguments={}, id="a"),)),),
+            ),
+        )
+        captured = Request(
+            envelope=Envelope(),
+            conversation=Conversation(
+                turns=(Turn(role="assistant", parts=(ToolUse(name="f", arguments={}, id="b"),)),),
+            ),
+        )
+
+        # Z-EQUAL's anchor equals Z-TEST's — not a proper prefix — so it
+        # specifically claims the delta and Z-TEST is exempt.
+        deltas = oracle._run_assertions(
+            inbound,
+            captured,
+            register=(conditional, equal),
+            triggers_met=frozenset({r.Trigger.ALWAYS}),
+        )
+        assert deltas == (c.part_path(0, 0, "id"),)
+
+    def test_narrower_triggered_row_exempts_the_untriggered_broad_anchor(self) -> None:
+        """A narrower triggered row specifically claims the delta, exempting
+        the untriggered broad-anchor conditional row (the M16/M3 shape)."""
         # Conditional row with the broader anchor ``conversation.turns``.
         conditional = r.MutationRow(
             id="Z-COND",
@@ -480,7 +644,8 @@ class TestAssertion2:
             design_ref="test",
         )
         # Triggered row anchored at the narrower
-        # ``conversation.turns[*].parts[*].id``.
+        # ``conversation.turns[*].parts[*].id`` — its anchor is deeper
+        # than Z-COND's, so it specifically claims the delta.
         triggered = r.MutationRow(
             id="Z-TRIG",
             site=("tests/harness/test_oracle.py:Z-TRIG",),
@@ -503,9 +668,6 @@ class TestAssertion2:
             ),
         )
 
-        # The triggered row (Z-TRIG) is active and claims the part-level
-        # ``id`` delta. The conditional row (Z-COND) has its trigger absent
-        # but its delta is claimed by Z-TRIG → no assertion-2 violation.
         deltas = oracle._run_assertions(
             inbound,
             captured,

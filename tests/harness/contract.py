@@ -2328,3 +2328,53 @@ def path_matches(pattern: str, concrete: str) -> bool:
 
     return True
 
+
+def pattern_is_proper_prefix_of(shallow: str, deep: str) -> bool:
+    """Return whether one *pattern* is a strictly coarser anchor than another.
+
+    Two register rows can match the same concrete delta (§3.3.1a's prefix
+    rule), and when they do, attribution matters: the row whose anchor is a
+    **strict prefix** of the other's is the coarser one —
+    ``conversation.turns`` is a proper prefix of
+    ``conversation.turns[*].parts[*]``, which is a proper prefix of
+    ``conversation.turns[*].parts[*].cache_control``. The oracle's §3.3.2
+    assertion 2 uses this to defer a co-anchor row to a triggered row with
+    an equally-or-more specific anchor: a delta a narrow triggered row
+    explains is not evidence that the broad untriggered row fired.
+
+    Equal patterns are **not** a proper prefix in either direction, so two
+    rows sharing an anchor co-claim — neither defers to the other, and a
+    triggered row sharing an untriggered row's exact anchor *does* exempt
+    that row (the M8/M3 case: both anchor the bare part path, and M8's
+    carrier repair explains a part delta M3's trigger absence cannot).
+
+    Args:
+        shallow: The candidate coarser pattern.
+        deep: The candidate finer pattern.
+
+    Returns:
+        ``True`` when ``shallow``'s segments are a proper prefix of
+        ``deep``'s — strictly shorter, and equal element-for-element up to
+        that length.
+
+    Raises:
+        ValueError: When either pattern has unbalanced brackets.
+    """
+    shallow_segments = _segments(shallow)
+    deep_segments = _segments(deep)
+    if len(shallow_segments) >= len(deep_segments):
+        return False
+
+    # Same bare-collection rule :func:`path_matches` applies: a bracket-free
+    # shallow segment matches the deep segment's bracketed member of itself
+    # (`turns` is a proper prefix of `turns[*].parts[*].id`). Without it, a
+    # bare collection anchor and its wildcard member would compare unequal
+    # at the very segment that makes the prefix relation.
+    for index, shallow_segment in enumerate(shallow_segments):
+        deep_segment = deep_segments[index]
+        if "[" not in shallow_segment and deep_segment.startswith(f"{shallow_segment}["):
+            continue
+        if shallow_segment != deep_segment:
+            return False
+    return True
+
