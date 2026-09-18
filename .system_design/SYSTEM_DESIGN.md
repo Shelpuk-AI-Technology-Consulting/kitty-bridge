@@ -411,24 +411,64 @@ other non-Messages wire behaves byte-identically to the pre-KBR-232 code.
   Responses stream enters the empty-response ladder through the existing
   `translator.response_was_empty` branch, exactly as a content-less CC stream does
   (KBR-274).
-- **KBR-248 closed the converted-route gap on `/v1/chat/completions`.** A converted
-  stream's role chunk used to set `has_content`, so a content-less completion reached the
-  client as a well-formed skeleton and the empty-response ladder could not fire there — as
-  before KBR-232. The handler now runs a converter-gated pre-emission hold (the CC-side
-  KBR-155 counterpart): non-content converted lines (the role chunk, the finish chunk,
-  ``[DONE]``) are withheld until the first content-bearing delta (non-empty `content`,
-  `tool_calls`, or `reasoning_content`), so an empty attempt stays pre-emission and the
-  existing ladder fires. The hold is gated on `stream_converter is not None` — the **hold** only applies to
-  the converted route; raw Chat Completions-wire upstreams still write through
-  every line, because the ticket's scope is the converted route and widening the
-  hold to every plain-POST CC provider is a product decision KBR-248 does not
-  authorise. The empty-response ladder and its D4 exhaustion terminal, by
-  contrast, are route-wide: a raw Chat Completions ladder-exhausting stream
-  (e.g. repeated empty 200 bodies) ends in the same `type: "empty_response"`
-  D4 event, conforming to Q14 bullet 4. **KBR-277 closed the non-streaming half.**
+- **KBR-276 closed the raw-CC gap on `/v1/chat/completions`.** KBR-248
+  (closed in PR #205) added the hold converter-gated
+  (`release = stream_converter is not None`) and explicitly deferred widening
+  it to raw-CC upstreams: a content-less completion from OpenAI, OpenRouter,
+  DeepSeek, or any plain-POST CC backend reached the client as a well-formed
+  skeleton (role chunk → finish → `[DONE]`), the empty-response ladder could
+  not fire there, and the backend was marked healthy. KBR-276 authorises the
+  widening: the hold now engages unconditionally on the route (the converter
+  gate is dropped — the classifier `_cc_chunk_carries_content` works on raw
+  CC chunks the same way it works on converter-emitted ones), so an empty
+  raw-CC attempt is pre-emission and the existing ladder fires. The mechanism
+  is the mirror of KBR-248's: non-content Chat Completions lines (the role
+  chunk, the finish chunk, `[DONE]`) are withheld until the first
+  content-bearing delta (non-empty `content`, `tool_calls`, or
+  `reasoning_content`); a content-bearing stream is byte-identical to
+  today's output because the held preamble flushes ahead of the first
+  content line. The byte cap (`PreambleHold.MAX_HELD_BYTES`, D5 fail-open),
+  the non-JSON fail-open, the ladder reachability, and the D4 exhaustion
+  terminal (`type: "empty_response"` + `[DONE]`, backend not marked
+  healthy) are unchanged. **Accepted cost:** every content-less raw-CC
+  completion now pays the empty ladder's retry latency
+  (`_EMPTY_RETRY_DELAYS` + `_EMPTY_FINAL_DELAYS`, ~80 s on a single-backend
+  pool) instead of being delivered as a skeleton. A pre-content in-stream
+  `error` chunk on a raw-CC upstream now takes the in-stream failover arm
+  (pre-emission) rather than the "error after content" arm — the same
+  semantics the converted route has had since KBR-248. **Scope-out,
+  deliberate:** the hold lives in the plain-POST branch only; the
+  custom-transport branch this route re-dispatches into on cross-class
+  failover (KBR-254) synthesises its own CC stream and has no hold, so an
+  empty completion from a `use_custom_transport` failover target still
+  delivers the skeleton within the crossing bound — the same defect one
+  branch over, owned by its own ticket. **Usage note:** usage a discarded
+  empty attempt carried is never attributed (the D4 exhaustion terminal
+  logs no completion); pre-existing behaviour shared with the converted
+  route. The reasoning asymmetry the KBR-248 record called deliberate is
+  closed by KBR-277 below; pinned streaming-side by
+  `test_a_reasoning_only_raw_cc_prefix_releases_the_hold`. **Known limit,
+  deliberate for this ticket (KBR-285 owns the widening):** the widened hold
+  makes `_cc_chunk_carries_content`'s three-shape content set binding for
+  raw-CC chunks, and the set counts only non-empty string `content`, a
+  non-empty `tool_calls` list, and non-empty string `reasoning_content`. An
+  OpenAI **refusal-only** completion (`delta.refusal` carrying text,
+  `content` null) — a normal shape on the provider this ticket names first —
+  is therefore held as non-content, takes the ladder, and ends in the D4
+  terminal after the retry schedule, where pre-KBR-276 the refusal text
+  reached the client verbatim; legacy dict `function_call` deltas and
+  list-typed multimodal `content` deltas misclassify the same way. The
+  non-streaming detector `_is_empty_cc_response` shares the narrow set, so
+  the gap is consistent across the route rather than a new asymmetry —
+  widening the classifier is a product decision on what "content" means for
+  every Chat Completions route, the same class of trade KBR-248 deferred,
+  and is filed as KBR-285. Tests:
+  `tests/bridge/test_raw_cc_empty_hold.py` (raw-CC mirror of the KBR-248
+  suite).
+- **KBR-277 closed the non-streaming half.**
   `BridgeServer._is_empty_cc_response`'s Chat Completions-shaped arm now reads
   `message.reasoning_content` with the same `isinstance(..., str) and ... != ""` rule
-  `_cc_chunk_carries_content` (`server.py:1483`) applies to `delta.reasoning_content`.
+  `_cc_chunk_carries_content` applies to `delta.reasoning_content`.
   The two predicates agree on the `reasoning_content` axis — the property test in
   `tests/bridge/test_empty_response_reasoning_properties.py` pins this. The
   Messages-shaped arm is unchanged and continues to mirror
@@ -439,11 +479,7 @@ other non-Messages wire behaves byte-identically to the pre-KBR-232 code.
   the streaming predicate's `content` check uses `!= ""` (whitespace-only content is
   content). `TEST_SUITE.md` D6 covers only the empty-string case; aligning the two
   would change product behaviour outside KBR-277's scope (a whitespace-only `content`
-  would stop being treated as empty) and is left in place. The hold is byte-capped at
-  `PreambleHold.MAX_HELD_BYTES` (D5 fail-open). An exhausted
-  ladder emits the route's D4 terminal error (`type: "empty_response"` + ``[DONE]``),
-  matching Q14 bullet 4 and the KBR-235/KBR-250 siblings; the backend is not marked
-  healthy on that path.
+  would stop being treated as empty) and is left in place.
 - In-stream error failover on `/v1/chat/completions` needs a backend pool; pool-less the
   error surfaces to the client (which is still the fix: the per-event translator used to
   swallow the error and deliver a truncated success).
