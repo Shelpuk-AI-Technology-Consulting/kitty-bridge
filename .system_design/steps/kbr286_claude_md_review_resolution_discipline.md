@@ -79,12 +79,12 @@ Implementation-time findings:
   installed into the venv by hand — a local-environment gap, not a repo
   defect, and pre-existing on `main`.
 
-Gates: `test_project_claude_md_review_discipline.py` 7/7 ·
+Gates: `test_project_claude_md_review_discipline.py` 8/8 ·
 `test_layer_selection.py` 19/19 (both pins green, the §6.2 contract-guard
-scan finds the new file) · step-index validator unchanged (its only red
-remains the pre-existing `t_g6 → t_w8` dangling dep on `main`, tracked in
-KBR-278's open follow-up; this step adds no dangling dep) · `ruff check` on
-touched files clean.
+scan finds the new file) · review-scripts suite 738/738 · step-index
+validator unchanged (its only red remains the pre-existing `t_g6 → t_w8`
+dangling dep on `main`, tracked in KBR-278's open follow-up; this step adds
+no dangling dep) · `ruff check` on touched files clean.
 
 ### Review rounds (PR #230)
 
@@ -99,7 +99,7 @@ touched files clean.
 * **Internal code review round 2** (APPROVE): all three round-1 fixes
   independently re-verified; one documentary nit in a commit message
   deferred as not worth rewriting pushed history.
-* **Automated reviewer round** (1 warning, addressed in commit `ee4e217`):
+* **Automated reviewer round 3** (1 warning, addressed in commit `ee4e217`):
   plain `git check-ignore` short-circuits tracked files out of the ignore
   consultation, so the guard was green in exactly the re-ignore scenario it
   exists to detect. Verified empirically (with `/CLAUDE.md` re-added:
@@ -109,7 +109,33 @@ touched files clean.
   confirms the corrected guard fails with the line re-added. The inline
   thread was replied to and resolved; the PR-level round comment states
   one finding addressed, nothing deferred.
-* **CI**: all 14 checks pass on the final commit (test matrix
+* **Automated reviewer round 4** (4 findings across two reviewer passes,
+  addressed in commit `f27517c`): (a) three further sub-clause holes
+  confirmed empirically before the fix — every anchor made unique to its
+  rule's wording, re-probed after; (b) ten-plus sites in `.github/review/`
+  still said `.gitignore` excludes `CLAUDE.md` — prose + the
+  `FORWARD_LOOKING_LITERALS` excuse + the `ALLOWED` fixture pins updated
+  in lockstep (one accidental CLAIMS-window trip caught and reworded);
+  (c) the "Self-guarded" claim gained an in-suite section-scoping check
+  (`test_the_section_extraction_does_not_leak_preamble_text`); (d) the
+  exit-128 failure message branched so a broken git reports the git
+  failure, not a phantom ignore pattern. All four threads replied to and
+  resolved.
+* **Merge-conflict rebase (2026-09-19)**: main advanced through KBR-282 /
+  KBR-87 / KBR-52 / KBR-268; the §6.2.3 table re-piled three times
+  (KBR-282 widened the neighbouring row twice under my feet) — resolved by
+  keeping the neighbour's current row and my KBR-286 row, latest version.
+* **Automated reviewer round 5** (4 findings on the rebased head, this
+  commit): (a) `scripts/regenerate_step_index.py` and `tests/test_step_index.py`
+  cited a `§System-design discipline` CLAUDE.md section the tracked file
+  has never carried (the citation predates KBR-286 and pointed at the
+  per-developer home file) — citations now name KBR-278 directly; (b)
+  three further sub-clause anchors added (rule 1's disposition assignment,
+  rule 2's "addressed and implemented" and "posted once per round"), each
+  probed after; (c) the `_CLAUSES` comment reworded so section-scoping is
+  attributed to the in-suite probe and uniqueness to the hand-run rewrite
+  probes; (d) this step file's stale counts and round list updated.
+* **CI**: all 14 checks pass on the rebased head (test matrix
   3.10–3.13 × Linux/macOS/Windows, `review`, `ci-required`, CodeQL,
   Analyze, review-scripts, review_replies, update-metadata).
 
@@ -123,7 +149,8 @@ touched files clean.
 
 ## Status
 
-Implemented; three review rounds closed (two internal, one automated), all
-14 CI checks pass on the final commit, one inline thread resolved. PR #230
-remains open awaiting the reporter's confirmation of decisions D1–D4 plus
-any further review before merge.
+Implemented; five review rounds closed (two internal, three automated), all
+14 CI checks pass on the rebased head, nine inline threads resolved (0 open,
+1 reply-and-resolve per the shipped rule). PR #230 remains open awaiting the
+reporter's confirmation of decisions D1–D4 plus any further review before
+merge.
